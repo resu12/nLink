@@ -1289,7 +1289,10 @@ public sealed partial class NknSignalingTransport
         }
 
         NknRuntimeDiagnostics.IncrementMessagesReceived();
-        Log($"Envelope received (type={env.Type}, payload_len={env.Payload.Length}, msg_id={env.MessageId}, reply_to={env.ReplyTo ?? "-"})");
+        if (FileTransferDiagnosticLogPolicy.TraceEnabled)
+        {
+            Log($"Envelope received (type={env.Type}, payload_len={env.Payload.Length}, msg_id={env.MessageId}, reply_to={env.ReplyTo ?? "-"})");
+        }
 
         try
         {
@@ -4919,6 +4922,12 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
+        if (messageType == MsgType.FileTransferDataFrame &&
+            !FileTransferDiagnosticLogPolicy.TraceEnabled)
+        {
+            return;
+        }
+
         effectiveTransport ??= handlingTunaAcceleratedInboundMessage ? "tuna" : "nkn";
         var accelerated = string.Equals(effectiveTransport, "tuna", StringComparison.Ordinal) ? 1 : 0;
         LocalOperationalLog.Info(
@@ -4987,6 +4996,12 @@ public sealed partial class NknSignalingTransport
     {
         if (message.Channel != NknBridgeChannel.Bulk &&
             !IsFileTransferMessageType(env.Type))
+        {
+            return;
+        }
+
+        if (env.Type == MsgType.FileTransferDataFrame &&
+            !FileTransferDiagnosticLogPolicy.TraceEnabled)
         {
             return;
         }
@@ -5269,6 +5284,7 @@ public sealed partial class NknSignalingTransport
 
         private readonly NknSignalingTransport owner;
         private readonly object queueGate = new();
+        private readonly object transportSummaryGate = new();
         private readonly Channel<QueuedFileTransferDataFrame> frames = Channel.CreateBounded<QueuedFileTransferDataFrame>(
             new BoundedChannelOptions(FileTransferDataSessionMaxQueuedFrames)
             {
@@ -5282,6 +5298,13 @@ public sealed partial class NknSignalingTransport
         private int disposed;
         private int activeReader;
         private int available = 1;
+        private long chunkBatchTransportSummaryCount;
+        private long chunkBatchTransportSummaryNormalCount;
+        private long chunkBatchTransportSummaryRepairCount;
+        private long chunkBatchTransportSummaryRawBytes;
+        private long chunkBatchTransportSummaryBridgePayloadBytes;
+        private long chunkBatchTransportSummaryChunkCount;
+        private int chunkBatchTransportSummaryMaxChunkCount;
         private EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? availabilityChanged;
 
         public TransportFileTransferDataSession(NknSignalingTransport owner, string sessionId, string transferId)
@@ -5685,23 +5708,31 @@ public sealed partial class NknSignalingTransport
                 ? rawBytes / (double)budgetMeasurement.BridgePayloadBytes
                 : 0D;
             var bridgePayloadFillPercent = budgetMeasurement.BridgePayloadBytes * 100D / FileTransferMaxBridgePayloadBytes;
-            LocalOperationalLog.Info(
-                "SessionSecurity",
-                string.Format(
-                    CultureInfo.InvariantCulture,
-                    "event=filetransfer_chunk_batch_sent_as_batch; transport=nkn; transfer_id={0}; session_id={1}; frame_type={2}; chunk_range={3}-{4}; chunk_frame_count={5}; batch_chunk_count={5}; raw_bytes={6}; lane={7}; batch_profile={8}; repair_delivery_mode={9}; raw_to_bridge_payload_ratio={10:F3}; bridge_payload_fill_percent={11:F2}",
-                    batch.TransferId,
-                    batch.SessionId,
-                    batch.Type,
-                    batch.StartChunkIndex,
-                    finalChunkIndex,
-                    batch.DataSegments.Count,
-                    rawBytes,
-                    lane,
-                    batchProfile,
-                    repairDeliveryMode,
-                    rawToBridgePayloadRatio,
-                    bridgePayloadFillPercent));
+            RecordChunkBatchTransportSummary(
+                rawBytes,
+                budgetMeasurement.BridgePayloadBytes,
+                batch.DataSegments.Count,
+                isRepairBatch);
+            if (isRepairBatch || FileTransferDiagnosticLogPolicy.TraceEnabled)
+            {
+                LocalOperationalLog.Info(
+                    "SessionSecurity",
+                    string.Format(
+                        CultureInfo.InvariantCulture,
+                        "event=filetransfer_chunk_batch_sent_as_batch; transport=nkn; transfer_id={0}; session_id={1}; frame_type={2}; chunk_range={3}-{4}; chunk_frame_count={5}; batch_chunk_count={5}; raw_bytes={6}; lane={7}; batch_profile={8}; repair_delivery_mode={9}; raw_to_bridge_payload_ratio={10:F3}; bridge_payload_fill_percent={11:F2}",
+                        batch.TransferId,
+                        batch.SessionId,
+                        batch.Type,
+                        batch.StartChunkIndex,
+                        finalChunkIndex,
+                        batch.DataSegments.Count,
+                        rawBytes,
+                        lane,
+                        batchProfile,
+                        repairDeliveryMode,
+                        rawToBridgePayloadRatio,
+                        bridgePayloadFillPercent));
+            }
 
             if (useControlBulkRepair)
             {
@@ -5854,9 +5885,90 @@ public sealed partial class NknSignalingTransport
                 return;
             }
 
+            if (FileTransferDiagnosticLogPolicy.TraceEnabled)
+            {
+                LocalOperationalLog.Info(
+                    "SessionSecurity",
+                    $"event=filetransfer_data_frame_dispatched; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}; lane={MapBridgeChannel(channel)}; queued_frames={queuedFramesAfter}; queued_bytes={queuedBytesAfter}");
+            }
+        }
+
+        private void RecordChunkBatchTransportSummary(
+            long rawBytes,
+            int bridgePayloadBytes,
+            int chunkCount,
+            bool repairBatch)
+        {
+            lock (transportSummaryGate)
+            {
+                chunkBatchTransportSummaryCount++;
+                if (repairBatch)
+                {
+                    chunkBatchTransportSummaryRepairCount++;
+                }
+                else
+                {
+                    chunkBatchTransportSummaryNormalCount++;
+                }
+
+                chunkBatchTransportSummaryRawBytes += Math.Max(0L, rawBytes);
+                chunkBatchTransportSummaryBridgePayloadBytes += Math.Max(0, bridgePayloadBytes);
+                chunkBatchTransportSummaryChunkCount += Math.Max(0, chunkCount);
+                chunkBatchTransportSummaryMaxChunkCount = Math.Max(chunkBatchTransportSummaryMaxChunkCount, chunkCount);
+            }
+        }
+
+        private void LogChunkBatchTransportSummary()
+        {
+            long count;
+            long normalCount;
+            long repairCount;
+            long rawBytes;
+            long bridgePayloadBytes;
+            long chunkCount;
+            int maxChunkCount;
+            lock (transportSummaryGate)
+            {
+                count = chunkBatchTransportSummaryCount;
+                if (count <= 0)
+                {
+                    return;
+                }
+
+                normalCount = chunkBatchTransportSummaryNormalCount;
+                repairCount = chunkBatchTransportSummaryRepairCount;
+                rawBytes = chunkBatchTransportSummaryRawBytes;
+                bridgePayloadBytes = chunkBatchTransportSummaryBridgePayloadBytes;
+                chunkCount = chunkBatchTransportSummaryChunkCount;
+                maxChunkCount = chunkBatchTransportSummaryMaxChunkCount;
+            }
+
+            var rawToBridgePayloadRatio = bridgePayloadBytes > 0
+                ? rawBytes / (double)bridgePayloadBytes
+                : 0D;
+            var bridgePayloadFillPercent = count > 0
+                ? bridgePayloadBytes * 100D / (FileTransferMaxBridgePayloadBytes * (double)count)
+                : 0D;
+            var averageChunkCount = count > 0
+                ? chunkCount / (double)count
+                : 0D;
             LocalOperationalLog.Info(
                 "SessionSecurity",
-                $"event=filetransfer_data_frame_dispatched; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}; lane={MapBridgeChannel(channel)}; queued_frames={queuedFramesAfter}; queued_bytes={queuedBytesAfter}");
+                string.Format(
+                    CultureInfo.InvariantCulture,
+                    "event=filetransfer_chunk_batch_transport_summary; transport=nkn; transfer_id={0}; session_id={1}; batch_frames_sent_total={2}; normal_batch_frames_sent_total={3}; repair_batch_frames_sent_total={4}; raw_bytes_sent_total={5}; bridge_payload_bytes_total={6}; chunk_count_sent_total={7}; batch_chunk_count={8:F2}; average_batch_chunk_count={8:F2}; max_batch_chunk_count={9}; raw_to_bridge_payload_ratio={10:F3}; bridge_payload_fill_percent={11:F2}",
+                    TransferId,
+                    SessionId,
+                    count,
+                    normalCount,
+                    repairCount,
+                    rawBytes,
+                    bridgePayloadBytes,
+                    chunkCount,
+                    averageChunkCount,
+                    maxChunkCount,
+                    rawToBridgePayloadRatio,
+                    bridgePayloadFillPercent));
         }
 
         private bool TryReserveQueuedFrame(long estimatedBytes, out int queuedFramesAfter, out long queuedBytesAfter)
@@ -6051,6 +6163,7 @@ public sealed partial class NknSignalingTransport
                 return;
             }
 
+            LogChunkBatchTransportSummary();
             frames.Writer.TryComplete();
             owner.RemoveFileTransferDataSession(this);
         }

@@ -391,6 +391,23 @@ function New-FileTransferRetainedSummary {
     $senderPipelineEvents = @(Get-FileTransferEventsByName -Events $transferEvents -Names @('filetransfer_v4_sender_pipeline_summary'))
     $senderFeedEvents = @(Get-FileTransferEventsByName -Events $transferEvents -Names @('filetransfer_v4_sender_feed_summary'))
     $senderCacheEvents = @(Get-FileTransferEventsByName -Events $transferEvents -Names @('filetransfer_sender_repair_cache_policy', 'filetransfer_sender_repair_cache_summary', 'filetransfer_sender_repair_cache_pressure_entered', 'filetransfer_sender_repair_cache_pressure_exited', 'filetransfer_sender_cache_exhausted', 'filetransfer_sender_repair_unavailable'))
+    $v4SenderPumpSummaryEvents = @(Get-FileTransferEventsByName -Events $transferEvents -Names @('filetransfer_v4_sender_pump_summary'))
+    $v4EfficiencyEvents = @(Get-FileTransferEventsByName -Events $transferEvents -Names @('filetransfer_v4_efficiency_summary'))
+    $chunkBatchTransportSummaryEvents = @(Get-FileTransferEventsByName -Events $transferEvents -Names @('filetransfer_chunk_batch_transport_summary'))
+    $v4OutboundEfficiencyEvents = @($v4EfficiencyEvents | Where-Object { (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' })
+    $v4InboundEfficiencyEvents = @($v4EfficiencyEvents | Where-Object { (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' })
+    $batchSentAsBatchCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_chunk_batch_sent_as_batch'
+    if ($batchSentAsBatchCount -eq 0) {
+        $batchSentAsBatchCount = [Math]::Max(
+            (Get-FileTransferMaxField -Events $v4SenderPumpSummaryEvents -FieldName 'batch_frames_sent_total'),
+            [Math]::Max(
+                (Get-FileTransferMaxField -Events $v4OutboundEfficiencyEvents -FieldName 'batch_frames_sent_total'),
+                (Get-FileTransferMaxField -Events $chunkBatchTransportSummaryEvents -FieldName 'batch_frames_sent_total')))
+    }
+    $receiverBufferWriteBatchCommittedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_receiver_write_batch_committed'
+    if ($receiverBufferWriteBatchCommittedCount -eq 0) {
+        $receiverBufferWriteBatchCommittedCount = Get-FileTransferMaxField -Events $v4InboundEfficiencyEvents -FieldName 'sparse_write_batch_count_total'
+    }
     $receiverFeedbackEvents = @(Get-FileTransferEventsByName -Events $transferEvents -Names @('filetransfer_v4_receiver_feedback_pump_started', 'filetransfer_v4_receiver_feedback_enqueued', 'filetransfer_v4_receiver_feedback_coalesced', 'filetransfer_v4_receiver_feedback_sent', 'filetransfer_v4_receiver_feedback_summary', 'filetransfer_v4_receiver_feedback_failed'))
     $receiverFeedbackPumpStartedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_v4_receiver_feedback_pump_started'
     $receiverFeedbackPumpModeEventCount = @(
@@ -468,7 +485,7 @@ function New-FileTransferRetainedSummary {
         MaxBytesBeforeStartupExit = Get-FileTransferMaxField -Events $transferEvents -FieldName 'bytes_before_startup_exit'
         MaxStartupProbeWindowBytes = Get-FileTransferMaxField -Events $transferEvents -FieldName 'startup_probe_window_bytes'
         FirstRepairOrTimeoutBeforeStartupExitCount = @($transferEvents | Where-Object { (Get-FileTransferEventInt64Field -Event $_ -Name 'first_repair_or_timeout_before_startup_exit' -Default 0) -gt 0 }).Count
-        BatchSentAsBatchCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_chunk_batch_sent_as_batch'
+        BatchSentAsBatchCount = $batchSentAsBatchCount
         BatchSplitCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_chunk_batch_split_for_transport'
         PayloadBudgetCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_transport_payload_budget'
         PayloadRejectedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_transport_payload_rejected'
@@ -483,7 +500,7 @@ function New-FileTransferRetainedSummary {
         ReceiverBufferPressureEnteredCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_receiver_buffer_pressure_entered'
         ReceiverBufferPressureExitedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_receiver_buffer_pressure_exited'
         ReceiverBufferGrantClampedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_receiver_grant_clamped_for_buffer'
-        ReceiverBufferWriteBatchCommittedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_receiver_write_batch_committed'
+        ReceiverBufferWriteBatchCommittedCount = $receiverBufferWriteBatchCommittedCount
         ReceiverSparseModeSelectedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_receiver_sparse_mode_selected'
         ReceiverSparseWriteSummaryCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_receiver_sparse_write_summary'
         ReceiverSparseCommitSummaryCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_receiver_sparse_commit_summary'

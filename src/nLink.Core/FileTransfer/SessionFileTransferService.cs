@@ -4821,6 +4821,10 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public long PullReceiverSparseWriteDurationMsRecent { get; set; }
 
+        public int PullReceiverSparseWriteBatchCountTotal { get; set; }
+
+        public long PullReceiverSparseWriteDurationMsTotal { get; set; }
+
         public int PullReceiverSparseChunksWrittenRecent { get; set; }
 
         public int PullReceiverSparseContiguousChunksCommittedRecent { get; set; }
@@ -4868,6 +4872,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         public int V4FrontierStallChunkIndex { get; set; } = -1;
 
         public DateTimeOffset? V4FrontierStallLastSuppressedLogUtc { get; set; }
+
+        public int V4FrontierStallSuppressedCountTotal { get; set; }
 
         public bool V4ReceiverRepairSchedulerStarted { get; set; }
 
@@ -5054,6 +5060,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         public long PullReceiverRawBytesRecent { get; set; }
 
         public long PullReceiverRawBatchBytesTotal { get; set; }
+
+        public int PullReceiverRawBatchFramesTotal { get; set; }
 
         public long PullReceiverAcceptedRawBytesTotal { get; set; }
 

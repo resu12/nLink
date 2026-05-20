@@ -2083,7 +2083,10 @@ public sealed partial class NknSignalingTransport
                         $"event=screenshare_control_bootstrap_gate_stage; stage=released; stream_epoch={bootstrapMetadata!.StreamEpoch}; frame_id={bootstrapMetadata.FrameId}; is_keyframe={(bootstrapMetadata.IsKeyFrame ? 1 : 0)}; msg_id={envelope.MessageId}");
                 }
             }
-            Log($"Envelope sent (type={envelope.Type}, payload_len={envelope.Payload.Length}, msg_id={envelope.MessageId})");
+            if (FileTransferDiagnosticLogPolicy.TraceEnabled)
+            {
+                Log($"Envelope sent (type={envelope.Type}, payload_len={envelope.Payload.Length}, msg_id={envelope.MessageId})");
+            }
         }
         catch (Exception ex)
         {
@@ -2116,7 +2119,11 @@ public sealed partial class NknSignalingTransport
                 LocalOperationalLog.Info(
                     "NKN.Tuna",
                     $"event=tuna_accelerated_file_frame_sent; channel=bulk; payload_bytes={bytes.Length}");
-                Log($"Bulk envelope sent via Tuna acceleration (type={envelope.Type}, payload_len={envelope.Payload.Length}, msg_id={envelope.MessageId})");
+                if (FileTransferDiagnosticLogPolicy.TraceEnabled)
+                {
+                    Log($"Bulk envelope sent via Tuna acceleration (type={envelope.Type}, payload_len={envelope.Payload.Length}, msg_id={envelope.MessageId})");
+                }
+
                 return true;
             }
 
@@ -2126,7 +2133,11 @@ public sealed partial class NknSignalingTransport
             {
                 RecordTunaFallbackNknFrameSent(envelope.Type, NknBridgeChannel.Bulk, bytes.Length);
             }
-            Log($"Bulk envelope sent (type={envelope.Type}, payload_len={envelope.Payload.Length}, msg_id={envelope.MessageId})");
+            if (FileTransferDiagnosticLogPolicy.TraceEnabled)
+            {
+                Log($"Bulk envelope sent (type={envelope.Type}, payload_len={envelope.Payload.Length}, msg_id={envelope.MessageId})");
+            }
+
             return false;
         }
         catch (Exception ex)

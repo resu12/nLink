@@ -913,6 +913,7 @@ function New-FileTransferThroughputSummaryLines {
     $payloadEfficiencyProfileEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_payload_efficiency_profile_selected'))
     $payloadBudgetEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_transport_payload_budget'))
     $payloadBatchEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_chunk_batch_sent_as_batch'))
+    $payloadTransportSummaryEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_chunk_batch_transport_summary'))
     $payloadBinaryEvents = @(
         Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_binary_frame_sent') |
             Where-Object {
@@ -922,7 +923,7 @@ function New-FileTransferThroughputSummaryLines {
                     $frameType -eq 'filetransfer.chunk_batch.v4'
             }
     )
-    $payloadShapeEvents = @($payloadBatchEvents + $payloadBudgetEvents + $payloadBinaryEvents)
+    $payloadShapeEvents = @($payloadBatchEvents + $payloadBudgetEvents + $payloadBinaryEvents + $payloadTransportSummaryEvents)
     $profileChanged = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_profile_changed'))
     $reorderPolicy = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_reorder_policy_decision'))
     $grantSummaries = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_grant_window_summary'))
@@ -1022,8 +1023,18 @@ function New-FileTransferThroughputSummaryLines {
         })
     $v4RepairSentEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_repair_sent'))
     $v4RepairBatchEvents = @($payloadBatchEvents | Where-Object { (Get-FileTransferEventField -Event $_ -Name 'batch_profile' -Default '') -like 'v4_repair_*' })
-    $v4BatchDenominator = $v4BatchEvents.Count + $v4SplitEvents.Count
-    $v4BatchRatio = if ($v4BatchDenominator -gt 0) { ($v4BatchEvents.Count / [double]$v4BatchDenominator).ToString('F6', [System.Globalization.CultureInfo]::InvariantCulture) } else { '0.000000' }
+    $v4TransportSummaryBatchCount = Get-FileTransferMaxField -Events $payloadTransportSummaryEvents -FieldName 'batch_frames_sent_total'
+    $v4BatchNumerator = if ($v4BatchEvents.Count -gt 0) { $v4BatchEvents.Count } else { $v4TransportSummaryBatchCount }
+    $v4BatchDenominator = $v4BatchNumerator + $v4SplitEvents.Count
+    $v4BatchRatio = if ($v4BatchDenominator -gt 0) { ($v4BatchNumerator / [double]$v4BatchDenominator).ToString('F6', [System.Globalization.CultureInfo]::InvariantCulture) } else { '0.000000' }
+    $v4AverageBatchChunkCount = Get-FileTransferAverageDoubleField -Events @($v4BatchEvents + $v4BudgetEvents) -FieldName 'batch_chunk_count'
+    if ($v4AverageBatchChunkCount -eq '0.00') {
+        $v4AverageBatchChunkCount = Get-FileTransferAverageDoubleField -Events $payloadTransportSummaryEvents -FieldName 'average_batch_chunk_count'
+    }
+    $v4MaxBatchChunkCount = Get-FileTransferMaxField -Events @($v4BatchEvents + $v4BudgetEvents) -FieldName 'batch_chunk_count'
+    if ($v4MaxBatchChunkCount -eq 0) {
+        $v4MaxBatchChunkCount = Get-FileTransferMaxField -Events $payloadTransportSummaryEvents -FieldName 'max_batch_chunk_count'
+    }
     $v4MixedEnabledEvidenceCount =
         (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v4_mixed_enabled') +
         (Get-FileTransferEventFieldValueCount -Events $Summary.TransferEvents -FieldName 'mixed_screenshare' -Value '1')
@@ -1124,16 +1135,16 @@ function New-FileTransferThroughputSummaryLines {
         ("v6_chunk_batch_send_late_failed_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_chunk_batch_send_late_failed')),
         ("v4_repair_batch_bulk_only_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $v4RepairBatchEvents -FieldName 'repair_delivery_mode' -Value 'bulk_only')),
         ("v4_repair_batch_control_bulk_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $v4RepairBatchEvents -FieldName 'repair_delivery_mode' -Value 'control_bulk_escalated')),
-        ("v4_average_batch_chunk_count={0}" -f (Get-FileTransferAverageDoubleField -Events @($v4BatchEvents + $v4BudgetEvents) -FieldName 'batch_chunk_count')),
-        ("v4_max_batch_chunk_count={0}" -f (Get-FileTransferMaxField -Events @($v4BatchEvents + $v4BudgetEvents) -FieldName 'batch_chunk_count')),
-        ("v4_average_bridge_payload_fill_percent={0}" -f (Get-FileTransferAverageDoubleField -Events @($v4BatchEvents + $v4BudgetEvents) -FieldName 'bridge_payload_fill_percent')),
-        ("v4_p95_bridge_payload_fill_percent={0}" -f (Get-FileTransferPercentileDoubleField -Events @($v4BatchEvents + $v4BudgetEvents) -FieldName 'bridge_payload_fill_percent' -Percentile 95)),
-        ("v4_raw_to_bridge_payload_ratio_max={0}" -f (Get-FileTransferMaxDoubleField -Events @($v4BatchEvents + $v4BudgetEvents) -FieldName 'raw_to_bridge_payload_ratio')),
+        ("v4_average_batch_chunk_count={0}" -f $v4AverageBatchChunkCount),
+        ("v4_max_batch_chunk_count={0}" -f $v4MaxBatchChunkCount),
+        ("v4_average_bridge_payload_fill_percent={0}" -f (Get-FileTransferAverageDoubleField -Events @($v4BatchEvents + $v4BudgetEvents + $payloadTransportSummaryEvents) -FieldName 'bridge_payload_fill_percent')),
+        ("v4_p95_bridge_payload_fill_percent={0}" -f (Get-FileTransferPercentileDoubleField -Events @($v4BatchEvents + $v4BudgetEvents + $payloadTransportSummaryEvents) -FieldName 'bridge_payload_fill_percent' -Percentile 95)),
+        ("v4_raw_to_bridge_payload_ratio_max={0}" -f (Get-FileTransferMaxDoubleField -Events @($v4BatchEvents + $v4BudgetEvents + $payloadTransportSummaryEvents) -FieldName 'raw_to_bridge_payload_ratio')),
         ("average_batch_chunk_count={0}" -f (Get-FileTransferAverageDoubleField -Events $payloadShapeEvents -FieldName 'batch_chunk_count')),
         ("max_batch_chunk_count={0}" -f (Get-FileTransferMaxField -Events $payloadShapeEvents -FieldName 'batch_chunk_count')),
-        ("average_bridge_payload_fill_percent={0}" -f (Get-FileTransferAverageDoubleField -Events @($payloadBatchEvents + $payloadBudgetEvents) -FieldName 'bridge_payload_fill_percent')),
-        ("p95_bridge_payload_fill_percent={0}" -f (Get-FileTransferPercentileDoubleField -Events @($payloadBatchEvents + $payloadBudgetEvents) -FieldName 'bridge_payload_fill_percent' -Percentile 95)),
-        ("raw_to_bridge_payload_ratio_max={0}" -f (Get-FileTransferMaxDoubleField -Events @($payloadBatchEvents + $payloadBudgetEvents) -FieldName 'raw_to_bridge_payload_ratio')),
+        ("average_bridge_payload_fill_percent={0}" -f (Get-FileTransferAverageDoubleField -Events @($payloadBatchEvents + $payloadBudgetEvents + $payloadTransportSummaryEvents) -FieldName 'bridge_payload_fill_percent')),
+        ("p95_bridge_payload_fill_percent={0}" -f (Get-FileTransferPercentileDoubleField -Events @($payloadBatchEvents + $payloadBudgetEvents + $payloadTransportSummaryEvents) -FieldName 'bridge_payload_fill_percent' -Percentile 95)),
+        ("raw_to_bridge_payload_ratio_max={0}" -f (Get-FileTransferMaxDoubleField -Events @($payloadBatchEvents + $payloadBudgetEvents + $payloadTransportSummaryEvents) -FieldName 'raw_to_bridge_payload_ratio')),
         ("bulk_frames_per_mib={0}" -f (Get-FileTransferBulkFramesPerMiB -Summary $Summary)),
         ("max_sender_remote_granted_window_bytes={0}" -f (Get-FileTransferMaxField -Events $senderThroughput -FieldName 'remote_granted_window_bytes')),
         ("max_sender_sent_cache_bytes={0}" -f (Get-FileTransferMaxField -Events $senderThroughput -FieldName 'sent_cache_bytes')),
@@ -1262,6 +1273,19 @@ function New-FileTransferProtocolShapeSummaryLines {
     $v4StateReceivedEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_state_received'))
     $v4ChunkBatchSentEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_chunk_batch_sent'))
     $v4SenderPumpEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_sender_pump_summary'))
+    $v4EfficiencyEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_efficiency_summary'))
+    $v4OutboundEfficiencyEvents = @($v4EfficiencyEvents | Where-Object { (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' })
+    $v4InboundEfficiencyEvents = @($v4EfficiencyEvents | Where-Object { (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' })
+    $v4ChunkBatchCount = $v4BatchEvents.Count
+    if ($v4ChunkBatchCount -eq 0) {
+        $v4ChunkBatchCount = Get-FileTransferMaxField -Events $v4InboundEfficiencyEvents -FieldName 'raw_batch_frames_received_total'
+    }
+    $v4ChunkBatchSentCount = $v4ChunkBatchSentEvents.Count
+    if ($v4ChunkBatchSentCount -eq 0) {
+        $v4ChunkBatchSentCount = [Math]::Max(
+            (Get-FileTransferMaxField -Events $v4SenderPumpEvents -FieldName 'batch_frames_sent_total'),
+            (Get-FileTransferMaxField -Events $v4OutboundEfficiencyEvents -FieldName 'batch_frames_sent_total'))
+    }
     $v4RepairScheduledEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_repair_scheduled'))
     $v4RepairSentEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_repair_sent'))
     $v4CompleteReceivedEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_complete_received'))
@@ -1327,13 +1351,13 @@ function New-FileTransferProtocolShapeSummaryLines {
         ("v4_manifest_count={0}" -f $v4ManifestEvents.Count),
         ("v4_sparse_receiver_selected_count={0}" -f $v4SparseModeEvents.Count),
         ("v4_state_sent_count={0}" -f $v4StateEvents.Count),
-        ("v4_chunk_batch_count={0}" -f $v4BatchEvents.Count),
+        ("v4_chunk_batch_count={0}" -f $v4ChunkBatchCount),
         ("v4_complete_count={0}" -f $v4CompleteEvents.Count),
         ("v4_receiver_failed_count={0}" -f $v4ReceiverFailedEvents.Count),
         ("v4_sender_started_count={0}" -f $v4SenderStartedEvents.Count),
         ("v4_manifest_sent_count={0}" -f $v4ManifestSentEvents.Count),
         ("v4_state_received_count={0}" -f $v4StateReceivedEvents.Count),
-        ("v4_chunk_batch_sent_count={0}" -f $v4ChunkBatchSentEvents.Count),
+        ("v4_chunk_batch_sent_count={0}" -f $v4ChunkBatchSentCount),
         ("v4_sender_pump_summary_count={0}" -f $v4SenderPumpEvents.Count),
         ("v4_repair_scheduled_count={0}" -f $v4RepairScheduledEvents.Count),
         ("v4_repair_sent_count={0}" -f $v4RepairSentEvents.Count),
@@ -1654,13 +1678,16 @@ function New-FileTransferTransportBudgetSummaryLines {
 
     $events = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @(
         'filetransfer_chunk_batch_sent_as_batch',
+        'filetransfer_chunk_batch_transport_summary',
         'filetransfer_chunk_batch_split_for_transport',
         'filetransfer_transport_payload_budget',
         'filetransfer_transport_payload_rejected',
         'filetransfer_data_frame_decode_failed',
         'filetransfer_chunk_rejected',
         'filetransfer_message_rejected'))
+    $transportSummaryEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_chunk_batch_transport_summary'))
     $budgetEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_transport_payload_budget', 'filetransfer_transport_payload_rejected'))
+    $budgetMetricEvents = @($budgetEvents + $transportSummaryEvents)
 
     return @(
         ("transfer_id={0}" -f $Summary.TransferId),
@@ -1673,11 +1700,11 @@ function New-FileTransferTransportBudgetSummaryLines {
         ("message_rejected_count={0}" -f $Summary.MessageRejectedCount),
         ("max_bridge_command_bytes={0}" -f (Get-FileTransferMaxField -Events $budgetEvents -FieldName 'bridge_command_bytes')),
         ("max_bridge_payload_bytes={0}" -f (Get-FileTransferMaxField -Events $budgetEvents -FieldName 'bridge_payload_bytes')),
-        ("average_batch_chunk_count={0}" -f (Get-FileTransferAverageDoubleField -Events $budgetEvents -FieldName 'batch_chunk_count')),
-        ("max_batch_chunk_count={0}" -f (Get-FileTransferMaxField -Events $budgetEvents -FieldName 'batch_chunk_count')),
-        ("average_bridge_payload_fill_percent={0}" -f (Get-FileTransferAverageDoubleField -Events $budgetEvents -FieldName 'bridge_payload_fill_percent')),
-        ("p95_bridge_payload_fill_percent={0}" -f (Get-FileTransferPercentileDoubleField -Events $budgetEvents -FieldName 'bridge_payload_fill_percent' -Percentile 95)),
-        ("raw_to_bridge_payload_ratio_max={0}" -f (Get-FileTransferMaxDoubleField -Events $budgetEvents -FieldName 'raw_to_bridge_payload_ratio')),
+        ("average_batch_chunk_count={0}" -f (Get-FileTransferAverageDoubleField -Events $budgetMetricEvents -FieldName 'batch_chunk_count')),
+        ("max_batch_chunk_count={0}" -f (Get-FileTransferMaxField -Events $budgetMetricEvents -FieldName 'max_batch_chunk_count')),
+        ("average_bridge_payload_fill_percent={0}" -f (Get-FileTransferAverageDoubleField -Events $budgetMetricEvents -FieldName 'bridge_payload_fill_percent')),
+        ("p95_bridge_payload_fill_percent={0}" -f (Get-FileTransferPercentileDoubleField -Events $budgetMetricEvents -FieldName 'bridge_payload_fill_percent' -Percentile 95)),
+        ("raw_to_bridge_payload_ratio_max={0}" -f (Get-FileTransferMaxDoubleField -Events $budgetMetricEvents -FieldName 'raw_to_bridge_payload_ratio')),
         '',
         'transport_budget_evidence:'
     ) + (Get-FileTransferArtifactEvidenceLines -Events $events -Limit 40)
@@ -1688,6 +1715,7 @@ function New-FileTransferPayloadEfficiencySummaryLines {
 
     $profileEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_payload_efficiency_profile_selected'))
     $batchEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_chunk_batch_sent_as_batch'))
+    $transportSummaryEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_chunk_batch_transport_summary'))
     $budgetEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_transport_payload_budget'))
     $binaryEvents = @(
         Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_binary_frame_sent') |
@@ -1697,20 +1725,20 @@ function New-FileTransferPayloadEfficiencySummaryLines {
                     $frameType -eq 'filetransfer.chunk_batch.v4'
             }
     )
-    $shapeEvents = @($batchEvents + $budgetEvents + $binaryEvents)
+    $shapeEvents = @($batchEvents + $budgetEvents + $binaryEvents + $transportSummaryEvents)
     $bridgeBulkEvents = @($Summary.GlobalEvents | Where-Object { $_.EventName -eq 'nkn_bridge_bulk_send_summary' })
-    $evidence = @($profileEvents + $batchEvents + $budgetEvents + $binaryEvents + $bridgeBulkEvents | Sort-Object Sequence)
+    $evidence = @($profileEvents + $batchEvents + $transportSummaryEvents + $budgetEvents + $binaryEvents + $bridgeBulkEvents | Sort-Object Sequence)
 
     return @(
         ("transfer_id={0}" -f $Summary.TransferId),
         ("payload_efficiency_profile={0}" -f (Get-FileTransferPayloadEfficiencyProfile -ProfileEvents $profileEvents -BudgetEvents $budgetEvents -BatchEvents $batchEvents)),
         ("profile_selected_count={0}" -f $profileEvents.Count),
-        ("batch_sent_as_batch_count={0}" -f $batchEvents.Count),
+        ("batch_sent_as_batch_count={0}" -f $Summary.BatchSentAsBatchCount),
         ("average_batch_chunk_count={0}" -f (Get-FileTransferAverageDoubleField -Events $shapeEvents -FieldName 'batch_chunk_count')),
-        ("max_batch_chunk_count={0}" -f (Get-FileTransferMaxField -Events $shapeEvents -FieldName 'batch_chunk_count')),
-        ("average_bridge_payload_fill_percent={0}" -f (Get-FileTransferAverageDoubleField -Events @($batchEvents + $budgetEvents) -FieldName 'bridge_payload_fill_percent')),
-        ("p95_bridge_payload_fill_percent={0}" -f (Get-FileTransferPercentileDoubleField -Events @($batchEvents + $budgetEvents) -FieldName 'bridge_payload_fill_percent' -Percentile 95)),
-        ("raw_to_bridge_payload_ratio_max={0}" -f (Get-FileTransferMaxDoubleField -Events @($batchEvents + $budgetEvents) -FieldName 'raw_to_bridge_payload_ratio')),
+        ("max_batch_chunk_count={0}" -f (Get-FileTransferMaxField -Events $shapeEvents -FieldName 'max_batch_chunk_count')),
+        ("average_bridge_payload_fill_percent={0}" -f (Get-FileTransferAverageDoubleField -Events @($batchEvents + $budgetEvents + $transportSummaryEvents) -FieldName 'bridge_payload_fill_percent')),
+        ("p95_bridge_payload_fill_percent={0}" -f (Get-FileTransferPercentileDoubleField -Events @($batchEvents + $budgetEvents + $transportSummaryEvents) -FieldName 'bridge_payload_fill_percent' -Percentile 95)),
+        ("raw_to_bridge_payload_ratio_max={0}" -f (Get-FileTransferMaxDoubleField -Events @($batchEvents + $budgetEvents + $transportSummaryEvents) -FieldName 'raw_to_bridge_payload_ratio')),
         ("bulk_frames_per_mib={0}" -f (Get-FileTransferBulkFramesPerMiB -Summary $Summary)),
         ("max_bridge_bulk_payload_bytes_per_second={0}" -f (Get-FileTransferMaxField -Events $bridgeBulkEvents -FieldName 'payload_bytes_per_second')),
         ("reorder_event_count={0}" -f $Summary.ReorderEventCount),

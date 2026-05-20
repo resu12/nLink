@@ -1516,6 +1516,11 @@ public sealed partial class SessionFileTransferService
         InboundWriteBatch batch,
         long writeDurationMs)
     {
+        if (!FileTransferDiagnosticLogPolicy.TraceEnabled)
+        {
+            return;
+        }
+
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_receiver_write_batch_committed; transfer_id={context.TransferId}; session_id={context.SessionId}; batch_chunk_count={batch.ChunkCount}; batch_bytes={batch.ByteCount}; write_duration_ms={writeDurationMs}; pending_chunk_count={batch.PendingChunkCountAfterDequeue}; pending_bytes={batch.PendingBytesAfterDequeue}; next_chunk_index={batch.NextChunkIndexAfterDequeue}; highest_received_chunk_index={batch.HighestReceivedChunkIndex}; late_arrival_distance={batch.LateArrivalDistance}; granted_window_bytes={batch.GrantedWindowBytes}");
@@ -1524,6 +1529,11 @@ public sealed partial class SessionFileTransferService
     private static void LogPullDataFrameReceived(string transferId, string sessionId, FileTransferDataFrame frame)
     {
         LogPullBinaryFrameReceived(transferId, sessionId, frame);
+        if (!FileTransferDiagnosticLogPolicy.TraceEnabled)
+        {
+            return;
+        }
+
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_data_frame_received; transfer_id={transferId}; session_id={sessionId}; frame_type={frame.Type}; chunk_index={GetFrameChunkIndex(frame)}");
@@ -1545,6 +1555,11 @@ public sealed partial class SessionFileTransferService
 
     private static void LogPullBinaryFrameSent(string transferId, string sessionId, FileTransferDataFrame frame, int payloadBytes)
     {
+        if (!FileTransferDiagnosticLogPolicy.TraceEnabled)
+        {
+            return;
+        }
+
         var serializedPayloadBytes = FileTransferProtocol.IsV4DataFrame(frame)
             ? FileTransferDataFrameCodec.SerializeLegacyV4(frame).Length
             : FileTransferDataFrameCodec.Serialize(frame).Length;
@@ -1557,6 +1572,11 @@ public sealed partial class SessionFileTransferService
 
     private static void LogPullBinaryFrameReceived(string transferId, string sessionId, FileTransferDataFrame frame)
     {
+        if (!FileTransferDiagnosticLogPolicy.TraceEnabled)
+        {
+            return;
+        }
+
         var rawChunkBytes = GetFrameRawChunkBytes(frame);
         LocalOperationalLog.Info(
             "FileTransferService",

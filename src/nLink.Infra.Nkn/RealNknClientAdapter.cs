@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.Json;
 using NLink.Core;
 using NLink.Core.Configuration;
+using NLink.Core.FileTransfer;
 using NLink.Core.Logging;
 using NLink.Core.Retry;
 using NLink.Core.ScreenShare;
@@ -3164,7 +3165,10 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
         var messageCount = Interlocked.Exchange(ref bridgeSendCountSinceLastLog, 0);
         var totalPayloadBytes = Interlocked.Exchange(ref bridgeSendPayloadBytesSinceLastLog, 0);
-        Log($"Bridge outbound traffic (messages={messageCount}, payload_bytes={totalPayloadBytes}, dest_len={destinationLength})");
+        if (FileTransferDiagnosticLogPolicy.TraceEnabled)
+        {
+            Log($"Bridge outbound traffic (messages={messageCount}, payload_bytes={totalPayloadBytes}, dest_len={destinationLength})");
+        }
     }
 
     private void MaybeLogBridgeMessageSummary(int payloadLength, int sourceLength, bool isTopic)
@@ -3192,7 +3196,10 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
         var messageCount = Interlocked.Exchange(ref bridgeMessageCountSinceLastLog, 0);
         var totalPayloadBytes = Interlocked.Exchange(ref bridgeMessagePayloadBytesSinceLastLog, 0);
-        Log($"Bridge control/session traffic (messages={messageCount}, payload_bytes={totalPayloadBytes}, source_len={sourceLength}, is_topic={isTopic})");
+        if (FileTransferDiagnosticLogPolicy.TraceEnabled)
+        {
+            Log($"Bridge control/session traffic (messages={messageCount}, payload_bytes={totalPayloadBytes}, source_len={sourceLength}, is_topic={isTopic})");
+        }
     }
 
     private void MaybeLogBridgeBulkMessageSummary(int payloadLength, int sourceLength, bool isTopic)
@@ -3220,7 +3227,10 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
         var messageCount = Interlocked.Exchange(ref bulkBridgeMessageCountSinceLastLog, 0);
         var totalPayloadBytes = Interlocked.Exchange(ref bulkBridgeMessagePayloadBytesSinceLastLog, 0);
-        Log($"Bridge filetransfer bulk traffic (messages={messageCount}, payload_bytes={totalPayloadBytes}, source_len={sourceLength}, is_topic={isTopic})");
+        if (FileTransferDiagnosticLogPolicy.TraceEnabled)
+        {
+            Log($"Bridge filetransfer bulk traffic (messages={messageCount}, payload_bytes={totalPayloadBytes}, source_len={sourceLength}, is_topic={isTopic})");
+        }
     }
 
     private void RecordInboundDelivery(
