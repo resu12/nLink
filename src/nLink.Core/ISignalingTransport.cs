@@ -71,6 +71,8 @@ public interface ITransportAccelerationStatus
 
     bool IsTransportAccelerationActive { get; }
 
+    bool ShouldUseFileTransferV6ForAcceleration { get; }
+
     string TransportAccelerationStatusReason { get; }
 }
 

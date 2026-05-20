@@ -1448,6 +1448,12 @@ public sealed partial class SessionFileTransferService
             normalized?.Contains("sidecar", StringComparison.OrdinalIgnoreCase) == true;
     }
 
+    private static bool IsTunaActivationNegotiationTransportPauseReason(string? reason)
+        => string.Equals(
+            NormalizeReason(reason),
+            "tuna_activation_negotiating",
+            StringComparison.Ordinal);
+
     private void ReplaceOutboundDataSessionLocked(OutboundTransferContext context, IFileTransferDataSession session)
     {
         if (ReferenceEquals(context.DataSession, session))

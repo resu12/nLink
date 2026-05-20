@@ -184,9 +184,15 @@ public sealed record FileTransferTransferSnapshot(
             FileTransferTransferState.Failed;
 
     public long ProgressBytes
-        => Direction == FileTransferDirection.Outbound
-            ? Math.Max(0L, BytesAcknowledgedByReceiver ?? BytesTransferred)
-            : Math.Max(0L, BytesTransferred);
+    {
+        get
+        {
+            var visible = Direction == FileTransferDirection.Outbound
+                ? BytesAcknowledgedByReceiver ?? BytesTransferred
+                : BytesAcceptedForTransport ?? BytesTransferred;
+            return Math.Clamp(visible, 0L, Math.Max(0L, FileSizeBytes));
+        }
+    }
 
     public double ProgressFraction
         => FileSizeBytes <= 0

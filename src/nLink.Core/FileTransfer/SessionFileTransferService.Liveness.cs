@@ -393,6 +393,20 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        if (TryDeferOutboundV6PeerLivenessTimeoutForPostTunaFallbackRepair(
+                context,
+                lastPeerLivenessUtc,
+                peerLivenessTimeout,
+                out var postTunaFallbackOutboundToSignal))
+        {
+            if (postTunaFallbackOutboundToSignal is not null)
+            {
+                SignalOutboundV4SenderPump(postTunaFallbackOutboundToSignal);
+            }
+
+            return false;
+        }
+
         if (TryDeferOutboundV6PeerLivenessTimeoutForRecovery(
                 context,
                 lastPeerLivenessUtc,
@@ -463,6 +477,75 @@ public sealed partial class SessionFileTransferService
             notifyPeer: true,
             cancelReason: null,
             ct: CancellationToken.None).ConfigureAwait(false);
+        return true;
+    }
+
+    private bool TryDeferOutboundV6PeerLivenessTimeoutForPostTunaFallbackRepair(
+        OutboundTransferContext context,
+        DateTimeOffset? lastPeerLivenessUtc,
+        TimeSpan peerLivenessTimeout,
+        out OutboundTransferContext? outboundToSignal)
+    {
+        outboundToSignal = null;
+        DateTimeOffset now;
+        int deferralCount;
+        int remoteFrontier;
+        int highestAcceptedChunk;
+        int inFlightSendCount;
+        int pendingRepairCount;
+        long peerLivenessSilenceMs;
+        lock (gate)
+        {
+            if (!ReferenceEquals(outboundTransfer, context) ||
+                context.IsTerminal ||
+                !IsNegotiableDataProtocolVersion(context.NegotiatedDataProtocolVersion) ||
+                !ShouldUsePostTunaFallbackV6SparseRuntimeLocked(context) ||
+                !IsOutboundPostTunaRecoveryActiveLocked(context) ||
+                context.UserPaused ||
+                context.PeerPaused ||
+                !context.PullSessionActive ||
+                IsV6TransportEpochUnresolved(context.V6TransportEpoch))
+            {
+                return false;
+            }
+
+            var hasRecoveryWork =
+                context.ChunksAcceptedForTransport > context.RemoteNextExpectedChunkIndex ||
+                context.BytesAcceptedForTransport > context.BytesTransferred ||
+                context.SentAwaitingAck.Count > 0 ||
+                context.V6ChunkSendsInFlight.Count > 0 ||
+                context.PullV4SenderPumpRepairRequests.Count > 0 ||
+                context.PullV4SenderPumpRepairQueue.Count > 0 ||
+                context.PullPostTunaRecoveryActive;
+            if (!hasRecoveryWork)
+            {
+                return false;
+            }
+
+            now = DateTimeOffset.UtcNow;
+            var peerLivenessSilence = lastPeerLivenessUtc is null
+                ? TimeSpan.Zero
+                : now - lastPeerLivenessUtc.Value;
+
+            context.V6PeerLivenessRecoveryDeferralCount++;
+            context.V6PeerLivenessRecoveryDeferredUtc = now;
+            context.V6EpochLivenessDeferralCount++;
+            context.V6EpochLivenessDeferralUtc = now;
+            context.PullTransportResumeRequestPending = true;
+            context.V4SenderPumpLastWakeReason = "post_tuna_fallback_peer_liveness_repair";
+
+            deferralCount = context.V6PeerLivenessRecoveryDeferralCount;
+            remoteFrontier = context.RemoteNextExpectedChunkIndex;
+            highestAcceptedChunk = Math.Max(-1, context.ChunksAcceptedForTransport - 1);
+            inFlightSendCount = context.V6ChunkSendsInFlight.Count(pair => pair.Key >= context.RemoteNextExpectedChunkIndex);
+            pendingRepairCount = context.PullV4SenderPumpRepairRequests.Count;
+            peerLivenessSilenceMs = lastPeerLivenessUtc is null ? -1 : (long)Math.Max(0, peerLivenessSilence.TotalMilliseconds);
+            outboundToSignal = context;
+        }
+
+        LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_v6_heartbeat_timeout_deferred_for_post_tuna_fallback_repair; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; last_peer_liveness_utc={FormatProtocolLogValue(lastPeerLivenessUtc?.ToString("O"))}; timeout_ms={(long)peerLivenessTimeout.TotalMilliseconds}; peer_liveness_silence_ms={peerLivenessSilenceMs}; deferral_count={deferralCount}; remote_frontier_chunk_index={remoteFrontier}; highest_accepted_chunk_index={highestAcceptedChunk}; in_flight_send_count={inFlightSendCount}; pending_repair_count={pendingRepairCount}; transport_paused={(context.PullTransportPaused ? 1 : 0)}; recovered_transport_epoch={context.LastRecoveredV6TransportEpoch}; recovered_handoff_kind={FormatFileTransferTransportHandoffKind(context.LastRecoveredV6TransportEpochKind)}");
         return true;
     }
 
@@ -771,6 +854,25 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        if (TryDeferInboundV6PeerLivenessTimeoutForPostTunaFallbackRepair(
+                context,
+                lastPeerLivenessUtc,
+                peerLivenessTimeout,
+                out var postTunaFallbackInboundToSignal))
+        {
+            if (postTunaFallbackInboundToSignal is not null)
+            {
+                await SendInboundV4StateAsync(
+                        postTunaFallbackInboundToSignal,
+                        "post_tuna_fallback_peer_liveness_repair",
+                        terminalReady: false,
+                        forceSend: true)
+                    .ConfigureAwait(false);
+            }
+
+            return false;
+        }
+
         if (TryDeferInboundV6PeerLivenessTimeoutForRegularNknFeedbackRepair(
                 context,
                 lastPeerLivenessUtc,
@@ -798,6 +900,72 @@ public sealed partial class SessionFileTransferService
             errorMessage: "Peer disconnected.",
             cancelReason: null,
             ct: CancellationToken.None).ConfigureAwait(false);
+        return true;
+    }
+
+    private bool TryDeferInboundV6PeerLivenessTimeoutForPostTunaFallbackRepair(
+        InboundTransferContext context,
+        DateTimeOffset? lastPeerLivenessUtc,
+        TimeSpan peerLivenessTimeout,
+        out InboundTransferContext? inboundToSignal)
+    {
+        inboundToSignal = null;
+        DateTimeOffset now;
+        int deferralCount;
+        int committedChunkIndex;
+        int highestObservedChunkIndex;
+        int sparsePendingWriteCount;
+        long bytesTransferred;
+        long peerLivenessSilenceMs;
+        lock (gate)
+        {
+            if (!ReferenceEquals(inboundTransfer, context) ||
+                context.IsTerminal ||
+                !IsNegotiableDataProtocolVersion(context.NegotiatedDataProtocolVersion) ||
+                !ShouldUsePostTunaFallbackV6SparseRuntimeLocked(context) ||
+                !IsInboundPostTunaRecoveryActiveLocked(context) ||
+                context.UserPaused ||
+                context.PeerPaused ||
+                !context.PullSessionActive ||
+                !context.PullManifestReceived ||
+                context.NextChunkIndex >= context.ChunkCount ||
+                IsV6TransportEpochUnresolved(context.V6TransportEpoch))
+            {
+                return false;
+            }
+
+            var hasRecoveryWork =
+                context.PullPostTunaRecoveryActive ||
+                context.NextChunkIndex <= context.PullHighestReceivedChunkIndex ||
+                context.ReceiverSparseChunksPendingWrite.Count > 0;
+            if (!hasRecoveryWork)
+            {
+                return false;
+            }
+
+            now = DateTimeOffset.UtcNow;
+            var peerLivenessSilence = lastPeerLivenessUtc is null
+                ? TimeSpan.Zero
+                : now - lastPeerLivenessUtc.Value;
+
+            context.V6EpochLivenessDeferralCount++;
+            context.V6EpochLivenessDeferralUtc = now;
+            context.PullTransportResumeRequestPending = true;
+            context.V6LastReceiverStateSentUtc = null;
+            context.V6LastFrontierRequestSentUtc = null;
+
+            deferralCount = context.V6EpochLivenessDeferralCount;
+            committedChunkIndex = context.NextChunkIndex;
+            highestObservedChunkIndex = context.PullHighestReceivedChunkIndex;
+            sparsePendingWriteCount = context.ReceiverSparseChunksPendingWrite.Count;
+            bytesTransferred = context.BytesTransferred;
+            peerLivenessSilenceMs = lastPeerLivenessUtc is null ? -1 : (long)Math.Max(0, peerLivenessSilence.TotalMilliseconds);
+            inboundToSignal = context;
+        }
+
+        LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_v6_heartbeat_timeout_deferred_for_post_tuna_fallback_repair; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; last_peer_liveness_utc={FormatProtocolLogValue(lastPeerLivenessUtc?.ToString("O"))}; timeout_ms={(long)peerLivenessTimeout.TotalMilliseconds}; peer_liveness_silence_ms={peerLivenessSilenceMs}; deferral_count={deferralCount}; committed_chunk={committedChunkIndex}; highest_observed_chunk={highestObservedChunkIndex}; bytes_transferred={bytesTransferred}; sparse_pending_write_count={sparsePendingWriteCount}; transport_paused={(context.PullTransportPaused ? 1 : 0)}; recovered_transport_epoch={context.LastRecoveredV6TransportEpoch}; recovered_handoff_kind={FormatFileTransferTransportHandoffKind(context.LastRecoveredV6TransportEpochKind)}");
         return true;
     }
 

@@ -7,6 +7,9 @@ public sealed partial class SessionFileTransferService
     private static TimeSpan ResolveV6TransportEpochProofTimeout()
         => V6TransportEpochProofTimeoutOverrideForTests ?? V6TransportEpochProofTimeout;
 
+    private static TimeSpan ResolveV6TransportProbeAckSendTimeout()
+        => V6TransportProbeAckSendTimeoutOverrideForTests ?? V6TransportProbeAckSendTimeout;
+
     private static bool IsV6TransportEpochUnresolved(V6TransportEpoch? epoch)
         => epoch is not null &&
            epoch.State is not V6TransportEpochState.Recovered and not V6TransportEpochState.Terminal;
@@ -648,7 +651,7 @@ public sealed partial class SessionFileTransferService
         }
     }
 
-    private async Task HandleReceivedV6TransportProbeFrameAsync(
+    private Task HandleReceivedV6TransportProbeFrameAsync(
         string sessionId,
         string transferId,
         FileTransferDirection direction,
@@ -665,9 +668,20 @@ public sealed partial class SessionFileTransferService
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=filetransfer_v6_transport_probe_ignored; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; transport_epoch={frame.TransportEpoch}; probe_id={FormatProtocolLogValue(frame.ProbeId ?? "(none)")}; target_transport={FormatFileTransferTransportKind(targetTransport)}; received_transport={FormatFileTransferTransportKind(receivedTransportKind)}; reason=transport_proof_mismatch");
-            return;
+            return Task.CompletedTask;
         }
 
+        _ = SendV6TransportProbeAckAsync(sessionId, transferId, direction, frame, targetTransport);
+        return Task.CompletedTask;
+    }
+
+    private async Task SendV6TransportProbeAckAsync(
+        string sessionId,
+        string transferId,
+        FileTransferDirection direction,
+        FileTransferTransportProbeFrameV6 frame,
+        FileTransferTransportKind targetTransport)
+    {
         try
         {
             var currentTransport = GetTransportOrThrow();
@@ -679,12 +693,39 @@ public sealed partial class SessionFileTransferService
                 ProbeId = frame.ProbeId,
                 TargetTransport = frame.TargetTransport,
             };
-            await currentTransport.SendFileTransferTransportProbeAsync(ack, CancellationToken.None).ConfigureAwait(false);
+            using var timeoutCts = new CancellationTokenSource();
+            var timeout = ResolveV6TransportProbeAckSendTimeout();
+            var sendTask = currentTransport.SendFileTransferTransportProbeAsync(ack, timeoutCts.Token);
+            var completedTask = await Task.WhenAny(sendTask, Task.Delay(timeout)).ConfigureAwait(false);
+            if (!ReferenceEquals(completedTask, sendTask))
+            {
+                timeoutCts.Cancel();
+                _ = sendTask.ContinueWith(
+                    static task =>
+                    {
+                        _ = task.Exception;
+                    },
+                    CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted,
+                    TaskScheduler.Default);
+                LocalOperationalLog.Warn(
+                    "FileTransferService",
+                    $"event=filetransfer_v6_transport_probe_ack_failed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; transport_epoch={frame.TransportEpoch}; error=timeout; timeout_ms={(long)timeout.TotalMilliseconds}");
+                return;
+            }
+
+            await sendTask.ConfigureAwait(false);
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=filetransfer_v6_transport_probe_ack_sent; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; transport_epoch={frame.TransportEpoch}; probe_id={FormatProtocolLogValue(frame.ProbeId)}; target_transport={FormatFileTransferTransportKind(targetTransport)}");
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException)
+        {
+            LocalOperationalLog.Warn(
+                "FileTransferService",
+                $"event=filetransfer_v6_transport_probe_ack_failed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; transport_epoch={frame.TransportEpoch}; error=canceled");
+        }
+        catch (Exception ex)
         {
             LocalOperationalLog.Warn(
                 "FileTransferService",
@@ -1022,6 +1063,7 @@ public sealed partial class SessionFileTransferService
             context.RemoteNextExpectedChunkIndex >= context.ChunkCount
                 ? context.FileSizeBytes
                 : Math.Min(context.FileSizeBytes, (long)context.RemoteNextExpectedChunkIndex * context.ChunkSizeBytes));
+        context.BytesAcknowledgedByReceiver = Math.Max(context.BytesAcknowledgedByReceiver, context.BytesTransferred);
 
         foreach (var chunkIndex in context.SentAwaitingAck.Keys.Where(chunkIndex => chunkIndex < context.RemoteNextExpectedChunkIndex).ToArray())
         {

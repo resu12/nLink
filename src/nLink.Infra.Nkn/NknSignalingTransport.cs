@@ -405,6 +405,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         authoritativeConnectedAddressSource.HasAuthoritativeConnectedAddress;
     public SessionSecurityState CurrentSessionSecurityState => currentSessionSecurityState;
     public bool IsTransportAccelerationActive => IsAccelerationNegotiatedAndHealthy();
+    public bool ShouldUseFileTransferV6ForAcceleration => ShouldUseFileTransferV6ForAccelerationCore();
     public string TransportAccelerationStatusReason
     {
         get

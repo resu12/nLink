@@ -31,6 +31,7 @@ public sealed partial class SessionFileTransferService
 
         context.BytesTransferred = acknowledgedBytes;
         context.ChunksTransferred = acknowledgedChunks;
+        context.BytesAcknowledgedByReceiver = Math.Max(context.BytesAcknowledgedByReceiver, acknowledgedBytes);
     }
 
     private async Task TransitionOutboundToTerminalAsync(
@@ -77,6 +78,7 @@ public sealed partial class SessionFileTransferService
                 context.ChunksTransferred = context.ChunkCount;
                 context.BytesAcceptedForTransport = context.FileSizeBytes;
                 context.ChunksAcceptedForTransport = context.ChunkCount;
+                context.BytesAcknowledgedByReceiver = context.FileSizeBytes;
             }
 
             snapshot = CreateSnapshotLocked();
@@ -87,6 +89,7 @@ public sealed partial class SessionFileTransferService
             dataSessionToDispose = context.DetachDataSession();
         }
 
+        LogV4EfficiencySummary(context, terminalState);
         RaiseTransferChanged(snapshot);
         dataSessionToDispose?.Dispose();
         try
@@ -173,6 +176,7 @@ public sealed partial class SessionFileTransferService
             dataSessionToDispose = context.DetachDataSession();
         }
 
+        LogV4EfficiencySummary(context, terminalState);
         if (terminalState == FileTransferTransferState.Completed &&
             context.PullTransportRebindGeneration > 0)
         {
@@ -240,6 +244,7 @@ public sealed partial class SessionFileTransferService
             context.State = state;
             context.BytesTransferred = bytesTransferred;
             context.ChunksTransferred = chunksTransferred;
+            context.BytesAcknowledgedByReceiver = Math.Max(context.BytesAcknowledgedByReceiver, bytesTransferred);
             context.StatusMessage = context.UserPaused
                 ? "Transfer paused."
                 : context.PeerPaused

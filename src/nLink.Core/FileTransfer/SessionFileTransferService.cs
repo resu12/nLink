@@ -159,6 +159,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int PullTransportRebindFrontierOnlyStableAdvanceChunks = 64;
     private static readonly TimeSpan V5TransportHandoffWaitingTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan V6TransportEpochProofTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan V6TransportProbeAckSendTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan PullV4PostFallbackPeerSilenceTimeout = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan PullV4PeerSilenceTimeout = TimeSpan.FromSeconds(90);
     private static readonly int[] CancelRetryDelaysMs = [250, 750, 1500, 3000, 7000, 12000, 20000, 30000];
@@ -223,7 +224,9 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int V4SenderPumpPendingBytes = 2 * 1024 * 1024;
     private const int V4RepairRepeatIntervalMs = 750;
     private const int V4FileOnlyFrontierRepairRepeatIntervalMs = 250;
+    private const int V4RegularNknFileOnlyFrontierRepairRepeatIntervalMs = 750;
     private const int V6RegularNknSparseRuntimeFrontierRepairRepeatIntervalMs = V4FileOnlyFrontierRepairRepeatIntervalMs;
+    private const int V6RegularNknSparseRuntimeSenderFrontierRepairRepeatIntervalMs = V4RepairRepeatIntervalMs;
     private const int V4RepairRequestHistoryRetentionMs = 10000;
     private const int V4RepairRedundancyEscalationStallMs = 2000;
     private const int V4FileOnlyFirstRepairCreditStallEscalationMs = 1000;
@@ -245,6 +248,9 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int V4KnownFrontierRepairChunks = V4MaxBatchSegmentsDefault;
     private const int V4FileOnlyInitialFrontierRepairChunks = 12;
     private const int V4MixedInitialFrontierRepairChunks = 12;
+    private const string V6RegularNknFrontierRepairTransactionRequestPrefix = "regular-nkn-frontier:";
+    private const string V6RegularNknFrontierRepairTransactionPriority = "frontier";
+    private const string V6RegularNknFrontierRepairTransactionRecoveryMode = "regular_nkn_frontier_stall_control_bulk";
     private const int V4PostFallbackEmergencyFrontierRepairChunks = 1;
     private const int V4PostFallbackFrontierBackfillStep1Chunks = 3;
     private const int V4PostFallbackFrontierBackfillStep2Chunks = 12;
@@ -368,6 +374,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     internal static TimeSpan? V6HeartbeatIntervalOverrideForTests { get; set; }
     internal static TimeSpan? V6PeerLivenessTimeoutOverrideForTests { get; set; }
     internal static TimeSpan? V6TransportEpochProofTimeoutOverrideForTests { get; set; }
+    internal static TimeSpan? V6TransportProbeAckSendTimeoutOverrideForTests { get; set; }
     internal static TimeSpan? V6TunaRedundantDataProbeDelayOverrideForTests { get; set; }
     internal static long? V6TunaRedundantDataMinimumBytesAfterProofOverrideForTests { get; set; }
     internal static TimeSpan? V6SenderTransportSendTimeoutOverrideForTests { get; set; }
@@ -793,6 +800,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             }
 
             context = new OutboundTransferContext(normalizedDescriptor, openReadStreamAsync);
+            context.OfferedDataProtocolVersion = ResolvePreferredDataProtocolVersionForNewTransfer(currentTransport);
             outboundTransfer = context;
         }
 
@@ -833,7 +841,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             TransferId = context.TransferId,
             FileName = context.FileName,
             FileSizeBytes = context.FileSizeBytes,
-            PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+            PreferredDataProtocolVersion = context.OfferedDataProtocolVersion,
         };
 
         try
@@ -932,7 +940,7 @@ public sealed partial class SessionFileTransferService : IDisposable
 
             context.OpenWriteDestinationAsync = openWriteDestinationAsync;
             context.AcceptInProgress = false;
-            context.NegotiatedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6;
+            context.NegotiatedDataProtocolVersion = context.OfferedDataProtocolVersion;
             context.MetadataAwaitingSinceUtc = DateTimeOffset.UtcNow;
             context.State = FileTransferTransferState.AwaitingMetadata;
             context.StatusMessage = "Waiting for sender to prepare the file.";
@@ -950,10 +958,13 @@ public sealed partial class SessionFileTransferService : IDisposable
                 {
                     SessionId = context.SessionId,
                     TransferId = context.TransferId,
-                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                    AcceptedDataProtocolVersion = context.NegotiatedDataProtocolVersion,
                 },
                 ct).ConfigureAwait(false);
-            StartInboundV6HeartbeatLoop(context, "accept_sent");
+            if (context.NegotiatedDataProtocolVersion >= FileTransferProtocol.ProtocolVersionV6)
+            {
+                StartInboundV6HeartbeatLoop(context, "accept_sent");
+            }
             return CaptureCurrentInboundSnapshot();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1415,14 +1426,14 @@ public sealed partial class SessionFileTransferService : IDisposable
                     context.TransferId,
                     context.SessionId,
                     FileTransferDirection.Outbound,
-                    offeredVersion: FileTransferProtocol.ProtocolVersionV6,
+                    offeredVersion: context.OfferedDataProtocolVersion,
                     acceptedVersion: context.NegotiatedDataProtocolVersion,
-                    reason: "prepared_protocol_not_v6");
+                    reason: "prepared_protocol_not_supported");
                 await TransitionOutboundToTerminalAsync(
                     context,
                     FileTransferTransferState.Failed,
                     errorCode: TransportIncompatibleErrorCode,
-                    statusMessage: "File transfer requires V6 data protocol.",
+                    statusMessage: "File transfer requires a supported data protocol.",
                     notifyPeer: false,
                     cancelReason: null,
                     ct: CancellationToken.None).ConfigureAwait(false);
@@ -1431,6 +1442,25 @@ public sealed partial class SessionFileTransferService : IDisposable
 
             if (!await PrepareAcceptedOutboundTransferAsync(context, context.LifetimeCts.Token).ConfigureAwait(false))
             {
+                return;
+            }
+
+            if (context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV4)
+            {
+                LogV4Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Outbound);
+                if ((sessionScreenShareActive || sessionScreenShareDegraded) && !ShouldAllowV4DuringScreenShare())
+                {
+                    await FailOutboundV4Async(
+                        context,
+                        dataSession: null,
+                        V4FileOnlyRequiredErrorCode,
+                        "V4 file-transfer send is currently file-only.",
+                        notifyPeer: false).ConfigureAwait(false);
+                    return;
+                }
+
+                LogV4MixedScreenShareEnabled(context.TransferId, context.SessionId, FileTransferDirection.Outbound);
+                await RunOutboundRegularNknV4Async(context).ConfigureAwait(false);
                 return;
             }
 
@@ -1774,7 +1804,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 FileTransferDirection.Inbound,
                 offeredVersion: message.PreferredDataProtocolVersion,
                 acceptedVersion: null,
-                reason: "offer_protocol_not_v6");
+                reason: "offer_protocol_not_supported");
             await SendDeclineAsync(message.SessionId, message.TransferId, TransportIncompatibleErrorCode, CancellationToken.None).ConfigureAwait(false);
             return;
         }
@@ -1825,7 +1855,9 @@ public sealed partial class SessionFileTransferService : IDisposable
         ArgumentNullException.ThrowIfNull(message);
 
         OutboundTransferContext? context;
-        var acceptedVersionIsV6 = IsNegotiableDataProtocolVersion(message.AcceptedDataProtocolVersion);
+        var acceptedProtocolVersion = message.AcceptedDataProtocolVersion;
+        var acceptedVersionIsNegotiable = IsNegotiableDataProtocolVersion(acceptedProtocolVersion);
+        var acceptedVersionMatchesOffer = false;
         lock (gate)
         {
             context = outboundTransfer;
@@ -1838,7 +1870,8 @@ public sealed partial class SessionFileTransferService : IDisposable
                 return;
             }
 
-            if (!acceptedVersionIsV6)
+            acceptedVersionMatchesOffer = acceptedProtocolVersion == context.OfferedDataProtocolVersion;
+            if (!acceptedVersionIsNegotiable || !acceptedVersionMatchesOffer || acceptedProtocolVersion is null)
             {
                 // Leave SendStarted false so the transfer remains visibly rejected by negotiation,
                 // not partially started.
@@ -1847,26 +1880,26 @@ public sealed partial class SessionFileTransferService : IDisposable
             {
                 context.SendStarted = true;
                 context.SessionId = message.SessionId;
-                context.NegotiatedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6;
+                context.NegotiatedDataProtocolVersion = acceptedProtocolVersion.Value;
                 context.State = FileTransferTransferState.PreparingMetadata;
                 context.StatusMessage = "Preparing file metadata.";
             }
         }
 
-        if (!acceptedVersionIsV6)
+        if (!acceptedVersionIsNegotiable || !acceptedVersionMatchesOffer || acceptedProtocolVersion is null)
         {
             LogLegacyNegotiationRejected(
                 message.TransferId,
                 message.SessionId,
                 FileTransferDirection.Outbound,
-                offeredVersion: FileTransferProtocol.ProtocolVersionV6,
-                acceptedVersion: message.AcceptedDataProtocolVersion,
-                reason: "accept_protocol_not_v6");
+                offeredVersion: context.OfferedDataProtocolVersion,
+                acceptedVersion: acceptedProtocolVersion,
+                reason: acceptedVersionIsNegotiable ? "accept_protocol_mismatch" : "accept_protocol_not_supported");
             await TransitionOutboundToTerminalAsync(
                 context,
                 FileTransferTransferState.Failed,
                 errorCode: TransportIncompatibleErrorCode,
-                statusMessage: "Receiver did not accept the required V6 file-transfer protocol.",
+                statusMessage: "Receiver did not accept the offered file-transfer protocol.",
                 notifyPeer: false,
                 cancelReason: null,
                 ct: CancellationToken.None).ConfigureAwait(false);
@@ -1878,7 +1911,10 @@ public sealed partial class SessionFileTransferService : IDisposable
             FileTransferDirection.Outbound,
             message.TransferId,
             sessionId: message.SessionId);
-        StartOutboundV6HeartbeatLoop(context, "accept_received");
+        if (context.NegotiatedDataProtocolVersion >= FileTransferProtocol.ProtocolVersionV6)
+        {
+            StartOutboundV6HeartbeatLoop(context, "accept_received");
+        }
         RaiseTransferChanged(CreateSnapshot());
         _ = PrepareAndStartAcceptedOutboundTransferAsync(context);
     }
@@ -1943,13 +1979,13 @@ public sealed partial class SessionFileTransferService : IDisposable
                         FileTransferDirection.Inbound,
                         offeredVersion: message.ProtocolVersion,
                         acceptedVersion: context.NegotiatedDataProtocolVersion,
-                        reason: "session_open_protocol_not_v6");
+                        reason: "session_open_protocol_not_supported");
                     LogV6SessionOpenRejected(
                         message.TransferId,
                         message.SessionId,
                         FileTransferDirection.Inbound,
                         message.ProtocolVersion,
-                        "session_open_protocol_not_v6");
+                        "session_open_protocol_not_supported");
                 }
                 context = null;
             }
@@ -1961,6 +1997,68 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         if (context is null)
         {
+            return;
+        }
+
+        if (message.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4)
+        {
+            LogV4Negotiated(message.TransferId, message.SessionId, FileTransferDirection.Inbound);
+            if ((sessionScreenShareActive || sessionScreenShareDegraded) && !ShouldAllowV4DuringScreenShare())
+            {
+                await TransitionInboundToTerminalAsync(
+                    context,
+                    FileTransferTransferState.Failed,
+                    errorCode: V4FileOnlyRequiredErrorCode,
+                    statusMessage: "V4 file-transfer receive is currently file-only.",
+                    sendError: true,
+                    errorMessage: "V4 file-transfer receive is currently file-only.",
+                    cancelReason: null,
+                    ct: CancellationToken.None).ConfigureAwait(false);
+                return;
+            }
+
+            LogV4MixedScreenShareEnabled(message.TransferId, message.SessionId, FileTransferDirection.Inbound);
+            try
+            {
+                var session = await GetTransportOrThrow()
+                    .OpenFileTransferDataSessionAsync(message.SessionId, message.TransferId, context.LifetimeCts.Token)
+                    .ConfigureAwait(false);
+
+                lock (gate)
+                {
+                    if (!ReferenceEquals(inboundTransfer, context) || context.IsTerminal)
+                    {
+                        session.Dispose();
+                        return;
+                    }
+
+                    ReplaceInboundDataSessionLocked(context, session);
+                    context.PullSessionActive = true;
+                    context.NegotiatedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4;
+                    context.StatusMessage = "Waiting for V4 file-transfer manifest.";
+                }
+
+                LogTransferInfo(
+                    "filetransfer_session_opened",
+                    FileTransferDirection.Inbound,
+                    message.TransferId,
+                    sessionId: message.SessionId,
+                    reason: $"role={message.SessionRole}; protocol_version={message.ProtocolVersion}; chunk_size_bytes={message.ChunkSizeBytes}; pipeline_depth={message.InitialPipelineDepth}");
+                _ = RunInboundRegularNknV4Async(context, message);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                await TransitionInboundToTerminalAsync(
+                    context,
+                    FileTransferTransferState.Failed,
+                    errorCode: InvalidStateErrorCode,
+                    statusMessage: ex.Message,
+                    sendError: true,
+                    errorMessage: "Could not open the dedicated V4 file-transfer session.",
+                    cancelReason: null,
+                    ct: CancellationToken.None).ConfigureAwait(false);
+            }
+
             return;
         }
 
@@ -2582,6 +2680,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.ChunksTransferred = context.ChunkCount;
             context.BytesAcceptedForTransport = context.FileSizeBytes;
             context.ChunksAcceptedForTransport = context.ChunkCount;
+            context.BytesAcknowledgedByReceiver = context.FileSizeBytes;
             context.State = FileTransferTransferState.AwaitingCompletion;
             context.StatusMessage = "Waiting for receiver verification.";
         }
@@ -2738,7 +2837,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             destination = context.WriteDestination;
         }
 
-        var isV4 = negotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV6;
+        var isV4 = negotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV4 || sparseMode;
         if (isV4)
         {
             LocalOperationalLog.Info(
@@ -2936,7 +3035,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         var buffer = ArrayPool<byte>.Shared.Rent(ReceiverWriteBatchMaxBytes);
         long remaining = context.FileSizeBytes;
         long readBytes = 0;
-        var isV4 = context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV6;
+        var isV4 = context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV4 ||
+            context.ReceiverSparseWriteActive;
         var completed = false;
         if (isV4)
         {
@@ -3240,15 +3340,26 @@ public sealed partial class SessionFileTransferService : IDisposable
             {
                 try
                 {
-                    var payload = FileTransferDataFrameCodec.Serialize(
-                        new FileTransferChunkBatchFrameV6
+                    var estimateFrame = context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV4
+                        ? new FileTransferChunkBatchFrameV4
                         {
                             SessionId = string.IsNullOrWhiteSpace(context.SessionId) ? new string('s', 32) : context.SessionId,
                             TransferId = context.TransferId,
                             StartChunkIndex = 0,
                             ChunkCount = 1,
                             DataSegments = [new byte[candidateChunkSize]],
-                        });
+                        }
+                        : new FileTransferChunkBatchFrameV6
+                        {
+                            SessionId = string.IsNullOrWhiteSpace(context.SessionId) ? new string('s', 32) : context.SessionId,
+                            TransferId = context.TransferId,
+                            StartChunkIndex = 0,
+                            ChunkCount = 1,
+                            DataSegments = [new byte[candidateChunkSize]],
+                        };
+                    var payload = context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV4
+                        ? FileTransferDataFrameCodec.SerializeLegacyV4(estimateFrame)
+                        : FileTransferDataFrameCodec.Serialize(estimateFrame);
                     return payload.Length <= FileTransferProtocol.MaxSerializedChunkBatchPayloadBytesV4;
                 }
                 catch (InvalidOperationException)
@@ -3256,11 +3367,22 @@ public sealed partial class SessionFileTransferService : IDisposable
                     return false;
                 }
             },
-            "No valid V6 file-transfer chunk size fits within the payload budget.");
+            "No valid file-transfer chunk size fits within the payload budget.");
     }
 
     private static bool IsNegotiableDataProtocolVersion(int? protocolVersion)
-        => protocolVersion == FileTransferProtocol.ProtocolVersionV6;
+        => protocolVersion is FileTransferProtocol.ProtocolVersionV4
+            or FileTransferProtocol.ProtocolVersionV6;
+
+    private static int ResolvePreferredDataProtocolVersionForNewTransfer(IFileTransferSignalingTransport? currentTransport)
+        => ShouldUseFileTransferV6ForAcceleration(currentTransport)
+            ? FileTransferProtocol.ProtocolVersionV6
+            : FileTransferProtocol.ProtocolVersionV4;
+
+    private static bool ShouldUseFileTransferV6ForAcceleration(IFileTransferSignalingTransport? currentTransport)
+        => currentTransport is global::NLink.Core.ITransportAccelerationStatus accelerationStatus &&
+           (accelerationStatus.IsTransportAccelerationActive ||
+            accelerationStatus.ShouldUseFileTransferV6ForAcceleration);
 
     private static bool IsV6StreamingTransport(IFileTransferSignalingTransport? currentTransport)
         => currentTransport is IFileTransferProtocolCapabilities { SupportsFileTransferV6Streaming: true };
@@ -3381,6 +3503,14 @@ public sealed partial class SessionFileTransferService : IDisposable
         InboundTransferContext context,
         FileTransferSessionOpenV2 sessionOpen)
         => RunInboundSparseCreditReceiveLoopAsync(context, sessionOpen, FileTransferSparseCreditRuntimeKind.PrimaryRegularNknBulkV6);
+
+    private Task RunOutboundRegularNknV4Async(OutboundTransferContext context)
+        => RunOutboundSparseCreditSenderAsync(context, FileTransferSparseCreditRuntimeKind.PrimaryRegularNknV4);
+
+    private Task RunInboundRegularNknV4Async(
+        InboundTransferContext context,
+        FileTransferSessionOpenV2 sessionOpen)
+        => RunInboundSparseCreditReceiveLoopAsync(context, sessionOpen, FileTransferSparseCreditRuntimeKind.PrimaryRegularNknV4);
 
     private static void LogPrimaryRegularNknBulkV6Selected(
         string transferId,
@@ -3559,6 +3689,13 @@ public sealed partial class SessionFileTransferService : IDisposable
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_v6_negotiated; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; direction={direction}; protocol_version={FileTransferProtocol.ProtocolVersionV6}");
+    }
+
+    private static void LogV4Negotiated(string transferId, string sessionId, FileTransferDirection direction)
+    {
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_v4_negotiated; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; direction={direction}; protocol_version={FileTransferProtocol.ProtocolVersionV4}; activation=primary_regular_nkn; runtime_profile=regular_nkn_v4_fast");
     }
 
     private static void LogV6SessionOpenRejected(
@@ -3820,6 +3957,7 @@ public sealed partial class SessionFileTransferService : IDisposable
 
     private enum FileTransferSparseCreditRuntimeKind
     {
+        PrimaryRegularNknV4,
         PrimaryRegularNknBulkV6,
     }
 
@@ -3905,6 +4043,8 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public string? Sha256Base64 { get; set; }
 
+        public int OfferedDataProtocolVersion { get; set; } = FileTransferProtocol.ProtocolVersionV6;
+
         public int NegotiatedDataProtocolVersion { get; set; } = FileTransferProtocol.ProtocolVersionV6;
 
         public bool V6RegularNknBulkSparseProfileActive { get; set; }
@@ -3921,6 +4061,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         public long BytesAcceptedForTransport { get; set; }
 
         public int ChunksAcceptedForTransport { get; set; }
+
+        public long BytesAcknowledgedByReceiver { get; set; }
 
         public FileTransferTransferState State { get; set; } = FileTransferTransferState.Offering;
 
@@ -4172,15 +4314,37 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public long PullSenderRawBytesRecent { get; set; }
 
+        public long PullSenderRawBytesTotal { get; set; }
+
+        public long PullSenderNormalRawBytesTotal { get; set; }
+
+        public long PullSenderRepairRawBytesTotal { get; set; }
+
         public int PullSenderChunkFramesRecent { get; set; }
 
         public int PullSenderBatchFramesRecent { get; set; }
 
+        public int PullSenderBatchFramesTotal { get; set; }
+
+        public int PullSenderNormalBatchFramesTotal { get; set; }
+
+        public int PullSenderRepairBatchFramesTotal { get; set; }
+
         public int PullSenderChunkCountRecent { get; set; }
+
+        public int PullSenderChunkCountTotal { get; set; }
+
+        public int PullSenderNormalChunkCountTotal { get; set; }
+
+        public int PullSenderRepairChunkCountTotal { get; set; }
 
         public int PullSenderSendWaitCountRecent { get; set; }
 
+        public int PullSenderSendWaitCountTotal { get; set; }
+
         public int PullSenderRepairSendCountRecent { get; set; }
+
+        public int PullSenderPipelineFailedFramesTotal { get; set; }
 
         public int PullSenderCacheHitCountRecent { get; set; }
 
@@ -4256,6 +4420,14 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public int V4LastStateEpoch { get; set; } = -1;
 
+        public int PullV4StateReceivedCountTotal { get; set; }
+
+        public int PullV4StateAppliedCountTotal { get; set; }
+
+        public int PullV4StateDuplicateCountTotal { get; set; }
+
+        public int PullV4StateStaleCountTotal { get; set; }
+
         public int V4PauseControlEpoch { get; set; }
 
         public int PeerV4LastPauseControlEpoch { get; set; } = -1;
@@ -4305,7 +4477,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 ErrorCode,
                 StatusMessage,
                 BytesAcceptedForTransport: BytesAcceptedForTransport,
-                BytesAcknowledgedByReceiver: BytesTransferred,
+                BytesAcknowledgedByReceiver: Math.Max(BytesAcknowledgedByReceiver, BytesTransferred),
                 IsPaused: UserPaused,
                 PauseReason: UserPauseReason,
                 IsPeerPaused: PeerPaused,
@@ -4669,9 +4841,25 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public int V4LastStateDurableHighestChunkIndex { get; set; } = -1;
 
+        public long V4LastStateBytesCommitted { get; set; }
+
         public bool V4MixedScreenShareTransfer { get; set; }
 
         public DateTimeOffset? V4LastStateSentUtc { get; set; }
+
+        public long V6RegularNknFrontierRepairTransactionSequence { get; set; }
+
+        public string? V6RegularNknFrontierRepairTransactionId { get; set; }
+
+        public int V6RegularNknFrontierRepairTransactionStartChunkIndex { get; set; } = -1;
+
+        public int V6RegularNknFrontierRepairTransactionChunkCount { get; set; }
+
+        public DateTimeOffset? V6RegularNknFrontierRepairTransactionStartedUtc { get; set; }
+
+        public DateTimeOffset? V6RegularNknFrontierRepairTransactionLastObservedUtc { get; set; }
+
+        public int V6RegularNknFrontierRepairTransactionObservedCount { get; set; }
 
         public Dictionary<string, V4ReceiverRepairRequestState> V4ReceiverRepairRequests { get; } = new(StringComparer.Ordinal);
 
@@ -4837,6 +5025,16 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public int PeerV4LastStateEpoch { get; set; } = -1;
 
+        public int PullV4StateSentCountTotal { get; set; }
+
+        public int PullV4RepairRequestCountTotal { get; set; }
+
+        public int PullV4RepairRequestedChunkCountTotal { get; set; }
+
+        public int PullV4RepairSuppressedCountTotal { get; set; }
+
+        public int PullV4FrontierTailRepairRequestCountTotal { get; set; }
+
         public int V4PauseControlEpoch { get; set; }
 
         public int PeerV4LastPauseControlEpoch { get; set; } = -1;
@@ -4854,6 +5052,26 @@ public sealed partial class SessionFileTransferService : IDisposable
         public long PullUsefulPayloadBytesRecent { get; set; }
 
         public long PullReceiverRawBytesRecent { get; set; }
+
+        public long PullReceiverRawBatchBytesTotal { get; set; }
+
+        public long PullReceiverAcceptedRawBytesTotal { get; set; }
+
+        public long PullReceiverDuplicateOrStaleRawBytesTotal { get; set; }
+
+        public int PullReceiverChunkCountTotal { get; set; }
+
+        public int PullReceiverAcceptedChunkCountTotal { get; set; }
+
+        public int PullReceiverDuplicateOrStaleChunkCountTotal { get; set; }
+
+        public int PullReceiverRepairOverlapChunkCountTotal { get; set; }
+
+        public int PullReceiverRepairAcceptedChunkCountTotal { get; set; }
+
+        public int PullReceiverRepairDuplicateOrStaleChunkCountTotal { get; set; }
+
+        public long PullReceiverRepairDuplicateOrStaleRawBytesTotal { get; set; }
 
         public long PullReceiverContiguousBytesCommittedRecent { get; set; }
 
