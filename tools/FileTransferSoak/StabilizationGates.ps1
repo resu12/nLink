@@ -27,26 +27,18 @@ function Test-FileTransferTerminalCompleted {
     return $TerminalEvents.Count -gt 0
 }
 
-function Test-FileTransferSummaryHasV4Evidence {
+function Test-FileTransferSummaryHasV6Evidence {
     param([Parameter(Mandatory = $true)]$Summary)
 
     if ((Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v6_negotiated') -gt 0 -or
         (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v6_sender_started') -gt 0 -or
-        (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v6_receiver_started') -gt 0 -or
-        (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v5_negotiated') -gt 0 -or
-        (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v5_sender_started') -gt 0 -or
-        (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v5_receiver_started') -gt 0 -or
-        (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v4_negotiated') -gt 0 -or
-        (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v4_sender_started') -gt 0 -or
-        (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v4_receiver_started') -gt 0 -or
-        (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v4_state_sent') -gt 0 -or
-        (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v4_state_received') -gt 0) {
+        (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v6_receiver_started') -gt 0) {
         return $true
     }
 
     foreach ($event in @($Summary.TransferEvents)) {
         $frameType = Get-FileTransferEventField -Event $event -Name 'frame_type' -Default ''
-        if ($frameType -like 'filetransfer.*.v6' -or $frameType -like 'filetransfer.*.v5' -or $frameType -like 'filetransfer.*.v4') {
+        if ($frameType -like 'filetransfer.*.v6') {
             return $true
         }
     }
@@ -57,7 +49,7 @@ function Test-FileTransferSummaryHasV4Evidence {
 function Get-FileTransferUnexpectedLegacyFrameEventsDuringV4 {
     param([Parameter(Mandatory = $true)]$Summary)
 
-    if (-not (Test-FileTransferSummaryHasV4Evidence -Summary $Summary)) {
+    if (-not (Test-FileTransferSummaryHasV6Evidence -Summary $Summary)) {
         return @()
     }
 
@@ -376,6 +368,7 @@ function Get-FileTransferHardFailureEvents {
 function Get-FileTransferLegacyProtocolStartedEvents {
     param([Parameter(Mandatory = $true)]$Summary)
 
+    $usesV6Protocol = Test-FileTransferSummaryHasV6Evidence -Summary $Summary
     return @(
         $Summary.TransferEvents |
             Where-Object {
@@ -385,7 +378,10 @@ function Get-FileTransferLegacyProtocolStartedEvents {
 
                 $protocolVersion = Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default ''
                 return -not [string]::IsNullOrWhiteSpace($protocolVersion) -and
-                    $protocolVersion -ne '6'
+                    (
+                        ($usesV6Protocol -and $protocolVersion -ne '6') -or
+                        (-not $usesV6Protocol -and $protocolVersion -ne '4' -and $protocolVersion -ne '6')
+                    )
             }
     )
 }

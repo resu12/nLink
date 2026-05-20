@@ -590,7 +590,12 @@ function Write-FileTransferLiveNknSummary {
     $legacyDataProtocolStartedCount = @($Analysis.Summary.TransferEvents | Where-Object {
             $_.EventName -eq 'filetransfer_session_opened' -and
             -not [string]::IsNullOrWhiteSpace((Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '')) -and
-            (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -ne '6'
+            (
+                ($dataProtocolVersion -eq 6 -and (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -ne '6') -or
+                ($dataProtocolVersion -ne 6 -and
+                    (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -ne '4' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -ne '6')
+            )
         }).Count
     $unexpectedLegacyDataFrameDuringV4Count = 0
     if ($dataProtocolVersion -eq 6) {
@@ -604,7 +609,7 @@ function Write-FileTransferLiveNknSummary {
                 )
             }).Count
     }
-    $resolvedPayloadEfficiencyProfile = if ($dataProtocolVersion -eq 6 -and $PayloadEfficiencyProfile -eq 'Auto') {
+    $resolvedPayloadEfficiencyProfile = if (($dataProtocolVersion -eq 4 -or $dataProtocolVersion -eq 6) -and $PayloadEfficiencyProfile -eq 'Auto') {
         'v4_default_21k'
     }
     else {

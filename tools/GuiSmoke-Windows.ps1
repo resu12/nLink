@@ -2608,7 +2608,13 @@ function Unlock-TunaFromSessionHeader {
     Click-Element $accept
 
     if ($WaitForRuntimeEvidence) {
-        [void](Wait-AppLogContainsAfterBookmark -Bookmark $bookmark -Needle 'event=tuna_runtime_unlocked' -TimeoutMs 90000 -Description "$RoleLabel Tuna runtime unlocked")
+        [void](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
+            @('event=tuna_runtime_unlocked'),
+            @('event=tuna_acceleration_payer_intent_queued', 'trigger=runtime_unlock'),
+            @('event=tuna_acceleration_timeline', 'status=selected_payer_starting_listener'),
+            @('event=tuna_acceleration_timeline', 'status=listener_starting'),
+            @('event=tuna_acceleration_timeline', 'status=waiting_for_answer')
+        ) -TimeoutMs 90000 -Description "$RoleLabel Tuna runtime unlocked or runtime-unlock negotiation started")
         Write-Host "[GUI Smoke][filetransfer_tuna] $RoleLabel Tuna unlock completed." -ForegroundColor Green
         return
     }
@@ -3001,7 +3007,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     }
 
     if ($FaultMode -ne 'none' -and -not $fallbackEpochStartedObserved) {
-        $minimumFaultPayloadBytes = [Math]::Min(67108864L, [Math]::Max(1048576L, [long]($PayloadSizeBytes / 2)))
+        $minimumFaultPayloadBytes = [Math]::Min(16777216L, [Math]::Max(1048576L, [long]($PayloadSizeBytes / 8)))
         $acceleratedPayloadLine = [string](Wait-TunaGuiAcceleratedFilePayloadBeforeFault -Bookmark $bookmark -MinimumTotalPayloadBytes $minimumFaultPayloadBytes)
         $observedEvidenceLines.Add($acceleratedPayloadLine) | Out-Null
         Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode

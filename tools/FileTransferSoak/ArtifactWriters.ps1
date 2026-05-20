@@ -1092,6 +1092,7 @@ function New-FileTransferThroughputSummaryLines {
         ("v4_repair_delivery_retry_escalated_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $v4RepairSentEvents -FieldName 'repair_delivery_escalation_reason' -Value 'retry')),
         ("v4_repair_delivery_credit_stall_escalated_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $v4RepairSentEvents -FieldName 'repair_delivery_escalation_reason' -Value 'credit_stall')),
         ("v4_repair_delivery_frontier_not_advanced_escalated_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $v4RepairSentEvents -FieldName 'repair_delivery_escalation_reason' -Value 'frontier_not_advanced')),
+        ("v4_repair_delivery_primary_regular_nkn_frontier_first_send_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $v4RepairSentEvents -FieldName 'repair_delivery_escalation_reason' -Value 'primary_regular_nkn_frontier_first_send')),
         ("v6_receiver_state_sent_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_receiver_state_sent')),
         ("v6_receiver_state_received_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_receiver_state_received')),
         ("v6_receiver_request_window_sent_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_receiver_request_window_sent')),
@@ -1268,9 +1269,19 @@ function New-FileTransferProtocolShapeSummaryLines {
     $v4FeedbackFirstSuccessEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_feedback_first_success'))
     $v4FeedbackBothFailedEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_feedback_both_failed'))
     $v4FeedbackSecondaryCompletedEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_feedback_secondary_completed'))
-    $v4EvidencePresent = ($v6NegotiatedEvents.Count + $v6ReceiverStartedEvents.Count + $v6SenderStartedEvents.Count + $v5NegotiatedEvents.Count + $v5ReceiverStartedEvents.Count + $v5SenderStartedEvents.Count + $v4NegotiatedEvents.Count + $v4ReceiverStartedEvents.Count + $v4SenderStartedEvents.Count + $v4StateEvents.Count + $v4StateReceivedEvents.Count + $v4BatchEvents.Count + $v4ChunkBatchSentEvents.Count) -gt 0
+    $v6ProtocolEvidencePresent = ($v6NegotiatedEvents.Count + $v6ReceiverStartedEvents.Count + $v6SenderStartedEvents.Count) -gt 0
+    if (-not $v6ProtocolEvidencePresent) {
+        foreach ($event in @($Summary.TransferEvents)) {
+            $frameType = Get-FileTransferEventField -Event $event -Name 'frame_type' -Default ''
+            if ($frameType -like 'filetransfer.*.v6') {
+                $v6ProtocolEvidencePresent = $true
+                break
+            }
+        }
+    }
+
     $unexpectedLegacyFrameEventsDuringV4 = @()
-    if ($v4EvidencePresent) {
+    if ($v6ProtocolEvidencePresent) {
         $unexpectedLegacyFrameEventsDuringV4 = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_binary_frame_sent', 'filetransfer_binary_frame_received', 'filetransfer_data_frame_dispatched') |
             Where-Object {
                 $frameType = Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default ''
@@ -1281,7 +1292,10 @@ function New-FileTransferProtocolShapeSummaryLines {
         Where-Object {
             $protocolVersion = Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default ''
             -not [string]::IsNullOrWhiteSpace($protocolVersion) -and
-                $protocolVersion -ne '6'
+                (
+                    ($v6ProtocolEvidencePresent -and $protocolVersion -ne '6') -or
+                    (-not $v6ProtocolEvidencePresent -and $protocolVersion -ne '4' -and $protocolVersion -ne '6')
+                )
         })
     $frameTypeLines = New-Object System.Collections.Generic.List[string]
     foreach ($key in @($Summary.FrameTypeCounts.Keys | Sort-Object)) {
@@ -1572,6 +1586,7 @@ function New-FileTransferRepairReorderSummaryLines {
         ("v4_repair_delivery_retry_escalated_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $v4RepairSentEvents -FieldName 'repair_delivery_escalation_reason' -Value 'retry')),
         ("v4_repair_delivery_credit_stall_escalated_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $v4RepairSentEvents -FieldName 'repair_delivery_escalation_reason' -Value 'credit_stall')),
         ("v4_repair_delivery_frontier_not_advanced_escalated_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $v4RepairSentEvents -FieldName 'repair_delivery_escalation_reason' -Value 'frontier_not_advanced')),
+        ("v4_repair_delivery_primary_regular_nkn_frontier_first_send_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $v4RepairSentEvents -FieldName 'repair_delivery_escalation_reason' -Value 'primary_regular_nkn_frontier_first_send')),
         ("v4_repair_batch_bulk_only_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $v4RepairBatchEvents -FieldName 'repair_delivery_mode' -Value 'bulk_only')),
         ("v4_repair_batch_control_bulk_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $v4RepairBatchEvents -FieldName 'repair_delivery_mode' -Value 'control_bulk_escalated')),
         ("v4_repair_chunk_observed_count={0}" -f $v4RepairObservedEvents.Count),
@@ -2835,6 +2850,7 @@ function New-FileTransferThroughputDecompositionSummaryLines {
         ("v4_repair_delivery_retry_escalated_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $v4RepairSentEvents -FieldName 'repair_delivery_escalation_reason' -Value 'retry')),
         ("v4_repair_delivery_credit_stall_escalated_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $v4RepairSentEvents -FieldName 'repair_delivery_escalation_reason' -Value 'credit_stall')),
         ("v4_repair_delivery_frontier_not_advanced_escalated_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $v4RepairSentEvents -FieldName 'repair_delivery_escalation_reason' -Value 'frontier_not_advanced')),
+        ("v4_repair_delivery_primary_regular_nkn_frontier_first_send_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $v4RepairSentEvents -FieldName 'repair_delivery_escalation_reason' -Value 'primary_regular_nkn_frontier_first_send')),
         ("v4_repair_batch_bulk_only_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $v4RepairBatchEvents -FieldName 'repair_delivery_mode' -Value 'bulk_only')),
         ("v4_repair_batch_control_bulk_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $v4RepairBatchEvents -FieldName 'repair_delivery_mode' -Value 'control_bulk_escalated')),
         ("v4_repair_chunk_observed_count={0}" -f $v4RepairObservedEvents.Count),
