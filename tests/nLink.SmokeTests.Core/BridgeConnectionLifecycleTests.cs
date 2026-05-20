@@ -2437,6 +2437,107 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public async Task Bridge_ReceiveStallRecovery_ControlOnlyReconnectsAfterGraceEvenWhenBulkReceiveActive()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-control-recovery-grace", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-control-recovery-grace.js");
+        WriteBridgeScriptWithManifest(
+            bridgePath,
+            BuildReceiveStallRecoveryMockBridgeScript(
+                countFile,
+                controlMessagesReceivedSinceLast: 0,
+                bulkMessagesReceivedSinceLast: 1,
+                totalMessagesReceivedSinceLast: 1,
+                controlLastReceivedAgeMs: 35_000,
+                bulkLastReceivedAgeMs: 100,
+                stallHealthSampleCount: 6));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var prevFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
+        var prevControlOnlyRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", "1");
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "control-recovery-grace");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "control-recovery-grace");
+            var identity = new NknIdentity("control-recovery-grace", "control-recovery-grace.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            adapter.RegisterActiveFileTransferDataSession("transfer-control-recovery-grace");
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await adapter.ConnectAsync(cts.Token);
+
+            await WaitUntilAsync(
+                () =>
+                {
+                    var text = LocalOperationalLog.GetRecentLogText();
+                    return text.Contains("event=nkn_bridge_control_receive_recovery_unsuppressed", StringComparison.Ordinal) &&
+                           text.Contains("event=nkn_bridge_receive_stall_recovery_started", StringComparison.Ordinal) &&
+                           text.Contains("stall_reason=control_receive_stalled", StringComparison.Ordinal);
+                },
+                TimeSpan.FromSeconds(5));
+            await WaitUntilAsync(
+                () => File.Exists(countFile) &&
+                      int.TryParse(File.ReadAllText(countFile).Trim(), out var count) &&
+                      count >= 2,
+                TimeSpan.FromSeconds(5));
+
+            var logText = LocalOperationalLog.GetRecentLogText();
+            Assert.Contains("event=nkn_bridge_control_receive_degraded", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_control_receive_recovery_unsuppressed", logText, StringComparison.Ordinal);
+            Assert.Contains("reason=filetransfer_bulk_receive_active", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_receive_stall_recovery_started", logText, StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession("transfer-control-recovery-grace");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevFastRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", prevControlOnlyRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public async Task Bridge_ReceiveStallRecovery_SuppressesControlOnlyReconnectWhenBulkReceiveFreshBeyondGrace()
     {
         if (!OperatingSystem.IsWindows())

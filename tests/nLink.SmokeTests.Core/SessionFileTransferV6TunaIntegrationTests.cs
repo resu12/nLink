@@ -391,6 +391,7 @@ public sealed class SessionFileTransferV6TunaIntegrationTests : SessionFileTrans
         LoopbackFileTransferTransport receiverTransport,
         string transferId)
     {
+        senderTransport.SetTransportAccelerationActiveForTests(true, "test_v6_tuna_integration");
         var payload = Enumerable.Range(0, 384_000).Select(static index => (byte)(index % 251)).ToArray();
         await sender.TryStartSendAsync(
             new FileTransferSendDescriptor("v6-tuna-integration.bin", payload.Length, transferId),

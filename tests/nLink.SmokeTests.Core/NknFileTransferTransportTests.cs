@@ -2192,6 +2192,167 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
         }
     }
 
+    [Theory]
+    [InlineData("epoch")]
+    [InlineData("probe")]
+    [InlineData("repair_proof")]
+    [Trait("Category", "Smoke")]
+    public async Task NknTransport_FileTransferRecoveryLifecycle_UsesBulkDuplicateWhenControlLaneTimesOut(string messageKind)
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            int logStartIndex = CoreSmokeTestsBase.GetOperationalLogLength();
+            using CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(8.0));
+            NknTransportOptions options = NknTransportOptions.Load();
+            FakeNknClient hostClient = new FakeNknClient($"host.filetransfer.recovery-bulk.{messageKind}.address");
+            FakeNknClient helperClient = new FakeNknClient($"helper.filetransfer.recovery-bulk.{messageKind}.address");
+            NknIdentity hostIdentity = new NknIdentity($"host-recovery-bulk-{messageKind}-id", hostClient.Address);
+            NknIdentity helperIdentity = new NknIdentity($"helper-recovery-bulk-{messageKind}-id", helperClient.Address);
+            using NknSignalingTransport host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using NknSignalingTransport helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            string sessionId = await CoreSmokeTestsBase.ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            string transferId = $"transfer_nkn_recovery_bulk_{messageKind}";
+
+            TaskCompletionSource<FileTransferOfferV2> offerReceived = new TaskCompletionSource<FileTransferOfferV2>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<FileTransferAcceptV1> acceptReceived = new TaskCompletionSource<FileTransferAcceptV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<FileTransferTransportEpochV6> epochReceived = new TaskCompletionSource<FileTransferTransportEpochV6>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<FileTransferTransportProbeV6> probeReceived = new TaskCompletionSource<FileTransferTransportProbeV6>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<FileTransferRepairProofV6> proofReceived = new TaskCompletionSource<FileTransferRepairProofV6>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            host.FileTransferOfferReceived += delegate (object? _, FileTransferOfferReceivedEventArgs e)
+            {
+                if (string.Equals(e.Message.TransferId, transferId, StringComparison.Ordinal))
+                {
+                    offerReceived.TrySetResult(e.Message);
+                }
+            };
+            helper.FileTransferAcceptReceived += delegate (object? _, FileTransferAcceptReceivedEventArgs e)
+            {
+                if (string.Equals(e.Message.TransferId, transferId, StringComparison.Ordinal))
+                {
+                    acceptReceived.TrySetResult(e.Message);
+                }
+            };
+            host.FileTransferTransportEpochReceived += delegate (object? _, FileTransferTransportEpochReceivedEventArgs e)
+            {
+                if (string.Equals(e.Message.TransferId, transferId, StringComparison.Ordinal))
+                {
+                    epochReceived.TrySetResult(e.Message);
+                }
+            };
+            host.FileTransferTransportProbeReceived += delegate (object? _, FileTransferTransportProbeReceivedEventArgs e)
+            {
+                if (string.Equals(e.Message.TransferId, transferId, StringComparison.Ordinal))
+                {
+                    probeReceived.TrySetResult(e.Message);
+                }
+            };
+            host.FileTransferRepairProofReceived += delegate (object? _, FileTransferRepairProofReceivedEventArgs e)
+            {
+                if (string.Equals(e.Message.TransferId, transferId, StringComparison.Ordinal))
+                {
+                    proofReceived.TrySetResult(e.Message);
+                }
+            };
+
+            await helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV2
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "recovery-bulk.bin",
+                    FileSizeBytes = 4096L,
+                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                },
+                cts.Token);
+            await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+            await host.SendFileTransferAcceptAsync(
+                new FileTransferAcceptV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                },
+                cts.Token);
+            await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+
+            helperClient.BeforeSendAsync = async (destination, _, token) =>
+            {
+                if (string.Equals(destination, hostClient.ConnectedAddress, StringComparison.Ordinal))
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                }
+            };
+
+            using CancellationTokenSource sendCts = new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
+            switch (messageKind)
+            {
+                case "epoch":
+                    await helper.SendFileTransferTransportEpochAsync(
+                        new FileTransferTransportEpochV6
+                        {
+                            SessionId = sessionId,
+                            TransferId = transferId,
+                            TransportEpoch = 7,
+                            HandoffKind = "regular_nkn_recovery",
+                            TargetTransport = "regular_nkn",
+                            State = "waiting_for_target_transport",
+                        },
+                        sendCts.Token);
+                    FileTransferTransportEpochV6 epoch = await epochReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+                    Assert.Equal(7, epoch.TransportEpoch);
+                    Assert.Equal("regular_nkn", epoch.TargetTransport);
+                    break;
+
+                case "probe":
+                    await helper.SendFileTransferTransportProbeAsync(
+                        new FileTransferTransportProbeV6
+                        {
+                            SessionId = sessionId,
+                            TransferId = transferId,
+                            TransportEpoch = 8,
+                            ProbeId = "probe-recovery-bulk",
+                            TargetTransport = "regular_nkn",
+                        },
+                        sendCts.Token);
+                    FileTransferTransportProbeV6 probe = await probeReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+                    Assert.Equal(8, probe.TransportEpoch);
+                    Assert.Equal("probe-recovery-bulk", probe.ProbeId);
+                    break;
+
+                case "repair_proof":
+                    await helper.SendFileTransferRepairProofAsync(
+                        new FileTransferRepairProofV6
+                        {
+                            SessionId = sessionId,
+                            TransferId = transferId,
+                            TransportEpoch = 9,
+                            RepairRequestId = "v6-frontier:9:32:1",
+                            AppliedChunkCount = 1,
+                            CommittedChunkIndex = 33,
+                            RecoveryMode = "frontier_repair_only",
+                        },
+                        sendCts.Token);
+                    FileTransferRepairProofV6 proof = await proofReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+                    Assert.Equal(9, proof.TransportEpoch);
+                    Assert.Equal(33, proof.CommittedChunkIndex);
+                    break;
+
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(messageKind), messageKind, "Unsupported recovery lifecycle message kind.");
+            }
+
+            string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
+            Assert.DoesNotContain("reason=secure_envelope_invalid", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("reason=source_identity_mismatch", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
     [Trait("Category", "Smoke")]
     [Fact]
     public async Task NknTransport_V6ControlComplete_ClearsSameDirectionBusyGuard()

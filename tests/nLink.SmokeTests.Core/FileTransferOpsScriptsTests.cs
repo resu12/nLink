@@ -1849,6 +1849,34 @@ public sealed class FileTransferOpsScriptsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_CleanRegularNknV4Transfer_IsFirstClassPass()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(BuildCleanCompletedRegularNknV4TransferFixture("transfer_regular_v4_clean"));
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("PASS", verdict["verdict"]);
+
+        var throughput = ReadArtifactReport(result.ArtifactDir, "throughput-summary.txt");
+        Assert.Equal("4", throughput["data_protocol_version"]);
+        Assert.Equal("1.000000", throughput["v4_batch_ratio"]);
+
+        var protocol = ReadArtifactReport(result.ArtifactDir, "protocol-shape-summary.txt");
+        Assert.Equal("2", protocol["v4_negotiated_count"]);
+        Assert.Equal("1", protocol["v4_sender_started_count"]);
+        Assert.Equal("1", protocol["v4_receiver_started_count"]);
+        Assert.Equal("0", protocol["v6_sender_started_count"]);
+        Assert.Equal("0", protocol["v6_receiver_started_count"]);
+        Assert.Equal("0", protocol["legacy_data_protocol_started_count"]);
+        Assert.Equal("0", protocol["unexpected_legacy_data_frame_during_v4_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_V6ControlHealth_IsTrackedInThroughputSummary()
     {
         if (!OperatingSystem.IsWindows())
@@ -2203,6 +2231,7 @@ public sealed class FileTransferOpsScriptsTests
             .Append(LogLine($"event=filetransfer_v4_repair_sent; transfer_id={transferId}; session_id=sess_a; repair_request_key=4:3:4:12:4:3; range_count=1; requested_chunk_count=3; sent_chunk_count=3; repair_delivery_mode=control_bulk_escalated; repair_delivery_escalation_reason=frontier_not_advanced"))
             .Append(LogLine($"event=filetransfer_v4_repair_sent; transfer_id={transferId}; session_id=sess_a; repair_request_key=8:3:8:18:8:3; range_count=1; requested_chunk_count=3; sent_chunk_count=3; repair_delivery_mode=control_bulk_escalated; repair_delivery_escalation_reason=credit_stall"))
             .Append(LogLine($"event=filetransfer_v4_repair_sent; transfer_id={transferId}; session_id=sess_a; repair_request_key=12:3:12:24:12:3; range_count=1; requested_chunk_count=3; sent_chunk_count=3; repair_delivery_mode=control_bulk_escalated; repair_delivery_escalation_reason=retry"))
+            .Append(LogLine($"event=filetransfer_v4_repair_sent; transfer_id={transferId}; session_id=sess_a; repair_request_key=16:3:16:30:16:3; range_count=1; requested_chunk_count=3; sent_chunk_count=3; repair_delivery_mode=control_bulk_escalated; repair_delivery_escalation_reason=primary_regular_nkn_frontier_first_send"))
             .Append(LogLine($"event=filetransfer_chunk_batch_sent_as_batch; transport=nkn; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.chunk_batch.v6; batch_profile=v4_repair_21k; batch_chunk_count=3; chunk_range=4-6; raw_bytes=64512; lane=bulk; repair_delivery_mode=bulk_only; raw_to_bridge_payload_ratio=0.975; bridge_payload_fill_percent=96.000"))
             .Append(LogLine($"event=filetransfer_chunk_batch_sent_as_batch; transport=nkn; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.chunk_batch.v6; batch_profile=v4_repair_21k; batch_chunk_count=3; chunk_range=7-9; raw_bytes=64512; lane=control_bulk; repair_delivery_mode=control_bulk_escalated; raw_to_bridge_payload_ratio=0.975; bridge_payload_fill_percent=96.000"))
             .ToArray();
@@ -2211,19 +2240,22 @@ public sealed class FileTransferOpsScriptsTests
 
         var repair = ReadArtifactReport(result.ArtifactDir, "repair-reorder-summary.txt");
         Assert.Equal("1", repair["v4_repair_delivery_bulk_only_count"]);
-        Assert.Equal("3", repair["v4_repair_delivery_control_bulk_escalated_count"]);
+        Assert.Equal("4", repair["v4_repair_delivery_control_bulk_escalated_count"]);
         Assert.Equal("1", repair["v4_repair_delivery_retry_escalated_count"]);
         Assert.Equal("1", repair["v4_repair_delivery_credit_stall_escalated_count"]);
         Assert.Equal("1", repair["v4_repair_delivery_frontier_not_advanced_escalated_count"]);
+        Assert.Equal("1", repair["v4_repair_delivery_primary_regular_nkn_frontier_first_send_count"]);
         Assert.Equal("1", repair["v4_repair_batch_bulk_only_count"]);
         Assert.Equal("1", repair["v4_repair_batch_control_bulk_count"]);
 
         var throughput = ReadArtifactReport(result.ArtifactDir, "throughput-summary.txt");
         Assert.Equal("1", throughput["v4_repair_delivery_bulk_only_count"]);
-        Assert.Equal("3", throughput["v4_repair_delivery_control_bulk_escalated_count"]);
+        Assert.Equal("4", throughput["v4_repair_delivery_control_bulk_escalated_count"]);
+        Assert.Equal("1", throughput["v4_repair_delivery_primary_regular_nkn_frontier_first_send_count"]);
 
         var decomposition = ReadArtifactReport(result.ArtifactDir, "throughput-decomposition-summary.txt");
         Assert.Equal("1", decomposition["v4_repair_delivery_credit_stall_escalated_count"]);
+        Assert.Equal("1", decomposition["v4_repair_delivery_primary_regular_nkn_frontier_first_send_count"]);
         Assert.Equal("1", decomposition["v4_repair_batch_control_bulk_count"]);
     }
 
@@ -3345,6 +3377,41 @@ if (-not $result.RegressionFailed) {
             LogLine($"event=filetransfer_v4_complete_sent; transfer_id={transferId}; session_id=sess_a; file_size=64512; sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
             LogLine($"event=filetransfer_v4_complete_received; transfer_id={transferId}; session_id=sess_a; file_size=64512; sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
             LogLine("event=nkn_bridge_bulk_send_summary; frames_sent=1; send_failures=0; queue_clears=0; queue_depth=0; queued_bytes=0; oldest_queued_age_ms=0; payload_bytes_sent=65024; payload_bytes_per_second=6502400; in_flight=1; in_flight_bytes=65024; configured_concurrency=4; effective_concurrency=4; in_flight_max=1; in_flight_bytes_max=65024; worker_utilization_percent=25"),
+            LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=(none)"),
+            LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none)")
+        ];
+    }
+
+    private static string[] BuildCleanCompletedRegularNknV4TransferFixture(string transferId)
+    {
+        return
+        [
+            LogLine($"event=filetransfer_v4_negotiated; transfer_id={transferId}; session_id=sess_a; direction=Outbound; protocol_version=4; activation=primary_regular_nkn; runtime_profile=regular_nkn_v4_fast"),
+            LogLine($"event=filetransfer_v4_negotiated; transfer_id={transferId}; session_id=sess_a; direction=Inbound; protocol_version=4; activation=primary_regular_nkn; runtime_profile=regular_nkn_v4_fast"),
+            LogLine($"event=filetransfer_session_opened; direction=outbound; transfer_id={transferId}; session_id=sess_a; protocol_version=4; chunk_size_bytes=21504; pipeline_depth=8; reason=role=Sender"),
+            LogLine($"event=filetransfer_session_opened; direction=inbound; transfer_id={transferId}; session_id=sess_a; protocol_version=4; chunk_size_bytes=21504; pipeline_depth=8; reason=role=Receiver"),
+            LogLine($"event=filetransfer_v4_sender_started; transfer_id={transferId}; session_id=sess_a; protocol_version=4; chunk_size=21504; pump_depth=8; pending_send_bytes_limit=2097152"),
+            LogLine($"event=filetransfer_v4_receiver_started; transfer_id={transferId}; session_id=sess_a; protocol_version=4; session_open_chunk_size_bytes=21504; session_open_pipeline_depth=8"),
+            LogLine($"event=filetransfer_v4_manifest_sent; transfer_id={transferId}; session_id=sess_a; file_size=64512; chunk_size=21504; chunk_count=3; sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+            LogLine($"event=filetransfer_binary_frame_sent; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.manifest.v4; payload_bytes=167; serialized_payload_bytes=167; raw_chunk_bytes=0; chunk_count=0"),
+            LogLine($"event=filetransfer_v4_manifest_received; transfer_id={transferId}; session_id=sess_a; file_size=64512; chunk_size=21504; chunk_count=3; sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+            LogLine($"event=filetransfer_v4_sparse_mode_selected; transfer_id={transferId}; session_id=sess_a; can_read=1; can_write=1; can_seek=1"),
+            LogLine($"event=filetransfer_v4_state_sent; transfer_id={transferId}; session_id=sess_a; epoch=1; contiguous_committed_chunk_index=0; durable_received_highest_chunk_index=-1; credit_until_chunk_index_exclusive=3; missing_range_count=0; bytes_committed=0; terminal_ready=0"),
+            LogLine($"event=filetransfer_data_frame_dispatched; transport=nkn; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.state.v4; lane=control; queued_frames=1; queued_bytes=1024"),
+            LogLine($"event=filetransfer_v4_feedback_first_success; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.state.v4; lane=bulk; secondary_lane=control"),
+            LogLine($"event=filetransfer_v4_feedback_secondary_completed; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.state.v4; lane=control; elapsed_ms=3"),
+            LogLine($"event=filetransfer_v4_state_received; transfer_id={transferId}; session_id=sess_a; epoch=1; contiguous_committed_chunk_index=0; durable_received_highest_chunk_index=-1; credit_until_chunk_index_exclusive=3; missing_range_count=0"),
+            LogLine($"event=filetransfer_v4_sender_pump_summary; transfer_id={transferId}; session_id=sess_a; sample_window_ms=1000; scheduled_frames=1; completed_frames=1; failed_frames=0; in_flight_frames=1; raw_bytes_sent=64512; repair_send_count=0"),
+            LogLine($"event=filetransfer_chunk_batch_sent_as_batch; transport=nkn; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.chunk_batch.v4; batch_profile=v4_default_21k; batch_chunk_count=3; chunk_range=0-2; raw_bytes=64512; lane=bulk; raw_to_bridge_payload_ratio=0.975; bridge_payload_fill_percent=96.000"),
+            LogLine($"event=filetransfer_transport_payload_budget; transport=nkn; transfer_id={transferId}; message_type=file_transfer_data_frame; frame_type=filetransfer.chunk_batch.v4; batch_profile=v4_default_21k; lane=bulk; batch_chunk_count=3; serialized_payload_bytes=64615; secure_payload_bytes=64840; bridge_payload_bytes=64917; bridge_command_bytes=65017; max_allowed_bytes=65536; raw_to_bridge_payload_ratio=0.994; bridge_payload_fill_percent=99.055"),
+            LogLine($"event=filetransfer_binary_frame_sent; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.chunk_batch.v4; chunk_index=0-2; payload_bytes=64615; serialized_payload_bytes=64615; raw_chunk_bytes=64512; chunk_count=3; batch_chunk_count=3"),
+            LogLine($"event=filetransfer_binary_frame_received; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.chunk_batch.v4; chunk_index=0-2; raw_chunk_bytes=64512; chunk_count=3; batch_chunk_count=3"),
+            LogLine($"event=filetransfer_v4_chunk_batch_sent; transfer_id={transferId}; session_id=sess_a; start_chunk_index=0; chunk_count=3; raw_bytes=64512; batch_profile=v4_default_21k"),
+            LogLine($"event=filetransfer_v4_chunk_batch_received; transfer_id={transferId}; session_id=sess_a; start_chunk_index=0; chunk_count=3; raw_bytes=64512"),
+            LogLine($"event=filetransfer_v4_sparse_write_committed; transfer_id={transferId}; session_id=sess_a; chunk_count=3; bytes_written=64512; contiguous_committed_chunk_index=3; durable_received_highest_chunk_index=2"),
+            LogLine($"event=filetransfer_v4_complete_sent; transfer_id={transferId}; session_id=sess_a; file_size=64512; sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+            LogLine($"event=filetransfer_v4_complete_received; transfer_id={transferId}; session_id=sess_a; file_size=64512; sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+            LogLine("event=nkn_bridge_bulk_send_summary; frames_sent=1; send_failures=0; queue_clears=0; queue_depth=0; queued_bytes=0; oldest_queued_age_ms=0; payload_bytes_sent=64917; payload_bytes_per_second=6491700; in_flight=1; in_flight_bytes=64917; configured_concurrency=4; effective_concurrency=4; in_flight_max=1; in_flight_bytes_max=64917; worker_utilization_percent=25"),
             LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=(none)"),
             LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none)")
         ];

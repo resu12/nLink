@@ -558,7 +558,7 @@ public sealed class FileTransferPanelItemViewModelTests
     }
 
     [Fact]
-    public void InboundSparseTransfer_ShowsCommittedProgressWhenSparseWritesRunAhead()
+    public void InboundSparseTransfer_ShowsDiskWrittenProgressWhenSparseWritesRunAhead()
     {
         var item = FileTransferPanelItemViewModel.FromSnapshot(
             new FileTransferTransferSnapshot(
@@ -578,8 +578,8 @@ public sealed class FileTransferPanelItemViewModelTests
                 BytesAcceptedForTransport: 74_448_896));
 
         Assert.NotNull(item);
-        Assert.Equal("10 MB / 128 MB", item!.ProgressText);
-        Assert.Equal(10_485_760d / 134_217_728d, item.ProgressFraction, 6);
+        Assert.Equal("71 MB / 128 MB", item!.ProgressText);
+        Assert.Equal(74_448_896d / 134_217_728d, item.ProgressFraction, 6);
     }
 
     [Fact]

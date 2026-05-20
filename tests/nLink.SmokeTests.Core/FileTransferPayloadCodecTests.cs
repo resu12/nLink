@@ -51,7 +51,6 @@ public sealed class FileTransferPayloadCodecTests
 
     [Theory]
     [InlineData(null)]
-    [InlineData(FileTransferProtocol.ProtocolVersionV4)]
     [InlineData(FileTransferProtocol.ProtocolVersionV5)]
     [InlineData(99)]
     public void Offer_RejectsMissingLegacyOrUnsupportedProtocol(int? preferredVersion)
@@ -69,6 +68,27 @@ public sealed class FileTransferPayloadCodecTests
             });
 
         Assert.False(FileTransferPayloadCodec.TryDeserializeOffer(payload, out _));
+    }
+
+    [Fact]
+    public void Offer_AcceptsV4Protocol()
+    {
+        var payload = FileTransferPayloadCodec.Serialize(
+            new FileTransferOfferV2
+            {
+                Kind = "filetransfer",
+                Type = FileTransferProtocol.OfferTypeV2,
+                SessionId = " session_a ",
+                TransferId = " transfer_a ",
+                FileName = " report.pdf ",
+                FileSizeBytes = 123,
+                PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+            });
+
+        var parsed = FileTransferPayloadCodec.TryDeserializeOffer(payload, out var message);
+
+        Assert.True(parsed);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV4, message.PreferredDataProtocolVersion);
     }
 
     [Fact]
@@ -108,7 +128,6 @@ public sealed class FileTransferPayloadCodecTests
 
     [Theory]
     [InlineData(null)]
-    [InlineData(FileTransferProtocol.ProtocolVersionV4)]
     [InlineData(FileTransferProtocol.ProtocolVersionV5)]
     [InlineData(99)]
     public void Accept_RejectsMissingLegacyOrUnsupportedProtocol(int? acceptedVersion)
@@ -124,6 +143,23 @@ public sealed class FileTransferPayloadCodecTests
             });
 
         Assert.False(FileTransferPayloadCodec.TryDeserializeAccept(payload, out _));
+    }
+
+    [Fact]
+    public void Accept_AcceptsV4Protocol()
+    {
+        var payload = FileTransferPayloadCodec.Serialize(
+            new FileTransferAcceptV1
+            {
+                SessionId = " session_a ",
+                TransferId = " transfer_a ",
+                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+            });
+
+        var parsed = FileTransferPayloadCodec.TryDeserializeAccept(payload, out var message);
+
+        Assert.True(parsed);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV4, message.AcceptedDataProtocolVersion);
     }
 
     [Fact]
@@ -171,7 +207,6 @@ public sealed class FileTransferPayloadCodecTests
 
     [Theory]
     [InlineData(null)]
-    [InlineData(FileTransferProtocol.ProtocolVersionV4)]
     [InlineData(FileTransferProtocol.ProtocolVersionV5)]
     [InlineData(99)]
     public void SessionOpen_RejectsMissingLegacyOrUnsupportedProtocol(int? protocolVersion)
@@ -190,6 +225,30 @@ public sealed class FileTransferPayloadCodecTests
             });
 
         Assert.False(FileTransferPayloadCodec.TryDeserializeSessionOpen(payload, out _));
+    }
+
+    [Fact]
+    public void SessionOpenV4_RoundTrips_AndNormalizesEnvelope()
+    {
+        var payload = FileTransferPayloadCodec.Serialize(
+            new FileTransferSessionOpenV2
+            {
+                SessionId = " session_a ",
+                TransferId = " transfer_a ",
+                ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                SessionRole = " receiver ",
+                ChunkSizeBytes = 4096,
+                InitialPipelineDepth = 8,
+            });
+
+        var parsed = FileTransferPayloadCodec.TryDeserializeSessionOpen(payload, out var message);
+
+        Assert.True(parsed);
+        Assert.Equal("session_a", message.SessionId);
+        Assert.Equal("transfer_a", message.TransferId);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV4, message.ProtocolVersion);
+        Assert.Equal(FileTransferProtocol.SessionRoleReceiver, message.SessionRole);
+        Assert.Equal(FileTransferProtocol.SessionOpenTypeV2, message.Type);
     }
 
     [Fact]

@@ -7,7 +7,7 @@ namespace NLink.SmokeTests;
 public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTransferServiceTestBase
 {
     [Fact]
-    public async Task OutboundOffer_OnV6CapableTransport_AdvertisesV6()
+    public async Task OutboundOffer_OnRegularNknTransport_AdvertisesV4()
     {
         const string transferId = "transfer_protocol_offer_v4";
         var payload = new byte[] { 1, 2, 3, 4 };
@@ -21,6 +21,60 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
 
         await sender.TryStartSendAsync(
             new FileTransferSendDescriptor("offer-v4.bin", payload.Length, transferId),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+        var offer = Assert.Single(senderTransport.SentOffers);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV4, offer.PreferredDataProtocolVersion);
+    }
+
+    [Fact]
+    public async Task OutboundOffer_OnAcceleratedTransport_AdvertisesV6()
+    {
+        const string transferId = "transfer_protocol_offer_accelerated_v6";
+        var payload = new byte[] { 1, 2, 3, 4 };
+        using var senderTransport = new LoopbackFileTransferTransport("session_protocol_offer_accelerated_v6")
+        {
+            IsTransportAccelerationActive = true,
+            TransportAccelerationStatusReason = "test_tuna_active",
+        };
+        using var receiverTransport = new LoopbackFileTransferTransport("session_protocol_offer_accelerated_v6");
+        senderTransport.Connect(receiverTransport);
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("offer-v6.bin", payload.Length, transferId),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+        var offer = Assert.Single(senderTransport.SentOffers);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV6, offer.PreferredDataProtocolVersion);
+    }
+
+    [Fact]
+    public async Task OutboundOffer_OnTunaEligibleTransport_AdvertisesV6BeforeAccelerationIsActive()
+    {
+        const string transferId = "transfer_protocol_offer_tuna_pending_v6";
+        var payload = new byte[] { 1, 2, 3, 4 };
+        using var senderTransport = new LoopbackFileTransferTransport("session_protocol_offer_tuna_pending_v6")
+        {
+            ShouldUseFileTransferV6ForAcceleration = true,
+            TransportAccelerationStatusReason = "test_tuna_pending",
+        };
+        using var receiverTransport = new LoopbackFileTransferTransport("session_protocol_offer_tuna_pending_v6");
+        senderTransport.Connect(receiverTransport);
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("offer-tuna-pending-v6.bin", payload.Length, transferId),
             _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
             CancellationToken.None);
 
@@ -54,7 +108,7 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
     }
 
     [Fact]
-    public async Task InboundAccept_ForV6Offer_SendsV6Accept()
+    public async Task InboundAccept_ForV4Offer_SendsV4Accept()
     {
         const string transferId = "transfer_protocol_accept_v4";
         using var senderTransport = new LoopbackFileTransferTransport("session_protocol_accept_v4");
@@ -70,7 +124,7 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
                 TransferId = transferId,
                 FileName = "accept-v4.bin",
                 FileSizeBytes = 4,
-                PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
             },
             CancellationToken.None);
 
@@ -82,14 +136,14 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
 
         await WaitUntilAsync(() => receiverTransport.SentAccepts.Count == 1);
         var accept = Assert.Single(receiverTransport.SentAccepts);
-        Assert.Equal(FileTransferProtocol.ProtocolVersionV6, accept.AcceptedDataProtocolVersion);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV4, accept.AcceptedDataProtocolVersion);
     }
 
     [Theory]
     [InlineData(null)]
     [InlineData(2)]
     [InlineData(3)]
-    [InlineData(4)]
+    [InlineData(5)]
     public async Task InboundOffer_WithLegacyOrMissingProtocol_IsDeclinedWithoutPendingTransfer(int? preferredVersion)
     {
         const string transferId = "transfer_protocol_legacy_offer";
@@ -122,7 +176,8 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
     [InlineData(null)]
     [InlineData(2)]
     [InlineData(3)]
-    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(6)]
     public async Task OutboundAccept_WithLegacyOrMissingProtocol_FailsTransfer(int? acceptedVersion)
     {
         const string transferId = "transfer_protocol_legacy_accept";
@@ -156,7 +211,7 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
     }
 
     [Fact]
-    public async Task OutboundAccept_WithV6Protocol_StartsV6SenderRuntime()
+    public async Task OutboundAccept_WithV4Protocol_StartsV4SenderRuntime()
     {
         const string transferId = "transfer_protocol_v4_accept_guard";
         var payload = new byte[] { 1, 2, 3, 4 };
@@ -178,26 +233,26 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
             {
                 SessionId = "session_protocol_v4_accept_guard",
                 TransferId = transferId,
-                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
             },
             CancellationToken.None);
 
         await WaitUntilAsync(() => senderTransport.SentSessionOpens.Count == 1);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any());
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV4>().Any());
         Assert.Equal(FileTransferTransferState.Sending, sender.Snapshot.Outbound!.State);
         Assert.Null(sender.Snapshot.Outbound.ErrorCode);
         var sessionOpen = Assert.Single(senderTransport.SentSessionOpens);
-        Assert.Equal(FileTransferProtocol.ProtocolVersionV6, sessionOpen.ProtocolVersion);
-        Assert.Contains(senderTransport.SentDataFrames, static frame => frame is FileTransferManifestFrameV6);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV4, sessionOpen.ProtocolVersion);
+        Assert.Contains(senderTransport.SentDataFrames, static frame => frame is FileTransferManifestFrameV4 and not FileTransferManifestFrameV6);
         var logTail = ReadOperationalLogTail(logStart);
-        Assert.Contains("event=filetransfer_v6_negotiated", logTail, StringComparison.Ordinal);
-        Assert.Contains("event=filetransfer_v6_sender_started", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v4_negotiated", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v4_sender_started", logTail, StringComparison.Ordinal);
     }
 
     [Theory]
     [InlineData(2)]
     [InlineData(3)]
-    [InlineData(4)]
+    [InlineData(5)]
     public async Task InboundSessionOpen_WithNonV6Protocol_DoesNotStartDataSession(int protocolVersion)
     {
         const string transferId = "transfer_protocol_non_v4_session_open";
@@ -248,7 +303,7 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
     }
 
     [Fact]
-    public async Task InboundSessionOpen_WithV6Protocol_StartsReceiverAndWaitsForManifest()
+    public async Task InboundSessionOpen_WithV4Protocol_StartsReceiverAndWaitsForManifest()
     {
         const string transferId = "transfer_protocol_v4_session_open_guard";
         var logStart = GetOperationalLogLength();
@@ -265,7 +320,7 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
                 TransferId = transferId,
                 FileName = "v4-session-open.bin",
                 FileSizeBytes = 4,
-                PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
@@ -282,19 +337,19 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
             {
                 SessionId = sessionId,
                 TransferId = transferId,
-                ProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
                 SessionRole = FileTransferProtocol.SessionRoleSender,
                 ChunkSizeBytes = 4096,
                 InitialPipelineDepth = 1,
             },
             CancellationToken.None);
 
-        await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v6_receiver_started", StringComparison.Ordinal));
+        await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v4_receiver_started", StringComparison.Ordinal));
         Assert.Equal(FileTransferTransferState.AwaitingMetadata, receiver.Snapshot.Inbound!.State);
         Assert.Null(receiver.Snapshot.Inbound.ErrorCode);
         var logTail = ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_session_opened", logTail, StringComparison.Ordinal);
-        Assert.Contains("event=filetransfer_v6_negotiated", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v4_negotiated", logTail, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_v6_session_open_rejected", logTail, StringComparison.Ordinal);
     }
 }
