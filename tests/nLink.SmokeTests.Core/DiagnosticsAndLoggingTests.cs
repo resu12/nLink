@@ -770,7 +770,7 @@ public void SessionHeaderTunaIcon_DoesNotPulseWhileWalletLocked()
     Assert.True(applyStart >= 0, "Expected Tuna unlock toggle state method.");
     Assert.Contains("var pulsing = !active &&", source, StringComparison.Ordinal);
     Assert.Contains("!TunaStatusPresentationMapper.SuppressesPendingVisual(reason)", source, StringComparison.Ordinal);
-    Assert.Contains("var highlighted = active;", source, StringComparison.Ordinal);
+    Assert.Contains("var highlighted = active || pulsing;", source, StringComparison.Ordinal);
     Assert.Contains("TunaPayerBrush", source, StringComparison.Ordinal);
     Assert.Contains("presentation.IsLocalPayer", source, StringComparison.Ordinal);
     Assert.Contains("!tunaUnlockToggleOn", source, StringComparison.Ordinal);

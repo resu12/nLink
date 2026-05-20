@@ -20,6 +20,8 @@ internal sealed class FakeNknClient : INknClient, IAuthoritativeConnectedAddress
 
     public Func<string, byte[], CancellationToken, Task>? BeforeSendAsync { get; set; }
 
+    public Func<string, byte[], NknBridgeChannel, CancellationToken, Task>? BeforeSendCoreAsync { get; set; }
+
     public Func<string, byte[], CancellationToken, Task<bool>>? ShouldDeliverSendAsync { get; set; }
 
     public Func<string, byte[], CancellationToken, Task>? BeforePublishAsync { get; set; }
@@ -254,6 +256,12 @@ internal sealed class FakeNknClient : INknClient, IAuthoritativeConnectedAddress
         if (beforeSendAsync is not null)
         {
             await beforeSendAsync(destination, payload, ct).ConfigureAwait(false);
+        }
+
+        var beforeSendCoreAsync = BeforeSendCoreAsync;
+        if (beforeSendCoreAsync is not null)
+        {
+            await beforeSendCoreAsync(destination, payload, channel, ct).ConfigureAwait(false);
         }
 
         var shouldDeliverSendAsync = ShouldDeliverSendAsync;

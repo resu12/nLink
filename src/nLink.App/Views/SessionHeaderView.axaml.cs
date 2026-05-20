@@ -480,8 +480,8 @@ public partial class SessionHeaderView : UserControl
                       tunaUnlockToggleOn &&
                       presentation.IsConnecting &&
                       !TunaStatusPresentationMapper.SuppressesPendingVisual(reason);
-        var highlighted = active;
-        var paying = active && presentation.IsLocalPayer;
+        var highlighted = active || pulsing;
+        var paying = highlighted && presentation.IsLocalPayer;
         var nextPictogramBrush = highlighted ? (paying ? TunaPayerBrush : TunaActiveBrush) : TunaInactiveBrush;
         var nextGlowBrush = highlighted ? (paying ? TunaPayerGlowBrush : TunaActiveGlowBrush) : TunaInactiveGlowBrush;
         var nextPictogramOpacity = highlighted ? 1d : 0.58d;

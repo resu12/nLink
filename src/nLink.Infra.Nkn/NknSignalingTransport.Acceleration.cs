@@ -22,6 +22,7 @@ public sealed partial class NknSignalingTransport
     private static readonly TimeSpan HelperPaidOfferHelpeePriorityDelay = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan HelperPaidOfferHelpeeIntentGraceDelay = TimeSpan.FromMilliseconds(750);
     private static readonly TimeSpan AccelerationListenerReadyRetryDelay = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan AccelerationControlDirectSendWait = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan AccelerationControlBulkBypassWait = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan AccelerationAnswerAckTimeout = TimeSpan.FromSeconds(35);
     private static readonly TimeSpan AccelerationAnswerReplayDelay = TimeSpan.FromSeconds(2);
@@ -40,6 +41,7 @@ public sealed partial class NknSignalingTransport
     private static bool handlingTunaAcceleratedInboundMessage;
     internal static TimeSpan? AccelerationOfferAnswerTimeoutOverrideForTests;
     internal static TimeSpan? AccelerationOfferReplayDelayOverrideForTests;
+    internal static TimeSpan? AccelerationControlDirectSendWaitOverrideForTests;
     internal static TimeSpan? AccelerationControlBulkBypassWaitOverrideForTests;
     internal static TimeSpan? HelperPaidOfferHelpeePriorityDelayOverrideForTests;
     internal static TimeSpan? HelperPaidOfferHelpeeIntentGraceDelayOverrideForTests;
@@ -2977,6 +2979,9 @@ public sealed partial class NknSignalingTransport
     private static TimeSpan ResolveAccelerationControlBulkBypassWait()
         => AccelerationControlBulkBypassWaitOverrideForTests ?? AccelerationControlBulkBypassWait;
 
+    private static TimeSpan ResolveAccelerationControlDirectSendWait()
+        => AccelerationControlDirectSendWaitOverrideForTests ?? AccelerationControlDirectSendWait;
+
     private async Task<bool> SendAccelerationControlPriorityCopyAsync(
         string destination,
         Envelope envelope,
@@ -2989,12 +2994,15 @@ public sealed partial class NknSignalingTransport
             $"event=tuna_acceleration_control_priority_started; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(envelope.Type)}; lane=control_priority");
         try
         {
-            NknRuntimeDiagnostics.IncrementMessagesSent();
-            await client.SendAsync(destination, bytes, ct).ConfigureAwait(false);
-            LocalOperationalLog.Info(
-                "NKN.Tuna",
-                $"event=tuna_acceleration_control_priority_sent; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(envelope.Type)}; lane=control_priority");
-            return true;
+            return await TrySendAccelerationControlDirectCopyAsync(
+                destination,
+                bytes,
+                purpose,
+                envelope.Type,
+                "control_priority",
+                "tuna_acceleration_control_priority_sent",
+                "tuna_acceleration_control_priority_failed",
+                ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -3014,12 +3022,18 @@ public sealed partial class NknSignalingTransport
     {
         try
         {
-            NknRuntimeDiagnostics.IncrementMessagesSent();
-            await client.SendAsync(destination, bytes, ct).ConfigureAwait(false);
-            LocalOperationalLog.Info(
-                "NKN.Tuna",
-                $"event=tuna_acceleration_control_bulk_bypass_sent; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(envelope.Type)}; lane=control_to_bulk_endpoint");
-            return true;
+            if (await TrySendAccelerationControlDirectCopyAsync(
+                    destination,
+                    bytes,
+                    purpose,
+                    envelope.Type,
+                    "control_to_bulk_endpoint",
+                    "tuna_acceleration_control_bulk_bypass_sent",
+                    "tuna_acceleration_control_bulk_bypass_priority_failed",
+                    ct).ConfigureAwait(false))
+            {
+                return true;
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -3043,6 +3057,88 @@ public sealed partial class NknSignalingTransport
                 $"event=tuna_acceleration_control_bulk_bypass_failed; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(envelope.Type)}; error={ex.GetType().Name}");
             return false;
         }
+    }
+
+    private async Task<bool> TrySendAccelerationControlDirectCopyAsync(
+        string destination,
+        byte[] bytes,
+        string purpose,
+        MsgType messageType,
+        string lane,
+        string sentEvent,
+        string failedEvent,
+        CancellationToken ct)
+    {
+        Task sendTask;
+        try
+        {
+            NknRuntimeDiagnostics.IncrementMessagesSent();
+            sendTask = client.SendAsync(destination, bytes, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event={failedEvent}; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(messageType)}; lane={SanitizeLogToken(lane)}; error={ex.GetType().Name}");
+            return false;
+        }
+
+        var waitTimeout = ResolveAccelerationControlDirectSendWait();
+        var timeoutTask = Task.Delay(waitTimeout, ct);
+        var completed = await Task.WhenAny(sendTask, timeoutTask).ConfigureAwait(false);
+        if (!ReferenceEquals(completed, sendTask))
+        {
+            if (ct.IsCancellationRequested)
+            {
+                ct.ThrowIfCancellationRequested();
+            }
+
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event={failedEvent}; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(messageType)}; lane={SanitizeLogToken(lane)}; error=Timeout; wait_ms={(long)waitTimeout.TotalMilliseconds}");
+            ObserveAccelerationControlDirectSendLateTask(sendTask, purpose, lane);
+            return false;
+        }
+
+        try
+        {
+            await sendTask.ConfigureAwait(false);
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event={sentEvent}; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(messageType)}; lane={SanitizeLogToken(lane)}");
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event={failedEvent}; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(messageType)}; lane={SanitizeLogToken(lane)}; error={ex.GetType().Name}");
+            return false;
+        }
+    }
+
+    private static void ObserveAccelerationControlDirectSendLateTask(Task task, string purpose, string lane)
+    {
+        _ = task.ContinueWith(
+            completed =>
+            {
+                if (completed.IsFaulted)
+                {
+                    var ex = completed.Exception?.GetBaseException();
+                    LocalOperationalLog.Warn(
+                        "NKN.Tuna",
+                        $"event=tuna_acceleration_control_direct_send_late_failure; purpose={SanitizeLogToken(purpose)}; lane={SanitizeLogToken(lane)}; error={ex?.GetType().Name ?? "unknown"}");
+                }
+                else if (completed.IsCanceled)
+                {
+                    LocalOperationalLog.Warn(
+                        "NKN.Tuna",
+                        $"event=tuna_acceleration_control_direct_send_late_canceled; purpose={SanitizeLogToken(purpose)}; lane={SanitizeLogToken(lane)}");
+                }
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 
     private static void ObserveAccelerationControlSendTask(Task<bool> task, string purpose, string lane)

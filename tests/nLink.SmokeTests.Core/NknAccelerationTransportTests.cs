@@ -821,6 +821,92 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task TransportAccelerationOffer_FallsBackToBulkQueueWhenDirectControlCopiesHang()
+    {
+        FakeNknClient.ResetNetwork();
+        var previousHelpeePriorityDelay = NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
+        var previousDirectSendWait = NknSignalingTransport.AccelerationControlDirectSendWaitOverrideForTests;
+        NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = TimeSpan.Zero;
+        NknSignalingTransport.AccelerationControlDirectSendWaitOverrideForTests = TimeSpan.FromMilliseconds(50);
+        var blockedDirectControlOffer = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.tuna.file.activation.bulk-queue-fallback.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            var helperClient = new FakeNknClient("helper.tuna.file.activation.bulk-queue-fallback.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+            var hostLane = new RetryableTunaAccelerationSession(canListen: false, failedDialAttemptsBeforeSuccess: 0);
+            var helperLane = new RetryableTunaAccelerationSession(canListen: false, failedDialAttemptsBeforeSuccess: 0);
+            var blockedDirectControlCount = 0;
+            hostClient.BeforeSendCoreAsync = async (_, payload, channel, ct) =>
+            {
+                if (channel == NknBridgeChannel.Control &&
+                    EnvelopeCodec.TryDeserialize(payload, out var envelope) &&
+                    envelope.Type == MsgType.TransportAccelerationOffer)
+                {
+                    Interlocked.Increment(ref blockedDirectControlCount);
+                    await blockedDirectControlOffer.Task.WaitAsync(ct).ConfigureAwait(false);
+                }
+            };
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-tuna-file-activation-bulk-queue-fallback-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                hostLane);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-tuna-file-activation-bulk-queue-fallback-id", helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                helperLane);
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            _ = await host.OpenFileTransferDataSessionAsync(
+                sessionId,
+                "transfer_tuna_activation_bulk_queue_fallback",
+                cts.Token);
+            var logStart = GetOperationalLogLength();
+
+            hostLane.SetCanListen(true);
+            await ((ITransportAccelerationControl)host).RequestAccelerationNegotiationAsync("runtime_unlock", cts.Token);
+
+            await WaitUntilAsync(
+                () => host.IsAccelerationAvailableForTests && helper.IsAccelerationAvailableForTests,
+                TimeSpan.FromSeconds(6));
+
+            Assert.True(Volatile.Read(ref blockedDirectControlCount) > 0);
+            Assert.True(hostLane.EnsureListenerCalls > 0);
+            Assert.True(helperLane.StartDialerCalls > 0);
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=tuna_acceleration_control_priority_failed; purpose=offer", logTail, StringComparison.Ordinal);
+            Assert.Contains("error=Timeout", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=tuna_acceleration_control_bulk_bypass_priority_failed; purpose=offer", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=tuna_acceleration_control_bulk_bypass_sent; purpose=offer", logTail, StringComparison.Ordinal);
+            Assert.Contains("lane=bulk_queue_fallback", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=tuna_acceleration_offer_queued;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=tuna_acceleration_negotiated;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_control_send_wait_timeout; purpose=offer;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_offer_rejected;", logTail, StringComparison.Ordinal);
+
+            blockedDirectControlOffer.TrySetResult(null);
+            await Task.Delay(100, cts.Token);
+        }
+        finally
+        {
+            blockedDirectControlOffer.TrySetResult(null);
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = previousHelpeePriorityDelay;
+            NknSignalingTransport.AccelerationControlDirectSendWaitOverrideForTests = previousDirectSendWait;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task TransportAccelerationOffer_WaitsForSlowActivationControlSend()
     {
         FakeNknClient.ResetNetwork();
