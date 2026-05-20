@@ -72,6 +72,88 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
+    public async Task PrimaryRegularNknV4Fast_OutboundProgressTracksReceiverSparseBytesWritten()
+    {
+        const string transferId = "transfer_v4_sender_progress_sparse_written";
+        const string sessionId = "session_v4_sender_progress_sparse_written";
+        var payload = Enumerable.Range(0, 2_000_000).Select(static index => (byte)(index % 251)).ToArray();
+        var droppedFrontierBatchCount = 0;
+        using var senderTransport = new LoopbackFileTransferTransport(sessionId)
+        {
+            FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup,
+        };
+        using var receiverTransport = new LoopbackFileTransferTransport(sessionId)
+        {
+            FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup,
+        };
+        senderTransport.OutboundDataFrameDeliveryOverrideWithLaneAsync = (_, frame, _, _) =>
+        {
+            if (frame is FileTransferChunkBatchFrameV4 batch &&
+                frame is not FileTransferChunkBatchFrameV6 &&
+                batch.StartChunkIndex <= 0 &&
+                batch.StartChunkIndex + batch.ChunkCount > 0)
+            {
+                Interlocked.Increment(ref droppedFrontierBatchCount);
+                return Task.FromResult(true);
+            }
+
+            return Task.FromResult(false);
+        };
+        senderTransport.Connect(receiverTransport);
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+        using var destination = new NonDisposingMemoryStream();
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("v4-progress-sparse-written.bin", payload.Length, transferId),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+        await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
+
+        var writtenProgressTarget = 3L * 21 * 1024;
+        await WaitUntilAsync(
+            () =>
+            {
+                var inbound = receiver.Snapshot.Inbound;
+                var outbound = sender.Snapshot.Outbound;
+                return Volatile.Read(ref droppedFrontierBatchCount) > 0 &&
+                       inbound?.BytesTransferred == 0 &&
+                       (inbound.BytesAcceptedForTransport ?? 0L) >= writtenProgressTarget &&
+                       (outbound?.ProgressBytes ?? 0L) >= writtenProgressTarget;
+            },
+            timeoutMs: 10000);
+
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV4, Assert.Single(senderTransport.SentSessionOpens).ProtocolVersion);
+        Assert.Equal(0, receiver.Snapshot.Inbound!.BytesTransferred);
+        Assert.True(receiver.Snapshot.Inbound!.BytesAcceptedForTransport >= writtenProgressTarget);
+        Assert.True(sender.Snapshot.Outbound!.ProgressBytes >= writtenProgressTarget);
+        Assert.Contains(
+            receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV4>(),
+            state => state is not FileTransferReceiverStateFrameV6 &&
+                     state.ContiguousCommittedChunkIndex == 0 &&
+                     state.BytesCommitted >= writtenProgressTarget);
+
+        var receiverProgressAtPause = receiver.Snapshot.Inbound!.BytesAcceptedForTransport!.Value;
+        var stateCountBeforePause = receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV4>().Count();
+        Assert.NotNull(await receiver.PauseTransferAsync(transferId, "receiver_pause", CancellationToken.None));
+        await WaitUntilAsync(
+            () => sender.Snapshot.Outbound is { IsPeerPaused: true } outbound &&
+                  outbound.ProgressBytes >= receiverProgressAtPause,
+            timeoutMs: 5000);
+        await WaitUntilAsync(
+            () => receiverTransport.SentDataFrames
+                .OfType<FileTransferStateFrameV4>()
+                .Skip(stateCountBeforePause)
+                .Any(state => state is not FileTransferReceiverStateFrameV6 &&
+                              state.TransferPaused &&
+                              state.BytesCommitted >= receiverProgressAtPause),
+            timeoutMs: 5000);
+    }
+
+    [Fact]
     public async Task V6SparseSender_CompletesFromTerminalReadyStateWhenLifecycleCompleteIsLost()
     {
         const string transferId = "transfer_v6_sparse_terminal_ready_complete";

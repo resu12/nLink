@@ -70,6 +70,8 @@ public sealed partial class NknSignalingTransport
     private string transportAccelerationStatusReason = "inactive";
     private string? accelerationUserStoppedSessionId;
     private long accelerationUserStoppedUtcMs;
+    private string? accelerationPeerUserStoppedSessionId;
+    private long accelerationPeerUserStoppedUtcMs;
     private long tunaFallbackProofNextEpoch;
     private TunaFallbackProofState? tunaFallbackProofState;
 
@@ -1871,6 +1873,11 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
+        if (IsRemoteUserRequestedAccelerationStopReason(normalized))
+        {
+            return false;
+        }
+
         if (normalized.StartsWith("remote_", StringComparison.Ordinal))
         {
             return true;
@@ -1878,7 +1885,7 @@ public sealed partial class NknSignalingTransport
 
         if (IsUserRequestedAccelerationStopReason(normalized))
         {
-            return true;
+            return false;
         }
 
         return normalized is
@@ -1918,9 +1925,10 @@ public sealed partial class NknSignalingTransport
     internal static bool ShouldStartImmediateFileTransferFallbackProbe(string? reason)
     {
         var normalized = SanitizeLogToken(reason);
-        if (IsUserRequestedAccelerationStopReason(normalized))
+        if (IsUserRequestedAccelerationStopReason(normalized) ||
+            IsRemoteUserRequestedAccelerationStopReason(normalized))
         {
-            return true;
+            return false;
         }
 
         return normalized is
@@ -3296,6 +3304,11 @@ public sealed partial class NknSignalingTransport
         var downReason = $"remote_{down.Reason}";
         var downLanes = NknAccelerationLaneCodec.FromNames(down.SupportedLanes);
         var isUserRequestedDown = IsUserRequestedAccelerationStopReason(down.Reason);
+        if (isUserRequestedDown)
+        {
+            MarkAccelerationPeerUserStoppedForCurrentSession(down.SessionId);
+        }
+
         if (IsAccelerationNegotiatedAndHealthy())
         {
             ResetAccelerationNegotiation(downReason);
@@ -4149,6 +4162,7 @@ public sealed partial class NknSignalingTransport
         if (isRuntimeUnlock)
         {
             ClearAccelerationUserStoppedForCurrentSession();
+            ClearAccelerationPeerUserStoppedForCurrentSession();
             Interlocked.Exchange(ref accelerationEarlyDropRetryAttempts, 0);
         }
 
@@ -4248,9 +4262,9 @@ public sealed partial class NknSignalingTransport
 
     private void ResetAccelerationNegotiation(string reason)
     {
+        var normalizedReason = SanitizeLogToken(reason);
         string? fallbackSessionId;
         NknAccelerationLaneKind fallbackLanes;
-        var shouldStartFallbackProof = ShouldStartTunaFallbackProofForResetReason(reason);
         lock (accelerationGate)
         {
             fallbackSessionId = accelerationSessionId;
@@ -4267,20 +4281,31 @@ public sealed partial class NknSignalingTransport
             }
         }
 
+        var suppressFallbackProof = ShouldSuppressTunaFallbackProofAfterUserStop(normalizedReason, fallbackSessionId);
+        var shouldStartFallbackProof = !suppressFallbackProof &&
+                                       ShouldStartTunaFallbackProofForResetReason(normalizedReason);
         if (shouldStartFallbackProof)
         {
-            StartTunaFallbackProofIfNeeded(reason, fallbackSessionId, fallbackLanes);
-            RebindFileTransferDataSessionsForTunaFallback(reason, fallbackSessionId, fallbackLanes);
-            RebindScreenShareDataSessionsForTunaFallback(reason, fallbackSessionId, fallbackLanes);
+            StartTunaFallbackProofIfNeeded(normalizedReason, fallbackSessionId, fallbackLanes);
+            RebindFileTransferDataSessionsForTunaFallback(normalizedReason, fallbackSessionId, fallbackLanes);
+            RebindScreenShareDataSessionsForTunaFallback(normalizedReason, fallbackSessionId, fallbackLanes);
         }
-        else if (ShouldCompleteTunaFallbackProofForResetReason(reason))
+        else if (suppressFallbackProof)
         {
-            CompleteTunaFallbackProof(reason);
+            CompleteTunaFallbackProof(normalizedReason);
+            ResumeFileTransferDataSessionsAfterTunaActivationNegotiation(
+                $"reset_{normalizedReason}",
+                currentSessionSecurityState.SessionId?.Value,
+                "reset_acceleration");
+        }
+        else if (ShouldCompleteTunaFallbackProofForResetReason(normalizedReason))
+        {
+            CompleteTunaFallbackProof(normalizedReason);
         }
         else
         {
             ResumeFileTransferDataSessionsAfterTunaActivationNegotiation(
-                $"reset_{SanitizeLogToken(reason)}",
+                $"reset_{normalizedReason}",
                 currentSessionSecurityState.SessionId?.Value,
                 "reset_acceleration");
         }
@@ -4291,9 +4316,9 @@ public sealed partial class NknSignalingTransport
         Interlocked.Exchange(ref remoteHelpeeAccelerationOfferObserved, 0);
         Interlocked.Exchange(ref remoteHelpeePayerIntentState, RemoteHelpeePayerIntentUnknown);
         Interlocked.Exchange(ref remoteHelpeePayerIntentObservedUtcMs, 0);
-        AdvancePayerDecisionEpoch($"reset_{reason}");
-        LocalOperationalLog.Info("NKN.Tuna", $"event=tuna_acceleration_reset; reason={SanitizeLogToken(reason)}");
-        NotifyTransportAccelerationStateChanged(reason);
+        AdvancePayerDecisionEpoch($"reset_{normalizedReason}");
+        LocalOperationalLog.Info("NKN.Tuna", $"event=tuna_acceleration_reset; reason={normalizedReason}; fallback_proof_suppressed={(suppressFallbackProof ? 1 : 0)}");
+        NotifyTransportAccelerationStateChanged(normalizedReason);
     }
 
     private void NotifyTransportAccelerationStateChanged(string reason)
@@ -4442,6 +4467,7 @@ public sealed partial class NknSignalingTransport
 
         var currentSessionId = currentSessionSecurityState.SessionId?.Value;
         var cleared = false;
+        var clearedPeerStop = false;
         lock (accelerationGate)
         {
             if (!string.IsNullOrWhiteSpace(currentSessionId) &&
@@ -4452,6 +4478,15 @@ public sealed partial class NknSignalingTransport
                 accelerationUserStoppedUtcMs = 0;
                 cleared = true;
             }
+
+            if (!string.IsNullOrWhiteSpace(currentSessionId) &&
+                string.Equals(accelerationPeerUserStoppedSessionId, currentSessionId, StringComparison.Ordinal) &&
+                sentAtUnixMs >= accelerationPeerUserStoppedUtcMs)
+            {
+                accelerationPeerUserStoppedSessionId = null;
+                accelerationPeerUserStoppedUtcMs = 0;
+                clearedPeerStop = true;
+            }
         }
 
         if (cleared)
@@ -4459,6 +4494,13 @@ public sealed partial class NknSignalingTransport
             LocalOperationalLog.Info(
                 "NKN.Tuna",
                 $"event=tuna_acceleration_user_stop_cleared; trigger=peer_{SanitizeLogToken(messageType)}");
+        }
+
+        if (clearedPeerStop)
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=tuna_acceleration_peer_user_stop_cleared; trigger=peer_{SanitizeLogToken(messageType)}");
         }
     }
 
@@ -4475,6 +4517,103 @@ public sealed partial class NknSignalingTransport
             "user_locked" or
             "user_disabled" or
             "user_stopped_tuna";
+    }
+
+    private static bool IsRemoteUserRequestedAccelerationStopReason(string? reason)
+    {
+        var normalized = SanitizeLogToken(reason);
+        return normalized.StartsWith("remote_", StringComparison.Ordinal) &&
+               IsUserRequestedAccelerationStopReason(normalized["remote_".Length..]);
+    }
+
+    private bool ShouldSuppressTunaFallbackProofAfterUserStop(string reason, string? fallbackSessionId)
+    {
+        if (IsUserRequestedAccelerationStopReason(reason) ||
+            IsRemoteUserRequestedAccelerationStopReason(reason))
+        {
+            return true;
+        }
+
+        if (!IsAccelerationUserStoppedForFallbackSession(fallbackSessionId))
+        {
+            if (!IsAccelerationPeerUserStoppedForFallbackSession(fallbackSessionId))
+            {
+                return false;
+            }
+        }
+
+        return reason is
+            "sidecar_read_failed" or
+            "sidecar_write_failed" or
+            "sidecar_remote_closed" or
+            "sidecar_queue_overflow" or
+            "sidecar_status_timeout" or
+            "sidecar_invalid_status" or
+            "sidecar_status_parse_failed" or
+            "sidecar_local_ipc_eof" or
+            "sidecar_tuna_stream_eof" or
+            "sidecar_local_write_failed" or
+            "sidecar_tuna_write_failed" or
+            "sidecar_listener_exited" or
+            "sidecar_dialer_exited" or
+            "sidecar_process_exited" or
+            "sidecar_unexpected_exit" or
+            "sidecar_disposed";
+    }
+
+    private bool IsAccelerationUserStoppedForFallbackSession(string? fallbackSessionId)
+    {
+        var sessionId = string.IsNullOrWhiteSpace(fallbackSessionId)
+            ? currentSessionSecurityState.SessionId?.Value
+            : fallbackSessionId.Trim();
+        lock (accelerationGate)
+        {
+            return !string.IsNullOrWhiteSpace(sessionId) &&
+                   string.Equals(accelerationUserStoppedSessionId, sessionId, StringComparison.Ordinal);
+        }
+    }
+
+    private void MarkAccelerationPeerUserStoppedForCurrentSession(string? sessionId = null)
+    {
+        var stoppedSessionId = string.IsNullOrWhiteSpace(sessionId)
+            ? currentSessionSecurityState.SessionId?.Value
+            : sessionId.Trim();
+        if (string.IsNullOrWhiteSpace(stoppedSessionId))
+        {
+            return;
+        }
+
+        lock (accelerationGate)
+        {
+            accelerationPeerUserStoppedSessionId = stoppedSessionId;
+            accelerationPeerUserStoppedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        }
+    }
+
+    private void ClearAccelerationPeerUserStoppedForCurrentSession()
+    {
+        var currentSessionId = currentSessionSecurityState.SessionId?.Value;
+        lock (accelerationGate)
+        {
+            if (string.IsNullOrWhiteSpace(currentSessionId) ||
+                string.Equals(accelerationPeerUserStoppedSessionId, currentSessionId, StringComparison.Ordinal))
+            {
+                accelerationPeerUserStoppedSessionId = null;
+                accelerationPeerUserStoppedUtcMs = 0;
+            }
+        }
+    }
+
+    private bool IsAccelerationPeerUserStoppedForFallbackSession(string? fallbackSessionId)
+    {
+        var sessionId = string.IsNullOrWhiteSpace(fallbackSessionId)
+            ? currentSessionSecurityState.SessionId?.Value
+            : fallbackSessionId.Trim();
+        lock (accelerationGate)
+        {
+            return !string.IsNullOrWhiteSpace(sessionId) &&
+                   string.Equals(accelerationPeerUserStoppedSessionId, sessionId, StringComparison.Ordinal);
+        }
     }
 
     private static bool ShouldResetRemotePayerDecisionForResetReason(string? reason)

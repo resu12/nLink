@@ -484,9 +484,11 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
     [InlineData("sidecar_byte_cap_reached", true)]
     [InlineData("sidecar_remote_byte_cap_reached", true)]
     [InlineData("remote_read_failed", true)]
-    [InlineData("header_switch_off", true)]
-    [InlineData("soak_switch_off", true)]
-    [InlineData("runtime_disabled", true)]
+    [InlineData("header_switch_off", false)]
+    [InlineData("remote_header_switch_off", false)]
+    [InlineData("soak_switch_off", false)]
+    [InlineData("runtime_disabled", false)]
+    [InlineData("user_stopped_tuna", false)]
     [Trait("Category", "Smoke")]
     public void TunaFallbackProof_ResetReasonClassifierDistinguishesFailureFromTeardown(
         string reason,
@@ -515,7 +517,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
     [InlineData("sidecar_remote_closed", true)]
     [InlineData("sidecar_read_failed", true)]
     [InlineData("remote_sidecar_remote_closed", true)]
-    [InlineData("header_switch_off", true)]
+    [InlineData("header_switch_off", false)]
+    [InlineData("remote_header_switch_off", false)]
+    [InlineData("user_stopped_tuna", false)]
     [InlineData("reset_session_tracking", false)]
     [InlineData("dispose", false)]
     [Trait("Category", "Smoke")]
@@ -2331,7 +2335,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task TransportAccelerationStop_StartsFallbackBeforeBlockedDownNotificationCompletes()
+    public async Task TransportAccelerationStop_ResumesRegularNknBeforeBlockedDownNotificationCompletes()
     {
         FakeNknClient.ResetNetwork();
         var blockedDownNotification = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -2386,13 +2390,12 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.True(stopTask.IsCompletedSuccessfully);
             Assert.False(host.IsAccelerationAvailableForTests);
             Assert.True(host.IsAccelerationUserStoppedForCurrentSessionForTests);
-            await WaitUntilAsync(
-                () => host.AccelerationDiagnosticsForTests.FallbackEpoch > 0,
-                TimeSpan.FromSeconds(2));
+            Assert.Equal(0, host.AccelerationDiagnosticsForTests.FallbackEpoch);
 
             var logTail = ReadOperationalLogTail(logStart);
-            Assert.Contains("event=tuna_fallback_started;", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_fallback_filetransfer_rebind_requested;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=tuna_acceleration_reset; reason=header_switch_off; fallback_proof_suppressed=1", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_fallback_started;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_fallback_filetransfer_rebind_requested;", logTail, StringComparison.Ordinal);
         }
         finally
         {

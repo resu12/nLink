@@ -614,6 +614,20 @@ public void TunaStatusPresentationMapper_HeaderReasonCanShowLiveNegotiationButLo
 }
 
 [Fact]
+public void TunaStatusPresentationMapper_UserStopReasonWinsOverReadyRuntime()
+{
+    var presentation = TunaStatusPresentationMapper.FromState(
+        transportActive: false,
+        transportReason: "remote_header_switch_off",
+        runtimeStatus: "provider_paths_ready",
+        sessionUnlockOn: true);
+
+    Assert.Equal("Tuna was turned off for this session. Regular NKN is being used.", presentation.Text);
+    Assert.False(presentation.IsConnecting);
+    Assert.True(TunaStatusPresentationMapper.SuppressesPendingVisual("remote_header_switch_off"));
+}
+
+[Fact]
 public void DiagnosticsPageViewModel_ScreenSharePresetCommands_UpdateDisplayedSummary()
 {
     var previousMaxFps = Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareMaxFpsVariable);
@@ -638,17 +652,30 @@ public void DiagnosticsPageViewModel_ScreenSharePresetCommands_UpdateDisplayedSu
 
         Assert.Equal("Current preset: Custom. Capture 10 FPS, send 8 FPS, resolution up to (custom), scale 100%.", vm.AdvancedScreenShareSettingsSummary);
         Assert.True(vm.ShowScreenShareResetHint);
+        Assert.False(vm.IsBalancedScreenSharePresetActive);
+        Assert.False(vm.IsHighQualityScreenSharePresetActive);
+        Assert.False(vm.IsTunaQualityScreenSharePresetActive);
+        Assert.False(vm.IsHighPerformanceScreenSharePresetActive);
 
         vm.ApplyHighQualityScreenSharePresetCommand.Execute(null);
 
         Assert.Equal("Current preset: High quality. Capture 24 FPS, send 15 FPS, resolution up to 1440x810, scale 100%.", vm.AdvancedScreenShareSettingsSummary);
         Assert.False(vm.ShowScreenShareResetHint);
+        Assert.False(vm.IsBalancedScreenSharePresetActive);
+        Assert.True(vm.IsHighQualityScreenSharePresetActive);
+        Assert.False(vm.IsTunaQualityScreenSharePresetActive);
+        Assert.False(vm.IsHighPerformanceScreenSharePresetActive);
         Assert.Contains(nameof(DiagnosticsPageViewModel.AdvancedScreenShareSettingsSummary), changed);
+        Assert.Contains(nameof(DiagnosticsPageViewModel.IsHighQualityScreenSharePresetActive), changed);
         Assert.Contains(nameof(DiagnosticsPageViewModel.ShowScreenShareResetHint), changed);
 
         vm.ApplyTunaQualityScreenSharePresetCommand.Execute(null);
 
         Assert.Equal("Current preset: Tuna quality. Capture 30 FPS, send 15 FPS, resolution up to 1600x900, scale 100%.", vm.AdvancedScreenShareSettingsSummary);
+        Assert.False(vm.IsBalancedScreenSharePresetActive);
+        Assert.False(vm.IsHighQualityScreenSharePresetActive);
+        Assert.True(vm.IsTunaQualityScreenSharePresetActive);
+        Assert.False(vm.IsHighPerformanceScreenSharePresetActive);
         Assert.Equal("30", Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareMaxFpsVariable));
         Assert.Equal("15", Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable));
         Assert.Equal("1", Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareScaleVariable));
@@ -657,6 +684,10 @@ public void DiagnosticsPageViewModel_ScreenSharePresetCommands_UpdateDisplayedSu
         vm.ApplyBalancedScreenSharePresetCommand.Execute(null);
 
         Assert.Equal(FeatureFlags.ScreenShareQualityProfileNormal, Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareQualityProfileVariable));
+        Assert.True(vm.IsBalancedScreenSharePresetActive);
+        Assert.False(vm.IsHighQualityScreenSharePresetActive);
+        Assert.False(vm.IsTunaQualityScreenSharePresetActive);
+        Assert.False(vm.IsHighPerformanceScreenSharePresetActive);
     }
     finally
     {
@@ -703,6 +734,9 @@ public void DiagnosticsPageView_UsesOptionsTabs()
     Assert.Contains("ScreenSharePresetTunaQuality", xaml, StringComparison.Ordinal);
     Assert.Contains("High performance", xaml, StringComparison.Ordinal);
     Assert.Contains("ScreenSharePresetHighPerformance", xaml, StringComparison.Ordinal);
+    Assert.Contains("activeScreenSharePresetButton", xaml, StringComparison.Ordinal);
+    Assert.DoesNotContain("AdvancedScreenShareSettingsSummary", xaml, StringComparison.Ordinal);
+    Assert.DoesNotContain("ScreenShareCaptureEnvHint", xaml, StringComparison.Ordinal);
     Assert.Contains("Tuna quality uses more bandwidth", xaml, StringComparison.Ordinal);
     Assert.DoesNotContain("Feature Flags", xaml, StringComparison.Ordinal);
     Assert.DoesNotContain("ScreenShare Capture Tuning", xaml, StringComparison.Ordinal);
@@ -734,10 +768,13 @@ public void SessionHeaderTunaIcon_DoesNotPulseWhileWalletLocked()
     var applyStart = source.IndexOf("private void ApplyTunaUnlockToggleState", StringComparison.Ordinal);
 
     Assert.True(applyStart >= 0, "Expected Tuna unlock toggle state method.");
-    Assert.Contains("var pulsing = !active && tunaUnlockToggleOn && presentation.IsConnecting;", source, StringComparison.Ordinal);
+    Assert.Contains("var pulsing = !active &&", source, StringComparison.Ordinal);
+    Assert.Contains("!TunaStatusPresentationMapper.SuppressesPendingVisual(reason)", source, StringComparison.Ordinal);
+    Assert.Contains("var highlighted = active;", source, StringComparison.Ordinal);
     Assert.Contains("TunaPayerBrush", source, StringComparison.Ordinal);
     Assert.Contains("presentation.IsLocalPayer", source, StringComparison.Ordinal);
     Assert.Contains("!tunaUnlockToggleOn", source, StringComparison.Ordinal);
+    Assert.Contains("TunaStatusPresentationMapper.SuppressesPendingVisual(TunaStatusReason)", source, StringComparison.Ordinal);
     Assert.DoesNotContain("ShouldPulseTunaStatus", source, StringComparison.Ordinal);
     Assert.Contains("UpdateTunaVisualState();", source[applyStart..], StringComparison.Ordinal);
 }
@@ -809,7 +846,7 @@ public void FileTransferRebind_DoesNotSendRepairWhileTransportProofPending()
     Assert.Contains("!context.PullTransportPaused &&", rebindSource, StringComparison.Ordinal);
     Assert.Contains("\"transport_recovered_unproven\" or", rebindSource, StringComparison.Ordinal);
     Assert.Contains("\"transport_probe_unproven\" or", rebindSource, StringComparison.Ordinal);
-    Assert.Contains("\"receive_stall_recovery\" ||", rebindSource, StringComparison.Ordinal);
+    Assert.Contains("\"receive_stall_recovery\" or", rebindSource, StringComparison.Ordinal);
     Assert.Contains("context.PullTransportPaused ||", v4Source, StringComparison.Ordinal);
     Assert.Contains("filetransfer_v4_peer_feedback_timeout", v4Source, StringComparison.Ordinal);
     Assert.Contains("post_tuna_fallback_peer_silence", v4Source, StringComparison.Ordinal);

@@ -32,7 +32,6 @@
                             <Border Classes="appCard" Padding="20">
                                 <StackPanel Spacing="14">
                                     <TextBlock Classes="appSectionTitle" Text="Screen share settings"/>
-                                    <TextBlock Classes="appMuted" Text="{Binding AdvancedScreenShareSettingsSummary}" TextWrapping="Wrap"/>
                                     <TextBlock Classes="appMuted"
                                                Text="A custom or migrated screen share preset is active. Apply Balanced to return to the default support baseline."
                                                IsVisible="{Binding ShowScreenShareResetHint}"
@@ -45,6 +44,7 @@
                                         <Button Grid.Row="0"
                                                 Grid.Column="0"
                                                 Classes="appButton secondaryButton compactButton"
+                                                Classes.activeScreenSharePresetButton="{Binding IsBalancedScreenSharePresetActive}"
                                                 Content="Balanced"
                                                 Command="{Binding ApplyBalancedScreenSharePresetCommand}"/>
                                         <TextBlock Grid.Row="0"
@@ -57,6 +57,7 @@
                                         <Button Grid.Row="1"
                                                 Grid.Column="0"
                                                 Classes="appButton secondaryButton compactButton"
+                                                Classes.activeScreenSharePresetButton="{Binding IsHighQualityScreenSharePresetActive}"
                                                 Content="High quality"
                                                 Command="{Binding ApplyHighQualityScreenSharePresetCommand}"/>
                                         <TextBlock Grid.Row="1"
@@ -69,6 +70,7 @@
                                         <Button Grid.Row="2"
                                                 Grid.Column="0"
                                                 Classes="appButton secondaryButton compactButton"
+                                                Classes.activeScreenSharePresetButton="{Binding IsTunaQualityScreenSharePresetActive}"
                                                 Content="Tuna quality"
                                                 Command="{Binding ApplyTunaQualityScreenSharePresetCommand}"/>
                                         <TextBlock Grid.Row="2"
@@ -81,6 +83,7 @@
                                         <Button Grid.Row="3"
                                                 Grid.Column="0"
                                                 Classes="appButton secondaryButton compactButton"
+                                                Classes.activeScreenSharePresetButton="{Binding IsHighPerformanceScreenSharePresetActive}"
                                                 Content="High performance"
                                                 Command="{Binding ApplyHighPerformanceScreenSharePresetCommand}"/>
                                         <TextBlock Grid.Row="3"
@@ -92,10 +95,6 @@
                                     </Grid>
                                     <TextBlock Classes="appMuted"
                                                Text="Tuna quality uses more bandwidth and is recommended when Tuna acceleration is enabled. Current NKN remains available and may auto-reduce quality if delivery is congested."
-                                               FontSize="12"
-                                               TextWrapping="Wrap"/>
-                                    <TextBlock Classes="appMuted"
-                                               Text="{Binding ScreenShareCaptureEnvHint}"
                                                FontSize="12"
                                                TextWrapping="Wrap"/>
                                 </StackPanel>

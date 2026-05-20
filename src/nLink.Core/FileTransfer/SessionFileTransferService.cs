@@ -1158,7 +1158,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         {
             ScheduleInboundV4PauseControlRetry(pausedInboundContext, paused: true, "user_paused");
             _ = Task.Run(
-                () => SendInboundV6ReceiverStateAsync(pausedInboundContext, "user_paused", forceSend: true),
+                () => SendInboundPauseProgressStateAsync(pausedInboundContext, "user_paused"),
                 CancellationToken.None);
         }
 
@@ -1263,7 +1263,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         {
             ScheduleInboundV4PauseControlRetry(resumedInboundContext, paused: false, "user_resumed");
             _ = Task.Run(
-                () => FlushInboundV6PausedProgressAsync(resumedInboundContext, "user_resumed"),
+                () => FlushInboundPausedProgressAsync(resumedInboundContext, "user_resumed"),
                 CancellationToken.None);
         }
 

@@ -6281,7 +6281,7 @@ public sealed partial class SessionFileTransferService
     }
 
     private static bool ShouldUseInboundV4BytesCommittedForStateCadenceLocked(InboundTransferContext context)
-        => !ShouldAdvertiseInboundV4SparseWrittenProgressLocked(context);
+        => ShouldAdvertiseInboundV4SparseWrittenProgressLocked(context);
 
     private static int ResolveInboundV4StateProgressMinChunks(InboundTransferContext context)
         => ShouldAdvertiseInboundV4SparseWrittenProgressLocked(context)
@@ -6580,9 +6580,10 @@ public sealed partial class SessionFileTransferService
     }
 
     private static bool ShouldAdvertiseInboundV4SparseWrittenProgressLocked(InboundTransferContext context)
-        => context.RuntimeProfile == FileTransferRuntimeProfile.PrimaryRegularNknBulkV6 &&
-           context.V6RegularNknBulkSparseProfileActive &&
-           context.ReceiverSparseWriteActive &&
+        => context.ReceiverSparseWriteActive &&
+           (context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV4 ||
+            (context.RuntimeProfile == FileTransferRuntimeProfile.PrimaryRegularNknBulkV6 &&
+             context.V6RegularNknBulkSparseProfileActive)) &&
            context.V5TransportHandoff is null &&
            !context.PullPostTunaRecoveryActive;
 

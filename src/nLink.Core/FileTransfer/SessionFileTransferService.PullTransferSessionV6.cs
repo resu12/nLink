@@ -5187,6 +5187,55 @@ public sealed partial class SessionFileTransferService
         await SendInboundV6FrontierRequestAsync(context, reason, forceSend: true).ConfigureAwait(false);
     }
 
+    private Task<bool> SendInboundPauseProgressStateAsync(InboundTransferContext context, string reason)
+        => ShouldUseInboundSparseCreditProgressState(context)
+            ? SendInboundV4StateAsync(context, reason, terminalReady: false, forceSend: true)
+            : SendInboundV6ReceiverStateAsync(context, reason, forceSend: true);
+
+    private async Task FlushInboundPausedProgressAsync(InboundTransferContext context, string reason)
+    {
+        if (!ShouldUseInboundSparseCreditProgressState(context))
+        {
+            await FlushInboundV6PausedProgressAsync(context, reason).ConfigureAwait(false);
+            return;
+        }
+
+        bool completed;
+        lock (gate)
+        {
+            if (!ReferenceEquals(inboundTransfer, context) ||
+                context.IsTerminal ||
+                !context.PullManifestReceived ||
+                context.UserPaused ||
+                context.PeerPaused)
+            {
+                return;
+            }
+
+            completed = context.NextChunkIndex >= context.ChunkCount && context.ChunkCount > 0;
+        }
+
+        if (completed)
+        {
+            await FinalizeInboundTransferAsync(context, context.LifetimeCts.Token).ConfigureAwait(false);
+            return;
+        }
+
+        await SendInboundV4StateAsync(context, reason, terminalReady: false, forceSend: true).ConfigureAwait(false);
+    }
+
+    private bool ShouldUseInboundSparseCreditProgressState(InboundTransferContext context)
+    {
+        lock (gate)
+        {
+            return ReferenceEquals(inboundTransfer, context) &&
+                   !context.IsTerminal &&
+                   (context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV4 ||
+                    (context.ReceiverSparseWriteActive &&
+                     ShouldAdvertiseInboundV4SparseWrittenProgressLocked(context)));
+        }
+    }
+
     private IReadOnlyList<FileTransferRangeV4> BuildInboundV6RequestRangesLocked(InboundTransferContext context)
     {
         if (context.UserPaused ||

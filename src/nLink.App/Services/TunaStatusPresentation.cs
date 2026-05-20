@@ -122,6 +122,27 @@ internal static class TunaStatusPresentationMapper
             runtimeStatus: runtimeStatus,
             sessionUnlockOn: IsRuntimeUnlockOn(runtimeStatus));
 
+    public static bool SuppressesPendingVisual(string? transportReason)
+    {
+        var token = Normalize(transportReason);
+        return token is
+            "header_switch_off" or
+            "remote_header_switch_off" or
+            "soak_switch_off" or
+            "remote_soak_switch_off" or
+            "runtime_disabled" or
+            "remote_runtime_disabled" or
+            "wallet_unlinked" or
+            "remote_wallet_unlinked" or
+            "user_locked" or
+            "remote_user_locked" or
+            "user_disabled" or
+            "remote_user_disabled" or
+            "user_stopped_tuna" or
+            "remote_user_stopped_tuna" or
+            "switching_to_regular_nkn";
+    }
+
     private static string ResolveToken(string? transportReason, string? runtimeStatus, bool sessionUnlockOn)
     {
         var runtime = Normalize(runtimeStatus);

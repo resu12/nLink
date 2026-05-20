@@ -476,15 +476,18 @@ public partial class SessionHeaderView : UserControl
             reason,
             tunaRuntimeStatus,
             tunaUnlockToggleOn);
-        var pulsing = !active && tunaUnlockToggleOn && presentation.IsConnecting;
-        var highlighted = active || pulsing;
-        var paying = highlighted && presentation.IsLocalPayer;
+        var pulsing = !active &&
+                      tunaUnlockToggleOn &&
+                      presentation.IsConnecting &&
+                      !TunaStatusPresentationMapper.SuppressesPendingVisual(reason);
+        var highlighted = active;
+        var paying = active && presentation.IsLocalPayer;
         var nextPictogramBrush = highlighted ? (paying ? TunaPayerBrush : TunaActiveBrush) : TunaInactiveBrush;
         var nextGlowBrush = highlighted ? (paying ? TunaPayerGlowBrush : TunaActiveGlowBrush) : TunaInactiveGlowBrush;
         var nextPictogramOpacity = highlighted ? 1d : 0.58d;
         var nextGlowOpacity = active ? 0.38d : pulsing ? 0.55d : 0d;
         var nextInnerGlowOpacity = active ? 0.2d : pulsing ? 0.28d : 0d;
-        var nextGillOpacity = highlighted ? 0.92d : 0.55d;
+        var nextGillOpacity = active ? 0.92d : pulsing ? 0.72d : 0.55d;
         var nextTip = paying && !presentation.Text.Contains("paying", StringComparison.OrdinalIgnoreCase)
             ? $"{presentation.Text} This computer is paying as the Tuna listener."
             : presentation.Text;
@@ -529,6 +532,7 @@ public partial class SessionHeaderView : UserControl
     {
         if (TunaActive ||
             !tunaUnlockToggleOn ||
+            TunaStatusPresentationMapper.SuppressesPendingVisual(TunaStatusReason) ||
             !TunaStatusPresentationMapper.FromState(
                 transportActive: false,
                 transportReason: TunaStatusReason,

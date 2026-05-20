@@ -256,6 +256,10 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public string ScreenShareCaptureScale => ScreenShareQualitySettings.FormatScale(FeatureFlags.ScreenShareScale);
     public string ScreenShareQualityProfile => FeatureFlags.ScreenShareQualityProfile;
     public string ScreenShareEffectivePresetName => ScreenShareQualitySettings.GetCurrentEnvironmentState().EffectivePresetName;
+    public bool IsBalancedScreenSharePresetActive => IsScreenSharePresetActive(ScreenShareQualitySettings.BalancedPreset);
+    public bool IsHighQualityScreenSharePresetActive => IsScreenSharePresetActive(ScreenShareQualitySettings.HighQualityPreset);
+    public bool IsTunaQualityScreenSharePresetActive => IsScreenSharePresetActive(ScreenShareQualitySettings.TunaQualityPreset);
+    public bool IsHighPerformanceScreenSharePresetActive => IsScreenSharePresetActive(ScreenShareQualitySettings.HighPerformancePreset);
     public string ScreenSharePresetMigrationStatus => ScreenShareQualitySettings.WasLegacyHigherClarityPresetMigrated ? "Yes" : "No";
     public string ScreenSharePresetBalanced => $"Good default for most sessions. {ScreenShareQualitySettings.BalancedPreset.DescribeForOptions()}.";
     public string ScreenSharePresetHighQuality => $"Smoother motion over regular NKN. {ScreenShareQualitySettings.HighQualityPreset.DescribeForOptions()}.";
@@ -1159,6 +1163,10 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         OnPropertyChanged(nameof(ScreenShareCaptureScale));
         OnPropertyChanged(nameof(ScreenShareQualityProfile));
         OnPropertyChanged(nameof(ScreenShareEffectivePresetName));
+        OnPropertyChanged(nameof(IsBalancedScreenSharePresetActive));
+        OnPropertyChanged(nameof(IsHighQualityScreenSharePresetActive));
+        OnPropertyChanged(nameof(IsTunaQualityScreenSharePresetActive));
+        OnPropertyChanged(nameof(IsHighPerformanceScreenSharePresetActive));
         OnPropertyChanged(nameof(ScreenSharePresetMigrationStatus));
         OnPropertyChanged(nameof(AdvancedScreenShareSettingsSummary));
         OnPropertyChanged(nameof(ShowScreenShareResetHint));
@@ -1192,6 +1200,12 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
                 LocalOperationalLog.Warn("Diagnostics", $"Persisting ScreenShare preset '{presetName}' failed: {ex.GetType().Name}");
             }
         });
+    }
+
+    private static bool IsScreenSharePresetActive(ScreenSharePresetDefinition preset)
+    {
+        var currentState = ScreenShareQualitySettings.GetCurrentEnvironmentState();
+        return string.Equals(currentState.EffectivePresetKey, preset.Key, StringComparison.Ordinal);
     }
 
     private static bool TrySetUserEnvironmentVariable(string name, string value)
