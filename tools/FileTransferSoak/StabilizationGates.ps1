@@ -404,12 +404,64 @@ function Get-FileTransferBridgeBulkFailureEvents {
     )
 }
 
+function Test-FileTransferBenignControlOnlyReceiveEvent {
+    param($Event)
+
+    if ($null -eq $Event) {
+        return $false
+    }
+
+    $bulkLastReceivedAgeMs = Get-FileTransferEventInt64Field -Event $Event -Name 'bulk_last_received_age_ms' -Default -1
+    $bulkReceiveFresh = $bulkLastReceivedAgeMs -ge 0 -and $bulkLastReceivedAgeMs -lt 6000
+    $bulkReceiveActive = (Get-FileTransferEventInt64Field -Event $Event -Name 'bulk_messages_received_since_last' -Default 0) -gt 0
+
+    if ($Event.EventName -eq 'nkn_bridge_control_receive_recovery_suppressed') {
+        $reason = Get-FileTransferEventField -Event $Event -Name 'reason' -Default ''
+        return $reason -eq 'bulk_receive_active' -or
+            $reason -eq 'filetransfer_bulk_receive_active' -or
+            $reason -eq 'bulk_receive_fresh' -or
+            $reason -eq 'filetransfer_bulk_receive_fresh'
+    }
+
+    if ($Event.EventName -eq 'nkn_bridge_control_receive_degraded') {
+        $activeFileTransferSessions = Get-FileTransferEventInt64Field -Event $Event -Name 'active_file_transfer_sessions' -Default 0
+        return $activeFileTransferSessions -gt 0 -and ($bulkReceiveActive -or $bulkReceiveFresh)
+    }
+
+    if ($Event.EventName -eq 'screenshare_bridge_transport_health_summary') {
+        $hasTransportChurn =
+            (Get-FileTransferEventInt64Field -Event $Event -Name 'disconnect_count_since_last' -Default 0) -gt 0 -or
+            (Get-FileTransferEventInt64Field -Event $Event -Name 'connect_failed_count_since_last' -Default 0) -gt 0 -or
+            (Get-FileTransferEventInt64Field -Event $Event -Name 'ws_error_count_since_last' -Default 0) -gt 0 -or
+            (Get-FileTransferEventInt64Field -Event $Event -Name 'rpc_fallback_attempt_count_since_last' -Default 0) -gt 0
+        if ($hasTransportChurn) {
+            return $false
+        }
+
+        $framesSentSinceLast = Get-FileTransferEventInt64Field -Event $Event -Name 'frames_sent_since_last' -Default 0
+        $totalMessagesReceivedSinceLast = Get-FileTransferEventInt64Field -Event $Event -Name 'total_messages_received_since_last' -Default 1
+        if ($framesSentSinceLast -le 0 -or $totalMessagesReceivedSinceLast -ne 0) {
+            return $false
+        }
+
+        $controlLastReceivedAgeMs = Get-FileTransferEventInt64Field -Event $Event -Name 'control_last_received_age_ms' -Default -1
+        $bulkReceiveNeverObserved = $controlLastReceivedAgeMs -lt 0 -and $bulkLastReceivedAgeMs -lt 0
+        return $bulkReceiveFresh -or $bulkReceiveNeverObserved
+    }
+
+    return $false
+}
+
 function Get-FileTransferExternalTransportWarningEvents {
     param([Parameter(Mandatory = $true)]$Summary)
 
     return @(
         $Summary.GlobalEvents |
             Where-Object {
+                if (Test-FileTransferBenignControlOnlyReceiveEvent -Event $_) {
+                    return $false
+                }
+
                 $_.EventName -eq 'nkn_bridge_receive_stall_detected' -or
                 $_.EventName -eq 'nkn_bridge_receive_stall_recovery_started' -or
                 $_.EventName -eq 'nkn_bridge_receive_stall_recovery_completed' -or

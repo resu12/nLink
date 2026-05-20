@@ -2730,7 +2730,7 @@ public sealed class FileTransferOpsScriptsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task AnalyzeRetained_ControlStaleButBulkFlowing_ReportsControlDegraded()
+    public async Task AnalyzeRetained_ControlStaleButBulkFlowing_DoesNotWarnExternalTransport()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -2746,7 +2746,7 @@ public sealed class FileTransferOpsScriptsTests
         var result = await RunAnalyzeFixtureAsync(lines);
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
-        Assert.Equal("WARN_EXTERNAL_TRANSPORT", verdict["verdict"]);
+        Assert.Equal("PASS", verdict["verdict"]);
         var external = ReadArtifactReport(result.ArtifactDir, "external-transport-health-summary.txt");
         Assert.Equal("0", external["receive_stall_detected_count"]);
         Assert.Equal("0", external["receive_stall_recovery_started_count"]);
@@ -2756,6 +2756,33 @@ public sealed class FileTransferOpsScriptsTests
         var decomposition = ReadArtifactReport(result.ArtifactDir, "throughput-decomposition-summary.txt");
         Assert.Equal("1", decomposition["control_receive_degraded_count"]);
         Assert.Equal("1", decomposition["control_receive_recovery_suppressed_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_ControlStaleButBulkFreshZeroWindow_DoesNotWarnExternalTransport()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildCleanCompletedTransferFixture("transfer_control_fresh")
+            .Append(LogLine("event=screenshare_bridge_transport_health_summary; disconnect_count_since_last=0; connect_failed_count_since_last=0; ws_error_count_since_last=0; rpc_fallback_attempt_count_since_last=0; control_ready=1; media_ready=1; bulk_ready=1; frames_sent_since_last=6; control_messages_received_since_last=0; media_messages_received_since_last=0; bulk_messages_received_since_last=0; total_messages_received_since_last=0; control_bytes_received_since_last=0; media_bytes_received_since_last=0; bulk_bytes_received_since_last=0; total_bytes_received_since_last=0; control_last_received_age_ms=20251; media_last_received_age_ms=0; bulk_last_received_age_ms=2726"))
+            .Append(LogLine("event=nkn_bridge_control_receive_degraded; connect_key=test; consecutive_control_zero_receive_windows=7; active_file_transfer_sessions=1; frames_sent_since_last=6; control_messages_received_since_last=0; bulk_messages_received_since_last=0; total_messages_received_since_last=0; control_last_received_age_ms=20251; bulk_last_received_age_ms=2726; sample_window_ms=2000"))
+            .Append(LogLine("event=nkn_bridge_control_receive_recovery_suppressed; reason=filetransfer_bulk_receive_fresh; connect_key=test; consecutive_control_zero_receive_windows=7; active_file_transfer_sessions=1; recovery_count=0; control_messages_received_since_last=0; bulk_messages_received_since_last=0; control_last_received_age_ms=20251; bulk_last_received_age_ms=2726"))
+            .ToArray();
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("PASS", verdict["verdict"]);
+        var external = ReadArtifactReport(result.ArtifactDir, "external-transport-health-summary.txt");
+        Assert.Equal("0", external["receive_stall_detected_count"]);
+        Assert.Equal("0", external["receive_stall_recovery_started_count"]);
+        Assert.Equal("1", external["control_receive_degraded_count"]);
+        Assert.Equal("1", external["control_receive_recovery_suppressed_count"]);
+        Assert.Equal("1", external["control_receive_recovery_suppressed_bulk_fresh_count"]);
     }
 
     [Fact]

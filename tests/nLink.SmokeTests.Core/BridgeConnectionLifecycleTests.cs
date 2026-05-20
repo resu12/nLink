@@ -2437,7 +2437,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public async Task Bridge_ReceiveStallRecovery_ControlOnlyReconnectsAfterGraceEvenWhenBulkReceiveActive()
+    public async Task Bridge_ReceiveStallRecovery_ControlOnlyOverrideSuppressesAfterGraceWhenBulkReceiveActive()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -2499,22 +2499,21 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 () =>
                 {
                     var text = LocalOperationalLog.GetRecentLogText();
-                    return text.Contains("event=nkn_bridge_control_receive_recovery_unsuppressed", StringComparison.Ordinal) &&
-                           text.Contains("event=nkn_bridge_receive_stall_recovery_started", StringComparison.Ordinal) &&
-                           text.Contains("stall_reason=control_receive_stalled", StringComparison.Ordinal);
+                    return text.Contains("event=nkn_bridge_control_receive_recovery_suppressed", StringComparison.Ordinal) &&
+                           text.Contains("reason=filetransfer_bulk_receive_active", StringComparison.Ordinal) &&
+                           text.Contains("protocol_repair_grace_windows=", StringComparison.Ordinal) &&
+                           File.Exists(countFile);
                 },
                 TimeSpan.FromSeconds(5));
-            await WaitUntilAsync(
-                () => File.Exists(countFile) &&
-                      int.TryParse(File.ReadAllText(countFile).Trim(), out var count) &&
-                      count >= 2,
-                TimeSpan.FromSeconds(5));
+            await Task.Delay(TimeSpan.FromMilliseconds(500), cts.Token);
 
             var logText = LocalOperationalLog.GetRecentLogText();
             Assert.Contains("event=nkn_bridge_control_receive_degraded", logText, StringComparison.Ordinal);
-            Assert.Contains("event=nkn_bridge_control_receive_recovery_unsuppressed", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_control_receive_recovery_suppressed", logText, StringComparison.Ordinal);
             Assert.Contains("reason=filetransfer_bulk_receive_active", logText, StringComparison.Ordinal);
-            Assert.Contains("event=nkn_bridge_receive_stall_recovery_started", logText, StringComparison.Ordinal);
+            Assert.True(File.Exists(countFile));
+            Assert.True(int.TryParse(File.ReadAllText(countFile).Trim(), out var count));
+            Assert.Equal(1, count);
 
             adapter.UnregisterActiveFileTransferDataSession("transfer-control-recovery-grace");
             await adapter.DisconnectAsync();

@@ -1761,10 +1761,6 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         else if (controlReceiveStalled &&
                  controlConsecutiveWindows >= ReceiveStallFastRequiredConsecutiveWindows)
         {
-            var controlOnlyRecoveryGraceExhausted =
-                options.ReceiveStallControlOnlyRecoveryEnabled &&
-                (controlConsecutiveWindows >= ReceiveStallFileTransferProtocolRepairGraceWindows ||
-                 controlLastReceivedAgeMs >= ReceiveStallFileTransferProtocolRepairGraceMaxAgeMs);
             if (bulkReceiveFreshForActiveFileTransfer)
             {
                 var suppressReason = bulkReceiveActiveThisWindow
@@ -1775,19 +1771,11 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                     $"connect_key={connectKey}; consecutive_control_zero_receive_windows={controlConsecutiveWindows}; active_file_transfer_sessions={fileTransferActiveSessionCount}; frames_sent_since_last={framesSentSinceLast}; " +
                     $"control_messages_received_since_last={controlMessagesReceivedSinceLast}; bulk_messages_received_since_last={bulkMessagesReceivedSinceLast}; total_messages_received_since_last={totalMessagesReceivedSinceLast}; " +
                     $"control_last_received_age_ms={controlLastReceivedAgeMs}; bulk_last_received_age_ms={bulkLastReceivedAgeMs}; sample_window_ms={sampleWindowMs}");
-                if (!controlOnlyRecoveryGraceExhausted)
-                {
-                    Log(
-                        $"event=nkn_bridge_control_receive_recovery_suppressed; reason={suppressReason}; " +
-                        $"connect_key={connectKey}; consecutive_control_zero_receive_windows={controlConsecutiveWindows}; active_file_transfer_sessions={fileTransferActiveSessionCount}; recovery_count={Volatile.Read(ref receiveStallRecoveryCount)}; " +
-                        $"control_messages_received_since_last={controlMessagesReceivedSinceLast}; bulk_messages_received_since_last={bulkMessagesReceivedSinceLast}; control_last_received_age_ms={controlLastReceivedAgeMs}; bulk_last_received_age_ms={bulkLastReceivedAgeMs}");
-                    return;
-                }
-
                 Log(
-                    $"event=nkn_bridge_control_receive_recovery_unsuppressed; reason={suppressReason}; " +
+                    $"event=nkn_bridge_control_receive_recovery_suppressed; reason={suppressReason}; " +
                     $"connect_key={connectKey}; consecutive_control_zero_receive_windows={controlConsecutiveWindows}; active_file_transfer_sessions={fileTransferActiveSessionCount}; recovery_count={Volatile.Read(ref receiveStallRecoveryCount)}; " +
                     $"control_messages_received_since_last={controlMessagesReceivedSinceLast}; bulk_messages_received_since_last={bulkMessagesReceivedSinceLast}; control_last_received_age_ms={controlLastReceivedAgeMs}; bulk_last_received_age_ms={bulkLastReceivedAgeMs}; protocol_repair_grace_windows={ReceiveStallFileTransferProtocolRepairGraceWindows}; protocol_repair_grace_max_age_ms={ReceiveStallFileTransferProtocolRepairGraceMaxAgeMs}");
+                return;
             }
 
             if (!options.ReceiveStallControlOnlyRecoveryEnabled &&
