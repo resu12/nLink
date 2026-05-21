@@ -285,11 +285,13 @@ public sealed partial class NknSignalingTransport
             : sessionId.Trim();
         var normalizedTransferId = NormalizeRequiredFileTransferId(transferId);
 
+        TransportFileTransferDataSession? session;
+        var createdSession = false;
         lock (gate)
         {
             fileTransferDataSessionRemoteOpenSuppressed.Remove(normalizedTransferId);
             fileTransferDataSessions.TryGetValue(normalizedTransferId, out var existingSession);
-            TransportFileTransferDataSession? session = existingSession;
+            session = existingSession;
             if (session is not null &&
                 session.IsDisposed)
             {
@@ -304,14 +306,42 @@ public sealed partial class NknSignalingTransport
             {
                 session = new TransportFileTransferDataSession(this, normalizedSessionId, normalizedTransferId);
                 fileTransferDataSessions[normalizedTransferId] = session;
+                createdSession = true;
             }
             else if (!string.Equals(session.SessionId, normalizedSessionId, StringComparison.Ordinal))
             {
                 throw new InvalidOperationException("File-transfer data session id mismatch for existing transfer.");
             }
-
-            return Task.FromResult<IFileTransferDataSession>(session);
         }
+
+        if (createdSession)
+        {
+            ApplyActiveTunaActivationPauseToNewFileTransferDataSession(session!, "local_open");
+        }
+
+        return Task.FromResult<IFileTransferDataSession>(session!);
+    }
+
+    private void ApplyActiveTunaActivationPauseToNewFileTransferDataSession(
+        TransportFileTransferDataSession session,
+        string trigger)
+    {
+        if (!session.IsAvailable ||
+            !TryGetActiveFileTransferTunaActivationPauseForCurrentSession(out var pausedSessionId) ||
+            !string.Equals(pausedSessionId, session.SessionId, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=filetransfer_data_session_opened_during_tuna_activation_pause; transfer_id={SanitizeLogToken(session.TransferId)}; session_id={SanitizeLogToken(session.SessionId)}; reason=tuna_activation_negotiating; trigger={SanitizeLogToken(trigger)}");
+        session.SetAvailability(
+            isAvailable: false,
+            reason: "tuna_activation_negotiating",
+            requiresResumeRequest: false,
+            handoffKind: FileTransferTransportHandoffKind.None,
+            targetTransport: FileTransferTransportKind.RegularNkn);
     }
 
     public int ResolveSafeOutboundChunkSize(FileTransferChunkBudgetRequest request)
@@ -978,13 +1008,31 @@ public sealed partial class NknSignalingTransport
         FileTransferTransportHandoffKind handoffKind,
         FileTransferTransportKind targetTransport)
     {
-        if (targetTransport != FileTransferTransportKind.RegularNkn ||
-            handoffKind != FileTransferTransportHandoffKind.TunaToNormalFallback)
+        if (targetTransport != FileTransferTransportKind.RegularNkn)
         {
             return handoffKind;
         }
 
         var normalizedReason = SanitizeLogToken(reason);
+        if (handoffKind is FileTransferTransportHandoffKind.RegularNknRecovery or FileTransferTransportHandoffKind.TunaToNormalFallback &&
+            TryGetUnresolvedFileTransferV6TransportEpochForCurrentSession(out var unresolvedFallbackEpoch) &&
+            unresolvedFallbackEpoch.TargetTransport == FileTransferTransportKind.RegularNkn &&
+            unresolvedFallbackEpoch.HandoffKind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
+            (IsRegularNknRecoveryProbeToken(normalizedReason) ||
+             string.Equals(normalizedReason, "receive_stall_recovery", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(normalizedReason, "transport_recovered_unproven", StringComparison.OrdinalIgnoreCase)))
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=filetransfer_v6_availability_handoff_kind_preserved; session_id={SanitizeLogToken(unresolvedFallbackEpoch.SessionId)}; transfer_id={SanitizeLogToken(unresolvedFallbackEpoch.TransferId)}; direction={unresolvedFallbackEpoch.Direction.ToString().ToLowerInvariant()}; transport_epoch={unresolvedFallbackEpoch.TransportEpoch}; reason={normalizedReason}; requested_handoff_kind={FormatFileTransferTransportHandoffKindForLog(handoffKind)}; effective_handoff_kind={FormatFileTransferTransportHandoffKindForLog(FileTransferTransportHandoffKind.TunaToNormalFallback)}");
+            return FileTransferTransportHandoffKind.TunaToNormalFallback;
+        }
+
+        if (handoffKind != FileTransferTransportHandoffKind.TunaToNormalFallback)
+        {
+            return handoffKind;
+        }
+
         if (IsRegularNknRecoveryProbeToken(normalizedReason))
         {
             return FileTransferTransportHandoffKind.RegularNknRecovery;
@@ -4861,6 +4909,7 @@ public sealed partial class NknSignalingTransport
         FileTransferTransportKind receivedTransportKind)
     {
         TransportFileTransferDataSession? session;
+        var createdSession = false;
         lock (gate)
         {
             fileTransferDataSessions.TryGetValue(frame.TransferId, out var existingSession);
@@ -4897,6 +4946,7 @@ public sealed partial class NknSignalingTransport
 
                 session = new TransportFileTransferDataSession(this, frame.SessionId, frame.TransferId);
                 fileTransferDataSessions[frame.TransferId] = session;
+                createdSession = true;
             }
             else if (!string.Equals(session.SessionId, frame.SessionId, StringComparison.Ordinal))
             {
@@ -4905,6 +4955,11 @@ public sealed partial class NknSignalingTransport
                     $"event=filetransfer_data_frame_ignored; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}; reason=session_id_mismatch_existing_queue");
                 return;
             }
+        }
+
+        if (createdSession)
+        {
+            ApplyActiveTunaActivationPauseToNewFileTransferDataSession(session!, "remote_open");
         }
 
         session!.Deliver(frame, channel, receivedTransportKind);
@@ -5305,6 +5360,8 @@ public sealed partial class NknSignalingTransport
         private long chunkBatchTransportSummaryBridgePayloadBytes;
         private long chunkBatchTransportSummaryChunkCount;
         private int chunkBatchTransportSummaryMaxChunkCount;
+        private CancellationTokenSource tunaActivationPauseCts = new();
+        private string availabilityReason = "available";
         private EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? availabilityChanged;
 
         public TransportFileTransferDataSession(NknSignalingTransport owner, string sessionId, string transferId)
@@ -5336,12 +5393,35 @@ public sealed partial class NknSignalingTransport
                 }
 
                 availabilityChanged += value;
+                if (TryReplayTunaActivationPauseAvailability(value))
+                {
+                    return;
+                }
+
                 if (!owner.TryReplayPendingFileTransferV6Handoff(this, "subscriber_added"))
                 {
                     owner.TryRequestCurrentTunaActivationHandoffForFileTransferSession(this, "subscriber_added");
                 }
             }
             remove => availabilityChanged -= value;
+        }
+
+        private bool TryReplayTunaActivationPauseAvailability(EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs> handler)
+        {
+            if (!IsUnavailableForTunaActivationPause(out var pauseReason))
+            {
+                return false;
+            }
+
+            handler.Invoke(
+                this,
+                new FileTransferDataSessionAvailabilityChangedEventArgs(
+                    isAvailable: false,
+                    reason: pauseReason,
+                    requiresResumeRequest: false,
+                    handoffKind: FileTransferTransportHandoffKind.None,
+                    targetTransport: FileTransferTransportKind.RegularNkn));
+            return true;
         }
 
         public async ValueTask<FileTransferDataFrame> ReceiveAsync(CancellationToken ct)
@@ -5377,41 +5457,114 @@ public sealed partial class NknSignalingTransport
             owner.TrackOutboundFileTransferDataFrameLifecycle(frame);
         }
 
-        private Task SendAsyncCore(FileTransferDataFrame frame, CancellationToken ct)
+        private async Task SendAsyncCore(FileTransferDataFrame frame, CancellationToken ct)
         {
-            if (frame is FileTransferChunkBatchFrameV4 v4Batch && v4Batch.DataSegments.Count > 0)
+            var sendCt = ct;
+            CancellationTokenSource? activationPauseLinkedCts = null;
+            try
             {
-                return SendChunkBatchV4Async(v4Batch, ct);
-            }
+                if (TryGetTunaActivationPauseBlockingReason(out var pauseReason))
+                {
+                    throw new InvalidOperationException($"File-transfer data session is unavailable: {pauseReason}.");
+                }
 
-            var serializedFrame = SerializeFileTransferDataFrameForWire(frame);
-            if (ShouldSendV4ReceiverFeedbackWithBulkRedundancy(frame))
+                activationPauseLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(
+                    ct,
+                    Volatile.Read(ref tunaActivationPauseCts).Token);
+                sendCt = activationPauseLinkedCts.Token;
+
+                if (frame is FileTransferChunkBatchFrameV4 v4Batch && v4Batch.DataSegments.Count > 0)
+                {
+                    await SendChunkBatchV4Async(v4Batch, sendCt).ConfigureAwait(false);
+                    return;
+                }
+
+                var serializedFrame = SerializeFileTransferDataFrameForWire(frame);
+                if (ShouldSendV4ReceiverFeedbackWithBulkRedundancy(frame))
+                {
+                    await SendDataFrameWithBulkRedundancyAsync(
+                            frame,
+                            serializedFrame,
+                            protocolVersion: FileTransferProtocol.IsV4DataFrame(frame)
+                                ? FileTransferProtocol.ProtocolVersionV4
+                                : FileTransferProtocol.ProtocolVersionV6,
+                            bothFailedMessage: FileTransferProtocol.IsV4DataFrame(frame)
+                                ? "V4 redundant feedback send failed on both lanes."
+                                : "V6 redundant feedback send failed on both lanes.",
+                            sendCt)
+                        .ConfigureAwait(false);
+                    return;
+                }
+
+                var useBulkLane = ShouldUseBulkLane(frame);
+
+                await owner.SendFileTransferEnvelopeRawAsync(
+                        MsgType.FileTransferDataFrame,
+                        TransferId,
+                        serializedFrame,
+                        useBulkLane,
+                        frame.Type,
+                        ct: sendCt,
+                        rawPayloadBytes: GetFrameRawPayloadBytes(frame),
+                        batchChunkCount: GetFrameBatchChunkCount(frame),
+                        batchProfile: ResolvePayloadEfficiencyProfileNameForDiagnostics(),
+                        forceRegularNknBulk: ShouldForceRegularNknBulk(frame))
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested && IsUnavailableForTunaActivationPause(out var pauseReason))
             {
-                return SendDataFrameWithBulkRedundancyAsync(
-                    frame,
-                    serializedFrame,
-                    protocolVersion: FileTransferProtocol.IsV4DataFrame(frame)
-                        ? FileTransferProtocol.ProtocolVersionV4
-                        : FileTransferProtocol.ProtocolVersionV6,
-                    bothFailedMessage: FileTransferProtocol.IsV4DataFrame(frame)
-                        ? "V4 redundant feedback send failed on both lanes."
-                        : "V6 redundant feedback send failed on both lanes.",
-                    ct);
+                LocalOperationalLog.Warn(
+                    "SessionSecurity",
+                    $"event=filetransfer_data_session_send_canceled_for_tuna_activation_pause; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; reason={SanitizeLogToken(pauseReason)}");
+                throw;
             }
+            finally
+            {
+                activationPauseLinkedCts?.Dispose();
+            }
+        }
 
-            var useBulkLane = ShouldUseBulkLane(frame);
+        private bool TryGetTunaActivationPauseBlockingReason(out string pauseReason)
+        {
+            pauseReason = Volatile.Read(ref availabilityReason) ?? "available";
+            return Volatile.Read(ref tunaActivationPauseCts).IsCancellationRequested ||
+                   IsUnavailableForTunaActivationPause(out pauseReason);
+        }
 
-            return owner.SendFileTransferEnvelopeRawAsync(
-                MsgType.FileTransferDataFrame,
-                TransferId,
-                serializedFrame,
-                useBulkLane,
-                frame.Type,
-                ct: ct,
-                rawPayloadBytes: GetFrameRawPayloadBytes(frame),
-                batchChunkCount: GetFrameBatchChunkCount(frame),
-                batchProfile: ResolvePayloadEfficiencyProfileNameForDiagnostics(),
-                forceRegularNknBulk: ShouldForceRegularNknBulk(frame));
+        private bool IsUnavailableForTunaActivationPause(out string reason)
+        {
+            reason = Volatile.Read(ref availabilityReason) ?? string.Empty;
+            return Volatile.Read(ref available) == 0 &&
+                   IsTunaActivationNegotiationAvailabilityReason(reason);
+        }
+
+        private static bool IsTunaActivationNegotiationAvailabilityReason(string? reason)
+            => string.Equals(reason, "tuna_activation_negotiating", StringComparison.OrdinalIgnoreCase);
+
+        private void CancelTunaActivationPauseSends()
+        {
+            try
+            {
+                Volatile.Read(ref tunaActivationPauseCts).Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        }
+
+        private void ResetTunaActivationPauseSends()
+        {
+            var previous = Interlocked.Exchange(ref tunaActivationPauseCts, new CancellationTokenSource());
+            if (previous.IsCancellationRequested)
+            {
+                try
+                {
+                    previous.Dispose();
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+            }
         }
 
         private async Task SendDataFrameWithBulkRedundancyAsync(
@@ -6076,10 +6229,28 @@ public sealed partial class NknSignalingTransport
             }
 
             var next = isAvailable ? 1 : 0;
+            var previousReason = Volatile.Read(ref availabilityReason);
+            var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "transport_state_changed" : reason.Trim();
+            var activationBarrier = !isAvailable && IsTunaActivationNegotiationAvailabilityReason(normalizedReason);
             var previous = Interlocked.Exchange(ref available, next);
+            Volatile.Write(ref availabilityReason, normalizedReason);
+            if (activationBarrier)
+            {
+                CancelTunaActivationPauseSends();
+            }
+
+            if (isAvailable && previous == 0)
+            {
+                ResetTunaActivationPauseSends();
+            }
+
             var explicitHandoff = requiresResumeRequest &&
                                   handoffKind != FileTransferTransportHandoffKind.None;
-            if (previous == next && !explicitHandoff)
+            var activationBarrierReasonChanged =
+                previous == next &&
+                !string.Equals(previousReason, normalizedReason, StringComparison.OrdinalIgnoreCase) &&
+                (activationBarrier || IsTunaActivationNegotiationAvailabilityReason(previousReason));
+            if (previous == next && !explicitHandoff && !activationBarrierReasonChanged)
             {
                 return;
             }

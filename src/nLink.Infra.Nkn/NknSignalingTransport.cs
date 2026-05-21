@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
 using NLink.Core;
+using NLink.Core.Configuration;
 using NLink.Core.FileTransfer;
 using NLink.Core.Logging;
 using NLink.Core.RemoteControl;
@@ -15,7 +16,7 @@ using NLink.Core.SessionSecurity;
 namespace NLink.Infra.Nkn;
 
 #pragma warning disable CS0067
-public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, ITransportAccelerationStatus, ITransportAccelerationControl, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IScreenShareTransportBackpressureProbe, IScreenShareTransportPolicyController, IFileTransferSignalingTransport, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IAuthoritativeConnectedAddressSource
+public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, ITransportAccelerationStatus, ITransportAccelerationControl, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IScreenShareTransportBackpressureProbe, IScreenShareTransportPolicyController, IFileTransferSignalingTransport, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IAuthoritativeConnectedAddressSource
 {
     private readonly record struct FileTransferV6TransportEpochKey(
         string SessionId,
@@ -406,6 +407,9 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     public SessionSecurityState CurrentSessionSecurityState => currentSessionSecurityState;
     public bool IsTransportAccelerationActive => IsAccelerationNegotiatedAndHealthy();
     public bool ShouldUseFileTransferV6ForAcceleration => ShouldUseFileTransferV6ForAccelerationCore();
+    public bool IsFileTunaActiveForRouteSelection => IsFileTransferAccelerationNegotiatedAndHealthy();
+    public bool IsPostTunaFileFallbackActiveForRouteSelection => IsFileTransferUsingRegularNknFallbackForCurrentSession();
+    public bool IsDiagnosticRegularNknV6RouteEnabled => IsDiagnosticRegularNknV6RouteEnabledCore();
     public string TransportAccelerationStatusReason
     {
         get
@@ -416,6 +420,18 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             }
         }
     }
+
+    private static bool IsDiagnosticRegularNknV6RouteEnabledCore()
+    {
+        var value = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(
+            "NLINK_FILETRANSFER_DIAGNOSTIC_REGULAR_NKN_V6",
+            category: "filetransfer_diagnostic");
+        return string.Equals(value, "1", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(value, "on", StringComparison.OrdinalIgnoreCase);
+    }
+
     public bool CanSendSessionEnd => !disposed && !string.IsNullOrWhiteSpace(currentEnvelopeCode) && !string.IsNullOrWhiteSpace(remoteEndpoint);
     public bool CanSendPendingJoinCancel
     {
@@ -2352,17 +2368,39 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         {
             var recoveryReason = string.IsNullOrWhiteSpace(e.ExitReasonText) ? "receive_stall_recovery" : e.ExitReasonText;
             var sessionId = currentSessionSecurityState.SessionId?.Value;
+            if (ShouldSuppressFileTransferTransportRecoveredForTunaActivationPause("receive_stall_recovery_started", out _))
+            {
+                return;
+            }
+
             if (ShouldUseFileTransferV6EpochForRegularNknRecovery(sessionId))
             {
-                MarkFileTransferFallbackNknProofPending(
-                    reason: recoveryReason,
-                    sessionId: sessionId,
-                    lanes: NknAccelerationLaneKind.File);
+                var handoffKind = FileTransferTransportHandoffKind.RegularNknRecovery;
+                var markProofPending = true;
+                if (TryGetUnresolvedFileTransferV6TransportEpochForCurrentSession(out var unresolvedEpoch) &&
+                    unresolvedEpoch.TargetTransport == FileTransferTransportKind.RegularNkn &&
+                    unresolvedEpoch.HandoffKind == FileTransferTransportHandoffKind.TunaToNormalFallback)
+                {
+                    handoffKind = FileTransferTransportHandoffKind.TunaToNormalFallback;
+                    markProofPending = false;
+                    LocalOperationalLog.Info(
+                        "NKN.Tuna",
+                        $"event=filetransfer_receive_stall_recovery_preserved_tuna_fallback_epoch; session_id={SanitizeLogToken(unresolvedEpoch.SessionId)}; transfer_id={SanitizeLogToken(unresolvedEpoch.TransferId)}; direction={unresolvedEpoch.Direction.ToString().ToLowerInvariant()}; transport_epoch={unresolvedEpoch.TransportEpoch}; reason={SanitizeLogToken(recoveryReason)}");
+                }
+
+                if (markProofPending)
+                {
+                    MarkFileTransferFallbackNknProofPending(
+                        reason: recoveryReason,
+                        sessionId: sessionId,
+                        lanes: NknAccelerationLaneKind.File);
+                }
+
                 SetFileTransferDataSessionsAvailability(
                     isAvailable: false,
                     reason: "receive_stall_recovery",
                     requiresResumeRequest: true,
-                    handoffKind: FileTransferTransportHandoffKind.RegularNknRecovery,
+                    handoffKind: handoffKind,
                     targetTransport: FileTransferTransportKind.RegularNkn);
             }
             else

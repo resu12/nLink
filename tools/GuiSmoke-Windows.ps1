@@ -2855,6 +2855,7 @@ function Get-TunaGuiEvidenceSummary {
         resumeSent = $false
         resumeReceived = $false
         heartbeatTimeoutCount = 0
+        heartbeatDeferredTimeoutCount = 0
         peerDisconnectedCount = 0
         transportFailedCount = 0
         senderChunkBytes = 0L
@@ -2911,7 +2912,12 @@ function Get-TunaGuiEvidenceSummary {
         }
 
         if ($line.IndexOf('event=filetransfer_v6_heartbeat_timeout', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-            $summary.heartbeatTimeoutCount++
+            if ($line.IndexOf('_deferred_', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $summary.heartbeatDeferredTimeoutCount++
+            }
+            else {
+                $summary.heartbeatTimeoutCount++
+            }
         }
 
         if ($line.IndexOf('peer_disconnected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
@@ -2977,8 +2983,14 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     $acceptButton = Wait-ControlEnabledStateByAutomationId -Window $receiverWindow -AutomationId 'Chat.FileTransfer.Accept' -IsEnabled $true -TimeoutMs $StartupTimeoutMs
     Click-Element $acceptButton
 
-    [void](Wait-AppLogContainsAfterBookmark -Bookmark $bookmark -Needle 'event=filetransfer_v6_sender_started' -TimeoutMs 45000 -Description 'V6 sender started')
-    [void](Wait-AppLogContainsAfterBookmark -Bookmark $bookmark -Needle 'event=filetransfer_v6_receiver_started' -TimeoutMs 45000 -Description 'V6 receiver started')
+    [void](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
+        @('event=filetransfer_v4_sender_started'),
+        @('event=filetransfer_v6_sender_started')
+    ) -TimeoutMs 45000 -Description 'primary file-transfer sender started')
+    [void](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
+        @('event=filetransfer_v4_receiver_started'),
+        @('event=filetransfer_v6_receiver_started')
+    ) -TimeoutMs 45000 -Description 'primary file-transfer receiver started')
 
     [void](Wait-FileTransferTerminalOrProgressBeforeAction -Bookmark $bookmark -ProgressTimeoutMs $ProgressTimeoutMs -MinProgressEvents 2 -TimeoutMs 60000)
 
