@@ -121,6 +121,13 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        if (current.Kind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
+            normalizedKind == FileTransferTransportHandoffKind.RegularNknRecovery &&
+            targetTransport == FileTransferTransportKind.RegularNkn)
+        {
+            return true;
+        }
+
         return current.Kind == normalizedKind;
     }
 

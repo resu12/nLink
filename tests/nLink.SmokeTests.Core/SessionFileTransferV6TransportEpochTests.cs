@@ -1818,6 +1818,8 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             var payload = Enumerable.Range(0, 5_000_000).Select(static index => (byte)(index % 251)).ToArray();
             using var senderTransport = new LoopbackFileTransferTransport("session_v6_epoch_inbound_liveness_defers_regular_nkn_waiting");
             using var receiverTransport = new LoopbackFileTransferTransport("session_v6_epoch_inbound_liveness_defers_regular_nkn_waiting");
+            EnsureV6RouteForTest(senderTransport);
+            EnsureV6RouteForTest(receiverTransport);
             senderTransport.Connect(receiverTransport);
             using var sender = new SessionFileTransferService();
             using var receiver = new SessionFileTransferService();
@@ -2248,6 +2250,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         string transferId,
         int payloadSize = 256_000)
     {
+        EnsureV6RouteForTest(senderTransport);
         var payload = Enumerable.Range(0, payloadSize).Select(static index => (byte)(index % 251)).ToArray();
         await sender.TryStartSendAsync(
             new FileTransferSendDescriptor("v6-epoch.bin", payload.Length, transferId),
@@ -2261,10 +2264,30 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                 SessionId = offer.SessionId,
                 TransferId = transferId,
                 AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                FileTransferRoute = offer.FileTransferRoute,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
         return await receiverTransport.OpenFileTransferDataSessionAsync(offer.SessionId, transferId, CancellationToken.None);
+    }
+
+    private static void EnsureV6RouteForTest(LoopbackFileTransferTransport transport)
+    {
+        if (transport.IsFileTunaActiveForRouteSelection ||
+            transport.IsPostTunaFileFallbackActiveForRouteSelection ||
+            transport.IsDiagnosticRegularNknV6RouteEnabled)
+        {
+            return;
+        }
+
+        if (transport.FileTransferTransportProfileKind == FileTransferTransportProfileKind.ConservativeNknStartup)
+        {
+            transport.IsDiagnosticRegularNknV6RouteEnabled = true;
+        }
+        else
+        {
+            transport.IsFileTunaActiveForRouteSelection = true;
+        }
     }
 
     private static async Task<FileTransferReceivedDataFrame> ReceiveProbeAsync(

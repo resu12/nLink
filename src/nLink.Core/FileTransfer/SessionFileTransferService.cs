@@ -799,8 +799,16 @@ public sealed partial class SessionFileTransferService : IDisposable
                 return null;
             }
 
-            context = new OutboundTransferContext(normalizedDescriptor, openReadStreamAsync);
-            context.OfferedDataProtocolVersion = ResolvePreferredDataProtocolVersionForNewTransfer(currentTransport);
+            var routeSelection = ResolveFileTransferRouteForNewTransfer(currentTransport);
+            context = new OutboundTransferContext(normalizedDescriptor, openReadStreamAsync)
+            {
+                RouteSelection = routeSelection,
+                OfferedDataProtocolVersion = routeSelection.ProtocolVersion,
+                NegotiatedDataProtocolVersion = routeSelection.ProtocolVersion,
+            };
+            ApplyFileTransferRuntimeProfileSelectionLocked(
+                context,
+                FileTransferRuntimeProfileSelection.FromRouteSelection(routeSelection));
             outboundTransfer = context;
         }
 
@@ -842,6 +850,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             FileName = context.FileName,
             FileSizeBytes = context.FileSizeBytes,
             PreferredDataProtocolVersion = context.OfferedDataProtocolVersion,
+            FileTransferRoute = context.RouteSelection.TelemetryToken,
         };
 
         try
@@ -940,7 +949,7 @@ public sealed partial class SessionFileTransferService : IDisposable
 
             context.OpenWriteDestinationAsync = openWriteDestinationAsync;
             context.AcceptInProgress = false;
-            context.NegotiatedDataProtocolVersion = context.OfferedDataProtocolVersion;
+            context.NegotiatedDataProtocolVersion = context.RouteSelection.ProtocolVersion;
             context.MetadataAwaitingSinceUtc = DateTimeOffset.UtcNow;
             context.State = FileTransferTransferState.AwaitingMetadata;
             context.StatusMessage = "Waiting for sender to prepare the file.";
@@ -959,6 +968,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                     SessionId = context.SessionId,
                     TransferId = context.TransferId,
                     AcceptedDataProtocolVersion = context.NegotiatedDataProtocolVersion,
+                    FileTransferRoute = context.RouteSelection.TelemetryToken,
                 },
                 ct).ConfigureAwait(false);
             if (context.NegotiatedDataProtocolVersion >= FileTransferProtocol.ProtocolVersionV6)
@@ -1092,7 +1102,9 @@ public sealed partial class SessionFileTransferService : IDisposable
                 !outboundTransfer.IsTerminal &&
                 string.Equals(outboundTransfer.TransferId, normalizedTransferId, StringComparison.Ordinal))
             {
-                if (outboundTransfer.UserPaused || !CanUserPauseOutbound(outboundTransfer.State))
+                if (outboundTransfer.UserPaused ||
+                    IsTunaActivationNegotiationTransportPauseReason(outboundTransfer.PullTransportPauseReason) ||
+                    !CanUserPauseOutbound(outboundTransfer.State))
                 {
                     return null;
                 }
@@ -1118,7 +1130,9 @@ public sealed partial class SessionFileTransferService : IDisposable
                      !inboundTransfer.IsTerminal &&
                      string.Equals(inboundTransfer.TransferId, normalizedTransferId, StringComparison.Ordinal))
             {
-                if (inboundTransfer.UserPaused || !CanUserPauseInbound(inboundTransfer.State))
+                if (inboundTransfer.UserPaused ||
+                    IsTunaActivationNegotiationTransportPauseReason(inboundTransfer.PullTransportPauseReason) ||
+                    !CanUserPauseInbound(inboundTransfer.State))
                 {
                     return null;
                 }
@@ -1445,52 +1459,103 @@ public sealed partial class SessionFileTransferService : IDisposable
                 return;
             }
 
-            if (context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV4)
+            if (context.NegotiatedDataProtocolVersion != context.RouteSelection.ProtocolVersion)
             {
-                LogV4Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Outbound);
-                if ((sessionScreenShareActive || sessionScreenShareDegraded) && !ShouldAllowV4DuringScreenShare())
-                {
-                    await FailOutboundV4Async(
-                        context,
-                        dataSession: null,
-                        V4FileOnlyRequiredErrorCode,
-                        "V4 file-transfer send is currently file-only.",
-                        notifyPeer: false).ConfigureAwait(false);
-                    return;
-                }
-
-                LogV4MixedScreenShareEnabled(context.TransferId, context.SessionId, FileTransferDirection.Outbound);
-                await RunOutboundRegularNknV4Async(context).ConfigureAwait(false);
-                return;
-            }
-
-            LogV6Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Outbound);
-            if ((sessionScreenShareActive || sessionScreenShareDegraded) && !ShouldAllowV4DuringScreenShare())
-            {
-                await FailOutboundV4Async(
+                LogLegacyNegotiationRejected(
+                    context.TransferId,
+                    context.SessionId,
+                    FileTransferDirection.Outbound,
+                    offeredVersion: context.OfferedDataProtocolVersion,
+                    acceptedVersion: context.NegotiatedDataProtocolVersion,
+                    reason: "prepared_route_protocol_mismatch");
+                await TransitionOutboundToTerminalAsync(
                     context,
-                    dataSession: null,
-                    V4FileOnlyRequiredErrorCode,
-                    "V6 file-transfer send is currently file-only.",
-                    notifyPeer: false).ConfigureAwait(false);
+                    FileTransferTransferState.Failed,
+                    errorCode: TransportIncompatibleErrorCode,
+                    statusMessage: "File transfer route does not match the negotiated protocol.",
+                    notifyPeer: false,
+                    cancelReason: null,
+                    ct: CancellationToken.None).ConfigureAwait(false);
                 return;
             }
 
-            LogV4MixedScreenShareEnabled(context.TransferId, context.SessionId, FileTransferDirection.Outbound);
-            var runtimeSelection = ResolveFileTransferRuntimeProfile(context);
-            LogFileTransferBridgeRecoveryPolicySelected(
-                context.TransferId,
-                context.SessionId,
-                FileTransferDirection.Outbound,
-                runtimeSelection);
-            if (runtimeSelection.Profile == FileTransferRuntimeProfile.PrimaryRegularNknBulkV6)
+            switch (context.RouteSelection.Route)
             {
-                LogPrimaryRegularNknBulkV6Selected(context.TransferId, context.SessionId, FileTransferDirection.Outbound, runtimeSelection);
-                await RunOutboundPrimaryRegularNknBulkV6Async(context).ConfigureAwait(false);
-            }
-            else
-            {
-                await RunOutboundV6SenderAsync(context).ConfigureAwait(false);
+                case FileTransferRoute.RegularNknV4Fast:
+                    LogV4Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Outbound);
+                    if ((sessionScreenShareActive || sessionScreenShareDegraded) && !ShouldAllowV4DuringScreenShare())
+                    {
+                        await FailOutboundV4Async(
+                            context,
+                            dataSession: null,
+                            V4FileOnlyRequiredErrorCode,
+                            "V4 file-transfer send is currently file-only.",
+                            notifyPeer: false).ConfigureAwait(false);
+                        return;
+                    }
+
+                    LogV4MixedScreenShareEnabled(context.TransferId, context.SessionId, FileTransferDirection.Outbound);
+                    await RunOutboundRegularNknV4Async(context).ConfigureAwait(false);
+                    return;
+
+                case FileTransferRoute.FileTunaV6:
+                case FileTransferRoute.PostTunaFallbackV6:
+                    LogV6Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Outbound);
+                    if ((sessionScreenShareActive || sessionScreenShareDegraded) && !ShouldAllowV4DuringScreenShare())
+                    {
+                        await FailOutboundV4Async(
+                            context,
+                            dataSession: null,
+                            V4FileOnlyRequiredErrorCode,
+                            "V6 file-transfer send is currently file-only.",
+                            notifyPeer: false).ConfigureAwait(false);
+                        return;
+                    }
+
+                    LogV4MixedScreenShareEnabled(context.TransferId, context.SessionId, FileTransferDirection.Outbound);
+                    var v6RuntimeSelection = ResolveFileTransferRuntimeProfile(context);
+                    LogFileTransferBridgeRecoveryPolicySelected(
+                        context.TransferId,
+                        context.SessionId,
+                        FileTransferDirection.Outbound,
+                        v6RuntimeSelection);
+                    await RunOutboundV6SenderAsync(context).ConfigureAwait(false);
+                    return;
+
+                case FileTransferRoute.DiagnosticRegularNknV6:
+                    LogV6Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Outbound);
+                    if ((sessionScreenShareActive || sessionScreenShareDegraded) && !ShouldAllowV4DuringScreenShare())
+                    {
+                        await FailOutboundV4Async(
+                            context,
+                            dataSession: null,
+                            V4FileOnlyRequiredErrorCode,
+                            "V6 file-transfer send is currently file-only.",
+                            notifyPeer: false).ConfigureAwait(false);
+                        return;
+                    }
+
+                    LogV4MixedScreenShareEnabled(context.TransferId, context.SessionId, FileTransferDirection.Outbound);
+                    var diagnosticRuntimeSelection = ResolveFileTransferRuntimeProfile(context);
+                    LogFileTransferBridgeRecoveryPolicySelected(
+                        context.TransferId,
+                        context.SessionId,
+                        FileTransferDirection.Outbound,
+                        diagnosticRuntimeSelection);
+                    LogPrimaryRegularNknBulkV6Selected(context.TransferId, context.SessionId, FileTransferDirection.Outbound, diagnosticRuntimeSelection);
+                    await RunOutboundPrimaryRegularNknBulkV6Async(context).ConfigureAwait(false);
+                    return;
+
+                default:
+                    await TransitionOutboundToTerminalAsync(
+                        context,
+                        FileTransferTransferState.Failed,
+                        errorCode: TransportIncompatibleErrorCode,
+                        statusMessage: "Unsupported file-transfer route.",
+                        notifyPeer: false,
+                        cancelReason: null,
+                        ct: CancellationToken.None).ConfigureAwait(false);
+                    return;
             }
         }
         catch (OperationCanceledException) when (context.LifetimeCts.IsCancellationRequested)
@@ -1809,9 +1874,31 @@ public sealed partial class SessionFileTransferService : IDisposable
             return;
         }
 
+        IFileTransferSignalingTransport? currentTransport;
+        lock (gate)
+        {
+            currentTransport = transport;
+        }
+
+        if (!TryResolveIncomingOfferRouteSelection(message, currentTransport, out var routeSelection, out var routeRejectReason))
+        {
+            LogLegacyNegotiationRejected(
+                message.TransferId,
+                message.SessionId,
+                FileTransferDirection.Inbound,
+                offeredVersion: message.PreferredDataProtocolVersion,
+                acceptedVersion: null,
+                reason: routeRejectReason);
+            await SendDeclineAsync(message.SessionId, message.TransferId, TransportIncompatibleErrorCode, CancellationToken.None).ConfigureAwait(false);
+            return;
+        }
+
         InboundTransferContext? busyTransfer = null;
         SessionFileTransferSnapshot? snapshotToRaise = null;
-        var incoming = new InboundTransferContext(message);
+        var incoming = new InboundTransferContext(message, routeSelection);
+        ApplyFileTransferRuntimeProfileSelectionLocked(
+            incoming,
+            FileTransferRuntimeProfileSelection.FromRouteSelection(routeSelection));
 
         lock (gate)
         {
@@ -1858,6 +1945,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         var acceptedProtocolVersion = message.AcceptedDataProtocolVersion;
         var acceptedVersionIsNegotiable = IsNegotiableDataProtocolVersion(acceptedProtocolVersion);
         var acceptedVersionMatchesOffer = false;
+        var acceptedRouteMatchesOffer = false;
         lock (gate)
         {
             context = outboundTransfer;
@@ -1871,7 +1959,13 @@ public sealed partial class SessionFileTransferService : IDisposable
             }
 
             acceptedVersionMatchesOffer = acceptedProtocolVersion == context.OfferedDataProtocolVersion;
-            if (!acceptedVersionIsNegotiable || !acceptedVersionMatchesOffer || acceptedProtocolVersion is null)
+            acceptedRouteMatchesOffer =
+                acceptedProtocolVersion is { } normalizedAcceptedProtocolVersion &&
+                IsRouteTokenCompatibleWithSelection(
+                    message.FileTransferRoute,
+                    normalizedAcceptedProtocolVersion,
+                    context.RouteSelection);
+            if (!acceptedVersionIsNegotiable || !acceptedVersionMatchesOffer || !acceptedRouteMatchesOffer || acceptedProtocolVersion is null)
             {
                 // Leave SendStarted false so the transfer remains visibly rejected by negotiation,
                 // not partially started.
@@ -1886,7 +1980,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             }
         }
 
-        if (!acceptedVersionIsNegotiable || !acceptedVersionMatchesOffer || acceptedProtocolVersion is null)
+        if (!acceptedVersionIsNegotiable || !acceptedVersionMatchesOffer || !acceptedRouteMatchesOffer || acceptedProtocolVersion is null)
         {
             LogLegacyNegotiationRejected(
                 message.TransferId,
@@ -1894,7 +1988,11 @@ public sealed partial class SessionFileTransferService : IDisposable
                 FileTransferDirection.Outbound,
                 offeredVersion: context.OfferedDataProtocolVersion,
                 acceptedVersion: acceptedProtocolVersion,
-                reason: acceptedVersionIsNegotiable ? "accept_protocol_mismatch" : "accept_protocol_not_supported");
+                reason: !acceptedVersionIsNegotiable
+                    ? "accept_protocol_not_supported"
+                    : acceptedVersionMatchesOffer
+                        ? "accept_route_mismatch"
+                        : "accept_protocol_mismatch");
             await TransitionOutboundToTerminalAsync(
                 context,
                 FileTransferTransferState.Failed,
@@ -1956,6 +2054,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         ArgumentNullException.ThrowIfNull(message);
 
         InboundTransferContext? context;
+        InboundTransferContext? rejectedContext = null;
+        string? sessionOpenRejectReason = null;
         lock (gate)
         {
             context = inboundTransfer;
@@ -1969,24 +2069,15 @@ public sealed partial class SessionFileTransferService : IDisposable
             if (!string.Equals(context.SessionId, message.SessionId, StringComparison.Ordinal) ||
                 !string.Equals(message.SessionRole, FileTransferProtocol.SessionRoleSender, StringComparison.Ordinal) ||
                 message.ProtocolVersion != context.NegotiatedDataProtocolVersion ||
-                !IsNegotiableDataProtocolVersion(message.ProtocolVersion))
+                !IsNegotiableDataProtocolVersion(message.ProtocolVersion) ||
+                !IsRouteTokenCompatibleWithSelection(message.FileTransferRoute, message.ProtocolVersion, context.RouteSelection))
             {
-                if (!IsNegotiableDataProtocolVersion(message.ProtocolVersion))
-                {
-                    LogLegacyNegotiationRejected(
-                        message.TransferId,
-                        message.SessionId,
-                        FileTransferDirection.Inbound,
-                        offeredVersion: message.ProtocolVersion,
-                        acceptedVersion: context.NegotiatedDataProtocolVersion,
-                        reason: "session_open_protocol_not_supported");
-                    LogV6SessionOpenRejected(
-                        message.TransferId,
-                        message.SessionId,
-                        FileTransferDirection.Inbound,
-                        message.ProtocolVersion,
-                        "session_open_protocol_not_supported");
-                }
+                rejectedContext = context;
+                sessionOpenRejectReason = !IsNegotiableDataProtocolVersion(message.ProtocolVersion)
+                    ? "session_open_protocol_not_supported"
+                    : message.ProtocolVersion != context.NegotiatedDataProtocolVersion
+                        ? "session_open_protocol_mismatch"
+                        : "session_open_route_mismatch";
                 context = null;
             }
             else if (context.State is not FileTransferTransferState.AwaitingMetadata and not FileTransferTransferState.Receiving)
@@ -1995,12 +2086,39 @@ public sealed partial class SessionFileTransferService : IDisposable
             }
         }
 
+        if (rejectedContext is not null)
+        {
+            LogLegacyNegotiationRejected(
+                message.TransferId,
+                message.SessionId,
+                FileTransferDirection.Inbound,
+                offeredVersion: message.ProtocolVersion,
+                acceptedVersion: rejectedContext.NegotiatedDataProtocolVersion,
+                reason: sessionOpenRejectReason ?? "session_open_route_mismatch");
+            LogV6SessionOpenRejected(
+                message.TransferId,
+                message.SessionId,
+                FileTransferDirection.Inbound,
+                message.ProtocolVersion,
+                sessionOpenRejectReason ?? "session_open_route_mismatch");
+            await TransitionInboundToTerminalAsync(
+                rejectedContext,
+                FileTransferTransferState.Failed,
+                errorCode: TransportIncompatibleErrorCode,
+                statusMessage: "Sender opened a file-transfer route that does not match the accepted route.",
+                sendError: true,
+                errorMessage: "Sender opened a file-transfer route that does not match the accepted route.",
+                cancelReason: null,
+                ct: CancellationToken.None).ConfigureAwait(false);
+            return;
+        }
+
         if (context is null)
         {
             return;
         }
 
-        if (message.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4)
+        if (context.RouteSelection.Route == FileTransferRoute.RegularNknV4Fast)
         {
             LogV4Negotiated(message.TransferId, message.SessionId, FileTransferDirection.Inbound);
             if ((sessionScreenShareActive || sessionScreenShareDegraded) && !ShouldAllowV4DuringScreenShare())
@@ -2034,7 +2152,7 @@ public sealed partial class SessionFileTransferService : IDisposable
 
                     ReplaceInboundDataSessionLocked(context, session);
                     context.PullSessionActive = true;
-                    context.NegotiatedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4;
+                    context.NegotiatedDataProtocolVersion = context.RouteSelection.ProtocolVersion;
                     context.StatusMessage = "Waiting for V4 file-transfer manifest.";
                 }
 
@@ -2062,7 +2180,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             return;
         }
 
-        if (message.ProtocolVersion == FileTransferProtocol.ProtocolVersionV6)
+        if (context.RouteSelection.Route is FileTransferRoute.FileTunaV6 or FileTransferRoute.PostTunaFallbackV6)
         {
             LogV6Negotiated(message.TransferId, message.SessionId, FileTransferDirection.Inbound);
             if ((sessionScreenShareActive || sessionScreenShareDegraded) && !ShouldAllowV4DuringScreenShare())
@@ -2102,7 +2220,7 @@ public sealed partial class SessionFileTransferService : IDisposable
 
                     ReplaceInboundDataSessionLocked(context, session);
                     context.PullSessionActive = true;
-                    context.NegotiatedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6;
+                    context.NegotiatedDataProtocolVersion = context.RouteSelection.ProtocolVersion;
                     context.StatusMessage = "Waiting for V6 file-transfer manifest.";
                 }
 
@@ -2119,15 +2237,83 @@ public sealed partial class SessionFileTransferService : IDisposable
                     context.SessionId,
                     FileTransferDirection.Inbound,
                     runtimeSelection);
-                if (runtimeSelection.Profile == FileTransferRuntimeProfile.PrimaryRegularNknBulkV6)
+                _ = RunInboundV6ReceiverAsync(context, message);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                await TransitionInboundToTerminalAsync(
+                    context,
+                    FileTransferTransferState.Failed,
+                    errorCode: InvalidStateErrorCode,
+                    statusMessage: ex.Message,
+                    sendError: true,
+                    errorMessage: "Could not open the dedicated V6 file-transfer session.",
+                    cancelReason: null,
+                    ct: CancellationToken.None).ConfigureAwait(false);
+            }
+
+            return;
+        }
+
+        if (context.RouteSelection.Route == FileTransferRoute.DiagnosticRegularNknV6)
+        {
+            LogV6Negotiated(message.TransferId, message.SessionId, FileTransferDirection.Inbound);
+            if ((sessionScreenShareActive || sessionScreenShareDegraded) && !ShouldAllowV4DuringScreenShare())
+            {
+                LogV6SessionOpenRejected(
+                    message.TransferId,
+                    message.SessionId,
+                    FileTransferDirection.Inbound,
+                    message.ProtocolVersion,
+                    "file_only_required");
+                await TransitionInboundToTerminalAsync(
+                    context,
+                    FileTransferTransferState.Failed,
+                    errorCode: V4FileOnlyRequiredErrorCode,
+                    statusMessage: "V6 file-transfer receive is currently file-only.",
+                    sendError: true,
+                    errorMessage: "V6 file-transfer receive is currently file-only.",
+                    cancelReason: null,
+                    ct: CancellationToken.None).ConfigureAwait(false);
+                return;
+            }
+
+            LogV4MixedScreenShareEnabled(message.TransferId, message.SessionId, FileTransferDirection.Inbound);
+            try
+            {
+                var session = await GetTransportOrThrow()
+                    .OpenFileTransferDataSessionAsync(message.SessionId, message.TransferId, context.LifetimeCts.Token)
+                    .ConfigureAwait(false);
+
+                lock (gate)
                 {
-                    LogPrimaryRegularNknBulkV6Selected(context.TransferId, context.SessionId, FileTransferDirection.Inbound, runtimeSelection);
-                    _ = RunInboundPrimaryRegularNknBulkV6Async(context, message);
+                    if (!ReferenceEquals(inboundTransfer, context) || context.IsTerminal)
+                    {
+                        session.Dispose();
+                        return;
+                    }
+
+                    ReplaceInboundDataSessionLocked(context, session);
+                    context.PullSessionActive = true;
+                    context.NegotiatedDataProtocolVersion = context.RouteSelection.ProtocolVersion;
+                    context.StatusMessage = "Waiting for V6 file-transfer manifest.";
                 }
-                else
-                {
-                    _ = RunInboundV6ReceiverAsync(context, message);
-                }
+
+                LogTransferInfo(
+                    "filetransfer_session_opened",
+                    FileTransferDirection.Inbound,
+                    message.TransferId,
+                    sessionId: message.SessionId,
+                    reason: $"role={message.SessionRole}; protocol_version={message.ProtocolVersion}; chunk_size_bytes={message.ChunkSizeBytes}; pipeline_depth={message.InitialPipelineDepth}");
+                StartInboundV6HeartbeatLoop(context, "session_open_received");
+                var runtimeSelection = ResolveFileTransferRuntimeProfile(context);
+                LogFileTransferBridgeRecoveryPolicySelected(
+                    context.TransferId,
+                    context.SessionId,
+                    FileTransferDirection.Inbound,
+                    runtimeSelection);
+                LogPrimaryRegularNknBulkV6Selected(context.TransferId, context.SessionId, FileTransferDirection.Inbound, runtimeSelection);
+                _ = RunInboundPrimaryRegularNknBulkV6Async(context, message);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -2200,10 +2386,16 @@ public sealed partial class SessionFileTransferService : IDisposable
         InboundTransferContext? inboundToResume = null;
         string? outboundPausedTransferId = null;
         string? outboundPausedSessionId = null;
+        OutboundTransferContext? outboundPaused = null;
         string? inboundPausedTransferId = null;
         string? inboundPausedSessionId = null;
+        InboundTransferContext? inboundPaused = null;
         bool outboundResumed = false;
         bool inboundResumed = false;
+        bool outboundActivationPauseStarted = false;
+        bool inboundActivationPauseStarted = false;
+        bool outboundActivationPauseResumed = false;
+        bool inboundActivationPauseResumed = false;
         bool outboundEpochStartedWhileUnavailable = false;
         bool inboundEpochStartedWhileUnavailable = false;
 
@@ -2214,6 +2406,9 @@ public sealed partial class SessionFileTransferService : IDisposable
             {
                 if (effectiveIsAvailable)
                 {
+                    var wasActivationPause =
+                        outbound.PullTransportPaused &&
+                        IsTunaActivationNegotiationTransportPauseReason(outbound.PullTransportPauseReason);
                     outboundResumed = TryResumeOutboundTransportLocked(
                         outbound,
                         effectiveReason,
@@ -2223,6 +2418,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                     if (outboundResumed)
                     {
                         outboundToResume = outbound;
+                        outboundActivationPauseResumed = wasActivationPause;
                     }
                 }
                 else
@@ -2231,6 +2427,8 @@ public sealed partial class SessionFileTransferService : IDisposable
                     {
                         outboundPausedTransferId = outbound.TransferId;
                         outboundPausedSessionId = outbound.SessionId;
+                        outboundPaused = outbound;
+                        outboundActivationPauseStarted = IsTunaActivationNegotiationTransportPauseReason(effectiveReason);
                     }
 
                     if (TryStartOutboundV6TransportEpochWhileUnavailableLocked(
@@ -2251,6 +2449,9 @@ public sealed partial class SessionFileTransferService : IDisposable
             {
                 if (effectiveIsAvailable)
                 {
+                    var wasActivationPause =
+                        inbound.PullTransportPaused &&
+                        IsTunaActivationNegotiationTransportPauseReason(inbound.PullTransportPauseReason);
                     inboundResumed = TryResumeInboundTransportLocked(
                         inbound,
                         effectiveReason,
@@ -2260,6 +2461,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                     if (inboundResumed)
                     {
                         inboundToResume = inbound;
+                        inboundActivationPauseResumed = wasActivationPause;
                     }
                 }
                 else
@@ -2268,6 +2470,8 @@ public sealed partial class SessionFileTransferService : IDisposable
                     {
                         inboundPausedTransferId = inbound.TransferId;
                         inboundPausedSessionId = inbound.SessionId;
+                        inboundPaused = inbound;
+                        inboundActivationPauseStarted = IsTunaActivationNegotiationTransportPauseReason(effectiveReason);
                     }
 
                     if (TryStartInboundV6TransportEpochWhileUnavailableLocked(
@@ -2287,16 +2491,34 @@ public sealed partial class SessionFileTransferService : IDisposable
         if (outboundPausedTransferId is not null && outboundPausedSessionId is not null)
         {
             LogTransportPaused(FileTransferDirection.Outbound, outboundPausedTransferId, outboundPausedSessionId, effectiveReason);
+            if (outboundPaused is not null)
+            {
+                if (outboundActivationPauseStarted)
+                {
+                    ScheduleOutboundV4TransportPauseControlRetry(outboundPaused, paused: true, effectiveReason);
+                }
+
+                SignalOutboundV4SenderPump(outboundPaused);
+            }
         }
 
         if (inboundPausedTransferId is not null && inboundPausedSessionId is not null)
         {
             LogTransportPaused(FileTransferDirection.Inbound, inboundPausedTransferId, inboundPausedSessionId, effectiveReason);
+            if (inboundActivationPauseStarted && inboundPaused is not null)
+            {
+                ScheduleInboundV4TransportPauseControlRetry(inboundPaused, paused: true, effectiveReason);
+            }
         }
 
         if (outboundResumed && outboundToResume is not null)
         {
             LogTransportResumed(FileTransferDirection.Outbound, outboundToResume.TransferId, outboundToResume.SessionId, effectiveReason, effectiveRequiresResumeRequest);
+            if (outboundActivationPauseResumed)
+            {
+                ScheduleOutboundV4TransportPauseControlRetry(outboundToResume, paused: false, effectiveReason);
+            }
+
             if (effectiveRequiresResumeRequest)
             {
                 IFileTransferDataSession? checkpointDataSession = null;
@@ -2356,6 +2578,11 @@ public sealed partial class SessionFileTransferService : IDisposable
         if (inboundResumed && inboundToResume is not null)
         {
             LogTransportResumed(FileTransferDirection.Inbound, inboundToResume.TransferId, inboundToResume.SessionId, effectiveReason, effectiveRequiresResumeRequest);
+            if (inboundActivationPauseResumed)
+            {
+                ScheduleInboundV4TransportPauseControlRetry(inboundToResume, paused: false, effectiveReason);
+            }
+
             if (effectiveRequiresResumeRequest)
             {
                 var primaryRegularNknBulkV6Rebind = false;
@@ -3375,14 +3602,92 @@ public sealed partial class SessionFileTransferService : IDisposable
             or FileTransferProtocol.ProtocolVersionV6;
 
     private static int ResolvePreferredDataProtocolVersionForNewTransfer(IFileTransferSignalingTransport? currentTransport)
-        => ShouldUseFileTransferV6ForAcceleration(currentTransport)
-            ? FileTransferProtocol.ProtocolVersionV6
-            : FileTransferProtocol.ProtocolVersionV4;
+        => ResolveFileTransferRouteForNewTransfer(currentTransport).ProtocolVersion;
 
-    private static bool ShouldUseFileTransferV6ForAcceleration(IFileTransferSignalingTransport? currentTransport)
-        => currentTransport is global::NLink.Core.ITransportAccelerationStatus accelerationStatus &&
-           (accelerationStatus.IsTransportAccelerationActive ||
-            accelerationStatus.ShouldUseFileTransferV6ForAcceleration);
+    private static FileTransferRouteSelection ResolveFileTransferRouteForNewTransfer(IFileTransferSignalingTransport? currentTransport)
+        => FileTransferRouteResolver.Resolve(FileTransferRouteResolverInput.FromTransport(currentTransport));
+
+    private static bool TryResolveIncomingOfferRouteSelection(
+        FileTransferOfferV2 message,
+        IFileTransferSignalingTransport? currentTransport,
+        out FileTransferRouteSelection routeSelection,
+        out string reason)
+    {
+        routeSelection = default;
+        reason = "offer_route_invalid";
+        if (message.PreferredDataProtocolVersion is not { } preferredProtocolVersion ||
+            !IsNegotiableDataProtocolVersion(preferredProtocolVersion))
+        {
+            reason = "offer_protocol_not_supported";
+            return false;
+        }
+
+        var localSelection = ResolveFileTransferRouteForNewTransfer(currentTransport);
+        if (!string.IsNullOrWhiteSpace(message.FileTransferRoute))
+        {
+            if (!TryResolveRouteSelectionFromToken(message.FileTransferRoute, preferredProtocolVersion, out var explicitSelection))
+            {
+                reason = "offer_route_invalid_or_protocol_mismatch";
+                return false;
+            }
+
+            if (explicitSelection.Route != localSelection.Route)
+            {
+                reason = "offer_route_not_active";
+                return false;
+            }
+
+            routeSelection = explicitSelection;
+            reason = "offer_route_explicit";
+            return true;
+        }
+
+        if (localSelection.ProtocolVersion != preferredProtocolVersion)
+        {
+            reason = "offer_route_context_mismatch";
+            return false;
+        }
+
+        routeSelection = localSelection;
+        reason = "offer_route_inferred";
+        return true;
+    }
+
+    private static bool TryResolveRouteSelectionFromToken(
+        string? routeToken,
+        int protocolVersion,
+        out FileTransferRouteSelection routeSelection)
+    {
+        routeSelection = default;
+        if (!FileTransferRouteResolver.TryNormalizeTelemetryToken(routeToken, protocolVersion, out var normalizedToken) ||
+            string.IsNullOrWhiteSpace(normalizedToken) ||
+            !FileTransferRouteResolver.TryParseTelemetryToken(normalizedToken, out var route))
+        {
+            return false;
+        }
+
+        routeSelection = FileTransferRouteResolver.Resolve(route);
+        return true;
+    }
+
+    private static bool IsRouteTokenCompatibleWithSelection(
+        string? routeToken,
+        int protocolVersion,
+        FileTransferRouteSelection selection)
+    {
+        if (selection.ProtocolVersion != protocolVersion)
+        {
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(routeToken))
+        {
+            return true;
+        }
+
+        return FileTransferRouteResolver.TryNormalizeTelemetryToken(routeToken, protocolVersion, out var normalizedToken) &&
+               string.Equals(normalizedToken, selection.TelemetryToken, StringComparison.Ordinal);
+    }
 
     private static bool IsV6StreamingTransport(IFileTransferSignalingTransport? currentTransport)
         => currentTransport is IFileTransferProtocolCapabilities { SupportsFileTransferV6Streaming: true };
@@ -3420,22 +3725,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             return FileTransferRuntimeProfileSelection.Default("terminal");
         }
 
-        if (context.NegotiatedDataProtocolVersion < FileTransferProtocol.ProtocolVersionV6)
-        {
-            return FileTransferRuntimeProfileSelection.Default("protocol_not_v6");
-        }
-
-        if (!IsOutboundV6PrimaryRegularNknWithoutTunaRecoveryLocked(context))
-        {
-            return FileTransferRuntimeProfileSelection.Default("not_primary_regular_nkn");
-        }
-
-        if (IsPrimaryRegularNknBulkV6ProfileEnabled(transport))
-        {
-            return FileTransferRuntimeProfileSelection.PrimaryRegularNknBulkV6("conservative_regular_nkn");
-        }
-
-        return FileTransferRuntimeProfileSelection.Default("transport_profile_not_conservative");
+        return FileTransferRuntimeProfileSelection.FromRouteSelection(context.RouteSelection);
     }
 
     private FileTransferRuntimeProfileSelection ResolveFileTransferRuntimeProfileLocked(
@@ -3451,22 +3741,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             return FileTransferRuntimeProfileSelection.Default("terminal");
         }
 
-        if (context.NegotiatedDataProtocolVersion < FileTransferProtocol.ProtocolVersionV6)
-        {
-            return FileTransferRuntimeProfileSelection.Default("protocol_not_v6");
-        }
-
-        if (!IsInboundV6PrimaryRegularNknWithoutTunaRecoveryLocked(context))
-        {
-            return FileTransferRuntimeProfileSelection.Default("not_primary_regular_nkn");
-        }
-
-        if (IsPrimaryRegularNknBulkV6ProfileEnabled(transport))
-        {
-            return FileTransferRuntimeProfileSelection.PrimaryRegularNknBulkV6("conservative_regular_nkn");
-        }
-
-        return FileTransferRuntimeProfileSelection.Default("transport_profile_not_conservative");
+        return FileTransferRuntimeProfileSelection.FromRouteSelection(context.RouteSelection);
     }
 
     private static void ApplyFileTransferRuntimeProfileSelectionLocked(
@@ -3950,6 +4225,7 @@ public sealed partial class SessionFileTransferService : IDisposable
 
     private enum FileTransferBridgeRecoveryPolicy
     {
+        RegularNknV4Fast,
         TunaStrictRecovery,
         PostTunaFallbackStrictRecovery,
         PrimaryRegularNknQuietRecovery,
@@ -3988,11 +4264,26 @@ public sealed partial class SessionFileTransferService : IDisposable
         public static FileTransferRuntimeProfileSelection Default(string reason)
             => new(FileTransferRuntimeProfile.Default, FileTransferBridgeRecoveryPolicy.TunaStrictRecovery, reason);
 
+        public static FileTransferRuntimeProfileSelection RegularNknV4Fast(string reason)
+            => new(FileTransferRuntimeProfile.Default, FileTransferBridgeRecoveryPolicy.RegularNknV4Fast, reason);
+
+        public static FileTransferRuntimeProfileSelection PostTunaFallback(string reason)
+            => new(FileTransferRuntimeProfile.Default, FileTransferBridgeRecoveryPolicy.PostTunaFallbackStrictRecovery, reason);
+
         public static FileTransferRuntimeProfileSelection PrimaryRegularNknBulkV6(string reason)
             => new(
                 FileTransferRuntimeProfile.PrimaryRegularNknBulkV6,
                 FileTransferBridgeRecoveryPolicy.PrimaryRegularNknQuietRecovery,
                 reason);
+
+        public static FileTransferRuntimeProfileSelection FromRouteSelection(FileTransferRouteSelection routeSelection)
+            => routeSelection.Route switch
+            {
+                FileTransferRoute.RegularNknV4Fast => RegularNknV4Fast(routeSelection.SelectionReason),
+                FileTransferRoute.PostTunaFallbackV6 => PostTunaFallback(routeSelection.SelectionReason),
+                FileTransferRoute.DiagnosticRegularNknV6 => PrimaryRegularNknBulkV6(routeSelection.SelectionReason),
+                _ => Default(routeSelection.SelectionReason),
+            };
 
         public bool UsesRegularNknSparseEngine =>
             Profile is FileTransferRuntimeProfile.PrimaryRegularNknBulkV6;
@@ -4010,6 +4301,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         {
             FileTransferBridgeRecoveryPolicy.PrimaryRegularNknQuietRecovery => "primary_regular_nkn_quiet",
             FileTransferBridgeRecoveryPolicy.PostTunaFallbackStrictRecovery => "post_tuna_fallback_strict",
+            FileTransferBridgeRecoveryPolicy.RegularNknV4Fast => "regular_nkn_v4_fast",
             _ => "tuna_strict",
         };
 
@@ -4046,6 +4338,9 @@ public sealed partial class SessionFileTransferService : IDisposable
         public int OfferedDataProtocolVersion { get; set; } = FileTransferProtocol.ProtocolVersionV6;
 
         public int NegotiatedDataProtocolVersion { get; set; } = FileTransferProtocol.ProtocolVersionV6;
+
+        public FileTransferRouteSelection RouteSelection { get; set; } =
+            FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
 
         public bool V6RegularNknBulkSparseProfileActive { get; set; }
 
@@ -4181,6 +4476,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         public bool PullTransportResumeRequestPending { get; set; }
 
         public int PullTransportRebindGeneration { get; set; }
+
+        public int TunaActivationBarrierStateSendSuppressedCount { get; set; }
 
         public long LastRecoveredV5TransportHandoffEpoch { get; set; }
 
@@ -4664,7 +4961,7 @@ public sealed partial class SessionFileTransferService : IDisposable
 
     private sealed class InboundTransferContext
     {
-        public InboundTransferContext(FileTransferOfferV2 offer)
+        public InboundTransferContext(FileTransferOfferV2 offer, FileTransferRouteSelection routeSelection)
         {
             ArgumentNullException.ThrowIfNull(offer);
             SessionId = offer.SessionId;
@@ -4672,6 +4969,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             FileName = offer.FileName;
             FileSizeBytes = offer.FileSizeBytes;
             OfferedDataProtocolVersion = offer.PreferredDataProtocolVersion ?? 0;
+            RouteSelection = routeSelection;
+            NegotiatedDataProtocolVersion = routeSelection.ProtocolVersion;
         }
 
         public CancellationTokenSource LifetimeCts { get; } = new();
@@ -4689,6 +4988,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         public int OfferedDataProtocolVersion { get; }
 
         public int NegotiatedDataProtocolVersion { get; set; } = FileTransferProtocol.ProtocolVersionV6;
+
+        public FileTransferRouteSelection RouteSelection { get; set; }
 
         public bool V6RegularNknBulkSparseProfileActive { get; set; }
 
@@ -4938,6 +5239,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         public bool PullTransportResumeRequestPending { get; set; }
 
         public int PullTransportRebindGeneration { get; set; }
+
+        public int TunaActivationBarrierStateSendSuppressedCount { get; set; }
 
         public long LastRecoveredV5TransportHandoffEpoch { get; set; }
 

@@ -794,9 +794,25 @@ public sealed partial class SessionFileTransferService
 
     private bool TryPauseOutboundTransportLocked(OutboundTransferContext context, string reason, bool requiresResumeRequest)
     {
-        if (context.PullTransportPaused || context.IsTerminal)
+        if (context.IsTerminal)
         {
             return false;
+        }
+
+        if (context.PullTransportPaused)
+        {
+            if (!IsTunaActivationNegotiationTransportPauseReason(reason) ||
+                IsTunaActivationNegotiationTransportPauseReason(context.PullTransportPauseReason))
+            {
+                return false;
+            }
+
+            context.PullTransportPausedSinceUtc = DateTimeOffset.UtcNow;
+            context.PullTransportGraceDeadlineUtc = context.PullTransportPausedSinceUtc.Value.AddMilliseconds(PullSessionTransportRecoveryGraceMs);
+            context.PullTransportPauseReason = reason;
+            context.PullTransportResumeRequestPending = false;
+            context.V4SenderPumpLastWakeReason = "tuna_activation_barrier";
+            return true;
         }
 
         context.PullTransportPaused = true;
@@ -809,9 +825,24 @@ public sealed partial class SessionFileTransferService
 
     private bool TryPauseInboundTransportLocked(InboundTransferContext context, string reason, bool requiresResumeRequest)
     {
-        if (context.PullTransportPaused || context.IsTerminal)
+        if (context.IsTerminal)
         {
             return false;
+        }
+
+        if (context.PullTransportPaused)
+        {
+            if (!IsTunaActivationNegotiationTransportPauseReason(reason) ||
+                IsTunaActivationNegotiationTransportPauseReason(context.PullTransportPauseReason))
+            {
+                return false;
+            }
+
+            context.PullTransportPausedSinceUtc = DateTimeOffset.UtcNow;
+            context.PullTransportGraceDeadlineUtc = context.PullTransportPausedSinceUtc.Value.AddMilliseconds(PullSessionTransportRecoveryGraceMs);
+            context.PullTransportPauseReason = reason;
+            context.PullTransportResumeRequestPending = false;
+            return true;
         }
 
         context.PullTransportPaused = true;

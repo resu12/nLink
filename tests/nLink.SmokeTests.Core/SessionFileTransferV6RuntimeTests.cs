@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Security.Cryptography;
 using NLink.Core.FileTransfer;
 
@@ -18,6 +19,8 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         var payload = Enumerable.Range(0, payloadSize).Select(static index => (byte)(index % 251)).ToArray();
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        EnsureV6RouteForTest(senderTransport);
+        EnsureV6RouteForTest(receiverTransport);
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         using var receiver = new SessionFileTransferService();
@@ -57,6 +60,8 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         var payload = Enumerable.Range(0, 128_000).Select(static index => (byte)(index % 251)).ToArray();
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        EnsureV6RouteForTest(senderTransport);
+        EnsureV6RouteForTest(receiverTransport);
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         using var receiver = new SessionFileTransferService();
@@ -83,7 +88,7 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         var logTail = ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_bridge_recovery_policy_selected; direction=outbound", logTail, StringComparison.Ordinal);
         Assert.Contains("runtime_profile=Default", logTail, StringComparison.Ordinal);
-        Assert.Contains("selection_reason=transport_profile_not_conservative", logTail, StringComparison.Ordinal);
+        Assert.Contains("selection_reason=file_tuna_active", logTail, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_primary_regular_nkn_bulk_v6_selected", logTail, StringComparison.Ordinal);
     }
 
@@ -95,6 +100,8 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         var payload = Enumerable.Range(0, 256_000).Select(static index => (byte)(index % 251)).ToArray();
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        EnsureV6RouteForTest(senderTransport);
+        EnsureV6RouteForTest(receiverTransport);
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         sender.AttachTransport(senderTransport);
@@ -156,6 +163,8 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         var payload = Enumerable.Range(0, 512_000).Select(static index => (byte)(index % 251)).ToArray();
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        EnsureV6RouteForTest(senderTransport);
+        EnsureV6RouteForTest(receiverTransport);
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         sender.AttachTransport(senderTransport);
@@ -202,6 +211,8 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         var payload = Enumerable.Range(0, 512_000).Select(static index => (byte)(index % 251)).ToArray();
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        EnsureV6RouteForTest(senderTransport);
+        EnsureV6RouteForTest(receiverTransport);
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         sender.AttachTransport(senderTransport);
@@ -264,6 +275,8 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         var payload = Enumerable.Range(0, 2_000_000).Select(static index => (byte)(index % 251)).ToArray();
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        EnsureV6RouteForTest(senderTransport);
+        EnsureV6RouteForTest(receiverTransport);
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         sender.AttachTransport(senderTransport);
@@ -282,6 +295,7 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
                 SessionId = offer.SessionId,
                 TransferId = transferId,
                 AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                FileTransferRoute = offer.FileTransferRoute,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
@@ -357,6 +371,8 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         var payload = new byte[20 * 1024 * 1024];
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        EnsureV6RouteForTest(senderTransport);
+        EnsureV6RouteForTest(receiverTransport);
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         sender.AttachTransport(senderTransport);
@@ -408,6 +424,8 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         var payload = new byte[20 * 1024 * 1024];
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        EnsureV6RouteForTest(senderTransport);
+        EnsureV6RouteForTest(receiverTransport);
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         sender.AttachTransport(senderTransport);
@@ -481,6 +499,8 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         var payload = new byte[16 * 1024 * 1024];
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        EnsureV6RouteForTest(senderTransport);
+        EnsureV6RouteForTest(receiverTransport);
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         sender.AttachTransport(senderTransport);
@@ -607,6 +627,8 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         var payload = new byte[20 * 1024 * 1024];
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        EnsureV6RouteForTest(senderTransport);
+        EnsureV6RouteForTest(receiverTransport);
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         sender.AttachTransport(senderTransport);
@@ -659,8 +681,20 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
             },
             CancellationToken.None);
 
+        string? pressureClearedLogTail = null;
         await WaitUntilAsync(
-            () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v6_regular_nkn_frontier_pressure_cleared", StringComparison.Ordinal),
+            () =>
+            {
+                var tail = ReadOperationalLogTail(logStart);
+                if (!tail.Contains("event=filetransfer_v6_regular_nkn_frontier_pressure_cleared", StringComparison.Ordinal) ||
+                    !tail.Contains("reason=receiver_state_progress", StringComparison.Ordinal))
+                {
+                    return false;
+                }
+
+                pressureClearedLogTail = tail;
+                return true;
+            },
             timeoutMs: 5000);
         await WaitUntilAsync(
             () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>()
@@ -669,7 +703,7 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
                               batch.StartChunkIndex + batch.ChunkCount > 12 + pressureSendAheadLimitChunks),
             timeoutMs: 5000);
 
-        var logTail = ReadOperationalLogTail(logStart);
+        var logTail = pressureClearedLogTail ?? ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_v6_regular_nkn_frontier_pressure_cleared", logTail, StringComparison.Ordinal);
         Assert.Contains("reason=receiver_state_progress", logTail, StringComparison.Ordinal);
     }
@@ -812,6 +846,8 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         var payload = Enumerable.Range(0, 512_000).Select(static index => (byte)(index % 251)).ToArray();
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        EnsureV6RouteForTest(senderTransport);
+        EnsureV6RouteForTest(receiverTransport);
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         sender.AttachTransport(senderTransport);
@@ -829,6 +865,7 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
                 SessionId = offer.SessionId,
                 TransferId = transferId,
                 AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                FileTransferRoute = offer.FileTransferRoute,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
@@ -2823,6 +2860,8 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         var payload = Enumerable.Range(0, 512_000).Select(static index => (byte)(index % 251)).ToArray();
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        EnsureV6RouteForTest(senderTransport);
+        EnsureV6RouteForTest(receiverTransport);
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         sender.AttachTransport(senderTransport);
@@ -2841,6 +2880,7 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
                 SessionId = offer.SessionId,
                 TransferId = transferId,
                 AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                FileTransferRoute = offer.FileTransferRoute,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
@@ -2885,6 +2925,8 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         var payload = Enumerable.Range(0, 512_000).Select(static index => (byte)(index % 251)).ToArray();
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        EnsureV6RouteForTest(senderTransport);
+        EnsureV6RouteForTest(receiverTransport);
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         sender.AttachTransport(senderTransport);
@@ -2903,6 +2945,7 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
                 SessionId = offer.SessionId,
                 TransferId = transferId,
                 AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                FileTransferRoute = offer.FileTransferRoute,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
@@ -2952,6 +2995,8 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         var payload = Enumerable.Range(0, 512_000).Select(static index => (byte)(index % 251)).ToArray();
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        EnsureV6RouteForTest(senderTransport);
+        EnsureV6RouteForTest(receiverTransport);
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         sender.AttachTransport(senderTransport);
@@ -2970,6 +3015,7 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
                 SessionId = offer.SessionId,
                 TransferId = transferId,
                 AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                FileTransferRoute = offer.FileTransferRoute,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
@@ -3027,6 +3073,8 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         var payload = Enumerable.Range(0, 512_000).Select(static index => (byte)(index % 251)).ToArray();
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        EnsureV6RouteForTest(senderTransport);
+        EnsureV6RouteForTest(receiverTransport);
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         sender.AttachTransport(senderTransport);
@@ -3045,6 +3093,7 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
                 SessionId = offer.SessionId,
                 TransferId = transferId,
                 AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                FileTransferRoute = offer.FileTransferRoute,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
@@ -3100,6 +3149,8 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         var payload = Enumerable.Range(0, 512_000).Select(static index => (byte)(index % 251)).ToArray();
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        EnsureV6RouteForTest(senderTransport);
+        EnsureV6RouteForTest(receiverTransport);
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         sender.AttachTransport(senderTransport);
@@ -3118,6 +3169,7 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
                 SessionId = offer.SessionId,
                 TransferId = transferId,
                 AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                FileTransferRoute = offer.FileTransferRoute,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
@@ -3171,6 +3223,8 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         var payload = Enumerable.Range(0, 512_000).Select(static index => (byte)(index % 251)).ToArray();
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        EnsureV6RouteForTest(senderTransport);
+        EnsureV6RouteForTest(receiverTransport);
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         sender.AttachTransport(senderTransport);
@@ -3189,6 +3243,7 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
                 SessionId = offer.SessionId,
                 TransferId = transferId,
                 AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                FileTransferRoute = offer.FileTransferRoute,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
@@ -3476,6 +3531,7 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         byte[] payload,
         int? chunkSizeBytes = null)
     {
+        EnsureV6RouteForTest(senderTransport);
         await sender.TryStartSendAsync(
             new FileTransferSendDescriptor("v6-manual-sender.bin", payload.Length, transferId, chunkSizeBytes),
             _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
@@ -3488,6 +3544,7 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
                 SessionId = offer.SessionId,
                 TransferId = transferId,
                 AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                FileTransferRoute = offer.FileTransferRoute,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentSessionOpens.Any(), timeoutMs: 5000);
@@ -3547,6 +3604,9 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         string sha256,
         FileTransferWriteStreamFactory openWriteStreamAsync)
     {
+        EnsureV6RouteForTest(senderTransport);
+        EnsureAttachedReceiverV6RouteForTest(receiver);
+        var routeToken = ResolveRouteToken(senderTransport);
         await senderTransport.SendFileTransferOfferAsync(
             new FileTransferOfferV2
             {
@@ -3555,6 +3615,7 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
                 FileName = fileName,
                 FileSizeBytes = fileSizeBytes,
                 PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                FileTransferRoute = routeToken,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
@@ -3566,6 +3627,7 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
                 SessionId = sessionId,
                 TransferId = transferId,
                 ProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                FileTransferRoute = routeToken,
                 SessionRole = FileTransferProtocol.SessionRoleSender,
                 ChunkSizeBytes = 4,
                 InitialPipelineDepth = 1,
@@ -3574,6 +3636,38 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State is FileTransferTransferState.AwaitingMetadata or FileTransferTransferState.Receiving);
         return await senderTransport.OpenFileTransferDataSessionAsync(sessionId, transferId, CancellationToken.None);
     }
+
+    private static void EnsureAttachedReceiverV6RouteForTest(SessionFileTransferService receiver)
+    {
+        var field = typeof(SessionFileTransferService).GetField("transport", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        if (field!.GetValue(receiver) is LoopbackFileTransferTransport transport)
+        {
+            EnsureV6RouteForTest(transport);
+        }
+    }
+
+    private static void EnsureV6RouteForTest(LoopbackFileTransferTransport transport)
+    {
+        if (transport.IsFileTunaActiveForRouteSelection ||
+            transport.IsPostTunaFileFallbackActiveForRouteSelection ||
+            transport.IsDiagnosticRegularNknV6RouteEnabled)
+        {
+            return;
+        }
+
+        if (transport.FileTransferTransportProfileKind == FileTransferTransportProfileKind.ConservativeNknStartup)
+        {
+            transport.IsDiagnosticRegularNknV6RouteEnabled = true;
+        }
+        else
+        {
+            transport.IsFileTunaActiveForRouteSelection = true;
+        }
+    }
+
+    private static string ResolveRouteToken(LoopbackFileTransferTransport transport)
+        => FileTransferRouteResolver.Resolve(FileTransferRouteResolverInput.FromTransport(transport)).TelemetryToken;
 
     private static FileTransferManifestFrameV6 CreateManifest(
         string sessionId,

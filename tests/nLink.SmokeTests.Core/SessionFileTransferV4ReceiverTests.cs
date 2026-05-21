@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Security.Cryptography;
 using NLink.Core.FileTransfer;
 
@@ -255,6 +256,86 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
         {
             SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests = previousTimeout;
         }
+    }
+
+    [Fact]
+    public async Task V4SparseReceiver_TunaActivationPauseSuppressesStateSends()
+    {
+        const string transferId = "transfer_v4_receiver_tuna_activation_pause";
+        const string sessionId = "session_v4_receiver_tuna_activation_pause";
+        var logStart = GetOperationalLogLength();
+        var payload = Enumerable.Range(1, 80).Select(static value => (byte)value).ToArray();
+        var sha256 = Convert.ToBase64String(SHA256.HashData(payload));
+        using var destination = new NonDisposingMemoryStream();
+        using var senderTransport = new LoopbackFileTransferTransport(sessionId);
+        using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        senderTransport.FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup;
+        senderTransport.TransportAccelerationStatusReason = "test_tuna_pending";
+        receiverTransport.FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup;
+        receiverTransport.TransportAccelerationStatusReason = "test_tuna_pending";
+        var receiverStateSendCount = 0;
+        receiverTransport.OutboundDataFrameDeliveryOverrideAsync = (_, frame, _) =>
+        {
+            if (frame is FileTransferStateFrameV4 and not FileTransferReceiverStateFrameV6)
+            {
+                Interlocked.Increment(ref receiverStateSendCount);
+            }
+
+            return Task.FromResult(false);
+        };
+        senderTransport.Connect(receiverTransport);
+        using var receiver = new SessionFileTransferService();
+        receiver.AttachTransport(receiverTransport);
+
+        var senderSession = await StartInboundRegularNknV4ReceiverAsync(
+            senderTransport,
+            receiver,
+            transferId,
+            sessionId,
+            "v4-receiver-tuna-activation-pause.bin",
+            payload.Length,
+            sha256,
+            (_, _) => Task.FromResult<Stream>(destination));
+
+        await senderSession.SendAsync(CreateRegularNknV4Manifest(sessionId, transferId, "v4-receiver-tuna-activation-pause.bin", payload.Length, chunkSizeBytes: 4, sha256), CancellationToken.None);
+        await senderSession.SendAsync(
+            new FileTransferChunkBatchFrameV4
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                StartChunkIndex = 0,
+                ChunkCount = 1,
+                DataSegments = [payload.Take(4).ToArray()],
+            },
+            CancellationToken.None);
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.BytesTransferred == 4, timeoutMs: 5000);
+
+        receiverTransport.SetLocalDataSessionsUnavailableForTests("tuna_activation_negotiating");
+        await WaitUntilAsync(
+            () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_transport_paused; direction=inbound", StringComparison.Ordinal),
+            timeoutMs: 5000);
+        var stateSendCountBeforePause = Volatile.Read(ref receiverStateSendCount);
+
+        receiverTransport.ReceiveDeliveredDataFrame(
+            new FileTransferChunkBatchFrameV4
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                StartChunkIndex = 1,
+                ChunkCount = 16,
+                DataSegments = Enumerable.Range(1, 16)
+                    .Select(index => payload.Skip(index * 4).Take(4).ToArray())
+                    .ToList(),
+            });
+
+        await WaitUntilAsync(
+            () => ReadOperationalLogTail(logStart).Contains(
+                "event=filetransfer_v4_state_send_suppressed_for_tuna_activation_barrier;",
+                StringComparison.Ordinal),
+            timeoutMs: 5000);
+
+        Assert.Equal(stateSendCountBeforePause, Volatile.Read(ref receiverStateSendCount));
+        Assert.NotEqual(FileTransferTransferState.Failed, receiver.Snapshot.Inbound?.State);
     }
 
     [Fact]
@@ -2226,6 +2307,71 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
             Sha256Base64 = sha256,
         };
 
+    private static FileTransferManifestFrameV4 CreateRegularNknV4Manifest(
+        string sessionId,
+        string transferId,
+        string fileName,
+        long fileSizeBytes,
+        int chunkSizeBytes,
+        string sha256)
+        => new()
+        {
+            SessionId = sessionId,
+            TransferId = transferId,
+            FileName = fileName,
+            FileSizeBytes = fileSizeBytes,
+            ChunkSizeBytes = chunkSizeBytes,
+            ChunkCount = checked((int)((fileSizeBytes + chunkSizeBytes - 1) / chunkSizeBytes)),
+            Sha256Base64 = sha256,
+        };
+
+    private static async Task<IFileTransferDataSession> StartInboundRegularNknV4ReceiverAsync(
+        LoopbackFileTransferTransport senderTransport,
+        SessionFileTransferService receiver,
+        string transferId,
+        string sessionId,
+        string fileName,
+        long fileSizeBytes,
+        string sha256,
+        FileTransferWriteStreamFactory openWriteStreamAsync)
+    {
+        const string routeToken = FileTransferRouteResolver.RegularNknV4FastToken;
+        await senderTransport.SendFileTransferOfferAsync(
+            new FileTransferOfferV2
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                FileName = fileName,
+                FileSizeBytes = fileSizeBytes,
+                PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                FileTransferRoute = routeToken,
+            },
+            CancellationToken.None);
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+
+        await receiver.AcceptIncomingTransferAsync(transferId, openWriteStreamAsync, CancellationToken.None);
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.AwaitingMetadata);
+
+        var logStart = ReadOperationalLogText().Length;
+        await senderTransport.SendFileTransferSessionOpenAsync(
+            new FileTransferSessionOpenV2
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                FileTransferRoute = routeToken,
+                SessionRole = FileTransferProtocol.SessionRoleSender,
+                ChunkSizeBytes = 4,
+                InitialPipelineDepth = 1,
+            },
+            CancellationToken.None);
+        await WaitUntilAsync(
+            () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_session_opened; direction=inbound", StringComparison.Ordinal) &&
+                  ReadOperationalLogTail(logStart).Contains("protocol_version=4", StringComparison.Ordinal),
+            timeoutMs: 5000);
+        return await senderTransport.OpenFileTransferDataSessionAsync(sessionId, transferId, CancellationToken.None).ConfigureAwait(false);
+    }
+
     private static async Task<IFileTransferDataSession> StartInboundV4ReceiverAsync(
         LoopbackFileTransferTransport senderTransport,
         SessionFileTransferService receiver,
@@ -2236,6 +2382,8 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
         string sha256,
         FileTransferWriteStreamFactory openWriteStreamAsync)
     {
+        EnsureAttachedReceiverV6RouteForTest(receiver, senderTransport);
+        var routeToken = ResolveRouteToken(senderTransport);
         await senderTransport.SendFileTransferOfferAsync(
             new FileTransferOfferV2
             {
@@ -2244,6 +2392,7 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
                 FileName = fileName,
                 FileSizeBytes = fileSizeBytes,
                 PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                FileTransferRoute = routeToken,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
@@ -2258,6 +2407,7 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
                 SessionId = sessionId,
                 TransferId = transferId,
                 ProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                FileTransferRoute = routeToken,
                 SessionRole = FileTransferProtocol.SessionRoleSender,
                 ChunkSizeBytes = 4,
                 InitialPipelineDepth = 1,
@@ -2266,6 +2416,65 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
         await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v6_receiver_started;", StringComparison.Ordinal), timeoutMs: 5000);
         return await senderTransport.OpenFileTransferDataSessionAsync(sessionId, transferId, CancellationToken.None).ConfigureAwait(false);
     }
+
+    private static void EnsureAttachedReceiverV6RouteForTest(
+        SessionFileTransferService receiver,
+        LoopbackFileTransferTransport senderTransport)
+    {
+        var field = typeof(SessionFileTransferService).GetField("transport", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        if (field!.GetValue(receiver) is LoopbackFileTransferTransport transport)
+        {
+            EnsureMatchingV6RouteForTest(senderTransport, transport);
+        }
+    }
+
+    private static void EnsureMatchingV6RouteForTest(
+        LoopbackFileTransferTransport senderTransport,
+        LoopbackFileTransferTransport receiverTransport)
+    {
+        var route = ResolveV6RouteForTest(senderTransport, receiverTransport);
+        ApplyV6RouteForTest(senderTransport, route);
+        ApplyV6RouteForTest(receiverTransport, route);
+    }
+
+    private static FileTransferRoute ResolveV6RouteForTest(
+        LoopbackFileTransferTransport senderTransport,
+        LoopbackFileTransferTransport receiverTransport)
+    {
+        if (senderTransport.IsPostTunaFileFallbackActiveForRouteSelection ||
+            receiverTransport.IsPostTunaFileFallbackActiveForRouteSelection)
+        {
+            return FileTransferRoute.PostTunaFallbackV6;
+        }
+
+        if (senderTransport.IsDiagnosticRegularNknV6RouteEnabled ||
+            receiverTransport.IsDiagnosticRegularNknV6RouteEnabled)
+        {
+            return FileTransferRoute.DiagnosticRegularNknV6;
+        }
+
+        if (senderTransport.IsFileTunaActiveForRouteSelection ||
+            receiverTransport.IsFileTunaActiveForRouteSelection)
+        {
+            return FileTransferRoute.FileTunaV6;
+        }
+
+        return senderTransport.FileTransferTransportProfileKind == FileTransferTransportProfileKind.ConservativeNknStartup ||
+               receiverTransport.FileTransferTransportProfileKind == FileTransferTransportProfileKind.ConservativeNknStartup
+            ? FileTransferRoute.DiagnosticRegularNknV6
+            : FileTransferRoute.FileTunaV6;
+    }
+
+    private static void ApplyV6RouteForTest(LoopbackFileTransferTransport transport, FileTransferRoute route)
+    {
+        transport.IsFileTunaActiveForRouteSelection = route == FileTransferRoute.FileTunaV6;
+        transport.IsPostTunaFileFallbackActiveForRouteSelection = route == FileTransferRoute.PostTunaFallbackV6;
+        transport.IsDiagnosticRegularNknV6RouteEnabled = route == FileTransferRoute.DiagnosticRegularNknV6;
+    }
+
+    private static string ResolveRouteToken(LoopbackFileTransferTransport transport)
+        => FileTransferRouteResolver.Resolve(FileTransferRouteResolverInput.FromTransport(transport)).TelemetryToken;
 
     private sealed class WriteOnlySeekableMemoryStream : Stream
     {

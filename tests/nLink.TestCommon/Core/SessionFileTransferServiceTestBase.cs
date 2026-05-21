@@ -166,7 +166,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         return builder.ToString();
     }
 
-    protected sealed class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, ITransportAccelerationStatus
+    protected sealed class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, ITransportAccelerationStatus
     {
         private readonly string sessionId;
         private readonly ConcurrentDictionary<string, LoopbackDataSession> dataSessions = new(StringComparer.Ordinal);
@@ -174,6 +174,8 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         private int activeDataSessionSends;
         private int maxConcurrentDataSessionSends;
         private int dataSessionSendCount;
+        private bool shouldUseFileTransferV6ForAcceleration;
+        private bool isFileTunaActiveForRouteSelection;
         public LoopbackFileTransferTransport(string sessionId)
         {
             this.sessionId = sessionId;
@@ -181,7 +183,22 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
 
         public bool SupportsFileTransferV6Streaming { get; set; } = true;
         public bool IsTransportAccelerationActive { get; set; }
-        public bool ShouldUseFileTransferV6ForAcceleration { get; set; }
+        public bool ShouldUseFileTransferV6ForAcceleration
+        {
+            get => shouldUseFileTransferV6ForAcceleration;
+            set => shouldUseFileTransferV6ForAcceleration = value;
+        }
+
+        public bool IsFileTunaActiveForRouteSelection
+        {
+            get => isFileTunaActiveForRouteSelection || shouldUseFileTransferV6ForAcceleration;
+            set => isFileTunaActiveForRouteSelection = value;
+        }
+
+        public bool IsPostTunaFileFallbackActiveForRouteSelection { get; set; }
+
+        public bool IsDiagnosticRegularNknV6RouteEnabled { get; set; }
+
         public string TransportAccelerationStatusReason { get; set; } = "test_default_regular_nkn";
         public FileTransferTransportProfileKind FileTransferTransportProfileKind { get; set; } = FileTransferTransportProfileKind.Default;
         public int DataSessionSendDelayMs { get; set; }
@@ -197,6 +214,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         public Func<LoopbackFileTransferTransport, FileTransferCompleteV1, CancellationToken, Task<bool>>? OutboundCompleteDeliveryOverrideAsync { get; set; }
         public FileTransferTransportKind NextDataFrameTransportKind { get; set; } = FileTransferTransportKind.RegularNkn;
         public Func<LoopbackFileTransferTransport, FileTransferSessionOpenV2, CancellationToken, Task<bool>>? OutboundSessionOpenDeliveryOverrideAsync { get; set; }
+        public bool ThrowWhenUnavailableDataSessionSend { get; set; }
         public Func<FileTransferCompleteV1, CancellationToken, Task>? BeforeCompleteDeliveredAsync { get; set; }
         public Exception? OfferSendException { get; init; }
         public ConcurrentQueue<FileTransferErrorV1> SentErrors { get; } = [];
@@ -577,6 +595,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             private int disposed;
             private int activeReader;
             private int available = 1;
+            private string availabilityReason = "available";
             public LoopbackDataSession(LoopbackFileTransferTransport owner, string sessionId, string transferId)
             {
                 this.owner = owner;
@@ -613,6 +632,14 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             {
                 ct.ThrowIfCancellationRequested();
                 ObjectDisposedException.ThrowIf(disposed != 0, this);
+                var availabilityBypass = frame is FileTransferTransportProbeFrameV6 || IsV6RecoveryFeedbackFrame(frame);
+                if (owner.ThrowWhenUnavailableDataSessionSend &&
+                    !IsAvailable &&
+                    !availabilityBypass)
+                {
+                    throw new InvalidOperationException($"File-transfer data session is unavailable: {Volatile.Read(ref availabilityReason)}.");
+                }
+
                 return owner.DeliverDataFrameToPeerAsync(frame, frame is FileTransferChunkBatchFrameV4, ct);
             }
 
@@ -644,6 +671,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
 
                 var updated = isAvailable ? 1 : 0;
                 var previous = Interlocked.Exchange(ref available, updated);
+                Volatile.Write(ref availabilityReason, reason);
                 if (previous == updated)
                 {
                     return;

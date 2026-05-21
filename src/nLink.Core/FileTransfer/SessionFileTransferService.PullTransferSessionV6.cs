@@ -18,7 +18,8 @@ public sealed partial class SessionFileTransferService
             {
                 SessionId = context.SessionId,
                 TransferId = context.TransferId,
-                ProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                ProtocolVersion = context.RouteSelection.ProtocolVersion,
+                FileTransferRoute = context.RouteSelection.TelemetryToken,
                 SessionRole = FileTransferProtocol.SessionRoleSender,
                 ChunkSizeBytes = context.ChunkSizeBytes,
                 InitialPipelineDepth = ResolveOutboundInitialPipelineDepth(context),
