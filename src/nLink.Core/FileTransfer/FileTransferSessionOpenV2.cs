@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace NLink.Core.FileTransfer;
 
 public sealed record FileTransferSessionOpenV2
@@ -11,6 +13,9 @@ public sealed record FileTransferSessionOpenV2
     public string TransferId { get; init; } = string.Empty;
 
     public int ProtocolVersion { get; init; } = FileTransferProtocol.ProtocolVersionV6;
+
+    [JsonPropertyName("fileTransferRoute")]
+    public string? FileTransferRoute { get; init; }
 
     public string SessionRole { get; init; } = string.Empty;
 

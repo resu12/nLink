@@ -92,7 +92,8 @@ public static class FileTransferPayloadCodec
             !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.OfferTypeV2, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId) ||
             !TryNormalizeFileName(parsed.FileName, out var fileName) ||
             parsed.FileSizeBytes <= 0 ||
-            !TryNormalizeRequiredProtocolVersion(parsed.PreferredDataProtocolVersion, out var preferredDataProtocolVersion))
+            !TryNormalizeRequiredProtocolVersion(parsed.PreferredDataProtocolVersion, out var preferredDataProtocolVersion) ||
+            !TryNormalizeOptionalRouteToken(parsed.FileTransferRoute, preferredDataProtocolVersion, out var fileTransferRoute))
         {
             return false;
         }
@@ -105,6 +106,7 @@ public static class FileTransferPayloadCodec
             TransferId = transferId,
             FileName = fileName,
             PreferredDataProtocolVersion = preferredDataProtocolVersion,
+            FileTransferRoute = fileTransferRoute,
         };
         return true;
     }
@@ -115,7 +117,8 @@ public static class FileTransferPayloadCodec
         if (!TryDeserialize(utf8Json, out FileTransferAcceptV1? parsed) ||
             parsed is null ||
             !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.AcceptTypeV1, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId) ||
-            !TryNormalizeRequiredProtocolVersion(parsed.AcceptedDataProtocolVersion, out var acceptedDataProtocolVersion))
+            !TryNormalizeRequiredProtocolVersion(parsed.AcceptedDataProtocolVersion, out var acceptedDataProtocolVersion) ||
+            !TryNormalizeOptionalRouteToken(parsed.FileTransferRoute, acceptedDataProtocolVersion, out var fileTransferRoute))
         {
             return false;
         }
@@ -127,6 +130,7 @@ public static class FileTransferPayloadCodec
             SessionId = sessionId,
             TransferId = transferId,
             AcceptedDataProtocolVersion = acceptedDataProtocolVersion,
+            FileTransferRoute = fileTransferRoute,
         };
         return true;
     }
@@ -182,6 +186,7 @@ public static class FileTransferPayloadCodec
             parsed is null ||
             !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.SessionOpenTypeV2, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId) ||
             !IsSupportedDataProtocolVersion(parsed.ProtocolVersion) ||
+            !TryNormalizeOptionalRouteToken(parsed.FileTransferRoute, parsed.ProtocolVersion, out var fileTransferRoute) ||
             !TryNormalizeSessionRole(parsed.SessionRole, out var sessionRole) ||
             parsed.ChunkSizeBytes <= 0 ||
             parsed.ChunkSizeBytes > FileTransferProtocol.MaxChunkRawBytes ||
@@ -196,6 +201,7 @@ public static class FileTransferPayloadCodec
             Type = FileTransferProtocol.SessionOpenTypeV2,
             SessionId = sessionId,
             TransferId = transferId,
+            FileTransferRoute = fileTransferRoute,
             SessionRole = sessionRole,
         };
         return true;
@@ -233,6 +239,12 @@ public static class FileTransferPayloadCodec
         normalizedProtocolVersion = protocolVersion.Value;
         return true;
     }
+
+    internal static bool TryNormalizeOptionalRouteToken(
+        string? routeToken,
+        int protocolVersion,
+        out string? normalizedRouteToken)
+        => FileTransferRouteResolver.TryNormalizeTelemetryToken(routeToken, protocolVersion, out normalizedRouteToken);
 
     public static bool TryDeserializeError(ReadOnlySpan<byte> utf8Json, out FileTransferErrorV1 msg)
     {

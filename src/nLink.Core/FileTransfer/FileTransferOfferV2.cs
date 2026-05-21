@@ -24,4 +24,7 @@ public sealed record FileTransferOfferV2
 
     [JsonPropertyName("preferredDataProtocolVersion")]
     public int? PreferredDataProtocolVersion { get; init; }
+
+    [JsonPropertyName("fileTransferRoute")]
+    public string? FileTransferRoute { get; init; }
 }

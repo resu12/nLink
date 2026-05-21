@@ -19,6 +19,7 @@ public sealed class FileTransferPayloadCodecTests
                 FileName = " report.pdf ",
                 FileSizeBytes = 123,
                 PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                FileTransferRoute = " FILE_TUNA_V6 ",
             });
 
         var parsed = FileTransferPayloadCodec.TryDeserializeOffer(payload, out var message);
@@ -30,6 +31,7 @@ public sealed class FileTransferPayloadCodecTests
         Assert.Equal(FileTransferProtocol.Kind, message.Kind);
         Assert.Equal(FileTransferProtocol.OfferTypeV2, message.Type);
         Assert.Equal(FileTransferProtocol.ProtocolVersionV6, message.PreferredDataProtocolVersion);
+        Assert.Equal(FileTransferRouteResolver.FileTunaV6Token, message.FileTransferRoute);
     }
 
     [Fact]
@@ -100,6 +102,7 @@ public sealed class FileTransferPayloadCodecTests
                 SessionId = " session_a ",
                 TransferId = " transfer_a ",
                 AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                FileTransferRoute = " FILE_TUNA_V6 ",
             });
 
         var parsed = FileTransferPayloadCodec.TryDeserializeAccept(payload, out var message);
@@ -109,6 +112,7 @@ public sealed class FileTransferPayloadCodecTests
         Assert.Equal("transfer_a", message.TransferId);
         Assert.Equal(FileTransferProtocol.AcceptTypeV1, message.Type);
         Assert.Equal(FileTransferProtocol.ProtocolVersionV6, message.AcceptedDataProtocolVersion);
+        Assert.Equal(FileTransferRouteResolver.FileTunaV6Token, message.FileTransferRoute);
     }
 
     [Fact]
@@ -171,6 +175,7 @@ public sealed class FileTransferPayloadCodecTests
                 SessionId = " session_a ",
                 TransferId = " transfer_a ",
                 ProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                FileTransferRoute = " FILE_TUNA_V6 ",
                 SessionRole = " receiver ",
                 ChunkSizeBytes = 4096,
                 InitialPipelineDepth = 8,
@@ -182,6 +187,7 @@ public sealed class FileTransferPayloadCodecTests
         Assert.Equal("session_a", message.SessionId);
         Assert.Equal("transfer_a", message.TransferId);
         Assert.Equal(FileTransferProtocol.ProtocolVersionV6, message.ProtocolVersion);
+        Assert.Equal(FileTransferRouteResolver.FileTunaV6Token, message.FileTransferRoute);
         Assert.Equal(FileTransferProtocol.SessionRoleReceiver, message.SessionRole);
         Assert.Equal(FileTransferProtocol.SessionOpenTypeV2, message.Type);
     }
@@ -249,6 +255,148 @@ public sealed class FileTransferPayloadCodecTests
         Assert.Equal(FileTransferProtocol.ProtocolVersionV4, message.ProtocolVersion);
         Assert.Equal(FileTransferProtocol.SessionRoleReceiver, message.SessionRole);
         Assert.Equal(FileTransferProtocol.SessionOpenTypeV2, message.Type);
+    }
+
+    [Theory]
+    [InlineData("offer")]
+    [InlineData("accept")]
+    [InlineData("session_open")]
+    public void RouteToken_Missing_RemainsCompatible(string payloadKind)
+    {
+        var parsed = payloadKind switch
+        {
+            "offer" => FileTransferPayloadCodec.TryDeserializeOffer(
+                FileTransferPayloadCodec.Serialize(
+                    new FileTransferOfferV2
+                    {
+                        SessionId = "session_a",
+                        TransferId = "transfer_a",
+                        FileName = "report.pdf",
+                        FileSizeBytes = 123,
+                        PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    }),
+                out var offer) && offer.FileTransferRoute is null,
+            "accept" => FileTransferPayloadCodec.TryDeserializeAccept(
+                FileTransferPayloadCodec.Serialize(
+                    new FileTransferAcceptV1
+                    {
+                        SessionId = "session_a",
+                        TransferId = "transfer_a",
+                        AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    }),
+                out var accept) && accept.FileTransferRoute is null,
+            "session_open" => FileTransferPayloadCodec.TryDeserializeSessionOpen(
+                FileTransferPayloadCodec.Serialize(
+                    new FileTransferSessionOpenV2
+                    {
+                        SessionId = "session_a",
+                        TransferId = "transfer_a",
+                        ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                        SessionRole = FileTransferProtocol.SessionRoleSender,
+                        ChunkSizeBytes = 4096,
+                        InitialPipelineDepth = 1,
+                    }),
+                out var sessionOpen) && sessionOpen.FileTransferRoute is null,
+            _ => false,
+        };
+
+        Assert.True(parsed);
+    }
+
+    [Theory]
+    [InlineData("offer")]
+    [InlineData("accept")]
+    [InlineData("session_open")]
+    public void RouteToken_Invalid_IsRejected(string payloadKind)
+    {
+        var payload = payloadKind switch
+        {
+            "offer" => JsonSerializer.SerializeToUtf8Bytes(
+                new
+                {
+                    kind = FileTransferProtocol.Kind,
+                    type = FileTransferProtocol.OfferTypeV2,
+                    sessionId = "session_a",
+                    transferId = "transfer_a",
+                    fileName = "report.pdf",
+                    fileSizeBytes = 123L,
+                    preferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    fileTransferRoute = "not_a_route",
+                }),
+            "accept" => JsonSerializer.SerializeToUtf8Bytes(
+                new
+                {
+                    kind = FileTransferProtocol.Kind,
+                    type = FileTransferProtocol.AcceptTypeV1,
+                    sessionId = "session_a",
+                    transferId = "transfer_a",
+                    acceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    fileTransferRoute = "not_a_route",
+                }),
+            _ => JsonSerializer.SerializeToUtf8Bytes(
+                new
+                {
+                    kind = FileTransferProtocol.Kind,
+                    type = FileTransferProtocol.SessionOpenTypeV2,
+                    sessionId = "session_a",
+                    transferId = "transfer_a",
+                    protocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    sessionRole = FileTransferProtocol.SessionRoleSender,
+                    chunkSizeBytes = 4096,
+                    initialPipelineDepth = 1,
+                    fileTransferRoute = "not_a_route",
+                }),
+        };
+
+        AssertRoutePayloadRejected(payloadKind, payload);
+    }
+
+    [Theory]
+    [InlineData("offer")]
+    [InlineData("accept")]
+    [InlineData("session_open")]
+    public void RouteToken_ProtocolMismatch_IsRejected(string payloadKind)
+    {
+        var payload = payloadKind switch
+        {
+            "offer" => JsonSerializer.SerializeToUtf8Bytes(
+                new
+                {
+                    kind = FileTransferProtocol.Kind,
+                    type = FileTransferProtocol.OfferTypeV2,
+                    sessionId = "session_a",
+                    transferId = "transfer_a",
+                    fileName = "report.pdf",
+                    fileSizeBytes = 123L,
+                    preferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    fileTransferRoute = FileTransferRouteResolver.FileTunaV6Token,
+                }),
+            "accept" => JsonSerializer.SerializeToUtf8Bytes(
+                new
+                {
+                    kind = FileTransferProtocol.Kind,
+                    type = FileTransferProtocol.AcceptTypeV1,
+                    sessionId = "session_a",
+                    transferId = "transfer_a",
+                    acceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    fileTransferRoute = FileTransferRouteResolver.FileTunaV6Token,
+                }),
+            _ => JsonSerializer.SerializeToUtf8Bytes(
+                new
+                {
+                    kind = FileTransferProtocol.Kind,
+                    type = FileTransferProtocol.SessionOpenTypeV2,
+                    sessionId = "session_a",
+                    transferId = "transfer_a",
+                    protocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    sessionRole = FileTransferProtocol.SessionRoleSender,
+                    chunkSizeBytes = 4096,
+                    initialPipelineDepth = 1,
+                    fileTransferRoute = FileTransferRouteResolver.FileTunaV6Token,
+                }),
+        };
+
+        AssertRoutePayloadRejected(payloadKind, payload);
     }
 
     [Fact]
@@ -476,5 +624,18 @@ public sealed class FileTransferPayloadCodecTests
             });
 
         Assert.False(FileTransferPayloadCodec.TryDeserializeHeartbeat(payload, out _));
+    }
+
+    private static void AssertRoutePayloadRejected(string payloadKind, byte[] payload)
+    {
+        var rejected = payloadKind switch
+        {
+            "offer" => !FileTransferPayloadCodec.TryDeserializeOffer(payload, out _),
+            "accept" => !FileTransferPayloadCodec.TryDeserializeAccept(payload, out _),
+            "session_open" => !FileTransferPayloadCodec.TryDeserializeSessionOpen(payload, out _),
+            _ => false,
+        };
+
+        Assert.True(rejected);
     }
 }

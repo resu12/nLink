@@ -18,4 +18,7 @@ public sealed record FileTransferAcceptV1
 
     [JsonPropertyName("acceptedDataProtocolVersion")]
     public int? AcceptedDataProtocolVersion { get; init; }
+
+    [JsonPropertyName("fileTransferRoute")]
+    public string? FileTransferRoute { get; init; }
 }
