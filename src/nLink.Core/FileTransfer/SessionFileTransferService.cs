@@ -157,7 +157,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int PullTransportRebindSafetyReplayMaxBytes = 4 * 1024 * 1024;
     private static readonly TimeSpan PullTransportRebindSafetyReplayRearmCooldown = TimeSpan.FromSeconds(5);
     private const int PullTransportRebindFrontierOnlyStableAdvanceChunks = 64;
-    private static readonly TimeSpan V5TransportHandoffWaitingTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan V6TransportHandoffWaitingTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan V6TransportEpochProofTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan V6TransportProbeAckSendTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan PullV4PostFallbackPeerSilenceTimeout = TimeSpan.FromSeconds(45);
@@ -266,6 +266,11 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int V6RecoveredRegularNknFrontierStalledReceiverRequestWindowChunks = 384;
     private const int V6FrontierStalledReceiverRequestWindowChunks = 256;
     private const int V6FrontierRequestChunks = 12;
+    private const int V6PostTunaFallbackFrontierRescueExactChunks = V4PostFallbackEmergencyFrontierRepairChunks;
+    private const int V6PostTunaFallbackFrontierRescueStep1Chunks = V4PostFallbackFrontierBackfillStep1Chunks;
+    private const int V6PostTunaFallbackFrontierRescueStep2Chunks = V4PostFallbackFrontierBackfillStep2Chunks;
+    private const int V6PostTunaFallbackFrontierRescueStep3Chunks = V4PostFallbackFrontierBackfillStep3Chunks;
+    private const int V6PostTunaFallbackSenderSelfRepairChunks = V4PostFallbackFrontierBackfillStep3Chunks;
     private const int V6EpochFrontierRequestChunks = 1;
     private const int V6SparseSeekableRollingAheadChunks = 2048;
     private const int V6SparseSeekableRequestBudgetChunks = 1536;
@@ -4629,7 +4634,7 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public int TunaActivationBarrierStateSendSuppressedCount { get; set; }
 
-        public long LastRecoveredV5TransportHandoffEpoch { get; set; }
+        public long LastRecoveredV6TransportHandoffEpoch { get; set; }
 
         public long LastRecoveredV6TransportEpoch { get; set; }
 
@@ -4713,6 +4718,12 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public int V6RegularNknRedundantDataBatchCount { get; set; }
 
+        public long V6PostTunaFallbackSenderSelfRepairSequence { get; set; }
+
+        public int V6PostTunaFallbackSenderSelfRepairChunkIndex { get; set; } = -1;
+
+        public DateTimeOffset? V6PostTunaFallbackSenderSelfRepairUtc { get; set; }
+
         public bool PullPostTunaRecoveryActive { get; set; }
 
         public int PullPostTunaRecoveryGeneration { get; set; }
@@ -4735,7 +4746,7 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public DateTimeOffset? PullTransportRebindStartedUtc { get; set; }
 
-        public TransportHandoffEpoch? V5TransportHandoff { get; set; }
+        public TransportHandoffEpoch? V6TransportHandoff { get; set; }
 
         public bool UserPaused { get; set; }
 
@@ -5392,7 +5403,7 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public int TunaActivationBarrierStateSendSuppressedCount { get; set; }
 
-        public long LastRecoveredV5TransportHandoffEpoch { get; set; }
+        public long LastRecoveredV6TransportHandoffEpoch { get; set; }
 
         public long LastRecoveredV6TransportEpoch { get; set; }
 
@@ -5419,6 +5430,14 @@ public sealed partial class SessionFileTransferService : IDisposable
         public int V6LastFrontierRequestChunkIndex { get; set; } = -1;
 
         public string? V6LastFrontierRequestId { get; set; }
+
+        public int V6PostTunaFallbackFrontierRescueChunkIndex { get; set; } = -1;
+
+        public int V6PostTunaFallbackFrontierRescueStep { get; set; }
+
+        public int V6PostTunaFallbackFrontierRescueRequestCount { get; set; }
+
+        public DateTimeOffset? V6PostTunaFallbackFrontierRescueStartedUtc { get; set; }
 
         public long V6RegularNknCheckpointSequence { get; set; }
 
@@ -5462,13 +5481,13 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public int PullTransportRebindFrontierRepairLastCommittedChunkIndex { get; set; } = -1;
 
-        public TransportHandoffEpoch? V5TransportHandoff { get; set; }
+        public TransportHandoffEpoch? V6TransportHandoff { get; set; }
 
-        public DateTimeOffset? LastV5FrontierRepairStillMissingLogUtc { get; set; }
+        public DateTimeOffset? LastV6FrontierRepairStillMissingLogUtc { get; set; }
 
-        public int LastV5FrontierRepairStillMissingChunkIndex { get; set; } = -1;
+        public int LastV6FrontierRepairStillMissingChunkIndex { get; set; } = -1;
 
-        public int SuppressedV5FrontierRepairStillMissingLogCount { get; set; }
+        public int SuppressedV6FrontierRepairStillMissingLogCount { get; set; }
 
         public bool UserPaused { get; set; }
 

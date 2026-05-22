@@ -18,16 +18,6 @@ public static class FileTransferProtocol
     public const string SessionCancelFrameTypeV4 = "filetransfer.cancel.v4";
     public const string ErrorFrameTypeV4 = "filetransfer.error.v4";
     public const string PauseControlFrameTypeV4 = "filetransfer.pause_control.v4";
-    public const string ManifestFrameTypeV5 = "filetransfer.manifest.v5";
-    public const string StateFrameTypeV5 = "filetransfer.state.v5";
-    public const string ChunkBatchFrameTypeV5 = "filetransfer.chunk_batch.v5";
-    public const string SessionCompleteFrameTypeV5 = "filetransfer.complete.v5";
-    public const string SessionCancelFrameTypeV5 = "filetransfer.cancel.v5";
-    public const string ErrorFrameTypeV5 = "filetransfer.error.v5";
-    public const string PauseControlFrameTypeV5 = "filetransfer.pause_control.v5";
-    public const string HandoffFrameTypeV5 = "filetransfer.handoff.v5";
-    public const string RepairRequestFrameTypeV5 = "filetransfer.repair_request.v5";
-    public const string RepairProofFrameTypeV5 = "filetransfer.repair_proof.v5";
     public const string ManifestFrameTypeV6 = "filetransfer.manifest.v6";
     public const string ReceiverStateFrameTypeV6 = "filetransfer.receiver_state.v6";
     public const string ChunkBatchFrameTypeV6 = "filetransfer.chunk_batch.v6";
@@ -44,7 +34,6 @@ public static class FileTransferProtocol
     public const string SessionRoleSender = "Sender";
     public const string SessionRoleReceiver = "Receiver";
     public const int ProtocolVersionV4 = 4;
-    public const int ProtocolVersionV5 = 5;
     public const int ProtocolVersionV6 = 6;
 
     public const int Sha256LengthBytes = 32;
@@ -61,27 +50,21 @@ public static class FileTransferProtocol
     public const int MaxChunkBatchSegmentsV4 = 3;
     public const int MaxChunkBatchRawBytesV4 = FileTransferChunkBudget.MaxRawBatchBytes;
     public const int MaxSerializedChunkBatchPayloadBytesV4 = FileTransferChunkBudget.MaxSerializedChunkBatchPayloadBytes;
-    public const int MaxStateMissingRangesV5 = MaxStateMissingRangesV4;
-    public const int MaxStateMissingChunksV5 = MaxStateMissingChunksV4;
-    public const int MaxChunkCountV5 = MaxChunkCountV4;
-    public const int MaxChunkBatchSegmentsV5 = MaxChunkBatchSegmentsV4;
-    public const int MaxChunkBatchRawBytesV5 = MaxChunkBatchRawBytesV4;
-    public const int MaxSerializedChunkBatchPayloadBytesV5 = MaxSerializedChunkBatchPayloadBytesV4;
     public const int MaxStateMissingRangesV6 = 128;
     public const int MaxStateMissingChunksV6 = 8192;
-    public const int MaxChunkCountV6 = MaxChunkCountV5;
+    public const int MaxChunkCountV6 = MaxChunkCountV4;
     public const int MaxChunkBatchSegmentsV6 = 8;
-    public const int MaxChunkBatchRawBytesV6 = MaxChunkBatchRawBytesV5;
-    public const int MaxSerializedChunkBatchPayloadBytesV6 = MaxSerializedChunkBatchPayloadBytesV5;
+    public const int MaxChunkBatchRawBytesV6 = MaxChunkBatchRawBytesV4;
+    public const int MaxSerializedChunkBatchPayloadBytesV6 = MaxSerializedChunkBatchPayloadBytesV4;
 
     public static bool IsV4DataFrame(FileTransferDataFrame? frame)
-        => frame is FileTransferManifestFrameV4 and not FileTransferManifestFrameV5 and not FileTransferManifestFrameV6
-            or FileTransferStateFrameV4 and not FileTransferStateFrameV5 and not FileTransferReceiverStateFrameV6
-            or FileTransferChunkBatchFrameV4 and not FileTransferChunkBatchFrameV5 and not FileTransferChunkBatchFrameV6
-            or FileTransferCompleteFrameV4 and not FileTransferCompleteFrameV5 and not FileTransferCompleteFrameV6
-            or FileTransferCancelFrameV4 and not FileTransferCancelFrameV5 and not FileTransferCancelFrameV6
-            or FileTransferErrorFrameV4 and not FileTransferErrorFrameV5 and not FileTransferErrorFrameV6
-            or FileTransferPauseControlFrameV4 and not FileTransferPauseControlFrameV5 and not FileTransferPauseControlFrameV6;
+        => frame is FileTransferManifestFrameV4 and not FileTransferManifestFrameV6
+            or FileTransferStateFrameV4 and not FileTransferReceiverStateFrameV6
+            or FileTransferChunkBatchFrameV4 and not FileTransferChunkBatchFrameV6
+            or FileTransferCompleteFrameV4 and not FileTransferCompleteFrameV6
+            or FileTransferCancelFrameV4 and not FileTransferCancelFrameV6
+            or FileTransferErrorFrameV4 and not FileTransferErrorFrameV6
+            or FileTransferPauseControlFrameV4 and not FileTransferPauseControlFrameV6;
 
     public static bool IsV6DataFrame(FileTransferDataFrame? frame)
         => frame is FileTransferManifestFrameV6

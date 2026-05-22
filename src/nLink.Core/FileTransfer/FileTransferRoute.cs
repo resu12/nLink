@@ -13,7 +13,6 @@ internal enum FileTransferRoute
 {
     RegularNknV4Fast,
     FileTunaV4,
-    FileTunaV6,
     PostTunaFallbackV6,
     DiagnosticRegularNknV6,
 }
@@ -103,7 +102,6 @@ internal static class FileTransferRouteResolver
 {
     public const string RegularNknV4FastToken = "regular_nkn_v4_fast";
     public const string FileTunaV4Token = "file_tuna_v4";
-    public const string FileTunaV6Token = "file_tuna_v6";
     public const string PostTunaFallbackV6Token = "post_tuna_fallback_v6";
     public const string DiagnosticRegularNknV6Token = "diagnostic_regular_nkn_v6";
 
@@ -172,16 +170,6 @@ internal static class FileTransferRouteResolver
                 IsDiagnosticRegularNknV6RouteEnabled: false,
                 HandoffKind: FileTransferTransportHandoffKind.None,
                 TransportProfileKind: FileTransferTransportProfileKind.Default)),
-            FileTransferRoute.FileTunaV6 => new FileTransferRouteSelection(
-                FileTransferRoute.FileTunaV6,
-                FileTunaV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                FileTransferRouteRuntimeProfile.DefaultV6,
-                FileTransferFrameFamily.V6,
-                FileTransferTransportHandoffKind.None,
-                FileTransferRouteBridgeRecoveryPolicy.TunaStrictRecovery,
-                FileTransferRouteLivenessTerminalPolicy.TunaV6Strict,
-                "legacy_file_tuna_v6"),
             FileTransferRoute.PostTunaFallbackV6 => Resolve(new FileTransferRouteResolverInput(
                 IsFileTunaActive: false,
                 IsPostTunaFileFallbackActive: true,
@@ -236,9 +224,6 @@ internal static class FileTransferRouteResolver
                 return true;
             case FileTunaV4Token:
                 route = FileTransferRoute.FileTunaV4;
-                return true;
-            case FileTunaV6Token:
-                route = FileTransferRoute.FileTunaV6;
                 return true;
             case PostTunaFallbackV6Token:
                 route = FileTransferRoute.PostTunaFallbackV6;

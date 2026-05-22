@@ -1693,13 +1693,14 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         var controlLivenessFreshForActiveFileTransfer =
             controlMessagesReceivedSinceLast > 0 ||
             (controlLastReceivedAgeMs >= 0 && controlLastReceivedAgeMs < ReceiveStallControlAgeThresholdMs);
+        var bulkLivenessUnknownForActiveFileTransfer = fileTransferActive && bulkLastReceivedAgeMs < 0;
         var bulkReceiveStalledCandidate =
             fileTransferActive &&
             readyEmitted > 0 &&
             bulkReady > 0 &&
             activeOutboundTraffic &&
             bulkMessagesReceivedSinceLast == 0 &&
-            bulkLastReceivedAgeMs >= ReceiveStallBulkAgeThresholdMs &&
+            (bulkLivenessUnknownForActiveFileTransfer || bulkLastReceivedAgeMs >= ReceiveStallBulkAgeThresholdMs) &&
             !controlLivenessFreshForActiveFileTransfer;
         var bulkConsecutiveWindows = bulkReceiveStalledCandidate
             ? Interlocked.Increment(ref receiveStallBulkConsecutiveWindows)
@@ -1750,7 +1751,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             stallReason = "all_channels_zero_receive";
             qualifiedConsecutiveWindows = consecutiveWindows;
             requiresControlProof = true;
-            requiresBulkProof = bulkLastReceivedAgeMs >= ReceiveStallBulkAgeThresholdMs;
+            requiresBulkProof = bulkLivenessUnknownForActiveFileTransfer ||
+                                bulkLastReceivedAgeMs >= ReceiveStallBulkAgeThresholdMs;
         }
         else if (bulkReceiveStalled &&
                  bulkConsecutiveWindows >= ReceiveStallFastRequiredConsecutiveWindows)

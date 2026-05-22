@@ -12,7 +12,7 @@ public enum V6TransportEpochState
     Terminal = 7,
 }
 
-internal enum V5TransportHandoffState
+internal enum V6TransportHandoffState
 {
     None = 0,
     TransportProofPending = 1,
@@ -124,7 +124,7 @@ internal sealed class TransportHandoffEpoch
 
     public DateTimeOffset? LastProofUtc { get; set; }
 
-    public V5TransportHandoffState State { get; set; } = V5TransportHandoffState.TransportProofPending;
+    public V6TransportHandoffState State { get; set; } = V6TransportHandoffState.TransportProofPending;
 
     public int DurableProgressSamples { get; set; }
 

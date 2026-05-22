@@ -1169,13 +1169,6 @@ internal static class FileTransferSoakRunner
             {
                 metrics.DataProtocolVersion = Math.Max(metrics.DataProtocolVersion, FileTransferProtocol.ProtocolVersionV6);
             }
-            else if (line.Contains("protocol_version=5", StringComparison.Ordinal) ||
-                     line.Contains("event=filetransfer_v5_negotiated", StringComparison.Ordinal) ||
-                     line.Contains("event=filetransfer_v5_sender_started", StringComparison.Ordinal) ||
-                     line.Contains("event=filetransfer_v5_receiver_started", StringComparison.Ordinal))
-            {
-                metrics.DataProtocolVersion = Math.Max(metrics.DataProtocolVersion, 5);
-            }
             else if (line.Contains("protocol_version=4", StringComparison.Ordinal) ||
                      line.Contains("event=filetransfer_v4_negotiated", StringComparison.Ordinal) ||
                      line.Contains("event=filetransfer_v4_sender_started", StringComparison.Ordinal) ||

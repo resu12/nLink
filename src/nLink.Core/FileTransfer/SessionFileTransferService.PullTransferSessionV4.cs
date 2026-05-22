@@ -330,15 +330,15 @@ public sealed partial class SessionFileTransferService
                 switch (frame)
                 {
                     case FileTransferTransportEpochFrameV6 handoff:
-                        ApplyOutboundV5HandoffFrame(context, handoff);
+                        ApplyOutboundV6HandoffFrame(context, handoff);
                         SignalOutboundV4SenderPump(context);
                         break;
                     case FileTransferFrontierRequestFrameV6 repairRequest:
-                        ApplyOutboundV5RepairRequest(context, repairRequest);
+                        ApplyOutboundV6RepairRequest(context, repairRequest);
                         SignalOutboundV4SenderPump(context);
                         break;
                     case FileTransferRepairProofFrameV6 repairProof:
-                        ApplyOutboundV5RepairProof(context, repairProof);
+                        ApplyOutboundV6RepairProof(context, repairProof);
                         SignalOutboundV4SenderPump(context);
                         break;
                     case FileTransferTransportProbeFrameV6 probe:
@@ -1130,7 +1130,7 @@ public sealed partial class SessionFileTransferService
                or FileTransferTransportHandoffKind.TunaRestart ||
            targetTransport == FileTransferTransportKind.Tuna;
 
-    private static bool ShouldSuppressLegacyV5HandoffForDedicatedV6EpochLocked(
+    private static bool ShouldSuppressLegacyV6HandoffForDedicatedV6EpochLocked(
         OutboundTransferContext context,
         long transportEpoch)
     {
@@ -1152,7 +1152,7 @@ public sealed partial class SessionFileTransferService
                    context.LastRecoveredV6TransportTargetTransport);
     }
 
-    private static void LogLegacyV5HandoffSuppressedForDedicatedV6Epoch(
+    private static void LogLegacyV6HandoffSuppressedForDedicatedV6Epoch(
         OutboundTransferContext context,
         long transportEpoch,
         string frameType,
@@ -1294,12 +1294,14 @@ public sealed partial class SessionFileTransferService
 
     private static bool ShouldUsePostTunaFallbackV6SparseRuntimeLocked(OutboundTransferContext context)
         => context.NegotiatedDataProtocolVersion >= FileTransferProtocol.ProtocolVersionV6 &&
-           (context.V6RegularNknBulkSparseProfileActive ||
+           (context.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6 ||
+            context.V6RegularNknBulkSparseProfileActive ||
             context.RuntimeProfile == FileTransferRuntimeProfile.PrimaryRegularNknBulkV6);
 
     private static bool ShouldUsePostTunaFallbackV6SparseRuntimeLocked(InboundTransferContext context)
         => context.NegotiatedDataProtocolVersion >= FileTransferProtocol.ProtocolVersionV6 &&
-           (context.V6RegularNknBulkSparseProfileActive ||
+           (context.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6 ||
+            context.V6RegularNknBulkSparseProfileActive ||
             context.RuntimeProfile == FileTransferRuntimeProfile.PrimaryRegularNknBulkV6);
 
     private static bool ShouldPauseOutboundV4SenderPumpForV6RegularNknSparseRuntimeLocked(OutboundTransferContext context)
@@ -1598,19 +1600,19 @@ public sealed partial class SessionFileTransferService
                 }
                 else if (!context.V4TerminalReady)
                 {
-                    if (IsV5TransportHandoffBlockingTail(context.V5TransportHandoff))
+                    if (IsV6TransportHandoffBlockingTail(context.V6TransportHandoff))
                     {
                         var now = DateTimeOffset.UtcNow;
-                        if (context.V5TransportHandoff is { State: not V5TransportHandoffState.Recovered } handoff &&
-                            now - GetV5TransportHandoffActivityUtc(handoff) >= V5TransportHandoffWaitingTimeout &&
+                        if (context.V6TransportHandoff is { State: not V6TransportHandoffState.Recovered } handoff &&
+                            now - GetV6TransportHandoffActivityUtc(handoff) >= V6TransportHandoffWaitingTimeout &&
                             !HasOutboundV4RepairWorkInProgressLocked(context))
                         {
-                            TrySetV5TransportHandoffState(
+                            TrySetV6TransportHandoffState(
                                 handoff,
                                 FileTransferDirection.Outbound,
                                 context.TransferId,
                                 context.SessionId,
-                                V5TransportHandoffState.WaitingForRegularNkn,
+                                V6TransportHandoffState.WaitingForRegularNkn,
                                 "proof_timeout",
                                 context.RemoteNextExpectedChunkIndex,
                                 Math.Max(-1, context.ChunksAcceptedForTransport - 1));
@@ -1624,7 +1626,7 @@ public sealed partial class SessionFileTransferService
                         context.V4SenderPumpLastWakeReason = "v6_handoff_tail_blocked";
                         LocalOperationalLog.Info(
                             "FileTransferService",
-                            $"event=filetransfer_v6_tail_blocked_until_frontier_proof; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={context.V5TransportHandoff!.EpochId}; state={FormatV5TransportHandoffState(context.V5TransportHandoff.State)}; remote_next_expected_chunk_index={context.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}; repair_queue_depth={context.PullV4SenderPumpRepairQueue.Count}");
+                            $"event=filetransfer_v6_tail_blocked_until_frontier_proof; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={context.V6TransportHandoff!.EpochId}; state={FormatV6TransportHandoffState(context.V6TransportHandoff.State)}; remote_next_expected_chunk_index={context.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}; repair_queue_depth={context.PullV4SenderPumpRepairQueue.Count}");
                         MaybeQueueOutboundV4StalledRebindSafetyReplayLocked(context, "v6_handoff_tail_blocked");
                         MaybeLogOutboundV4SenderPumpSummaryLocked(context, DateTimeOffset.UtcNow, force: false);
                         waitForSignal = context.ResetAndGetV4SenderPumpSignalTask();
@@ -1785,7 +1787,7 @@ public sealed partial class SessionFileTransferService
             context.UserPaused ||
             context.PeerPaused ||
             recoveryGeneration <= 0 ||
-            (!context.PullPostTunaRecoveryActive && recoveryGeneration <= context.LastRecoveredV5TransportHandoffEpoch) ||
+            (!context.PullPostTunaRecoveryActive && recoveryGeneration <= context.LastRecoveredV6TransportHandoffEpoch) ||
             context.NegotiatedDataProtocolVersion < FileTransferProtocol.ProtocolVersionV6 ||
             !context.PullSourceCanSeek ||
             context.RemoteNextExpectedChunkIndex >= context.ChunkCount)
@@ -1902,7 +1904,7 @@ public sealed partial class SessionFileTransferService
                     context.BytesTransferred = Math.Max(context.BytesTransferred, Math.Min(context.FileSizeBytes, state.BytesCommitted));
                     context.BytesAcknowledgedByReceiver = Math.Max(context.BytesAcknowledgedByReceiver, context.BytesTransferred);
                     context.V4TerminalReady |= state.TerminalReady;
-                    UpdateOutboundV5TransportHandoffFromStateLocked(context, state);
+                    UpdateOutboundV6TransportHandoffFromStateLocked(context, state);
                     var suppressRepairsForAcceptedTail =
                         TryCompleteOutboundV6TransportEpochWhenPeerCaughtUpToAcceptedTailLocked(context, state);
                     UpdateOutboundV4PostRebindFrontierOnlyRecoveryLocked(context, state);
@@ -2051,25 +2053,25 @@ public sealed partial class SessionFileTransferService
             $"event=filetransfer_transport_rebind_frontier_only_recovered; transfer_id={context.TransferId}; session_id={context.SessionId}; rebind_generation={recoveryGeneration}; active_start_chunk_index={activeStart}; remote_next_expected_chunk_index={context.RemoteNextExpectedChunkIndex}; advanced_chunks={advancedChunks}; missing_range_count={state.MissingRanges.Count}");
     }
 
-    private static void UpdateOutboundV5TransportHandoffFromStateLocked(
+    private static void UpdateOutboundV6TransportHandoffFromStateLocked(
         OutboundTransferContext context,
         FileTransferStateFrameV4 state)
     {
-        if (context.V5TransportHandoff is null)
+        if (context.V6TransportHandoff is null)
         {
             return;
         }
 
-        var handoff = context.V5TransportHandoff;
-        if (handoff.EpochId <= context.LastRecoveredV5TransportHandoffEpoch &&
-            !IsV5TransportHandoffBlockingTail(handoff))
+        var handoff = context.V6TransportHandoff;
+        if (handoff.EpochId <= context.LastRecoveredV6TransportHandoffEpoch &&
+            !IsV6TransportHandoffBlockingTail(handoff))
         {
             return;
         }
 
-        if (handoff.State == V5TransportHandoffState.Recovered)
+        if (handoff.State == V6TransportHandoffState.Recovered)
         {
-            CompleteOutboundV5TransportHandoffLocked(
+            CompleteOutboundV6TransportHandoffLocked(
                 context,
                 "recovered_state_observed",
                 context.RemoteNextExpectedChunkIndex,
@@ -2077,31 +2079,31 @@ public sealed partial class SessionFileTransferService
             return;
         }
 
-        var v5State = state as FileTransferReceiverStateFrameV6;
-        if (v5State is not null &&
-            v5State.TransportEpoch > 0 &&
-            v5State.TransportEpoch != handoff.EpochId)
+        var v6State = state as FileTransferReceiverStateFrameV6;
+        if (v6State is not null &&
+            v6State.TransportEpoch > 0 &&
+            v6State.TransportEpoch != handoff.EpochId)
         {
-            if (!TryAdoptOutboundPeerV5TransportHandoffEpochLocked(
+            if (!TryAdoptOutboundPeerV6TransportHandoffEpochLocked(
                     context,
-                    v5State.TransportEpoch,
+                    v6State.TransportEpoch,
                     FileTransferProtocol.ReceiverStateFrameTypeV6,
                     "peer_state_epoch_conflict",
-                    Math.Clamp(v5State.ContiguousCommittedChunkIndex, 0, context.ChunkCount),
-                    v5State.DurableReceivedHighestChunkIndex,
-                    requireFrontierEvidence: v5State.MissingRanges.Count > 0))
+                    Math.Clamp(v6State.ContiguousCommittedChunkIndex, 0, context.ChunkCount),
+                    v6State.DurableReceivedHighestChunkIndex,
+                    requireFrontierEvidence: v6State.MissingRanges.Count > 0))
             {
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_v6_recovery_frame_ignored; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; frame_type={FileTransferProtocol.ReceiverStateFrameTypeV6}; reason=stale_or_mismatched_epoch; frame_transport_epoch={v5State.TransportEpoch}; current_transport_epoch={handoff.EpochId}");
+                    $"event=filetransfer_v6_recovery_frame_ignored; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; frame_type={FileTransferProtocol.ReceiverStateFrameTypeV6}; reason=stale_or_mismatched_epoch; frame_transport_epoch={v6State.TransportEpoch}; current_transport_epoch={handoff.EpochId}");
                 return;
             }
 
-            handoff = context.V5TransportHandoff!;
+            handoff = context.V6TransportHandoff!;
         }
 
         handoff.LastProofUtc = DateTimeOffset.UtcNow;
-        if (TryCompleteOutboundV5HandoffWhenPeerCaughtUpToAcceptedTailLocked(context, state, handoff))
+        if (TryCompleteOutboundV6HandoffWhenPeerCaughtUpToAcceptedTailLocked(context, state, handoff))
         {
             return;
         }
@@ -2111,12 +2113,12 @@ public sealed partial class SessionFileTransferService
             context.RemoteNextExpectedChunkIndex < range.StartChunkIndex + range.ChunkCount);
         if (context.RemoteNextExpectedChunkIndex <= handoff.StartingCommittedChunkIndex || frontierMissing)
         {
-            TrySetV5TransportHandoffState(
+            TrySetV6TransportHandoffState(
                 handoff,
                 FileTransferDirection.Outbound,
                 context.TransferId,
                 context.SessionId,
-                V5TransportHandoffState.FrontierRepairOnly,
+                V6TransportHandoffState.FrontierRepairOnly,
                 frontierMissing ? "frontier_missing_state" : "state_proof",
                 context.RemoteNextExpectedChunkIndex,
                 state.DurableReceivedHighestChunkIndex);
@@ -2128,12 +2130,12 @@ public sealed partial class SessionFileTransferService
             state.DurableReceivedHighestChunkIndex - context.RemoteNextExpectedChunkIndex + 1);
         if (state.MissingRanges.Count > 0 || frontierLagChunks > 0)
         {
-            TrySetV5TransportHandoffState(
+            TrySetV6TransportHandoffState(
                 handoff,
                 FileTransferDirection.Outbound,
                 context.TransferId,
                 context.SessionId,
-                V5TransportHandoffState.BackfillRepair,
+                V6TransportHandoffState.BackfillRepair,
                 state.MissingRanges.Count > 0
                     ? "frontier_proof_with_backfill"
                     : "frontier_proof_with_sparse_backfill",
@@ -2153,7 +2155,7 @@ public sealed partial class SessionFileTransferService
         if (context.RemoteNextExpectedChunkIndex >= context.ChunkCount ||
             handoff.DurableProgressSamples >= 2)
         {
-            CompleteOutboundV5TransportHandoffLocked(
+            CompleteOutboundV6TransportHandoffLocked(
                 context,
                 "durable_frontier_progress",
                 context.RemoteNextExpectedChunkIndex,
@@ -2161,7 +2163,7 @@ public sealed partial class SessionFileTransferService
         }
     }
 
-    private static bool TryCompleteOutboundV5HandoffWhenPeerCaughtUpToAcceptedTailLocked(
+    private static bool TryCompleteOutboundV6HandoffWhenPeerCaughtUpToAcceptedTailLocked(
         OutboundTransferContext context,
         FileTransferStateFrameV4 state,
         TransportHandoffEpoch handoff)
@@ -2184,7 +2186,7 @@ public sealed partial class SessionFileTransferService
             }
         }
 
-        CompleteOutboundV5TransportHandoffLocked(
+        CompleteOutboundV6TransportHandoffLocked(
             context,
             "frontier_caught_up_to_accepted_tail",
             remoteFrontier,
@@ -2231,7 +2233,7 @@ public sealed partial class SessionFileTransferService
         return false;
     }
 
-    private static IReadOnlyList<FileTransferRangeV4> ClampV5HandoffFrontierRepairRangesForSend(
+    private static IReadOnlyList<FileTransferRangeV4> ClampV6HandoffFrontierRepairRangesForSend(
         IReadOnlyList<FileTransferRangeV4> ranges,
         int frontierChunkIndex,
         int chunkCount)
@@ -2274,16 +2276,16 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        return IsV5TransportHandoffBlockingTail(context.V5TransportHandoff) ||
+        return IsV6TransportHandoffBlockingTail(context.V6TransportHandoff) ||
                context.PullTransportFrontierOnlyRepairActive;
     }
 
-    private static bool ShouldClampOutboundV5HandoffFrontierRepairRangeForSendLocked(
+    private static bool ShouldClampOutboundV6HandoffFrontierRepairRangeForSendLocked(
         OutboundTransferContext context,
         FileTransferStateFrameV4 state,
         int frontierChunkIndex)
     {
-        if (IsOutboundV5BackfillRepairRequestLocked(context, state))
+        if (IsOutboundV6BackfillRepairRequestLocked(context, state))
         {
             return false;
         }
@@ -2324,15 +2326,15 @@ public sealed partial class SessionFileTransferService
         return false;
     }
 
-    private static bool IsOutboundV5BackfillRepairRequestLocked(
+    private static bool IsOutboundV6BackfillRepairRequestLocked(
         OutboundTransferContext context,
         FileTransferStateFrameV4 state)
-        => state is FileTransferReceiverStateFrameV6 v5State &&
-           string.Equals(v5State.Priority, "backfill", StringComparison.OrdinalIgnoreCase) &&
-           string.Equals(v5State.RecoveryMode, FormatV5TransportHandoffState(V5TransportHandoffState.BackfillRepair), StringComparison.OrdinalIgnoreCase) &&
-           context.V5TransportHandoff?.State == V5TransportHandoffState.BackfillRepair;
+        => state is FileTransferReceiverStateFrameV6 v6State &&
+           string.Equals(v6State.Priority, "backfill", StringComparison.OrdinalIgnoreCase) &&
+           string.Equals(v6State.RecoveryMode, FormatV6TransportHandoffState(V6TransportHandoffState.BackfillRepair), StringComparison.OrdinalIgnoreCase) &&
+           context.V6TransportHandoff?.State == V6TransportHandoffState.BackfillRepair;
 
-    private static bool IsOutboundPeerV5TransportEpochUsableLocked(
+    private static bool IsOutboundPeerV6TransportEpochUsableLocked(
         OutboundTransferContext context,
         long transportEpoch)
     {
@@ -2341,17 +2343,17 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        if (context.V5TransportHandoff is { } handoff &&
+        if (context.V6TransportHandoff is { } handoff &&
             handoff.EpochId == transportEpoch &&
-            handoff.State != V5TransportHandoffState.Recovered)
+            handoff.State != V6TransportHandoffState.Recovered)
         {
             return true;
         }
 
-        return transportEpoch > context.LastRecoveredV5TransportHandoffEpoch;
+        return transportEpoch > context.LastRecoveredV6TransportHandoffEpoch;
     }
 
-    private static bool TryAdoptOutboundPeerV5TransportHandoffEpochLocked(
+    private static bool TryAdoptOutboundPeerV6TransportHandoffEpochLocked(
         OutboundTransferContext context,
         long peerTransportEpoch,
         string frameType,
@@ -2361,9 +2363,9 @@ public sealed partial class SessionFileTransferService
         bool requireFrontierEvidence)
     {
         if (peerTransportEpoch <= 0 ||
-            context.V5TransportHandoff is not { } current ||
+            context.V6TransportHandoff is not { } current ||
             current.EpochId == peerTransportEpoch ||
-            !IsV5TransportHandoffBlockingTail(current))
+            !IsV6TransportHandoffBlockingTail(current))
         {
             return false;
         }
@@ -2381,7 +2383,7 @@ public sealed partial class SessionFileTransferService
 
         var previousEpoch = current.EpochId;
         var previousState = current.State;
-        context.V5TransportHandoff = new TransportHandoffEpoch
+        context.V6TransportHandoff = new TransportHandoffEpoch
         {
             EpochId = peerTransportEpoch,
             Kind = current.Kind,
@@ -2394,7 +2396,7 @@ public sealed partial class SessionFileTransferService
             StartingCommittedChunkIndex = Math.Min(current.StartingCommittedChunkIndex, clampedPeerCommitted),
             StartingHighestObservedChunkIndex = Math.Max(current.StartingHighestObservedChunkIndex, peerHighest),
             LastProofUtc = DateTimeOffset.UtcNow,
-            State = V5TransportHandoffState.FrontierRepairOnly,
+            State = V6TransportHandoffState.FrontierRepairOnly,
             LastObservedCommittedChunkIndex = clampedPeerCommitted,
             LastObservedHighestChunkIndex = peerHighest,
             LastRepairRequestId = current.LastRepairRequestId,
@@ -2406,11 +2408,11 @@ public sealed partial class SessionFileTransferService
         context.V4SenderPumpLastWakeReason = "v6_handoff_epoch_reconciled";
         LocalOperationalLog.Warn(
             "FileTransferService",
-            $"event=filetransfer_v6_handoff_epoch_conflict; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; frame_type={frameType}; action=adopt_peer_epoch; reason={FormatProtocolLogValue(reason)}; previous_transport_epoch={previousEpoch}; peer_transport_epoch={peerTransportEpoch}; last_recovered_transport_epoch={context.LastRecoveredV5TransportHandoffEpoch}; previous_state={FormatV5TransportHandoffState(previousState)}; state={FormatV5TransportHandoffState(context.V5TransportHandoff.State)}; committed_chunk={clampedPeerCommitted}; highest_observed_chunk={peerHighest}; target_transport={FormatFileTransferTransportKind(context.V5TransportHandoff.TargetTransport)}");
+            $"event=filetransfer_v6_handoff_epoch_conflict; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; frame_type={frameType}; action=adopt_peer_epoch; reason={FormatProtocolLogValue(reason)}; previous_transport_epoch={previousEpoch}; peer_transport_epoch={peerTransportEpoch}; last_recovered_transport_epoch={context.LastRecoveredV6TransportHandoffEpoch}; previous_state={FormatV6TransportHandoffState(previousState)}; state={FormatV6TransportHandoffState(context.V6TransportHandoff.State)}; committed_chunk={clampedPeerCommitted}; highest_observed_chunk={peerHighest}; target_transport={FormatFileTransferTransportKind(context.V6TransportHandoff.TargetTransport)}");
         return true;
     }
 
-    private static bool TryReopenOutboundRecoveredV5TransportHandoffEpochLocked(
+    private static bool TryReopenOutboundRecoveredV6TransportHandoffEpochLocked(
         OutboundTransferContext context,
         long peerTransportEpoch,
         string frameType,
@@ -2420,8 +2422,8 @@ public sealed partial class SessionFileTransferService
         bool requireFrontierEvidence)
     {
         if (peerTransportEpoch <= 0 ||
-            peerTransportEpoch > context.LastRecoveredV5TransportHandoffEpoch ||
-            context.V5TransportHandoff is not null)
+            peerTransportEpoch > context.LastRecoveredV6TransportHandoffEpoch ||
+            context.V6TransportHandoff is not null)
         {
             return false;
         }
@@ -2438,7 +2440,7 @@ public sealed partial class SessionFileTransferService
         }
 
         var now = DateTimeOffset.UtcNow;
-        context.V5TransportHandoff = new TransportHandoffEpoch
+        context.V6TransportHandoff = new TransportHandoffEpoch
         {
             EpochId = peerTransportEpoch,
             Kind = FileTransferTransportHandoffKind.RegularNknRecovery,
@@ -2451,7 +2453,7 @@ public sealed partial class SessionFileTransferService
             StartingCommittedChunkIndex = Math.Min(currentFrontier, clampedPeerCommitted),
             StartingHighestObservedChunkIndex = Math.Max(Math.Max(-1, context.ChunksAcceptedForTransport - 1), peerHighest),
             LastProofUtc = now,
-            State = V5TransportHandoffState.FrontierRepairOnly,
+            State = V6TransportHandoffState.FrontierRepairOnly,
             LastObservedCommittedChunkIndex = clampedPeerCommitted,
             LastObservedHighestChunkIndex = peerHighest,
             LastStateChangeLogUtc = now,
@@ -2462,11 +2464,11 @@ public sealed partial class SessionFileTransferService
         context.V4SenderPumpLastWakeReason = "v6_handoff_reopened_recovered_epoch";
         LocalOperationalLog.Warn(
             "FileTransferService",
-            $"event=filetransfer_v6_handoff_epoch_reopened; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; frame_type={frameType}; reason={FormatProtocolLogValue(reason)}; peer_transport_epoch={peerTransportEpoch}; last_recovered_transport_epoch={context.LastRecoveredV5TransportHandoffEpoch}; state={FormatV5TransportHandoffState(context.V5TransportHandoff.State)}; committed_chunk={clampedPeerCommitted}; highest_observed_chunk={peerHighest}; current_frontier_chunk={currentFrontier}; target_transport={FormatFileTransferTransportKind(context.V5TransportHandoff.TargetTransport)}");
+            $"event=filetransfer_v6_handoff_epoch_reopened; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; frame_type={frameType}; reason={FormatProtocolLogValue(reason)}; peer_transport_epoch={peerTransportEpoch}; last_recovered_transport_epoch={context.LastRecoveredV6TransportHandoffEpoch}; state={FormatV6TransportHandoffState(context.V6TransportHandoff.State)}; committed_chunk={clampedPeerCommitted}; highest_observed_chunk={peerHighest}; current_frontier_chunk={currentFrontier}; target_transport={FormatFileTransferTransportKind(context.V6TransportHandoff.TargetTransport)}");
         return true;
     }
 
-    private void ApplyOutboundV5HandoffFrame(OutboundTransferContext context, FileTransferTransportEpochFrameV6 handoff)
+    private void ApplyOutboundV6HandoffFrame(OutboundTransferContext context, FileTransferTransportEpochFrameV6 handoff)
     {
         lock (gate)
         {
@@ -2477,8 +2479,8 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
-            if (!IsOutboundPeerV5TransportEpochUsableLocked(context, handoff.TransportEpoch) &&
-                !TryAdoptOutboundPeerV5TransportHandoffEpochLocked(
+            if (!IsOutboundPeerV6TransportEpochUsableLocked(context, handoff.TransportEpoch) &&
+                !TryAdoptOutboundPeerV6TransportHandoffEpochLocked(
                     context,
                     handoff.TransportEpoch,
                     FileTransferProtocol.TransportEpochFrameTypeV6,
@@ -2489,13 +2491,13 @@ public sealed partial class SessionFileTransferService
             {
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_v6_recovery_frame_ignored; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; frame_type={FileTransferProtocol.TransportEpochFrameTypeV6}; reason=recovered_epoch; frame_transport_epoch={handoff.TransportEpoch}; last_recovered_transport_epoch={context.LastRecoveredV5TransportHandoffEpoch}");
+                    $"event=filetransfer_v6_recovery_frame_ignored; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; frame_type={FileTransferProtocol.TransportEpochFrameTypeV6}; reason=recovered_epoch; frame_transport_epoch={handoff.TransportEpoch}; last_recovered_transport_epoch={context.LastRecoveredV6TransportHandoffEpoch}");
                 return;
             }
 
-            if (context.V5TransportHandoff is null)
+            if (context.V6TransportHandoff is null)
             {
-                context.V5TransportHandoff = new TransportHandoffEpoch
+                context.V6TransportHandoff = new TransportHandoffEpoch
                 {
                     EpochId = handoff.TransportEpoch,
                     Kind = FileTransferTransportHandoffKind.RegularNknRecovery,
@@ -2508,17 +2510,17 @@ public sealed partial class SessionFileTransferService
                     StartingHighestObservedChunkIndex = Math.Max(-1, context.ChunksAcceptedForTransport - 1),
                     LastObservedCommittedChunkIndex = Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, context.ChunkCount),
                     LastObservedHighestChunkIndex = Math.Max(-1, context.ChunksAcceptedForTransport - 1),
-                    State = V5TransportHandoffState.TransportProofPending,
+                    State = V6TransportHandoffState.TransportProofPending,
                 };
-                LogV5TransportHandoffEpochStarted(
+                LogV6TransportHandoffEpochStarted(
                     FileTransferDirection.Outbound,
                     context.TransferId,
                     context.SessionId,
-                    context.V5TransportHandoff);
+                    context.V6TransportHandoff);
             }
 
-            if (context.V5TransportHandoff.EpochId != handoff.TransportEpoch &&
-                !TryAdoptOutboundPeerV5TransportHandoffEpochLocked(
+            if (context.V6TransportHandoff.EpochId != handoff.TransportEpoch &&
+                !TryAdoptOutboundPeerV6TransportHandoffEpochLocked(
                     context,
                     handoff.TransportEpoch,
                     FileTransferProtocol.TransportEpochFrameTypeV6,
@@ -2529,28 +2531,28 @@ public sealed partial class SessionFileTransferService
             {
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_v6_recovery_frame_ignored; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; frame_type={FileTransferProtocol.TransportEpochFrameTypeV6}; reason=stale_or_mismatched_epoch; frame_transport_epoch={handoff.TransportEpoch}; current_transport_epoch={context.V5TransportHandoff.EpochId}");
+                    $"event=filetransfer_v6_recovery_frame_ignored; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; frame_type={FileTransferProtocol.TransportEpochFrameTypeV6}; reason=stale_or_mismatched_epoch; frame_transport_epoch={handoff.TransportEpoch}; current_transport_epoch={context.V6TransportHandoff.EpochId}");
                 return;
             }
 
-            if (context.V5TransportHandoff.State == V5TransportHandoffState.Recovered)
+            if (context.V6TransportHandoff.State == V6TransportHandoffState.Recovered)
             {
                 return;
             }
 
-            TrySetV5TransportHandoffState(
-                context.V5TransportHandoff,
+            TrySetV6TransportHandoffState(
+                context.V6TransportHandoff,
                 FileTransferDirection.Outbound,
                 context.TransferId,
                 context.SessionId,
-                V5TransportHandoffState.FrontierRepairOnly,
+                V6TransportHandoffState.FrontierRepairOnly,
                 "peer_handoff",
                 context.RemoteNextExpectedChunkIndex,
                 Math.Max(-1, context.ChunksAcceptedForTransport - 1));
         }
     }
 
-    private void ApplyOutboundV5RepairRequest(OutboundTransferContext context, FileTransferFrontierRequestFrameV6 repairRequest)
+    private void ApplyOutboundV6RepairRequest(OutboundTransferContext context, FileTransferFrontierRequestFrameV6 repairRequest)
     {
         if (repairRequest.MissingRanges.Count == 0)
         {
@@ -2567,12 +2569,12 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
-            var suppressLegacyHandoff = ShouldSuppressLegacyV5HandoffForDedicatedV6EpochLocked(
+            var suppressLegacyHandoff = ShouldSuppressLegacyV6HandoffForDedicatedV6EpochLocked(
                 context,
                 repairRequest.TransportEpoch);
             if (!suppressLegacyHandoff &&
-                !IsOutboundPeerV5TransportEpochUsableLocked(context, repairRequest.TransportEpoch) &&
-                !TryAdoptOutboundPeerV5TransportHandoffEpochLocked(
+                !IsOutboundPeerV6TransportEpochUsableLocked(context, repairRequest.TransportEpoch) &&
+                !TryAdoptOutboundPeerV6TransportHandoffEpochLocked(
                     context,
                     repairRequest.TransportEpoch,
                     FileTransferProtocol.FrontierRequestFrameTypeV6,
@@ -2580,7 +2582,7 @@ public sealed partial class SessionFileTransferService
                     first.StartChunkIndex,
                     first.StartChunkIndex + first.ChunkCount - 1,
                     requireFrontierEvidence: true) &&
-                !TryReopenOutboundRecoveredV5TransportHandoffEpochLocked(
+                !TryReopenOutboundRecoveredV6TransportHandoffEpochLocked(
                     context,
                     repairRequest.TransportEpoch,
                     FileTransferProtocol.FrontierRequestFrameTypeV6,
@@ -2591,22 +2593,22 @@ public sealed partial class SessionFileTransferService
             {
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_v6_recovery_frame_ignored; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; frame_type={FileTransferProtocol.FrontierRequestFrameTypeV6}; reason=recovered_epoch; frame_transport_epoch={repairRequest.TransportEpoch}; last_recovered_transport_epoch={context.LastRecoveredV5TransportHandoffEpoch}");
+                    $"event=filetransfer_v6_recovery_frame_ignored; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; frame_type={FileTransferProtocol.FrontierRequestFrameTypeV6}; reason=recovered_epoch; frame_transport_epoch={repairRequest.TransportEpoch}; last_recovered_transport_epoch={context.LastRecoveredV6TransportHandoffEpoch}");
                 return;
             }
 
             if (suppressLegacyHandoff)
             {
-                LogLegacyV5HandoffSuppressedForDedicatedV6Epoch(
+                LogLegacyV6HandoffSuppressedForDedicatedV6Epoch(
                     context,
                     repairRequest.TransportEpoch,
                     FileTransferProtocol.FrontierRequestFrameTypeV6,
                     "dedicated_v6_transport_epoch");
             }
-            else if (context.V5TransportHandoff is null)
+            else if (context.V6TransportHandoff is null)
             {
                 context.PullTransportRebindGeneration = Math.Max(context.PullTransportRebindGeneration, (int)Math.Min(int.MaxValue, repairRequest.TransportEpoch));
-                context.V5TransportHandoff = new TransportHandoffEpoch
+                context.V6TransportHandoff = new TransportHandoffEpoch
                 {
                     EpochId = repairRequest.TransportEpoch,
                     Kind = FileTransferTransportHandoffKind.RegularNknRecovery,
@@ -2619,20 +2621,20 @@ public sealed partial class SessionFileTransferService
                     StartingHighestObservedChunkIndex = Math.Max(-1, context.ChunksAcceptedForTransport - 1),
                     LastObservedCommittedChunkIndex = Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, context.ChunkCount),
                     LastObservedHighestChunkIndex = Math.Max(-1, context.ChunksAcceptedForTransport - 1),
-                    State = V5TransportHandoffState.TransportProofPending,
+                    State = V6TransportHandoffState.TransportProofPending,
                 };
-                LogV5TransportHandoffEpochStarted(
+                LogV6TransportHandoffEpochStarted(
                     FileTransferDirection.Outbound,
                     context.TransferId,
                     context.SessionId,
-                    context.V5TransportHandoff);
+                    context.V6TransportHandoff);
             }
 
             if (!suppressLegacyHandoff &&
-                context.V5TransportHandoff is { } legacyHandoff &&
+                context.V6TransportHandoff is { } legacyHandoff &&
                 legacyHandoff.EpochId != repairRequest.TransportEpoch)
             {
-                if (!TryAdoptOutboundPeerV5TransportHandoffEpochLocked(
+                if (!TryAdoptOutboundPeerV6TransportHandoffEpochLocked(
                         context,
                         repairRequest.TransportEpoch,
                         FileTransferProtocol.FrontierRequestFrameTypeV6,
@@ -2643,21 +2645,21 @@ public sealed partial class SessionFileTransferService
                 {
                     LocalOperationalLog.Info(
                         "FileTransferService",
-                        $"event=filetransfer_v6_recovery_frame_ignored; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; frame_type={FileTransferProtocol.FrontierRequestFrameTypeV6}; reason=stale_or_mismatched_epoch; frame_transport_epoch={repairRequest.TransportEpoch}; current_transport_epoch={context.V5TransportHandoff.EpochId}");
+                        $"event=filetransfer_v6_recovery_frame_ignored; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; frame_type={FileTransferProtocol.FrontierRequestFrameTypeV6}; reason=stale_or_mismatched_epoch; frame_transport_epoch={repairRequest.TransportEpoch}; current_transport_epoch={context.V6TransportHandoff.EpochId}");
                     return;
                 }
             }
 
             if (!suppressLegacyHandoff)
             {
-                MarkV5TransportHandoffPeerActivity(context.V5TransportHandoff);
+                MarkV6TransportHandoffPeerActivity(context.V6TransportHandoff);
                 var requestedState =
                     string.Equals(repairRequest.Priority, "backfill", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(repairRequest.RecoveryMode, FormatV5TransportHandoffState(V5TransportHandoffState.BackfillRepair), StringComparison.OrdinalIgnoreCase)
-                        ? V5TransportHandoffState.BackfillRepair
-                        : V5TransportHandoffState.FrontierRepairOnly;
-                TrySetV5TransportHandoffState(
-                    context.V5TransportHandoff,
+                    string.Equals(repairRequest.RecoveryMode, FormatV6TransportHandoffState(V6TransportHandoffState.BackfillRepair), StringComparison.OrdinalIgnoreCase)
+                        ? V6TransportHandoffState.BackfillRepair
+                        : V6TransportHandoffState.FrontierRepairOnly;
+                TrySetV6TransportHandoffState(
+                    context.V6TransportHandoff,
                     FileTransferDirection.Outbound,
                     context.TransferId,
                     context.SessionId,
@@ -2689,7 +2691,7 @@ public sealed partial class SessionFileTransferService
             $"event=filetransfer_v6_frontier_repair_requested; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={repairRequest.TransportEpoch}; repair_request_id={FormatProtocolLogValue(repairRequest.RepairRequestId ?? "(none)")}; priority={FormatProtocolLogValue(repairRequest.Priority ?? "(none)")}; first_start_chunk_index={first.StartChunkIndex}; requested_chunk_count={first.ChunkCount}; range_count={repairRequest.MissingRanges.Count}");
     }
 
-    private void ApplyOutboundV5RepairProof(OutboundTransferContext context, FileTransferRepairProofFrameV6 repairProof)
+    private void ApplyOutboundV6RepairProof(OutboundTransferContext context, FileTransferRepairProofFrameV6 repairProof)
     {
         lock (gate)
         {
@@ -2700,8 +2702,8 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
-            if (!IsOutboundPeerV5TransportEpochUsableLocked(context, repairProof.TransportEpoch) &&
-                !TryAdoptOutboundPeerV5TransportHandoffEpochLocked(
+            if (!IsOutboundPeerV6TransportEpochUsableLocked(context, repairProof.TransportEpoch) &&
+                !TryAdoptOutboundPeerV6TransportHandoffEpochLocked(
                     context,
                     repairProof.TransportEpoch,
                     FileTransferProtocol.RepairProofFrameTypeV6,
@@ -2713,13 +2715,13 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
-            if (context.V5TransportHandoff is null)
+            if (context.V6TransportHandoff is null)
             {
                 return;
             }
 
-            if (context.V5TransportHandoff.EpochId != repairProof.TransportEpoch &&
-                !TryAdoptOutboundPeerV5TransportHandoffEpochLocked(
+            if (context.V6TransportHandoff.EpochId != repairProof.TransportEpoch &&
+                !TryAdoptOutboundPeerV6TransportHandoffEpochLocked(
                     context,
                     repairProof.TransportEpoch,
                     FileTransferProtocol.RepairProofFrameTypeV6,
@@ -2731,14 +2733,14 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
-            TrySetV5TransportHandoffState(
-                context.V5TransportHandoff,
+            TrySetV6TransportHandoffState(
+                context.V6TransportHandoff,
                 FileTransferDirection.Outbound,
                 context.TransferId,
                 context.SessionId,
-                repairProof.CommittedChunkIndex > context.V5TransportHandoff.StartingCommittedChunkIndex
-                    ? V5TransportHandoffState.BackfillRepair
-                    : V5TransportHandoffState.FrontierRepairOnly,
+                repairProof.CommittedChunkIndex > context.V6TransportHandoff.StartingCommittedChunkIndex
+                    ? V6TransportHandoffState.BackfillRepair
+                    : V6TransportHandoffState.FrontierRepairOnly,
                 "repair_proof",
                 repairProof.CommittedChunkIndex,
                 Math.Max(context.ChunksAcceptedForTransport - 1, repairProof.CommittedChunkIndex - 1));
@@ -2855,9 +2857,9 @@ public sealed partial class SessionFileTransferService
             maxRepairChunks,
             frontierExclusive: postRebindFrontierRepair);
         if (postRebindFrontierRepair &&
-            ShouldClampOutboundV5HandoffFrontierRepairRangeForSendLocked(context, state, state.ContiguousCommittedChunkIndex))
+            ShouldClampOutboundV6HandoffFrontierRepairRangeForSendLocked(context, state, state.ContiguousCommittedChunkIndex))
         {
-            normalizedRanges = ClampV5HandoffFrontierRepairRangesForSend(
+            normalizedRanges = ClampV6HandoffFrontierRepairRangesForSend(
                 normalizedRanges,
                 state.ContiguousCommittedChunkIndex,
                 context.ChunkCount);
@@ -2887,12 +2889,12 @@ public sealed partial class SessionFileTransferService
             normalizedRanges.Count == 1 &&
             firstStart == state.ContiguousCommittedChunkIndex &&
             requestedChunkCount <= V4PostFallbackEmergencyFrontierRepairChunks;
-        var v5BackfillEmergencyCreditRepair = IsOutboundV5BackfillRepairRequestLocked(context, state) &&
+        var v6BackfillEmergencyCreditRepair = IsOutboundV6BackfillRepairRequestLocked(context, state) &&
             postRebindFrontierRepair &&
             firstStart == state.ContiguousCommittedChunkIndex &&
             lastEndExclusive > firstStart + V4PostFallbackEmergencyFrontierRepairChunks;
-        var allowEmergencyCreditRepair = emergencyCreditRepair || v5BackfillEmergencyCreditRepair;
-        var emergencyCreditEndExclusive = v5BackfillEmergencyCreditRepair
+        var allowEmergencyCreditRepair = emergencyCreditRepair || v6BackfillEmergencyCreditRepair;
+        var emergencyCreditEndExclusive = v6BackfillEmergencyCreditRepair
             ? Math.Min(context.ChunkCount, lastEndExclusive)
             : firstStart + V4PostFallbackEmergencyFrontierRepairChunks;
         var chunkIndices = FilterRepairChunkIndicesForSend(
@@ -2901,9 +2903,9 @@ public sealed partial class SessionFileTransferService
             allowEmergencyCreditRepair,
             emergencyCreditEndExclusive,
             out var stats);
-        var protocolRepairRequestId = state is FileTransferReceiverStateFrameV6 v5StateForRepair ? v5StateForRepair.RepairRequestId : null;
-        var protocolPriority = state is FileTransferReceiverStateFrameV6 v5StateForPriority ? v5StateForPriority.Priority : null;
-        var protocolRecoveryMode = state is FileTransferReceiverStateFrameV6 v5StateForRecoveryMode ? v5StateForRecoveryMode.RecoveryMode : null;
+        var protocolRepairRequestId = state is FileTransferReceiverStateFrameV6 v6StateForRepair ? v6StateForRepair.RepairRequestId : null;
+        var protocolPriority = state is FileTransferReceiverStateFrameV6 v6StateForPriority ? v6StateForPriority.Priority : null;
+        var protocolRecoveryMode = state is FileTransferReceiverStateFrameV6 v6StateForRecoveryMode ? v6StateForRecoveryMode.RecoveryMode : null;
         var rangeRepairRequestKey = CreateV4RepairRequestKey(
             context.TransferId,
             firstStart,
@@ -2979,7 +2981,7 @@ public sealed partial class SessionFileTransferService
                 {
                     LocalOperationalLog.Warn(
                         "FileTransferService",
-                        $"event=filetransfer_v6_exact_frontier_repair_enqueued; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={context.V5TransportHandoff?.EpochId ?? context.PullTransportRebindGeneration}; state={FormatV5TransportHandoffState(context.V5TransportHandoff?.State ?? V5TransportHandoffState.FrontierRepairOnly)}; frontier_chunk_index={state.ContiguousCommittedChunkIndex}; repair_request_key={repairRequestKey}; source_state_missing_range_count={state.MissingRanges.Count}; durable_received_highest_chunk_index={state.DurableReceivedHighestChunkIndex}");
+                        $"event=filetransfer_v6_exact_frontier_repair_enqueued; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={context.V6TransportHandoff?.EpochId ?? context.PullTransportRebindGeneration}; state={FormatV6TransportHandoffState(context.V6TransportHandoff?.State ?? V6TransportHandoffState.FrontierRepairOnly)}; frontier_chunk_index={state.ContiguousCommittedChunkIndex}; repair_request_key={repairRequestKey}; source_state_missing_range_count={state.MissingRanges.Count}; durable_received_highest_chunk_index={state.DurableReceivedHighestChunkIndex}");
                 }
             }
             CleanupOutboundV4RepairRequestStateLocked(context, DateTimeOffset.UtcNow);
@@ -3026,15 +3028,15 @@ public sealed partial class SessionFileTransferService
                     context.BytesAcceptedForTransport = context.ChunksAcceptedForTransport >= context.ChunkCount
                         ? context.FileSizeBytes
                         : Math.Min(context.FileSizeBytes, (long)context.ChunksAcceptedForTransport * Math.Max(1, context.ChunkSizeBytes));
-                    var eventName = v5BackfillEmergencyCreditRepair
+                    var eventName = v6BackfillEmergencyCreditRepair
                         ? "filetransfer_v6_backfill_repair_credit_granted"
                         : "filetransfer_v4_emergency_frontier_credit_granted";
-                    var reason = v5BackfillEmergencyCreditRepair
+                    var reason = v6BackfillEmergencyCreditRepair
                         ? "post_fallback_backfill_repair"
                         : "post_fallback_missing_frontier";
                     LocalOperationalLog.Warn(
                         "FileTransferService",
-                        $"event={eventName}; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={reason}; rebind_generation={context.PullTransportRebindGeneration}; previous_chunks_accepted_for_transport={previousAccepted}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}; emergency_start_chunk_index={firstStart}; emergency_end_chunk_exclusive={emergencyEndExclusive}; remote_next_expected_chunk_index={context.RemoteNextExpectedChunkIndex}; remote_credit_until_chunk_index_exclusive={context.RemoteGrantedUntilExclusive}; transport_epoch={context.V5TransportHandoff?.EpochId ?? 0}");
+                        $"event={eventName}; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={reason}; rebind_generation={context.PullTransportRebindGeneration}; previous_chunks_accepted_for_transport={previousAccepted}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}; emergency_start_chunk_index={firstStart}; emergency_end_chunk_exclusive={emergencyEndExclusive}; remote_next_expected_chunk_index={context.RemoteNextExpectedChunkIndex}; remote_credit_until_chunk_index_exclusive={context.RemoteGrantedUntilExclusive}; transport_epoch={context.V6TransportHandoff?.EpochId ?? 0}");
                 }
             }
 
@@ -3964,20 +3966,20 @@ public sealed partial class SessionFileTransferService
         var unresolvedV6Epoch = IsV6TransportEpochUnresolved(context.V6TransportEpoch)
             ? context.V6TransportEpoch
             : null;
-        var v6TransportEpoch = unresolvedV6Epoch?.EpochId ?? context.V5TransportHandoff?.EpochId ?? 0;
+        var v6TransportEpoch = unresolvedV6Epoch?.EpochId ?? context.V6TransportHandoff?.EpochId ?? 0;
         var v6RecoveryMode = protocolRecoveryMode ??
                              (unresolvedV6Epoch is not null
                                  ? FormatV6TransportEpochState(unresolvedV6Epoch.State)
-                                 : context.V5TransportHandoff is null
+                                 : context.V6TransportHandoff is null
                                      ? null
-                                     : FormatV5TransportHandoffState(context.V5TransportHandoff.State));
+                                     : FormatV6TransportHandoffState(context.V6TransportHandoff.State));
         var v6Priority = repairSend
             ? protocolPriority ??
               (unresolvedV6Epoch is not null
                   ? unresolvedV6Epoch.State == V6TransportEpochState.BackfillRepair
                       ? "backfill"
                       : "frontier"
-                  : IsV5TransportHandoffBlockingTail(context.V5TransportHandoff)
+                  : IsV6TransportHandoffBlockingTail(context.V6TransportHandoff)
                       ? "frontier"
                       : "repair")
             : null;
@@ -4850,19 +4852,19 @@ public sealed partial class SessionFileTransferService
         var unresolvedV6Epoch = IsV6TransportEpochUnresolved(context.V6TransportEpoch)
             ? context.V6TransportEpoch
             : null;
-        if (IsV5TransportHandoffBlockingTail(context.V5TransportHandoff) ||
+        if (IsV6TransportHandoffBlockingTail(context.V6TransportHandoff) ||
             unresolvedV6Epoch is not null ||
             context.PullPostTunaRecoveryActive)
         {
             var transportEpoch = unresolvedV6Epoch?.EpochId ??
-                                 context.V5TransportHandoff?.EpochId ??
+                                 context.V6TransportHandoff?.EpochId ??
                                  context.PullTransportRebindGeneration;
             var handoffState = unresolvedV6Epoch is not null
                 ? FormatV6TransportEpochState(unresolvedV6Epoch.State)
-                : FormatV5TransportHandoffState(context.V5TransportHandoff?.State ?? V5TransportHandoffState.FrontierRepairOnly);
+                : FormatV6TransportHandoffState(context.V6TransportHandoff?.State ?? V6TransportHandoffState.FrontierRepairOnly);
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_v4_sender_resume_rewind_suppressed_for_v6_handoff; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={reason}; remote_next_expected_chunk_index={remoteFrontier}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}; remote_credit_until_chunk_index_exclusive={context.RemoteGrantedUntilExclusive}; transport_epoch={transportEpoch}; handoff_state={handoffState}; handoff_kind={FormatFileTransferTransportHandoffKind(unresolvedV6Epoch?.Kind ?? context.V5TransportHandoff?.Kind ?? FileTransferTransportHandoffKind.None)}; target_transport={FormatFileTransferTransportKind(unresolvedV6Epoch?.TargetTransport ?? context.V5TransportHandoff?.TargetTransport ?? FileTransferTransportKind.Unknown)}; post_tuna_recovery_active={(context.PullPostTunaRecoveryActive ? 1 : 0)}; source_can_seek={(context.PullSourceCanSeek ? 1 : 0)}");
+                $"event=filetransfer_v4_sender_resume_rewind_suppressed_for_v6_handoff; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={reason}; remote_next_expected_chunk_index={remoteFrontier}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}; remote_credit_until_chunk_index_exclusive={context.RemoteGrantedUntilExclusive}; transport_epoch={transportEpoch}; handoff_state={handoffState}; handoff_kind={FormatFileTransferTransportHandoffKind(unresolvedV6Epoch?.Kind ?? context.V6TransportHandoff?.Kind ?? FileTransferTransportHandoffKind.None)}; target_transport={FormatFileTransferTransportKind(unresolvedV6Epoch?.TargetTransport ?? context.V6TransportHandoff?.TargetTransport ?? FileTransferTransportKind.Unknown)}; post_tuna_recovery_active={(context.PullPostTunaRecoveryActive ? 1 : 0)}; source_can_seek={(context.PullSourceCanSeek ? 1 : 0)}");
             return;
         }
 
@@ -4900,7 +4902,7 @@ public sealed partial class SessionFileTransferService
             context.NegotiatedDataProtocolVersion < FileTransferProtocol.ProtocolVersionV6 ||
             !context.PullSourceCanSeek ||
             recoveryGeneration <= 0 ||
-            (!context.PullPostTunaRecoveryActive && recoveryGeneration <= context.LastRecoveredV5TransportHandoffEpoch))
+            (!context.PullPostTunaRecoveryActive && recoveryGeneration <= context.LastRecoveredV6TransportHandoffEpoch))
         {
             return;
         }
@@ -4952,13 +4954,13 @@ public sealed partial class SessionFileTransferService
                 "FileTransferService",
                 $"event=filetransfer_transport_rebind_frontier_only_replay; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; rebind_generation={recoveryGeneration}; remote_next_expected_chunk_index={remoteFrontier}; previous_replay_end_chunk_exclusive={previousReplayEndExclusive}; replay_end_chunk_exclusive={grantedUntilExclusive}; frontier_only_start_chunk_index={context.PullTransportFrontierOnlyRepairStartChunkIndex}");
         }
-        else if (IsV5TransportHandoffBlockingTail(context.V5TransportHandoff))
+        else if (IsV6TransportHandoffBlockingTail(context.V6TransportHandoff))
         {
             var previousReplayEndExclusive = grantedUntilExclusive;
             grantedUntilExclusive = Math.Min(context.ChunkCount, remoteFrontier + V4PostFallbackEmergencyFrontierRepairChunks);
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_v6_tail_blocked_until_frontier_proof; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={context.V5TransportHandoff!.EpochId}; state={FormatV5TransportHandoffState(context.V5TransportHandoff.State)}; remote_next_expected_chunk_index={remoteFrontier}; previous_replay_end_chunk_exclusive={previousReplayEndExclusive}; replay_end_chunk_exclusive={grantedUntilExclusive}");
+                $"event=filetransfer_v6_tail_blocked_until_frontier_proof; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={context.V6TransportHandoff!.EpochId}; state={FormatV6TransportHandoffState(context.V6TransportHandoff.State)}; remote_next_expected_chunk_index={remoteFrontier}; previous_replay_end_chunk_exclusive={previousReplayEndExclusive}; replay_end_chunk_exclusive={grantedUntilExclusive}");
         }
 
         var maxChunksByBytes = Math.Max(1, PullTransportRebindSafetyReplayMaxBytes / Math.Max(1, context.ChunkSizeBytes));
@@ -5292,8 +5294,8 @@ public sealed partial class SessionFileTransferService
                 {
                     case FileTransferTransportEpochFrameV6 handoff:
                         MarkInboundV4PeerFrameReceived(context);
-                        ApplyInboundV5HandoffFrame(context, handoff);
-                        await SendInboundV5TransportHandoffAsync(context, "peer_handoff").ConfigureAwait(false);
+                        ApplyInboundV6HandoffFrame(context, handoff);
+                        await SendInboundV6TransportHandoffAsync(context, "peer_handoff").ConfigureAwait(false);
                         break;
                     case FileTransferFrontierRequestFrameV6 repairRequest:
                         MarkInboundV4PeerFrameReceived(context);
@@ -5345,12 +5347,12 @@ public sealed partial class SessionFileTransferService
                         }
                         else
                         {
-                            LogInboundV4FrameIgnored(context, repairRequest, "unexpected_inbound_repair_request_v5");
+                            LogInboundV4FrameIgnored(context, repairRequest, "unexpected_inbound_repair_request_v6");
                         }
                         break;
                     case FileTransferRepairProofFrameV6 repairProof:
                         MarkInboundV4PeerFrameReceived(context);
-                        ApplyInboundV5RepairProof(context, repairProof);
+                        ApplyInboundV6RepairProof(context, repairProof);
                         break;
                     case FileTransferTransportProbeFrameV6 probe:
                         MarkInboundV4PeerFrameReceived(context);
@@ -5550,7 +5552,7 @@ public sealed partial class SessionFileTransferService
         return shouldFlushPausedProgress;
     }
 
-    private void ApplyInboundV5HandoffFrame(InboundTransferContext context, FileTransferTransportEpochFrameV6 handoff)
+    private void ApplyInboundV6HandoffFrame(InboundTransferContext context, FileTransferTransportEpochFrameV6 handoff)
     {
         SessionFileTransferSnapshot? snapshot = null;
         lock (gate)
@@ -5562,18 +5564,18 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
-            if (handoff.TransportEpoch <= context.LastRecoveredV5TransportHandoffEpoch)
+            if (handoff.TransportEpoch <= context.LastRecoveredV6TransportHandoffEpoch)
             {
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_v6_recovery_frame_ignored; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; frame_type={FileTransferProtocol.TransportEpochFrameTypeV6}; reason=recovered_epoch; frame_transport_epoch={handoff.TransportEpoch}; last_recovered_transport_epoch={context.LastRecoveredV5TransportHandoffEpoch}");
+                    $"event=filetransfer_v6_recovery_frame_ignored; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; frame_type={FileTransferProtocol.TransportEpochFrameTypeV6}; reason=recovered_epoch; frame_transport_epoch={handoff.TransportEpoch}; last_recovered_transport_epoch={context.LastRecoveredV6TransportHandoffEpoch}");
                 return;
             }
 
-            if (context.V5TransportHandoff is null)
+            if (context.V6TransportHandoff is null)
             {
                 context.PullTransportRebindGeneration = Math.Max(context.PullTransportRebindGeneration, (int)Math.Min(int.MaxValue, handoff.TransportEpoch));
-                context.V5TransportHandoff = new TransportHandoffEpoch
+                context.V6TransportHandoff = new TransportHandoffEpoch
                 {
                     EpochId = handoff.TransportEpoch,
                     Reason = "peer_handoff",
@@ -5582,29 +5584,29 @@ public sealed partial class SessionFileTransferService
                     StartingHighestObservedChunkIndex = context.PullHighestReceivedChunkIndex,
                     LastObservedCommittedChunkIndex = Math.Clamp(context.NextChunkIndex, 0, context.ChunkCount),
                     LastObservedHighestChunkIndex = context.PullHighestReceivedChunkIndex,
-                    State = V5TransportHandoffState.NknProofPending,
+                    State = V6TransportHandoffState.NknProofPending,
                 };
-                LogV5TransportHandoffEpochStarted(
+                LogV6TransportHandoffEpochStarted(
                     FileTransferDirection.Inbound,
                     context.TransferId,
                     context.SessionId,
-                    context.V5TransportHandoff);
+                    context.V6TransportHandoff);
             }
 
-            if (context.V5TransportHandoff.EpochId != handoff.TransportEpoch)
+            if (context.V6TransportHandoff.EpochId != handoff.TransportEpoch)
             {
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_v6_recovery_frame_ignored; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; frame_type={FileTransferProtocol.TransportEpochFrameTypeV6}; reason=stale_or_mismatched_epoch; frame_transport_epoch={handoff.TransportEpoch}; current_transport_epoch={context.V5TransportHandoff.EpochId}");
+                    $"event=filetransfer_v6_recovery_frame_ignored; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; frame_type={FileTransferProtocol.TransportEpochFrameTypeV6}; reason=stale_or_mismatched_epoch; frame_transport_epoch={handoff.TransportEpoch}; current_transport_epoch={context.V6TransportHandoff.EpochId}");
                 return;
             }
 
-            TrySetV5TransportHandoffState(
-                context.V5TransportHandoff,
+            TrySetV6TransportHandoffState(
+                context.V6TransportHandoff,
                 FileTransferDirection.Inbound,
                 context.TransferId,
                 context.SessionId,
-                V5TransportHandoffState.FrontierRepairOnly,
+                V6TransportHandoffState.FrontierRepairOnly,
                 "peer_handoff",
                 context.NextChunkIndex,
                 context.PullHighestReceivedChunkIndex);
@@ -5618,27 +5620,27 @@ public sealed partial class SessionFileTransferService
         }
     }
 
-    private void ApplyInboundV5RepairProof(InboundTransferContext context, FileTransferRepairProofFrameV6 repairProof)
+    private void ApplyInboundV6RepairProof(InboundTransferContext context, FileTransferRepairProofFrameV6 repairProof)
     {
         lock (gate)
         {
             if (!ReferenceEquals(inboundTransfer, context) ||
                 context.IsTerminal ||
-                repairProof.TransportEpoch <= context.LastRecoveredV5TransportHandoffEpoch ||
-                context.V5TransportHandoff is null ||
-                context.V5TransportHandoff.EpochId != repairProof.TransportEpoch)
+                repairProof.TransportEpoch <= context.LastRecoveredV6TransportHandoffEpoch ||
+                context.V6TransportHandoff is null ||
+                context.V6TransportHandoff.EpochId != repairProof.TransportEpoch)
             {
                 return;
             }
 
-            TrySetV5TransportHandoffState(
-                context.V5TransportHandoff,
+            TrySetV6TransportHandoffState(
+                context.V6TransportHandoff,
                 FileTransferDirection.Inbound,
                 context.TransferId,
                 context.SessionId,
-                repairProof.CommittedChunkIndex > context.V5TransportHandoff.StartingCommittedChunkIndex
-                    ? V5TransportHandoffState.BackfillRepair
-                    : V5TransportHandoffState.FrontierRepairOnly,
+                repairProof.CommittedChunkIndex > context.V6TransportHandoff.StartingCommittedChunkIndex
+                    ? V6TransportHandoffState.BackfillRepair
+                    : V6TransportHandoffState.FrontierRepairOnly,
                 "repair_proof",
                 repairProof.CommittedChunkIndex,
                 context.PullHighestReceivedChunkIndex);
@@ -6109,7 +6111,7 @@ public sealed partial class SessionFileTransferService
                     repairDuplicateOrStaleChunkCount,
                     repairFrontierBefore,
                     repairFrontierBefore);
-                LogInboundV5FrontierRepairStillMissing(
+                LogInboundV6FrontierRepairStillMissing(
                     context,
                     batch,
                     repairRequestedRangeStart,
@@ -6229,16 +6231,16 @@ public sealed partial class SessionFileTransferService
                     batch.ChunkCount);
             }
 
-            if (context.V5TransportHandoff is { } handoff &&
-                batch is FileTransferChunkBatchFrameV6 v5Batch &&
-                (v5Batch.TransportEpoch == 0 || v5Batch.TransportEpoch == handoff.EpochId) &&
+            if (context.V6TransportHandoff is { } handoff &&
+                batch is FileTransferChunkBatchFrameV6 handoffBatch &&
+                (handoffBatch.TransportEpoch == 0 || handoffBatch.TransportEpoch == handoff.EpochId) &&
                 (acceptedChunks.Count > 0 || repairOverlapChunkCount > 0))
             {
                 var nextState = context.NextChunkIndex > handoff.StartingCommittedChunkIndex &&
                                 context.NextChunkIndex > repairFrontierBefore
-                    ? V5TransportHandoffState.BackfillRepair
-                    : V5TransportHandoffState.FrontierRepairOnly;
-                TrySetV5TransportHandoffState(
+                    ? V6TransportHandoffState.BackfillRepair
+                    : V6TransportHandoffState.FrontierRepairOnly;
+                TrySetV6TransportHandoffState(
                     handoff,
                     FileTransferDirection.Inbound,
                     context.TransferId,
@@ -6255,10 +6257,10 @@ public sealed partial class SessionFileTransferService
                         SessionId = context.SessionId,
                         TransferId = context.TransferId,
                         TransportEpoch = handoff.EpochId,
-                        RepairRequestId = v5Batch.RepairRequestId ?? handoff.LastRepairRequestId,
+                        RepairRequestId = handoffBatch.RepairRequestId ?? handoff.LastRepairRequestId,
                         AppliedChunkCount = acceptedChunks.Count,
                         CommittedChunkIndex = context.NextChunkIndex,
-                        RecoveryMode = FormatV5TransportHandoffState(nextState),
+                        RecoveryMode = FormatV6TransportHandoffState(nextState),
                     };
                 }
             }
@@ -6374,7 +6376,7 @@ public sealed partial class SessionFileTransferService
                 var finalFrontierStatus = repairFrontierChunkStatus == "accepted_for_write"
                     ? "accepted_but_not_committed"
                     : repairFrontierChunkStatus;
-                LogInboundV5FrontierRepairStillMissing(
+                LogInboundV6FrontierRepairStillMissing(
                     context,
                     batch,
                     repairRequestedRangeStart,
@@ -6421,12 +6423,12 @@ public sealed partial class SessionFileTransferService
         else
         {
             await SendInboundV4StateAsync(context, "chunk_batch_committed", terminalReady: false).ConfigureAwait(false);
-            await SendInboundV5RepairRequestAsync(context, "chunk_batch_committed").ConfigureAwait(false);
+            await SendInboundV6RepairRequestAsync(context, "chunk_batch_committed").ConfigureAwait(false);
         }
 
         if (repairProofFrame is not null)
         {
-            await SendInboundV5RepairProofAsync(context, repairProofFrame).ConfigureAwait(false);
+            await SendInboundV6RepairProofAsync(context, repairProofFrame).ConfigureAwait(false);
         }
 
         if (completed)
@@ -6488,7 +6490,7 @@ public sealed partial class SessionFileTransferService
         await SendInboundV4StateAsync(context, reason, terminalReady: false).ConfigureAwait(false);
     }
 
-    private async Task SendInboundV5RepairProofAsync(InboundTransferContext context, FileTransferRepairProofFrameV6 proof)
+    private async Task SendInboundV6RepairProofAsync(InboundTransferContext context, FileTransferRepairProofFrameV6 proof)
     {
         IFileTransferDataSession? dataSession;
         lock (gate)
@@ -6690,8 +6692,8 @@ public sealed partial class SessionFileTransferService
             frontierWindowCreditCapped =
                 ShouldClampInboundV4CreditForTransportRebind(context, state, frontierLagChunks) &&
                 state.CreditUntilChunkIndexExclusive > frontierCreditCapChunkIndexExclusive;
-            if (IsV5TransportHandoffBlockingTail(context.V5TransportHandoff) &&
-                context.V5TransportHandoff!.State != V5TransportHandoffState.BackfillRepair)
+            if (IsV6TransportHandoffBlockingTail(context.V6TransportHandoff) &&
+                context.V6TransportHandoff!.State != V6TransportHandoffState.BackfillRepair)
             {
                 var frontierOnlyCredit = Math.Clamp(
                     state.ContiguousCommittedChunkIndex + V4PostFallbackEmergencyFrontierRepairChunks,
@@ -6701,7 +6703,7 @@ public sealed partial class SessionFileTransferService
                 {
                     LocalOperationalLog.Info(
                         "FileTransferService",
-                        $"event=filetransfer_v6_tail_blocked_until_frontier_proof; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={context.V5TransportHandoff.EpochId}; state={FormatV5TransportHandoffState(context.V5TransportHandoff.State)}; original_credit_until_chunk_index_exclusive={state.CreditUntilChunkIndexExclusive}; advertised_credit_until_chunk_index_exclusive={frontierOnlyCredit}; contiguous_committed_chunk_index={state.ContiguousCommittedChunkIndex}; durable_received_highest_chunk_index={state.DurableReceivedHighestChunkIndex}");
+                        $"event=filetransfer_v6_tail_blocked_until_frontier_proof; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={context.V6TransportHandoff.EpochId}; state={FormatV6TransportHandoffState(context.V6TransportHandoff.State)}; original_credit_until_chunk_index_exclusive={state.CreditUntilChunkIndexExclusive}; advertised_credit_until_chunk_index_exclusive={frontierOnlyCredit}; contiguous_committed_chunk_index={state.ContiguousCommittedChunkIndex}; durable_received_highest_chunk_index={state.DurableReceivedHighestChunkIndex}");
                     state = state with { CreditUntilChunkIndexExclusive = frontierOnlyCredit };
                 }
             }
@@ -6945,7 +6947,7 @@ public sealed partial class SessionFileTransferService
                 "frontier_stall_repair_due",
                 terminalReady: false,
                 requireMissingRange: true).ConfigureAwait(false);
-            await SendInboundV5RepairRequestAsync(context, "frontier_stall_repair_due").ConfigureAwait(false);
+            await SendInboundV6RepairRequestAsync(context, "frontier_stall_repair_due").ConfigureAwait(false);
         }
     }
 
@@ -7133,10 +7135,10 @@ public sealed partial class SessionFileTransferService
             : null;
         var receiverTransportEpoch = primaryRegularNknCheckpoint
             ? context.PullTransportRebindGeneration
-            : unresolvedV6Epoch?.EpochId ?? context.V5TransportHandoff?.EpochId ?? 0;
+            : unresolvedV6Epoch?.EpochId ?? context.V6TransportHandoff?.EpochId ?? 0;
         var receiverRepairRequestId = primaryRegularNknCheckpoint
             ? context.V6RegularNknLastCheckpointSyncRequestId ?? $"checkpoint:{context.V6RegularNknCheckpointSequence}"
-            : primaryRegularNknFrontierRepairRequestId ?? unresolvedV6Epoch?.LastRepairRequestId ?? context.V5TransportHandoff?.LastRepairRequestId;
+            : primaryRegularNknFrontierRepairRequestId ?? unresolvedV6Epoch?.LastRepairRequestId ?? context.V6TransportHandoff?.LastRepairRequestId;
         var receiverPriority = primaryRegularNknCheckpoint
             ? V6RegularNknCheckpointSyncPriority
             : primaryRegularNknFrontierRepairRequestId is not null
@@ -7145,9 +7147,9 @@ public sealed partial class SessionFileTransferService
                 ? unresolvedV6Epoch.State == V6TransportEpochState.BackfillRepair
                     ? "backfill"
                     : "frontier"
-                : context.V5TransportHandoff is null
+                : context.V6TransportHandoff is null
                     ? null
-                    : context.V5TransportHandoff.State == V5TransportHandoffState.BackfillRepair
+                    : context.V6TransportHandoff.State == V6TransportHandoffState.BackfillRepair
                         ? "backfill"
                         : "frontier";
         var receiverRecoveryMode = primaryRegularNknCheckpoint
@@ -7156,9 +7158,9 @@ public sealed partial class SessionFileTransferService
                 ? V6RegularNknFrontierRepairTransactionRecoveryMode
             : unresolvedV6Epoch is not null
                 ? FormatV6TransportEpochState(unresolvedV6Epoch.State)
-                : context.V5TransportHandoff is null
+                : context.V6TransportHandoff is null
                     ? null
-                    : FormatV5TransportHandoffState(context.V5TransportHandoff.State);
+                    : FormatV6TransportHandoffState(context.V6TransportHandoff.State);
         var bytesCommitted = ResolveInboundV4StateBytesCommittedLocked(context);
 
         if (!ShouldUseV6SparseCreditEnvelope(context))
@@ -7219,7 +7221,7 @@ public sealed partial class SessionFileTransferService
            (context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV4 ||
             (context.RuntimeProfile == FileTransferRuntimeProfile.PrimaryRegularNknBulkV6 &&
              context.V6RegularNknBulkSparseProfileActive)) &&
-           context.V5TransportHandoff is null &&
+           context.V6TransportHandoff is null &&
            !context.PullPostTunaRecoveryActive;
 
     private IReadOnlyList<FileTransferRangeV4> BuildInboundV4MissingRangesLocked(
@@ -7292,7 +7294,7 @@ public sealed partial class SessionFileTransferService
                 var count = 0;
                 var isFrontierRange = start == context.NextChunkIndex;
                 var exactFrontierRepairRequired = isFrontierRange &&
-                    IsInboundV5ExactFrontierRepairRequiredLocked(context);
+                    IsInboundV6ExactFrontierRepairRequiredLocked(context);
                 var maxRangeChunks = isFrontierRange && IsInboundPostTunaRecoveryActiveLocked(context)
                     ? exactFrontierRepairRequired
                         ? V4PostFallbackEmergencyFrontierRepairChunks
@@ -7358,7 +7360,7 @@ public sealed partial class SessionFileTransferService
                     var maxRepairCount = repairEndExclusive - context.NextChunkIndex;
                     var repairCount = IsInboundPostTunaRecoveryActiveLocked(context)
                         ? Math.Min(
-                            IsInboundV5ExactFrontierRepairRequiredLocked(context)
+                            IsInboundV6ExactFrontierRepairRequiredLocked(context)
                                 ? V4PostFallbackEmergencyFrontierRepairChunks
                                 : ResolveV4PostFallbackFrontierRepairChunks(context),
                             maxRepairCount)
@@ -7734,7 +7736,7 @@ public sealed partial class SessionFileTransferService
             return V4PostFallbackEmergencyFrontierRepairChunks;
         }
 
-        if (IsInboundV5ExactFrontierRepairRequiredLocked(context))
+        if (IsInboundV6ExactFrontierRepairRequiredLocked(context))
         {
             return V4PostFallbackEmergencyFrontierRepairChunks;
         }
@@ -7751,7 +7753,7 @@ public sealed partial class SessionFileTransferService
             V4PostFallbackFrontierBackfillStep3Chunks);
     }
 
-    private static bool IsInboundV5ExactFrontierRepairRequiredLocked(InboundTransferContext context)
+    private static bool IsInboundV6ExactFrontierRepairRequiredLocked(InboundTransferContext context)
     {
         if (!IsInboundPostTunaRecoveryActiveLocked(context) ||
             context.NextChunkIndex < 0 ||
@@ -7767,11 +7769,11 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        if (context.V5TransportHandoff is { } handoff)
+        if (context.V6TransportHandoff is { } handoff)
         {
-            return handoff.State is V5TransportHandoffState.NknProofPending
-                or V5TransportHandoffState.FrontierRepairOnly
-                or V5TransportHandoffState.WaitingForRegularNkn;
+            return handoff.State is V6TransportHandoffState.NknProofPending
+                or V6TransportHandoffState.FrontierRepairOnly
+                or V6TransportHandoffState.WaitingForRegularNkn;
         }
 
         return true;
@@ -8243,7 +8245,7 @@ public sealed partial class SessionFileTransferService
             $"event=filetransfer_v4_repair_chunk_observed; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={firstKey}; matched_key_count={observedRepairKeys.Count}; overlap_chunk_count={overlapChunkCount}; accepted_chunk_count={acceptedChunkCount}; duplicate_or_stale_chunk_count={duplicateOrStaleChunkCount}; frontier_before={frontierBefore}; frontier_after={frontierAfter}; frontier_advanced={(frontierAfter > frontierBefore ? 1 : 0)}; batch_start_chunk_index={batch.StartChunkIndex}; batch_chunk_count={batch.ChunkCount}");
     }
 
-    private static void LogInboundV5FrontierRepairStillMissing(
+    private static void LogInboundV6FrontierRepairStillMissing(
         InboundTransferContext context,
         FileTransferChunkBatchFrameV4 batch,
         int requestedRangeStart,
@@ -8263,26 +8265,26 @@ public sealed partial class SessionFileTransferService
             return;
         }
 
-        var transportEpoch = batch is FileTransferChunkBatchFrameV6 v5Batch
-            ? v5Batch.TransportEpoch
-            : context.V5TransportHandoff?.EpochId ?? 0;
-        var repairRequestId = batch is FileTransferChunkBatchFrameV6 v5RepairBatch
-            ? v5RepairBatch.RepairRequestId
-            : context.V5TransportHandoff?.LastRepairRequestId;
+        var transportEpoch = batch is FileTransferChunkBatchFrameV6 v6Batch
+            ? v6Batch.TransportEpoch
+            : context.V6TransportHandoff?.EpochId ?? 0;
+        var repairRequestId = batch is FileTransferChunkBatchFrameV6 v6RepairBatch
+            ? v6RepairBatch.RepairRequestId
+            : context.V6TransportHandoff?.LastRepairRequestId;
         var now = DateTimeOffset.UtcNow;
-        var sameFrontier = context.LastV5FrontierRepairStillMissingChunkIndex == frontierBefore;
+        var sameFrontier = context.LastV6FrontierRepairStillMissingChunkIndex == frontierBefore;
         if (sameFrontier &&
-            context.LastV5FrontierRepairStillMissingLogUtc is { } lastLogUtc &&
+            context.LastV6FrontierRepairStillMissingLogUtc is { } lastLogUtc &&
             now - lastLogUtc < TimeSpan.FromSeconds(2))
         {
-            context.SuppressedV5FrontierRepairStillMissingLogCount++;
+            context.SuppressedV6FrontierRepairStillMissingLogCount++;
             return;
         }
 
-        var suppressedCount = context.SuppressedV5FrontierRepairStillMissingLogCount;
-        context.LastV5FrontierRepairStillMissingLogUtc = now;
-        context.LastV5FrontierRepairStillMissingChunkIndex = frontierBefore;
-        context.SuppressedV5FrontierRepairStillMissingLogCount = 0;
+        var suppressedCount = context.SuppressedV6FrontierRepairStillMissingLogCount;
+        context.LastV6FrontierRepairStillMissingLogUtc = now;
+        context.LastV6FrontierRepairStillMissingChunkIndex = frontierBefore;
+        context.SuppressedV6FrontierRepairStillMissingLogCount = 0;
         LocalOperationalLog.Warn(
             "FileTransferService",
             $"event=filetransfer_v6_frontier_repair_still_missing; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={transportEpoch}; repair_request_id={FormatProtocolLogValue(repairRequestId ?? "(none)")}; reason={FormatProtocolLogValue(reason)}; requested_missing_range_start={requestedRangeStart}; requested_missing_range_count={requestedRangeCount}; committed_frontier_before={frontierBefore}; committed_frontier_after={frontierAfter}; batch_start_chunk_index={batch.StartChunkIndex}; batch_chunk_count={batch.ChunkCount}; accepted_chunk_count={acceptedChunkCount}; duplicate_or_stale_chunk_count={duplicateOrStaleChunkCount}; pending_write_chunk_count={pendingWriteChunkCount}; frontier_chunk_observed={(frontierChunkObserved ? 1 : 0)}; frontier_chunk_status={FormatProtocolLogValue(frontierChunkStatus)}; suppressed_count={suppressedCount}");

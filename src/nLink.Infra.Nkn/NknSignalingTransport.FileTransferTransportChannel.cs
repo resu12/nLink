@@ -1206,8 +1206,7 @@ public sealed partial class NknSignalingTransport
             intent = candidate;
             fileTransferRouteHints.TryGetValue(session.TransferId, out var candidateRouteHint);
             routeHint = candidateRouteHint;
-            if (IsNormalToTunaActivationHandoff(candidate.HandoffKind, candidate.TargetTransport) &&
-                !ShouldAllowLegacyFileTunaV6ActivationHandoff(candidateRouteHint))
+            if (IsNormalToTunaActivationHandoff(candidate.HandoffKind, candidate.TargetTransport))
             {
                 pendingFileTransferV6HandoffsBySession.Remove(session.SessionId);
                 LocalOperationalLog.Info(
@@ -1241,50 +1240,7 @@ public sealed partial class NknSignalingTransport
 
     private bool TryRequestCurrentTunaActivationHandoffForFileTransferSession(TransportFileTransferDataSession session, string trigger)
     {
-        if (session.IsDisposed)
-        {
-            return false;
-        }
-
-        var currentSessionId = currentSessionSecurityState.SessionId?.Value;
-        lock (gate)
-        {
-            if (!fileTransferDataSessions.TryGetValue(session.TransferId, out var current) ||
-                !ReferenceEquals(current, session))
-            {
-                return false;
-            }
-
-            fileTransferRouteHints.TryGetValue(session.TransferId, out var routeHint);
-            if (!ShouldAllowLegacyFileTunaV6ActivationHandoff(routeHint))
-            {
-                return false;
-            }
-        }
-
-        lock (accelerationGate)
-        {
-            if (accelerationLane?.IsAvailable != true ||
-                (accelerationNegotiatedLanes & NknAccelerationLaneKind.File) != NknAccelerationLaneKind.File ||
-                string.IsNullOrWhiteSpace(accelerationSessionId) ||
-                string.IsNullOrWhiteSpace(currentSessionId) ||
-                !string.Equals(accelerationSessionId, currentSessionId, StringComparison.Ordinal) ||
-                !string.Equals(accelerationSessionId, session.SessionId, StringComparison.Ordinal) ||
-                string.Equals(accelerationUserStoppedSessionId, currentSessionId, StringComparison.Ordinal))
-            {
-                return false;
-            }
-        }
-
-        const string reason = "active_tuna_session_registered";
-        LocalOperationalLog.Info(
-            "NKN.Tuna",
-            $"event=filetransfer_v6_active_tuna_handoff_synthesized; session_id={SanitizeLogToken(session.SessionId)}; transfer_id={SanitizeLogToken(session.TransferId)}; reason={reason}; trigger={SanitizeLogToken(trigger)}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(FileTransferTransportHandoffKind.NormalToTunaActivation)}; target_transport={FormatFileTransferTransportKindForLog(FileTransferTransportKind.Tuna)}");
-        session.RequestHandoff(
-            reason,
-            FileTransferTransportHandoffKind.NormalToTunaActivation,
-            FileTransferTransportKind.Tuna);
-        return true;
+        return false;
     }
 
     private static bool IsNormalToTunaActivationHandoff(
@@ -1292,10 +1248,6 @@ public sealed partial class NknSignalingTransport
         FileTransferTransportKind targetTransport)
         => handoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
            targetTransport == FileTransferTransportKind.Tuna;
-
-    private static bool ShouldAllowLegacyFileTunaV6ActivationHandoff(FileTransferRouteHint routeHint)
-        => routeHint.Route == FileTransferRoute.FileTunaV6 &&
-           routeHint.ProtocolVersion >= FileTransferProtocol.ProtocolVersionV6;
 
     private void TrackFileTransferRouteHint(
         string? transferId,
@@ -2698,7 +2650,7 @@ public sealed partial class NknSignalingTransport
 
     private static bool IsBenignLateFileTransferDataFrameRejection(FileTransferDataFrame frame, string failureReason)
         => ((failureReason is "unknown_transfer_id" or "transfer_already_terminal") &&
-            (IsReceiverFeedbackDataFrame(frame) || IsV5RecoveryControlDataFrame(frame) || IsTerminalDataFrame(frame) || frame is FileTransferPauseControlFrameV4)) ||
+            (IsReceiverFeedbackDataFrame(frame) || IsV6RecoveryControlDataFrame(frame) || IsTerminalDataFrame(frame) || frame is FileTransferPauseControlFrameV4)) ||
            failureReason == "post_terminal_late_frame_canceled" ||
            (failureReason == "post_completion_late_sender_frame" && IsSenderDataFrame(frame)) ||
            (failureReason == "transfer_already_terminal" && IsSenderDataFrame(frame));
@@ -4631,7 +4583,7 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
-        if (IsV5RecoveryControlDataFrame(frame))
+        if (IsV6RecoveryControlDataFrame(frame))
         {
             if (currentState.Phase is not FileTransferTransportPhase.Accepted
                 and not FileTransferTransportPhase.Started
@@ -4798,7 +4750,7 @@ public sealed partial class NknSignalingTransport
     private static bool IsReceiverFeedbackDataFrame(FileTransferDataFrame frame)
         => frame is FileTransferStateFrameV4;
 
-    private static bool IsV5RecoveryControlDataFrame(FileTransferDataFrame frame)
+    private static bool IsV6RecoveryControlDataFrame(FileTransferDataFrame frame)
         => frame is FileTransferTransportEpochFrameV6
             or FileTransferTransportProbeFrameV6
             or FileTransferFrontierRequestFrameV6
@@ -6036,7 +5988,7 @@ public sealed partial class NknSignalingTransport
                 "SessionSecurity",
                 $"event=filetransfer_chunk_batch_split_for_transport; transport=nkn; transfer_id={batch.TransferId}; session_id={batch.SessionId}; original_frame_type={batch.Type}; split_chunk_range={batch.StartChunkIndex}-{finalChunkIndex}; chunk_frame_count={batch.DataSegments.Count}; per_frame_raw_bytes={perFrameRawBytes}; lane=bulk; reason={reason}");
 
-            var v5MetadataBatch = batch as FileTransferChunkBatchFrameV6;
+            var v6MetadataBatch = batch as FileTransferChunkBatchFrameV6;
             var startOffset = 0;
             while (startOffset < batch.DataSegments.Count)
             {
@@ -6061,11 +6013,11 @@ public sealed partial class NknSignalingTransport
                         BatchProfile = ResolveBatchProfileNameForDiagnostics(batch),
                         RepairDeliveryMode = batch.RepairDeliveryMode,
                         ForceRegularNknBulk = batch.ForceRegularNknBulk,
-                        TransportEpoch = v5MetadataBatch?.TransportEpoch ?? 0,
-                        BatchId = v5MetadataBatch?.BatchId,
-                        RepairRequestId = v5MetadataBatch?.RepairRequestId,
-                        Priority = v5MetadataBatch?.Priority,
-                        RecoveryMode = v5MetadataBatch?.RecoveryMode,
+                        TransportEpoch = v6MetadataBatch?.TransportEpoch ?? 0,
+                        BatchId = v6MetadataBatch?.BatchId,
+                        RepairRequestId = v6MetadataBatch?.RepairRequestId,
+                        Priority = v6MetadataBatch?.Priority,
+                        RecoveryMode = v6MetadataBatch?.RecoveryMode,
                     };
                     byte[] candidatePayload;
                     try

@@ -3466,7 +3466,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             return false;
         }
 
-        if (IsV5RecoveryControlDataFrame(frame))
+        if (IsV6RecoveryControlDataFrame(frame))
         {
             if (currentState.Phase is not FileTransferTransportPhase.Accepted
                 and not FileTransferTransportPhase.Started
@@ -3545,7 +3545,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     private static bool IsReceiverFeedbackDataFrame(FileTransferDataFrame frame)
         => frame is FileTransferStateFrameV4;
 
-    private static bool IsV5RecoveryControlDataFrame(FileTransferDataFrame frame)
+    private static bool IsV6RecoveryControlDataFrame(FileTransferDataFrame frame)
         => frame is FileTransferTransportEpochFrameV6
             or FileTransferTransportProbeFrameV6
             or FileTransferFrontierRequestFrameV6
@@ -3566,7 +3566,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
 
     private static bool IsBenignLateFileTransferDataFrameRejection(FileTransferDataFrame frame, string failureReason)
         => ((failureReason is "unknown_transfer_id" or "transfer_already_terminal") &&
-            (IsReceiverFeedbackDataFrame(frame) || IsV5RecoveryControlDataFrame(frame) || IsTerminalDataFrame(frame) || frame is FileTransferPauseControlFrameV4)) ||
+            (IsReceiverFeedbackDataFrame(frame) || IsV6RecoveryControlDataFrame(frame) || IsTerminalDataFrame(frame) || frame is FileTransferPauseControlFrameV4)) ||
            (failureReason == "transfer_already_terminal" && IsSenderDataFrame(frame));
 
     private static void LogFileTransferFrameEvent(string direction, string frameType, string transferId)
