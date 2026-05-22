@@ -356,6 +356,77 @@ function Build-FileTransferPortableIfNeeded {
     }
 }
 
+function Assert-FileTransferPathUnderRoot {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Root
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $fullRoot = [System.IO.Path]::GetFullPath($Root)
+    if (-not $fullRoot.EndsWith([System.IO.Path]::DirectorySeparatorChar)) {
+        $fullRoot += [System.IO.Path]::DirectorySeparatorChar
+    }
+
+    if (-not $fullPath.StartsWith($fullRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to operate on path outside artifact root. Path='$fullPath' Root='$fullRoot'"
+    }
+}
+
+function Test-FileTransferRegularNknStagingExcludedItem {
+    param([Parameter(Mandatory = $true)]$Item)
+
+    if ($Item.PSIsContainer -and [string]::Equals($Item.Name, 'tuna', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+
+    if (-not $Item.PSIsContainer -and
+        ([string]::Equals($Item.Name, 'nlink-tuna-sidecar.exe', [System.StringComparison]::OrdinalIgnoreCase) -or
+         [string]::Equals($Item.Name, 'tuna-sidecar-manifest.json', [System.StringComparison]::OrdinalIgnoreCase))) {
+        return $true
+    }
+
+    return $false
+}
+
+function Copy-FileTransferRegularNknOnlyPortable {
+    param(
+        [Parameter(Mandatory = $true)][string]$ResolvedExePath,
+        [Parameter(Mandatory = $true)][string]$ArtifactDir
+    )
+
+    $sourceExePath = [System.IO.Path]::GetFullPath($ResolvedExePath)
+    if (-not (Test-Path -LiteralPath $sourceExePath -PathType Leaf)) {
+        throw "Cannot stage regular-NKN-only portable app because nLink.exe was not found: $sourceExePath"
+    }
+
+    $sourceDir = [System.IO.Path]::GetFullPath((Split-Path -Parent $sourceExePath))
+    $artifactRoot = [System.IO.Path]::GetFullPath($ArtifactDir)
+    $stageDir = Join-Path $artifactRoot 'regular-nkn-app\sidecar-isolated\a\b\c\d\e\f\app'
+    $stageDir = [System.IO.Path]::GetFullPath($stageDir)
+    Assert-FileTransferPathUnderRoot -Path $stageDir -Root $artifactRoot
+
+    if (Test-Path -LiteralPath $stageDir) {
+        Remove-Item -LiteralPath $stageDir -Recurse -Force
+    }
+
+    New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+    foreach ($item in Get-ChildItem -LiteralPath $sourceDir -Force) {
+        if (Test-FileTransferRegularNknStagingExcludedItem -Item $item) {
+            continue
+        }
+
+        Copy-Item -LiteralPath $item.FullName -Destination $stageDir -Recurse -Force
+    }
+
+    $stagedExePath = Join-Path $stageDir (Split-Path -Leaf $sourceExePath)
+    if (-not (Test-Path -LiteralPath $stagedExePath -PathType Leaf)) {
+        throw "Regular-NKN-only staging completed but nLink.exe was not found at $stagedExePath."
+    }
+
+    return $stagedExePath
+}
+
 function Get-FileTransferSummaryValue {
     param(
         $Values,
@@ -913,29 +984,37 @@ function Write-FileTransferNknFakeArtifacts {
         $timestamp = $baseTimestamp.AddSeconds(1 + ($cycleIndex * 3))
 
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp -Message (
-                    'event=filetransfer_v6_negotiated; transfer_id={0}; session_id={1}; direction=outbound; negotiated_version=6' -f $transferId, $sessionId))) | Out-Null
+                    'event=filetransfer_route_selected; direction=outbound; transfer_id={0}; session_id={1}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=fake_regular_nkn; file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=nkn' -f $transferId, $sessionId))) | Out-Null
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(10) -Message (
-                    'event=filetransfer_v6_sender_started; transfer_id={0}; session_id={1}; chunk_size_bytes=21504; chunk_count={2}; pipeline_depth=8; pending_bytes_limit=2097152' -f $transferId, $sessionId, $chunkFrameCount))) | Out-Null
+                    'event=filetransfer_route_selected; direction=inbound; transfer_id={0}; session_id={1}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=fake_regular_nkn; file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=nkn' -f $transferId, $sessionId))) | Out-Null
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(20) -Message (
-                    'event=filetransfer_v6_receiver_started; transfer_id={0}; session_id={1}; protocol_version=6; session_open_chunk_size_bytes=21504; session_open_pipeline_depth=8' -f $transferId, $sessionId))) | Out-Null
+                    'event=filetransfer_protocol_negotiated; direction=outbound; transfer_id={0}; session_id={1}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; bridge_recovery_policy=regular_nkn_v4_fast; selection_reason=fake_regular_nkn' -f $transferId, $sessionId))) | Out-Null
+        $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(30) -Message (
+                    'event=filetransfer_session_opened; direction=outbound; transfer_id={0}; session_id={1}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; bridge_recovery_policy=regular_nkn_v4_fast; reason=role=Sender' -f $transferId, $sessionId))) | Out-Null
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(40) -Message (
                     'event=filetransfer_v4_manifest_sent; transfer_id={0}; session_id={1}; file_size_bytes={2}; chunk_size_bytes=21504; chunk_count={3}' -f $transferId, $sessionId, $payloadBytes, $chunkFrameCount))) | Out-Null
+        $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(45) -Message (
+                    'event=filetransfer_v4_sender_started; direction=outbound; transfer_id={0}; session_id={1}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; bridge_recovery_policy=regular_nkn_v4_fast; chunk_size_bytes=21504; chunk_count={2}; pipeline_depth=8; pending_bytes_limit=2097152' -f $transferId, $sessionId, $chunkFrameCount))) | Out-Null
+        $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(50) -Message (
+                    'event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={0}; session_id={1}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; bridge_recovery_policy=regular_nkn_v4_fast' -f $transferId, $sessionId))) | Out-Null
+        $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(55) -Message (
+                    'event=filetransfer_v4_receiver_started; direction=inbound; transfer_id={0}; session_id={1}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; bridge_recovery_policy=regular_nkn_v4_fast; session_open_chunk_size_bytes=21504; session_open_pipeline_depth=8' -f $transferId, $sessionId))) | Out-Null
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(60) -Message (
                     'event=filetransfer_v4_state_sent; transfer_id={0}; session_id={1}; epoch=1; contiguous_committed_chunk_index=0; durable_received_highest_chunk_index=-1; credit_until_chunk_index_exclusive={2}; missing_range_count=0; bytes_committed=0; terminal_ready=0' -f $transferId, $sessionId, $chunkFrameCount))) | Out-Null
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(80) -Message (
-                    'event=filetransfer_v4_feedback_first_success; transport=nkn; transfer_id={0}; session_id={1}; frame_type=filetransfer.receiver_state.v6; lane=bulk; elapsed_ms=2; first_lane_failed=0' -f $transferId, $sessionId))) | Out-Null
+                    'event=filetransfer_v4_feedback_first_success; transport=nkn; transfer_id={0}; session_id={1}; frame_type=filetransfer.receiver_state.v4; lane=bulk; elapsed_ms=2; first_lane_failed=0' -f $transferId, $sessionId))) | Out-Null
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(100) -Message (
                     'event=filetransfer_v4_state_received; transfer_id={0}; session_id={1}; epoch=1; applied=1; stale=0; duplicate=0; contiguous_committed_chunk_index=0; durable_received_highest_chunk_index=-1; credit_until_chunk_index_exclusive={2}; effective_credit_until_chunk_index_exclusive={2}; available_credit_chunks={2}; missing_range_count=0; bytes_committed=0; terminal_ready=0' -f $transferId, $sessionId, $chunkFrameCount))) | Out-Null
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(105) -Message (
                     'event=filetransfer_v4_sender_pump_summary; transfer_id={0}; session_id={1}; sample_window_ms=1000; scheduled_frames=1; normal_scheduled_frames=1; repair_scheduled_frames=0; completed_frames=1; failed_frames=0; in_flight_frames=1; raw_bytes_sent={2}; repair_send_count=0; available_credit_bytes=1048576; credit_exhausted_time_ms=0; next_unsent_chunk_index=0; credit_ceiling_chunk_index={3}; remote_frontier_chunk_index=0; terminal_ready=0; pump_wake_reason=state_credit' -f $transferId, $sessionId, $payloadBytes, $chunkFrameCount))) | Out-Null
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(110) -Message (
-                    'event=filetransfer_chunk_batch_sent_as_batch; transport=nkn; transfer_id={0}; session_id={1}; frame_type=filetransfer.chunk_batch.v6; chunk_range=0-{2}; chunk_frame_count={3}; batch_chunk_count={3}; raw_bytes={4}; lane=bulk; batch_profile=v4_default_21k; raw_to_bridge_payload_ratio=0.992; bridge_payload_fill_percent=99.10' -f $transferId, $sessionId, $batchFinalChunkIndex, $batchChunkCount, $batchPayloadBytes))) | Out-Null
+                    'event=filetransfer_chunk_batch_sent_as_batch; transport=nkn; transfer_id={0}; session_id={1}; frame_type=filetransfer.chunk_batch.v4; chunk_range=0-{2}; chunk_frame_count={3}; batch_chunk_count={3}; raw_bytes={4}; lane=bulk; batch_profile=v4_default_21k; raw_to_bridge_payload_ratio=0.992; bridge_payload_fill_percent=99.10' -f $transferId, $sessionId, $batchFinalChunkIndex, $batchChunkCount, $batchPayloadBytes))) | Out-Null
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(120) -Message (
-                    'event=filetransfer_transport_payload_budget; transport=nkn; transfer_id={0}; message_type=file_transfer_data_frame; frame_type=filetransfer.chunk_batch.v6; lane=bulk; serialized_payload_bytes={1}; secure_payload_bytes={2}; bridge_payload_bytes={3}; bridge_command_bytes={4}; max_allowed_bytes=65536; batch_profile=v4_default_21k; batch_chunk_count={5}; raw_to_bridge_payload_ratio=0.992; bridge_payload_fill_percent=99.10' -f $transferId, $batchPayloadBytes, ($batchPayloadBytes + 225), ($batchPayloadBytes + 302), $transportPayloadBytes, $batchChunkCount))) | Out-Null
+                    'event=filetransfer_transport_payload_budget; transport=nkn; transfer_id={0}; message_type=file_transfer_data_frame; frame_type=filetransfer.chunk_batch.v4; lane=bulk; serialized_payload_bytes={1}; secure_payload_bytes={2}; bridge_payload_bytes={3}; bridge_command_bytes={4}; max_allowed_bytes=65536; batch_profile=v4_default_21k; batch_chunk_count={5}; raw_to_bridge_payload_ratio=0.992; bridge_payload_fill_percent=99.10' -f $transferId, $batchPayloadBytes, ($batchPayloadBytes + 225), ($batchPayloadBytes + 302), $transportPayloadBytes, $batchChunkCount))) | Out-Null
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(130) -Message (
-                    'event=filetransfer_binary_frame_sent; transfer_id={0}; session_id={1}; frame_type=filetransfer.chunk_batch.v6; chunk_index=0-{2}; payload_bytes={3}; serialized_payload_bytes={3}; raw_chunk_bytes={4}; chunk_count={5}' -f $transferId, $sessionId, $batchFinalChunkIndex, $batchPayloadBytes, $batchPayloadBytes, $batchChunkCount))) | Out-Null
+                    'event=filetransfer_binary_frame_sent; transfer_id={0}; session_id={1}; frame_type=filetransfer.chunk_batch.v4; chunk_index=0-{2}; payload_bytes={3}; serialized_payload_bytes={3}; raw_chunk_bytes={4}; chunk_count={5}' -f $transferId, $sessionId, $batchFinalChunkIndex, $batchPayloadBytes, $batchPayloadBytes, $batchChunkCount))) | Out-Null
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(140) -Message (
-                    'event=filetransfer_binary_frame_received; transfer_id={0}; session_id={1}; frame_type=filetransfer.chunk_batch.v6; chunk_index=0-{2}; raw_chunk_bytes={3}; chunk_count={4}' -f $transferId, $sessionId, $batchFinalChunkIndex, $batchPayloadBytes, $batchChunkCount))) | Out-Null
+                    'event=filetransfer_binary_frame_received; transfer_id={0}; session_id={1}; frame_type=filetransfer.chunk_batch.v4; chunk_index=0-{2}; raw_chunk_bytes={3}; chunk_count={4}' -f $transferId, $sessionId, $batchFinalChunkIndex, $batchPayloadBytes, $batchChunkCount))) | Out-Null
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(160) -Message (
                     'event=file_transfer_inbound_terminal; role=helper; session_id={0}; transfer_id={1}; state=Completed; error_code=(none); chunks_transferred={2}/{2}; reason=Transfer complete; saved_path=(none)' -f $sessionId, $transferId, $chunkFrameCount))) | Out-Null
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(180) -Message (
@@ -984,6 +1063,7 @@ function Clear-FileTransferNknRunArtifacts {
             'filetransfer-live-nkn-summary.json',
             'filetransfer-live-nkn-summary.txt',
             'filetransfer-operator-verdict.txt',
+            'filetransfer-route-consistency-summary.txt',
             'filetransfer-retained-log-slice.log',
             'gui-smoke-stderr.log',
             'gui-smoke-stdout.log',
@@ -1010,6 +1090,8 @@ Assert-PayloadEfficiencyProfileIsSafeForMode
 $resolvedArtifactDir = Resolve-FileTransferArtifactDir -RepoRoot $repoRoot -RequestedArtifactDir $ArtifactDir
 New-Item -ItemType Directory -Force -Path $resolvedArtifactDir | Out-Null
 Clear-FileTransferNknRunArtifacts -ArtifactDir $resolvedArtifactDir
+$regularNknTunaStateRoot = Join-Path $resolvedArtifactDir 'regular-nkn-tuna-state'
+New-Item -ItemType Directory -Force -Path $regularNknTunaStateRoot | Out-Null
 $effectiveLiveCycles = Get-FileTransferNknEffectiveCycleCount -PayloadSizes $PayloadSizes -Cycles $Cycles
 
 $guiSmokeScript = Join-Path $repoRoot 'tools\GuiSmoke-Windows.ps1'
@@ -1020,6 +1102,7 @@ if (-not (Test-Path -LiteralPath $guiSmokeScript -PathType Leaf)) {
 $resolvedExePath = Resolve-FileTransferLiveExePath -RepoRoot $repoRoot -RequestedPath $ExePath
 $autopickPath = Join-Path $resolvedArtifactDir 'filetransfer-live-autopick-payload.bin'
 [System.IO.File]::WriteAllBytes($autopickPath, [byte[]]@())
+$effectiveResolvedExePath = $resolvedExePath
 
 $scenario = if ([string]::Equals($Mode, 'nkn-mixed', [System.StringComparison]::OrdinalIgnoreCase)) {
     'FILETRANSFER_NKN_MIXED_SOAK'
@@ -1042,7 +1125,20 @@ foreach ($key in @(
         'NLINK_FILETRANSFER_SOAK_AUTOPICK_FILE',
         'NLINK_FILETRANSFER_SOAK_STARTUP_TIMEOUT_SECONDS',
         'NLINK_FILETRANSFER_SOAK_PROGRESS_TIMEOUT_SECONDS',
-        'NLINK_FILETRANSFER_MIXED_SCREENSHARE_WARMUP_TIMEOUT_SECONDS')) {
+        'NLINK_FILETRANSFER_MIXED_SCREENSHARE_WARMUP_TIMEOUT_SECONDS',
+        'NLINK_TUNA_STATE_ROOT',
+        'NLINK_NKN_TUNA_ENABLED',
+        'NLINK_NKN_TUNA_SIDECAR_EXE',
+        'NLINK_NKN_TUNA_LISTENER_ENDPOINT',
+        'NLINK_NKN_TUNA_LANES',
+        'NLINK_NKN_TUNA_ALLOW_DEGRADED_PROVIDER_READY',
+        'NLINK_NKN_TUNA_REQUIRE_STRICT_PROVIDER_READY',
+        'NLINK_NKN_TUNA_DEGRADED_PROVIDER_GRACE_SECONDS',
+        'NLINK_RUN_TUNA_GUI_FILETRANSFER',
+        'NLINK_TUNA_GUI_WALLET_PATH',
+        'NLINK_TUNA_GUI_SIDECAR_EXE',
+        'NLINK_TUNA_GUI_ROUTE_MODE',
+        'NLINK_TUNA_GUI_FAULT')) {
     $previousValues[$key] = [pscustomobject]@{
         HadValue = Test-Path -LiteralPath ("Env:{0}" -f $key)
         Value = [System.Environment]::GetEnvironmentVariable($key)
@@ -1060,6 +1156,10 @@ try {
         Stop-NLinkProcesses -ResolvedExePath $resolvedExePath
         Build-FileTransferPortableIfNeeded -RepoRoot $repoRoot -ResolvedExePath $resolvedExePath -ForceBuild:$Build.IsPresent
         Ensure-NknBridgeRuntimeForExe -RepoRoot $repoRoot -ResolvedExePath $resolvedExePath
+        if ([string]::Equals($Mode, 'nkn-fast', [System.StringComparison]::OrdinalIgnoreCase)) {
+            $effectiveResolvedExePath = Copy-FileTransferRegularNknOnlyPortable -ResolvedExePath $resolvedExePath -ArtifactDir $resolvedArtifactDir
+            Stop-NLinkProcesses -ResolvedExePath $effectiveResolvedExePath
+        }
     }
 
     Set-ProcessEnvironmentValue -Name 'NLINK_UNSAFE_DEVELOPER_MODE' -Value '1'
@@ -1075,12 +1175,29 @@ try {
     Set-ProcessEnvironmentValue -Name 'NLINK_FILETRANSFER_SOAK_STARTUP_TIMEOUT_SECONDS' -Value ([string][Math]::Min([Math]::Max(30, $CycleTimeoutSeconds), 90))
     Set-ProcessEnvironmentValue -Name 'NLINK_FILETRANSFER_SOAK_PROGRESS_TIMEOUT_SECONDS' -Value ([string][Math]::Min([Math]::Max(30, $ProgressTimeoutSeconds), $CycleTimeoutSeconds))
     Set-ProcessEnvironmentValue -Name 'NLINK_FILETRANSFER_MIXED_SCREENSHARE_WARMUP_TIMEOUT_SECONDS' -Value ([string][Math]::Min([Math]::Max(30, $CycleTimeoutSeconds), 120))
+    Set-ProcessEnvironmentValue -Name 'NLINK_TUNA_STATE_ROOT' -Value $regularNknTunaStateRoot
+    Set-ProcessEnvironmentValue -Name 'NLINK_NKN_TUNA_ENABLED' -Value $null
+    Set-ProcessEnvironmentValue -Name 'NLINK_NKN_TUNA_SIDECAR_EXE' -Value $null
+    Set-ProcessEnvironmentValue -Name 'NLINK_NKN_TUNA_LISTENER_ENDPOINT' -Value $null
+    Set-ProcessEnvironmentValue -Name 'NLINK_NKN_TUNA_LANES' -Value $null
+    Set-ProcessEnvironmentValue -Name 'NLINK_NKN_TUNA_ALLOW_DEGRADED_PROVIDER_READY' -Value $null
+    Set-ProcessEnvironmentValue -Name 'NLINK_NKN_TUNA_REQUIRE_STRICT_PROVIDER_READY' -Value $null
+    Set-ProcessEnvironmentValue -Name 'NLINK_NKN_TUNA_DEGRADED_PROVIDER_GRACE_SECONDS' -Value $null
+    Set-ProcessEnvironmentValue -Name 'NLINK_RUN_TUNA_GUI_FILETRANSFER' -Value $null
+    Set-ProcessEnvironmentValue -Name 'NLINK_TUNA_GUI_WALLET_PATH' -Value $null
+    Set-ProcessEnvironmentValue -Name 'NLINK_TUNA_GUI_SIDECAR_EXE' -Value $null
+    Set-ProcessEnvironmentValue -Name 'NLINK_TUNA_GUI_ROUTE_MODE' -Value $null
+    Set-ProcessEnvironmentValue -Name 'NLINK_TUNA_GUI_FAULT' -Value $null
 
     Write-Host "Running live NKN file-transfer soak..." -ForegroundColor Cyan
     Write-Host "  Mode: $Mode"
     Write-Host "  Scenario: $scenario"
-    Write-Host "  ExePath: $resolvedExePath"
+    Write-Host "  ExePath: $effectiveResolvedExePath"
+    if (-not [string]::Equals($effectiveResolvedExePath, $resolvedExePath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Write-Host "  SourceExePath: $resolvedExePath"
+    }
     Write-Host "  ArtifactDir: $resolvedArtifactDir"
+    Write-Host "  TunaStateRoot: $regularNknTunaStateRoot"
     Write-Host "  ExternalTopologyProfile: $ExternalTopologyProfile"
     Write-Host "  PayloadEfficiencyProfile: $PayloadEfficiencyProfile"
     if ($fakeGuiMode) {
@@ -1102,7 +1219,7 @@ try {
     else {
         $guiHarnessExitCode = Invoke-FileTransferGuiSmokeWithTimeout `
             -GuiSmokeScript $guiSmokeScript `
-            -ResolvedExePath $resolvedExePath `
+            -ResolvedExePath $effectiveResolvedExePath `
             -ArtifactDir $resolvedArtifactDir `
             -TimeoutSeconds $TimeoutSeconds
     }
@@ -1143,7 +1260,7 @@ try {
         -Mode $Mode `
         -ExternalTopologyProfile $ExternalTopologyProfile `
         -PayloadEfficiencyProfile $PayloadEfficiencyProfile `
-        -ResolvedExePath $resolvedExePath `
+        -ResolvedExePath $effectiveResolvedExePath `
         -GuiHarnessExitCode $guiHarnessExitCode `
         -CyclesRequested $effectiveLiveCycles
 
@@ -1191,6 +1308,9 @@ try {
 }
 finally {
     if (-not $fakeGuiMode) {
+        if (-not [string]::Equals($effectiveResolvedExePath, $resolvedExePath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            Stop-NLinkProcesses -ResolvedExePath $effectiveResolvedExePath
+        }
         Stop-NLinkProcesses -ResolvedExePath $resolvedExePath
     }
     Restore-FileTransferExternalTopologyProfileEnvironment -Restore $topologyRestore

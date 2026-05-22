@@ -907,9 +907,11 @@ internal static class FileTransferSoakRunner
         var screenShareFramesEmitted = cycles.Sum(static c => c.ScreenShareFramesEmitted);
         var screenShareMediaFramesDelayed = cycles.Sum(static c => c.ScreenShareMediaFramesDelayed);
         var screenShareMediaFramesDropped = cycles.Sum(static c => c.ScreenShareMediaFramesDropped);
-        var dataProtocolVersion = logMetrics.V4NegotiatedCount > 0 || logMetrics.V4ChunkBatchFrameCount > 0
-            ? FileTransferProtocol.ProtocolVersionV6
-            : 0;
+        var dataProtocolVersion = logMetrics.DataProtocolVersion > 0
+            ? logMetrics.DataProtocolVersion
+            : logMetrics.V4ChunkBatchFrameCount > 0
+                ? FileTransferProtocol.ProtocolVersionV4
+                : 0;
         var hardLogFailure = logMetrics.PayloadRejectedCount > 0 ||
                              logMetrics.DecodeFailureCount > 0 ||
                              logMetrics.MessageRejectedCount > 0 ||
@@ -1160,10 +1162,28 @@ internal static class FileTransferSoakRunner
         using var reader = new StringReader(logText);
         while (reader.ReadLine() is { } line)
         {
-            if (line.Contains("event=filetransfer_v6_negotiated", StringComparison.Ordinal))
+            if (line.Contains("protocol_version=6", StringComparison.Ordinal) ||
+                line.Contains("event=filetransfer_v6_negotiated", StringComparison.Ordinal) ||
+                line.Contains("event=filetransfer_v6_sender_started", StringComparison.Ordinal) ||
+                line.Contains("event=filetransfer_v6_receiver_started", StringComparison.Ordinal))
             {
-                metrics.V4NegotiatedCount++;
+                metrics.DataProtocolVersion = Math.Max(metrics.DataProtocolVersion, FileTransferProtocol.ProtocolVersionV6);
             }
+            else if (line.Contains("protocol_version=5", StringComparison.Ordinal) ||
+                     line.Contains("event=filetransfer_v5_negotiated", StringComparison.Ordinal) ||
+                     line.Contains("event=filetransfer_v5_sender_started", StringComparison.Ordinal) ||
+                     line.Contains("event=filetransfer_v5_receiver_started", StringComparison.Ordinal))
+            {
+                metrics.DataProtocolVersion = Math.Max(metrics.DataProtocolVersion, 5);
+            }
+            else if (line.Contains("protocol_version=4", StringComparison.Ordinal) ||
+                     line.Contains("event=filetransfer_v4_negotiated", StringComparison.Ordinal) ||
+                     line.Contains("event=filetransfer_v4_sender_started", StringComparison.Ordinal) ||
+                     line.Contains("event=filetransfer_v4_receiver_started", StringComparison.Ordinal))
+            {
+                metrics.DataProtocolVersion = Math.Max(metrics.DataProtocolVersion, FileTransferProtocol.ProtocolVersionV4);
+            }
+
             if (line.Contains("event=filetransfer_v4_chunk_batch_sent", StringComparison.Ordinal))
             {
                 metrics.V4ChunkBatchFrameCount++;
@@ -1295,7 +1315,7 @@ internal static class FileTransferSoakRunner
 
     private sealed class LogMetrics
     {
-        public int V4NegotiatedCount { get; set; }
+        public int DataProtocolVersion { get; set; }
         public int V4ChunkBatchFrameCount { get; set; }
         public int V4MixedEnabledCount { get; set; }
         public int ReorderEventCount { get; set; }

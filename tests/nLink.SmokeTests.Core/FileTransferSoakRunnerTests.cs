@@ -462,13 +462,13 @@ public sealed class FileTransferSoakRunnerTests : CoreSmokeTestsBase
 
             await AssertLocalV4SoakSuccessAsync(artifactDir, exitCode, "local-mixed", "ScreenSharePressure");
             var summary = ReadArtifactReport(artifactDir, "filetransfer-local-soak-summary.txt");
-            Assert.Equal("5", summary["data_protocol_version"]);
+            Assert.Equal("4", summary["data_protocol_version"]);
             Assert.True(long.Parse(summary["v4_mixed_enabled_count"]) > 0);
             Assert.True(long.Parse(summary["v4_chunk_batch_frame_count"]) > 0);
 
             var mixed = ReadArtifactReport(artifactDir, "mixed-screenshare-summary.txt");
             Assert.Equal("1", mixed["mixed_screenshare_exercised"]);
-            Assert.Equal("5", mixed["data_protocol_version"]);
+            Assert.Equal("4", mixed["data_protocol_version"]);
             Assert.True(long.Parse(mixed["v4_mixed_enabled_count"]) > 0);
             Assert.True(long.Parse(mixed["screen_share_frames_emitted"]) > 0);
 
@@ -625,8 +625,13 @@ public sealed class FileTransferSoakRunnerTests : CoreSmokeTestsBase
         Assert.Contains(verdict["verdict"], new[] { "PASS", "WARN_RECOVERED_PRESSURE" });
 
         var logSlice = await File.ReadAllTextAsync(Path.Combine(artifactDir, "filetransfer-retained-log-slice.log"), Encoding.UTF8);
-        Assert.Contains("event=filetransfer_v6_sender_started", logSlice, StringComparison.Ordinal);
-        Assert.Contains("event=filetransfer_v4_complete_received", logSlice, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_route_selected", logSlice, StringComparison.Ordinal);
+        Assert.Contains("route=regular_nkn_v4_fast", logSlice, StringComparison.Ordinal);
+        Assert.Contains("protocol_version=4", logSlice, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v4_sender_started", logSlice, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_v6_sender_started", logSlice, StringComparison.Ordinal);
+        Assert.Contains("event=transfer_terminal", logSlice, StringComparison.Ordinal);
+        Assert.Contains("error_code=(none)", logSlice, StringComparison.Ordinal);
     }
 
     private static async Task AssertV4FileOnlyUnsupportedSoakFailureAsync(

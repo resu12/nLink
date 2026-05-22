@@ -6,6 +6,8 @@ param(
     [string]$PayerMode = "helpee",
     [ValidateSet("none", "switch-off", "sidecar-kill")]
     [string]$Fault = "switch-off",
+    [ValidateSet("handoff-fallback", "preactivated", "post-fallback", "v4-restart-v6-fallback")]
+    [string]$RouteMode = "handoff-fallback",
     [ValidateSet("helpee-to-helper", "helper-to-helpee")]
     [string]$Direction = "helpee-to-helper",
     [string]$PayloadSize = "128MiB",
@@ -13,11 +15,242 @@ param(
     [int]$ProgressTimeoutSeconds = 180,
     [string]$ArtifactDir = "",
     [string]$ExePath = ".\artifacts\portable\nLink\win-x64\nLink.exe",
+    [switch]$ExercisePause,
     [switch]$Build
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+function Test-TunaGuiLateSetupCleanupLine {
+    param([AllowEmptyString()][string]$Line)
+
+    if ([string]::IsNullOrEmpty($Line)) {
+        return $false
+    }
+
+    if ($Line.IndexOf('event=filetransfer_v4_feedback_', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+        $Line.IndexOf('frame_type=filetransfer.cancel.v4', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+        $Line.IndexOf('OperationCanceledException', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return $true
+    }
+
+    if ($Line.IndexOf('event=filetransfer_lifecycle_priority_send_failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+        $Line.IndexOf('kind=cancel', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+        $Line.IndexOf('source=terminal_redundant_retry', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return $true
+    }
+
+    return $false
+}
+
+function Select-TunaGuiControlledRestartLogSlices {
+    param([Parameter(Mandatory = $true)][string]$ArtifactDir)
+
+    $logPath = Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log'
+    if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) {
+        return [pscustomobject]@{
+            SetupPath = ''
+            MeasuredPath = ''
+            FilteredSetupCleanupLineCount = 0
+        }
+    }
+
+    $lines = @(Get-Content -LiteralPath $logPath)
+    $setupStartIndex = -1
+    $startIndex = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($setupStartIndex -lt 0 -and
+            $lines[$i].IndexOf('event=filetransfer_route_selected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $lines[$i].IndexOf('route=file_tuna_v4', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $setupStartIndex = $i
+        }
+
+        if ($lines[$i].IndexOf('event=filetransfer_route_selected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $lines[$i].IndexOf('route=post_tuna_fallback_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $startIndex = $i
+            break
+        }
+    }
+
+    $fullPath = Join-Path $ArtifactDir 'filetransfer-retained-log-slice-full.log'
+    if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+        Copy-Item -LiteralPath $logPath -Destination $fullPath -Force
+    }
+
+    $setupPath = Join-Path $ArtifactDir 'filetransfer-setup-retained-log-slice.log'
+    if ($setupStartIndex -ge 0) {
+        $setupEndIndex = if ($startIndex -gt $setupStartIndex) { $startIndex - 1 } else { $lines.Count - 1 }
+        $setupLines = @(
+            '[1970-01-01 00:00:00Z] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_phase_marker; phase=setup_file_tuna_v4_started'
+            $lines[$setupStartIndex..$setupEndIndex]
+        )
+        if ($startIndex -gt $setupStartIndex) {
+            $setupLines += '[1970-01-01 00:00:00Z] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_phase_marker; phase=setup_file_tuna_v4_cleanup_closed'
+        }
+
+        $setupLines | Set-Content -LiteralPath $setupPath -Encoding UTF8
+    }
+    else {
+        '[1970-01-01 00:00:00Z] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_phase_marker; phase=setup_file_tuna_v4_started; missing_setup_slice=1' |
+            Set-Content -LiteralPath $setupPath -Encoding UTF8
+    }
+
+    if ($startIndex -lt 0) {
+        return [pscustomobject]@{
+            SetupPath = $setupPath
+            MeasuredPath = ''
+            FilteredSetupCleanupLineCount = 0
+        }
+    }
+
+    $filteredSetupCleanupLineCount = 0
+    $measuredLines = New-Object System.Collections.Generic.List[string]
+    $measuredLines.Add('[1970-01-01 00:00:00Z] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_phase_marker; phase=measured_post_tuna_fallback_v6_started') | Out-Null
+    foreach ($line in @($lines[$startIndex..($lines.Count - 1)])) {
+        if (Test-TunaGuiLateSetupCleanupLine -Line ([string]$line)) {
+            $filteredSetupCleanupLineCount++
+            continue
+        }
+
+        $measuredLines.Add([string]$line) | Out-Null
+    }
+    $measuredLines.Add('[1970-01-01 00:00:00Z] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_phase_marker; phase=measured_post_tuna_fallback_v6_terminal') | Out-Null
+
+    $measuredPath = Join-Path $ArtifactDir 'filetransfer-measured-fallback-retained-log-slice.log'
+    $measuredLines.ToArray() | Set-Content -LiteralPath $measuredPath -Encoding UTF8
+    return [pscustomobject]@{
+        SetupPath = $setupPath
+        MeasuredPath = $measuredPath
+        FilteredSetupCleanupLineCount = $filteredSetupCleanupLineCount
+    }
+}
+
+function Invoke-TunaGuiRetainedAnalysis {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$AnalysisDir,
+        [Parameter(Mandatory = $true)][string]$LogPath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($LogPath) -or -not (Test-Path -LiteralPath $LogPath -PathType Leaf)) {
+        throw "Retained log slice was not available: $LogPath"
+    }
+
+    New-Item -ItemType Directory -Force -Path $AnalysisDir | Out-Null
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RepoRoot 'tools\FileTransfer-Ops.ps1') -Mode AnalyzeRetained -LogPath $LogPath -ArtifactDir $AnalysisDir -TailMinutes 0
+    if ($LASTEXITCODE -ne 0) {
+        throw "Retained analysis failed with exit code $LASTEXITCODE. Artifacts: $AnalysisDir"
+    }
+}
+
+function Invoke-TunaGuiRetainedAnalysisBestEffort {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$AnalysisDir,
+        [Parameter(Mandatory = $true)][string]$LogPath
+    )
+
+    try {
+        Invoke-TunaGuiRetainedAnalysis -RepoRoot $RepoRoot -AnalysisDir $AnalysisDir -LogPath $LogPath
+    }
+    catch {
+        Write-Warning ("Retained analysis could not be completed for {0}: {1}" -f $LogPath, $_.Exception.Message)
+    }
+}
+
+function Invoke-TunaGuiMeasuredFallbackRetainedAnalysis {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)][string]$LogPath
+    )
+
+    Invoke-TunaGuiRetainedAnalysis -RepoRoot $RepoRoot -AnalysisDir (Join-Path $ArtifactDir 'measured-fallback-analysis') -LogPath $LogPath
+}
+
+function Invoke-TunaGuiMeasuredFallbackRetainedAnalysisBestEffort {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$ArtifactDir
+    )
+
+    try {
+        $slices = Select-TunaGuiControlledRestartLogSlices -ArtifactDir $ArtifactDir
+        if (-not [string]::IsNullOrWhiteSpace([string]$slices.SetupPath) -and
+            (Test-Path -LiteralPath ([string]$slices.SetupPath) -PathType Leaf)) {
+            Invoke-TunaGuiRetainedAnalysisBestEffort -RepoRoot $RepoRoot -AnalysisDir (Join-Path $ArtifactDir 'setup-analysis') -LogPath $slices.SetupPath
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace([string]$slices.MeasuredPath) -and
+            (Test-Path -LiteralPath ([string]$slices.MeasuredPath) -PathType Leaf)) {
+            Invoke-TunaGuiMeasuredFallbackRetainedAnalysis -RepoRoot $RepoRoot -ArtifactDir $ArtifactDir -LogPath $slices.MeasuredPath
+        }
+    }
+    catch {
+        Write-Warning ("Measured fallback retained analysis could not be completed: {0}" -f $_.Exception.Message)
+    }
+}
+
+function Read-TunaGuiReportValue {
+    param(
+        [Parameter(Mandatory = $true)][string]$ReportPath,
+        [Parameter(Mandatory = $true)][string]$Key,
+        [string]$DefaultValue = ''
+    )
+
+    if (-not (Test-Path -LiteralPath $ReportPath -PathType Leaf)) {
+        return $DefaultValue
+    }
+
+    foreach ($line in @(Get-Content -LiteralPath $ReportPath)) {
+        $text = [string]$line
+        if ($text.StartsWith(($Key + '='), [System.StringComparison]::Ordinal)) {
+            return $text.Substring($Key.Length + 1)
+        }
+    }
+
+    return $DefaultValue
+}
+
+function Count-TunaGuiReportMatchingLines {
+    param(
+        [Parameter(Mandatory = $true)][string]$ReportPath,
+        [Parameter(Mandatory = $true)][string]$Pattern
+    )
+
+    if (-not (Test-Path -LiteralPath $ReportPath -PathType Leaf)) {
+        return 0
+    }
+
+    return @((Get-Content -LiteralPath $ReportPath) | Select-String -Pattern $Pattern).Count
+}
+
+function Update-TunaGuiControlledRestartSummary {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)][int]$FilteredSetupCleanupLineCount
+    )
+
+    $summaryPath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json'
+    if (-not (Test-Path -LiteralPath $summaryPath -PathType Leaf)) {
+        return
+    }
+
+    $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+    $setupVerdictPath = Join-Path $ArtifactDir 'setup-analysis\filetransfer-operator-verdict.txt'
+    $measuredVerdictPath = Join-Path $ArtifactDir 'measured-fallback-analysis\filetransfer-operator-verdict.txt'
+    $measuredRoutePath = Join-Path $ArtifactDir 'measured-fallback-analysis\filetransfer-route-consistency-summary.txt'
+    $measuredStabilityPath = Join-Path $ArtifactDir 'measured-fallback-analysis\stability-gates-summary.txt'
+    $summary | Add-Member -NotePropertyName controlledRestartAnalysis -NotePropertyValue ([ordered]@{
+        setupVerdict = Read-TunaGuiReportValue -ReportPath $setupVerdictPath -Key 'verdict' -DefaultValue '(missing)'
+        measuredRouteVerdict = Read-TunaGuiReportValue -ReportPath $measuredRoutePath -Key 'route_consistency_verdict' -DefaultValue '(missing)'
+        measuredOperatorVerdict = Read-TunaGuiReportValue -ReportPath $measuredVerdictPath -Key 'verdict' -DefaultValue '(missing)'
+        setupCleanupWarningCount = $FilteredSetupCleanupLineCount
+        fallbackBridgeRecoveryWarningCount = Count-TunaGuiReportMatchingLines -ReportPath $measuredStabilityPath -Pattern 'recovered post-Tuna fallback bridge queue clear'
+    }) -Force
+    $summary | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
+}
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Push-Location $repoRoot
@@ -97,7 +330,14 @@ try {
     $env:NLINK_TUNA_GUI_SIDECAR_EXE = $resolvedSidecar
     $env:NLINK_TUNA_GUI_PAYER_MODE = $PayerMode
     $env:NLINK_TUNA_GUI_FAULT = $Fault
-    $env:NLINK_TUNA_GUI_EXERCISE_PAUSE = '1'
+    $env:NLINK_TUNA_GUI_ROUTE_MODE = $RouteMode
+    Remove-Item Env:NLINK_FILETRANSFER_DIAGNOSTIC_FILE_TUNA_V4 -ErrorAction SilentlyContinue
+    if ($ExercisePause) {
+        $env:NLINK_TUNA_GUI_EXERCISE_PAUSE = '1'
+    }
+    else {
+        Remove-Item Env:NLINK_TUNA_GUI_EXERCISE_PAUSE -ErrorAction SilentlyContinue
+    }
     $env:NLINK_FILETRANSFER_SOAK_DIRECTION = $Direction
     $env:NLINK_FILETRANSFER_SOAK_PAYLOAD_SIZES = $PayloadSize
     $env:NLINK_FILETRANSFER_SOAK_CYCLE_TIMEOUT_SECONDS = [string]$TimeoutSeconds
@@ -107,20 +347,42 @@ try {
 
     Write-Host "[Tuna GUI] Running file-transfer handoff/fallback GUI smoke." -ForegroundColor Cyan
     Write-Host "[Tuna GUI] Artifacts: $resolvedArtifactDir" -ForegroundColor DarkGray
-    Write-Host "[Tuna GUI] Direction=$Direction Payer=$PayerMode Fault=$Fault Payload=$PayloadSize" -ForegroundColor DarkGray
+    Write-Host "[Tuna GUI] Direction=$Direction Payer=$PayerMode Fault=$Fault RouteMode=$RouteMode Payload=$PayloadSize" -ForegroundColor DarkGray
 
     & ".\tools\GuiSmoke-Windows.ps1" -ExePath $resolvedExe -TimeoutSeconds $TimeoutSeconds
     $guiSmokeExitCode = $LASTEXITCODE
     if ($guiSmokeExitCode -ne 0) {
+        if ($RouteMode -eq 'v4-restart-v6-fallback') {
+            Invoke-TunaGuiMeasuredFallbackRetainedAnalysisBestEffort -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir
+        }
+
         throw "GUI smoke failed with exit code $guiSmokeExitCode. Artifacts: $resolvedArtifactDir"
     }
 
     $summaryPath = Join-Path $resolvedArtifactDir 'filetransfer-tuna-gui-summary.json'
     if (-not (Test-Path -LiteralPath $summaryPath -PathType Leaf)) {
+        if ($RouteMode -eq 'v4-restart-v6-fallback') {
+            Invoke-TunaGuiMeasuredFallbackRetainedAnalysisBestEffort -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir
+        }
+
         throw "GUI smoke did not write file-transfer Tuna summary. Artifacts: $resolvedArtifactDir"
     }
 
     $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+    if ($RouteMode -eq 'v4-restart-v6-fallback') {
+        $slices = Select-TunaGuiControlledRestartLogSlices -ArtifactDir $resolvedArtifactDir
+        if (-not [string]::IsNullOrWhiteSpace([string]$slices.SetupPath)) {
+            Invoke-TunaGuiRetainedAnalysisBestEffort -RepoRoot $repoRoot -AnalysisDir (Join-Path $resolvedArtifactDir 'setup-analysis') -LogPath $slices.SetupPath
+        }
+
+        Invoke-TunaGuiMeasuredFallbackRetainedAnalysis -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir -LogPath $slices.MeasuredPath
+        Update-TunaGuiControlledRestartSummary -ArtifactDir $resolvedArtifactDir -FilteredSetupCleanupLineCount ([int]$slices.FilteredSetupCleanupLineCount)
+    }
+    elseif ($RouteMode -eq 'preactivated') {
+        $retainedPath = Join-Path $resolvedArtifactDir 'filetransfer-retained-log-slice.log'
+        Invoke-TunaGuiRetainedAnalysis -RepoRoot $repoRoot -AnalysisDir $resolvedArtifactDir -LogPath $retainedPath
+    }
+
     if (-not [bool]$summary.completed -or -not [bool]$summary.integrityOk) {
         throw ("GUI smoke summary reports incomplete transfer. completed={0}; integrity_ok={1}; inbound_state={2}; outbound_state={3}; inbound_error={4}; outbound_error={5}; artifacts={6}" -f `
             $summary.completed,

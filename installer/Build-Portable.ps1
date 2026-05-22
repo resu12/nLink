@@ -513,12 +513,15 @@ if ($LASTEXITCODE -ne 0) {
 if (-not $SkipBridgeBundle) {
     Write-Host "[nLink] Building bundled NKN bridge runtime..." -ForegroundColor Cyan
     & $bridgeBundleScriptPath -Runtime $Runtime -OutDir $BridgeBundleDir
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
+    $bridgeBundleScriptSucceeded = $?
+    if (-not $bridgeBundleScriptSucceeded) {
+        $bridgeBundleExitCode = if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { [int]$LASTEXITCODE } else { 1 }
+        exit $bridgeBundleExitCode
     }
 
     Assert-BridgeBundleRuntime -BridgeDir $bridgeBundleAbs -ExpectedAppVersion $resolvedVersion
     Copy-BridgeBundleToPortable -BridgeDir $bridgeBundleAbs -PortableOutDir $canonicalOutAbs -Runtime $Runtime -ExpectedAppVersion $resolvedVersion
+    $global:LASTEXITCODE = 0
 }
 
 if (-not $SkipTunaSidecarBundle) {

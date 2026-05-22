@@ -140,6 +140,35 @@ function Test-FileTransferCleanTerminalCompletion {
         (Test-FileTransferTerminalCompleted -TerminalEvents $Summary.TerminalEvents)
 }
 
+function Test-FileTransferSummarySelectedRoute {
+    param(
+        [Parameter(Mandatory = $true)]$Summary,
+        [Parameter(Mandatory = $true)][string]$Route
+    )
+
+    if ($null -eq $Summary.RouteConsistency) {
+        return $false
+    }
+
+    foreach ($selected in @($Summary.RouteConsistency.RouteSelectedEvents)) {
+        if ((Get-FileTransferEventField -Event $selected -Name 'route' -Default '') -eq $Route) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Test-FileTransferRouteConsistencyClean {
+    param([Parameter(Mandatory = $true)]$Summary)
+
+    if ($null -eq $Summary.RouteConsistency) {
+        return $false
+    }
+
+    return @($Summary.RouteConsistency.Findings).Count -eq 0
+}
+
 function Test-FileTransferEventNearRecoveryMarker {
     param(
         $Event,
@@ -255,6 +284,32 @@ function Test-FileTransferSummaryUsesPrimaryRegularNknQuietBridgePolicy {
     return $false
 }
 
+function Test-FileTransferBenignControlledFallbackCancelFeedbackFailure {
+    param(
+        $Event,
+        [Parameter(Mandatory = $true)]$Summary
+    )
+
+    if ($null -eq $Event -or $Event.EventName -ne 'filetransfer_v4_feedback_both_failed') {
+        return $false
+    }
+
+    if (-not (Test-FileTransferCleanTerminalCompletion -Summary $Summary) -or
+        -not (Test-FileTransferRouteConsistencyClean -Summary $Summary) -or
+        -not (Test-FileTransferSummarySelectedRoute -Summary $Summary -Route 'post_tuna_fallback_v6')) {
+        return $false
+    }
+
+    $frameType = Get-FileTransferEventField -Event $Event -Name 'frame_type' -Default ''
+    if ($frameType -ne 'filetransfer.cancel.v4') {
+        return $false
+    }
+
+    $firstError = Get-FileTransferEventField -Event $Event -Name 'first_error' -Default ''
+    $secondError = Get-FileTransferEventField -Event $Event -Name 'second_error' -Default ''
+    return "$firstError $secondError" -like '*OperationCanceledException*'
+}
+
 function Test-FileTransferRecoverableV6FeedbackFailure {
     param(
         $Event,
@@ -334,6 +389,41 @@ function Test-FileTransferRecoverableBridgeBulkFailure {
     return Test-FileTransferEventNearRecoveryMarker -Event $Event -Summary $Summary -SequenceWindow 180
 }
 
+function Test-FileTransferRecoverablePostTunaFallbackBridgeClear {
+    param(
+        $Event,
+        [Parameter(Mandatory = $true)]$Summary
+    )
+
+    if ($null -eq $Event) {
+        return $false
+    }
+
+    if (-not (Test-FileTransferCleanTerminalCompletion -Summary $Summary) -or
+        -not (Test-FileTransferRouteConsistencyClean -Summary $Summary) -or
+        -not (Test-FileTransferSummarySelectedRoute -Summary $Summary -Route 'post_tuna_fallback_v6')) {
+        return $false
+    }
+
+    if ($Event.EventName -ne 'nkn_bridge_bulk_send_summary' -and
+        $Event.EventName -ne 'nkn_bridge_bulk_queue_state') {
+        return $false
+    }
+
+    $sendFailures = Get-FileTransferEventInt64Field -Event $Event -Name 'send_failures' -Default 0
+    if ($sendFailures -gt 0) {
+        return $false
+    }
+
+    $queueClears = Get-FileTransferEventInt64Field -Event $Event -Name 'queue_clears' -Default 0
+    $clearedSinceLast = Get-FileTransferEventInt64Field -Event $Event -Name 'cleared_since_last' -Default 0
+    if ($queueClears -le 0 -and $clearedSinceLast -le 0) {
+        return $false
+    }
+
+    return Test-FileTransferEventNearRecoveryMarker -Event $Event -Summary $Summary -SequenceWindow 260
+}
+
 function Get-FileTransferHardFailureEvents {
     param([Parameter(Mandatory = $true)]$Summary)
 
@@ -344,6 +434,7 @@ function Get-FileTransferHardFailureEvents {
             Where-Object {
                 $null -ne $_ -and
                 -not (Test-FileTransferBenignPostCompletionLateSenderFrame -Event $_ -CompletedTerminalSequences $completedTerminalSequences) -and
+                -not (Test-FileTransferBenignControlledFallbackCancelFeedbackFailure -Event $_ -Summary $Summary) -and
                 -not (Test-FileTransferRecoverableV6FeedbackFailure -Event $_ -Summary $Summary) -and
                 ($_.EventName -eq 'filetransfer_transport_payload_rejected' -or
                 $_.EventName -eq 'filetransfer_data_frame_decode_failed' -or
@@ -393,6 +484,7 @@ function Get-FileTransferBridgeBulkFailureEvents {
         $Summary.GlobalEvents |
             Where-Object {
                 -not (Test-FileTransferRecoverableBridgeBulkFailure -Event $_ -Summary $Summary) -and
+                -not (Test-FileTransferRecoverablePostTunaFallbackBridgeClear -Event $_ -Summary $Summary) -and
                 (
                     ($_.EventName -eq 'nkn_bridge_bulk_send_summary' -and
                         ((Get-FileTransferEventInt64Field -Event $_ -Name 'send_failures' -Default 0) -gt 0 -or
@@ -401,6 +493,15 @@ function Get-FileTransferBridgeBulkFailureEvents {
                         (Get-FileTransferEventInt64Field -Event $_ -Name 'cleared_since_last' -Default 0) -gt 0)
                 )
             }
+    )
+}
+
+function Get-FileTransferPostTunaFallbackBridgeClearWarningEvents {
+    param([Parameter(Mandatory = $true)]$Summary)
+
+    return @(
+        $Summary.GlobalEvents |
+            Where-Object { Test-FileTransferRecoverablePostTunaFallbackBridgeClear -Event $_ -Summary $Summary }
     )
 }
 
@@ -623,14 +724,36 @@ function Get-FileTransferStabilizationGateResult {
         Add-FileTransferGateFinding -List $hardFailures -Finding ("bridge bulk send failure/clear: {0}" -f (Format-FileTransferEvidenceLine -Event $event))
     }
 
+    [object[]]$routeConsistencyFindings = @()
+    if ($null -ne $Summary.RouteConsistency) {
+        $routeConsistencyFindings = @($Summary.RouteConsistency.Findings)
+    }
+    if ($routeConsistencyFindings.Count -gt 0) {
+        foreach ($finding in @($routeConsistencyFindings)) {
+            $operatorFinding = ([string]$finding).Replace('=', ':')
+            Add-FileTransferGateFinding -List $hardFailures -Finding ("route consistency: {0}" -f $operatorFinding)
+        }
+    }
+
     if ($hardFailures.Count -gt 0) {
+        [object[]]$routeEvidenceEvents = @()
+        if ($null -ne $Summary.RouteConsistency) {
+            $routeEvidenceEvents = @($Summary.RouteConsistency.EvidenceEvents)
+        }
+        $nextArtifact = if ($routeConsistencyFindings.Count -gt 0) {
+            'filetransfer-route-consistency-summary.txt'
+        }
+        else {
+            'stability-gates-summary.txt'
+        }
+
         return [pscustomobject]@{
             Verdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
             GateStatus = 'fail'
             HardFailures = @($hardFailures)
             Warnings = @()
-            NextArtifact = 'stability-gates-summary.txt'
-            EvidenceEvents = @($Summary.TerminalEvents + $hardFailureEvents + $legacyProtocolStartedEvents + $unexpectedLegacyFramesDuringV4 + $bridgeBulkFailures | Select-Object -First 20)
+            NextArtifact = $nextArtifact
+            EvidenceEvents = @($Summary.TerminalEvents + $hardFailureEvents + $legacyProtocolStartedEvents + $unexpectedLegacyFramesDuringV4 + $bridgeBulkFailures + $routeEvidenceEvents | Select-Object -First 20)
         }
     }
 
@@ -691,12 +814,18 @@ function Get-FileTransferStabilizationGateResult {
 
     $cohabitationWarnings = @(Get-FileTransferCohabitationWarningEvents -Summary $Summary)
     $externalWarnings = @(Get-FileTransferExternalTransportWarningEvents -Summary $Summary)
+    $fallbackBridgeClearWarnings = @(Get-FileTransferPostTunaFallbackBridgeClearWarningEvents -Summary $Summary)
     $pressureWarnings = @(Get-FileTransferRecoveredPressureWarningEvents -Summary $Summary)
 
     if ($cohabitationWarnings.Count -gt 0) {
         $verdict = 'WARN_COHABITATION_PRESSURE'
         $nextArtifact = 'coexistence-summary.txt'
         Add-FileTransferGateFinding -List $warnings -Finding 'screen-share media pressure overlapped the completed transfer'
+    }
+    elseif ($fallbackBridgeClearWarnings.Count -gt 0) {
+        $verdict = 'WARN_EXTERNAL_TRANSPORT'
+        $nextArtifact = 'stability-gates-summary.txt'
+        Add-FileTransferGateFinding -List $warnings -Finding 'recovered post-Tuna fallback bridge queue clear overlapped the completed transfer'
     }
     elseif ($externalWarnings.Count -gt 0) {
         $verdict = 'WARN_EXTERNAL_TRANSPORT'
@@ -709,7 +838,7 @@ function Get-FileTransferStabilizationGateResult {
         Add-FileTransferGateFinding -List $warnings -Finding 'repair/reorder/degraded pressure recovered before terminal completion'
     }
 
-    $evidence = @($cohabitationWarnings + $externalWarnings + $pressureWarnings + $Summary.TerminalEvents | Select-Object -First 30)
+    $evidence = @($cohabitationWarnings + $fallbackBridgeClearWarnings + $externalWarnings + $pressureWarnings + $Summary.TerminalEvents | Select-Object -First 30)
 
     return [pscustomobject]@{
         Verdict = $verdict

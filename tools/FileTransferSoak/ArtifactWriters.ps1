@@ -1673,6 +1673,69 @@ function New-FileTransferRepairReorderSummaryLines {
     ) + (Get-FileTransferArtifactEvidenceLines -Events $events -Limit 40)
 }
 
+function New-FileTransferRouteConsistencySummaryLines {
+    param([Parameter(Mandatory = $true)]$Summary)
+
+    $routeConsistency = $Summary.RouteConsistency
+    [object[]]$routeSelectedEvents = @()
+    [object[]]$routeAwareEvents = @()
+    [object[]]$findings = @()
+    [object[]]$evidenceEvents = @()
+    if ($null -ne $routeConsistency) {
+        $routeSelectedEvents = @($routeConsistency.RouteSelectedEvents)
+        $routeAwareEvents = @($routeConsistency.RouteAwareEvents)
+        $findings = @($routeConsistency.Findings)
+        $evidenceEvents = @($routeConsistency.EvidenceEvents)
+    }
+    [object[]]$selectedRoutes = @(
+        $routeSelectedEvents |
+            ForEach-Object { Get-FileTransferEventField -Event $_ -Name 'route' -Default '' } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            Select-Object -Unique
+    )
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add(("transfer_id={0}" -f $Summary.TransferId)) | Out-Null
+    $lines.Add(("route_consistency_verdict={0}" -f ($(if ($null -ne $routeConsistency) { $routeConsistency.Verdict } else { 'legacy' })))) | Out-Null
+    $lines.Add(("route_selected_count={0}" -f $routeSelectedEvents.Length)) | Out-Null
+    $lines.Add(("route_aware_event_count={0}" -f $routeAwareEvents.Length)) | Out-Null
+    $lines.Add(("route_mismatch_count={0}" -f $findings.Length)) | Out-Null
+    $lines.Add(("selected_routes={0}" -f ($(if ($selectedRoutes.Length -gt 0) { $selectedRoutes -join ',' } else { '(none)' })))) | Out-Null
+
+    $index = 0
+    foreach ($event in @($routeSelectedEvents | Sort-Object Sequence)) {
+        $index++
+        $prefix = "selected.$index"
+        $lines.Add(("{0}.direction={1}" -f $prefix, (Get-FileTransferEventField -Event $event -Name 'direction' -Default '(none)'))) | Out-Null
+        $lines.Add(("{0}.route={1}" -f $prefix, (Get-FileTransferEventField -Event $event -Name 'route' -Default '(none)'))) | Out-Null
+        $lines.Add(("{0}.protocol_version={1}" -f $prefix, (Get-FileTransferEventField -Event $event -Name 'protocol_version' -Default '(none)'))) | Out-Null
+        $lines.Add(("{0}.runtime_profile={1}" -f $prefix, (Get-FileTransferEventField -Event $event -Name 'runtime_profile' -Default '(none)'))) | Out-Null
+        $lines.Add(("{0}.bridge_recovery_policy={1}" -f $prefix, (Get-FileTransferEventField -Event $event -Name 'bridge_recovery_policy' -Default '(none)'))) | Out-Null
+        $lines.Add(("{0}.selection_reason={1}" -f $prefix, (Get-FileTransferEventField -Event $event -Name 'selection_reason' -Default '(none)'))) | Out-Null
+    }
+
+    $lines.Add('') | Out-Null
+    $lines.Add('mismatches:') | Out-Null
+    if ($findings.Length -gt 0) {
+        $mismatchIndex = 0
+        foreach ($finding in @($findings)) {
+            $mismatchIndex++
+            $lines.Add(("mismatch.{0}={1}" -f $mismatchIndex, $finding)) | Out-Null
+        }
+    }
+    else {
+        $lines.Add('(none)') | Out-Null
+    }
+
+    $lines.Add('') | Out-Null
+    $lines.Add('route_evidence:') | Out-Null
+    foreach ($line in @(Get-FileTransferArtifactEvidenceLines -Events @($routeSelectedEvents + $evidenceEvents) -Limit 40)) {
+        $lines.Add($line) | Out-Null
+    }
+
+    return $lines.ToArray()
+}
+
 function New-FileTransferTransportBudgetSummaryLines {
     param([Parameter(Mandatory = $true)]$Summary)
 
@@ -2010,7 +2073,7 @@ function Resolve-FileTransferThroughputLimiter {
             }
     ).Count
 
-    if ($explicitReceiveStallCount -gt 0 -or $preSampleReceiveStallCount -ge 2) {
+    if ($explicitReceiveStallCount -gt 0) {
         return 'external_transport_limited'
     }
 
@@ -2243,6 +2306,10 @@ function Resolve-FileTransferThroughputLimiter {
             $v4ObservedGoodputBytesPerSecond -lt $v4TargetGoodputBytesPerSecond -and
             $v4CleanHardEvidence) {
             return 'nkn_bulk_underutilized'
+        }
+
+        if ($preSampleReceiveStallCount -ge 2) {
+            return 'external_transport_limited'
         }
 
         return 'inconclusive'
@@ -2751,6 +2818,35 @@ function New-FileTransferThroughputDecompositionSummaryLines {
     $v4CompleteReceivedEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_complete_received'))
     $v4FeedbackFirstSuccessEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_feedback_first_success'))
     $v4FeedbackBothFailedEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_feedback_both_failed'))
+    $v6SenderWaitingForRequestsEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v6_sender_waiting_for_requests'))
+    $v6ReceiverRequestWindowEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v6_receiver_request_window_sent'))
+    $v6ReceiverStateSentEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v6_receiver_state_sent'))
+    $v6ReceiverStateReceivedEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v6_receiver_state_received'))
+    $v6UnsolicitedChunkIgnoredEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v6_unsolicited_chunk_ignored'))
+    $v4LatestSenderPump = Get-FileTransferLatestEvent -Events $v4SenderPumpEvents -Name 'filetransfer_v4_sender_pump_summary'
+    $v4LatestReceiverStateMatches = @($v4StateSentEvents + $v4StateReceivedEvents | Sort-Object Sequence | Select-Object -Last 1)
+    $v4LatestReceiverState = if ($v4LatestReceiverStateMatches.Count -gt 0) { $v4LatestReceiverStateMatches[0] } else { $null }
+    $v4LatestSenderNextUnsentChunkIndex = if ($null -ne $v4LatestSenderPump) { Get-FileTransferEventInt64Field -Event $v4LatestSenderPump -Name 'next_unsent_chunk_index' -Default -1 } else { -1 }
+    $v4LatestSenderCreditCeilingChunkIndex = if ($null -ne $v4LatestSenderPump) { Get-FileTransferEventInt64Field -Event $v4LatestSenderPump -Name 'credit_ceiling_chunk_index' -Default -1 } else { -1 }
+    $v4LatestSenderRemoteFrontierChunkIndex = if ($null -ne $v4LatestSenderPump) { Get-FileTransferEventInt64Field -Event $v4LatestSenderPump -Name 'remote_frontier_chunk_index' -Default -1 } else { -1 }
+    $v4LatestReceiverFrontierChunkIndex = if ($null -ne $v4LatestReceiverState) { Get-FileTransferEventInt64Field -Event $v4LatestReceiverState -Name 'contiguous_committed_chunk_index' -Default -1 } else { -1 }
+    $v4LatestReceiverDurableHighestChunkIndex = if ($null -ne $v4LatestReceiverState) { Get-FileTransferEventInt64Field -Event $v4LatestReceiverState -Name 'durable_received_highest_chunk_index' -Default -1 } else { -1 }
+    $v4LatestReceiverCreditUntilChunkIndex = if ($null -ne $v4LatestReceiverState) { Get-FileTransferEventInt64Field -Event $v4LatestReceiverState -Name 'credit_until_chunk_index_exclusive' -Default -1 } else { -1 }
+    $v4FrontierRepairBacklogChunks = if ($v4LatestReceiverDurableHighestChunkIndex -ge $v4LatestReceiverFrontierChunkIndex -and $v4LatestReceiverFrontierChunkIndex -ge 0) {
+        [Math]::Max(0, $v4LatestReceiverDurableHighestChunkIndex - $v4LatestReceiverFrontierChunkIndex + 1)
+    }
+    else {
+        0
+    }
+    $v4FullNormalPayloadSent = if ($v4LatestSenderNextUnsentChunkIndex -ge 0 -and
+        $v4LatestSenderCreditCeilingChunkIndex -ge 0 -and
+        $v4LatestSenderNextUnsentChunkIndex -ge $v4LatestSenderCreditCeilingChunkIndex -and
+        (Get-FileTransferMaxField -Events $v4SenderPumpEvents -FieldName 'normal_raw_bytes_sent_total') -gt 0) {
+        1
+    }
+    else {
+        0
+    }
     $sparseCreditStats = Get-FileTransferSparseCreditStats -GrantEvents $grantSummaryEvents
     $proactiveFrontierRepairEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_frontier_gap_repair_eligible', 'filetransfer_frontier_gap_repair_requested', 'filetransfer_frontier_gap_repair_skipped', 'filetransfer_frontier_gap_repair_suppressed', 'filetransfer_frontier_gap_repair_sender_received', 'filetransfer_frontier_gap_repair_sender_scheduled', 'filetransfer_frontier_gap_repair_sender_sent', 'filetransfer_frontier_gap_repair_filled', 'filetransfer_proactive_frontier_repair_state_reset'))
     $proactiveRepairPressureStats = Get-FileTransferProactiveRepairPressureStats -Events @($reorderPolicyEvents + $grantSummaryEvents + $proactiveFrontierRepairEvents)
@@ -2906,6 +3002,26 @@ function New-FileTransferThroughputDecompositionSummaryLines {
         ("v4_sender_pump_repair_scheduled_frames={0}" -f (Get-FileTransferSumField -Events $v4SenderPumpEvents -FieldName 'repair_scheduled_frames')),
         ("v4_max_sender_pump_credit_exhausted_time_ms={0}" -f (Get-FileTransferMaxField -Events $v4SenderPumpEvents -FieldName 'credit_exhausted_time_ms')),
         ("v4_max_sender_pump_available_credit_bytes={0}" -f (Get-FileTransferMaxField -Events $v4SenderPumpEvents -FieldName 'available_credit_bytes')),
+        ("v4_max_sender_pump_normal_raw_bytes_sent_total={0}" -f (Get-FileTransferMaxField -Events $v4SenderPumpEvents -FieldName 'normal_raw_bytes_sent_total')),
+        ("v4_max_sender_pump_repair_raw_bytes_sent_total={0}" -f (Get-FileTransferMaxField -Events $v4SenderPumpEvents -FieldName 'repair_raw_bytes_sent_total')),
+        ("v4_latest_sender_next_unsent_chunk_index={0}" -f $v4LatestSenderNextUnsentChunkIndex),
+        ("v4_latest_sender_credit_ceiling_chunk_index={0}" -f $v4LatestSenderCreditCeilingChunkIndex),
+        ("v4_latest_sender_remote_frontier_chunk_index={0}" -f $v4LatestSenderRemoteFrontierChunkIndex),
+        ("v4_latest_receiver_frontier_chunk_index={0}" -f $v4LatestReceiverFrontierChunkIndex),
+        ("v4_latest_receiver_durable_highest_chunk_index={0}" -f $v4LatestReceiverDurableHighestChunkIndex),
+        ("v4_latest_receiver_credit_until_chunk_index={0}" -f $v4LatestReceiverCreditUntilChunkIndex),
+        ("v4_max_frontier_lag_chunks={0}" -f (Get-FileTransferMaxField -Events $v4StateSentEvents -FieldName 'frontier_lag_chunks')),
+        ("v4_full_normal_payload_sent={0}" -f $v4FullNormalPayloadSent),
+        ("v4_frontier_repair_backlog_chunks={0}" -f $v4FrontierRepairBacklogChunks),
+        ("v6_sender_waiting_for_requests_count={0}" -f $v6SenderWaitingForRequestsEvents.Count),
+        ("v6_receiver_request_window_sent_count={0}" -f $v6ReceiverRequestWindowEvents.Count),
+        ("v6_receiver_state_sent_count={0}" -f $v6ReceiverStateSentEvents.Count),
+        ("v6_receiver_state_received_count={0}" -f $v6ReceiverStateReceivedEvents.Count),
+        ("v6_unsolicited_chunk_ignored_count={0}" -f $v6UnsolicitedChunkIgnoredEvents.Count),
+        ("v6_unsolicited_behind_committed_frontier_count={0}" -f (@($v6UnsolicitedChunkIgnoredEvents | Where-Object { (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'behind_committed_frontier' }).Count)),
+        ("v6_max_receiver_requested_chunk_count={0}" -f (Get-FileTransferMaxField -Events $v6ReceiverRequestWindowEvents -FieldName 'requested_chunk_count')),
+        ("v6_max_receiver_requested_until_chunk_index_exclusive={0}" -f (Get-FileTransferMaxField -Events $v6ReceiverRequestWindowEvents -FieldName 'requested_until_chunk_index_exclusive')),
+        ("v6_max_receiver_request_window_chunks={0}" -f (Get-FileTransferMaxField -Events $v6ReceiverRequestWindowEvents -FieldName 'request_window_chunks')),
         ("max_sender_repair_cache_bytes={0}" -f $Summary.MaxSenderRepairCacheBytes),
         ("sender_repair_cache_hit_count={0}" -f $Summary.SenderRepairCacheHitCount),
         ("sender_repair_cache_miss_count={0}" -f $Summary.SenderRepairCacheMissCount),
@@ -3067,7 +3183,7 @@ function New-FileTransferThroughputDecompositionSummaryLines {
         ("retry_requested_count={0}" -f $Summary.RetryRequestedCount),
         '',
         'throughput_decomposition_evidence:'
-    ) + (Get-FileTransferArtifactEvidenceLines -Events @($senderEvents + $senderPipelineEvents + $senderFeedEvents + $senderCacheEvents + $receiverFeedbackEvents + $receiverEvents + $gapStallEvents + $sparseEvents + $bridgeBulkEvents + $externalHealthEvents + $inboundDeliveryEvents + $inboundEnvelopeReceivedEvents + $inboundEnvelopeDropEvents + $receiveStallDetectedEvents + $receiveStallRecoveryStartedEvents + $receiveStallRecoveryCompletedEvents + $receiveStallRecoveryFailedEvents + $receiveStallRecoveryCooldownBypassedEvents + $receiveStallRecoveryReceiveResumedEvents + $controlReceiveDegradedEvents + $controlReceiveRecoverySuppressedEvents + $receiveLivenessEvents + $reorderPolicyEvents + $grantSummaryEvents + $proactiveFrontierRepairEvents + $v4SenderPumpEvents + $v4StateSentEvents + $v4StateReceivedEvents + $v4RepairScheduledEvents + $v4RepairSentEvents + $v4CompleteSentEvents + $v4CompleteReceivedEvents + $v4FeedbackFirstSuccessEvents + $v4FeedbackBothFailedEvents | Sort-Object Sequence) -Limit 70)
+    ) + (Get-FileTransferArtifactEvidenceLines -Events @($senderEvents + $senderPipelineEvents + $senderFeedEvents + $senderCacheEvents + $receiverFeedbackEvents + $receiverEvents + $gapStallEvents + $sparseEvents + $bridgeBulkEvents + $externalHealthEvents + $inboundDeliveryEvents + $inboundEnvelopeReceivedEvents + $inboundEnvelopeDropEvents + $receiveStallDetectedEvents + $receiveStallRecoveryStartedEvents + $receiveStallRecoveryCompletedEvents + $receiveStallRecoveryFailedEvents + $receiveStallRecoveryCooldownBypassedEvents + $receiveStallRecoveryReceiveResumedEvents + $controlReceiveDegradedEvents + $controlReceiveRecoverySuppressedEvents + $receiveLivenessEvents + $reorderPolicyEvents + $grantSummaryEvents + $proactiveFrontierRepairEvents + $v4SenderPumpEvents + $v4StateSentEvents + $v4StateReceivedEvents + $v4RepairScheduledEvents + $v4RepairSentEvents + $v4CompleteSentEvents + $v4CompleteReceivedEvents + $v4FeedbackFirstSuccessEvents + $v4FeedbackBothFailedEvents + $v6SenderWaitingForRequestsEvents + $v6ReceiverRequestWindowEvents + $v6ReceiverStateSentEvents + $v6ReceiverStateReceivedEvents + $v6UnsolicitedChunkIgnoredEvents | Sort-Object Sequence) -Limit 70)
 }
 
 function New-FileTransferStabilityGateSummaryLines {
@@ -3443,6 +3559,30 @@ function Write-FileTransferDiagnosticsArtifacts {
     )
 
     $analyzedFiles = if ($Summary.LogFiles.Count -gt 0) { $Summary.LogFiles -join ';' } else { '(none)' }
+    $warningKinds = @(@(
+        foreach ($warning in @($GateResult.Warnings)) {
+            $text = [string]$warning
+            if ($text -eq 'external bridge/NKN health churn overlapped the completed transfer') {
+                'external_transport_churn'
+            }
+            elseif ($text -eq 'recovered post-Tuna fallback bridge queue clear overlapped the completed transfer') {
+                'recovered_post_tuna_fallback_bridge_clear'
+            }
+            elseif ($text -eq 'screen-share media pressure overlapped the completed transfer') {
+                'cohabitation_pressure'
+            }
+            elseif ($text -eq 'repair/reorder/degraded pressure recovered before terminal completion') {
+                'recovered_pressure'
+            }
+            elseif ($text -eq 'progress_timeout_with_receiver_gap_stall') {
+                'progress_timeout_with_receiver_gap_stall'
+            }
+            elseif (-not [string]::IsNullOrWhiteSpace($text)) {
+                ($text.ToLowerInvariant() -replace '[^a-z0-9]+', '_' -replace '^_+|_+$', '')
+            }
+        }
+    ) | Select-Object -Unique)
+
     $verdictLines = @(
         ("verdict={0}" -f $GateResult.Verdict),
         ("gate_status={0}" -f $GateResult.GateStatus),
@@ -3453,6 +3593,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("analyzed_files={0}" -f $analyzedFiles),
         ("hard_failure_count={0}" -f $GateResult.HardFailures.Count),
         ("warning_count={0}" -f $GateResult.Warnings.Count),
+        ("warning_kinds={0}" -f ($(if ($warningKinds.Count -gt 0) { $warningKinds -join ',' } else { '(none)' }))),
         '',
         'hard_failures:'
     ) + ($(if ($GateResult.HardFailures.Count -gt 0) { @($GateResult.HardFailures) } else { @('(none)') })) + @(
@@ -3469,6 +3610,7 @@ function Write-FileTransferDiagnosticsArtifacts {
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'throughput-decomposition-summary.txt' -Lines (New-FileTransferThroughputDecompositionSummaryLines -Summary $Summary -ArtifactDir $ArtifactDir) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'payload-efficiency-summary.txt' -Lines (New-FileTransferPayloadEfficiencySummaryLines -Summary $Summary) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'protocol-shape-summary.txt' -Lines (New-FileTransferProtocolShapeSummaryLines -Summary $Summary) | Out-Null
+    Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'filetransfer-route-consistency-summary.txt' -Lines (New-FileTransferRouteConsistencySummaryLines -Summary $Summary) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'repair-reorder-summary.txt' -Lines (New-FileTransferRepairReorderSummaryLines -Summary $Summary) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'transport-budget-summary.txt' -Lines (New-FileTransferTransportBudgetSummaryLines -Summary $Summary) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'bridge-config-summary.txt' -Lines (New-FileTransferBridgeConfigSummaryLines -Summary $Summary) | Out-Null
