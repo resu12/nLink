@@ -191,7 +191,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
 
         public bool IsFileTunaActiveForRouteSelection
         {
-            get => isFileTunaActiveForRouteSelection || shouldUseFileTransferV6ForAcceleration;
+            get => isFileTunaActiveForRouteSelection;
             set => isFileTunaActiveForRouteSelection = value;
         }
 

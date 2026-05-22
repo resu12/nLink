@@ -58,7 +58,7 @@ public sealed class FileTransferRouteResolverTests : SessionFileTransferServiceT
     }
 
     [Fact]
-    public void Resolve_ActiveFileTuna_SelectsFileTunaV6()
+    public void Resolve_ActiveFileTuna_SelectsFileTunaV4()
     {
         var selection = FileTransferRouteResolver.Resolve(new FileTransferRouteResolverInput(
             IsFileTunaActive: true,
@@ -67,14 +67,14 @@ public sealed class FileTransferRouteResolverTests : SessionFileTransferServiceT
             HandoffKind: FileTransferTransportHandoffKind.None,
             TransportProfileKind: FileTransferTransportProfileKind.Default));
 
-        Assert.Equal(FileTransferRoute.FileTunaV6, selection.Route);
-        Assert.Equal("file_tuna_v6", selection.TelemetryToken);
-        Assert.Equal(FileTransferProtocol.ProtocolVersionV6, selection.ProtocolVersion);
-        Assert.Equal(FileTransferRouteRuntimeProfile.DefaultV6, selection.RuntimeProfile);
-        Assert.Equal(FileTransferFrameFamily.V6, selection.FrameFamily);
+        Assert.Equal(FileTransferRoute.FileTunaV4, selection.Route);
+        Assert.Equal("file_tuna_v4", selection.TelemetryToken);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV4, selection.ProtocolVersion);
+        Assert.Equal(FileTransferRouteRuntimeProfile.FileTunaV4Fast, selection.RuntimeProfile);
+        Assert.Equal(FileTransferFrameFamily.V4, selection.FrameFamily);
         Assert.Equal(FileTransferTransportHandoffKind.None, selection.HandoffKind);
         Assert.Equal(FileTransferRouteBridgeRecoveryPolicy.TunaStrictRecovery, selection.BridgeRecoveryPolicy);
-        Assert.Equal(FileTransferRouteLivenessTerminalPolicy.TunaV6Strict, selection.LivenessTerminalPolicy);
+        Assert.Equal(FileTransferRouteLivenessTerminalPolicy.FileTunaV4Fast, selection.LivenessTerminalPolicy);
         Assert.Equal("file_tuna_active", selection.SelectionReason);
     }
 
@@ -153,7 +153,7 @@ public sealed class FileTransferRouteResolverTests : SessionFileTransferServiceT
             TransportAccelerationStatusReason = "test_file_regular_nkn_fallback",
         };
 
-        Assert.Equal(FileTransferRoute.FileTunaV6, ResolveFromTransport(activeTunaTransport).Route);
+        Assert.Equal(FileTransferRoute.FileTunaV4, ResolveFromTransport(activeTunaTransport).Route);
         Assert.Equal(FileTransferRoute.PostTunaFallbackV6, ResolveFromTransport(fallbackTransport).Route);
     }
 

@@ -32,6 +32,12 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
+        TrackFileTransferRouteHint(
+            message.TransferId,
+            message.FileTransferRoute,
+            message.PreferredDataProtocolVersion ?? 0,
+            "send_offer");
+
         await SendFileTransferEnvelopeAsync(
                 MsgType.FileTransferOffer,
                 message.TransferId,
@@ -51,6 +57,12 @@ public sealed partial class NknSignalingTransport
             await Task.FromCanceled(ct);
             return;
         }
+
+        TrackFileTransferRouteHint(
+            message.TransferId,
+            message.FileTransferRoute,
+            message.AcceptedDataProtocolVersion ?? 0,
+            "send_accept");
 
         await SendFileTransferEnvelopeAsync(
                 MsgType.FileTransferAccept,
@@ -91,6 +103,12 @@ public sealed partial class NknSignalingTransport
             await Task.FromCanceled(ct);
             return;
         }
+
+        TrackFileTransferRouteHint(
+            message.TransferId,
+            message.FileTransferRoute,
+            message.ProtocolVersion,
+            "send_session_open");
 
         if (!TryValidateAndTrackFileTransferMessage(MsgType.FileTransferSessionOpen, message.TransferId, inbound: false, applyStateChange: false, out var failureReason))
         {
@@ -296,6 +314,7 @@ public sealed partial class NknSignalingTransport
                 session.IsDisposed)
             {
                 fileTransferDataSessions.Remove(normalizedTransferId);
+                fileTransferRouteHints.Remove(normalizedTransferId);
                 LocalOperationalLog.Warn(
                     "SessionSecurity",
                     $"event=filetransfer_data_session_recreated; transport=nkn; transfer_id={normalizedTransferId}; session_id={normalizedSessionId}; reason=disposed_existing_session_on_open");
@@ -948,6 +967,7 @@ public sealed partial class NknSignalingTransport
             foreach (var staleTransferId in staleTransferIds)
             {
                 fileTransferDataSessions.Remove(staleTransferId);
+                fileTransferRouteHints.Remove(staleTransferId);
             }
 
             staleSessionCount = staleTransferIds.Length;
@@ -1074,6 +1094,7 @@ public sealed partial class NknSignalingTransport
             foreach (var staleTransferId in staleTransferIds)
             {
                 fileTransferDataSessions.Remove(staleTransferId);
+                fileTransferRouteHints.Remove(staleTransferId);
             }
 
             staleSessionCount = staleTransferIds.Length;
@@ -1171,6 +1192,7 @@ public sealed partial class NknSignalingTransport
     private bool TryReplayPendingFileTransferV6Handoff(TransportFileTransferDataSession session, string trigger)
     {
         FileTransferV6PendingHandoffIntent? intent = null;
+        FileTransferRouteHint? routeHint = null;
         lock (gate)
         {
             if (session.IsDisposed ||
@@ -1182,6 +1204,17 @@ public sealed partial class NknSignalingTransport
             }
 
             intent = candidate;
+            fileTransferRouteHints.TryGetValue(session.TransferId, out var candidateRouteHint);
+            routeHint = candidateRouteHint;
+            if (IsNormalToTunaActivationHandoff(candidate.HandoffKind, candidate.TargetTransport) &&
+                !ShouldAllowLegacyFileTunaV6ActivationHandoff(candidateRouteHint))
+            {
+                pendingFileTransferV6HandoffsBySession.Remove(session.SessionId);
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=filetransfer_v6_pending_handoff_suppressed_for_route; session_id={SanitizeLogToken(session.SessionId)}; transfer_id={SanitizeLogToken(session.TransferId)}; reason={candidate.Reason}; trigger={SanitizeLogToken(trigger)}; route={SanitizeLogToken(routeHint?.Token ?? "(unknown)")}; protocol_version={(routeHint?.ProtocolVersion ?? 0)}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(candidate.HandoffKind)}; target_transport={FormatFileTransferTransportKindForLog(candidate.TargetTransport)}");
+                return false;
+            }
         }
 
         LocalOperationalLog.Info(
@@ -1221,6 +1254,12 @@ public sealed partial class NknSignalingTransport
             {
                 return false;
             }
+
+            fileTransferRouteHints.TryGetValue(session.TransferId, out var routeHint);
+            if (!ShouldAllowLegacyFileTunaV6ActivationHandoff(routeHint))
+            {
+                return false;
+            }
         }
 
         lock (accelerationGate)
@@ -1246,6 +1285,45 @@ public sealed partial class NknSignalingTransport
             FileTransferTransportHandoffKind.NormalToTunaActivation,
             FileTransferTransportKind.Tuna);
         return true;
+    }
+
+    private static bool IsNormalToTunaActivationHandoff(
+        FileTransferTransportHandoffKind handoffKind,
+        FileTransferTransportKind targetTransport)
+        => handoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
+           targetTransport == FileTransferTransportKind.Tuna;
+
+    private static bool ShouldAllowLegacyFileTunaV6ActivationHandoff(FileTransferRouteHint routeHint)
+        => routeHint.Route == FileTransferRoute.FileTunaV6 &&
+           routeHint.ProtocolVersion >= FileTransferProtocol.ProtocolVersionV6;
+
+    private void TrackFileTransferRouteHint(
+        string? transferId,
+        string? routeToken,
+        int protocolVersion,
+        string source)
+    {
+        if (string.IsNullOrWhiteSpace(transferId) ||
+            string.IsNullOrWhiteSpace(routeToken) ||
+            !FileTransferRouteResolver.TryParseTelemetryToken(routeToken, out var route))
+        {
+            return;
+        }
+
+        var normalizedTransferId = transferId.Trim();
+        var selection = FileTransferRouteResolver.Resolve(route);
+        var normalizedProtocolVersion = protocolVersion > 0
+            ? protocolVersion
+            : selection.ProtocolVersion;
+        lock (gate)
+        {
+            fileTransferRouteHints[normalizedTransferId] = new FileTransferRouteHint(
+                route,
+                selection.TelemetryToken,
+                normalizedProtocolVersion,
+                source,
+                DateTimeOffset.UtcNow);
+        }
     }
 
     private void ClearPendingFileTransferV6Handoffs(string reason, string? sessionId = null)
@@ -1632,6 +1710,11 @@ public sealed partial class NknSignalingTransport
 
         LogFileTransferEnvelopeEvent("received", MsgType.FileTransferOffer, message.TransferId, source);
         Log($"FileTransferOffer received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length}, file_name_len={message.FileName.Length}, size_bytes={message.FileSizeBytes})");
+        TrackFileTransferRouteHint(
+            message.TransferId,
+            message.FileTransferRoute,
+            message.PreferredDataProtocolVersion ?? 0,
+            "receive_offer");
         FileTransferOfferReceived?.Invoke(this, new FileTransferOfferReceivedEventArgs(message, source));
     }
 
@@ -1659,6 +1742,11 @@ public sealed partial class NknSignalingTransport
 
         LogFileTransferEnvelopeEvent("received", MsgType.FileTransferAccept, message.TransferId, source);
         Log($"FileTransferAccept received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length})");
+        TrackFileTransferRouteHint(
+            message.TransferId,
+            message.FileTransferRoute,
+            message.AcceptedDataProtocolVersion ?? 0,
+            "receive_accept");
         FileTransferAcceptReceived?.Invoke(this, new FileTransferAcceptReceivedEventArgs(message, source));
     }
 
@@ -1852,6 +1940,11 @@ public sealed partial class NknSignalingTransport
             {
                 LogFileTransferEnvelopeEvent("received", MsgType.FileTransferOffer, message.TransferId, source);
                 Log($"FileTransferOffer received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length}, file_name_len={message.FileName.Length}, size_bytes={message.FileSizeBytes})");
+                TrackFileTransferRouteHint(
+                    message.TransferId,
+                    message.FileTransferRoute,
+                    message.PreferredDataProtocolVersion ?? 0,
+                    "receive_offer");
                 FileTransferOfferReceived?.Invoke(this, new FileTransferOfferReceivedEventArgs(message, source));
             });
         return true;
@@ -1887,6 +1980,11 @@ public sealed partial class NknSignalingTransport
             {
                 LogFileTransferEnvelopeEvent("received", MsgType.FileTransferAccept, message.TransferId, source);
                 Log($"FileTransferAccept received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length})");
+                TrackFileTransferRouteHint(
+                    message.TransferId,
+                    message.FileTransferRoute,
+                    message.AcceptedDataProtocolVersion ?? 0,
+                    "receive_accept");
                 FileTransferAcceptReceived?.Invoke(this, new FileTransferAcceptReceivedEventArgs(message, source));
             });
         return true;
@@ -2318,6 +2416,11 @@ public sealed partial class NknSignalingTransport
             () =>
             {
                 LogFileTransferEnvelopeEvent("received", MsgType.FileTransferSessionOpen, message.TransferId, source);
+                TrackFileTransferRouteHint(
+                    message.TransferId,
+                    message.FileTransferRoute,
+                    message.ProtocolVersion,
+                    "receive_session_open");
                 FileTransferSessionOpenReceived?.Invoke(this, new FileTransferSessionOpenReceivedEventArgs(message, source));
             });
         return true;
@@ -4506,9 +4609,22 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
+        if (frame is FileTransferCancelFrameV4)
+        {
+            if (currentState.Phase is not FileTransferTransportPhase.Accepted
+                and not FileTransferTransportPhase.Started
+                and not FileTransferTransportPhase.Transferring)
+            {
+                failureReason = "cancel_frame_requires_start";
+                return false;
+            }
+
+            nextState = currentState with { Phase = FileTransferTransportPhase.Canceled };
+            return true;
+        }
+
         if (frame is FileTransferPauseControlFrameV4
             or FileTransferCompleteFrameV4
-            or FileTransferCancelFrameV4
             or FileTransferErrorFrameV4)
         {
             failureReason = "lifecycle_data_frame_unsupported";
@@ -4918,6 +5034,7 @@ public sealed partial class NknSignalingTransport
                 session.IsDisposed)
             {
                 fileTransferDataSessions.Remove(frame.TransferId);
+                fileTransferRouteHints.Remove(frame.TransferId);
                 LocalOperationalLog.Warn(
                     "SessionSecurity",
                     $"event=filetransfer_data_session_recreated; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}; reason=disposed_existing_session_on_deliver");
@@ -5307,6 +5424,7 @@ public sealed partial class NknSignalingTransport
                 ReferenceEquals(current, session))
             {
                 fileTransferDataSessions.Remove(session.TransferId);
+                fileTransferRouteHints.Remove(session.TransferId);
                 removed = true;
                 LocalOperationalLog.Info(
                     "SessionSecurity",

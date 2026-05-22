@@ -49,6 +49,8 @@ public sealed partial class SessionFileTransferService
         string sessionId;
         string transferId;
         string? normalizedCancelReason;
+        int dataCancelProtocolVersion;
+        long dataCancelTransportEpoch;
 
         lock (gate)
         {
@@ -67,6 +69,8 @@ public sealed partial class SessionFileTransferService
             context.PeerPaused = false;
             context.PeerPauseReason = null;
             context.PeerPausedSinceUtc = null;
+            dataCancelProtocolVersion = context.NegotiatedDataProtocolVersion;
+            dataCancelTransportEpoch = context.V6TransportEpoch?.EpochId ?? context.LastRecoveredV6TransportEpoch;
             if (context.V6TransportEpoch is { } epoch)
             {
                 TerminalizeV6TransportEpochLocked(FileTransferDirection.Outbound, context.TransferId, context.SessionId, epoch, "transfer_terminal");
@@ -91,7 +95,6 @@ public sealed partial class SessionFileTransferService
 
         LogV4EfficiencySummary(context, terminalState);
         RaiseTransferChanged(snapshot);
-        dataSessionToDispose?.Dispose();
         try
         {
             if (shouldNotifyPeer)
@@ -99,6 +102,30 @@ public sealed partial class SessionFileTransferService
                 if (terminalState == FileTransferTransferState.Canceled)
                 {
                     await SendCancelAsync(sessionId, transferId, normalizedCancelReason, CancellationToken.None).ConfigureAwait(false);
+                    if (dataSessionToDispose is not null)
+                    {
+                        await TrySendCancelDataFrameAsync(
+                                dataSessionToDispose,
+                                sessionId,
+                                transferId,
+                                normalizedCancelReason,
+                                FileTransferDirection.Outbound,
+                                dataCancelProtocolVersion,
+                                dataCancelTransportEpoch,
+                                "terminal_redundant",
+                                CancellationToken.None)
+                            .ConfigureAwait(false);
+                        StartCancelDataFrameRetryLoop(
+                            dataSessionToDispose,
+                            sessionId,
+                            transferId,
+                            normalizedCancelReason,
+                            FileTransferDirection.Outbound,
+                            dataCancelProtocolVersion,
+                            dataCancelTransportEpoch,
+                            "terminal_redundant");
+                        dataSessionToDispose = null;
+                    }
                 }
                 else if (terminalState == FileTransferTransferState.Failed)
                 {
@@ -108,6 +135,7 @@ public sealed partial class SessionFileTransferService
         }
         finally
         {
+            dataSessionToDispose?.Dispose();
             context.DisposeResources();
         }
 
@@ -122,7 +150,8 @@ public sealed partial class SessionFileTransferService
             fileSizeBytes: context.FileSizeBytes,
             bytesTransferred: context.BytesTransferred,
             chunksTransferred: context.ChunksTransferred,
-            chunkCount: context.ChunkCount);
+            chunkCount: context.ChunkCount,
+            routeSelection: context.RouteSelection);
     }
 
     private async Task TransitionInboundToTerminalAsync(
@@ -142,6 +171,9 @@ public sealed partial class SessionFileTransferService
         string? normalizedErrorCode;
         IFileTransferDataSession? dataSessionToDispose = null;
         string? normalizedCancelReason;
+        bool shouldSendCancel;
+        int dataCancelProtocolVersion;
+        long dataCancelTransportEpoch;
 
         lock (gate)
         {
@@ -161,6 +193,8 @@ public sealed partial class SessionFileTransferService
             context.PeerPaused = false;
             context.PeerPauseReason = null;
             context.PeerPausedSinceUtc = null;
+            dataCancelProtocolVersion = context.NegotiatedDataProtocolVersion;
+            dataCancelTransportEpoch = context.V6TransportEpoch?.EpochId ?? context.V6ReceiverTransportEpoch;
             if (context.V6TransportEpoch is { } epoch)
             {
                 TerminalizeV6TransportEpochLocked(FileTransferDirection.Inbound, context.TransferId, context.SessionId, epoch, "transfer_terminal");
@@ -173,6 +207,8 @@ public sealed partial class SessionFileTransferService
             transferId = context.TransferId;
             normalizedErrorCode = context.ErrorCode;
             normalizedCancelReason = NormalizeReason(cancelReason) ?? CanceledReason;
+            shouldSendCancel = terminalState == FileTransferTransferState.Canceled &&
+                               !string.IsNullOrWhiteSpace(cancelReason);
             dataSessionToDispose = context.DetachDataSession();
         }
 
@@ -190,16 +226,39 @@ public sealed partial class SessionFileTransferService
         }
 
         RaiseTransferChanged(snapshot);
-        dataSessionToDispose?.Dispose();
         try
         {
             if (terminalState == FileTransferTransferState.Declined)
             {
                 await SendDeclineAsync(sessionId, transferId, cancelReason ?? DeclinedReason, ct).ConfigureAwait(false);
             }
-            else if (terminalState == FileTransferTransferState.Canceled)
+            else if (shouldSendCancel)
             {
                 await SendCancelAsync(sessionId, transferId, normalizedCancelReason, CancellationToken.None).ConfigureAwait(false);
+                if (dataSessionToDispose is not null)
+                {
+                    await TrySendCancelDataFrameAsync(
+                            dataSessionToDispose,
+                            sessionId,
+                            transferId,
+                            normalizedCancelReason,
+                            FileTransferDirection.Inbound,
+                            dataCancelProtocolVersion,
+                            dataCancelTransportEpoch,
+                            "terminal_redundant",
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                    StartCancelDataFrameRetryLoop(
+                        dataSessionToDispose,
+                        sessionId,
+                        transferId,
+                        normalizedCancelReason,
+                        FileTransferDirection.Inbound,
+                        dataCancelProtocolVersion,
+                        dataCancelTransportEpoch,
+                        "terminal_redundant");
+                    dataSessionToDispose = null;
+                }
             }
             else if (shouldSendError)
             {
@@ -208,6 +267,7 @@ public sealed partial class SessionFileTransferService
         }
         finally
         {
+            dataSessionToDispose?.Dispose();
             context.DisposeResources();
         }
 
@@ -223,7 +283,8 @@ public sealed partial class SessionFileTransferService
             bytesTransferred: context.BytesTransferred,
             chunksTransferred: context.ChunksTransferred,
             chunkCount: context.ChunkCount,
-            savedPath: context.SavedFilePath);
+            savedPath: context.SavedFilePath,
+            routeSelection: context.RouteSelection);
     }
 
     private void UpdateOutboundState(
@@ -374,30 +435,41 @@ public sealed partial class SessionFileTransferService
         }
     }
 
-    private async Task TrySendV4CancelFrameAsync(
+    private async Task TrySendCancelDataFrameAsync(
         IFileTransferDataSession dataSession,
         string sessionId,
         string transferId,
         string? reason,
         FileTransferDirection direction,
+        int protocolVersion,
+        long transportEpoch,
         string source,
         CancellationToken ct)
     {
         try
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(CancelDataFrameBestEffortTimeoutMs));
+            var frame = protocolVersion >= FileTransferProtocol.ProtocolVersionV6
+                ? new FileTransferCancelFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    Reason = NormalizeReason(reason),
+                    TransportEpoch = Math.Max(0, transportEpoch),
+                }
+                : new FileTransferCancelFrameV4
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    Reason = NormalizeReason(reason),
+                };
             await dataSession.SendAsync(
-                    new FileTransferCancelFrameV6
-                    {
-                        SessionId = sessionId,
-                        TransferId = transferId,
-                        Reason = NormalizeReason(reason),
-                    },
+                    frame,
                     timeout.Token)
                 .ConfigureAwait(false);
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_v4_cancel_frame_sent; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; source={source}");
+                $"event=filetransfer_cancel_data_frame_sent; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; protocol_version={protocolVersion}; transport_epoch={Math.Max(0, transportEpoch)}; source={source}");
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=filetransfer_lifecycle_priority_sent; kind=cancel; transfer_id={transferId}; session_id={sessionId}; reason={FormatProtocolLogValue(reason ?? CanceledReason)}; path=redundant_data_frame; direction={direction.ToString().ToLowerInvariant()}; source={source}");
@@ -412,32 +484,36 @@ public sealed partial class SessionFileTransferService
         {
             LocalOperationalLog.Warn(
                 "FileTransferService",
-                $"event=filetransfer_v4_cancel_frame_send_failed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; source={source}; error={FormatProtocolLogValue(ex.Message)}");
+                $"event=filetransfer_cancel_data_frame_send_failed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; source={source}; error={FormatProtocolLogValue(ex.Message)}");
             LocalOperationalLog.Warn(
                 "FileTransferService",
                 $"event=filetransfer_lifecycle_priority_send_failed; kind=cancel; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; source={source}; path=redundant_data_frame; error={ex.GetType().Name}");
         }
     }
 
-    private void StartV4CancelDataFrameRetryLoop(
+    private void StartCancelDataFrameRetryLoop(
         IFileTransferDataSession dataSession,
         string sessionId,
         string transferId,
         string? reason,
         FileTransferDirection direction,
+        int protocolVersion,
+        long transportEpoch,
         string source)
     {
         _ = Task.Run(
-            () => RunV4CancelDataFrameRetryLoopAsync(dataSession, sessionId, transferId, reason, direction, source),
+            () => RunCancelDataFrameRetryLoopAsync(dataSession, sessionId, transferId, reason, direction, protocolVersion, transportEpoch, source),
             CancellationToken.None);
     }
 
-    private async Task RunV4CancelDataFrameRetryLoopAsync(
+    private async Task RunCancelDataFrameRetryLoopAsync(
         IFileTransferDataSession dataSession,
         string sessionId,
         string transferId,
         string? reason,
         FileTransferDirection direction,
+        int protocolVersion,
+        long transportEpoch,
         string source)
     {
         try
@@ -445,12 +521,14 @@ public sealed partial class SessionFileTransferService
             for (var index = 0; index < CancelDataFrameRetryDelaysMs.Length; index++)
             {
                 await Task.Delay(CancelDataFrameRetryDelaysMs[index]).ConfigureAwait(false);
-                await TrySendV4CancelFrameAsync(
+                await TrySendCancelDataFrameAsync(
                         dataSession,
                         sessionId,
                         transferId,
                         reason,
                         direction,
+                        protocolVersion,
+                        transportEpoch,
                         $"{source}_retry_{index + 2}",
                         CancellationToken.None)
                     .ConfigureAwait(false);

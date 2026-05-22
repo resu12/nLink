@@ -137,7 +137,8 @@ public sealed partial class SessionFileTransferService
 
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event={(useV6Envelope ? "filetransfer_v6_sender_started" : "filetransfer_v4_sender_started")}; transfer_id={context.TransferId}; session_id={context.SessionId}; protocol_version={context.NegotiatedDataProtocolVersion}; chunk_size_bytes={context.ChunkSizeBytes}; chunk_count={context.ChunkCount}; pipeline_depth={V4SenderPumpDepth}; pending_bytes_limit={V4SenderPumpPendingBytes}");
+                $"event={(useV6Envelope ? "filetransfer_v6_sender_started" : "filetransfer_v4_sender_started")}; transfer_id={context.TransferId}; session_id={context.SessionId}; protocol_version={context.NegotiatedDataProtocolVersion}; route={context.RouteSelection.TelemetryToken}; runtime_profile={FormatFileTransferRouteRuntimeProfile(context.RouteSelection.RuntimeProfile)}; frame_family={FormatFileTransferFrameFamily(context.RouteSelection.FrameFamily)}; bridge_recovery_policy={FormatFileTransferRouteBridgeRecoveryPolicy(context.RouteSelection.BridgeRecoveryPolicy)}; chunk_size_bytes={context.ChunkSizeBytes}; chunk_count={context.ChunkCount}; pipeline_depth={V4SenderPumpDepth}; pending_bytes_limit={V4SenderPumpPendingBytes}");
+            LogFileTransferRuntimeStarted(context.TransferId, context.SessionId, FileTransferDirection.Outbound, "sender", context.RouteSelection);
 
             UpdateOutboundState(
                 context,
@@ -156,7 +157,8 @@ public sealed partial class SessionFileTransferService
                 FileTransferDirection.Outbound,
                 context.TransferId,
                 sessionId: context.SessionId,
-                reason: $"role={sessionOpen.SessionRole}; protocol_version={sessionOpen.ProtocolVersion}; chunk_size_bytes={sessionOpen.ChunkSizeBytes}; pipeline_depth={sessionOpen.InitialPipelineDepth}");
+                reason: FormatFileTransferSessionOpenReason(sessionOpen.SessionRole, sessionOpen.ProtocolVersion, sessionOpen.ChunkSizeBytes, sessionOpen.InitialPipelineDepth, context.RouteSelection),
+                routeSelection: context.RouteSelection);
 
             using var stream = await context.OpenReadStreamAsync(context.LifetimeCts.Token).ConfigureAwait(false);
             ValidateReadableStream(stream);
@@ -373,10 +375,22 @@ public sealed partial class SessionFileTransferService
                             $"event=filetransfer_lifecycle_data_frame_ignored; kind=complete; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason=phase2_control_required; file_size_bytes={complete.FileSizeBytes}");
                         break;
                     case FileTransferCancelFrameV4 cancel:
+                    {
+                        var reason = NormalizeReason(cancel.Reason);
                         LocalOperationalLog.Info(
                             "FileTransferService",
-                            $"event=filetransfer_lifecycle_data_frame_ignored; kind=cancel; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason=phase2_control_required; cancel_reason={FormatProtocolLogValue(NormalizeReason(cancel.Reason) ?? CanceledReason)}");
-                        break;
+                            $"event=filetransfer_lifecycle_priority_received; kind=cancel; transfer_id={context.TransferId}; session_id={context.SessionId}; direction=outbound; reason={FormatProtocolLogValue(reason ?? CanceledReason)}; path=redundant_data_frame");
+                        await TransitionOutboundToTerminalAsync(
+                                context,
+                                FileTransferTransferState.Canceled,
+                                errorCode: FileTransferResultCodes.CanceledRemote,
+                                statusMessage: reason ?? "Transfer canceled by peer.",
+                                notifyPeer: false,
+                                cancelReason: null,
+                                ct: CancellationToken.None)
+                            .ConfigureAwait(false);
+                        return;
+                    }
                     case FileTransferErrorFrameV4 error:
                         LocalOperationalLog.Info(
                             "FileTransferService",
@@ -4344,7 +4358,7 @@ public sealed partial class SessionFileTransferService
         var repairToRawPermille = ComputeEfficiencyPermille(context.PullSenderRepairRawBytesTotal, context.PullSenderRawBytesTotal);
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_v4_efficiency_summary; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; terminal_state={terminalState.ToString().ToLowerInvariant()}; protocol_version={context.NegotiatedDataProtocolVersion}; runtime_profile={FormatFileTransferRuntimeProfile(context.RuntimeProfile)}; file_size_bytes={fileSizeBytes}; bytes_acknowledged_by_receiver={context.BytesAcknowledgedByReceiver}; bytes_transferred={context.BytesTransferred}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}; remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; raw_bytes_sent_total={context.PullSenderRawBytesTotal}; normal_raw_bytes_sent_total={context.PullSenderNormalRawBytesTotal}; repair_raw_bytes_sent_total={context.PullSenderRepairRawBytesTotal}; raw_to_file_permille={rawToFilePermille}; normal_to_file_permille={normalToFilePermille}; repair_to_file_permille={repairToFilePermille}; repair_to_raw_permille={repairToRawPermille}; batch_frames_sent_total={context.PullSenderBatchFramesTotal}; normal_batch_frames_sent_total={context.PullSenderNormalBatchFramesTotal}; repair_batch_frames_sent_total={context.PullSenderRepairBatchFramesTotal}; chunk_count_sent_total={context.PullSenderChunkCountTotal}; normal_chunk_count_sent_total={context.PullSenderNormalChunkCountTotal}; repair_chunk_count_sent_total={context.PullSenderRepairChunkCountTotal}; send_wait_count_total={context.PullSenderSendWaitCountTotal}; failed_frames_total={context.PullSenderPipelineFailedFramesTotal}; receiver_state_received_total={context.PullV4StateReceivedCountTotal}; receiver_state_applied_total={context.PullV4StateAppliedCountTotal}; receiver_state_duplicate_total={context.PullV4StateDuplicateCountTotal}; receiver_state_stale_total={context.PullV4StateStaleCountTotal}; pending_repair_count={context.PullV4SenderPumpRepairQueue.Sum(static repair => repair.ChunkIndices.Count)}; sent_cache_chunk_count={context.PullSentChunkCache.Count}; sent_cache_bytes={context.PullSentChunkCacheBytes}");
+            $"event=filetransfer_v4_efficiency_summary; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; terminal_state={terminalState.ToString().ToLowerInvariant()}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.NegotiatedDataProtocolVersion}; runtime_profile={FormatFileTransferRouteRuntimeProfile(context.RouteSelection.RuntimeProfile)}; frame_family={FormatFileTransferFrameFamily(context.RouteSelection.FrameFamily)}; bridge_recovery_policy={FormatFileTransferRouteBridgeRecoveryPolicy(context.RouteSelection.BridgeRecoveryPolicy)}; file_size_bytes={fileSizeBytes}; bytes_acknowledged_by_receiver={context.BytesAcknowledgedByReceiver}; bytes_transferred={context.BytesTransferred}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}; remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; raw_bytes_sent_total={context.PullSenderRawBytesTotal}; normal_raw_bytes_sent_total={context.PullSenderNormalRawBytesTotal}; repair_raw_bytes_sent_total={context.PullSenderRepairRawBytesTotal}; raw_to_file_permille={rawToFilePermille}; normal_to_file_permille={normalToFilePermille}; repair_to_file_permille={repairToFilePermille}; repair_to_raw_permille={repairToRawPermille}; batch_frames_sent_total={context.PullSenderBatchFramesTotal}; normal_batch_frames_sent_total={context.PullSenderNormalBatchFramesTotal}; repair_batch_frames_sent_total={context.PullSenderRepairBatchFramesTotal}; chunk_count_sent_total={context.PullSenderChunkCountTotal}; normal_chunk_count_sent_total={context.PullSenderNormalChunkCountTotal}; repair_chunk_count_sent_total={context.PullSenderRepairChunkCountTotal}; send_wait_count_total={context.PullSenderSendWaitCountTotal}; failed_frames_total={context.PullSenderPipelineFailedFramesTotal}; receiver_state_received_total={context.PullV4StateReceivedCountTotal}; receiver_state_applied_total={context.PullV4StateAppliedCountTotal}; receiver_state_duplicate_total={context.PullV4StateDuplicateCountTotal}; receiver_state_stale_total={context.PullV4StateStaleCountTotal}; pending_repair_count={context.PullV4SenderPumpRepairQueue.Sum(static repair => repair.ChunkIndices.Count)}; sent_cache_chunk_count={context.PullSentChunkCache.Count}; sent_cache_bytes={context.PullSentChunkCacheBytes}");
     }
 
     private static void LogV4EfficiencySummary(
@@ -4363,7 +4377,7 @@ public sealed partial class SessionFileTransferService
         var acceptedToRawPermille = ComputeEfficiencyPermille(context.PullReceiverAcceptedRawBytesTotal, context.PullReceiverRawBatchBytesTotal);
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_v4_efficiency_summary; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; terminal_state={terminalState.ToString().ToLowerInvariant()}; protocol_version={context.NegotiatedDataProtocolVersion}; runtime_profile={FormatFileTransferRuntimeProfile(context.RuntimeProfile)}; file_size_bytes={fileSizeBytes}; bytes_transferred={context.BytesTransferred}; sparse_bytes_written={context.ReceiverSparseBytesWritten}; next_chunk_index={context.NextChunkIndex}; highest_received_chunk_index={context.PullHighestReceivedChunkIndex}; raw_batch_bytes_received_total={context.PullReceiverRawBatchBytesTotal}; raw_batch_frames_received_total={context.PullReceiverRawBatchFramesTotal}; accepted_raw_bytes_received_total={context.PullReceiverAcceptedRawBytesTotal}; duplicate_or_stale_raw_bytes_received_total={context.PullReceiverDuplicateOrStaleRawBytesTotal}; raw_to_file_permille={rawToFilePermille}; accepted_to_file_permille={acceptedToFilePermille}; duplicate_or_stale_to_raw_permille={duplicateToRawPermille}; accepted_to_raw_permille={acceptedToRawPermille}; chunk_count_received_total={context.PullReceiverChunkCountTotal}; accepted_chunk_count_total={context.PullReceiverAcceptedChunkCountTotal}; duplicate_or_stale_chunk_count_total={context.PullReceiverDuplicateOrStaleChunkCountTotal}; repair_overlap_chunk_count_total={context.PullReceiverRepairOverlapChunkCountTotal}; repair_accepted_chunk_count_total={context.PullReceiverRepairAcceptedChunkCountTotal}; repair_duplicate_or_stale_chunk_count_total={context.PullReceiverRepairDuplicateOrStaleChunkCountTotal}; repair_duplicate_or_stale_raw_bytes_total={context.PullReceiverRepairDuplicateOrStaleRawBytesTotal}; sparse_write_batch_count_total={context.PullReceiverSparseWriteBatchCountTotal}; sparse_write_duration_ms_total={context.PullReceiverSparseWriteDurationMsTotal}; receiver_state_sent_total={context.PullV4StateSentCountTotal}; repair_request_count_total={context.PullV4RepairRequestCountTotal}; repair_requested_chunk_count_total={context.PullV4RepairRequestedChunkCountTotal}; repair_suppressed_count_total={context.PullV4RepairSuppressedCountTotal}; frontier_tail_repair_request_count_total={context.PullV4FrontierTailRepairRequestCountTotal}; frontier_stall_suppressed_count_total={context.V4FrontierStallSuppressedCountTotal}; pending_repair_request_count={context.V4ReceiverRepairRequests.Count}; pending_write_chunk_count={context.ReceiverSparseChunksPendingWrite.Count}; pending_bytes={context.BufferedBytes}");
+            $"event=filetransfer_v4_efficiency_summary; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; terminal_state={terminalState.ToString().ToLowerInvariant()}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.NegotiatedDataProtocolVersion}; runtime_profile={FormatFileTransferRouteRuntimeProfile(context.RouteSelection.RuntimeProfile)}; frame_family={FormatFileTransferFrameFamily(context.RouteSelection.FrameFamily)}; bridge_recovery_policy={FormatFileTransferRouteBridgeRecoveryPolicy(context.RouteSelection.BridgeRecoveryPolicy)}; file_size_bytes={fileSizeBytes}; bytes_transferred={context.BytesTransferred}; sparse_bytes_written={context.ReceiverSparseBytesWritten}; next_chunk_index={context.NextChunkIndex}; highest_received_chunk_index={context.PullHighestReceivedChunkIndex}; raw_batch_bytes_received_total={context.PullReceiverRawBatchBytesTotal}; raw_batch_frames_received_total={context.PullReceiverRawBatchFramesTotal}; accepted_raw_bytes_received_total={context.PullReceiverAcceptedRawBytesTotal}; duplicate_or_stale_raw_bytes_received_total={context.PullReceiverDuplicateOrStaleRawBytesTotal}; raw_to_file_permille={rawToFilePermille}; accepted_to_file_permille={acceptedToFilePermille}; duplicate_or_stale_to_raw_permille={duplicateToRawPermille}; accepted_to_raw_permille={acceptedToRawPermille}; chunk_count_received_total={context.PullReceiverChunkCountTotal}; accepted_chunk_count_total={context.PullReceiverAcceptedChunkCountTotal}; duplicate_or_stale_chunk_count_total={context.PullReceiverDuplicateOrStaleChunkCountTotal}; repair_overlap_chunk_count_total={context.PullReceiverRepairOverlapChunkCountTotal}; repair_accepted_chunk_count_total={context.PullReceiverRepairAcceptedChunkCountTotal}; repair_duplicate_or_stale_chunk_count_total={context.PullReceiverRepairDuplicateOrStaleChunkCountTotal}; repair_duplicate_or_stale_raw_bytes_total={context.PullReceiverRepairDuplicateOrStaleRawBytesTotal}; sparse_write_batch_count_total={context.PullReceiverSparseWriteBatchCountTotal}; sparse_write_duration_ms_total={context.PullReceiverSparseWriteDurationMsTotal}; receiver_state_sent_total={context.PullV4StateSentCountTotal}; repair_request_count_total={context.PullV4RepairRequestCountTotal}; repair_requested_chunk_count_total={context.PullV4RepairRequestedChunkCountTotal}; repair_suppressed_count_total={context.PullV4RepairSuppressedCountTotal}; frontier_tail_repair_request_count_total={context.PullV4FrontierTailRepairRequestCountTotal}; frontier_stall_suppressed_count_total={context.V4FrontierStallSuppressedCountTotal}; pending_repair_request_count={context.V4ReceiverRepairRequests.Count}; pending_write_chunk_count={context.ReceiverSparseChunksPendingWrite.Count}; pending_bytes={context.BufferedBytes}");
     }
 
     private async Task FailOutboundV4Async(
@@ -5214,7 +5228,8 @@ public sealed partial class SessionFileTransferService
 
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event={(useV6Envelope ? "filetransfer_v6_receiver_started" : "filetransfer_v4_receiver_started")}; transfer_id={context.TransferId}; session_id={context.SessionId}; protocol_version={context.NegotiatedDataProtocolVersion}; session_open_chunk_size_bytes={sessionOpen.ChunkSizeBytes}; session_open_pipeline_depth={sessionOpen.InitialPipelineDepth}");
+            $"event={(useV6Envelope ? "filetransfer_v6_receiver_started" : "filetransfer_v4_receiver_started")}; transfer_id={context.TransferId}; session_id={context.SessionId}; protocol_version={context.NegotiatedDataProtocolVersion}; route={context.RouteSelection.TelemetryToken}; runtime_profile={FormatFileTransferRouteRuntimeProfile(context.RouteSelection.RuntimeProfile)}; frame_family={FormatFileTransferFrameFamily(context.RouteSelection.FrameFamily)}; bridge_recovery_policy={FormatFileTransferRouteBridgeRecoveryPolicy(context.RouteSelection.BridgeRecoveryPolicy)}; session_open_chunk_size_bytes={sessionOpen.ChunkSizeBytes}; session_open_pipeline_depth={sessionOpen.InitialPipelineDepth}");
+        LogFileTransferRuntimeStarted(context.TransferId, context.SessionId, FileTransferDirection.Inbound, "receiver", context.RouteSelection);
 
         try
         {
@@ -5401,10 +5416,23 @@ public sealed partial class SessionFileTransferService
                         LogInboundV4FrameIgnored(context, pauseControl, "lifecycle_data_frame_ignored_phase2");
                         break;
                     case FileTransferCancelFrameV4 cancel:
+                    {
+                        var reason = NormalizeReason(cancel.Reason);
                         LocalOperationalLog.Info(
                             "FileTransferService",
-                            $"event=filetransfer_lifecycle_data_frame_ignored; kind=cancel; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason=phase2_control_required; cancel_reason={FormatProtocolLogValue(NormalizeReason(cancel.Reason) ?? CanceledReason)}");
-                        break;
+                            $"event=filetransfer_lifecycle_priority_received; kind=cancel; transfer_id={context.TransferId}; session_id={context.SessionId}; direction=inbound; reason={FormatProtocolLogValue(reason ?? CanceledReason)}; path=redundant_data_frame");
+                        await TransitionInboundToTerminalAsync(
+                                context,
+                                FileTransferTransferState.Canceled,
+                                errorCode: FileTransferResultCodes.CanceledRemote,
+                                statusMessage: reason ?? "Transfer canceled by peer.",
+                                sendError: false,
+                                errorMessage: null,
+                                cancelReason: null,
+                                ct: CancellationToken.None)
+                            .ConfigureAwait(false);
+                        return;
+                    }
                     case FileTransferErrorFrameV4 error:
                         LocalOperationalLog.Info(
                             "FileTransferService",
@@ -5867,7 +5895,7 @@ public sealed partial class SessionFileTransferService
             sessionId: manifest.SessionId,
             fileName: manifest.FileName,
             fileSizeBytes: manifest.FileSizeBytes,
-            reason: $"protocol_version={FileTransferProtocol.ProtocolVersionV6}; chunk_count={manifest.ChunkCount}; chunk_size_bytes={manifest.ChunkSizeBytes}");
+            reason: $"protocol_version={FileTransferProtocol.ProtocolVersionV4}; chunk_count={manifest.ChunkCount}; chunk_size_bytes={manifest.ChunkSizeBytes}");
         return true;
     }
 

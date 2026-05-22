@@ -1031,6 +1031,26 @@ public sealed partial class SessionFileTransferService
         return CompleteOutboundV6TransportEpochLocked(context, "frontier_repair_proof");
     }
 
+    private bool TryRecoverOutboundV6RegularNknEpochFromPeerControlLocked(
+        OutboundTransferContext context,
+        long transportEpoch,
+        FileTransferTransportKind receivedTransportKind,
+        string reason)
+    {
+        var epoch = context.V6TransportEpoch;
+        if (!IsV6TransportEpochUnresolved(epoch) ||
+            epoch!.EpochId != transportEpoch ||
+            epoch.TargetTransport != FileTransferTransportKind.RegularNkn ||
+            receivedTransportKind != FileTransferTransportKind.RegularNkn ||
+            (epoch.Kind != FileTransferTransportHandoffKind.RegularNknRecovery &&
+             epoch.Kind != FileTransferTransportHandoffKind.TunaToNormalFallback))
+        {
+            return false;
+        }
+
+        return CompleteOutboundV6TransportEpochLocked(context, reason);
+    }
+
     private static bool IsRecoverableUnmatchedV6FrontierRepairProof(
         OutboundTransferContext context,
         V6TransportEpoch epoch,

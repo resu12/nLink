@@ -75,7 +75,8 @@ public sealed partial class SessionFileTransferService
 
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_v6_sender_started; transfer_id={context.TransferId}; session_id={context.SessionId}; protocol_version={FileTransferProtocol.ProtocolVersionV6}; chunk_size_bytes={context.ChunkSizeBytes}; chunk_count={context.ChunkCount}; request_driven=1");
+                $"event=filetransfer_v6_sender_started; transfer_id={context.TransferId}; session_id={context.SessionId}; protocol_version={FileTransferProtocol.ProtocolVersionV6}; route={context.RouteSelection.TelemetryToken}; runtime_profile={FormatFileTransferRouteRuntimeProfile(context.RouteSelection.RuntimeProfile)}; frame_family={FormatFileTransferFrameFamily(context.RouteSelection.FrameFamily)}; bridge_recovery_policy={FormatFileTransferRouteBridgeRecoveryPolicy(context.RouteSelection.BridgeRecoveryPolicy)}; chunk_size_bytes={context.ChunkSizeBytes}; chunk_count={context.ChunkCount}; request_driven=1");
+            LogFileTransferRuntimeStarted(context.TransferId, context.SessionId, FileTransferDirection.Outbound, "sender", context.RouteSelection);
 
             UpdateOutboundState(context, FileTransferTransferState.AwaitingStart, 0, 0, "Starting V6 file transfer.");
             await currentTransport.SendFileTransferSessionOpenAsync(sessionOpen, context.LifetimeCts.Token).ConfigureAwait(false);
@@ -84,7 +85,8 @@ public sealed partial class SessionFileTransferService
                 FileTransferDirection.Outbound,
                 context.TransferId,
                 sessionId: context.SessionId,
-                reason: $"role={sessionOpen.SessionRole}; protocol_version={sessionOpen.ProtocolVersion}; chunk_size_bytes={sessionOpen.ChunkSizeBytes}; pipeline_depth={sessionOpen.InitialPipelineDepth}");
+                reason: FormatFileTransferSessionOpenReason(sessionOpen.SessionRole, sessionOpen.ProtocolVersion, sessionOpen.ChunkSizeBytes, sessionOpen.InitialPipelineDepth, context.RouteSelection),
+                routeSelection: context.RouteSelection);
 
             using var stream = await context.OpenReadStreamAsync(context.LifetimeCts.Token).ConfigureAwait(false);
             ValidateReadableStream(stream);
@@ -190,10 +192,22 @@ public sealed partial class SessionFileTransferService
                             $"event=filetransfer_lifecycle_data_frame_ignored; kind=complete; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason=phase2_control_required; file_size_bytes={complete.FileSizeBytes}");
                         break;
                     case FileTransferCancelFrameV4 cancel:
+                    {
+                        var reason = NormalizeReason(cancel.Reason);
                         LocalOperationalLog.Info(
                             "FileTransferService",
-                            $"event=filetransfer_lifecycle_data_frame_ignored; kind=cancel; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason=phase2_control_required; cancel_reason={FormatProtocolLogValue(NormalizeReason(cancel.Reason) ?? CanceledReason)}");
-                        break;
+                            $"event=filetransfer_lifecycle_priority_received; kind=cancel; transfer_id={context.TransferId}; session_id={context.SessionId}; direction=outbound; reason={FormatProtocolLogValue(reason ?? CanceledReason)}; path=redundant_data_frame");
+                        await TransitionOutboundToTerminalAsync(
+                                context,
+                                FileTransferTransferState.Canceled,
+                                errorCode: FileTransferResultCodes.CanceledRemote,
+                                statusMessage: reason ?? "Transfer canceled by peer.",
+                                notifyPeer: false,
+                                cancelReason: null,
+                                ct: CancellationToken.None)
+                            .ConfigureAwait(false);
+                        return;
+                    }
                     case FileTransferErrorFrameV4 error:
                         LocalOperationalLog.Info(
                             "FileTransferService",
@@ -943,6 +957,15 @@ public sealed partial class SessionFileTransferService
         string? recoveryMode,
         FileTransferTransportKind receivedTransportKind)
     {
+        if (ShouldForceOutboundV6TunaFrontierRescueOverRegularNkn(
+            context,
+            transportEpoch,
+            recoveryMode,
+            receivedTransportKind))
+        {
+            return true;
+        }
+
         if (transportEpoch <= 0)
         {
             return receivedTransportKind == FileTransferTransportKind.RegularNkn &&
@@ -965,6 +988,32 @@ public sealed partial class SessionFileTransferService
         return recoveredTunaEpochId > 0 &&
                transportEpoch > recoveredTunaEpochId &&
                IsV6RegularNknRecoveryMode(recoveryMode);
+    }
+
+    private static bool ShouldForceOutboundV6TunaFrontierRescueOverRegularNkn(
+        OutboundTransferContext context,
+        long transportEpoch,
+        string? recoveryMode,
+        FileTransferTransportKind receivedTransportKind)
+    {
+        if (context.RouteSelection.Route != FileTransferRoute.FileTunaV6 ||
+            transportEpoch <= 0 ||
+            receivedTransportKind != FileTransferTransportKind.RegularNkn ||
+            !IsV6RegularNknFrontierControlBulkEscalationMode(recoveryMode) ||
+            !IsOutboundV6TunaNormalSendAheadPathLocked(context))
+        {
+            return false;
+        }
+
+        if (context.V6TransportEpoch is { } current &&
+            current.EpochId == transportEpoch &&
+            current.TargetTransport == FileTransferTransportKind.Tuna &&
+            current.State == V6TransportEpochState.Recovered)
+        {
+            return true;
+        }
+
+        return transportEpoch == ResolveRecoveredOutboundV6TunaActivationEpochId(context);
     }
 
     private static bool IsV6RegularNknRecoveryMode(string? recoveryMode)
@@ -1219,6 +1268,15 @@ public sealed partial class SessionFileTransferService
                     $"event=filetransfer_v6_frontier_request_advanced_remote_frontier; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={request.TransportEpoch}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId ?? "(none)")}; previous_remote_frontier_chunk_index={previousRemoteFrontier}; inferred_remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}");
             }
 
+            if (!isBackfillRequest)
+            {
+                _ = TryRecoverOutboundV6RegularNknEpochFromPeerControlLocked(
+                    context,
+                    request.TransportEpoch,
+                    receivedTransportKind,
+                    "frontier_request_control_proof");
+            }
+
             var forceRegularNknBulk = ShouldForceOutboundV6PeerRequestedPriorityOverRegularNkn(
                 context,
                 request.TransportEpoch,
@@ -1296,6 +1354,8 @@ public sealed partial class SessionFileTransferService
         }
 
         var requestedChunkAlreadyInFlight = false;
+        var forceInFlightPreemption = ShouldForceOutboundV6FrontierInFlightPreemptionLocked(context, request);
+        var preemptedInFlightCount = 0;
         foreach (var range in normalizedRanges)
         {
             var endExclusive = range.StartChunkIndex + range.ChunkCount;
@@ -1304,11 +1364,22 @@ public sealed partial class SessionFileTransferService
                 if (context.V6ChunkSendsInFlight.ContainsKey(chunkIndex))
                 {
                     requestedChunkAlreadyInFlight = true;
+                    if (forceInFlightPreemption &&
+                        context.V6ChunkSendsInFlight.Remove(chunkIndex))
+                    {
+                        preemptedInFlightCount++;
+                    }
+
+                    if (forceInFlightPreemption)
+                    {
+                        continue;
+                    }
+
                     break;
                 }
             }
 
-            if (requestedChunkAlreadyInFlight)
+            if (requestedChunkAlreadyInFlight && !forceInFlightPreemption)
             {
                 break;
             }
@@ -1324,14 +1395,46 @@ public sealed partial class SessionFileTransferService
         }
 
         context.V6CurrentNormalRequestKey = null;
-        var pipelineGeneration = requestedChunkAlreadyInFlight
+        var pipelineGeneration = requestedChunkAlreadyInFlight && !forceInFlightPreemption
             ? context.V6SenderPipelineGeneration
             : context.ResetV6SenderPipelineCancellation();
         context.V6SenderPumpLastWakeReason = "frontier_request_preempted_normal_pipeline";
 
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_v6_frontier_request_preempted_normal_pipeline; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={request.TransportEpoch}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId ?? "(none)")}; normal_request_count={normalRequestCount}; in_flight_send_count={inFlightSendCount}; requested_chunk_already_in_flight={(requestedChunkAlreadyInFlight ? 1 : 0)}; sender_pipeline_generation={pipelineGeneration}");
+            $"event=filetransfer_v6_frontier_request_preempted_normal_pipeline; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={request.TransportEpoch}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId ?? "(none)")}; normal_request_count={normalRequestCount}; in_flight_send_count={inFlightSendCount}; requested_chunk_already_in_flight={(requestedChunkAlreadyInFlight ? 1 : 0)}; forced_in_flight_preemption={(forceInFlightPreemption ? 1 : 0)}; preempted_in_flight_count={preemptedInFlightCount}; sender_pipeline_generation={pipelineGeneration}");
+    }
+
+    private static bool ShouldForceOutboundV6FrontierInFlightPreemptionLocked(
+        OutboundTransferContext context,
+        FileTransferFrontierRequestFrameV6 request)
+    {
+        if (string.IsNullOrWhiteSpace(request.RepairRequestId) ||
+            !string.Equals(request.Priority, "frontier", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var recoveryMode = NormalizeReason(request.RecoveryMode);
+        if (recoveryMode is "regular_nkn_frontier_stall" or "regular_nkn_frontier_stall_control_bulk")
+        {
+            return true;
+        }
+
+        if (request.TransportEpoch <= 0)
+        {
+            return false;
+        }
+
+        if (context.V6TransportEpoch is { } epoch &&
+            epoch.EpochId == request.TransportEpoch &&
+            epoch.TargetTransport == FileTransferTransportKind.RegularNkn)
+        {
+            return true;
+        }
+
+        return IsRecoveredOutboundV6RegularNknEpoch(context, request.TransportEpoch) ||
+               IsRecoveredOutboundV6RegularNknFrontierRepairEpoch(context, request.TransportEpoch);
     }
 
     private static void PreemptOutboundV6NormalPipelineForReceiverStateFrontierLocked(
@@ -3418,6 +3521,8 @@ public sealed partial class SessionFileTransferService
             {
                 var message = invalidOperation.Message;
                 if (message.Contains("Bridge disconnected", StringComparison.OrdinalIgnoreCase) ||
+                    message.Contains("NKN bridge is not running", StringComparison.OrdinalIgnoreCase) ||
+                    message.Contains("NKN bridge process is not available", StringComparison.OrdinalIgnoreCase) ||
                     message.Contains("Not connected", StringComparison.OrdinalIgnoreCase) ||
                     message.Contains("client not ready", StringComparison.OrdinalIgnoreCase) ||
                     message.Contains("data session is not available", StringComparison.OrdinalIgnoreCase))
@@ -3655,7 +3760,8 @@ public sealed partial class SessionFileTransferService
     {
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_v6_receiver_started; transfer_id={context.TransferId}; session_id={context.SessionId}; protocol_version={FileTransferProtocol.ProtocolVersionV6}; session_open_chunk_size_bytes={sessionOpen.ChunkSizeBytes}; session_open_pipeline_depth={sessionOpen.InitialPipelineDepth}; request_driven=1");
+            $"event=filetransfer_v6_receiver_started; transfer_id={context.TransferId}; session_id={context.SessionId}; protocol_version={FileTransferProtocol.ProtocolVersionV6}; route={context.RouteSelection.TelemetryToken}; runtime_profile={FormatFileTransferRouteRuntimeProfile(context.RouteSelection.RuntimeProfile)}; frame_family={FormatFileTransferFrameFamily(context.RouteSelection.FrameFamily)}; bridge_recovery_policy={FormatFileTransferRouteBridgeRecoveryPolicy(context.RouteSelection.BridgeRecoveryPolicy)}; session_open_chunk_size_bytes={sessionOpen.ChunkSizeBytes}; session_open_pipeline_depth={sessionOpen.InitialPipelineDepth}; request_driven=1");
+        LogFileTransferRuntimeStarted(context.TransferId, context.SessionId, FileTransferDirection.Inbound, "receiver", context.RouteSelection);
 
         try
         {
@@ -3752,10 +3858,23 @@ public sealed partial class SessionFileTransferService
                         LogInboundV4FrameIgnored(context, pauseControl, "lifecycle_data_frame_ignored_phase2");
                         break;
                     case FileTransferCancelFrameV4 cancel:
+                    {
+                        var reason = NormalizeReason(cancel.Reason);
                         LocalOperationalLog.Info(
                             "FileTransferService",
-                            $"event=filetransfer_lifecycle_data_frame_ignored; kind=cancel; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason=phase2_control_required; cancel_reason={FormatProtocolLogValue(NormalizeReason(cancel.Reason) ?? CanceledReason)}");
-                        break;
+                            $"event=filetransfer_lifecycle_priority_received; kind=cancel; transfer_id={context.TransferId}; session_id={context.SessionId}; direction=inbound; reason={FormatProtocolLogValue(reason ?? CanceledReason)}; path=redundant_data_frame");
+                        await TransitionInboundToTerminalAsync(
+                                context,
+                                FileTransferTransferState.Canceled,
+                                errorCode: FileTransferResultCodes.CanceledRemote,
+                                statusMessage: reason ?? "Transfer canceled by peer.",
+                                sendError: false,
+                                errorMessage: null,
+                                cancelReason: null,
+                                ct: CancellationToken.None)
+                            .ConfigureAwait(false);
+                        return;
+                    }
                     case FileTransferErrorFrameV4 error:
                         LocalOperationalLog.Info(
                             "FileTransferService",

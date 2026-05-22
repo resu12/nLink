@@ -4724,8 +4724,7 @@ public sealed partial class NknSignalingTransport
 
     private bool ShouldUseFileTransferV6ForAccelerationCore()
     {
-        if (IsFileTunaActiveForRouteSelection ||
-            IsPostTunaFileFallbackActiveForRouteSelection)
+        if (IsPostTunaFileFallbackActiveForRouteSelection)
         {
             return true;
         }

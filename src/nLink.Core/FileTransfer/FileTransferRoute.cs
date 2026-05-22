@@ -12,6 +12,7 @@ public interface IFileTransferRouteStatus
 internal enum FileTransferRoute
 {
     RegularNknV4Fast,
+    FileTunaV4,
     FileTunaV6,
     PostTunaFallbackV6,
     DiagnosticRegularNknV6,
@@ -26,6 +27,7 @@ internal enum FileTransferFrameFamily
 internal enum FileTransferRouteRuntimeProfile
 {
     RegularNknV4Fast,
+    FileTunaV4Fast,
     DefaultV6,
     PrimaryRegularNknBulkV6,
 }
@@ -41,6 +43,7 @@ internal enum FileTransferRouteBridgeRecoveryPolicy
 internal enum FileTransferRouteLivenessTerminalPolicy
 {
     RegularNknV4Fast,
+    FileTunaV4Fast,
     TunaV6Strict,
     PostTunaFallbackV6Repair,
     DiagnosticRegularNknV6,
@@ -76,12 +79,8 @@ internal readonly record struct FileTransferRouteResolverInput(
                 transportProfileKind);
         }
 
-        var legacyFileV6Acceleration =
-            transport is global::NLink.Core.ITransportAccelerationStatus accelerationStatus &&
-            accelerationStatus.ShouldUseFileTransferV6ForAcceleration;
-
         return new FileTransferRouteResolverInput(
-            IsFileTunaActive: legacyFileV6Acceleration,
+            IsFileTunaActive: false,
             IsPostTunaFileFallbackActive: false,
             IsDiagnosticRegularNknV6RouteEnabled: false,
             HandoffKind: FileTransferTransportHandoffKind.None,
@@ -103,6 +102,7 @@ internal readonly record struct FileTransferRouteSelection(
 internal static class FileTransferRouteResolver
 {
     public const string RegularNknV4FastToken = "regular_nkn_v4_fast";
+    public const string FileTunaV4Token = "file_tuna_v4";
     public const string FileTunaV6Token = "file_tuna_v6";
     public const string PostTunaFallbackV6Token = "post_tuna_fallback_v6";
     public const string DiagnosticRegularNknV6Token = "diagnostic_regular_nkn_v6";
@@ -126,14 +126,14 @@ internal static class FileTransferRouteResolver
         if (input.IsFileTunaActive)
         {
             return new FileTransferRouteSelection(
-                FileTransferRoute.FileTunaV6,
-                FileTunaV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                FileTransferRouteRuntimeProfile.DefaultV6,
-                FileTransferFrameFamily.V6,
+                FileTransferRoute.FileTunaV4,
+                FileTunaV4Token,
+                FileTransferProtocol.ProtocolVersionV4,
+                FileTransferRouteRuntimeProfile.FileTunaV4Fast,
+                FileTransferFrameFamily.V4,
                 input.HandoffKind,
                 FileTransferRouteBridgeRecoveryPolicy.TunaStrictRecovery,
-                FileTransferRouteLivenessTerminalPolicy.TunaV6Strict,
+                FileTransferRouteLivenessTerminalPolicy.FileTunaV4Fast,
                 "file_tuna_active");
         }
 
@@ -166,12 +166,22 @@ internal static class FileTransferRouteResolver
     public static FileTransferRouteSelection Resolve(FileTransferRoute route)
         => route switch
         {
-            FileTransferRoute.FileTunaV6 => Resolve(new FileTransferRouteResolverInput(
+            FileTransferRoute.FileTunaV4 => Resolve(new FileTransferRouteResolverInput(
                 IsFileTunaActive: true,
                 IsPostTunaFileFallbackActive: false,
                 IsDiagnosticRegularNknV6RouteEnabled: false,
                 HandoffKind: FileTransferTransportHandoffKind.None,
                 TransportProfileKind: FileTransferTransportProfileKind.Default)),
+            FileTransferRoute.FileTunaV6 => new FileTransferRouteSelection(
+                FileTransferRoute.FileTunaV6,
+                FileTunaV6Token,
+                FileTransferProtocol.ProtocolVersionV6,
+                FileTransferRouteRuntimeProfile.DefaultV6,
+                FileTransferFrameFamily.V6,
+                FileTransferTransportHandoffKind.None,
+                FileTransferRouteBridgeRecoveryPolicy.TunaStrictRecovery,
+                FileTransferRouteLivenessTerminalPolicy.TunaV6Strict,
+                "legacy_file_tuna_v6"),
             FileTransferRoute.PostTunaFallbackV6 => Resolve(new FileTransferRouteResolverInput(
                 IsFileTunaActive: false,
                 IsPostTunaFileFallbackActive: true,
@@ -223,6 +233,9 @@ internal static class FileTransferRouteResolver
         {
             case RegularNknV4FastToken:
                 route = FileTransferRoute.RegularNknV4Fast;
+                return true;
+            case FileTunaV4Token:
+                route = FileTransferRoute.FileTunaV4;
                 return true;
             case FileTunaV6Token:
                 route = FileTransferRoute.FileTunaV6;

@@ -6,6 +6,46 @@ namespace NLink.SmokeTests;
 [Collection(FakeNknNetworkCollection.Name)]
 public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTransferServiceTestBase
 {
+    [Theory]
+    [InlineData("regular", FileTransferRouteResolver.RegularNknV4FastToken, FileTransferProtocol.ProtocolVersionV4, "regular_nkn_v4_fast", "regular_nkn_v4_fast", "file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0")]
+    [InlineData("file_tuna", FileTransferRouteResolver.FileTunaV4Token, FileTransferProtocol.ProtocolVersionV4, "file_tuna_v4_fast", "tuna_strict", "file_tuna_active=1; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0")]
+    [InlineData("post_tuna_fallback", FileTransferRouteResolver.PostTunaFallbackV6Token, FileTransferProtocol.ProtocolVersionV6, "default_v6", "post_tuna_fallback_strict", "file_tuna_active=1; post_tuna_fallback_active=1; diagnostic_regular_nkn_v6=0")]
+    [InlineData("diagnostic", FileTransferRouteResolver.DiagnosticRegularNknV6Token, FileTransferProtocol.ProtocolVersionV6, "primary_regular_nkn_bulk_v6", "primary_regular_nkn_quiet", "file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=1")]
+    public async Task OutboundOffer_LogsRouteSelectedTelemetry(
+        string scenario,
+        string routeToken,
+        int protocolVersion,
+        string runtimeProfile,
+        string bridgeRecoveryPolicy,
+        string statusMarkers)
+    {
+        var transferId = "transfer_protocol_route_selected_" + scenario;
+        var payload = new byte[] { 1, 2, 3, 4 };
+        var logStart = GetOperationalLogLength();
+        using var senderTransport = new LoopbackFileTransferTransport("session_protocol_route_selected_" + scenario);
+        using var receiverTransport = new LoopbackFileTransferTransport("session_protocol_route_selected_" + scenario);
+        ConfigureRoute(senderTransport, routeToken);
+        ConfigureRoute(receiverTransport, routeToken);
+        senderTransport.Connect(receiverTransport);
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("route-selected-" + scenario + ".bin", payload.Length, transferId),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+        var logTail = ReadOperationalLogTail(logStart);
+        Assert.Contains($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}", logTail, StringComparison.Ordinal);
+        Assert.Contains($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}", logTail, StringComparison.Ordinal);
+        Assert.Contains($"route={routeToken}; protocol_version={protocolVersion}; runtime_profile={runtimeProfile}", logTail, StringComparison.Ordinal);
+        Assert.Contains($"bridge_recovery_policy={bridgeRecoveryPolicy}", logTail, StringComparison.Ordinal);
+        Assert.Contains(statusMarkers, logTail, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task OutboundOffer_OnRegularNknTransport_AdvertisesV4()
     {
@@ -31,18 +71,18 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
     }
 
     [Fact]
-    public async Task OutboundOffer_OnActiveFileTunaTransport_AdvertisesV6()
+    public async Task OutboundOffer_OnActiveFileTunaTransport_AdvertisesV4()
     {
-        const string transferId = "transfer_protocol_offer_accelerated_v6";
+        const string transferId = "transfer_protocol_offer_file_tuna_v4";
         var payload = new byte[] { 1, 2, 3, 4 };
-        using var senderTransport = new LoopbackFileTransferTransport("session_protocol_offer_accelerated_v6")
+        using var senderTransport = new LoopbackFileTransferTransport("session_protocol_offer_file_tuna_v4")
         {
             IsTransportAccelerationActive = true,
             IsFileTunaActiveForRouteSelection = true,
-            ShouldUseFileTransferV6ForAcceleration = true,
+            ShouldUseFileTransferV6ForAcceleration = false,
             TransportAccelerationStatusReason = "test_tuna_active",
         };
-        using var receiverTransport = new LoopbackFileTransferTransport("session_protocol_offer_accelerated_v6")
+        using var receiverTransport = new LoopbackFileTransferTransport("session_protocol_offer_file_tuna_v4")
         {
             IsFileTunaActiveForRouteSelection = true,
         };
@@ -59,8 +99,8 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
 
         await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
         var offer = Assert.Single(senderTransport.SentOffers);
-        Assert.Equal(FileTransferProtocol.ProtocolVersionV6, offer.PreferredDataProtocolVersion);
-        Assert.Equal(FileTransferRouteResolver.FileTunaV6Token, offer.FileTransferRoute);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV4, offer.PreferredDataProtocolVersion);
+        Assert.Equal(FileTransferRouteResolver.FileTunaV4Token, offer.FileTransferRoute);
     }
 
     [Fact]
@@ -360,7 +400,7 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
                 SessionId = "session_protocol_accept_route_mismatch",
                 TransferId = transferId,
                 AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
-                FileTransferRoute = FileTransferRouteResolver.FileTunaV6Token,
+                FileTransferRoute = FileTransferRouteResolver.FileTunaV4Token,
             },
             CancellationToken.None);
 
@@ -370,7 +410,6 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
     }
 
     [Theory]
-    [InlineData(nameof(FileTransferRouteResolver.FileTunaV6Token), FileTransferRouteResolver.FileTunaV6Token)]
     [InlineData(nameof(FileTransferRouteResolver.PostTunaFallbackV6Token), FileTransferRouteResolver.PostTunaFallbackV6Token)]
     [InlineData(nameof(FileTransferRouteResolver.DiagnosticRegularNknV6Token), FileTransferRouteResolver.DiagnosticRegularNknV6Token)]
     public async Task OutboundAccept_WithV6Route_StartsMatchingSessionOpen(string routeName, string routeToken)
@@ -418,7 +457,7 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
         using var senderTransport = new LoopbackFileTransferTransport("session_protocol_non_v4_session_open");
         using var receiverTransport = new LoopbackFileTransferTransport("session_protocol_non_v4_session_open")
         {
-            IsFileTunaActiveForRouteSelection = true,
+            IsPostTunaFileFallbackActiveForRouteSelection = true,
         };
         senderTransport.Connect(receiverTransport);
         using var receiver = new SessionFileTransferService();
@@ -432,7 +471,7 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
                 FileName = "non-v4-session-open.bin",
                 FileSizeBytes = 4,
                 PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
-                FileTransferRoute = FileTransferRouteResolver.FileTunaV6Token,
+                FileTransferRoute = FileTransferRouteResolver.PostTunaFallbackV6Token,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
@@ -511,7 +550,10 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
         Assert.Equal(FileTransferTransferState.AwaitingMetadata, receiver.Snapshot.Inbound!.State);
         Assert.Null(receiver.Snapshot.Inbound.ErrorCode);
         var logTail = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_route_selected; direction=inbound", logTail, StringComparison.Ordinal);
+        Assert.Contains($"route={FileTransferRouteResolver.RegularNknV4FastToken}; protocol_version=4", logTail, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_session_opened", logTail, StringComparison.Ordinal);
+        Assert.Contains($"route={FileTransferRouteResolver.RegularNknV4FastToken}", logTail, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_v4_negotiated", logTail, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_v6_session_open_rejected", logTail, StringComparison.Ordinal);
     }
@@ -520,6 +562,7 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
     public async Task InboundSessionOpen_WithMismatchedRoute_FailsAndSendsError()
     {
         const string transferId = "transfer_protocol_session_open_route_mismatch";
+        var logStart = GetOperationalLogLength();
         using var senderTransport = new LoopbackFileTransferTransport("session_protocol_session_open_route_mismatch");
         using var receiverTransport = new LoopbackFileTransferTransport("session_protocol_session_open_route_mismatch");
         senderTransport.Connect(receiverTransport);
@@ -552,7 +595,7 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
                 SessionId = sessionId,
                 TransferId = transferId,
                 ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
-                FileTransferRoute = FileTransferRouteResolver.FileTunaV6Token,
+                FileTransferRoute = FileTransferRouteResolver.FileTunaV4Token,
                 SessionRole = FileTransferProtocol.SessionRoleSender,
                 ChunkSizeBytes = 4096,
                 InitialPipelineDepth = 1,
@@ -562,11 +605,15 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
         await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.Failed);
         Assert.Equal(FileTransferResultCodes.TransportIncompatible, receiver.Snapshot.Inbound!.ErrorCode);
         Assert.Single(receiverTransport.SentErrors);
+        var logTail = ReadOperationalLogTail(logStart);
+        Assert.DoesNotContain("event=filetransfer_runtime_started", logTail, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_v4_receiver_started", logTail, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_v6_receiver_started", logTail, StringComparison.Ordinal);
     }
 
     private static void ConfigureRoute(LoopbackFileTransferTransport transport, string routeToken)
     {
-        if (string.Equals(routeToken, FileTransferRouteResolver.FileTunaV6Token, StringComparison.Ordinal))
+        if (string.Equals(routeToken, FileTransferRouteResolver.FileTunaV4Token, StringComparison.Ordinal))
         {
             transport.IsFileTunaActiveForRouteSelection = true;
         }

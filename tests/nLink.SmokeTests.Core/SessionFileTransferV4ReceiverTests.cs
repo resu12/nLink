@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Security.Cryptography;
 using NLink.Core.FileTransfer;
+using NLink.Core.Logging;
 
 namespace NLink.SmokeTests;
 
@@ -768,7 +769,7 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
             () => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Count() > stateCountBeforeRefresh,
             timeoutMs: 5000);
         await WaitUntilAsync(
-            () => ReadOperationalLogTail(logStart).Contains(
+            () => FilterV4ReceiverTransferLog(ReadV4ReceiverLogSnapshot(logStart), transferId).Contains(
                 "event=filetransfer_primary_regular_nkn_bulk_v6_checkpoint_sent",
                 StringComparison.Ordinal),
             timeoutMs: 5000);
@@ -779,7 +780,7 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
         Assert.Equal("checkpoint_sync", checkpoint.Priority);
         Assert.Equal("v6-regular-nkn-checkpoint-sync:test", checkpoint.RepairRequestId);
         Assert.True(checkpoint.CreditUntilChunkIndexExclusive > 0);
-        var logTail = ReadOperationalLogTail(logStart);
+        var logTail = FilterV4ReceiverTransferLog(ReadV4ReceiverLogSnapshot(logStart), transferId);
         Assert.Contains("event=filetransfer_primary_regular_nkn_bulk_v6_checkpoint_request_received", logTail, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_primary_regular_nkn_bulk_v6_checkpoint_sent", logTail, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_primary_regular_nkn_bulk_v6_checkpoint_response_queued", logTail, StringComparison.Ordinal);
@@ -1086,7 +1087,7 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
 
         var logTail = ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_primary_regular_nkn_bulk_v6_selected", logTail, StringComparison.Ordinal);
-        Assert.Contains("runtime_profile=PrimaryRegularNknBulkV6", logTail, StringComparison.Ordinal);
+        Assert.Contains("runtime_profile=primary_regular_nkn_bulk_v6", logTail, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_primary_regular_nkn_bulk_v6_state; direction=inbound", logTail, StringComparison.Ordinal);
         Assert.Contains("state=awaiting_manifest", logTail, StringComparison.Ordinal);
         Assert.Contains("state=credit_granted", logTail, StringComparison.Ordinal);
@@ -2454,27 +2455,28 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
             return FileTransferRoute.DiagnosticRegularNknV6;
         }
 
-        if (senderTransport.IsFileTunaActiveForRouteSelection ||
-            receiverTransport.IsFileTunaActiveForRouteSelection)
-        {
-            return FileTransferRoute.FileTunaV6;
-        }
-
-        return senderTransport.FileTransferTransportProfileKind == FileTransferTransportProfileKind.ConservativeNknStartup ||
-               receiverTransport.FileTransferTransportProfileKind == FileTransferTransportProfileKind.ConservativeNknStartup
-            ? FileTransferRoute.DiagnosticRegularNknV6
-            : FileTransferRoute.FileTunaV6;
+        return FileTransferRoute.DiagnosticRegularNknV6;
     }
 
     private static void ApplyV6RouteForTest(LoopbackFileTransferTransport transport, FileTransferRoute route)
     {
-        transport.IsFileTunaActiveForRouteSelection = route == FileTransferRoute.FileTunaV6;
+        transport.IsFileTunaActiveForRouteSelection = false;
         transport.IsPostTunaFileFallbackActiveForRouteSelection = route == FileTransferRoute.PostTunaFallbackV6;
         transport.IsDiagnosticRegularNknV6RouteEnabled = route == FileTransferRoute.DiagnosticRegularNknV6;
     }
 
     private static string ResolveRouteToken(LoopbackFileTransferTransport transport)
         => FileTransferRouteResolver.Resolve(FileTransferRouteResolverInput.FromTransport(transport)).TelemetryToken;
+
+    private static string ReadV4ReceiverLogSnapshot(int logStart)
+        => ReadOperationalLogTail(logStart) + Environment.NewLine + LocalOperationalLog.GetRecentLogText();
+
+    private static string FilterV4ReceiverTransferLog(string logText, string transferId)
+        => string.Join(
+            Environment.NewLine,
+            logText
+                .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+                .Where(line => line.Contains("transfer_id=" + transferId, StringComparison.Ordinal)));
 
     private sealed class WriteOnlySeekableMemoryStream : Stream
     {

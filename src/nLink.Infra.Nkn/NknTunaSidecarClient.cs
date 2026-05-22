@@ -144,9 +144,7 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
 
         if (ct.IsCancellationRequested)
         {
-            var rejected = Interlocked.Increment(ref sendRejected);
-            LogTrySendRejected(lane, envelopeBytes.Length, "canceled", rejected);
-            return false;
+            ct.ThrowIfCancellationRequested();
         }
 
         if (!IsAvailable)

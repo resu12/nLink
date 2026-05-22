@@ -1733,7 +1733,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
 
     [Trait("Category", "Smoke")]
     [Fact]
-    public async Task NknTransport_V6CancelDataFrame_IsRejectedInsteadOfPriorityCancel()
+    public async Task NknTransport_V6CancelDataFrame_IsAcceptedAsPriorityCancel()
     {
         FakeNknClient.ResetNetwork();
         try
@@ -1848,8 +1848,9 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
 
             FileTransferDataFrame queuedBeforeCancel = await hostDataSession.ReceiveAsync(cts.Token);
             Assert.IsType<FileTransferChunkBatchFrameV6>(queuedBeforeCancel);
-            await Task.Delay(150, cts.Token);
-            Assert.False(cancelReceived.Task.IsCompleted);
+            FileTransferCancelV1 receivedCancel = await cancelReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+            Assert.Equal(transferId, receivedCancel.TransferId);
+            Assert.Equal("sender_canceled", receivedCancel.Reason);
 
             InjectSecureFileTransferDataFrame(
                 host,
@@ -1866,16 +1867,11 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                 NknBridgeChannel.Bulk,
                 nextSequence++);
 
-            FileTransferDataFrame queuedAfterRejectedCancel = await hostDataSession.ReceiveAsync(cts.Token);
-            var batchAfterRejectedCancel = Assert.IsType<FileTransferChunkBatchFrameV6>(queuedAfterRejectedCancel);
-            Assert.Equal(1, batchAfterRejectedCancel.StartChunkIndex);
-
             await Task.Delay(100, cts.Token);
             string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
-            Assert.Contains("event=filetransfer_message_rejected; message_type=file_transfer_data_frame; reason=lifecycle_data_frame_unsupported", logTail, StringComparison.Ordinal);
-            Assert.Contains("file_transfer_data_frame_lifecycle_data_frame_unsupported", NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=filetransfer_v4_cancel_frame_received", logTail, StringComparison.Ordinal);
-            Assert.DoesNotContain("post_terminal_late_frame_canceled", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_v4_cancel_frame_received", logTail, StringComparison.Ordinal);
+            Assert.Contains("file_transfer_data_frame", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("reason=lifecycle_data_frame_unsupported", logTail, StringComparison.Ordinal);
         }
         finally
         {

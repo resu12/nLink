@@ -842,7 +842,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
 
         await SendFileTransferRawFrameAsync(
                 FileTransferDataFrameType,
-                FileTransferDataFrameCodec.Serialize(frame),
+                FileTransferProtocol.IsV4DataFrame(frame)
+                    ? FileTransferDataFrameCodec.SerializeLegacyV4(frame)
+                    : FileTransferDataFrameCodec.Serialize(frame),
                 transferId,
                 ct)
             .ConfigureAwait(false);
@@ -2563,7 +2565,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 return true;
             }
 
-            if (!FileTransferDataFrameCodec.TryDeserialize(securePayload.Plaintext, out var message) || message is null)
+            if ((!FileTransferDataFrameCodec.TryDeserialize(securePayload.Plaintext, out var message) &&
+                 !FileTransferDataFrameCodec.TryDeserializeLegacyV4(securePayload.Plaintext, out message)) ||
+                message is null)
             {
                 LocalOperationalLog.Warn(
                     "SessionSecurity",
@@ -3434,9 +3438,10 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         nextState = default;
         failureReason = string.Empty;
 
-        if (!FileTransferProtocol.IsV6DataFrame(frame))
+        if (!FileTransferProtocol.IsV6DataFrame(frame) &&
+            !FileTransferProtocol.IsV4DataFrame(frame))
         {
-            failureReason = "protocol_not_v6";
+            failureReason = "protocol_not_supported";
             return false;
         }
 

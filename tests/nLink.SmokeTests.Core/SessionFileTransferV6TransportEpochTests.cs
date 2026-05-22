@@ -115,6 +115,58 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
     }
 
     [Fact]
+    public async Task V6Epoch_RegularNknRecoveryFrontierRequestOverTargetTransportRecoversOutboundEpoch()
+    {
+        const string transferId = "transfer_v6_epoch_regular_nkn_frontier_control_proof";
+        var logStart = GetOperationalLogLength();
+        using var senderTransport = new LoopbackFileTransferTransport("session_v6_epoch_regular_nkn_frontier_control_proof");
+        using var receiverTransport = new LoopbackFileTransferTransport("session_v6_epoch_regular_nkn_frontier_control_proof");
+        senderTransport.Connect(receiverTransport);
+        using var sender = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+
+        var receiverSession = await StartManualOutboundV6SenderAsync(sender, senderTransport, receiverTransport, transferId);
+        senderTransport.RequestAllDataSessionHandoffs(
+            "receive_stall_recovery",
+            FileTransferTransportHandoffKind.RegularNknRecovery,
+            FileTransferTransportKind.RegularNkn);
+        await WaitUntilAsync(() => senderTransport.SentTransportEpochs.Any(), timeoutMs: 5000);
+
+        var probe = await ReceiveProbeAsync(receiverSession, "regular_nkn");
+        var probeFrame = Assert.IsType<FileTransferTransportProbeFrameV6>(probe.Frame);
+        senderTransport.NextDataFrameTransportKind = FileTransferTransportKind.RegularNkn;
+        await receiverSession.SendAsync(
+            new FileTransferFrontierRequestFrameV6
+            {
+                SessionId = probeFrame.SessionId,
+                TransferId = transferId,
+                TransportEpoch = probeFrame.TransportEpoch,
+                RepairRequestId = $"v6-frontier:{probeFrame.TransportEpoch}:0:1",
+                MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = 0, ChunkCount = 1 }],
+                Priority = "frontier",
+                RecoveryMode = "frontier_repair_only",
+            },
+            CancellationToken.None);
+
+        await WaitUntilAsync(
+            () => ReadOperationalLogTail(logStart).Contains("reason=frontier_request_control_proof", StringComparison.Ordinal),
+            timeoutMs: 5000);
+        await WaitUntilAsync(
+            () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(batch =>
+                batch.TransportEpoch == probeFrame.TransportEpoch &&
+                batch.StartChunkIndex == 0 &&
+                string.Equals(batch.Priority, "frontier", StringComparison.OrdinalIgnoreCase) &&
+                batch.ForceRegularNknBulk &&
+                batch.RepairDeliveryMode == FileTransferV4RepairDeliveryMode.ControlBulkRedundant),
+            timeoutMs: 5000);
+
+        var logTail = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_v6_epoch_recovered; direction=outbound", logTail, StringComparison.Ordinal);
+        Assert.Contains("handoff_kind=regular_nkn_recovery", logTail, StringComparison.Ordinal);
+        Assert.Contains("target_transport=regular_nkn", logTail, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task PrimaryRegularNknBulkV6_TunaActivationAndFallbackUseV6EpochPath()
     {
         const string transferId = "transfer_v6_primary_bulk_tuna_epoch_guard";
@@ -1132,11 +1184,13 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         }
     }
 
-    [Fact]
-    public async Task V6Epoch_InFlightSendFailureDuringRecoveryDoesNotTerminalizeSender()
+    [Theory]
+    [InlineData("object_disposed")]
+    [InlineData("bridge_not_running")]
+    public async Task V6Epoch_InFlightSendFailureDuringRecoveryDoesNotTerminalizeSender(string failureKind)
     {
-        const string transferId = "transfer_v6_epoch_send_failure_deferred";
-        const string sessionId = "session_v6_epoch_send_failure_deferred";
+        var transferId = $"transfer_v6_epoch_send_failure_deferred_{failureKind}";
+        var sessionId = $"session_v6_epoch_send_failure_deferred_{failureKind}";
         var logStart = GetOperationalLogLength();
         var normalSendStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseNormalSend = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1153,7 +1207,11 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             {
                 normalSendStarted.TrySetResult();
                 await releaseNormalSend.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                throw new ObjectDisposedException("LoopbackDataSession", "Bridge disconnected during recovery.");
+                throw failureKind switch
+                {
+                    "bridge_not_running" => new InvalidOperationException("NKN bridge is not running."),
+                    _ => new ObjectDisposedException("LoopbackDataSession", "Bridge disconnected during recovery."),
+                };
             }
 
             return false;
@@ -1312,8 +1370,61 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             timeoutMs: 5000);
 
         var logTail = ReadOperationalLogTail(logStart);
-        Assert.Contains("event=filetransfer_v6_transport_paused_frontier_proof_allowed", logTail, StringComparison.Ordinal);
+        Assert.Contains("reason=frontier_request_control_proof", logTail, StringComparison.Ordinal);
         Assert.NotEqual(FileTransferTransferState.Failed, sender.Snapshot.Outbound?.State);
+    }
+
+    [Fact]
+    public async Task V6Epoch_PostTunaFallbackSuppressesRepeatedRegularNknRecoveryAfterProof()
+    {
+        const string transferId = "transfer_v6_epoch_post_fallback_suppresses_repeated_regular_nkn";
+        const string sessionId = "session_v6_epoch_post_fallback_suppresses_repeated_regular_nkn";
+        var logStart = GetOperationalLogLength();
+        using var senderTransport = new LoopbackFileTransferTransport(sessionId);
+        using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        senderTransport.IsPostTunaFileFallbackActiveForRouteSelection = true;
+        receiverTransport.IsPostTunaFileFallbackActiveForRouteSelection = true;
+        senderTransport.Connect(receiverTransport);
+        using var sender = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        var receiverSession = await StartManualOutboundV6SenderAsync(sender, senderTransport, receiverTransport, transferId);
+
+        senderTransport.RequestAllDataSessionHandoffs(
+            "tuna_to_normal_fallback",
+            FileTransferTransportHandoffKind.TunaToNormalFallback,
+            FileTransferTransportKind.RegularNkn);
+        await WaitUntilAsync(() => senderTransport.SentTransportEpochs.Any(), timeoutMs: 5000);
+
+        var probe = await ReceiveProbeAsync(receiverSession);
+        var probeFrame = Assert.IsType<FileTransferTransportProbeFrameV6>(probe.Frame);
+        await receiverTransport.SendFileTransferTransportProbeAsync(
+            new FileTransferTransportProbeV6
+            {
+                SessionId = probeFrame.SessionId,
+                TransferId = transferId,
+                TransportEpoch = probeFrame.TransportEpoch,
+                ProbeId = probeFrame.ProbeId,
+                TargetTransport = probeFrame.TargetTransport,
+            },
+            CancellationToken.None);
+        await WaitUntilAsync(
+            () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v6_epoch_recovered", StringComparison.Ordinal),
+            timeoutMs: 5000);
+        var epochCountAfterProof = senderTransport.SentTransportEpochs.Count;
+
+        senderTransport.SetLocalDataSessionsUnavailableForTests("sender_request_feedback_stalled");
+        senderTransport.RequestAllDataSessionHandoffs(
+            "sender_request_feedback_stalled",
+            FileTransferTransportHandoffKind.RegularNknRecovery,
+            FileTransferTransportKind.RegularNkn);
+        await Task.Delay(300);
+
+        Assert.Equal(epochCountAfterProof, senderTransport.SentTransportEpochs.Count);
+        var logTail = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_v6_epoch_recovered_restart_suppressed", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v6_epoch_recovered_restart_pause_cleared", logTail, StringComparison.Ordinal);
+        Assert.Contains("route=post_tuna_fallback_v6", logTail, StringComparison.Ordinal);
+        Assert.Contains("was_paused=1", logTail, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2273,20 +2384,20 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
 
     private static void EnsureV6RouteForTest(LoopbackFileTransferTransport transport)
     {
-        if (transport.IsFileTunaActiveForRouteSelection ||
-            transport.IsPostTunaFileFallbackActiveForRouteSelection ||
+        if (transport.IsPostTunaFileFallbackActiveForRouteSelection ||
             transport.IsDiagnosticRegularNknV6RouteEnabled)
         {
             return;
         }
 
+        transport.IsFileTunaActiveForRouteSelection = false;
         if (transport.FileTransferTransportProfileKind == FileTransferTransportProfileKind.ConservativeNknStartup)
         {
             transport.IsDiagnosticRegularNknV6RouteEnabled = true;
         }
         else
         {
-            transport.IsFileTunaActiveForRouteSelection = true;
+            transport.IsPostTunaFileFallbackActiveForRouteSelection = true;
         }
     }
 

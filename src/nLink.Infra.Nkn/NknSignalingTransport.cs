@@ -40,6 +40,13 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         FileTransferTransportKind TargetTransport,
         DateTimeOffset RecordedUtc);
 
+    private readonly record struct FileTransferRouteHint(
+        FileTransferRoute Route,
+        string Token,
+        int ProtocolVersion,
+        string Source,
+        DateTimeOffset RecordedUtc);
+
     private sealed class RecoveryBurstLease
     {
         public string SessionId { get; init; } = string.Empty;
@@ -130,6 +137,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private readonly Dictionary<string, FileTransferTerminalTombstone> fileTransferTerminalTombstones = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTimeOffset> fileTransferCancelEchoLastSent = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TransportFileTransferDataSession> fileTransferDataSessions = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, FileTransferRouteHint> fileTransferRouteHints = new(StringComparer.Ordinal);
     private readonly HashSet<string> fileTransferDataSessionRemoteOpenSuppressed = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FileTransferV6PendingHandoffIntent> pendingFileTransferV6HandoffsBySession = new(StringComparer.Ordinal);
     private readonly object fileTransferFallbackProofGate = new();
@@ -425,6 +433,17 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     {
         var value = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(
             "NLINK_FILETRANSFER_DIAGNOSTIC_REGULAR_NKN_V6",
+            category: "filetransfer_diagnostic");
+        return string.Equals(value, "1", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(value, "on", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsDiagnosticFileTunaV4RouteEnabledCore()
+    {
+        var value = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(
+            "NLINK_FILETRANSFER_DIAGNOSTIC_FILE_TUNA_V4",
             category: "filetransfer_diagnostic");
         return string.Equals(value, "1", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) ||
