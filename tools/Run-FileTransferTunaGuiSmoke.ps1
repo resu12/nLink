@@ -15,6 +15,7 @@ param(
     [int]$ProgressTimeoutSeconds = 180,
     [string]$ArtifactDir = "",
     [string]$ExePath = ".\artifacts\portable\nLink\win-x64\nLink.exe",
+    [switch]$Mixed,
     [switch]$ExercisePause,
     [switch]$Build
 )
@@ -331,6 +332,12 @@ try {
     $env:NLINK_TUNA_GUI_PAYER_MODE = $PayerMode
     $env:NLINK_TUNA_GUI_FAULT = $Fault
     $env:NLINK_TUNA_GUI_ROUTE_MODE = $RouteMode
+    if ($Mixed) {
+        $env:NLINK_TUNA_GUI_MIXED_SCREENSHARE = '1'
+    }
+    else {
+        Remove-Item Env:NLINK_TUNA_GUI_MIXED_SCREENSHARE -ErrorAction SilentlyContinue
+    }
     Remove-Item Env:NLINK_FILETRANSFER_DIAGNOSTIC_FILE_TUNA_V4 -ErrorAction SilentlyContinue
     if ($ExercisePause) {
         $env:NLINK_TUNA_GUI_EXERCISE_PAUSE = '1'
@@ -347,7 +354,7 @@ try {
 
     Write-Host "[Tuna GUI] Running file-transfer handoff/fallback GUI smoke." -ForegroundColor Cyan
     Write-Host "[Tuna GUI] Artifacts: $resolvedArtifactDir" -ForegroundColor DarkGray
-    Write-Host "[Tuna GUI] Direction=$Direction Payer=$PayerMode Fault=$Fault RouteMode=$RouteMode Payload=$PayloadSize" -ForegroundColor DarkGray
+    Write-Host "[Tuna GUI] Direction=$Direction Payer=$PayerMode Fault=$Fault RouteMode=$RouteMode Payload=$PayloadSize Mixed=$($Mixed.IsPresent)" -ForegroundColor DarkGray
 
     & ".\tools\GuiSmoke-Windows.ps1" -ExePath $resolvedExe -TimeoutSeconds $TimeoutSeconds
     $guiSmokeExitCode = $LASTEXITCODE

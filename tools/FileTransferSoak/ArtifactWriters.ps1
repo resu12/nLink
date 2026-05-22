@@ -1036,7 +1036,9 @@ function New-FileTransferThroughputSummaryLines {
         $v4MaxBatchChunkCount = Get-FileTransferMaxField -Events $payloadTransportSummaryEvents -FieldName 'max_batch_chunk_count'
     }
     $v4MixedEnabledEvidenceCount =
+        (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v4_mixed_screenshare_enabled') +
         (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v4_mixed_enabled') +
+        (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v6_mixed_enabled') +
         (Get-FileTransferEventFieldValueCount -Events $Summary.TransferEvents -FieldName 'mixed_screenshare' -Value '1')
     $dataProtocolVersion = if (
         (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v6_negotiated') -gt 0 -or

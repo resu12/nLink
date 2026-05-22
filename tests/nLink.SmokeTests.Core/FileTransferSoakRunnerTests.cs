@@ -473,7 +473,7 @@ public sealed class FileTransferSoakRunnerTests : CoreSmokeTestsBase
             Assert.True(long.Parse(mixed["screen_share_frames_emitted"]) > 0);
 
             var logSlice = await File.ReadAllTextAsync(Path.Combine(artifactDir, "filetransfer-retained-log-slice.log"), Encoding.UTF8);
-            Assert.Contains("event=filetransfer_v6_mixed_enabled", logSlice, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_v4_mixed_screenshare_enabled", logSlice, StringComparison.Ordinal);
             Assert.Contains("mixed_screenshare=1", logSlice, StringComparison.Ordinal);
             Assert.DoesNotContain("v4_file_only_required", logSlice, StringComparison.Ordinal);
         }

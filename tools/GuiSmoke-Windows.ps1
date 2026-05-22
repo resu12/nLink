@@ -3511,6 +3511,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         direction = $Direction
         payerMode = $PayerMode
         faultMode = $FaultMode
+        mixedScreenShare = Test-GuiSmokeEnvEnabled -Name 'NLINK_TUNA_GUI_MIXED_SCREENSHARE'
         transferId = $terminal.TransferId
         payloadBytes = $PayloadSizeBytes
         durationMs = [Math]::Round($sw.Elapsed.TotalMilliseconds, 3)
@@ -3592,8 +3593,10 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         throw "Tuna GUI pause/resume probe did not produce complete lifecycle evidence. Summary: $($evidence | ConvertTo-Json -Compress)"
     }
 
-    [void](Wait-AutomationTextEquals -Window $Context.HelperWindow -AutomationId 'SessionHeader.StatusText' -ExpectedText 'Connected' -TimeoutMs 10000)
-    [void](Wait-AutomationTextEquals -Window $Context.HelpeeWindow -AutomationId 'SessionHeader.StatusText' -ExpectedText 'Connected' -TimeoutMs 10000)
+    if (-not (Test-GuiSmokeEnvEnabled -Name 'NLINK_TUNA_GUI_MIXED_SCREENSHARE')) {
+        [void](Wait-AutomationTextEquals -Window $Context.HelperWindow -AutomationId 'SessionHeader.StatusText' -ExpectedText 'Connected' -TimeoutMs 10000)
+        [void](Wait-AutomationTextEquals -Window $Context.HelpeeWindow -AutomationId 'SessionHeader.StatusText' -ExpectedText 'Connected' -TimeoutMs 10000)
+    }
 
     Write-Host ("[GUI Smoke][filetransfer_tuna] PASS direction={0} bytes={1} transfer_id={2} sent_chunk_bytes={3} received_chunk_bytes={4}" -f `
         $Direction,
@@ -3685,27 +3688,33 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
     $cycleTimeoutMs = Get-FileTransferSoakCycleTimeoutMs
     $startupTimeoutMs = Get-FileTransferSoakStartupTimeoutMs
     $progressTimeoutMs = Get-FileTransferSoakProgressTimeoutMs
+    $mixedScreenShare = Test-GuiSmokeEnvEnabled -Name 'NLINK_TUNA_GUI_MIXED_SCREENSHARE'
     $payerMode = Get-TunaGuiPayerRole
     $faultMode = Get-TunaGuiFaultMode
     $routeMode = Get-TunaGuiRouteMode
     $runBookmark = Get-AppLogBookmark
 
-    Write-Host ("[GUI Smoke][filetransfer_tuna] artifact_dir={0}; state_root={1}; direction={2}; payer={3}; fault={4}; route_mode={5}; payload_bytes={6}" -f `
+    Write-Host ("[GUI Smoke][filetransfer_tuna] artifact_dir={0}; state_root={1}; direction={2}; payer={3}; fault={4}; route_mode={5}; payload_bytes={6}; mixed_screenshare={7}" -f `
         $artifactDir,
         $stateRoot,
         $direction,
         $payerMode,
         $faultMode,
         $routeMode,
-        $payloadSize) -ForegroundColor DarkGray
+        $payloadSize,
+        ($(if ($mixedScreenShare) { 1 } else { 0 }))) -ForegroundColor DarkGray
 
     $previousInboundRoot = $env:NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT
+    $mixedShareButton = $null
     try {
         $env:NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT = $receivedRoot
 
         Start-HelpeeFlow -Context $Context
         Start-HelperFlow -Context $Context
         [void](Connect-HelperAndHelpee -Context $Context)
+        if ($mixedScreenShare) {
+            $mixedShareButton = Start-FileTransferMixedScreenShare -Context $Context -WarmupTimeoutMs (Get-FileTransferMixedScreenShareWarmupTimeoutMs)
+        }
 
         Invoke-FileTransferTunaHandoffFallbackCycle `
             -Context $Context `
@@ -3744,6 +3753,16 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
         throw
     }
     finally {
+        if ($null -ne $mixedShareButton) {
+            try {
+                Click-Element $mixedShareButton
+                [void](Wait-ScreenShareButtonText -Window $Context.HelpeeWindow -ExpectedText 'Share screen' -TimeoutMs 10000)
+            }
+            catch {
+                Write-Host "[GUI Smoke][filetransfer_tuna_mixed] Screen-share stop after file-transfer cycle was not clean: $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+        }
+
         Copy-FileTransferLiveLogSlice -ArtifactDir $artifactDir -Bookmark $runBookmark
         if ($null -eq $previousInboundRoot) {
             Remove-Item Env:NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT -ErrorAction SilentlyContinue

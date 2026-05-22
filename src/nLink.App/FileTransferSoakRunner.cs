@@ -1188,7 +1188,9 @@ internal static class FileTransferSoakRunner
             {
                 metrics.V4ChunkBatchFrameCount++;
             }
-            if (line.Contains("event=filetransfer_v6_mixed_enabled", StringComparison.Ordinal))
+            if (line.Contains("event=filetransfer_v4_mixed_screenshare_enabled", StringComparison.Ordinal) ||
+                line.Contains("event=filetransfer_v4_mixed_enabled", StringComparison.Ordinal) ||
+                line.Contains("event=filetransfer_v6_mixed_enabled", StringComparison.Ordinal))
             {
                 metrics.V4MixedEnabledCount++;
             }

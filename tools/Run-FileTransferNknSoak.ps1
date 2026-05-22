@@ -719,7 +719,9 @@ function Write-FileTransferLiveNknSummary {
              (Get-FileTransferEventField -Event $_ -Name 'queue_mode' -Default 'normal') -eq 'severe')
         }).Count
     $v4MixedEnabledEvidenceCount =
+        (Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v4_mixed_screenshare_enabled') +
         (Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v4_mixed_enabled') +
+        (Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v6_mixed_enabled') +
         (Get-FileTransferEventFieldValueCount -Events $Analysis.Summary.TransferEvents -FieldName 'mixed_screenshare' -Value '1')
 
     $summary = [ordered]@{

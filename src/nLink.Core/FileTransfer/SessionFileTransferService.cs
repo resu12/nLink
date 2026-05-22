@@ -1503,7 +1503,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                         return;
                     }
 
-                    LogV4MixedScreenShareEnabled(context.TransferId, context.SessionId, FileTransferDirection.Outbound);
+                    LogV4MixedScreenShareEnabled(context.TransferId, context.SessionId, FileTransferDirection.Outbound, context.RouteSelection);
                     await RunOutboundRegularNknV4Async(context).ConfigureAwait(false);
                     return;
 
@@ -1520,7 +1520,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                         return;
                     }
 
-                    LogV4MixedScreenShareEnabled(context.TransferId, context.SessionId, FileTransferDirection.Outbound);
+                    LogV4MixedScreenShareEnabled(context.TransferId, context.SessionId, FileTransferDirection.Outbound, context.RouteSelection);
                     var v6RuntimeSelection = ResolveFileTransferRuntimeProfile(context);
                     LogFileTransferBridgeRecoveryPolicySelected(
                         context.TransferId,
@@ -1544,7 +1544,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                         return;
                     }
 
-                    LogV4MixedScreenShareEnabled(context.TransferId, context.SessionId, FileTransferDirection.Outbound);
+                    LogV4MixedScreenShareEnabled(context.TransferId, context.SessionId, FileTransferDirection.Outbound, context.RouteSelection);
                     var diagnosticRuntimeSelection = ResolveFileTransferRuntimeProfile(context);
                     LogFileTransferBridgeRecoveryPolicySelected(
                         context.TransferId,
@@ -2152,7 +2152,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 return;
             }
 
-            LogV4MixedScreenShareEnabled(message.TransferId, message.SessionId, FileTransferDirection.Inbound);
+            LogV4MixedScreenShareEnabled(message.TransferId, message.SessionId, FileTransferDirection.Inbound, context.RouteSelection);
             try
             {
                 var session = await GetTransportOrThrow()
@@ -2221,7 +2221,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 return;
             }
 
-            LogV4MixedScreenShareEnabled(message.TransferId, message.SessionId, FileTransferDirection.Inbound);
+            LogV4MixedScreenShareEnabled(message.TransferId, message.SessionId, FileTransferDirection.Inbound, context.RouteSelection);
             try
             {
                 var session = await GetTransportOrThrow()
@@ -2298,7 +2298,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 return;
             }
 
-            LogV4MixedScreenShareEnabled(message.TransferId, message.SessionId, FileTransferDirection.Inbound);
+            LogV4MixedScreenShareEnabled(message.TransferId, message.SessionId, FileTransferDirection.Inbound, context.RouteSelection);
             try
             {
                 var session = await GetTransportOrThrow()
@@ -3919,7 +3919,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     private static bool IsActiveV4MixedOutboundTransferLocked(OutboundTransferContext? context)
         => context is not null &&
            !context.IsTerminal &&
-           context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
+           context.RouteSelection.FrameFamily == FileTransferFrameFamily.V4 &&
            (context.V4MixedScreenShareTransfer ||
             context.State is FileTransferTransferState.PreparingMetadata
                 or FileTransferTransferState.AwaitingStart
@@ -3929,14 +3929,23 @@ public sealed partial class SessionFileTransferService : IDisposable
     private static bool IsActiveV4MixedInboundTransferLocked(InboundTransferContext? context)
         => context is not null &&
            !context.IsTerminal &&
-           context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
+           context.RouteSelection.FrameFamily == FileTransferFrameFamily.V4 &&
            (context.V4MixedScreenShareTransfer ||
             context.State is FileTransferTransferState.AwaitingMetadata
                 or FileTransferTransferState.Receiving
                 or FileTransferTransferState.Verifying);
 
-    private void LogV4MixedScreenShareEnabled(string transferId, string sessionId, FileTransferDirection direction)
+    private void LogV4MixedScreenShareEnabled(
+        string transferId,
+        string sessionId,
+        FileTransferDirection direction,
+        FileTransferRouteSelection routeSelection)
     {
+        if (routeSelection.FrameFamily != FileTransferFrameFamily.V4)
+        {
+            return;
+        }
+
         if (!IsV4MixedScreenShareActive())
         {
             return;
@@ -3944,7 +3953,7 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_v6_mixed_enabled; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; direction={direction}; screen_share_active={(sessionScreenShareActive ? 1 : 0)}; screen_share_degraded={(sessionScreenShareDegraded ? 1 : 0)}; screen_share_observed={(sessionScreenShareObserved ? 1 : 0)}; screen_share_policy_hint=catch_up_only; credit_window_chunks={ResolveV4StateCreditWindowChunksForCurrentMode()}; normal_batch_segments={ResolveV4MaxBatchSegments(repairSend: false)}");
+            $"event=filetransfer_v4_mixed_screenshare_enabled; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; direction={direction}; screen_share_active={(sessionScreenShareActive ? 1 : 0)}; screen_share_degraded={(sessionScreenShareDegraded ? 1 : 0)}; screen_share_observed={(sessionScreenShareObserved ? 1 : 0)}; screen_share_policy_hint=catch_up_only; credit_window_chunks={ResolveV4StateCreditWindowChunksForCurrentMode()}; normal_batch_segments={ResolveV4MaxBatchSegments(repairSend: false)}");
     }
 
     private static FileTransferTransportProfileKind ResolveTransportProfileKind(IFileTransferSignalingTransport? currentTransport)

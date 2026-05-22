@@ -81,6 +81,76 @@ public sealed class SessionFileTransferRouteRuntimeRegressionTests : SessionFile
     }
 
     [Theory]
+    [InlineData("mixed_regular_v4", FileTransferRouteResolver.RegularNknV4FastToken, "regular_nkn_v4_fast", "regular_nkn_v4_fast")]
+    [InlineData("mixed_file_tuna_v4", FileTransferRouteResolver.FileTunaV4Token, "file_tuna_v4_fast", "tuna_strict")]
+    public async Task V4Routes_WithActiveScreenShare_StayV4AndExposeMixedTransferState(
+        string scenario,
+        string routeToken,
+        string runtimeProfile,
+        string bridgeRecoveryPolicy)
+    {
+        var transferId = "p4_" + ShortScenarioId(scenario);
+        var sessionId = "p4_session_" + ShortScenarioId(scenario);
+        var logStart = GetOperationalLogLength();
+        var payload = Enumerable.Range(0, 512_000).Select(static index => (byte)(index % 251)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport(sessionId)
+        {
+            DataSessionSendDelayMs = 2,
+        };
+        using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        ConfigureRouteToken(senderTransport, routeToken);
+        ConfigureRouteToken(receiverTransport, routeToken);
+        senderTransport.Connect(receiverTransport);
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+        sender.SetSessionScreenShareActive(true);
+        receiver.SetSessionScreenShareActive(true);
+        using var destination = new NonDisposingMemoryStream();
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor(scenario + ".bin", payload.Length, transferId),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision, timeoutMs: 5000);
+        await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
+        await WaitUntilAsync(
+            () => sender.IsV4MixedScreenShareTransferActive &&
+                  receiver.IsV4MixedScreenShareTransferActive,
+            timeoutMs: 5000);
+        await WaitUntilAsync(
+            () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+                  receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
+            timeoutMs: 20_000);
+
+        Assert.Equal(payload, destination.ToArray()[..payload.Length]);
+        var result = new RouteRuntimeResult(
+            senderTransport,
+            receiverTransport,
+            Assert.Single(senderTransport.SentOffers),
+            Assert.Single(receiverTransport.SentAccepts),
+            Assert.Single(senderTransport.SentSessionOpens),
+            ReadRouteLogSnapshot(logStart));
+        var transferLog = FilterTransferLog(result.LogTail, transferId);
+
+        AssertWireRoute(result, routeToken, FileTransferProtocol.ProtocolVersionV4);
+        AssertFrameFamily(result, FileTransferProtocol.ProtocolVersionV4);
+        AssertRouteAwareLogConsistency(
+            result.LogTail,
+            transferId,
+            routeToken,
+            FileTransferProtocol.ProtocolVersionV4,
+            runtimeProfile,
+            "v4",
+            bridgeRecoveryPolicy);
+        Assert.Contains("event=filetransfer_v4_mixed_screenshare_enabled; transfer_id=" + transferId, transferLog, StringComparison.Ordinal);
+        Assert.Contains("mixed_screenshare=1", transferLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_v6_sender_started; transfer_id=" + transferId, transferLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_v6_receiver_started; transfer_id=" + transferId, transferLog, StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData("post_tuna_fallback_runtime_guard", FileTransferRouteResolver.PostTunaFallbackV6Token, "post_tuna_fallback_strict")]
     public async Task V6FallbackRoute_NeverEntersRegularV4RouteOrRuntime(
         string scenario,
@@ -435,6 +505,8 @@ public sealed class SessionFileTransferRouteRuntimeRegressionTests : SessionFile
             "regular_no_v6" => "regular",
             "diagnostic_default_guard" => "diag_default",
             "diagnostic_opt_in_guard" => "diag_opt",
+            "mixed_regular_v4" => "mixed_reg",
+            "mixed_file_tuna_v4" => "mixed_tuna",
             _ => scenario.Length <= 20 ? scenario : scenario[..20],
         };
 
