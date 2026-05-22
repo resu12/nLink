@@ -636,6 +636,30 @@ public sealed class FileTransferDataFrameCodecTests
     }
 
     [Theory]
+    [InlineData(25)]
+    [InlineData(26)]
+    [InlineData(27)]
+    [InlineData(28)]
+    [InlineData(29)]
+    [InlineData(30)]
+    [InlineData(31)]
+    [InlineData(32)]
+    [InlineData(33)]
+    [InlineData(34)]
+    public void ObsoleteV5BinaryFrameCodes_AreRejected(byte frameCode)
+    {
+        using var buffer = new MemoryStream();
+        WriteUInt32(buffer, 0x3246544E);
+        buffer.WriteByte(1);
+        buffer.WriteByte(frameCode);
+        WriteString(buffer, "session_a");
+        WriteString(buffer, "transfer_obsolete_v5_binary_rejected");
+        WriteV6Metadata(buffer);
+
+        Assert.False(FileTransferDataFrameCodec.TryDeserialize(buffer.ToArray(), out _));
+    }
+
+    [Theory]
     [InlineData(FileTransferProtocol.ManifestFrameTypeV4)]
     [InlineData(FileTransferProtocol.StateFrameTypeV4)]
     [InlineData(FileTransferProtocol.ChunkBatchFrameTypeV4)]

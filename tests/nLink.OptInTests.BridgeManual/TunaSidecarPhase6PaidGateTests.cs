@@ -82,7 +82,7 @@ public sealed partial class TunaSidecarLiveManualTests
             FileReceiveRatio = 1,
             TunaFrameCount = 1,
             IsPhase6Gate = true,
-            DataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+            DataProtocolVersion = 5,
             FinalShaMatched = false,
             FalseRecoveryObserved = true,
             SenderTerminalObserved = false,

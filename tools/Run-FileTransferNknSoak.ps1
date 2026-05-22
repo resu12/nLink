@@ -604,20 +604,17 @@ function Write-FileTransferLiveNknSummary {
     $v4BatchEvents = @($Analysis.Summary.TransferEvents | Where-Object {
             $_.EventName -eq 'filetransfer_chunk_batch_sent_as_batch' -and
             ((Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -eq 'filetransfer.chunk_batch.v6' -or
-             (Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -eq 'filetransfer.chunk_batch.v5' -or
              (Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -eq 'filetransfer.chunk_batch.v4' -or
              (Get-FileTransferEventField -Event $_ -Name 'batch_profile' -Default '') -eq 'v4_default_21k')
         })
     $v4SplitEvents = @($Analysis.Summary.TransferEvents | Where-Object {
             $_.EventName -eq 'filetransfer_chunk_batch_split_for_transport' -and
             ((Get-FileTransferEventField -Event $_ -Name 'original_frame_type' -Default '') -eq 'filetransfer.chunk_batch.v6' -or
-             (Get-FileTransferEventField -Event $_ -Name 'original_frame_type' -Default '') -eq 'filetransfer.chunk_batch.v5' -or
              (Get-FileTransferEventField -Event $_ -Name 'original_frame_type' -Default '') -eq 'filetransfer.chunk_batch.v4')
         })
     $v4PayloadShapeEvents = @($Analysis.Summary.TransferEvents | Where-Object {
             ($_.EventName -eq 'filetransfer_chunk_batch_sent_as_batch' -or $_.EventName -eq 'filetransfer_transport_payload_budget') -and
             ((Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -eq 'filetransfer.chunk_batch.v6' -or
-             (Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -eq 'filetransfer.chunk_batch.v5' -or
              (Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -eq 'filetransfer.chunk_batch.v4' -or
              (Get-FileTransferEventField -Event $_ -Name 'batch_profile' -Default '') -eq 'v4_default_21k')
         })
@@ -630,14 +627,6 @@ function Write-FileTransferLiveNknSummary {
         $Analysis.Summary.FrameTypeCounts.ContainsKey('filetransfer.chunk_batch.v6') -or
         $Analysis.Summary.FrameTypeCounts.ContainsKey('filetransfer.receiver_state.v6')) {
         6
-    }
-    elseif (
-        (Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v5_negotiated') -gt 0 -or
-        (Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v5_sender_started') -gt 0 -or
-        (Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v5_receiver_started') -gt 0 -or
-        $Analysis.Summary.FrameTypeCounts.ContainsKey('filetransfer.chunk_batch.v5') -or
-        $Analysis.Summary.FrameTypeCounts.ContainsKey('filetransfer.state.v5')) {
-        5
     }
     elseif (
         (Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v4_negotiated') -gt 0 -or

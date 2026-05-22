@@ -53,7 +53,7 @@ public sealed class FileTransferPayloadCodecTests
 
     [Theory]
     [InlineData(null)]
-    [InlineData(FileTransferProtocol.ProtocolVersionV5)]
+    [InlineData(5)]
     [InlineData(99)]
     public void Offer_RejectsMissingLegacyOrUnsupportedProtocol(int? preferredVersion)
     {
@@ -132,7 +132,7 @@ public sealed class FileTransferPayloadCodecTests
 
     [Theory]
     [InlineData(null)]
-    [InlineData(FileTransferProtocol.ProtocolVersionV5)]
+    [InlineData(5)]
     [InlineData(99)]
     public void Accept_RejectsMissingLegacyOrUnsupportedProtocol(int? acceptedVersion)
     {
@@ -213,7 +213,7 @@ public sealed class FileTransferPayloadCodecTests
 
     [Theory]
     [InlineData(null)]
-    [InlineData(FileTransferProtocol.ProtocolVersionV5)]
+    [InlineData(5)]
     [InlineData(99)]
     public void SessionOpen_RejectsMissingLegacyOrUnsupportedProtocol(int? protocolVersion)
     {
@@ -406,49 +406,43 @@ public sealed class FileTransferPayloadCodecTests
     [InlineData("offer")]
     [InlineData("accept")]
     [InlineData("session_open")]
-    public void RouteToken_LegacyFileTunaV6_WithProtocol6_RemainsAccepted(string payloadKind)
+    public void RouteToken_FileTunaV6_WithProtocol6_IsRejected(string payloadKind)
     {
-        var parsed = payloadKind switch
+        var payload = payloadKind switch
         {
-            "offer" => FileTransferPayloadCodec.TryDeserializeOffer(
-                FileTransferPayloadCodec.Serialize(
-                    new FileTransferOfferV2
-                    {
-                        SessionId = "session_a",
-                        TransferId = "transfer_a",
-                        FileName = "legacy-tuna-v6.bin",
-                        FileSizeBytes = 123,
-                        PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
-                        FileTransferRoute = FileTransferRouteResolver.FileTunaV6Token,
-                    }),
-                out var offer) && offer.FileTransferRoute == FileTransferRouteResolver.FileTunaV6Token,
-            "accept" => FileTransferPayloadCodec.TryDeserializeAccept(
-                FileTransferPayloadCodec.Serialize(
-                    new FileTransferAcceptV1
-                    {
-                        SessionId = "session_a",
-                        TransferId = "transfer_a",
-                        AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
-                        FileTransferRoute = FileTransferRouteResolver.FileTunaV6Token,
-                    }),
-                out var accept) && accept.FileTransferRoute == FileTransferRouteResolver.FileTunaV6Token,
-            "session_open" => FileTransferPayloadCodec.TryDeserializeSessionOpen(
-                FileTransferPayloadCodec.Serialize(
-                    new FileTransferSessionOpenV2
-                    {
-                        SessionId = "session_a",
-                        TransferId = "transfer_a",
-                        ProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
-                        SessionRole = FileTransferProtocol.SessionRoleSender,
-                        ChunkSizeBytes = 4096,
-                        InitialPipelineDepth = 1,
-                        FileTransferRoute = FileTransferRouteResolver.FileTunaV6Token,
-                    }),
-                out var sessionOpen) && sessionOpen.FileTransferRoute == FileTransferRouteResolver.FileTunaV6Token,
-            _ => false,
+            "offer" => FileTransferPayloadCodec.Serialize(
+                new FileTransferOfferV2
+                {
+                    SessionId = "session_a",
+                    TransferId = "transfer_a",
+                    FileName = "obsolete-tuna-v6.bin",
+                    FileSizeBytes = 123,
+                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                    FileTransferRoute = "file_tuna_v6",
+                }),
+            "accept" => FileTransferPayloadCodec.Serialize(
+                new FileTransferAcceptV1
+                {
+                    SessionId = "session_a",
+                    TransferId = "transfer_a",
+                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                    FileTransferRoute = "file_tuna_v6",
+                }),
+            "session_open" => FileTransferPayloadCodec.Serialize(
+                new FileTransferSessionOpenV2
+                {
+                    SessionId = "session_a",
+                    TransferId = "transfer_a",
+                    ProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                    SessionRole = FileTransferProtocol.SessionRoleSender,
+                    ChunkSizeBytes = 4096,
+                    InitialPipelineDepth = 1,
+                    FileTransferRoute = "file_tuna_v6",
+                }),
+            _ => throw new ArgumentOutOfRangeException(nameof(payloadKind), payloadKind, null),
         };
 
-        Assert.True(parsed);
+        AssertRoutePayloadRejected(payloadKind, payload);
     }
 
     [Fact]

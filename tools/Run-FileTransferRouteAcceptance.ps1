@@ -648,9 +648,6 @@ function Get-RouteAcceptanceRouteMetadata {
         'file_tuna_v4' {
             return [pscustomobject]@{ Protocol = 4; Runtime = 'file_tuna_v4_fast'; Bridge = 'tuna_strict'; FrameFamily = 'v4'; SenderStarted = 'filetransfer_v4_sender_started'; ReceiverStarted = 'filetransfer_v4_receiver_started'; FileTuna = 1; Fallback = 0; Diagnostic = 0 }
         }
-        'file_tuna_v6' {
-            return [pscustomobject]@{ Protocol = 6; Runtime = 'default_v6'; Bridge = 'tuna_strict'; FrameFamily = 'v6'; SenderStarted = 'filetransfer_v6_sender_started'; ReceiverStarted = 'filetransfer_v6_receiver_started'; FileTuna = 1; Fallback = 0; Diagnostic = 0 }
-        }
         'post_tuna_fallback_v6' {
             return [pscustomobject]@{ Protocol = 6; Runtime = 'default_v6'; Bridge = 'post_tuna_fallback_strict'; FrameFamily = 'v6'; SenderStarted = 'filetransfer_v6_sender_started'; ReceiverStarted = 'filetransfer_v6_receiver_started'; FileTuna = 0; Fallback = 1; Diagnostic = 0 }
         }

@@ -329,6 +329,11 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Contains("measured-fallback-analysis", scriptText, StringComparison.Ordinal);
         Assert.Contains("setup-analysis", scriptText, StringComparison.Ordinal);
         Assert.Contains("controlledRestartAnalysis", scriptText, StringComparison.Ordinal);
+        Assert.Contains("fallbackFailurePhase", scriptText, StringComparison.Ordinal);
+        Assert.Contains("fallbackDiagnostics", scriptText, StringComparison.Ordinal);
+        Assert.Contains("lastCommittedChunk", scriptText, StringComparison.Ordinal);
+        Assert.Contains("v6ChunkSendTimeoutCount", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Write-TunaGuiControlledRestartFailureSummary", scriptText, StringComparison.Ordinal);
         Assert.Contains("Test-TunaGuiLateSetupCleanupLine", scriptText, StringComparison.Ordinal);
         Assert.Contains("frame_type=filetransfer.cancel.v4", scriptText, StringComparison.Ordinal);
         Assert.Contains("Invoke-TunaGuiRetainedAnalysis -RepoRoot $repoRoot -AnalysisDir $resolvedArtifactDir", scriptText, StringComparison.Ordinal);
@@ -753,14 +758,14 @@ public sealed class FileTransferOpsScriptsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task AnalyzeRetained_LegacyFileTunaV6Route_RemainsParseCompatiblePass()
+    public async Task AnalyzeRetained_FileTunaV6Route_ReturnsProtocolFailure()
     {
         if (!OperatingSystem.IsWindows())
         {
             return;
         }
 
-        const string transferId = "transfer_route_legacy_file_tuna_v6";
+        const string transferId = "transfer_route_obsolete_file_tuna_v6";
         var result = await RunAnalyzeFixtureAsync(BuildRouteAwareCompletedFixture(
             transferId,
             route: "file_tuna_v6",
@@ -770,11 +775,39 @@ public sealed class FileTransferOpsScriptsTests
             runtimeEventName: "filetransfer_v6_sender_started"));
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
-        Assert.Equal("PASS", verdict["verdict"]);
-        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
-        Assert.Equal("pass", route["route_consistency_verdict"]);
-        Assert.Equal("0", route["route_mismatch_count"]);
-        Assert.Equal("file_tuna_v6", route["selected_routes"]);
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        var routeText = File.ReadAllText(Path.Combine(result.ArtifactDir, "filetransfer-route-consistency-summary.txt"));
+        Assert.Contains("route_consistency_verdict=fail", routeText, StringComparison.Ordinal);
+        Assert.Contains("unknown route selected", routeText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_ObsoleteV5Evidence_ReturnsProtocolFailure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_route_obsolete_v5";
+        var lines = BuildRouteAwareCompletedFixture(
+                transferId,
+                route: "regular_nkn_v4_fast",
+                protocolVersion: 4,
+                runtimeProfile: "regular_nkn_v4_fast",
+                bridgeRecoveryPolicy: "regular_nkn_v4_fast",
+                runtimeEventName: "filetransfer_v4_sender_started")
+            .Append(LogLine($"event=filetransfer_v5_sender_started; transfer_id={transferId}; session_id=sess_a; protocol_version=5"))
+            .ToArray();
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        var routeText = File.ReadAllText(Path.Combine(result.ArtifactDir, "filetransfer-route-consistency-summary.txt"));
+        Assert.Contains("route_consistency_verdict=fail", routeText, StringComparison.Ordinal);
+        Assert.Contains("obsolete_protocol_v5", routeText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -4322,8 +4355,8 @@ if (-not $result.RegressionFailed) {
         var diagnosticMarker = diagnosticMarkerOverride ?? (route == "diagnostic_regular_nkn_v6" ? "1" : "0");
         return
         [
-            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_a; route={route}; protocol_version={protocolVersion}; runtime_profile={runtimeProfile}; frame_family={frameFamily}; handoff_kind=none; bridge_recovery_policy={bridgeRecoveryPolicy}; liveness_terminal_policy={route}; selection_reason=test_route; file_tuna_active={(route == "file_tuna_v4" || route == "file_tuna_v6" ? 1 : 0)}; post_tuna_fallback_active={(route == "post_tuna_fallback_v6" ? 1 : 0)}; diagnostic_regular_nkn_v6={diagnosticMarker}; transport_profile=default"),
-            LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id=sess_a; route={route}; protocol_version={protocolVersion}; runtime_profile={runtimeProfile}; frame_family={frameFamily}; handoff_kind=none; bridge_recovery_policy={bridgeRecoveryPolicy}; liveness_terminal_policy={route}; selection_reason=test_route; file_tuna_active={(route == "file_tuna_v4" || route == "file_tuna_v6" ? 1 : 0)}; post_tuna_fallback_active={(route == "post_tuna_fallback_v6" ? 1 : 0)}; diagnostic_regular_nkn_v6={diagnosticMarker}; transport_profile=default"),
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_a; route={route}; protocol_version={protocolVersion}; runtime_profile={runtimeProfile}; frame_family={frameFamily}; handoff_kind=none; bridge_recovery_policy={bridgeRecoveryPolicy}; liveness_terminal_policy={route}; selection_reason=test_route; file_tuna_active={(route == "file_tuna_v4" ? 1 : 0)}; post_tuna_fallback_active={(route == "post_tuna_fallback_v6" ? 1 : 0)}; diagnostic_regular_nkn_v6={diagnosticMarker}; transport_profile=default"),
+            LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id=sess_a; route={route}; protocol_version={protocolVersion}; runtime_profile={runtimeProfile}; frame_family={frameFamily}; handoff_kind=none; bridge_recovery_policy={bridgeRecoveryPolicy}; liveness_terminal_policy={route}; selection_reason=test_route; file_tuna_active={(route == "file_tuna_v4" ? 1 : 0)}; post_tuna_fallback_active={(route == "post_tuna_fallback_v6" ? 1 : 0)}; diagnostic_regular_nkn_v6={diagnosticMarker}; transport_profile=default"),
             LogLine($"event=filetransfer_protocol_negotiated; direction=outbound; transfer_id={transferId}; session_id=sess_a; route={route}; protocol_version={protocolVersion}; runtime_profile={runtimeProfile}; frame_family={frameFamily}; bridge_recovery_policy={bridgeRecoveryPolicy}; selection_reason=test_route"),
             LogLine($"event=filetransfer_session_opened; direction=outbound; transfer_id={transferId}; session_id=sess_a; route={route}; protocol_version={protocolVersion}; runtime_profile={runtimeProfile}; frame_family={frameFamily}; bridge_recovery_policy={bridgeRecoveryPolicy}; reason=role=Sender"),
             LogLine($"event={runtimeEventName}; direction=outbound; transfer_id={transferId}; session_id=sess_a; route={route}; protocol_version={effectiveRuntimeProtocolVersion}; runtime_profile={runtimeProfile}; frame_family={frameFamily}; bridge_recovery_policy={bridgeRecoveryPolicy}"),

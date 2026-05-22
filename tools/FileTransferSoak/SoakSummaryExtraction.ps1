@@ -198,7 +198,6 @@ function Get-FileTransferRouteExpectedProtocol {
     switch ($Route) {
         'regular_nkn_v4_fast' { return '4' }
         'file_tuna_v4' { return '4' }
-        'file_tuna_v6' { return '6' }
         'post_tuna_fallback_v6' { return '6' }
         'diagnostic_regular_nkn_v6' { return '6' }
         default { return '' }
@@ -211,7 +210,6 @@ function Get-FileTransferRouteExpectedRuntimeProfile {
     switch ($Route) {
         'regular_nkn_v4_fast' { return 'regular_nkn_v4_fast' }
         'file_tuna_v4' { return 'file_tuna_v4_fast' }
-        'file_tuna_v6' { return 'default_v6' }
         'post_tuna_fallback_v6' { return 'default_v6' }
         'diagnostic_regular_nkn_v6' { return 'primary_regular_nkn_bulk_v6' }
         default { return '' }
@@ -224,7 +222,6 @@ function Get-FileTransferRouteExpectedBridgePolicy {
     switch ($Route) {
         'regular_nkn_v4_fast' { return 'regular_nkn_v4_fast' }
         'file_tuna_v4' { return 'tuna_strict' }
-        'file_tuna_v6' { return 'tuna_strict' }
         'post_tuna_fallback_v6' { return 'post_tuna_fallback_strict' }
         'diagnostic_regular_nkn_v6' { return 'primary_regular_nkn_quiet' }
         default { return '' }
@@ -427,6 +424,18 @@ function Get-FileTransferRouteConsistency {
         Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding 'route-aware transfer events were present but no filetransfer_route_selected event was found' -Event $routeAwareEvents[0]
     }
 
+    foreach ($event in @($TransferEvents | Sort-Object Sequence)) {
+        $frameType = Get-FileTransferEventField -Event $event -Name 'frame_type' -Default ''
+        $originalFrameType = Get-FileTransferEventField -Event $event -Name 'original_frame_type' -Default ''
+        $protocolVersion = Get-FileTransferEventField -Event $event -Name 'protocol_version' -Default ''
+        if ($event.EventName -like 'filetransfer_v5_*' -or
+            $frameType -like '*.v5' -or
+            $originalFrameType -like '*.v5' -or
+            $protocolVersion -eq '5') {
+            Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding ("obsolete_protocol_v5: {0}" -f (Format-FileTransferEvidenceLine -Event $event)) -Event $event
+        }
+    }
+
     foreach ($event in @($routeAwareEvents)) {
         if ($event.EventName -eq 'filetransfer_route_selected') {
             continue
@@ -468,7 +477,7 @@ function Get-FileTransferRouteConsistency {
             Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding ("regular NKN V4 route entered V6 runtime: {0}" -f (Format-FileTransferEvidenceLine -Event $event)) -Event $event
         }
 
-        if (($selectedRoute -eq 'file_tuna_v6' -or $selectedRoute -eq 'post_tuna_fallback_v6' -or $selectedRoute -eq 'diagnostic_regular_nkn_v6') -and
+        if (($selectedRoute -eq 'post_tuna_fallback_v6' -or $selectedRoute -eq 'diagnostic_regular_nkn_v6') -and
             ($event.EventName -eq 'filetransfer_v4_sender_started' -or $event.EventName -eq 'filetransfer_v4_receiver_started')) {
             Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding ("V6 route entered regular V4 runtime: route={0}; event={1}" -f $selectedRoute, (Format-FileTransferEvidenceLine -Event $event)) -Event $event
         }

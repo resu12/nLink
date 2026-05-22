@@ -1425,7 +1425,7 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
     }
 
     [Fact]
-    public async Task V4SparseReceiver_PostFallbackFrontierRepairWidensAfterFirstV5Proof()
+    public async Task V4SparseReceiver_PostFallbackFrontierRepairWidensAfterFirstV6Proof()
     {
         const string transferId = "transfer_v4_post_fallback_backfill_widens";
         const string sessionId = "session_v4_post_fallback_backfill_widens";

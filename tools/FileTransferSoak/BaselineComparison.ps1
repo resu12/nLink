@@ -141,16 +141,16 @@ function Compare-FileTransferSafeBaseline {
     $currentBatchRatio = ConvertTo-FileTransferDouble -Values $Current -Name $batchRatioKey -Default -1
     $baselineBatchRatio = ConvertTo-FileTransferDouble -Values $Baseline -Name $batchRatioKey -Default -1
     if ($baselineBatchRatio -gt 0 -and $currentBatchRatio -ge 0 -and $currentBatchRatio -lt ($baselineBatchRatio * 0.80)) {
-        $batchRatioLabel = if ($currentProtocol -eq '6') { 'V6' } elseif ($currentProtocol -eq '5') { 'V5' } elseif ($currentProtocol -eq '4') { 'V4' } else { 'file-transfer' }
+        $batchRatioLabel = if ($currentProtocol -eq '6') { 'V6' } elseif ($currentProtocol -eq '4') { 'V4' } else { 'file-transfer' }
         Add-FileTransferRegressionFinding -List $findings -Finding (
             '{0} batch ratio regressed below 80% of safe baseline: current={1:F3}; baseline={2:F3}' -f $batchRatioLabel, $currentBatchRatio, $baselineBatchRatio)
     }
 
-    if ($currentProtocol -eq '6' -or $currentProtocol -eq '5' -or $currentProtocol -eq '4') {
+    if ($currentProtocol -eq '6' -or $currentProtocol -eq '4') {
         $currentPayloadFill = ConvertTo-FileTransferDouble -Values $Current -Name 'v4_average_bridge_payload_fill_percent' -Default -1
         $baselinePayloadFill = ConvertTo-FileTransferDouble -Values $Baseline -Name 'v4_average_bridge_payload_fill_percent' -Default -1
         if ($baselinePayloadFill -gt 0 -and $currentPayloadFill -ge 0 -and $currentPayloadFill -lt ($baselinePayloadFill * 0.80)) {
-            $payloadFillLabel = if ($currentProtocol -eq '6') { 'V6' } elseif ($currentProtocol -eq '5') { 'V5' } else { 'V4' }
+            $payloadFillLabel = if ($currentProtocol -eq '6') { 'V6' } else { 'V4' }
             Add-FileTransferRegressionFinding -List $findings -Finding (
                 '{0} bridge payload fill regressed below 80% of safe baseline: current={1:F3}; baseline={2:F3}' -f $payloadFillLabel, $currentPayloadFill, $baselinePayloadFill)
         }

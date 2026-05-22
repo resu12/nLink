@@ -117,8 +117,6 @@ function Test-FileTransferBenignPostCompletionLateSenderFrame {
     $frameType = Get-FileTransferEventField -Event $Event -Name 'frame_type' -Default ''
     if ($frameType -ne 'filetransfer.manifest.v6' -and
         $frameType -ne 'filetransfer.chunk_batch.v6' -and
-        $frameType -ne 'filetransfer.manifest.v5' -and
-        $frameType -ne 'filetransfer.chunk_batch.v5' -and
         $frameType -ne 'filetransfer.manifest.v4' -and
         $frameType -ne 'filetransfer.chunk_batch.v4') {
         return $false
@@ -442,7 +440,6 @@ function Get-FileTransferHardFailureEvents {
                 $_.EventName -eq 'filetransfer_message_rejected' -or
                 $_.EventName -eq 'filetransfer_local_soak_cycle_failed' -or
                 $_.EventName -eq 'filetransfer_v6_required_transport_incompatible' -or
-                $_.EventName -eq 'filetransfer_v5_required_transport_incompatible' -or
                 $_.EventName -eq 'filetransfer_v4_required_transport_incompatible' -or
                 $_.EventName -eq 'filetransfer_v4_receiver_failed' -or
                 $_.EventName -eq 'filetransfer_v4_sender_failed' -or
