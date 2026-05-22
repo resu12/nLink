@@ -5,7 +5,14 @@ param(
     [switch]$RunResources,
     [switch]$RunLeakCheck,
     [switch]$RunBetaReadiness,
-    [string]$Runtime = "win-x64"
+    [string]$Runtime = "win-x64",
+    [string]$FileTransferRouteAcceptanceWalletPath = ".\artifacts\tuna-poc\wallet-test-nkn.json",
+    [string]$FileTransferRouteAcceptanceWalletPassword = "",
+    [string]$FileTransferRouteAcceptanceArtifactRoot = "artifacts\filetransfer-route-acceptance",
+    [int]$FileTransferRouteAcceptanceTimeoutSeconds = 900,
+    [int]$FileTransferRouteAcceptanceProgressTimeoutSeconds = 180,
+    [int]$FileTransferRouteAcceptanceFallbackMaxAttempts = 2,
+    [bool]$FileTransferRouteAcceptanceAllowExternalTransportWarnings = $true
 )
 
 Set-StrictMode -Version Latest
@@ -297,6 +304,32 @@ try {
 
     Invoke-Step -Name "Build portable ZIP" -Action {
         & powershell -ExecutionPolicy Bypass -File ".\installer\Build-Portable.ps1" -Runtime $Runtime
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
+
+    Invoke-Step -Name "File transfer route acceptance gate" -Action {
+        $acceptancePassword = $FileTransferRouteAcceptanceWalletPassword
+        if ([string]::IsNullOrWhiteSpace($acceptancePassword)) {
+            $acceptancePassword = [string]$env:NLINK_TUNA_TEST_WALLET_PASSWORD
+        }
+
+        if ([string]::IsNullOrWhiteSpace($acceptancePassword)) {
+            throw "Set NLINK_TUNA_TEST_WALLET_PASSWORD or pass -FileTransferRouteAcceptanceWalletPassword before installer creation."
+        }
+
+        $portableExe = Join-Path $repoRoot "artifacts\portable\nLink\win-x64\nLink.exe"
+        $packagedSidecar = Join-Path $repoRoot ("artifacts\portable\nLink\win-x64\tuna\{0}\nlink-tuna-sidecar.exe" -f $Runtime)
+        & powershell -ExecutionPolicy Bypass -File ".\tools\Run-FileTransferRouteAcceptance.ps1" `
+            -ExePath $portableExe `
+            -WalletPath $FileTransferRouteAcceptanceWalletPath `
+            -WalletPassword $acceptancePassword `
+            -SidecarPath $packagedSidecar `
+            -Runtime $Runtime `
+            -ArtifactRoot $FileTransferRouteAcceptanceArtifactRoot `
+            -TimeoutSeconds $FileTransferRouteAcceptanceTimeoutSeconds `
+            -ProgressTimeoutSeconds $FileTransferRouteAcceptanceProgressTimeoutSeconds `
+            -FallbackMaxAttempts $FileTransferRouteAcceptanceFallbackMaxAttempts `
+            -AllowExternalTransportWarnings $FileTransferRouteAcceptanceAllowExternalTransportWarnings
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
 

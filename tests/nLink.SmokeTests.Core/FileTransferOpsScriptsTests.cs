@@ -82,7 +82,10 @@ public sealed class FileTransferOpsScriptsTests
         "tools/FileTransferSoak/StabilizationGates.ps1",
         "tools/FileTransferSoak/ArtifactWriters.ps1",
         "tools/FileTransferSoak/BaselineComparison.ps1",
+        "tools/PreRelease-Check.ps1",
         "tools/Run-FileTransferNknSoak.ps1",
+        "tools/Run-FileTransferRouteAcceptance.ps1",
+        "tools/Run-FileTransferTunaGuiSmoke.ps1",
         "tools/Run-FileTransferReceiveStallMatrix.ps1",
         "tools/Run-NknBridgeReceiveProbe.ps1"
     ];
@@ -95,6 +98,7 @@ public sealed class FileTransferOpsScriptsTests
         "throughput-decomposition-summary.txt",
         "payload-efficiency-summary.txt",
         "protocol-shape-summary.txt",
+        "filetransfer-route-consistency-summary.txt",
         "repair-reorder-summary.txt",
         "transport-budget-summary.txt",
         "bridge-config-summary.txt",
@@ -113,6 +117,14 @@ public sealed class FileTransferOpsScriptsTests
         "filetransfer-live-nkn-cycles.jsonl",
         "filetransfer-retained-log-slice.log",
         "baseline-comparison.txt"
+    ];
+
+    private static readonly string[] RequiredRouteAcceptanceSubdirectories =
+    [
+        "regular-nkn-64mb-quick",
+        "regular-nkn-128mb-target",
+        "tuna-128mb-no-fault",
+        "tuna-128mb-fallback"
     ];
 
     [Fact]
@@ -214,12 +226,199 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Contains("gui-smoke-stdout.log", scriptText, StringComparison.Ordinal);
         Assert.Contains("gui-smoke-stderr.log", scriptText, StringComparison.Ordinal);
         Assert.Contains("NLINK_FILETRANSFER_ALLOW_UNSAFE_MIXED_PAYLOAD_PROFILE", scriptText, StringComparison.Ordinal);
+        Assert.Contains("regular-nkn-tuna-state", scriptText, StringComparison.Ordinal);
+        Assert.Contains("NLINK_TUNA_STATE_ROOT", scriptText, StringComparison.Ordinal);
+        Assert.Contains("regular-nkn-app\\sidecar-isolated\\a\\b\\c\\d\\e\\f\\app", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Copy-FileTransferRegularNknOnlyPortable", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Test-FileTransferRegularNknStagingExcludedItem", scriptText, StringComparison.Ordinal);
+        Assert.Contains("nlink-tuna-sidecar.exe", scriptText, StringComparison.Ordinal);
+        Assert.Contains("NLINK_NKN_TUNA_SIDECAR_EXE", scriptText, StringComparison.Ordinal);
         Assert.Contains("$analysis.GateResult.Verdict -eq 'INCONCLUSIVE'", scriptText, StringComparison.Ordinal);
         Assert.Contains("$analysis.GateResult.Verdict -eq 'INVALID_SETUP'", scriptText, StringComparison.Ordinal);
         foreach (var artifactName in RequiredLiveNknArtifactFiles)
         {
             Assert.Contains(artifactName, scriptText, StringComparison.Ordinal);
         }
+    }
+
+    [Fact]
+    public void RunFileTransferRouteAcceptance_PublicParametersAndArtifactsRemainStable()
+    {
+        var repoRoot = FindRepoRoot();
+        var scriptPath = Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1");
+        var scriptText = File.ReadAllText(scriptPath);
+
+        Assert.Equal(
+            new[]
+            {
+                "ExePath",
+                "WalletPath",
+                "WalletPassword",
+                "SidecarPath",
+                "Runtime",
+                "ArtifactRoot",
+                "TimeoutSeconds",
+                "ProgressTimeoutSeconds",
+                "FallbackMaxAttempts",
+                "AllowExternalTransportWarnings"
+            },
+            ExtractTopLevelPowerShellParameterNames(scriptText));
+
+        Assert.Contains("artifacts\\filetransfer-route-acceptance", scriptText, StringComparison.Ordinal);
+        Assert.Contains("route-acceptance-summary.txt", scriptText, StringComparison.Ordinal);
+        Assert.Contains("route-acceptance-summary.json", scriptText, StringComparison.Ordinal);
+        Assert.Contains("regular-nkn-64mb-quick", scriptText, StringComparison.Ordinal);
+        Assert.Contains("regular-nkn-128mb-target", scriptText, StringComparison.Ordinal);
+        Assert.Contains("tuna-128mb-no-fault", scriptText, StringComparison.Ordinal);
+        Assert.Contains("tuna-128mb-fallback", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Run-FileTransferNknSoak.ps1", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Run-FileTransferTunaGuiSmoke.ps1", scriptText, StringComparison.Ordinal);
+        Assert.Contains("FileTransfer-Ops.ps1", scriptText, StringComparison.Ordinal);
+        Assert.Contains("-Mode', 'nkn-fast'", scriptText, StringComparison.Ordinal);
+        Assert.Contains("-PayloadSizes', $PayloadSize", scriptText, StringComparison.Ordinal);
+        Assert.Contains("-PayloadSize '64MiB'", scriptText, StringComparison.Ordinal);
+        Assert.Contains("-PayloadSize '128MiB'", scriptText, StringComparison.Ordinal);
+        Assert.Contains("-RouteMode', $RouteMode", scriptText, StringComparison.Ordinal);
+        Assert.Contains("-RouteMode 'preactivated'", scriptText, StringComparison.Ordinal);
+        Assert.Contains("-RouteMode 'v4-restart-v6-fallback'", scriptText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer-retained-log-slice-full.log", scriptText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer-setup-retained-log-slice.log", scriptText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer-measured-fallback-retained-log-slice.log", scriptText, StringComparison.Ordinal);
+        Assert.Contains("regular_nkn_v4_fast", scriptText, StringComparison.Ordinal);
+        Assert.Contains("file_tuna_v4", scriptText, StringComparison.Ordinal);
+        Assert.Contains("post_tuna_fallback_v6", scriptText, StringComparison.Ordinal);
+        Assert.Contains("diagnostic_regular_nkn_v6 route is not allowed", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Tuna no-fault acceptance unexpectedly entered fallback", scriptText, StringComparison.Ordinal);
+        Assert.Contains("1500000D", scriptText, StringComparison.Ordinal);
+        Assert.Contains("4000000D", scriptText, StringComparison.Ordinal);
+        Assert.Contains("FallbackMaxAttempts = 2", scriptText, StringComparison.Ordinal);
+        Assert.Contains("AllowExternalTransportWarnings = $true", scriptText, StringComparison.Ordinal);
+        Assert.Contains("route-acceptance-attempts.json", scriptText, StringComparison.Ordinal);
+        Assert.Contains("attempt-{0}", scriptText, StringComparison.Ordinal);
+        Assert.Contains("operatorAcceptedWithWarnings", scriptText, StringComparison.Ordinal);
+        Assert.Contains("warningKinds", scriptText, StringComparison.Ordinal);
+        foreach (var directory in RequiredRouteAcceptanceSubdirectories)
+        {
+            Assert.Contains(directory, scriptText, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void RunFileTransferTunaGuiSmoke_NoFaultFallbackEvidenceIsFailure()
+    {
+        var repoRoot = FindRepoRoot();
+        var scriptPath = Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1");
+        var scriptText = File.ReadAllText(scriptPath);
+
+        Assert.Contains("Tuna GUI preactivated no-fault transfer unexpectedly entered fallback", scriptText, StringComparison.Ordinal);
+        Assert.Contains("$FaultMode -eq 'none'", scriptText, StringComparison.Ordinal);
+        Assert.Contains("$evidence.fallbackEpochStarted", scriptText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RunFileTransferTunaGuiSmoke_ControlledFallbackFailureStillWritesMeasuredAnalysis()
+    {
+        var repoRoot = FindRepoRoot();
+        var scriptPath = Path.Combine(repoRoot, "tools", "Run-FileTransferTunaGuiSmoke.ps1");
+        var scriptText = File.ReadAllText(scriptPath);
+
+        Assert.Contains("Invoke-TunaGuiMeasuredFallbackRetainedAnalysisBestEffort", scriptText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer-retained-log-slice-full.log", scriptText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer-setup-retained-log-slice.log", scriptText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer-measured-fallback-retained-log-slice.log", scriptText, StringComparison.Ordinal);
+        Assert.Contains("measured-fallback-analysis", scriptText, StringComparison.Ordinal);
+        Assert.Contains("setup-analysis", scriptText, StringComparison.Ordinal);
+        Assert.Contains("controlledRestartAnalysis", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Test-TunaGuiLateSetupCleanupLine", scriptText, StringComparison.Ordinal);
+        Assert.Contains("frame_type=filetransfer.cancel.v4", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Invoke-TunaGuiRetainedAnalysis -RepoRoot $repoRoot -AnalysisDir $resolvedArtifactDir", scriptText, StringComparison.Ordinal);
+
+        var failureAnalysisIndex = scriptText.IndexOf("Invoke-TunaGuiMeasuredFallbackRetainedAnalysisBestEffort", StringComparison.Ordinal);
+        var guiFailureBranchIndex = scriptText.IndexOf("if ($guiSmokeExitCode -ne 0)", StringComparison.Ordinal);
+        var guiFailureThrowIndex = scriptText.IndexOf("GUI smoke failed with exit code", StringComparison.Ordinal);
+        var missingSummaryBranchIndex = scriptText.IndexOf("if (-not (Test-Path -LiteralPath $summaryPath -PathType Leaf))", StringComparison.Ordinal);
+        var missingSummaryThrowIndex = scriptText.IndexOf("GUI smoke did not write file-transfer Tuna summary", StringComparison.Ordinal);
+        Assert.True(failureAnalysisIndex >= 0, "Expected best-effort measured fallback analysis helper.");
+        Assert.True(guiFailureBranchIndex >= 0, "Expected GUI failure branch.");
+        Assert.True(guiFailureThrowIndex > guiFailureBranchIndex, "Expected GUI failure throw.");
+        Assert.Contains(
+            "Invoke-TunaGuiMeasuredFallbackRetainedAnalysisBestEffort",
+            scriptText[guiFailureBranchIndex..guiFailureThrowIndex],
+            StringComparison.Ordinal);
+        Assert.True(missingSummaryBranchIndex >= 0, "Expected missing-summary branch.");
+        Assert.True(missingSummaryThrowIndex > missingSummaryBranchIndex, "Expected missing-summary throw.");
+        Assert.Contains(
+            "Invoke-TunaGuiMeasuredFallbackRetainedAnalysisBestEffort",
+            scriptText[missingSummaryBranchIndex..missingSummaryThrowIndex],
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GuiSmokeWindows_ControlledFallbackWritesStablePhaseMarkersAndWaitsForSetupCleanup()
+    {
+        var repoRoot = FindRepoRoot();
+        var scriptPath = Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1");
+        var scriptText = File.ReadAllText(scriptPath);
+
+        Assert.Contains("phase=setup_file_tuna_v4_started", scriptText, StringComparison.Ordinal);
+        Assert.Contains("phase=setup_file_tuna_v4_terminal", scriptText, StringComparison.Ordinal);
+        Assert.Contains("phase=setup_file_tuna_v4_cleanup_closed", scriptText, StringComparison.Ordinal);
+        Assert.Contains("phase=measured_post_tuna_fallback_v6_started", scriptText, StringComparison.Ordinal);
+        Assert.Contains("phase=measured_post_tuna_fallback_v6_terminal", scriptText, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_data_session_removed", scriptText, StringComparison.Ordinal);
+        Assert.Contains("V4 restart precondition setup cleanup closed", scriptText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PreReleaseCheck_RunsRouteAcceptanceAfterPortableBeforeInstaller()
+    {
+        var repoRoot = FindRepoRoot();
+        var scriptPath = Path.Combine(repoRoot, "tools", "PreRelease-Check.ps1");
+        var scriptText = File.ReadAllText(scriptPath);
+
+        var portableIndex = scriptText.IndexOf("Build portable ZIP", StringComparison.Ordinal);
+        var routeAcceptanceIndex = scriptText.IndexOf("File transfer route acceptance gate", StringComparison.Ordinal);
+        var installerIndex = scriptText.IndexOf("Build installer", StringComparison.Ordinal);
+
+        Assert.True(portableIndex >= 0, "Expected portable build step.");
+        Assert.True(routeAcceptanceIndex > portableIndex, "Expected route acceptance after portable build.");
+        Assert.True(installerIndex > routeAcceptanceIndex, "Expected installer build after route acceptance.");
+        Assert.Contains("Run-FileTransferRouteAcceptance.ps1", scriptText, StringComparison.Ordinal);
+        Assert.Contains("NLINK_TUNA_TEST_WALLET_PASSWORD", scriptText, StringComparison.Ordinal);
+        Assert.Contains("FileTransferRouteAcceptanceWalletPassword", scriptText, StringComparison.Ordinal);
+        Assert.Contains("FileTransferRouteAcceptanceFallbackMaxAttempts", scriptText, StringComparison.Ordinal);
+        Assert.Contains("FileTransferRouteAcceptanceAllowExternalTransportWarnings", scriptText, StringComparison.Ordinal);
+        Assert.Contains("-FallbackMaxAttempts $FileTransferRouteAcceptanceFallbackMaxAttempts", scriptText, StringComparison.Ordinal);
+        Assert.Contains("-AllowExternalTransportWarnings $FileTransferRouteAcceptanceAllowExternalTransportWarnings", scriptText, StringComparison.Ordinal);
+        Assert.Contains("artifacts\\portable\\nLink\\win-x64\\nLink.exe", scriptText, StringComparison.Ordinal);
+        Assert.Contains("artifacts\\portable\\nLink\\win-x64\\tuna\\{0}\\nlink-tuna-sidecar.exe", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Build-Installer.ps1", scriptText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildPortable_BridgeBundleSuccessClearsRecoveredNativeExitCode()
+    {
+        var repoRoot = FindRepoRoot();
+        var scriptPath = Path.Combine(repoRoot, "installer", "Build-Portable.ps1");
+        var scriptText = File.ReadAllText(scriptPath);
+
+        var bridgeStepIndex = scriptText.IndexOf("Building bundled NKN bridge runtime", StringComparison.Ordinal);
+        var tunaStepIndex = scriptText.IndexOf("if (-not $SkipTunaSidecarBundle)", StringComparison.Ordinal);
+        Assert.True(bridgeStepIndex >= 0, "Expected portable build to invoke the bridge bundle step.");
+        Assert.True(tunaStepIndex > bridgeStepIndex, "Expected Tuna sidecar step after bridge bundle step.");
+
+        var bridgeBlock = scriptText[bridgeStepIndex..tunaStepIndex];
+        var scriptSucceededIndex = bridgeBlock.IndexOf("$bridgeBundleScriptSucceeded = $?", StringComparison.Ordinal);
+        var assertIndex = bridgeBlock.IndexOf("Assert-BridgeBundleRuntime -BridgeDir $bridgeBundleAbs", StringComparison.Ordinal);
+        var copyIndex = bridgeBlock.IndexOf("Copy-BridgeBundleToPortable", StringComparison.Ordinal);
+        var clearIndex = bridgeBlock.IndexOf("$global:LASTEXITCODE = 0", StringComparison.Ordinal);
+
+        Assert.True(scriptSucceededIndex >= 0, "Expected bridge bundle script success to be checked through PowerShell success state.");
+        Assert.True(assertIndex > scriptSucceededIndex, "Expected bridge output validation after script invocation.");
+        Assert.True(copyIndex > assertIndex, "Expected validated bridge output to be copied into the portable app.");
+        Assert.True(clearIndex > copyIndex, "Expected recovered stale native exit code to be cleared after validation.");
+        Assert.DoesNotContain("if ($LASTEXITCODE -ne 0)", bridgeBlock, StringComparison.Ordinal);
+        Assert.DoesNotContain("exit $LASTEXITCODE", bridgeBlock, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -463,6 +662,389 @@ public sealed class FileTransferOpsScriptsTests
 
         var decomposition = ReadArtifactReport(result.ArtifactDir, "throughput-decomposition-summary.txt");
         Assert.Equal("inconclusive", decomposition["likely_limiter"]);
+
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("legacy", route["route_consistency_verdict"]);
+        Assert.Equal("0", route["route_mismatch_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RouteConsistentRegularNknV4_ReturnsPass()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_route_regular_v4";
+        var result = await RunAnalyzeFixtureAsync(BuildRouteAwareCompletedFixture(
+            transferId,
+            route: "regular_nkn_v4_fast",
+            protocolVersion: 4,
+            runtimeProfile: "regular_nkn_v4_fast",
+            bridgeRecoveryPolicy: "regular_nkn_v4_fast",
+            runtimeEventName: "filetransfer_v4_sender_started"));
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("PASS", verdict["verdict"]);
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("pass", route["route_consistency_verdict"]);
+        Assert.Equal("0", route["route_mismatch_count"]);
+        Assert.Equal("regular_nkn_v4_fast", route["selected_routes"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RouteConsistentFileTunaV4_ReturnPass()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_route_file_tuna_v4";
+        var result = await RunAnalyzeFixtureAsync(BuildRouteAwareCompletedFixture(
+            transferId,
+            route: "file_tuna_v4",
+            protocolVersion: 4,
+            runtimeProfile: "file_tuna_v4_fast",
+            bridgeRecoveryPolicy: "tuna_strict",
+            runtimeEventName: "filetransfer_v4_sender_started"));
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("PASS", verdict["verdict"]);
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("pass", route["route_consistency_verdict"]);
+        Assert.Equal("0", route["route_mismatch_count"]);
+        Assert.Equal("file_tuna_v4", route["selected_routes"]);
+    }
+
+    [Theory]
+    [Trait("Category", "Smoke")]
+    [InlineData("post_tuna_fallback_v6", "default_v6", "post_tuna_fallback_strict")]
+    [InlineData("diagnostic_regular_nkn_v6", "primary_regular_nkn_bulk_v6", "primary_regular_nkn_quiet")]
+    public async Task AnalyzeRetained_RouteConsistentV6Routes_ReturnPass(
+        string routeToken,
+        string runtimeProfile,
+        string bridgeRecoveryPolicy)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var transferId = "transfer_route_pass_" + routeToken;
+        var result = await RunAnalyzeFixtureAsync(BuildRouteAwareCompletedFixture(
+            transferId,
+            route: routeToken,
+            protocolVersion: 6,
+            runtimeProfile: runtimeProfile,
+            bridgeRecoveryPolicy: bridgeRecoveryPolicy,
+            runtimeEventName: "filetransfer_v6_sender_started"));
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("PASS", verdict["verdict"]);
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("pass", route["route_consistency_verdict"]);
+        Assert.Equal("0", route["route_mismatch_count"]);
+        Assert.Equal(routeToken, route["selected_routes"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_LegacyFileTunaV6Route_RemainsParseCompatiblePass()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_route_legacy_file_tuna_v6";
+        var result = await RunAnalyzeFixtureAsync(BuildRouteAwareCompletedFixture(
+            transferId,
+            route: "file_tuna_v6",
+            protocolVersion: 6,
+            runtimeProfile: "default_v6",
+            bridgeRecoveryPolicy: "tuna_strict",
+            runtimeEventName: "filetransfer_v6_sender_started"));
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("PASS", verdict["verdict"]);
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("pass", route["route_consistency_verdict"]);
+        Assert.Equal("0", route["route_mismatch_count"]);
+        Assert.Equal("file_tuna_v6", route["selected_routes"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_DiagnosticRouteWithoutMarker_ReturnsProtocolFailure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_route_diagnostic_marker_missing";
+        var result = await RunAnalyzeFixtureAsync(BuildRouteAwareCompletedFixture(
+            transferId,
+            route: "diagnostic_regular_nkn_v6",
+            protocolVersion: 6,
+            runtimeProfile: "primary_regular_nkn_bulk_v6",
+            bridgeRecoveryPolicy: "primary_regular_nkn_quiet",
+            runtimeEventName: "filetransfer_v6_sender_started",
+            diagnosticMarkerOverride: "0"));
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        var routeText = File.ReadAllText(Path.Combine(result.ArtifactDir, "filetransfer-route-consistency-summary.txt"));
+        Assert.Contains("route_consistency_verdict=fail", routeText, StringComparison.Ordinal);
+        Assert.Contains("diagnostic route selected without diagnostic marker", routeText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RegularRouteWithV6Runtime_ReturnsProtocolFailure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_route_regular_v6_runtime";
+        var result = await RunAnalyzeFixtureAsync(BuildRouteAwareCompletedFixture(
+            transferId,
+            route: "regular_nkn_v4_fast",
+            protocolVersion: 4,
+            runtimeProfile: "regular_nkn_v4_fast",
+            bridgeRecoveryPolicy: "regular_nkn_v4_fast",
+            runtimeEventName: "filetransfer_v6_sender_started",
+            runtimeProtocolVersion: 6));
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("filetransfer-route-consistency-summary.txt", verdict["next_artifact"]);
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("fail", route["route_consistency_verdict"]);
+        Assert.NotEqual("0", route["route_mismatch_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_FileTunaV4RouteWithV6Runtime_ReturnsProtocolFailure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_route_tuna_v4_v6_runtime";
+        var result = await RunAnalyzeFixtureAsync(BuildRouteAwareCompletedFixture(
+            transferId,
+            route: "file_tuna_v4",
+            protocolVersion: 4,
+            runtimeProfile: "file_tuna_v4_fast",
+            bridgeRecoveryPolicy: "tuna_strict",
+            runtimeEventName: "filetransfer_v6_sender_started",
+            runtimeProtocolVersion: 6));
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("fail", route["route_consistency_verdict"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_PostTunaFallbackV6RouteWithV4Runtime_ReturnsProtocolFailure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_route_post_fallback_v4_runtime";
+        var result = await RunAnalyzeFixtureAsync(BuildRouteAwareCompletedFixture(
+            transferId,
+            route: "post_tuna_fallback_v6",
+            protocolVersion: 4,
+            runtimeProfile: "file_tuna_v4_fast",
+            bridgeRecoveryPolicy: "post_tuna_fallback_strict",
+            runtimeEventName: "filetransfer_v4_sender_started"));
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        var routeText = File.ReadAllText(Path.Combine(result.ArtifactDir, "filetransfer-route-consistency-summary.txt"));
+        Assert.Contains("route_consistency_verdict=fail", routeText, StringComparison.Ordinal);
+        Assert.Contains("route selected protocol mismatch", routeText, StringComparison.Ordinal);
+        Assert.Contains("V6 route entered regular V4 runtime", routeText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RouteBridgePolicyMismatch_ReturnsProtocolFailure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_route_bridge_mismatch";
+        var lines = BuildRouteAwareCompletedFixture(
+                transferId,
+                route: "post_tuna_fallback_v6",
+                protocolVersion: 6,
+                runtimeProfile: "default_v6",
+                bridgeRecoveryPolicy: "post_tuna_fallback_strict",
+                runtimeEventName: "filetransfer_v6_sender_started")
+            .Append(LogLine($"event=filetransfer_bridge_recovery_policy_selected; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; bridge_recovery_policy=tuna_strict"))
+            .ToArray();
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("fail", route["route_consistency_verdict"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_ControlledRestartTerminalSeparatedRoutes_ReturnsRouteConsistencyPass()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(BuildRouteAwareControlledRestartFixture(includeSetupTerminal: true));
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("pass", route["route_consistency_verdict"]);
+        Assert.Equal("0", route["route_mismatch_count"]);
+        Assert.Contains("file_tuna_v4", route["selected_routes"], StringComparison.Ordinal);
+        Assert.Contains("post_tuna_fallback_v6", route["selected_routes"], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_ControlledRestartRouteChangeBeforeTerminal_ReturnsProtocolFailure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(BuildRouteAwareControlledRestartFixture(includeSetupTerminal: false));
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        var routeText = File.ReadAllText(Path.Combine(result.ArtifactDir, "filetransfer-route-consistency-summary.txt"));
+        Assert.Contains("route_consistency_verdict=fail", routeText, StringComparison.Ordinal);
+        Assert.Contains("route changed before prior terminal", routeText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_MeasuredFallbackSliceOnly_ReturnsRouteConsistencyPass()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(BuildRouteAwareMeasuredFallbackFixture());
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("PASS", verdict["verdict"]);
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("pass", route["route_consistency_verdict"]);
+        Assert.Equal("post_tuna_fallback_v6", route["selected_routes"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_MeasuredFallbackLateSetupCancelFeedback_IsNotHardFailure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildRouteAwareMeasuredFallbackFixture().ToList();
+        var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
+        Assert.True(firstTerminalIndex > 0);
+        lines.Insert(
+            firstTerminalIndex,
+            LogLine("event=filetransfer_v4_feedback_both_failed; transport=nkn; transfer_id=[redacted]; session_id=sess_redacted; frame_type=filetransfer.cancel.v4; first_lane=control; second_lane=bulk; first_error=OperationCanceledException; second_error=OperationCanceledException"));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.NotEqual("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
+        Assert.Equal("0", stability["hard_failure_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_PostTunaFallbackRecoveredBridgeQueueClear_ReturnsWarningNotFailure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildRouteAwareMeasuredFallbackFixture().ToList();
+        var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
+        Assert.True(firstTerminalIndex > 0);
+        lines.InsertRange(
+            firstTerminalIndex,
+            [
+                LogLine("event=filetransfer_transport_epoch_started_while_unavailable; direction=outbound; transfer_id=[redacted]; session_id=sess_redacted; reason=transport_recovered_unproven; target_transport=regular_nkn"),
+                LogLine("event=nkn_bridge_bulk_queue_state; congested=0; severe=0; queue_depth=0; queued_bytes=0; oldest_queued_age_ms=0; in_flight=0; in_flight_bytes=0; configured_concurrency=4; effective_concurrency=4; cleared_since_last=5"),
+                LogLine("event=nkn_bridge_bulk_send_summary; frames_sent=17; frames_enqueued=22; payload_bytes_sent=847447; payload_bytes_per_second=423724; payload_bytes_enqueued=850237; payload_bytes_enqueued_per_second=425119; send_failures=0; queue_clears=5; queue_depth=0; queued_bytes=0; oldest_queued_age_ms=0; in_flight=0; configured_concurrency=4; effective_concurrency=4; in_flight_max=3; worker_utilization_percent=19; sample_window_ms=2000")
+            ]);
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("WARN_EXTERNAL_TRANSPORT", verdict["verdict"]);
+        Assert.Equal("recovered_post_tuna_fallback_bridge_clear", verdict["warning_kinds"]);
+        Assert.Contains("recovered post-Tuna fallback bridge queue clear", File.ReadAllText(Path.Combine(result.ArtifactDir, "stability-gates-summary.txt")), StringComparison.Ordinal);
+        var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
+        Assert.Equal("0", stability["hard_failure_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RegularRouteBridgeQueueClear_RemainsHardFailure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildRouteAwareCompletedFixture(
+            "transfer_regular_queue_clear",
+            route: "regular_nkn_v4_fast",
+            protocolVersion: 4,
+            runtimeProfile: "regular_nkn_v4_fast",
+            bridgeRecoveryPolicy: "regular_nkn_v4_fast",
+            runtimeEventName: "filetransfer_v4_sender_started").ToList();
+        var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
+        Assert.True(firstTerminalIndex > 0);
+        lines.Insert(
+            firstTerminalIndex,
+            LogLine("event=nkn_bridge_bulk_send_summary; frames_sent=17; payload_bytes_sent=847447; payload_bytes_per_second=423724; send_failures=0; queue_clears=5; queue_depth=0; queued_bytes=0; oldest_queued_age_ms=0; in_flight=0; configured_concurrency=4; effective_concurrency=4"));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Contains("bridge bulk send failure/clear", File.ReadAllText(Path.Combine(result.ArtifactDir, "stability-gates-summary.txt")), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2539,6 +3121,48 @@ public sealed class FileTransferOpsScriptsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_V4TerminalMissingWithRepairBackfill_ClassifiesRepairBeforeZeroReceiveSamples()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_v4_repair_backfill_timeout";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4; file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=conservative_nkn_startup"),
+            LogLine($"event=filetransfer_protocol_negotiated; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; bridge_recovery_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4"),
+            LogLine($"event=filetransfer_v4_sender_started; transfer_id={transferId}; session_id=sess_a; protocol_version=4; route=regular_nkn_v4_fast; runtime_profile=regular_nkn_v4_fast; frame_family=v4; bridge_recovery_policy=regular_nkn_v4_fast; chunk_size_bytes=21504; chunk_count=6242; pipeline_depth=8"),
+            LogLine($"event=filetransfer_v4_state_sent; transfer_id={transferId}; session_id=sess_a; reason=frontier_stall_repair_due; epoch=1589; contiguous_committed_chunk_index=2904; durable_received_highest_chunk_index=5639; credit_until_chunk_index_exclusive=6242; frontier_lag_chunks=2736; missing_range_count=1; frontier_stall_age_ms=847; terminal_ready=0"),
+            LogLine($"event=filetransfer_v4_state_received; transfer_id={transferId}; session_id=sess_a; epoch=1589; previous_epoch=1587; applied=1; stale=0; duplicate=0; contiguous_committed_chunk_index=2904; durable_received_highest_chunk_index=5639; credit_until_chunk_index_exclusive=6242; effective_credit_until_chunk_index_exclusive=6242; available_credit_bytes=0; missing_range_count=1; bytes_committed=88574976; terminal_ready=0"),
+            LogLine($"event=filetransfer_v4_repair_requested; transfer_id={transferId}; session_id=sess_a; repair_request_key=2904:12:2904:12; epoch=1589; attempt_count=1; range_count=1; requested_chunk_count=12; first_start_chunk_index=2904; last_end_chunk_exclusive=2916; frontier_stall_age_ms=847; repair_interval_ms=750"),
+            LogLine($"event=filetransfer_v4_repair_scheduled; transfer_id={transferId}; session_id=sess_a; repair_request_key=2904:12:2904:12; range_count=1; requested_chunk_count=12; scheduled_chunk_count=12; first_start_chunk_index=2904; last_end_chunk_exclusive=2916"),
+            LogLine($"event=filetransfer_v4_repair_sent; transfer_id={transferId}; session_id=sess_a; repair_request_key=2904:12:2904:12; range_count=1; requested_chunk_count=12; sent_chunk_count=12; repair_delivery_mode=control_bulk_escalated; repair_delivery_escalation_reason=first_send_credit_stall; first_start_chunk_index=2904; last_end_chunk_exclusive=2916; credit_exhausted_time_ms_at_repair=127766"),
+            LogLine($"event=filetransfer_v4_repair_filled; transfer_id={transferId}; session_id=sess_a; repair_request_key=2904:12:2904:12; first_start_chunk_index=2904; last_end_chunk_exclusive=2916; requested_chunk_count=12; attempt_count=1; request_to_fill_ms=731; contiguous_committed_chunk_index=2916; durable_received_highest_chunk_index=5639"),
+            LogLine($"event=filetransfer_v4_sender_pump_summary; transfer_id={transferId}; session_id=sess_a; sample_window_ms=2000; configured_depth=8; effective_depth=8; in_flight_frames=0; scheduled_frames=8; normal_scheduled_frames=0; repair_scheduled_frames=8; completed_frames=8; failed_frames=0; raw_bytes_sent=516096; batch_frames_sent=8; chunk_count_sent=24; repair_send_count=24; raw_bytes_sent_total=147507200; normal_raw_bytes_sent_total=134217728; repair_raw_bytes_sent_total=13289472; normal_chunk_count_sent_total=6242; repair_chunk_count_sent_total=618; credit_exhausted_time_ms=128084; available_credit_bytes=0; next_unsent_chunk_index=6242; credit_ceiling_chunk_index=6242; remote_frontier_chunk_index=2904; terminal_ready=0"),
+            LogLine("event=nkn_bridge_bulk_send_summary; frames_sent=344; frames_enqueued=344; payload_bytes_sent=22333168; payload_bytes_per_second=11166584; send_failures=0; queue_clears=0; queue_depth=0; configured_concurrency=4; effective_concurrency=4; in_flight_max=1; worker_utilization_percent=12; worker_saturation_percent=0; send_p95_ms=8"),
+            LogLine("event=screenshare_bridge_transport_health_summary; control_ready=1; media_ready=1; bulk_ready=1; frames_sent_since_last=346; control_messages_received_since_last=0; media_messages_received_since_last=0; bulk_messages_received_since_last=0; total_messages_received_since_last=0; control_last_received_age_ms=5000; media_last_received_age_ms=-1; bulk_last_received_age_ms=4000"),
+            LogLine("event=screenshare_bridge_transport_health_summary; control_ready=1; media_ready=1; bulk_ready=1; frames_sent_since_last=12; control_messages_received_since_last=0; media_messages_received_since_last=0; bulk_messages_received_since_last=0; total_messages_received_since_last=0; control_last_received_age_ms=7000; media_last_received_age_ms=-1; bulk_last_received_age_ms=6000")
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("INCONCLUSIVE", verdict["verdict"]);
+
+        var decomposition = ReadArtifactReport(result.ArtifactDir, "throughput-decomposition-summary.txt");
+        Assert.Equal("v4_missing_range_repair_limited", decomposition["likely_limiter"]);
+        Assert.Equal("2", decomposition["transport_ready_sending_zero_receive_window_count"]);
+        Assert.Equal("134217728", decomposition["v4_max_sender_pump_normal_raw_bytes_sent_total"]);
+        Assert.Equal("1", decomposition["v4_full_normal_payload_sent"]);
+        Assert.Equal("2904", decomposition["v4_latest_sender_remote_frontier_chunk_index"]);
+        Assert.Equal("2736", decomposition["v4_max_frontier_lag_chunks"]);
+        Assert.NotEqual("external_transport_limited", decomposition["likely_limiter"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_V4TailRepairSentButProgressTimeout_ClassifiesTailRepairNotFilled()
     {
         if (!OperatingSystem.IsWindows())
@@ -2648,6 +3272,7 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Equal("WARN_EXTERNAL_TRANSPORT", verdict["verdict"]);
         Assert.Equal("external-transport-health-summary.txt", verdict["next_artifact"]);
         Assert.Equal("0", verdict["hard_failure_count"]);
+        Assert.Equal("external_transport_churn", verdict["warning_kinds"]);
 
         var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
         Assert.Equal("0", stability["hard_failure_count"]);
@@ -2682,6 +3307,7 @@ public sealed class FileTransferOpsScriptsTests
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("WARN_EXTERNAL_TRANSPORT", verdict["verdict"]);
         Assert.Equal("external-transport-health-summary.txt", verdict["next_artifact"]);
+        Assert.Equal("external_transport_churn", verdict["warning_kinds"]);
     }
 
     [Fact]
@@ -2998,6 +3624,319 @@ if (-not $result.RegressionFailed) {
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task RunFileTransferRouteAcceptance_FakeModeProducesPassArtifacts()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "fake-pass");
+
+        try
+        {
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                BuildFakeRouteAcceptanceEnvironment("fake-pass"));
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"Expected fake route acceptance to pass.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+
+            AssertRequiredRouteAcceptanceArtifacts(runRoot);
+            var summary = ReadArtifactReport(runRoot, "route-acceptance-summary.txt");
+            Assert.Equal("PASS", summary["verdict"]);
+            Assert.Equal("4", summary["run_count"]);
+            Assert.Equal("0", summary["failure_count"]);
+            Assert.Equal("regular_nkn_v4_fast", summary["regular_nkn_64mb_quick.route"]);
+            Assert.Equal("4", summary["regular_nkn_64mb_quick.protocol"]);
+            Assert.Equal("regular_nkn_v4_fast", summary["regular_nkn_128mb_target.route"]);
+            Assert.Equal("4", summary["regular_nkn_128mb_target.protocol"]);
+            Assert.Equal("file_tuna_v4", summary["tuna_128mb_no_fault.route"]);
+            Assert.Equal("4", summary["tuna_128mb_no_fault.protocol"]);
+            Assert.Equal("post_tuna_fallback_v6", summary["tuna_128mb_fallback.route"]);
+            Assert.Equal("6", summary["tuna_128mb_fallback.protocol"]);
+            Assert.Equal("PASS", summary["tuna_128mb_fallback.operator_verdict"]);
+            Assert.Equal("1", summary["tuna_128mb_fallback.attempt_count"]);
+            Assert.Equal("0", summary["tuna_128mb_fallback.retry_used"]);
+            Assert.Equal("1", summary["tuna_128mb_fallback.selected_attempt"]);
+
+            var regularQuick = ReadArtifactReport(Path.Combine(runRoot, "regular-nkn-64mb-quick"), "filetransfer-live-nkn-summary.txt");
+            Assert.Equal("4", regularQuick["data_protocol_version"]);
+            Assert.Equal("0", regularQuick["bridge_bulk_send_failure_count"]);
+            var regularRoute = ReadArtifactReport(Path.Combine(runRoot, "regular-nkn-64mb-quick"), "filetransfer-route-consistency-summary.txt");
+            Assert.Equal("pass", regularRoute["route_consistency_verdict"]);
+            Assert.Equal("regular_nkn_v4_fast", regularRoute["selected_routes"]);
+
+            var tunaNoFault = File.ReadAllText(Path.Combine(runRoot, "tuna-128mb-no-fault", "filetransfer-tuna-gui-summary.json"));
+            Assert.Contains("\"goodputBytesPerSecond\"", tunaNoFault, StringComparison.Ordinal);
+            Assert.Contains("\"measuredPhase\"", tunaNoFault, StringComparison.Ordinal);
+            Assert.Contains("\"measured_file_tuna_v4\"", tunaNoFault, StringComparison.Ordinal);
+
+            var tunaFallback = File.ReadAllText(Path.Combine(runRoot, "tuna-128mb-fallback", "filetransfer-tuna-gui-summary.json"));
+            Assert.Contains("\"setupPhase\"", tunaFallback, StringComparison.Ordinal);
+            Assert.Contains("\"setup_file_tuna_v4\"", tunaFallback, StringComparison.Ordinal);
+            Assert.Contains("\"measuredPhase\"", tunaFallback, StringComparison.Ordinal);
+            Assert.Contains("\"measured_post_tuna_fallback_v6\"", tunaFallback, StringComparison.Ordinal);
+            Assert.Contains("\"controlledRestartAnalysis\"", tunaFallback, StringComparison.Ordinal);
+            Assert.True(File.Exists(Path.Combine(runRoot, "tuna-128mb-fallback", "filetransfer-retained-log-slice-full.log")));
+            Assert.True(File.Exists(Path.Combine(runRoot, "tuna-128mb-fallback", "filetransfer-setup-retained-log-slice.log")));
+            Assert.True(File.Exists(Path.Combine(runRoot, "tuna-128mb-fallback", "filetransfer-measured-fallback-retained-log-slice.log")));
+            Assert.True(Directory.Exists(Path.Combine(runRoot, "tuna-128mb-fallback", "attempt-1")));
+            Assert.True(File.Exists(Path.Combine(runRoot, "tuna-128mb-fallback", "attempt-1", "filetransfer-tuna-gui-summary.json")));
+            Assert.True(File.Exists(Path.Combine(runRoot, "tuna-128mb-fallback", "route-acceptance-attempts.json")));
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Theory]
+    [Trait("Category", "Smoke")]
+    [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_REGULAR_ROUTE", "file_tuna_v4", "selected route mismatch")]
+    [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_REGULAR_PROTOCOL", "6", "route consistency verdict is fail")]
+    [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_MISSING_ROUTE_SUMMARY", "1", "missing artifact: filetransfer-route-consistency-summary.txt")]
+    [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_REGULAR_BRIDGE_FAILURES", "1", "bridge_bulk_send_failure_count must be 0")]
+    [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ZOMBIE_TERMINAL", "1", "zombie terminal state observed")]
+    [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_REGULAR_GOODPUT_BPS", "1499999", "regular NKN goodput below floor")]
+    [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_TUNA_GOODPUT_BPS", "4000000", "Tuna goodput must be > 4000000")]
+    [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_TUNA_NOFAULT_FALLBACK", "1", "Tuna no-fault acceptance unexpectedly entered fallback")]
+    [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_TUNA_NOFAULT_ROUTE", "post_tuna_fallback_v6", "selected route mismatch")]
+    [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_TUNA_FALLBACK_ROUTE", "file_tuna_v4", "selected route mismatch")]
+    public async Task RunFileTransferRouteAcceptance_FakeModeFailsRouteGateMismatches(
+        string environmentName,
+        string environmentValue,
+        string expectedFailure)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "fake-fail");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("fake-fail");
+            environment[environmentName] = environmentValue;
+
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.True(File.Exists(Path.Combine(runRoot, "route-acceptance-summary.txt")), $"Expected route acceptance failure summary. STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+            var summaryText = File.ReadAllText(Path.Combine(runRoot, "route-acceptance-summary.txt"));
+            Assert.Contains("verdict=FAIL", summaryText, StringComparison.Ordinal);
+            Assert.Contains(expectedFailure, summaryText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RunFileTransferRouteAcceptance_FakeFallbackGoodputBelowTunaFloorStillPasses()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "fake-fallback-low-goodput");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("fake-fallback-low-goodput");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_TUNA_NOFAULT_GOODPUT_BPS"] = "5000000";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_TUNA_FALLBACK_GOODPUT_BPS"] = "1";
+
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"Expected low fallback goodput to remain informational.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+            var summary = ReadArtifactReport(runRoot, "route-acceptance-summary.txt");
+            Assert.Equal("PASS", summary["verdict"]);
+            Assert.Equal("post_tuna_fallback_v6", summary["tuna_128mb_fallback.route"]);
+            Assert.Equal("1.000", summary["tuna_128mb_fallback.goodput_bytes_per_second"]);
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RunFileTransferRouteAcceptance_FakeFallbackRetriesPreMeasuredTimeoutThenPasses()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "fake-fallback-retry");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("fake-fallback-retry");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_FALLBACK_RETRYABLE_ATTEMPT1"] = "1";
+
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"Expected retryable fallback fake to pass on attempt 2.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+            var summary = ReadArtifactReport(runRoot, "route-acceptance-summary.txt");
+            Assert.Equal("PASS", summary["verdict"]);
+            Assert.Equal("2", summary["tuna_128mb_fallback.attempt_count"]);
+            Assert.Equal("1", summary["tuna_128mb_fallback.retry_used"]);
+            Assert.Equal("2", summary["tuna_128mb_fallback.selected_attempt"]);
+            Assert.Contains("progress_timeout_before_measured_fallback_route", summary["tuna_128mb_fallback.first_failure_reason"], StringComparison.Ordinal);
+            Assert.True(Directory.Exists(Path.Combine(runRoot, "tuna-128mb-fallback", "attempt-1")));
+            Assert.True(Directory.Exists(Path.Combine(runRoot, "tuna-128mb-fallback", "attempt-2")));
+            Assert.True(File.Exists(Path.Combine(runRoot, "tuna-128mb-fallback", "attempt-1", "filetransfer-tuna-gui-error.json")));
+            Assert.True(File.Exists(Path.Combine(runRoot, "tuna-128mb-fallback", "attempt-2", "filetransfer-tuna-gui-summary.json")));
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RunFileTransferRouteAcceptance_FakeFallbackExhaustedRetriesFails()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "fake-fallback-exhausted");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("fake-fallback-exhausted");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_FALLBACK_RETRYABLE_ALWAYS"] = "1";
+
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.NotEqual(0, result.ExitCode);
+            var summaryText = File.ReadAllText(Path.Combine(runRoot, "route-acceptance-summary.txt"));
+            Assert.Contains("verdict=FAIL", summaryText, StringComparison.Ordinal);
+            Assert.Contains("fallback attempts exhausted before successful measured transfer", summaryText, StringComparison.Ordinal);
+            var summary = ReadArtifactReport(runRoot, "route-acceptance-summary.txt");
+            Assert.Equal("2", summary["tuna_128mb_fallback.attempt_count"]);
+            Assert.Equal("1", summary["tuna_128mb_fallback.retry_used"]);
+            Assert.Equal("0", summary["tuna_128mb_fallback.selected_attempt"]);
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Theory]
+    [Trait("Category", "Smoke")]
+    [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_TUNA_NOFAULT_EXTERNAL_WARNING", "tuna_128mb_no_fault", "external_transport_churn")]
+    [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_FALLBACK_RECOVERED_BRIDGE_WARNING", "tuna_128mb_fallback", "recovered_post_tuna_fallback_bridge_clear")]
+    public async Task RunFileTransferRouteAcceptance_FakeModeAcceptsAllowlistedOperatorWarnings(
+        string environmentName,
+        string runName,
+        string expectedWarningKind)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "fake-warning");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("fake-warning");
+            environment[environmentName] = "1";
+
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"Expected allowlisted operator warning to pass.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+            var summary = ReadArtifactReport(runRoot, "route-acceptance-summary.txt");
+            Assert.Equal("PASS", summary["verdict"]);
+            Assert.Equal("WARN_EXTERNAL_TRANSPORT", summary[$"{runName}.operator_verdict"]);
+            Assert.Equal("1", summary[$"{runName}.operator_accepted_with_warnings"]);
+            Assert.Equal(expectedWarningKind, summary[$"{runName}.warning_kinds"]);
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task RunFileTransferNknSoak_FakeNknFastProducesPassArtifacts()
     {
         if (!OperatingSystem.IsWindows())
@@ -3036,7 +3975,7 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("live-nkn", summary["artifact_kind"]);
             Assert.Equal("nkn-fast", summary["mode"]);
             Assert.Equal("1", summary["cycles_completed"]);
-            Assert.Equal("6", summary["data_protocol_version"]);
+            Assert.Equal("4", summary["data_protocol_version"]);
             Assert.Equal("v4_default_21k", summary["payload_efficiency_profile"]);
             Assert.Equal("expected", summary["bridge_config_status"]);
             Assert.Equal("4/8/4", summary["bridge_observed_topology"]);
@@ -3048,17 +3987,19 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("0", summary["bridge_bulk_send_failure_count"]);
 
             var protocolShape = File.ReadAllText(Path.Combine(artifactDir, "protocol-shape-summary.txt"));
-            Assert.Contains("filetransfer.chunk_batch.v6", protocolShape, StringComparison.Ordinal);
-            Assert.Contains("v6_sender_started_count=1", protocolShape, StringComparison.Ordinal);
+            Assert.Contains("filetransfer.chunk_batch.v4", protocolShape, StringComparison.Ordinal);
+            Assert.Contains("v4_sender_started_count=1", protocolShape, StringComparison.Ordinal);
+            Assert.Contains("v6_sender_started_count=0", protocolShape, StringComparison.Ordinal);
             Assert.Contains("v4_feedback_redundant_success_count=1", protocolShape, StringComparison.Ordinal);
 
             var baseline = ReadArtifactReport(artifactDir, "baseline-comparison.txt");
-            Assert.Equal("6", baseline["current_data_protocol_version"]);
+            Assert.Equal("4", baseline["current_data_protocol_version"]);
             Assert.Equal("1.000000", baseline["current_v4_batch_ratio"]);
 
             var promotion = ReadArtifactReport(artifactDir, "v4-promotion-decision.txt");
             Assert.Equal("hold_inconclusive", promotion["decision"]);
-            Assert.Equal("long_live_matrix_incomplete", promotion["reason"]);
+            Assert.Equal("non_v6_protocol", promotion["reason"]);
+            Assert.Equal("4", promotion["data_protocol_version"]);
             Assert.Equal("1", promotion["current_long_proof_completed_cycle_count"]);
             Assert.Equal("0", promotion["long_proof_matrix_complete"]);
         }
@@ -3070,7 +4011,7 @@ if (-not $result.RegressionFailed) {
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task RunFileTransferNknSoak_FakeV4LongProofAndBaselineRerunPromotes()
+    public async Task RunFileTransferNknSoak_FakeV4LongProofAndBaselineRerunHoldsRegularV4()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -3105,7 +4046,8 @@ if (-not $result.RegressionFailed) {
 
             var longDecision = ReadArtifactReport(safeDir, "v4-promotion-decision.txt");
             Assert.Equal("hold_inconclusive", longDecision["decision"]);
-            Assert.Equal("baseline_rerun_required", longDecision["reason"]);
+            Assert.Equal("non_v6_protocol", longDecision["reason"]);
+            Assert.Equal("4", longDecision["data_protocol_version"]);
             Assert.Equal("1500000.000", longDecision["target_goodput_bytes_per_second"]);
             Assert.Equal("1", longDecision["current_long_proof_matrix_complete"]);
             Assert.Equal("2", longDecision["current_long_proof_16m_completed_count"]);
@@ -3129,17 +4071,19 @@ if (-not $result.RegressionFailed) {
 
             Assert.True(
                 rerun.ExitCode == 0,
-                $"Expected fake V4 baseline rerun to promote.{Environment.NewLine}STDOUT:{Environment.NewLine}{rerun.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{rerun.Stderr}");
+                $"Expected fake V4 baseline rerun to complete cleanly.{Environment.NewLine}STDOUT:{Environment.NewLine}{rerun.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{rerun.Stderr}");
             AssertRequiredLiveArtifacts(rerunDir);
 
             var promotion = ReadArtifactReport(rerunDir, "v4-promotion-decision.txt");
-            Assert.Equal("promote_v6_file_only", promotion["decision"]);
-            Assert.Equal("promote", promotion["promotion_status"]);
-            Assert.Equal("long_proof_and_baseline_clean", promotion["reason"]);
+            Assert.Equal("hold_inconclusive", promotion["decision"]);
+            Assert.Equal("hold", promotion["promotion_status"]);
+            Assert.Equal("non_v6_protocol", promotion["reason"]);
+            Assert.Equal("4", promotion["data_protocol_version"]);
             Assert.Equal("1", promotion["safe_long_proof_matrix_complete"]);
-            Assert.Equal("1", promotion["same_protocol_v6_baseline_pass"]);
+            Assert.Equal("0", promotion["same_protocol_v6_baseline_pass"]);
             Assert.Equal("0", promotion["baseline_protocol_mismatch"]);
             Assert.Equal("0", promotion["baseline_regression_failed"]);
+            Assert.Equal("4", promotion["safe_data_protocol_version"]);
         }
         finally
         {
@@ -3149,7 +4093,7 @@ if (-not $result.RegressionFailed) {
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task RunFileTransferNknSoak_FakeV4LongProofBelowTargetSelectsSenderPumpIteration()
+    public async Task RunFileTransferNknSoak_FakeV4LongProofBelowTargetHoldsRegularV4()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -3185,10 +4129,11 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("v4_sender_pump_underfed", decomposition["likely_limiter"]);
 
             var promotion = ReadArtifactReport(artifactDir, "v4-promotion-decision.txt");
-            Assert.Equal("iterate_sender_pump", promotion["decision"]);
-            Assert.Equal("iterate", promotion["promotion_status"]);
-            Assert.Equal("goodput_target_not_met", promotion["reason"]);
-            Assert.Equal("sender_pump_scheduling_feed_capacity", promotion["next_focus"]);
+            Assert.Equal("hold_inconclusive", promotion["decision"]);
+            Assert.Equal("hold", promotion["promotion_status"]);
+            Assert.Equal("non_v6_protocol", promotion["reason"]);
+            Assert.Equal("fix_harness_or_analyzer_evidence", promotion["next_focus"]);
+            Assert.Equal("4", promotion["data_protocol_version"]);
             Assert.Equal("1500000.000", promotion["target_goodput_bytes_per_second"]);
             Assert.Equal("1", promotion["long_proof_matrix_complete"]);
             Assert.Equal("0", promotion["goodput_target_met"]);
@@ -3327,7 +4272,7 @@ if (-not $result.RegressionFailed) {
         {
             await File.WriteAllLinesAsync(
                 Path.Combine(safeDir, "filetransfer-live-nkn-summary.txt"),
-                BuildLiveSummaryLines(averageGoodput: 100_000, minimumGoodput: 100_000, bridgeWaiting: 0, protocolVersion: "6", v4BatchRatio: 1.0, v4PayloadFillPercent: 95.0),
+                BuildLiveSummaryLines(averageGoodput: 100_000, minimumGoodput: 100_000, bridgeWaiting: 0, protocolVersion: "4", v4BatchRatio: 1.0, v4PayloadFillPercent: 95.0),
                 new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
 
             var result = await RunPowerShellFileAsync(
@@ -3360,6 +4305,77 @@ if (-not $result.RegressionFailed) {
         {
             TryDeleteDirectory(tempRoot);
         }
+    }
+
+    private static string[] BuildRouteAwareCompletedFixture(
+        string transferId,
+        string route,
+        int protocolVersion,
+        string runtimeProfile,
+        string bridgeRecoveryPolicy,
+        string runtimeEventName,
+        int? runtimeProtocolVersion = null,
+        string? diagnosticMarkerOverride = null)
+    {
+        var effectiveRuntimeProtocolVersion = runtimeProtocolVersion ?? protocolVersion;
+        var frameFamily = protocolVersion == 6 ? "v6" : "v4";
+        var diagnosticMarker = diagnosticMarkerOverride ?? (route == "diagnostic_regular_nkn_v6" ? "1" : "0");
+        return
+        [
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_a; route={route}; protocol_version={protocolVersion}; runtime_profile={runtimeProfile}; frame_family={frameFamily}; handoff_kind=none; bridge_recovery_policy={bridgeRecoveryPolicy}; liveness_terminal_policy={route}; selection_reason=test_route; file_tuna_active={(route == "file_tuna_v4" || route == "file_tuna_v6" ? 1 : 0)}; post_tuna_fallback_active={(route == "post_tuna_fallback_v6" ? 1 : 0)}; diagnostic_regular_nkn_v6={diagnosticMarker}; transport_profile=default"),
+            LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id=sess_a; route={route}; protocol_version={protocolVersion}; runtime_profile={runtimeProfile}; frame_family={frameFamily}; handoff_kind=none; bridge_recovery_policy={bridgeRecoveryPolicy}; liveness_terminal_policy={route}; selection_reason=test_route; file_tuna_active={(route == "file_tuna_v4" || route == "file_tuna_v6" ? 1 : 0)}; post_tuna_fallback_active={(route == "post_tuna_fallback_v6" ? 1 : 0)}; diagnostic_regular_nkn_v6={diagnosticMarker}; transport_profile=default"),
+            LogLine($"event=filetransfer_protocol_negotiated; direction=outbound; transfer_id={transferId}; session_id=sess_a; route={route}; protocol_version={protocolVersion}; runtime_profile={runtimeProfile}; frame_family={frameFamily}; bridge_recovery_policy={bridgeRecoveryPolicy}; selection_reason=test_route"),
+            LogLine($"event=filetransfer_session_opened; direction=outbound; transfer_id={transferId}; session_id=sess_a; route={route}; protocol_version={protocolVersion}; runtime_profile={runtimeProfile}; frame_family={frameFamily}; bridge_recovery_policy={bridgeRecoveryPolicy}; reason=role=Sender"),
+            LogLine($"event={runtimeEventName}; direction=outbound; transfer_id={transferId}; session_id=sess_a; route={route}; protocol_version={effectiveRuntimeProtocolVersion}; runtime_profile={runtimeProfile}; frame_family={frameFamily}; bridge_recovery_policy={bridgeRecoveryPolicy}"),
+            LogLine($"event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={transferId}; session_id=sess_a; route={route}; protocol_version={effectiveRuntimeProtocolVersion}; runtime_profile={runtimeProfile}; frame_family={frameFamily}; bridge_recovery_policy={bridgeRecoveryPolicy}"),
+            LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=(none)"),
+            LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none)")
+        ];
+    }
+
+    private static string[] BuildRouteAwareControlledRestartFixture(bool includeSetupTerminal)
+    {
+        const string transferId = "[redacted]";
+        var lines = new List<string>
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=tuna_strict; liveness_terminal_policy=file_tuna_v4_fast; selection_reason=file_tuna_active; file_tuna_active=1; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=nkn"),
+            LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id=sess_redacted; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=tuna_strict; liveness_terminal_policy=file_tuna_v4_fast; selection_reason=file_tuna_active; file_tuna_active=1; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=nkn"),
+            LogLine($"event=filetransfer_session_opened; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; bridge_recovery_policy=tuna_strict; reason=role=Sender"),
+            LogLine($"event=filetransfer_v4_sender_started; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; bridge_recovery_policy=tuna_strict"),
+            LogLine($"event=filetransfer_v4_receiver_started; direction=inbound; transfer_id={transferId}; session_id=sess_redacted; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; bridge_recovery_policy=tuna_strict"),
+            LogLine($"event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={transferId}; session_id=sess_redacted; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; bridge_recovery_policy=tuna_strict"),
+            LogLine($"event=filetransfer_runtime_started; direction=inbound; role=receiver; transfer_id={transferId}; session_id=sess_redacted; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; bridge_recovery_policy=tuna_strict")
+        };
+
+        if (includeSetupTerminal)
+        {
+            lines.Add(LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_redacted; transfer_id={transferId}; state=Canceled; error_code=canceled_remote; saved_path=(none)"));
+            lines.Add(LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_redacted; transfer_id={transferId}; state=Canceled; error_code=canceled_local"));
+        }
+
+        lines.AddRange(BuildRouteAwareMeasuredFallbackFixture());
+        return lines.ToArray();
+    }
+
+    private static string[] BuildRouteAwareMeasuredFallbackFixture()
+    {
+        const string transferId = "[redacted]";
+        return
+        [
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6; selection_reason=post_tuna_file_fallback; file_tuna_active=0; post_tuna_fallback_active=1; diagnostic_regular_nkn_v6=0; transport_profile=nkn"),
+            LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6; selection_reason=post_tuna_file_fallback; file_tuna_active=0; post_tuna_fallback_active=1; diagnostic_regular_nkn_v6=0; transport_profile=nkn"),
+            LogLine($"event=filetransfer_protocol_negotiated; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; bridge_recovery_policy=post_tuna_fallback_strict; selection_reason=post_tuna_file_fallback"),
+            LogLine($"event=filetransfer_session_opened; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; bridge_recovery_policy=post_tuna_fallback_strict; reason=role=Sender"),
+            LogLine($"event=filetransfer_bridge_recovery_policy_selected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; bridge_recovery_policy=post_tuna_fallback_strict"),
+            LogLine($"event=filetransfer_v6_sender_started; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; bridge_recovery_policy=post_tuna_fallback_strict"),
+            LogLine($"event=filetransfer_v6_receiver_started; direction=inbound; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; bridge_recovery_policy=post_tuna_fallback_strict"),
+            LogLine($"event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; bridge_recovery_policy=post_tuna_fallback_strict"),
+            LogLine($"event=filetransfer_runtime_started; direction=inbound; role=receiver; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; bridge_recovery_policy=post_tuna_fallback_strict"),
+            LogLine($"event=filetransfer_binary_frame_sent; transfer_id={transferId}; session_id=sess_redacted; frame_type=filetransfer.chunk_batch.v6; chunk_index=0-31; payload_bytes=67108864; serialized_payload_bytes=67108864; raw_chunk_bytes=67108864; chunk_count=32"),
+            LogLine($"event=filetransfer_binary_frame_received; transfer_id={transferId}; session_id=sess_redacted; frame_type=filetransfer.chunk_batch.v6; chunk_index=0-31; raw_chunk_bytes=67108864; chunk_count=32"),
+            LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_redacted; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=(none); integrity_ok=1"),
+            LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_redacted; transfer_id={transferId}; state=Completed; error_code=(none); integrity_ok=1")
+        ];
     }
 
     private static string[] BuildCleanCompletedTransferFixture(string transferId)
@@ -3583,6 +4599,15 @@ if (-not $result.RegressionFailed) {
         return environment;
     }
 
+    private static Dictionary<string, string> BuildFakeRouteAcceptanceEnvironment(string timestamp)
+    {
+        return new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_GUI"] = "1",
+            ["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_TIMESTAMP"] = timestamp
+        };
+    }
+
     private static void AssertRequiredLiveArtifacts(string artifactDir)
     {
         foreach (var artifactName in RequiredLiveNknArtifactFiles.Concat(RequiredArtifactFiles))
@@ -3590,6 +4615,34 @@ if (-not $result.RegressionFailed) {
             Assert.True(
                 File.Exists(Path.Combine(artifactDir, artifactName)),
                 $"Expected live NKN artifact to exist: {Path.Combine(artifactDir, artifactName)}");
+        }
+    }
+
+    private static void AssertRequiredRouteAcceptanceArtifacts(string runRoot)
+    {
+        Assert.True(File.Exists(Path.Combine(runRoot, "route-acceptance-summary.txt")), "Expected route acceptance text summary.");
+        Assert.True(File.Exists(Path.Combine(runRoot, "route-acceptance-summary.json")), "Expected route acceptance JSON summary.");
+        foreach (var directoryName in RequiredRouteAcceptanceSubdirectories)
+        {
+            var artifactDir = Path.Combine(runRoot, directoryName);
+            Assert.True(Directory.Exists(artifactDir), $"Expected route acceptance subdirectory: {artifactDir}");
+            Assert.True(File.Exists(Path.Combine(artifactDir, "filetransfer-retained-log-slice.log")), $"Expected retained log slice in {artifactDir}");
+            Assert.True(File.Exists(Path.Combine(artifactDir, "filetransfer-route-consistency-summary.txt")), $"Expected route consistency summary in {artifactDir}");
+            Assert.True(File.Exists(Path.Combine(artifactDir, "transfer-terminal-summary.txt")), $"Expected terminal summary in {artifactDir}");
+        }
+
+        foreach (var directoryName in new[] { "regular-nkn-64mb-quick", "regular-nkn-128mb-target" })
+        {
+            var artifactDir = Path.Combine(runRoot, directoryName);
+            Assert.True(File.Exists(Path.Combine(artifactDir, "filetransfer-live-nkn-summary.txt")), $"Expected live NKN summary in {artifactDir}");
+            Assert.True(File.Exists(Path.Combine(artifactDir, "filetransfer-live-nkn-summary.json")), $"Expected live NKN JSON summary in {artifactDir}");
+            Assert.True(File.Exists(Path.Combine(artifactDir, "filetransfer-live-nkn-cycles.jsonl")), $"Expected live NKN cycles in {artifactDir}");
+        }
+
+        foreach (var directoryName in new[] { "tuna-128mb-no-fault", "tuna-128mb-fallback" })
+        {
+            var artifactDir = Path.Combine(runRoot, directoryName);
+            Assert.True(File.Exists(Path.Combine(artifactDir, "filetransfer-tuna-gui-summary.json")), $"Expected Tuna GUI summary in {artifactDir}");
         }
     }
 
