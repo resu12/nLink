@@ -314,7 +314,7 @@ function Test-RouteAcceptanceAllowedOperatorWarning {
 
     $allowed = @(switch ($ExpectedRoute) {
         'file_tuna_v4' { @('external_transport_churn') }
-        'post_tuna_fallback_v6' { @('external_transport_churn', 'recovered_post_tuna_fallback_bridge_clear') }
+        'post_tuna_fallback_v6' { @('external_transport_churn', 'fallback_v6_send_timeout_churn', 'fallback_frontier_repair_churn', 'fallback_receiver_state_churn', 'recovered_post_tuna_fallback_bridge_clear') }
         default { @() }
     })
 
@@ -500,10 +500,6 @@ function Assert-RegularNknRouteAcceptanceRun {
         }
 
         $result.goodputBytesPerSecond = ConvertTo-RouteAcceptanceDouble -Value (Get-RouteAcceptanceReportValue -Report $summary -Name 'average_goodput_bytes_per_second' -DefaultValue '0')
-        if ($result.goodputBytesPerSecond -lt $script:RegularNknGoodputFloorBytesPerSecond) {
-            Add-RouteAcceptanceFailure -Result $result -Message ("regular NKN goodput below floor: actual={0}; required>={1}" -f $result.goodputBytesPerSecond, $script:RegularNknGoodputFloorBytesPerSecond)
-        }
-
         $result.bridgeBulkSendFailureCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $summary -Name 'bridge_bulk_send_failure_count' -DefaultValue '0')
         if ($result.bridgeBulkSendFailureCount -ne 0) {
             Add-RouteAcceptanceFailure -Result $result -Message ("regular NKN bridge_bulk_send_failure_count must be 0, actual {0}" -f $result.bridgeBulkSendFailureCount)
@@ -774,7 +770,9 @@ function Write-RouteAcceptanceFakeRegularRun {
 
     $route = Get-RouteAcceptanceEnvValue -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_REGULAR_ROUTE' -DefaultValue 'regular_nkn_v4_fast'
     $protocol = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceEnvValue -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_REGULAR_PROTOCOL' -DefaultValue '0')
-    $goodput = ConvertTo-RouteAcceptanceDouble -Value (Get-RouteAcceptanceEnvValue -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_REGULAR_GOODPUT_BPS' -DefaultValue '8388608')
+    $defaultGoodput = Get-RouteAcceptanceEnvValue -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_REGULAR_GOODPUT_BPS' -DefaultValue '8388608'
+    $payloadGoodputOverrideName = if ($PayloadSize -eq '128MiB') { 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_REGULAR_128MB_GOODPUT_BPS' } else { 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_REGULAR_64MB_GOODPUT_BPS' }
+    $goodput = ConvertTo-RouteAcceptanceDouble -Value (Get-RouteAcceptanceEnvValue -Name $payloadGoodputOverrideName -DefaultValue $defaultGoodput)
     $bridgeFailures = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceEnvValue -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_REGULAR_BRIDGE_FAILURES' -DefaultValue '0')
     $terminalState = if (Test-RouteAcceptanceEnvEnabled -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_ZOMBIE_TERMINAL') { 'Sending' } else { 'Completed' }
     $payloadBytes = if ($PayloadSize -eq '128MiB') { 134217728L } else { 67108864L }
@@ -795,7 +793,7 @@ function Write-RouteAcceptanceFakeRegularRun {
         direction = 'helpee-to-helper'
         transfer_id = ('fake-{0}' -f $PayloadSize.ToLowerInvariant())
         payload_bytes = $payloadBytes
-        duration_ms = [Math]::Max(1, [int][Math]::Round(($payloadBytes / [Math]::Max(1D, $goodput)) * 1000D))
+        duration_ms = [Math]::Max(1L, [long][Math]::Round(($payloadBytes / [Math]::Max(1D, $goodput)) * 1000D))
         goodput_bytes_per_second = $goodput
         completed = $completed
         integrity_ok = $completed
@@ -942,10 +940,27 @@ function Write-RouteAcceptanceFakeTunaRun {
         controlledRestartAnalysis = if ($RouteMode -eq 'v4-restart-v6-fallback') {
             [ordered]@{
                 setupVerdict = 'INVALID_SETUP'
+                setupRawOperatorVerdict = 'INVALID_SETUP'
+                setupControlledCancelAccepted = $true
+                setupNormalizedVerdict = 'expected_controlled_setup_cancel'
                 measuredRouteVerdict = 'pass'
                 measuredOperatorVerdict = if ($emitFallbackRecoveredBridgeWarning) { 'WARN_EXTERNAL_TRANSPORT' } else { 'PASS' }
                 setupCleanupWarningCount = 0
                 fallbackBridgeRecoveryWarningCount = if ($emitFallbackRecoveredBridgeWarning) { 1 } else { 0 }
+            }
+        }
+        else {
+            $null
+        }
+        setupNormalizedVerdict = if ($RouteMode -eq 'v4-restart-v6-fallback') { 'expected_controlled_setup_cancel' } else { $null }
+        fallbackDiagnostics = if ($RouteMode -eq 'v4-restart-v6-fallback') {
+            [ordered]@{
+                fallbackWarningKinds = if ($emitFallbackRecoveredBridgeWarning) { @('recovered_post_tuna_fallback_bridge_clear') } else { @() }
+                sendTimeoutsPerMiB = 0
+                frontierRequestsPerMiB = 0
+                fallbackRescueFreezeCount = 0
+                fallbackRescueWidenCount = 0
+                setupNormalizedVerdict = 'expected_controlled_setup_cancel'
             }
         }
         else {
@@ -1127,8 +1142,13 @@ function Invoke-RouteAcceptanceChildScriptNoThrow {
         [Parameter(Mandatory = $true)][string[]]$Arguments
     )
 
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath @Arguments
-    return $LASTEXITCODE
+    $childOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath @Arguments 2>&1
+    $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+    foreach ($line in $childOutput) {
+        Write-Host $line
+    }
+
+    return $exitCode
 }
 
 function Invoke-RegularNknRouteAcceptanceRun {

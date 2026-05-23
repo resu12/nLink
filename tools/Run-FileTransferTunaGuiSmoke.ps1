@@ -6,7 +6,7 @@ param(
     [string]$PayerMode = "helpee",
     [ValidateSet("none", "switch-off", "sidecar-kill")]
     [string]$Fault = "switch-off",
-    [ValidateSet("handoff-fallback", "preactivated", "post-fallback", "v4-restart-v6-fallback")]
+    [ValidateSet("handoff-fallback", "preactivated", "post-fallback", "v4-restart-v6-fallback", "live-v4-switch-off")]
     [string]$RouteMode = "handoff-fallback",
     [ValidateSet("helpee-to-helper", "helper-to-helpee")]
     [string]$Direction = "helpee-to-helper",
@@ -227,6 +227,20 @@ function Count-TunaGuiReportMatchingLines {
     return @((Get-Content -LiteralPath $ReportPath) | Select-String -Pattern $Pattern).Count
 }
 
+function Split-TunaGuiTokenList {
+    param([AllowNull()][string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value) -or $Value -eq '(none)') {
+        return @()
+    }
+
+    return @(
+        $Value.Split([char]',', [System.StringSplitOptions]::RemoveEmptyEntries) |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_ -ne '(none)' }
+    )
+}
+
 function Get-TunaGuiLogEventCount {
     param(
         [string[]]$Lines,
@@ -249,8 +263,13 @@ function Get-TunaGuiMeasuredFallbackDiagnostics {
     $highestObservedChunk = -1
     $finalTerminalState = '(none)'
     $bridgeQueueClearCount = 0
+    $payloadBytes = 0
     foreach ($line in $lines) {
         $text = [string]$line
+        if ($text -match 'file_size_bytes=([0-9]+)') {
+            $payloadBytes = [Math]::Max($payloadBytes, [long]$Matches[1])
+        }
+
         if ($text -match 'next_chunk_index=([0-9]+)') {
             $lastCommittedChunk = [Math]::Max($lastCommittedChunk, [int]$Matches[1])
         }
@@ -276,16 +295,30 @@ function Get-TunaGuiMeasuredFallbackDiagnostics {
         }
     }
 
+    $frontierRequestCount = Get-TunaGuiLogEventCount -Lines $lines -EventName 'filetransfer_v6_frontier_request_sent'
+    $v6ChunkSendTimeoutCount = Get-TunaGuiLogEventCount -Lines $lines -EventName 'filetransfer_v6_chunk_batch_send_timeout'
+    $payloadMiB = if ($payloadBytes -gt 0) { [double]$payloadBytes / 1048576.0 } else { 0.0 }
+    $operatorWarningKinds = @()
+    $operatorVerdictPath = Join-Path $ArtifactDir 'measured-fallback-analysis\filetransfer-operator-verdict.txt'
+    if (Test-Path -LiteralPath $operatorVerdictPath -PathType Leaf) {
+        $operatorWarningKinds = @(Split-TunaGuiTokenList -Value (Read-TunaGuiReportValue -ReportPath $operatorVerdictPath -Key 'warning_kinds' -DefaultValue '(none)'))
+    }
+
     return [ordered]@{
         measuredSlicePresent = (Test-Path -LiteralPath $measuredPath -PathType Leaf)
         lastCommittedChunk = $lastCommittedChunk
         highestObservedChunk = $highestObservedChunk
-        frontierRequestCount = Get-TunaGuiLogEventCount -Lines $lines -EventName 'filetransfer_v6_frontier_request_sent'
+        frontierRequestCount = $frontierRequestCount
         duplicateFrontierRequestCount = Get-TunaGuiLogEventCount -Lines $lines -EventName 'filetransfer_v6_frontier_request_duplicate_ignored'
         receiverStateDeferredCount = Get-TunaGuiLogEventCount -Lines $lines -EventName 'filetransfer_v6_receiver_state_deferred'
         receiverStateCoalescedCount = Get-TunaGuiLogEventCount -Lines $lines -EventName 'filetransfer_v6_receiver_state_coalesced'
-        v6ChunkSendTimeoutCount = Get-TunaGuiLogEventCount -Lines $lines -EventName 'filetransfer_v6_chunk_batch_send_timeout'
+        v6ChunkSendTimeoutCount = $v6ChunkSendTimeoutCount
         bridgeQueueClearCount = $bridgeQueueClearCount
+        fallbackWarningKinds = @($operatorWarningKinds)
+        sendTimeoutsPerMiB = if ($payloadMiB -gt 0.0) { [Math]::Round([double]$v6ChunkSendTimeoutCount / $payloadMiB, 3) } else { 0.0 }
+        frontierRequestsPerMiB = if ($payloadMiB -gt 0.0) { [Math]::Round([double]$frontierRequestCount / $payloadMiB, 3) } else { 0.0 }
+        fallbackRescueFreezeCount = Get-TunaGuiLogEventCount -Lines $lines -EventName 'filetransfer_v6_post_tuna_fallback_normal_send_ahead_freeze_started'
+        fallbackRescueWidenCount = Get-TunaGuiLogEventCount -Lines $lines -EventName 'filetransfer_v6_post_tuna_fallback_frontier_rescue_widened'
         finalTerminalState = $finalTerminalState
     }
 }
@@ -324,6 +357,46 @@ function Resolve-TunaGuiControlledRestartFailurePhase {
     }
 
     return 'measured_terminal_failure'
+}
+
+function Test-TunaGuiControlledSetupCancelAccepted {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [AllowNull()]$Summary
+    )
+
+    if ($null -eq $Summary -or
+        -not ($Summary.PSObject.Properties.Name -contains 'setupPhase') -or
+        $null -eq $Summary.setupPhase) {
+        return $false
+    }
+
+    $setup = $Summary.setupPhase
+    $route = if ($setup.PSObject.Properties.Name -contains 'route') { [string]$setup.route } else { '' }
+    $protocol = if ($setup.PSObject.Properties.Name -contains 'protocolVersion') { [int]$setup.protocolVersion } else { 0 }
+    $inboundState = if ($setup.PSObject.Properties.Name -contains 'inboundState') { [string]$setup.inboundState } else { '' }
+    $outboundState = if ($setup.PSObject.Properties.Name -contains 'outboundState') { [string]$setup.outboundState } else { '' }
+    $inboundError = if ($setup.PSObject.Properties.Name -contains 'inboundErrorCode') { [string]$setup.inboundErrorCode } else { '' }
+    $outboundError = if ($setup.PSObject.Properties.Name -contains 'outboundErrorCode') { [string]$setup.outboundErrorCode } else { '' }
+    if ($route -ne 'file_tuna_v4' -or
+        $protocol -ne 4 -or
+        $inboundState -ne 'Canceled' -or
+        $outboundState -ne 'Canceled' -or
+        $inboundError -ne 'canceled_remote' -or
+        $outboundError -ne 'canceled_local') {
+        return $false
+    }
+
+    $setupPath = Join-Path $ArtifactDir 'filetransfer-setup-retained-log-slice.log'
+    $measuredPath = Join-Path $ArtifactDir 'filetransfer-measured-fallback-retained-log-slice.log'
+    if (-not (Test-Path -LiteralPath $setupPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $measuredPath -PathType Leaf)) {
+        return $false
+    }
+
+    $setupClosed = @(Get-Content -LiteralPath $setupPath | Where-Object { ([string]$_).IndexOf('phase=setup_file_tuna_v4_cleanup_closed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count -gt 0
+    $measuredStarted = @(Get-Content -LiteralPath $measuredPath | Where-Object { ([string]$_).IndexOf('phase=measured_post_tuna_fallback_v6_started', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count -gt 0
+    return $setupClosed -and $measuredStarted
 }
 
 function Write-TunaGuiControlledRestartFailureSummary {
@@ -373,13 +446,21 @@ function Update-TunaGuiControlledRestartSummary {
     $measuredStabilityPath = Join-Path $ArtifactDir 'measured-fallback-analysis\stability-gates-summary.txt'
     $fallbackDiagnostics = Get-TunaGuiMeasuredFallbackDiagnostics -ArtifactDir $ArtifactDir
     $fallbackFailurePhase = Resolve-TunaGuiControlledRestartFailurePhase -Summary $summary -ErrorSummary $null -FallbackDiagnostics $fallbackDiagnostics
+    $setupRawOperatorVerdict = Read-TunaGuiReportValue -ReportPath $setupVerdictPath -Key 'verdict' -DefaultValue '(missing)'
+    $setupControlledCancelAccepted = Test-TunaGuiControlledSetupCancelAccepted -ArtifactDir $ArtifactDir -Summary $summary
+    $setupNormalizedVerdict = if ($setupControlledCancelAccepted) { 'expected_controlled_setup_cancel' } else { $setupRawOperatorVerdict }
+    $fallbackDiagnostics['setupNormalizedVerdict'] = $setupNormalizedVerdict
     $summary | Add-Member -NotePropertyName controlledRestartAnalysis -NotePropertyValue ([ordered]@{
-        setupVerdict = Read-TunaGuiReportValue -ReportPath $setupVerdictPath -Key 'verdict' -DefaultValue '(missing)'
+        setupVerdict = $setupRawOperatorVerdict
+        setupRawOperatorVerdict = $setupRawOperatorVerdict
+        setupControlledCancelAccepted = $setupControlledCancelAccepted
+        setupNormalizedVerdict = $setupNormalizedVerdict
         measuredRouteVerdict = Read-TunaGuiReportValue -ReportPath $measuredRoutePath -Key 'route_consistency_verdict' -DefaultValue '(missing)'
         measuredOperatorVerdict = Read-TunaGuiReportValue -ReportPath $measuredVerdictPath -Key 'verdict' -DefaultValue '(missing)'
         setupCleanupWarningCount = $FilteredSetupCleanupLineCount
         fallbackBridgeRecoveryWarningCount = Count-TunaGuiReportMatchingLines -ReportPath $measuredStabilityPath -Pattern 'recovered post-Tuna fallback bridge queue clear'
     }) -Force
+    $summary | Add-Member -NotePropertyName setupNormalizedVerdict -NotePropertyValue $setupNormalizedVerdict -Force
     $summary | Add-Member -NotePropertyName fallbackFailurePhase -NotePropertyValue $fallbackFailurePhase -Force
     $summary | Add-Member -NotePropertyName fallbackFailureReason -NotePropertyValue '(none)' -Force
     $summary | Add-Member -NotePropertyName fallbackDiagnostics -NotePropertyValue $fallbackDiagnostics -Force
@@ -520,7 +601,7 @@ try {
         Invoke-TunaGuiMeasuredFallbackRetainedAnalysis -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir -LogPath $slices.MeasuredPath
         Update-TunaGuiControlledRestartSummary -ArtifactDir $resolvedArtifactDir -FilteredSetupCleanupLineCount ([int]$slices.FilteredSetupCleanupLineCount)
     }
-    elseif ($RouteMode -eq 'preactivated') {
+    elseif ($RouteMode -eq 'preactivated' -or $RouteMode -eq 'live-v4-switch-off') {
         $retainedPath = Join-Path $resolvedArtifactDir 'filetransfer-retained-log-slice.log'
         Invoke-TunaGuiRetainedAnalysis -RepoRoot $repoRoot -AnalysisDir $resolvedArtifactDir -LogPath $retainedPath
     }

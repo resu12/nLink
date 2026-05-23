@@ -1200,6 +1200,7 @@ public sealed partial class SessionFileTransferService
         context.PullTransportRebindGeneration = 0;
         context.PullTransportLastSafetyReplayGeneration = 0;
         context.PullTransportLastSafetyReplayFrontierChunkIndex = -1;
+        context.PullTransportLastSafetyReplayEndChunkIndex = -1;
         context.PullTransportLastSafetyReplayUtc = null;
         context.PullTransportSafetyReplayRearmCount = 0;
         context.PullTransportFrontierOnlyRepairActive = false;

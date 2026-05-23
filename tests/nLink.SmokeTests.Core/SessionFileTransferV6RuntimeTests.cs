@@ -177,7 +177,7 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
     {
         const string transferId = "transfer_v6_sender_frontier_request_no_ack";
         const string sessionId = "session_v6_sender_frontier_request_no_ack";
-        var payload = Enumerable.Range(0, 512_000).Select(static index => (byte)(index % 251)).ToArray();
+        var payload = Enumerable.Range(0, 1_000_000).Select(static index => (byte)(index % 251)).ToArray();
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
         EnsureV6RouteForTest(senderTransport);
@@ -1870,6 +1870,28 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         await WaitUntilAsync(
             () => receiverTransport.SentDataFrames.OfType<FileTransferFrontierRequestFrameV6>().Count() > frontierRequestCount,
             timeoutMs: 5000);
+        var secondFrontierRequest = receiverTransport.SentDataFrames
+            .OfType<FileTransferFrontierRequestFrameV6>()
+            .Last();
+        Assert.Equal(0, secondFrontierRequest.MissingRanges[0].StartChunkIndex);
+        Assert.Equal(1, secondFrontierRequest.MissingRanges[0].ChunkCount);
+        frontierRequestCount = receiverTransport.SentDataFrames.OfType<FileTransferFrontierRequestFrameV6>().Count();
+
+        await Task.Delay(850);
+        await senderSession.SendAsync(
+            new FileTransferChunkBatchFrameV6
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                StartChunkIndex = 15,
+                ChunkCount = 1,
+                DataSegments = [payload.Skip(15 * chunkSize).Take(chunkSize).ToArray()],
+            },
+            CancellationToken.None);
+
+        await WaitUntilAsync(
+            () => receiverTransport.SentDataFrames.OfType<FileTransferFrontierRequestFrameV6>().Count() > frontierRequestCount,
+            timeoutMs: 5000);
         var widenedFrontierRequest = receiverTransport.SentDataFrames
             .OfType<FileTransferFrontierRequestFrameV6>()
             .Last();
@@ -1882,6 +1904,7 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         Assert.Contains("event=filetransfer_v6_post_tuna_fallback_frontier_rescue_requested", logTail, StringComparison.Ordinal);
         Assert.Contains("rescue_step=0", logTail, StringComparison.Ordinal);
         Assert.Contains("rescue_step=1", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v6_post_tuna_fallback_frontier_rescue_widened", logTail, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2104,8 +2127,8 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
                     Epoch = 1,
                     ContiguousCommittedChunkIndex = 0,
                     DurableReceivedHighestChunkIndex = -1,
-                    CreditUntilChunkIndexExclusive = 12,
-                    MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = 0, ChunkCount = 12 }],
+                    CreditUntilChunkIndexExclusive = 64,
+                    MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = 0, ChunkCount = 64 }],
                     BytesCommitted = 0,
                 },
                 CancellationToken.None);
@@ -2506,7 +2529,7 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
     }
 
     [Fact]
-    public async Task V6Sender_RequeuesRegularNknNormalBatchAfterSendTimeout()
+    public async Task V6Sender_RequeuesPostTunaFallbackBatchAfterSendTimeout()
     {
         const string transferId = "transfer_v6_sender_regular_nkn_timeout_requeue";
         const string sessionId = "session_v6_sender_regular_nkn_timeout_requeue";
@@ -2514,6 +2537,8 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         var previousTimeout = SessionFileTransferService.V6SenderTransportSendTimeoutOverrideForTests;
         SessionFileTransferService.V6SenderTransportSendTimeoutOverrideForTests = TimeSpan.FromMilliseconds(100);
         var injectedTimeoutCount = 0;
+        var delayedStartChunkIndex = -1;
+        string? delayedPriority = null;
         var payload = Enumerable.Range(0, 512_000).Select(static index => (byte)(index % 251)).ToArray();
 
         try
@@ -2524,10 +2549,10 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
             senderTransport.OutboundDataFrameDeliveryOverrideWithLaneAsync = async (_, frame, _, ct) =>
             {
                 if (frame is FileTransferChunkBatchFrameV6 batch &&
-                    batch.StartChunkIndex == 0 &&
-                    string.IsNullOrWhiteSpace(batch.Priority) &&
                     Interlocked.CompareExchange(ref injectedTimeoutCount, 1, 0) == 0)
                 {
+                    Volatile.Write(ref delayedStartChunkIndex, batch.StartChunkIndex);
+                    delayedPriority = batch.Priority;
                     await Task.Delay(TimeSpan.FromSeconds(30), ct);
                     return true;
                 }
@@ -2566,14 +2591,28 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
                 timeoutMs: 5000);
 
             await WaitUntilAsync(
-                () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Count(static batch =>
-                    batch.StartChunkIndex == 0 &&
-                    string.IsNullOrWhiteSpace(batch.Priority)) >= 2,
+                () =>
+                {
+                    var startChunkIndex = Volatile.Read(ref delayedStartChunkIndex);
+                    if (startChunkIndex < 0)
+                    {
+                        return false;
+                    }
+
+                    return senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Count(batch =>
+                        batch.StartChunkIndex == startChunkIndex &&
+                        string.Equals(batch.Priority ?? string.Empty, delayedPriority ?? string.Empty, StringComparison.Ordinal)) >= 2 ||
+                        senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(batch =>
+                            batch.StartChunkIndex == 0 &&
+                            batch.ChunkCount == 1 &&
+                            string.Equals(batch.Priority, "frontier", StringComparison.OrdinalIgnoreCase));
+                },
                 timeoutMs: 5000);
 
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=filetransfer_v6_chunk_batch_send_timeout", logTail, StringComparison.Ordinal);
             Assert.Contains("event=filetransfer_v6_chunk_batch_send_timeout_requeue", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_v6_post_tuna_fallback_send_timeout_requeued", logTail, StringComparison.Ordinal);
             Assert.Contains("requeued_chunk_count=", logTail, StringComparison.Ordinal);
             Assert.Contains("reason=requeued", logTail, StringComparison.Ordinal);
             Assert.NotEqual(FileTransferTransferState.Failed, sender.Snapshot.Outbound?.State);

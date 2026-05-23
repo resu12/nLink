@@ -38,6 +38,17 @@ public interface IFileTransferReceiveRecoveryController
     void RequestFileTransferReceiveRecovery(FileTransferReceiveRecoveryRequest request);
 }
 
+public sealed record FileTransferRouteCompletedNotification(
+    string SessionId,
+    string TransferId,
+    string RouteToken,
+    int ProtocolVersion);
+
+public interface IFileTransferRouteCompletionObserver
+{
+    void ObserveFileTransferRouteCompleted(FileTransferRouteCompletedNotification notification);
+}
+
 public interface IFileTransferSignalingTransport
 {
     event EventHandler<FileTransferOfferReceivedEventArgs>? FileTransferOfferReceived;

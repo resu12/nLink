@@ -1,16 +1,26 @@
 # File Transfer Soak Workflow
 
-This workflow targets the current V6-only file-transfer protocol. V5, V4, null, or mismatched peers must fail cleanly as transport-incompatible; do not re-enable legacy data-protocol compatibility during soak triage.
+This workflow targets the current route-aware file-transfer model:
+
+- regular NKN -> `regular_nkn_v4_fast`, protocol `4`,
+- active file Tuna -> `file_tuna_v4`, protocol `4`,
+- controlled post-Tuna fallback -> fresh one-shot `post_tuna_fallback_v6`, protocol `6`,
+- diagnostic regular-NKN V6 -> `diagnostic_regular_nkn_v6`, explicit unsafe developer/test opt-in only.
+
+V5 and legacy active `file_tuna_v6` evidence are obsolete protocol inputs and should fail retained analysis or payload parsing. Do not re-enable legacy data-protocol compatibility during soak triage.
 
 ## Guardrails
 
 - Production bridge defaults remain unchanged.
-- Regular NKN control remains authoritative for lifecycle, liveness, V6 epoch acknowledgements, and terminalization.
-- Tuna remains experimental and default-off unless the Phase 6 paid gate passes.
+- Regular NKN control remains authoritative for lifecycle, liveness, route negotiation, V6 fallback proof, and terminalization.
+- Tuna remains experimental and default-off unless explicitly enabled for a test or session.
 - Do not redesign screen sharing, wallet UX, payer policy, caps, sidecar startup, installer behavior, or Diagnostics/Options UI while tuning file-transfer soak.
 - All generated artifacts must stay under repo `artifacts/`. Manual scripts and runbooks must never delete or clean Downloads or other user data folders.
 - Run .NET tests serially on Windows to avoid DLL file locks; see `docs/build-test-lock-avoidance.md`.
 - Regular NKN promotion uses a `1.5 MB/s` app-goodput target. Prefer stability, terminal correctness, and payload efficiency over chasing higher burst speed on variable public NKN paths.
+- Active Tuna no-fault acceptance uses a strict `> 4,000,000 B/s` goodput floor.
+- Controlled fallback has no speed floor; survival, SHA/integrity, terminals, and route correctness are the gate.
+- A successful controlled fallback must consume the post-fallback state; the next new file transfer should be `regular_nkn_v4_fast` / protocol `4`, not another `post_tuna_fallback_v6`, unless a new fallback event occurs.
 
 ## Common Runs
 
@@ -30,7 +40,7 @@ Supported operator modes:
 - `AnalyzeRetained`
 - `SupportCapture`
 
-Local V6 file-only proof:
+Local route/runtime proof:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\FileTransfer-Ops.ps1 -Mode LocalFast -PayloadSizes 16MiB -Cycles 1 -Build -FailOnGate
@@ -52,123 +62,119 @@ Use the regular-NKN GUI soak when the installed app appears slow:
 .\tools\Run-FileTransferNknSoak.ps1 -Mode nkn-fast -ExePath ".\src\nLink.App\bin\Release\net8.0\nLink.exe" -PayloadSizes "128MB" -Cycles 1 -Direction helpee-to-helper -CycleTimeoutSeconds 240 -ProgressTimeoutSeconds 90 -TimeoutSeconds 360 -ExternalTopologyProfile Default -PayloadEfficiencyProfile Auto -FailOnGate
 ```
 
-Read `filetransfer-live-nkn-summary.txt`, `transfer-terminal-summary.txt`, `throughput-summary.txt`, and `payload-efficiency-summary.txt` together. A clean terminal pass below `1.5 MB/s` is still a regression candidate when raw sent bytes, unsolicited chunks, or late sender frames show poor efficiency.
+Read `filetransfer-live-nkn-summary.txt`, `transfer-terminal-summary.txt`, `throughput-summary.txt`, `payload-efficiency-summary.txt`, and `filetransfer-route-consistency-summary.txt` together.
 
-Recent regular-NKN reference cells:
+Clean regular-NKN evidence should show:
 
-- `artifacts/filetransfer-soak/20260515-172434/`: completed with clean terminals but regressed efficiency; `946,388 B/s`, raw sent `270,413,824` bytes for `128MB`, `v6_unsolicited_chunk_ignored_count=5086`, `post_completion_late_sender_frame=416`.
-- `artifacts/filetransfer-soak/20260515-173810/`: current fixed reference; completed with clean terminals, `1,626,888 B/s`, raw sent `144,926,720` bytes for `128MB`, `v6_unsolicited_chunk_ignored_count=574`, `post_completion_late_sender_frame=0`.
+- route `regular_nkn_v4_fast`,
+- protocol `4`,
+- completed sender and receiver terminals,
+- SHA/integrity OK,
+- `bridge_bulk_send_failure_count=0`,
+- no regular-NKN bridge queue clear,
+- average goodput recorded against the `1,500,000 B/s` target when compared with the current 0.6.2-style baseline; on public NKN, below-target goodput is triage evidence rather than an automatic release blocker when route, integrity, terminal, and bridge-failure gates pass.
 
-The V6 regular-NKN near-frontier normal resend bypass is intentionally narrow. It should recover a non-advancing frontier without continuously refilling stale chunks while the receiver frontier is already moving.
+Recent route reference cells:
 
-## Phase 6 Paid Tuna Gate
+- `artifacts/filetransfer-route-ab/fallback-improvement-final-20260522T204000Z/regular-nkn-v4-64mb-r2/`: regular NKN V4 passed with SHA OK, completed terminals, no bridge bulk send failures, and `1,769,711 B/s`.
+- `artifacts/filetransfer-route-ab/fallback-improvement-final-20260522T204000Z/tuna-v4-64mb-r2/`: active Tuna V4 passed with SHA OK, completed terminals, and `4,087,486 B/s`.
+- `artifacts/filetransfer-route-ab/fallback-improvement-final-20260522T204000Z/tuna-fallback-64mb/`: controlled fallback passed with setup `file_tuna_v4` canceled cleanly and measured `post_tuna_fallback_v6` completed at `1,419,766 B/s`.
 
-Before paid Tuna time:
+Older V6 regular-NKN artifacts remain useful as regression history only. They are not current production-route baselines.
+
+## Route Acceptance Gate
+
+Before installer creation, run the route acceptance gate from an interactive Windows desktop with a packaged app, sidecar, and test wallet:
 
 ```powershell
-dotnet build src\nLink.App\nLink.App.csproj -c Release -m:1 -nr:false -p:UseSharedCompilation=false
-$version = (Get-Content VERSION -Raw).Trim()
-go -C tools\nkn-tuna-sidecar build -ldflags "-X main.sidecarVersion=$version" -o ..\..\artifacts\tuna-sidecar\nlink-tuna-sidecar.exe .
-dotnet test tests\nLink.SmokeTests.Core\nLink.SmokeTests.Core.csproj --filter "FullyQualifiedName~SessionFileTransferV6TunaIntegrationTests|FullyQualifiedName~SessionFileTransferV6TransportEpochTests|FullyQualifiedName~SessionFileTransferV6RuntimeTests|FullyQualifiedName~SessionFileTransferPauseTests|FullyQualifiedName~NknAccelerationTransportTests|FullyQualifiedName~NknFileTransferTransportTests|FullyQualifiedName~DiagnosticsAndLoggingTests|FullyQualifiedName~FileTransferOpsScriptsTests" -c Release -m:1 -nr:false -p:UseSharedCompilation=false
-dotnet build tests\nLink.OptInTests.BridgeManual\nLink.OptInTests.BridgeManual.csproj -c Release -m:1 -nr:false -p:UseSharedCompilation=false
-dotnet build-server shutdown
-```
-
-Run the short paid matrix only from an explicit opt-in shell:
-
-```powershell
-$env:NLINK_RUN_MANUAL_BRIDGE = "1"
-$env:NLINK_RUN_TUNA_PHASE6_SHORT_MATRIX = "1"
 $env:NLINK_TUNA_TEST_WALLET_PASSWORD = "<session-only test wallet password>"
-dotnet test tests\nLink.OptInTests.BridgeManual\nLink.OptInTests.BridgeManual.csproj -c Release --no-build --no-restore --filter "FullyQualifiedName~TunaSidecarPhase6_ShortPaidMatrix"
-dotnet build-server shutdown
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Run-FileTransferRouteAcceptance.ps1 `
+  -ExePath ".\artifacts\portable\nLink\win-x64\nLink.exe" `
+  -WalletPath ".\artifacts\tuna-poc\wallet-test-nkn.json" `
+  -SidecarPath ".\artifacts\portable\nLink\win-x64\tuna\win-x64\nlink-tuna-sidecar.exe" `
+  -FallbackMaxAttempts 2 `
+  -AllowExternalTransportWarnings $true
 ```
 
-The Phase 6 short matrix writes artifacts under `artifacts/tuna-sidecar/phase6-short-<timestamp>/`. Read `phase6-operator-verdict.txt` first, then keep `summary.json`, `runs.jsonl`, redacted app log tail, listener stdout/stderr, and sidecar cleanup evidence.
+The gate writes `route-acceptance-summary.txt` and `route-acceptance-summary.json` under `artifacts/filetransfer-route-acceptance/<timestamp>/`.
 
-## Paid Tuna GUI Handoff/Fallback Smoke
+Required matrix:
+
+- regular NKN 64 MiB quick,
+- regular NKN 128 MiB target,
+- active Tuna V4 128 MiB no-fault,
+- controlled restart fallback 128 MiB.
+
+Fallback retry is allowed only for retryable pre-measured failures, such as measured fallback never starting or a progress timeout before measured fallback produced terminal/integrity evidence. Route mismatch, protocol mismatch, missing `filetransfer_route_selected`, SHA failure, terminal failure, zombie terminal, diagnostic V6 during acceptance, or regular-NKN bridge bulk failure must not be retried into a pass.
+
+## Paid Tuna GUI Smoke
 
 Use the GUI smoke when the visual file-transfer card, pause/resume buttons, or session shell behavior needs to be exercised with real windows. This is an opt-in paid test and writes artifacts under `artifacts/gui-smoke/`.
+
+Active Tuna V4 no-fault:
 
 ```powershell
 $env:NLINK_TUNA_TEST_WALLET_PASSWORD = "<session-only test wallet password>"
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Run-FileTransferTunaGuiSmoke.ps1 `
+  -RouteMode preactivated `
+  -Fault none `
   -WalletPath ".\artifacts\tuna-poc\wallet-test-nkn.json" `
   -PayerMode helpee `
-  -Fault switch-off `
   -Direction helpee-to-helper `
   -PayloadSize 128MiB
 ```
 
-The runner launches two GUI app instances, connects them over NKN, starts a regular-NKN V6 file transfer, unlocks Tuna during the active transfer to prove `NormalToTunaActivation`, then triggers fallback and waits for completion. It also clicks Pause/Resume by default and verifies `pause_control.v6` lifecycle evidence.
-
-Useful variants:
+Controlled V4 setup -> V6 fallback restart:
 
 ```powershell
-# Kill the payer-side Tuna sidecar instead of switching Tuna off.
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Run-FileTransferTunaGuiSmoke.ps1 -Fault sidecar-kill
-
-# Exercise helper-paid Tuna.
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Run-FileTransferTunaGuiSmoke.ps1 -PayerMode helper -Direction helper-to-helpee
+$env:NLINK_TUNA_TEST_WALLET_PASSWORD = "<session-only test wallet password>"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Run-FileTransferTunaGuiSmoke.ps1 `
+  -RouteMode v4-restart-v6-fallback `
+  -Fault switch-off `
+  -WalletPath ".\artifacts\tuna-poc\wallet-test-nkn.json" `
+  -PayerMode helpee `
+  -Direction helpee-to-helper `
+  -PayloadSize 128MiB
 ```
 
-The GUI summary is written to `filetransfer-tuna-gui-summary.json`. Required evidence includes V6 sender/receiver start, `tuna_acceleration_negotiated`, terminal sender/receiver completion, SHA match, and no peer-disconnect or heartbeat-timeout evidence. Clean activation runs require a recovered `NormalToTunaActivation` epoch unless Tuna drops before proof and a fallback epoch starts; fallback runs require a recovered or explicitly waiting `TunaToNormalFallback` or `RegularNknRecovery` epoch.
+The GUI summary is written to `filetransfer-tuna-gui-summary.json`.
 
-File-transfer progress is committed-frontier based. On sparse destinations the receiver may accept far-ahead chunks, but the UI should report only contiguous committed bytes. During Tuna fallback or NKN receive-stall recovery it is normal for visible progress to pause, then jump when the missing frontier chunk arrives. Treat this as a bug only if the sender keeps sending unrequested chunks, committed progress stops until timeout, SHA validation fails, or sender/receiver terminal states diverge.
+For active Tuna, required evidence includes:
 
-Recent local GUI reference cells:
+- measured route `file_tuna_v4`,
+- protocol `4`,
+- V4 sender/receiver start,
+- `tuna_acceleration_negotiated`,
+- Tuna-accelerated file frame evidence,
+- terminal sender/receiver completion,
+- SHA match.
 
-- `artifacts/gui-smoke/tuna-filetransfer-20260513T200617Z/`: 128 MiB clean activation, completed, SHA match, no fallback.
-- `artifacts/gui-smoke/tuna-filetransfer-20260513T201011Z/`: 128 MiB switch-off fallback, completed, SHA match.
-- `artifacts/gui-smoke/tuna-filetransfer-20260513T201750Z/`: 128 MiB sidecar-kill fallback, completed, SHA match.
-- `artifacts/gui-smoke/tuna-filetransfer-20260513T202236Z/`: 512 MiB sidecar-kill fallback, completed, SHA match after regular-NKN receive-stall recovery.
+For controlled fallback, required evidence includes:
 
-Provider readiness warnings are now split so diagnostic degraded startup can be distinguished from a persistent provider-path problem:
+- setup phase `setup_file_tuna_v4`,
+- setup route `file_tuna_v4`,
+- setup protocol `4`,
+- clean local setup cancel/cleanup marker before measured fallback starts,
+- measured phase `measured_post_tuna_fallback_v6`,
+- measured route `post_tuna_fallback_v6`,
+- measured protocol `6`,
+- terminal sender/receiver completion,
+- SHA match.
+- next-transfer route `regular_nkn_v4_fast` / protocol `4` after successful measured fallback completion.
 
-- `providerDegradedAccepted` means the listener started with 3 usable Tuna paths under an explicit degraded-readiness diagnostic override.
-- `providerRecoveredAfterDegraded` means usable paths later reached the full 4-path target.
-- `providerStillDegradedAtEnd` means the cell ended before full 4-path readiness was observed, and the verdict reports `provider_paths_degraded`.
-- `providerQualityClass` is one of `full_ready`, `degraded_recovered`, `persistent_missing_path`, `timeout_before_degraded`, or `unknown`.
-- `provider-quality-report.json` is written beside `summary.json` and should be used to compare default strict readiness against explicit degraded-readiness diagnostic runs.
-- `activation_cleanup_late_peer_close` is a clean-activation warning only: full bytes, SHA match, and terminal sender/receiver snapshots are accepted even if peer-close evidence arrives late or is absent.
+The measured fallback retained slice is authoritative for fallback gating:
 
-Provider-path A/B troubleshooting sequence:
-
-```powershell
-# Strict runtime-equivalent behavior.
-$env:NLINK_TUNA_TEST_REQUIRE_PROVIDER_READY = "1"
-$env:NLINK_TUNA_TEST_PROVIDER_READY_ATTEMPTS = "3"
-$env:NLINK_TUNA_SOAK_CELL_FILTER = "phase6-tuna-file-helper-receiving-both-activation,phase6-tuna-file-helpee-receiving-both-activation,phase6-tuna-file-helpee-receiving-helper-cap"
-dotnet test tests\nLink.OptInTests.BridgeManual\nLink.OptInTests.BridgeManual.csproj -c Release --no-build --no-restore --filter "FullyQualifiedName~TunaSidecarPhase6_ShortPaidMatrix"
-
-# Degraded diagnostic: wait up to 20 seconds for the fourth provider path before accepting degraded readiness.
-$env:NLINK_TUNA_TEST_REQUIRE_PROVIDER_READY = $null
-$env:NLINK_TUNA_TEST_PROVIDER_READY_ATTEMPTS = $null
-$env:NLINK_TUNA_TEST_DEGRADED_PROVIDER_GRACE_SECONDS = "20"
-dotnet test tests\nLink.OptInTests.BridgeManual\nLink.OptInTests.BridgeManual.csproj -c Release --no-build --no-restore --filter "FullyQualifiedName~TunaSidecarPhase6_ShortPaidMatrix"
-
-# Strict retry: require full 4-path readiness, with up to three attempts.
-$env:NLINK_TUNA_TEST_DEGRADED_PROVIDER_GRACE_SECONDS = $null
-$env:NLINK_TUNA_TEST_REQUIRE_PROVIDER_READY = "1"
-$env:NLINK_TUNA_TEST_PROVIDER_READY_ATTEMPTS = "3"
-dotnet test tests\nLink.OptInTests.BridgeManual\nLink.OptInTests.BridgeManual.csproj -c Release --no-build --no-restore --filter "FullyQualifiedName~TunaSidecarPhase6_ShortPaidMatrix"
-```
-
-Latest local Phase 6 reference run:
-
-- Artifact root: `artifacts/tuna-sidecar/phase6-short-20260512T151146Z/`
-- Verdict: `PASS`
-- Cells: `12/12`
-- Notes: this historical run allowed degraded 3-path provider startup and all cells reported `provider_paths_degraded`; treat it as V6 protocol/fallback evidence only. Current runtime policy requires full provider readiness before Tuna is advertised as usable.
-
-The short matrix covers exactly 12 file-transfer cells: helper-receiving and helpee-receiving, each across helpee-only unlocked, helper-only unlocked, and both-unlocked payer modes, with one clean activation and one payer-specific fallback fault per payer. Helpee-only uses switch-off fallback, helper-only uses cap reached, and both-unlocked uses sidecar drop.
+- `filetransfer-retained-log-slice-full.log` keeps the complete run,
+- `filetransfer-setup-retained-log-slice.log` keeps setup evidence,
+- `filetransfer-measured-fallback-retained-log-slice.log` keeps measured fallback evidence,
+- `measured-fallback-analysis/filetransfer-route-consistency-summary.txt` and `filetransfer-operator-verdict.txt` gate the measured fallback.
 
 ## Evidence
 
 Primary artifacts:
 
 - `filetransfer-operator-verdict.txt`
-- `phase6-operator-verdict.txt`
+- `filetransfer-route-consistency-summary.txt`
 - `filetransfer-live-nkn-summary.txt`
 - `transfer-terminal-summary.txt`
 - `protocol-shape-summary.txt`
@@ -180,19 +186,22 @@ Primary artifacts:
 - `stability-gates-summary.txt`
 - `baseline-comparison.txt`
 
-Acceptance for V6/Tuna Phase 6:
+Acceptance expectations:
 
 - Completed transfers have SHA match.
-- `data_protocol_version=6`.
-- V6 epoch logs show start plus recovered, waiting, or terminal state as appropriate.
-- Recovery is proven by `filetransfer.transport_probe.v6` acknowledgement or `filetransfer.repair_proof.v6`, not by generic bridge ready, sidecar ready, send success, or bulk bytes.
+- Route/protocol/runtime/frame-family/bridge-policy evidence matches the selected route.
+- Route-aware logs include `filetransfer_route_selected`.
+- Regular NKN and active Tuna use protocol `4`.
+- Controlled fallback measured transfer uses protocol `6`.
 - No stuck `Sending...` or `Receiving...` card after cancel, peer close, session end, window close, or app exit.
 - Cancel from either side and peer close terminalize locally first and notify the peer over regular NKN control.
 - No orphan active sidecar remains after fallback/reset.
-- No payload rejects, decode failures, message rejects, bridge bulk failures, media queue severe events, progress timeout, false recovery, or unresolved V6 epoch except an explicit `Waiting for regular NKN` fault result.
+- No payload rejects, decode failures, message rejects, bridge bulk failures, media queue severe events, progress timeout, false recovery, or unresolved V6 fallback state.
+
+Recovered post-Tuna fallback bridge queue-clear evidence may be warning-only after the measured fallback has route consistency, SHA OK, and completed terminals. The same evidence remains a hard failure for regular NKN.
 
 ## Promotion Checks
 
-Do not promote from a one-cycle smoke, an inconclusive run, a progress timeout, a cross-protocol baseline, or any run with hard failure counters. Baseline comparison gates only when current and baseline artifacts both report `data_protocol_version=6`; protocol mismatches are report-only.
+Do not promote from a one-cycle smoke, an inconclusive run, a progress timeout, a cross-protocol baseline, or any run with hard failure counters.
 
-Legacy names such as `v4_default_21k`, `v4_*` event names, or V4-named test files may still appear in internal logs while older helper names are retired. They do not mean the negotiated data protocol is V4.
+Protocol mismatches are report-only only when comparing historical artifacts. Current route acceptance treats mismatches as hard failures.

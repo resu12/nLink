@@ -430,7 +430,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             : null;
     private PeerAddress? HelperIdentityForDisplay =>
         HelperRequestTargetAddress ??
-        (bootstrapHelperIdentityIsAuthoritative ? bootstrapHelperIdentity : null);
+        bootstrapHelperIdentity;
     private bool IsNknTransport =>
         string.Equals(transportConfig.Key, "NKN", StringComparison.OrdinalIgnoreCase);
     private bool RequiresHelperIdentityBootstrap =>

@@ -502,6 +502,79 @@ function Get-FileTransferPostTunaFallbackBridgeClearWarningEvents {
     )
 }
 
+function Test-FileTransferPostTunaFallbackWarningEligible {
+    param([Parameter(Mandatory = $true)]$Summary)
+
+    return (Test-FileTransferCleanTerminalCompletion -Summary $Summary) -and
+        (Test-FileTransferRouteConsistencyClean -Summary $Summary) -and
+        (Test-FileTransferSummarySelectedRoute -Summary $Summary -Route 'post_tuna_fallback_v6')
+}
+
+function Get-FileTransferPostTunaFallbackSendTimeoutWarningEvents {
+    param([Parameter(Mandatory = $true)]$Summary)
+
+    if (-not (Test-FileTransferPostTunaFallbackWarningEligible -Summary $Summary)) {
+        return @()
+    }
+
+    return @(
+        $Summary.TransferEvents |
+            Where-Object {
+                $_.EventName -eq 'filetransfer_v6_chunk_batch_send_timeout' -or
+                $_.EventName -eq 'filetransfer_v6_post_tuna_fallback_send_timeout_requeued' -or
+                $_.EventName -eq 'filetransfer_v6_post_tuna_fallback_send_timeout_frontier_repair_queued'
+            } |
+            Select-Object -First 10
+    )
+}
+
+function Get-FileTransferPostTunaFallbackFrontierRepairWarningEvents {
+    param([Parameter(Mandatory = $true)]$Summary)
+
+    if (-not (Test-FileTransferPostTunaFallbackWarningEligible -Summary $Summary)) {
+        return @()
+    }
+
+    $events = @(
+        $Summary.TransferEvents |
+            Where-Object {
+                ($_.EventName -eq 'filetransfer_v6_frontier_request_sent' -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'post_tuna_fallback_survival' -Default 0) -gt 0) -or
+                $_.EventName -eq 'filetransfer_v6_post_tuna_fallback_frontier_rescue_requested' -or
+                $_.EventName -eq 'filetransfer_v6_post_tuna_fallback_frontier_rescue_widened' -or
+                $_.EventName -eq 'filetransfer_v6_frontier_request_duplicate_ignored'
+            }
+    )
+
+    if ($events.Count -lt 10) {
+        return @()
+    }
+
+    return @($events | Select-Object -First 10)
+}
+
+function Get-FileTransferPostTunaFallbackReceiverStateWarningEvents {
+    param([Parameter(Mandatory = $true)]$Summary)
+
+    if (-not (Test-FileTransferPostTunaFallbackWarningEligible -Summary $Summary)) {
+        return @()
+    }
+
+    $events = @(
+        $Summary.TransferEvents |
+            Where-Object {
+                $_.EventName -eq 'filetransfer_v6_receiver_state_deferred' -or
+                $_.EventName -eq 'filetransfer_v6_receiver_state_coalesced'
+            }
+    )
+
+    if ($events.Count -lt 256) {
+        return @()
+    }
+
+    return @($events | Select-Object -First 10)
+}
+
 function Test-FileTransferBenignControlOnlyReceiveEvent {
     param($Event)
 
@@ -812,6 +885,9 @@ function Get-FileTransferStabilizationGateResult {
     $cohabitationWarnings = @(Get-FileTransferCohabitationWarningEvents -Summary $Summary)
     $externalWarnings = @(Get-FileTransferExternalTransportWarningEvents -Summary $Summary)
     $fallbackBridgeClearWarnings = @(Get-FileTransferPostTunaFallbackBridgeClearWarningEvents -Summary $Summary)
+    $fallbackSendTimeoutWarnings = @(Get-FileTransferPostTunaFallbackSendTimeoutWarningEvents -Summary $Summary)
+    $fallbackFrontierRepairWarnings = @(Get-FileTransferPostTunaFallbackFrontierRepairWarningEvents -Summary $Summary)
+    $fallbackReceiverStateWarnings = @(Get-FileTransferPostTunaFallbackReceiverStateWarningEvents -Summary $Summary)
     $pressureWarnings = @(Get-FileTransferRecoveredPressureWarningEvents -Summary $Summary)
 
     if ($cohabitationWarnings.Count -gt 0) {
@@ -819,15 +895,43 @@ function Get-FileTransferStabilizationGateResult {
         $nextArtifact = 'coexistence-summary.txt'
         Add-FileTransferGateFinding -List $warnings -Finding 'screen-share media pressure overlapped the completed transfer'
     }
-    elseif ($fallbackBridgeClearWarnings.Count -gt 0) {
+    elseif ($fallbackBridgeClearWarnings.Count -gt 0 -or
+            $fallbackSendTimeoutWarnings.Count -gt 0 -or
+            $fallbackFrontierRepairWarnings.Count -gt 0 -or
+            $fallbackReceiverStateWarnings.Count -gt 0 -or
+            $externalWarnings.Count -gt 0) {
         $verdict = 'WARN_EXTERNAL_TRANSPORT'
-        $nextArtifact = 'stability-gates-summary.txt'
-        Add-FileTransferGateFinding -List $warnings -Finding 'recovered post-Tuna fallback bridge queue clear overlapped the completed transfer'
-    }
-    elseif ($externalWarnings.Count -gt 0) {
-        $verdict = 'WARN_EXTERNAL_TRANSPORT'
-        $nextArtifact = 'external-transport-health-summary.txt'
-        Add-FileTransferGateFinding -List $warnings -Finding 'external bridge/NKN health churn overlapped the completed transfer'
+        $nextArtifact = if ($fallbackSendTimeoutWarnings.Count -gt 0 -or
+            $fallbackFrontierRepairWarnings.Count -gt 0 -or
+            $fallbackReceiverStateWarnings.Count -gt 0) {
+            'repair-reorder-summary.txt'
+        }
+        elseif ($fallbackBridgeClearWarnings.Count -gt 0) {
+            'stability-gates-summary.txt'
+        }
+        else {
+            'external-transport-health-summary.txt'
+        }
+
+        if ($fallbackBridgeClearWarnings.Count -gt 0) {
+            Add-FileTransferGateFinding -List $warnings -Finding 'recovered post-Tuna fallback bridge queue clear overlapped the completed transfer'
+        }
+
+        if ($fallbackSendTimeoutWarnings.Count -gt 0) {
+            Add-FileTransferGateFinding -List $warnings -Finding 'post-Tuna fallback V6 send timeout churn recovered before terminal completion'
+        }
+
+        if ($fallbackFrontierRepairWarnings.Count -gt 0) {
+            Add-FileTransferGateFinding -List $warnings -Finding 'post-Tuna fallback frontier repair churn recovered before terminal completion'
+        }
+
+        if ($fallbackReceiverStateWarnings.Count -gt 0) {
+            Add-FileTransferGateFinding -List $warnings -Finding 'post-Tuna fallback receiver state churn recovered before terminal completion'
+        }
+
+        if ($externalWarnings.Count -gt 0) {
+            Add-FileTransferGateFinding -List $warnings -Finding 'external bridge/NKN health churn overlapped the completed transfer'
+        }
     }
     elseif ($pressureWarnings.Count -gt 0) {
         $verdict = 'WARN_RECOVERED_PRESSURE'
@@ -835,7 +939,7 @@ function Get-FileTransferStabilizationGateResult {
         Add-FileTransferGateFinding -List $warnings -Finding 'repair/reorder/degraded pressure recovered before terminal completion'
     }
 
-    $evidence = @($cohabitationWarnings + $fallbackBridgeClearWarnings + $externalWarnings + $pressureWarnings + $Summary.TerminalEvents | Select-Object -First 30)
+    $evidence = @($cohabitationWarnings + $fallbackBridgeClearWarnings + $fallbackSendTimeoutWarnings + $fallbackFrontierRepairWarnings + $fallbackReceiverStateWarnings + $externalWarnings + $pressureWarnings + $Summary.TerminalEvents | Select-Object -First 30)
 
     return [pscustomobject]@{
         Verdict = $verdict

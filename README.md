@@ -10,7 +10,7 @@ Minimal `.NET 8` / Avalonia desktop app for Windows with deterministic smoke tes
 
 ## Current Release (0.7.0)
 
-`0.7.0` is the current release. It keeps the H.264 screen-sharing and normal NKN transport defaults, moves file transfer to the V6 data protocol, and adds the experimental Options Tuna wallet-linking UX while keeping Tuna runtime acceleration disabled unless explicitly enabled through the advanced opt-in path.
+`0.7.0` is the current release. It keeps the H.264 screen-sharing and normal NKN transport defaults, keeps regular file transfer on the stable V4 route, uses active file Tuna as a V4 acceleration route, and reserves V6 file transfer for one-shot controlled post-Tuna fallback or explicit unsafe diagnostic runs. It also adds the experimental Options Tuna wallet-linking UX while keeping Tuna runtime acceleration disabled unless explicitly enabled through the advanced opt-in path.
 
 ## Quick Start (Windows)
 
@@ -60,15 +60,16 @@ Notes:
 - Options -> Settings includes Balanced, High quality, Tuna quality, and High performance screen-share presets. High quality now opts into 24 capture FPS / 15 transport FPS over normal NKN, while Tuna quality remains the higher-bandwidth preset recommended for Tuna-enabled screen sharing.
 - The helper-side cursor overlay, H.264 motion/keyframe safeguards, WGC GPU scaling, and same-apartment Win10 WGC teardown remain enabled.
 - Chat UX keeps `Enter` to send, `Shift+Enter` for a new line, stable pane sizing in chat-only and screen-sharing layouts, and message entry remains available during screen sharing.
-- File transfer in `0.7.0` is V6-only and single-file only. No folders, drag-and-drop, or resume after restart yet.
+- File transfer in `0.7.0` is single-file only. No folders, drag-and-drop, or resume after restart yet.
+- Route defaults are explicit: regular NKN uses `regular_nkn_v4_fast` / protocol `4`, active file Tuna uses `file_tuna_v4` / protocol `4`, and controlled post-Tuna fallback uses a fresh one-shot `post_tuna_fallback_v6` / protocol `6` transfer. After a successful post-Tuna fallback transfer, the next new file transfer returns to regular V4. `diagnostic_regular_nkn_v6` is available only through unsafe developer/test opt-in.
 - Receiving a file requires explicit accept/decline, and file-transfer data is protected by nLink's session envelope plus source/session validation rather than by assuming NKN transport alone is sufficient.
 - Active file transfers can be paused, resumed, or canceled from either side when file transfer is allowed.
 - File-transfer lifecycle actions are hard-priority: cancel, pause, session end, peer down, window close, and app exit do not wait for file-data queues, repair queues, Tuna, or bulk backlog.
-- V6 file transfer uses receiver-driven request windows and proof-based transport epochs for Tuna activation and fallback.
+- V4 carries regular NKN and active file Tuna transfers. If Tuna is stopped during an active Tuna V4 transfer, the live transfer stays V4 and proves regular-NKN recovery in place. The controlled measured fallback path starts a fresh one-shot `post_tuna_fallback_v6` transfer with V6 recovery proof, then returns later transfers to regular V4.
 - Received files are saved into the Windows Downloads folder by default, with a numbered suffix added automatically when the target name already exists.
 - Safe-by-default file size cap for `0.7.0`: `25 GiB`
 - Options -> Wallet exposes an experimental Tuna wallet-linking and runtime opt-in section; linking a wallet does not start Tuna, spend NKN, or change the default transport.
-- The Phase 6 paid Tuna file-transfer gate passed 12/12 cells in local validation, but Tuna remains experimental/default-off while provider path degradation and retry caveats continue to be monitored.
+- The route acceptance gate now validates regular NKN V4, active Tuna V4, and controlled V6 fallback before installer creation. Active Tuna no-fault keeps a `> 4,000,000 B/s` goodput floor; fallback speed is informational and gated on survival, SHA/integrity, terminals, and route correctness.
 - Large file transfers over NKN can still be noticeably slower than local or direct network copy. Live screenshare latency can also vary with NKN/network delivery.
 - Release exception: Windows artifacts for `0.7.0` are unsigned; verify downloads with `SHA256SUMS.txt`.
 - Installer path: `%LOCALAPPDATA%\Programs\nLink`

@@ -7,7 +7,7 @@ Tuna remains experimental and default-off. The normal NKN bridge is still the ca
 Related app-payload references:
 
 - [`docs/screenshare-implementation.md`](screenshare-implementation.md) describes the current H.264 screen-share media pipeline.
-- [`docs/file-transfer-implementation.md`](file-transfer-implementation.md) describes the current V6 file-transfer data-session and transport-epoch recovery pipeline.
+- [`docs/file-transfer-implementation.md`](file-transfer-implementation.md) describes the current route-aware file-transfer pipeline: regular NKN V4, active Tuna V4, and controlled post-Tuna V6 fallback.
 
 ## Goals
 
@@ -277,7 +277,15 @@ These situations must not crash the app or end the normal NKN session:
 - user switch-off while starting,
 - user switch-off while active.
 
-File-transfer fallback is V6 transport-epoch based. When Tuna becomes active during a transfer, drops, caps out, is switched off, or restarts, file data enters a `FileTransferV6TransportEpoch`. New tail traffic on the target transport is blocked until the receiver proves the exact committed frontier can advance there. Generic bridge `Ready` or Tuna `Ready` is not enough to mark the transfer recovered.
+File-transfer routing is explicit:
+
+- regular NKN uses `regular_nkn_v4_fast`, protocol `4`,
+- active file Tuna uses `file_tuna_v4`, protocol `4`,
+- controlled post-Tuna fallback uses a fresh one-shot `post_tuna_fallback_v6`, protocol `6`.
+
+When Tuna stops during an active `file_tuna_v4` transfer, nLink does not mutate that live transfer into V6. The live transfer stays V4 and proves regular-NKN recovery in place. The controlled fallback model starts a fresh measured `post_tuna_fallback_v6` transfer after setup cleanup evidence is present. That measured V6 route is a one-shot recovery route: after it completes successfully, the fallback state is consumed and the next new file transfer returns to regular V4 unless a new fallback event occurs.
+
+The measured fallback V6 transfer uses transport-epoch proof. New tail traffic on the target transport is blocked until the receiver proves the exact committed frontier can advance there. Generic bridge `Ready` or Tuna `Ready` is not enough to mark the transfer recovered.
 
 The V6 epoch states are:
 
@@ -412,7 +420,7 @@ Useful environment overrides for developer tests:
 
 The advanced Options runtime pilot can also enable Tuna locally without changing default startup behavior. The paid listener now requires full provider readiness before advertising Tuna as usable for the session. Recent GUI/NKN runs showed that degraded 3-path startup can connect and then fail almost immediately with `remote_closed` / `terminal_tuna_write_failed`, so degraded provider readiness is now diagnostic-only. `NLINK_NKN_TUNA_ALLOW_DEGRADED_PROVIDER_READY=1` re-enables degraded readiness for explicit A/B experiments, while `NLINK_NKN_TUNA_REQUIRE_STRICT_PROVIDER_READY=1` keeps strict readiness even if that diagnostic override is present. `NLINK_NKN_TUNA_DEGRADED_PROVIDER_GRACE_SECONDS` is diagnostic-only and defaults to `0`; when set with degraded readiness enabled, nLink waits that many seconds for full 4-path readiness after 3-path degraded readiness appears.
 
-Run the Phase 6 short paid Tuna file-transfer gate from a developer machine:
+Run focused paid Tuna route checks from a developer machine:
 
 ```powershell
 dotnet build tests\nLink.OptInTests.BridgeManual\nLink.OptInTests.BridgeManual.csproj -c Release -m:1 -nr:false -p:UseSharedCompilation=false
@@ -423,14 +431,14 @@ dotnet test tests\nLink.OptInTests.BridgeManual\nLink.OptInTests.BridgeManual.cs
 dotnet build-server shutdown
 ```
 
-The Phase 6 short matrix writes artifacts under `artifacts/tuna-sidecar/phase6-short-<timestamp>/`. Read `phase6-operator-verdict.txt` first. The short gate covers helper-receiving and helpee-receiving file transfers across helpee-only unlocked, helper-only unlocked, and both-unlocked payer modes. Each payer/receiver pair runs one clean activation and one payer-specific fallback fault: helpee-only switch-off, helper-only cap reached, and both-unlocked sidecar drop. It requires V6 protocol evidence, SHA success for completed files, V6 epoch proof or explicit waiting, no false recovery from generic readiness, and no orphan sidecar. Provider readiness diagnostics distinguish diagnostic degraded startup accepted at 3 paths, later recovery to 4 paths, and persistent degraded-at-end warnings. Clean activation cells may warn `activation_cleanup_late_peer_close` when file bytes, SHA, and terminal sender/receiver snapshots are already clean but peer-close evidence is late. Repeated paid cells should use the build-once plus `--no-build --no-restore` pattern from `docs/build-test-lock-avoidance.md` to avoid Windows generated-output locks. For provider-path troubleshooting, compare `provider-quality-report.json` across strict readiness (`NLINK_TUNA_TEST_REQUIRE_PROVIDER_READY=1`, `NLINK_TUNA_TEST_PROVIDER_READY_ATTEMPTS=3`) and explicit degraded diagnostic runs (`NLINK_TUNA_TEST_DEGRADED_PROVIDER_GRACE_SECONDS=20`).
+The historical Phase 6 short matrix writes artifacts under `artifacts/tuna-sidecar/phase6-short-<timestamp>/`. Read `phase6-operator-verdict.txt` first when reviewing those artifacts. New pre-installer release evidence should use `tools\Run-FileTransferRouteAcceptance.ps1`, which validates regular NKN V4, active Tuna V4, and controlled post-Tuna V6 fallback. Repeated paid cells should use the build-once plus `--no-build --no-restore` pattern from `docs/build-test-lock-avoidance.md` to avoid Windows generated-output locks. For provider-path troubleshooting, compare `provider-quality-report.json` across strict readiness (`NLINK_TUNA_TEST_REQUIRE_PROVIDER_READY=1`, `NLINK_TUNA_TEST_PROVIDER_READY_ATTEMPTS=3`) and explicit degraded diagnostic runs (`NLINK_TUNA_TEST_DEGRADED_PROVIDER_GRACE_SECONDS=20`).
 
-Latest local Phase 6 file-transfer reference run:
+Historical local Phase 6 file-transfer reference run:
 
 - Artifact root: `artifacts/tuna-sidecar/phase6-short-20260512T151146Z/`
 - Verdict: `PASS`
 - Cells: `12/12`
-- Caveats: this historical run allowed degraded 3-path provider startup and all cells reported `provider_paths_degraded`; use it as protocol/fallback evidence only. Current runtime policy requires full provider readiness before Tuna is advertised as usable.
+- Caveats: this historical run allowed degraded 3-path provider startup and all cells reported `provider_paths_degraded`; use it as historical fallback evidence only. Current runtime policy requires full provider readiness before Tuna is advertised as usable, and current active file Tuna uses `file_tuna_v4`.
 
 The wider opt-in Tuna soak matrix remains available when a longer paid pass is warranted:
 

@@ -759,6 +759,15 @@ public sealed partial class NknSignalingTransport
             await SendEnvelopeAsync(destination, envelope, transportPayload, ct).ConfigureAwait(false);
         }
 
+        if (messageType == MsgType.FileTransferDataFrame && !sentViaAcceleration)
+        {
+            RecordTunaFallbackFileTransferDataFrameSent(
+                plaintextPayload,
+                useBulkLane ? NknBridgeChannel.Bulk : NknBridgeChannel.Control,
+                transportPayload.Length,
+                currentSessionSecurityState.SessionId?.Value);
+        }
+
         LogFileTransferEnvelopeEvent(
             "sent",
             messageType,

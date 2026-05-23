@@ -271,6 +271,8 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int V6PostTunaFallbackFrontierRescueStep2Chunks = V4PostFallbackFrontierBackfillStep2Chunks;
     private const int V6PostTunaFallbackFrontierRescueStep3Chunks = V4PostFallbackFrontierBackfillStep3Chunks;
     private const int V6PostTunaFallbackSenderSelfRepairChunks = V4PostFallbackFrontierBackfillStep3Chunks;
+    private const int V6PostTunaFallbackFrontierRescueRequestsBeforeWiden = 2;
+    private const int V6PostTunaFallbackNormalSendAheadFreezeChunks = V4PostFallbackFrontierBackfillStep3Chunks;
     private const int V6EpochFrontierRequestChunks = 1;
     private const int V6SparseSeekableRollingAheadChunks = 2048;
     private const int V6SparseSeekableRequestBudgetChunks = 1536;
@@ -2425,6 +2427,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         bool inboundActivationPauseResumed = false;
         bool outboundEpochStartedWhileUnavailable = false;
         bool inboundEpochStartedWhileUnavailable = false;
+        bool outboundLiveV4FallbackStartedWhileUnavailable = false;
+        bool inboundLiveV4FallbackStartedWhileUnavailable = false;
 
         lock (gate)
         {
@@ -2458,7 +2462,21 @@ public sealed partial class SessionFileTransferService : IDisposable
                         outboundActivationPauseStarted = IsTunaActivationNegotiationTransportPauseReason(effectiveReason);
                     }
 
-                    if (TryStartOutboundV6TransportEpochWhileUnavailableLocked(
+                    if (effectiveRequiresResumeRequest &&
+                        TryStartOutboundLiveV4TunaFallbackRecoveryLocked(
+                            outbound,
+                            effectiveReason,
+                            effectiveHandoffKind,
+                            effectiveTargetTransport))
+                    {
+                        outboundLiveV4FallbackStartedWhileUnavailable = true;
+                        outboundToResume = outbound;
+                        outboundPausedTransferId = null;
+                        outboundPausedSessionId = null;
+                        outboundPaused = null;
+                        outboundActivationPauseStarted = false;
+                    }
+                    else if (TryStartOutboundV6TransportEpochWhileUnavailableLocked(
                             outbound,
                             effectiveReason,
                             effectiveRequiresResumeRequest,
@@ -2508,7 +2526,21 @@ public sealed partial class SessionFileTransferService : IDisposable
                         inboundActivationPauseStarted = IsTunaActivationNegotiationTransportPauseReason(effectiveReason);
                     }
 
-                    if (TryStartInboundV6TransportEpochWhileUnavailableLocked(
+                    if (effectiveRequiresResumeRequest &&
+                        TryStartInboundLiveV4TunaFallbackRecoveryLocked(
+                            inbound,
+                            effectiveReason,
+                            effectiveHandoffKind,
+                            effectiveTargetTransport))
+                    {
+                        inboundLiveV4FallbackStartedWhileUnavailable = true;
+                        inboundToResume = inbound;
+                        inboundPausedTransferId = null;
+                        inboundPausedSessionId = null;
+                        inboundPaused = null;
+                        inboundActivationPauseStarted = false;
+                    }
+                    else if (TryStartInboundV6TransportEpochWhileUnavailableLocked(
                             inbound,
                             effectiveReason,
                             effectiveRequiresResumeRequest,
@@ -2552,7 +2584,15 @@ public sealed partial class SessionFileTransferService : IDisposable
             }
         }
 
-        if (outboundResumed && outboundToResume is not null)
+        if (outboundLiveV4FallbackStartedWhileUnavailable && outboundToResume is not null)
+        {
+            LogTransportPaused(FileTransferDirection.Outbound, outboundToResume.TransferId, outboundToResume.SessionId, effectiveReason);
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_live_v4_fallback_rebind_started; direction=outbound; transfer_id={outboundToResume.TransferId}; session_id={outboundToResume.SessionId}; reason={FormatProtocolLogValue(effectiveReason)}; rebind_generation={outboundToResume.PullTransportRebindGeneration}; remote_committed_chunk={outboundToResume.RemoteNextExpectedChunkIndex}; highest_sent_chunk={Math.Max(-1, outboundToResume.ChunksAcceptedForTransport - 1)}; availability_state=unavailable");
+            SignalOutboundV4SenderPump(outboundToResume);
+        }
+        else if (outboundResumed && outboundToResume is not null)
         {
             LogTransportResumed(FileTransferDirection.Outbound, outboundToResume.TransferId, outboundToResume.SessionId, effectiveReason, effectiveRequiresResumeRequest);
             if (outboundActivationPauseResumed)
@@ -2616,7 +2656,29 @@ public sealed partial class SessionFileTransferService : IDisposable
             SignalOutboundV4SenderPump(outboundToResume);
         }
 
-        if (inboundResumed && inboundToResume is not null)
+        if (inboundLiveV4FallbackStartedWhileUnavailable && inboundToResume is not null)
+        {
+            LogTransportResumed(FileTransferDirection.Inbound, inboundToResume.TransferId, inboundToResume.SessionId, effectiveReason, effectiveRequiresResumeRequest);
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_live_v4_fallback_rebind_started; direction=inbound; transfer_id={inboundToResume.TransferId}; session_id={inboundToResume.SessionId}; reason={FormatProtocolLogValue(effectiveReason)}; rebind_generation={inboundToResume.PullTransportRebindGeneration}; committed_chunk={inboundToResume.NextChunkIndex}; highest_received_chunk={inboundToResume.PullHighestReceivedChunkIndex}; availability_state=unavailable");
+            try
+            {
+                var sent = await MaybeSendTransportRebindStateAsync(inboundToResume).ConfigureAwait(false);
+
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=filetransfer_transport_rebind_state_forced; direction=inbound; transfer_id={inboundToResume.TransferId}; session_id={inboundToResume.SessionId}; reason={FormatProtocolLogValue(effectiveReason)}; rebind_generation={inboundToResume.PullTransportRebindGeneration}; state_sent={(sent ? 1 : 0)}; committed_chunk={inboundToResume.NextChunkIndex}; highest_received_chunk={inboundToResume.PullHighestReceivedChunkIndex}");
+                ScheduleInboundTransportRebindRetries(inboundToResume, effectiveReason, inboundToResume.PullTransportRebindGeneration);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                LocalOperationalLog.Warn(
+                    "FileTransferService",
+                    $"event=filetransfer_transport_rebind_failed; direction=inbound; transfer_id={inboundToResume.TransferId}; session_id={inboundToResume.SessionId}; reason={FormatProtocolLogValue(effectiveReason)}; rebind_generation={inboundToResume.PullTransportRebindGeneration}; error={FormatProtocolLogValue(ex.Message)}");
+            }
+        }
+        else if (inboundResumed && inboundToResume is not null)
         {
             LogTransportResumed(FileTransferDirection.Inbound, inboundToResume.TransferId, inboundToResume.SessionId, effectiveReason, effectiveRequiresResumeRequest);
             if (inboundActivationPauseResumed)
@@ -4724,6 +4786,10 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public DateTimeOffset? V6PostTunaFallbackSenderSelfRepairUtc { get; set; }
 
+        public int V6PostTunaFallbackNormalSendAheadFreezeChunkIndex { get; set; } = -1;
+
+        public DateTimeOffset? V6PostTunaFallbackNormalSendAheadFreezeUtc { get; set; }
+
         public bool PullPostTunaRecoveryActive { get; set; }
 
         public int PullPostTunaRecoveryGeneration { get; set; }
@@ -4735,6 +4801,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         public int PullTransportLastSafetyReplayGeneration { get; set; }
 
         public int PullTransportLastSafetyReplayFrontierChunkIndex { get; set; } = -1;
+
+        public int PullTransportLastSafetyReplayEndChunkIndex { get; set; } = -1;
 
         public DateTimeOffset? PullTransportLastSafetyReplayUtc { get; set; }
 

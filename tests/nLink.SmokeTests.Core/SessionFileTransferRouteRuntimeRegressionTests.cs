@@ -213,24 +213,21 @@ public sealed class SessionFileTransferRouteRuntimeRegressionTests : SessionFile
     }
 
     [Fact]
-    public async Task FileTunaV4_FallbackHandoffDoesNotSwitchLiveTransferAndNextTransferUsesV6Fallback()
+    public async Task PostTunaFallbackV6_SuccessConsumesFallbackRouteAndNextTransferUsesRegularV4()
     {
-        const string firstTransferId = "p4_file_tuna_v4_live_fallback";
-        const string secondTransferId = "p4_post_tuna_fallback_restart";
-        const string sessionId = "p4_session_restart";
+        const string firstTransferId = "p4_post_tuna_fallback_one_shot";
+        const string secondTransferId = "p4_after_post_tuna_fallback_regular_v4";
+        const string sessionId = "p4_session_post_fallback_one_shot";
         var logStart = GetOperationalLogLength();
         using var senderTransport = new LoopbackFileTransferTransport(sessionId)
         {
-            IsFileTunaActiveForRouteSelection = true,
-            IsTransportAccelerationActive = true,
-            DataSessionSendDelayMs = 2,
-            TransportAccelerationStatusReason = "test_file_tuna_active",
+            IsPostTunaFileFallbackActiveForRouteSelection = true,
+            TransportAccelerationStatusReason = "test_post_tuna_fallback_active",
         };
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId)
         {
-            IsFileTunaActiveForRouteSelection = true,
-            IsTransportAccelerationActive = true,
-            TransportAccelerationStatusReason = "test_file_tuna_active",
+            IsPostTunaFileFallbackActiveForRouteSelection = true,
+            TransportAccelerationStatusReason = "test_post_tuna_fallback_active",
         };
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
@@ -238,41 +235,36 @@ public sealed class SessionFileTransferRouteRuntimeRegressionTests : SessionFile
         sender.AttachTransport(senderTransport);
         receiver.AttachTransport(receiverTransport);
 
-        var firstPayload = Enumerable.Range(0, 512_000).Select(static index => (byte)(index % 251)).ToArray();
+        var firstPayload = Enumerable.Range(0, 128_000).Select(static index => (byte)(index % 251)).ToArray();
         using var firstDestination = new NonDisposingMemoryStream();
         await sender.TryStartSendAsync(
-            new FileTransferSendDescriptor("file-tuna-v4-live-fallback.bin", firstPayload.Length, firstTransferId),
+            new FileTransferSendDescriptor("post-tuna-fallback-v6-one-shot.bin", firstPayload.Length, firstTransferId),
             _ => Task.FromResult<Stream>(new MemoryStream(firstPayload, writable: false)),
             CancellationToken.None);
         await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision, timeoutMs: 5000);
         await receiver.AcceptIncomingTransferAsync(firstTransferId, (_, _) => Task.FromResult<Stream>(firstDestination), CancellationToken.None);
         await WaitUntilAsync(
-            () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV4>().Any(frame => frame.TransferId == firstTransferId),
-            timeoutMs: 5000);
-
-        senderTransport.IsFileTunaActiveForRouteSelection = false;
-        receiverTransport.IsFileTunaActiveForRouteSelection = false;
-        senderTransport.IsPostTunaFileFallbackActiveForRouteSelection = true;
-        receiverTransport.IsPostTunaFileFallbackActiveForRouteSelection = true;
-        senderTransport.RequestAllDataSessionHandoffs(
-            "test_tuna_stopped_during_file_tuna_v4",
-            FileTransferTransportHandoffKind.TunaToNormalFallback,
-            FileTransferTransportKind.RegularNkn);
-        receiverTransport.RequestAllDataSessionHandoffs(
-            "test_tuna_stopped_during_file_tuna_v4",
-            FileTransferTransportHandoffKind.TunaToNormalFallback,
-            FileTransferTransportKind.RegularNkn);
-
-        await WaitUntilAsync(
             () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
                   receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
             timeoutMs: 20_000);
         Assert.Equal(firstPayload, firstDestination.ToArray()[..firstPayload.Length]);
+        Assert.False(senderTransport.IsPostTunaFileFallbackActiveForRouteSelection);
+        Assert.False(receiverTransport.IsPostTunaFileFallbackActiveForRouteSelection);
+        Assert.Contains(
+            senderTransport.RouteCompletionNotifications,
+            notification => notification.TransferId == firstTransferId &&
+                            notification.RouteToken == FileTransferRouteResolver.PostTunaFallbackV6Token &&
+                            notification.ProtocolVersion == FileTransferProtocol.ProtocolVersionV6);
+        Assert.Contains(
+            receiverTransport.RouteCompletionNotifications,
+            notification => notification.TransferId == firstTransferId &&
+                            notification.RouteToken == FileTransferRouteResolver.PostTunaFallbackV6Token &&
+                            notification.ProtocolVersion == FileTransferProtocol.ProtocolVersionV6);
 
         var secondPayload = Enumerable.Range(0, 128_000).Select(static index => (byte)((index * 7) % 251)).ToArray();
         using var secondDestination = new NonDisposingMemoryStream();
         await sender.TryStartSendAsync(
-            new FileTransferSendDescriptor("post-tuna-fallback-v6-restart.bin", secondPayload.Length, secondTransferId),
+            new FileTransferSendDescriptor("after-post-tuna-fallback-regular-v4.bin", secondPayload.Length, secondTransferId),
             _ => Task.FromResult<Stream>(new MemoryStream(secondPayload, writable: false)),
             CancellationToken.None);
         await WaitUntilAsync(() => receiver.Snapshot.Inbound is { } inbound &&
@@ -293,26 +285,26 @@ public sealed class SessionFileTransferRouteRuntimeRegressionTests : SessionFile
         var logTail = ReadRouteLogSnapshot(logStart);
         var firstLog = FilterTransferLog(logTail, firstTransferId);
         var secondLog = FilterTransferLog(logTail, secondTransferId);
-        Assert.Contains("route=file_tuna_v4", firstLog, StringComparison.Ordinal);
-        Assert.DoesNotContain("event=filetransfer_v6_epoch_started", firstLog, StringComparison.Ordinal);
-        Assert.DoesNotContain("event=filetransfer_v6_sender_started", firstLog, StringComparison.Ordinal);
-        Assert.DoesNotContain("event=filetransfer_v6_receiver_started", firstLog, StringComparison.Ordinal);
-        Assert.Contains("route=post_tuna_fallback_v6", secondLog, StringComparison.Ordinal);
-        Assert.Contains("event=filetransfer_v6_sender_started", secondLog, StringComparison.Ordinal);
-        Assert.Contains("event=filetransfer_v6_receiver_started", secondLog, StringComparison.Ordinal);
+        Assert.Contains("route=post_tuna_fallback_v6", firstLog, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v6_sender_started", firstLog, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v6_receiver_started", firstLog, StringComparison.Ordinal);
+        Assert.Contains("route=regular_nkn_v4_fast", secondLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("route=post_tuna_fallback_v6", secondLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_v6_sender_started", secondLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_v6_receiver_started", secondLog, StringComparison.Ordinal);
 
         var firstOffer = senderTransport.SentOffers.Single(offer => offer.TransferId == firstTransferId);
         var secondOffer = senderTransport.SentOffers.Single(offer => offer.TransferId == secondTransferId);
-        Assert.Equal(FileTransferRouteResolver.FileTunaV4Token, firstOffer.FileTransferRoute);
-        Assert.Equal(FileTransferProtocol.ProtocolVersionV4, firstOffer.PreferredDataProtocolVersion);
-        Assert.Equal(FileTransferRouteResolver.PostTunaFallbackV6Token, secondOffer.FileTransferRoute);
-        Assert.Equal(FileTransferProtocol.ProtocolVersionV6, secondOffer.PreferredDataProtocolVersion);
+        Assert.Equal(FileTransferRouteResolver.PostTunaFallbackV6Token, firstOffer.FileTransferRoute);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV6, firstOffer.PreferredDataProtocolVersion);
+        Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken, secondOffer.FileTransferRoute);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV4, secondOffer.PreferredDataProtocolVersion);
         Assert.All(
             senderTransport.SentDataFrames.Where(frame => frame.TransferId == firstTransferId),
-            static frame => Assert.True(FileTransferProtocol.IsV4DataFrame(frame), $"Expected live FileTunaV4 frame, got {frame.Type}."));
+            static frame => Assert.True(FileTransferProtocol.IsV6DataFrame(frame), $"Expected one-shot fallback V6 frame, got {frame.Type}."));
         Assert.All(
             senderTransport.SentDataFrames.Where(frame => frame.TransferId == secondTransferId),
-            static frame => Assert.True(FileTransferProtocol.IsV6DataFrame(frame), $"Expected restarted fallback V6 frame, got {frame.Type}."));
+            static frame => Assert.True(FileTransferProtocol.IsV4DataFrame(frame), $"Expected regular V4 frame after one-shot fallback, got {frame.Type}."));
     }
 
     private static void ConfigureScenarioRouteStatus(LoopbackFileTransferTransport transport, string scenario)

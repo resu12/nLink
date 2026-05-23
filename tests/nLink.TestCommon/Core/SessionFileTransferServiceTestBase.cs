@@ -166,7 +166,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         return builder.ToString();
     }
 
-    protected sealed class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, ITransportAccelerationStatus
+    protected sealed class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferRouteCompletionObserver, ITransportAccelerationStatus
     {
         private readonly string sessionId;
         private readonly ConcurrentDictionary<string, LoopbackDataSession> dataSessions = new(StringComparer.Ordinal);
@@ -215,6 +215,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         public FileTransferTransportKind NextDataFrameTransportKind { get; set; } = FileTransferTransportKind.RegularNkn;
         public Func<LoopbackFileTransferTransport, FileTransferSessionOpenV2, CancellationToken, Task<bool>>? OutboundSessionOpenDeliveryOverrideAsync { get; set; }
         public bool ThrowWhenUnavailableDataSessionSend { get; set; }
+        public bool AllowUnavailableV4FallbackRecoveryFramesForTests { get; set; }
         public Func<FileTransferCompleteV1, CancellationToken, Task>? BeforeCompleteDeliveredAsync { get; set; }
         public Exception? OfferSendException { get; init; }
         public ConcurrentQueue<FileTransferErrorV1> SentErrors { get; } = [];
@@ -232,6 +233,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         public ConcurrentQueue<FileTransferDataFrame> SentDataFrames { get; } = [];
         public ConcurrentQueue<FileTransferV6TransportEpochSnapshot> ObservedV6TransportEpochs { get; } = [];
         public ConcurrentQueue<FileTransferReceiveRecoveryRequest> ReceiveRecoveryRequests { get; } = [];
+        public ConcurrentQueue<FileTransferRouteCompletedNotification> RouteCompletionNotifications { get; } = [];
 
         public event EventHandler<IncomingJoinRequestEventArgs>? IncomingJoinRequest;
         public event EventHandler<TransportSessionKeyReadyEventArgs>? SessionKeyReady;
@@ -270,6 +272,16 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
 
         public void RequestFileTransferReceiveRecovery(FileTransferReceiveRecoveryRequest request)
             => ReceiveRecoveryRequests.Enqueue(request);
+
+        public void ObserveFileTransferRouteCompleted(FileTransferRouteCompletedNotification notification)
+        {
+            RouteCompletionNotifications.Enqueue(notification);
+            if (string.Equals(notification.RouteToken, "post_tuna_fallback_v6", StringComparison.Ordinal) &&
+                notification.ProtocolVersion == FileTransferProtocol.ProtocolVersionV6)
+            {
+                IsPostTunaFileFallbackActiveForRouteSelection = false;
+            }
+        }
 
         public Task SendChatMessageAsync(ReadOnlyMemory<byte> payload, CancellationToken ct)
         {
@@ -425,6 +437,15 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             peer?.SetAllDataSessionsAvailability(isAvailable: false, reason, requiresResumeRequest: true);
         }
 
+        public void SetConnectedDataSessionsUnavailableForTests(
+            string reason,
+            FileTransferTransportHandoffKind handoffKind,
+            FileTransferTransportKind targetTransport)
+        {
+            SetAllDataSessionsAvailability(isAvailable: false, reason, requiresResumeRequest: true, handoffKind, targetTransport);
+            peer?.SetAllDataSessionsAvailability(isAvailable: false, reason, requiresResumeRequest: true, handoffKind, targetTransport);
+        }
+
         public void SetConnectedDataSessionsAvailableForTests(string reason)
         {
             SetAllDataSessionsAvailability(isAvailable: true, reason, requiresResumeRequest: true);
@@ -494,6 +515,19 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             }
         }
 
+        private void SetAllDataSessionsAvailability(
+            bool isAvailable,
+            string reason,
+            bool requiresResumeRequest,
+            FileTransferTransportHandoffKind handoffKind,
+            FileTransferTransportKind targetTransport)
+        {
+            foreach (var session in dataSessions.Values)
+            {
+                session.SetAvailability(isAvailable, reason, requiresResumeRequest, handoffKind, targetTransport);
+            }
+        }
+
         public void RequestAllDataSessionHandoffs(
             string reason,
             FileTransferTransportHandoffKind handoffKind,
@@ -543,7 +577,10 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             var target = peer ?? throw new InvalidOperationException("Loopback peer is not connected.");
             SentDataFrames.Enqueue(frame);
             var isTransportProbe = frame is FileTransferTransportProbeFrameV6;
-            var availabilityBypass = isTransportProbe || IsV6RecoveryFeedbackFrame(frame);
+            var availabilityBypass =
+                isTransportProbe ||
+                IsV6RecoveryFeedbackFrame(frame) ||
+                (AllowUnavailableV4FallbackRecoveryFramesForTests && IsV4FallbackRecoveryFrame(frame));
             if (!TryGetOrCreateDataSession(NormalizeSessionId(frame.SessionId), frame.TransferId, out var localSession) ||
                 (!localSession.IsAvailable && !availabilityBypass))
             {
@@ -587,6 +624,9 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                 or FileTransferFrontierRequestFrameV6
                 or FileTransferRepairProofFrameV6
                 or FileTransferTransportEpochFrameV6;
+
+        private static bool IsV4FallbackRecoveryFrame(FileTransferDataFrame frame)
+            => frame is FileTransferStateFrameV4 or FileTransferChunkBatchFrameV4;
 
         protected sealed class LoopbackDataSession : IFileTransferDataSession
         {
@@ -632,7 +672,10 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             {
                 ct.ThrowIfCancellationRequested();
                 ObjectDisposedException.ThrowIf(disposed != 0, this);
-                var availabilityBypass = frame is FileTransferTransportProbeFrameV6 || IsV6RecoveryFeedbackFrame(frame);
+                var availabilityBypass =
+                    frame is FileTransferTransportProbeFrameV6 ||
+                    IsV6RecoveryFeedbackFrame(frame) ||
+                    (owner.AllowUnavailableV4FallbackRecoveryFramesForTests && IsV4FallbackRecoveryFrame(frame));
                 if (owner.ThrowWhenUnavailableDataSessionSend &&
                     !IsAvailable &&
                     !availabilityBypass)
@@ -663,6 +706,19 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             }
 
             public void SetAvailability(bool isAvailable, string reason, bool requiresResumeRequest)
+                => SetAvailability(
+                    isAvailable,
+                    reason,
+                    requiresResumeRequest,
+                    FileTransferTransportHandoffKind.None,
+                    FileTransferTransportKind.Unknown);
+
+            public void SetAvailability(
+                bool isAvailable,
+                string reason,
+                bool requiresResumeRequest,
+                FileTransferTransportHandoffKind handoffKind,
+                FileTransferTransportKind targetTransport)
             {
                 if (disposed != 0)
                 {
@@ -672,12 +728,20 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                 var updated = isAvailable ? 1 : 0;
                 var previous = Interlocked.Exchange(ref available, updated);
                 Volatile.Write(ref availabilityReason, reason);
-                if (previous == updated)
+                if (previous == updated &&
+                    (!requiresResumeRequest || handoffKind == FileTransferTransportHandoffKind.None))
                 {
                     return;
                 }
 
-                AvailabilityChanged?.Invoke(this, new FileTransferDataSessionAvailabilityChangedEventArgs(isAvailable, reason, requiresResumeRequest));
+                AvailabilityChanged?.Invoke(
+                    this,
+                    new FileTransferDataSessionAvailabilityChangedEventArgs(
+                        isAvailable,
+                        reason,
+                        requiresResumeRequest,
+                        handoffKind,
+                        targetTransport));
             }
 
             public void RequestHandoff(

@@ -4,57 +4,81 @@ This document describes the current nLink file-transfer implementation. It is an
 
 ## Current Status
 
-- Protocol: V6-only in the current release. V5, V4, null, or unsupported peers are rejected cleanly as transport-incompatible.
 - Scope: single-file transfer only.
 - Not supported yet: folders, drag-and-drop, and resume after app restart.
 - Consent boundary: receiving a file requires explicit accept or decline.
 - Safety cap: file transfers are capped at `25 GiB` by the app release policy.
 - Destination: received files are saved to the Windows Downloads folder by default, with a numbered suffix when the target name already exists.
+- Protocols: production uses protocol `4` for regular NKN and active file Tuna, and protocol `6` only for controlled post-Tuna fallback. Protocol `5` is obsolete and rejected.
 - Transport boundary: normal NKN remains the default. Experimental Tuna can carry only `MsgType.FileTransferDataFrame` on the bulk lane after session-bound Tuna negotiation succeeds.
 
 File-transfer control stays on current NKN. Offer, accept, decline, session-open, cancel, error, and complete control messages are not accelerated by Tuna.
+
+## Production Routes
+
+Route selection is centralized in `FileTransferRouteResolver`. Sender offer, receiver accept, session-open, runtime start, telemetry, and bridge recovery policy are expected to consume the same `FileTransferRouteSelection`.
+
+| Route | Token | Protocol | Runtime profile | Frame family | Bridge policy |
+| --- | --- | --- | --- | --- | --- |
+| Regular NKN | `regular_nkn_v4_fast` | `4` | `regular_nkn_v4_fast` | `v4` | `regular_nkn_v4_fast` |
+| Active file Tuna | `file_tuna_v4` | `4` | `file_tuna_v4_fast` | `v4` | `tuna_strict` |
+| Post-Tuna fallback | `post_tuna_fallback_v6` | `6` | `default_v6` | `v6` | `post_tuna_fallback_strict` |
+| Diagnostic regular NKN V6 | `diagnostic_regular_nkn_v6` | `6` | `primary_regular_nkn_bulk_v6` | `v6` | `primary_regular_nkn_quiet` |
+
+Selection precedence:
+
+1. Post-Tuna file fallback active -> `post_tuna_fallback_v6`.
+2. Active file Tuna -> `file_tuna_v4`.
+3. Explicit unsafe diagnostic regular-NKN V6 opt-in -> `diagnostic_regular_nkn_v6`.
+4. Otherwise -> `regular_nkn_v4_fast`.
+
+Tuna configured, eligible, unlocked, funded, inactive, or failed without fallback is not enough to select V6. Screen-share-only acceleration is also not a file-transfer V6 selector.
+
+`file_tuna_v6` and all V5 frame families are obsolete. They must not be emitted by release defaults and are treated as unsupported input.
 
 ## High-Level Flow
 
 1. The helper and helpee complete the normal nLink invite, approval, and verified session handshake.
 2. The session grants the file-transfer capability.
 3. A sender chooses one file.
-4. `SessionFileTransferService` creates a `FileTransferOfferV2` and sends it over the secure control path.
-5. The receiver accepts or declines.
-6. On acceptance, both sides exchange `FileTransferSessionOpenV2`.
+4. `SessionFileTransferService` resolves one route and includes its route token in `FileTransferOfferV2`.
+5. The receiver accepts or declines. Accepted transfers carry the selected route in `FileTransferAcceptV1`.
+6. On acceptance, both sides exchange `FileTransferSessionOpenV2` with the route token.
 7. The transport opens an `IFileTransferDataSession` for the session and transfer id.
-8. The sender sends a V6 manifest containing file name, size, chunk size, chunk count, and SHA-256.
-9. The receiver sends V6 receiver-state frames with committed progress and explicit request ranges.
-10. The sender pumps V6 chunk batches only for ranges requested by `receiver_state.v6` or `frontier_request.v6`.
-11. The receiver writes chunks, commits progress, repairs missing ranges, and verifies the final SHA-256.
-12. The transfer ends with complete, cancel, or error state on both sides.
+8. The selected route dispatches to the matching runtime:
+   - `regular_nkn_v4_fast` and `file_tuna_v4` use the V4 sender/receiver.
+   - `post_tuna_fallback_v6` and diagnostic V6 use the V6 sender/receiver.
+9. The receiver writes chunks, commits progress, repairs missing ranges, and verifies the final SHA-256.
+10. The transfer ends with complete, cancel, or error state on both sides.
 
 ## Main Components
 
 ### Core Contracts And Models
 
+- `src/nLink.Core/FileTransfer/FileTransferRoute.cs`
+  Defines route status inputs, route tokens, route metadata, and the pure resolver.
 - `src/nLink.Core/FileTransfer/IFileTransferSignalingTransport.cs`
   Defines file-transfer control sends, data-session opening, and data-session receive/send.
 - `src/nLink.Core/FileTransfer/SessionFileTransferService.cs`
-  Owns transfer state, offer/accept flow, V6 sender and receiver behavior, progress, hard-priority pause/resume/cancel, and completion.
-- `src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs`
-  Implements the active V6 receiver-driven sender and receiver runtime.
-- `src/nLink.Core/FileTransfer/SessionFileTransferService.TransportEpochV6.cs`
-  Implements V6 transport epochs for Tuna activation, Tuna fallback, Tuna restart, and regular NKN recovery.
-- `src/nLink.Core/FileTransfer/SessionFileTransferService.Liveness.cs`
-  Implements V6 heartbeat/liveness and peer-disconnect terminalization.
+  Owns transfer state, offer/accept flow, route application, progress, hard-priority pause/resume/cancel, telemetry, and completion.
 - `src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV4.cs`
-  Remains as a legacy/internal compatibility path for older tests and naming debt. Active negotiated V6 transfers use the V6 runtime.
+  Implements the production V4 sender/receiver used by regular NKN and active file Tuna.
+- `src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV6.cs`
+  Implements the V6 sender/receiver used by post-Tuna fallback and diagnostic regular-NKN V6. It includes post-Tuna fallback survival diagnostics and frontier repair behavior.
+- `src/nLink.Core/FileTransfer/SessionFileTransferService.TransportEpochV6.cs`
+  Implements V6 transport-epoch recovery used by the V6 fallback/diagnostic paths.
+- `src/nLink.Core/FileTransfer/SessionFileTransferService.Liveness.cs`
+  Implements heartbeat/liveness and peer-disconnect terminalization.
 - `src/nLink.Core/FileTransfer/SessionFileTransferModels.cs`
   Defines descriptors, snapshots, flow policies, terminal states, and progress models.
 - `src/nLink.Core/FileTransfer/FileTransferProtocol.cs`
-  Defines protocol constants and message type names.
+  Defines current protocol constants and message type names. V5 constants are intentionally removed.
 - `src/nLink.Core/FileTransfer/FileTransferDataFrameV4.cs`
-  Defines the legacy V4 records plus current V6 manifest, receiver-state, chunk-batch, transport-epoch, transport-probe, frontier-request, repair-proof, complete, cancel, error, pause-control, and heartbeat frames.
+  Defines V4 data-frame records plus current V6 records.
 - `src/nLink.Core/FileTransfer/FileTransferDataFrameCodec.cs`
-  Encodes and decodes compact binary V6 data frames, while retaining safe decode handling for legacy tests/helpers where needed.
+  Encodes and decodes compact binary V4 and V6 data frames. V5 frame codes are rejected.
 - `src/nLink.Core/FileTransfer/FileTransferPayloadCodec.cs`
-  Encodes and decodes file-transfer control payloads.
+  Encodes and decodes file-transfer control payloads, including route-token normalization and protocol/route mismatch rejection.
 - `src/nLink.Core/FileTransfer/FileTransferChunkBudget.cs`
   Defines safe chunk and batch sizing limits.
 - `src/nLink.Core/FileTransfer/FileTransferPayloadEfficiencyProfile.cs`
@@ -74,7 +98,7 @@ File-transfer control stays on current NKN. Offer, accept, decline, session-open
 ### NKN Transport Path
 
 - `src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs`
-  Implements control payload routing, data-session behavior, secure envelope validation, V6 data-frame dispatch, transport-origin metadata, lifecycle control payloads, epoch proof messages, and file-transfer diagnostics.
+  Implements control payload routing, data-session behavior, secure envelope validation, data-frame dispatch, transport-origin metadata, lifecycle control payloads, route status, epoch proof messages, and file-transfer diagnostics.
 - `src/nLink.Infra.Nkn/NknEnvelopeRouter.cs`
   Routes `MsgType.FileTransferDataFrame` to file-transfer handling.
 
@@ -91,17 +115,24 @@ Control messages use the secure nLink session control path:
 - `cancel.v1`
 - `error.v1`
 - `complete.v1`
-- `pause_control.v6`
-- `heartbeat.v6`
-- `transport_epoch.v6`
-- `transport_probe.v6`
-- `repair_proof.v6`
+- pause/resume control
+- V6 heartbeat and recovery proof messages when the selected route is V6
 
-These messages stay on current NKN even when Tuna is active.
+`offer.v2`, `accept.v1`, and `session_open.v2` may carry `fileTransferRoute`. Missing route tokens remain compatible when local context can infer the route; invalid or protocol-mismatched route tokens are rejected as transport-incompatible.
 
 ### Data Frames
 
-V6 data frames use `IFileTransferDataSession`:
+V4 routes use V4 frames:
+
+- `manifest.v4`
+- `state.v4`
+- `chunk_batch.v4`
+- `complete.v4`
+- `cancel.v4`
+- `error.v4`
+- `pause_control.v4`
+
+V6 fallback/diagnostic routes use V6 frames:
 
 - `manifest.v6`
 - `receiver_state.v6`
@@ -126,8 +157,9 @@ The current implementation keeps payloads bounded before they reach the bridge:
 - Maximum raw batch: `64 KiB`.
 - Maximum serialized chunk payload: `50 KiB`.
 - Maximum serialized batch payload: `64 KiB`.
-- Default V6 chunk size: `21 KiB`.
-- Default maximum V6 batch segments: `3`.
+- Default V4/Tuna chunk size: `21 KiB`.
+- Default maximum V4/Tuna batch segments: `3`.
+- V6 fallback keeps the same raw bridge payload ceilings and may use V6-specific receiver-state/frontier repair windows.
 
 Payload efficiency profiles are available for focused tuning:
 
@@ -140,60 +172,48 @@ The environment variable is `NLINK_FILETRANSFER_PAYLOAD_EFFICIENCY_PROFILE`. Mix
 
 ## Flow Control And Recovery
 
-File transfer is receiver-driven. The receiver reports what it has durably accepted and how much more it can take. The sender pumps only within the advertised budget.
+Regular NKN and active file Tuna use the V4 runtime. V4 progress is receiver-confirmed and may repair missing ranges while preserving terminal correctness and SHA verification. If Tuna is disabled during an active `file_tuna_v4` transfer, that same transfer remains V4 and recovers over regular NKN; it is not canceled and restarted as V6.
 
-Important V6 receiver-state fields include:
-
-- contiguous committed chunk index,
-- durable highest received chunk index,
-- explicit missing/request ranges,
-- bytes committed,
-- memory pressure,
-- disk pressure,
-- terminal readiness,
-- pause state.
+Post-Tuna fallback uses a fresh one-shot V6 measured transfer. It is receiver-driven: the receiver reports what it has durably accepted and requests missing ranges; the sender pumps only within advertised budget or explicit frontier repair. Current production evidence shows this V6 fallback path is slower and more variable than the V4 regular/Tuna path, so V6 is not a throughput optimization. It is retained only as a one-shot recovery route after Tuna fallback, plus explicit unsafe diagnostics. After a successful `post_tuna_fallback_v6` transfer, the fallback route is consumed and the next new file transfer returns to regular V4 unless Tuna is active again.
 
 Recovery behaviors include:
 
 - missing-range repair,
 - sender repair cache,
 - sparse receiver writes where the destination stream supports seek/read/write,
-- file-only fast repair paths,
 - mixed screen-share pressure handling,
 - sender pump depth and pending-byte limits,
 - sender-side enforcement that chunks overlap an active receiver request,
-- pause/resume control from either side.
+- pause/resume control from either side,
+- V6 fallback frontier rescue when a post-Tuna fallback transfer reaches sustained frontier pressure.
 
 The transfer treats integrity and terminal correctness as more important than raw throughput.
 
-## V6 Transport Epochs
+## Controlled Post-Tuna Fallback
 
-V6 uses an explicit transport epoch state machine for file-data movement. It is used for both directions:
+Active file Tuna is V4. When Tuna stops during an active `file_tuna_v4` transfer, nLink does not mutate that live session into V6. The live transfer proves regular-NKN fallback in place and can complete naturally, cancel, or fail with normal terminal semantics.
 
-- normal NKN to Tuna activation,
-- Tuna to normal NKN fallback,
-- Tuna restart,
-- regular NKN receive recovery.
+The controlled fallback model is restart-based:
 
-Every transition creates a `FileTransferV6TransportEpoch` with source transport, target transport, reason, starting committed frontier, highest observed chunk, probe id, repair request id, and proof timestamps. Generic bridge readiness, Tuna readiness, send success, or bulk bytes are not enough to declare recovery.
+1. A setup transfer proves `file_tuna_v4`.
+2. Tuna is stopped or forced unavailable.
+3. Setup cleanup reaches terminal/cleanup evidence.
+4. A fresh measured transfer resolves one-shot `post_tuna_fallback_v6`.
+5. The measured transfer must complete with protocol `6`, route consistency, SHA/integrity OK, and completed terminals.
+6. If that measured transfer completes successfully, the post-fallback V6 route is consumed and the next new transfer resolves to regular V4.
 
-The epoch states are:
+Fallback speed is informational. Survival, route correctness, integrity, and clean terminal completion are the gate.
 
-- `EpochStarting`
-- `TargetProofPending`
-- `FrontierRepairOnly`
-- `BackfillRepair`
-- `Recovered`
-- `WaitingForTargetTransport`
-- `Terminal`
+Do not promote `post_tuna_fallback_v6` to a sticky or performance route. V4 remains the faster production path for regular NKN and active Tuna; V6 fallback is accepted for recovery survival even when its goodput is below the V4/Tuna baselines.
 
-During `TargetProofPending` and `FrontierRepairOnly`, the sender blocks new/tail chunk traffic on the target transport and sends only target probes or exact frontier chunks requested for the active epoch. Transport send success is logged as sent, not recovered. Recovery requires regular-control acknowledgement of `transport_probe.v6` or `repair_proof.v6`.
+The V6 fallback survival path logs:
 
-The receiver is authoritative for recovery. On an epoch it sends `receiver_state.v6` and, when stalled at the frontier, `frontier_request.v6` for the exact missing chunk/range first. Far-ahead chunks may be stored or deduped when the destination stream supports sparse writes, but they do not prove recovery until the committed frontier advances and proof is acknowledged over regular NKN control.
+- `filetransfer_v6_post_tuna_fallback_survival_policy_enabled`
+- `filetransfer_v6_post_tuna_fallback_frontier_rescue_requested`
+- `filetransfer_v6_post_tuna_fallback_sender_frontier_rescue_queued`
+- `filetransfer_v6_post_tuna_fallback_send_timeout_requeued`
 
-If proof does not arrive within the recovery window, the transfer remains alive and enters `WaitingForTargetTransport` / user-facing waiting state instead of falsely reporting recovered.
-
-Legacy V5 handoff names may still appear in compatibility aliases or old tests, but active negotiated transfers use V6 transport epochs.
+Bridge queue clears remain hard failures for regular NKN. Recovered bridge cleanup evidence during successful post-Tuna fallback may be downgraded to warnings only when route consistency, SHA, and terminals pass.
 
 ## Security And Consent
 
@@ -221,14 +241,13 @@ Both sides can pause, resume, or cancel active transfers. A transfer can end as:
 
 Restarting either app does not resume a partial transfer. Partial files must not be presented as resumable release artifacts.
 
-Lifecycle actions are hard-priority and local-first. Cancel, pause, resume, session end, peer down, window close, app exit, and transport detach bypass data queues, repair queues, Tuna, bulk backlog, and the V6 transport-epoch state machine.
+Lifecycle actions are hard-priority and local-first. Cancel, pause, resume, session end, peer down, window close, app exit, and transport detach bypass data queues, repair queues, Tuna, bulk backlog, and V6 fallback recovery state.
 
 When a lifecycle action is requested:
 
 - the local transfer card updates immediately,
 - transfer lifetime work is stopped or paused locally,
 - a best-effort lifecycle notice is sent over regular NKN control,
-- lifecycle data-session frames remain codec-supported but are not used as the authoritative Phase 2+ runtime path,
 - duplicate lifecycle notices are idempotent,
 - late data frames after terminalization are dropped with rate-limited diagnostics.
 
@@ -239,13 +258,15 @@ Complete wins only when checksum/final terminal state was committed first. Other
 The main support surfaces are:
 
 - Options -> Diagnostics -> Copy diagnostics.
-- `tools/FileTransfer-Ops.ps1`.
+- `tools\FileTransfer-Ops.ps1`.
 - Retained logs under `%LOCALAPPDATA%\nLink\logs`.
 - File-transfer analyzer artifacts.
 
-Useful diagnostics include transfer ids, terminal state, bridge bulk health, file-transfer message rejections, V6 manifest/receiver-state/chunk events, transport epochs, target probe acknowledgement, frontier repair proof, receiver buffer pressure, repair/reorder summaries, coexistence summaries, lifecycle-priority markers, and external transport health summaries.
+Useful diagnostics include transfer ids, route token, protocol version, terminal state, bridge bulk health, file-transfer message rejections, V4/V6 frame evidence, route consistency, V6 fallback frontier rescue, receiver buffer pressure, repair/reorder summaries, coexistence summaries, lifecycle-priority markers, and external transport health summaries.
 
 The first retained-analysis file to read is `filetransfer-operator-verdict.txt`.
+
+Route-aware logs must include `filetransfer_route_selected`. Route/protocol/runtime/bridge-policy mismatches are hard failures. Legacy no-route logs can still be classified as legacy compatibility evidence, but V5 and `file_tuna_v6` evidence are obsolete-protocol failures.
 
 ## Current Limits
 
@@ -254,8 +275,8 @@ The first retained-analysis file to read is `filetransfer-operator-verdict.txt`.
 - No drag-and-drop yet.
 - No resume after app restart.
 - Default file-size cap is `25 GiB`.
-- Live throughput depends on NKN and network delivery.
-- Tuna remains experimental and optional. Current NKN remains the default and fallback path.
+- Live throughput depends on NKN, Tuna provider health, and network delivery.
+- Tuna remains experimental and optional. Current NKN remains the default path when Tuna is inactive.
 
 ## Validation
 
@@ -264,5 +285,11 @@ For deterministic local regression checks:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tools\FileTransfer-Ops.ps1 -Mode LocalFast
 ```
+
+Before installer creation, the route acceptance gate must pass:
+
+- regular NKN 64 MiB quick and 128 MiB target: `regular_nkn_v4_fast`, protocol `4`, SHA OK, completed terminals, no regular bridge bulk failures; goodput is recorded for release notes and regression triage but is not a hard pre-installer gate on public NKN.
+- active Tuna 128 MiB no-fault: `file_tuna_v4`, protocol `4`, SHA OK, completed terminals, goodput greater than `4,000,000 B/s`.
+- controlled fallback 128 MiB: setup `file_tuna_v4` may cancel cleanly; measured transfer must be `post_tuna_fallback_v6`, protocol `6`, SHA OK, completed terminals. Fallback speed is informational.
 
 For operator flow and artifact interpretation, use [`docs/file-transfer-operability.md`](file-transfer-operability.md).

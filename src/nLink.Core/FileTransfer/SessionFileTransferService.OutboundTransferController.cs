@@ -51,6 +51,7 @@ public sealed partial class SessionFileTransferService
         string? normalizedCancelReason;
         int dataCancelProtocolVersion;
         long dataCancelTransportEpoch;
+        IFileTransferRouteCompletionObserver? routeCompletionObserver;
 
         lock (gate)
         {
@@ -91,6 +92,7 @@ public sealed partial class SessionFileTransferService
             transferId = context.TransferId;
             normalizedCancelReason = NormalizeReason(cancelReason) ?? CanceledReason;
             dataSessionToDispose = context.DetachDataSession();
+            routeCompletionObserver = transport as IFileTransferRouteCompletionObserver;
         }
 
         LogV4EfficiencySummary(context, terminalState);
@@ -152,6 +154,7 @@ public sealed partial class SessionFileTransferService
             chunksTransferred: context.ChunksTransferred,
             chunkCount: context.ChunkCount,
             routeSelection: context.RouteSelection);
+        NotifyRouteCompletedIfNeeded(routeCompletionObserver, context.RouteSelection, terminalState, sessionId, transferId);
     }
 
     private async Task TransitionInboundToTerminalAsync(
@@ -174,6 +177,7 @@ public sealed partial class SessionFileTransferService
         bool shouldSendCancel;
         int dataCancelProtocolVersion;
         long dataCancelTransportEpoch;
+        IFileTransferRouteCompletionObserver? routeCompletionObserver;
 
         lock (gate)
         {
@@ -210,6 +214,7 @@ public sealed partial class SessionFileTransferService
             shouldSendCancel = terminalState == FileTransferTransferState.Canceled &&
                                !string.IsNullOrWhiteSpace(cancelReason);
             dataSessionToDispose = context.DetachDataSession();
+            routeCompletionObserver = transport as IFileTransferRouteCompletionObserver;
         }
 
         LogV4EfficiencySummary(context, terminalState);
@@ -285,6 +290,29 @@ public sealed partial class SessionFileTransferService
             chunkCount: context.ChunkCount,
             savedPath: context.SavedFilePath,
             routeSelection: context.RouteSelection);
+        NotifyRouteCompletedIfNeeded(routeCompletionObserver, context.RouteSelection, terminalState, sessionId, transferId);
+    }
+
+    private static void NotifyRouteCompletedIfNeeded(
+        IFileTransferRouteCompletionObserver? observer,
+        FileTransferRouteSelection routeSelection,
+        FileTransferTransferState terminalState,
+        string sessionId,
+        string transferId)
+    {
+        if (observer is null ||
+            terminalState != FileTransferTransferState.Completed ||
+            routeSelection.Route != FileTransferRoute.PostTunaFallbackV6)
+        {
+            return;
+        }
+
+        observer.ObserveFileTransferRouteCompleted(
+            new FileTransferRouteCompletedNotification(
+                sessionId,
+                transferId,
+                routeSelection.TelemetryToken,
+                routeSelection.ProtocolVersion));
     }
 
     private void UpdateOutboundState(

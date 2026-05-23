@@ -3548,6 +3548,15 @@ function Write-FileTransferDiagnosticsArtifacts {
             elseif ($text -eq 'recovered post-Tuna fallback bridge queue clear overlapped the completed transfer') {
                 'recovered_post_tuna_fallback_bridge_clear'
             }
+            elseif ($text -eq 'post-Tuna fallback V6 send timeout churn recovered before terminal completion') {
+                'fallback_v6_send_timeout_churn'
+            }
+            elseif ($text -eq 'post-Tuna fallback frontier repair churn recovered before terminal completion') {
+                'fallback_frontier_repair_churn'
+            }
+            elseif ($text -eq 'post-Tuna fallback receiver state churn recovered before terminal completion') {
+                'fallback_receiver_state_churn'
+            }
             elseif ($text -eq 'screen-share media pressure overlapped the completed transfer') {
                 'cohabitation_pressure'
             }

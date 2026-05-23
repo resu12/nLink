@@ -1,6 +1,6 @@
 # File-Transfer Operability
 
-For the runtime architecture and current V6 receiver-driven data-session and transport-epoch pipeline, see `docs/file-transfer-implementation.md`.
+For the runtime architecture and current route-aware V4/V6 data-session pipeline, see `docs/file-transfer-implementation.md`.
 
 Start every retained file-transfer investigation with:
 
@@ -67,19 +67,31 @@ File-transfer evidence is classified before any tuning is proposed:
 - Treat live NKN soak artifacts as operator evidence. They may vary with topology, so compare them only with matching safe/strong baseline artifact directories.
 - Pause/resume is active-session only. Restarting either app does not resume a partial transfer, and partial files must not be presented as resumable release artifacts.
 
-## Regular NKN V6 Efficiency Triage
+## Regular NKN V4 Efficiency Triage
 
 For slow installed-build reports, first distinguish a protocol stall from inefficient completion:
 
 - If both terminal summaries are `Completed` and SHA/integrity is clean, treat low goodput as a regular-NKN efficiency regression, not a session teardown bug.
 - Check `throughput-summary.txt` for raw bytes sent versus delivered payload. A raw-to-payload ratio near `1.0` is the target; ratios near `2.0` usually mean resend pressure or delayed duplicate delivery.
-- Check `v6_unsolicited_chunk_ignored_count`, `post_completion_late_sender_frame`, and `filetransfer_v6_normal_refill_near_frontier_resend_bypassed`. The near-frontier normal resend bypass is a rescue path for a non-advancing receiver frontier; it should be rare while the receiver frontier is advancing.
+- Check protocol/route first. Current regular NKN should report route `regular_nkn_v4_fast` and protocol `4`; any `diagnostic_regular_nkn_v6` evidence in release-default runs is a hard route-selection bug.
+- Check `post_completion_late_sender_frame`, repair/reorder pressure, bridge bulk send/clear counters, and route consistency before judging speed.
 - Check `transfer-terminal-summary.txt` before judging speed. Sender/receiver terminal divergence, missing terminal evidence, or non-empty error codes still outrank goodput analysis.
 
 Current regular-NKN reference artifacts:
 
-- `artifacts/filetransfer-soak/20260515-172434/`: completed, but slow and inefficient. App goodput was `946,388 B/s`, raw V6 sender bytes were `270,413,824` for a `134,217,728` byte payload, `v6_unsolicited_chunk_ignored_count=5086`, and `post_completion_late_sender_frame=416`.
-- `artifacts/filetransfer-soak/20260515-173810/`: current fixed reference. App goodput was `1,626,888 B/s`, raw V6 sender bytes were `144,926,720` for a `134,217,728` byte payload, `v6_unsolicited_chunk_ignored_count=574`, and `post_completion_late_sender_frame=0`.
+- `artifacts/filetransfer-route-ab/fallback-improvement-final-20260522T204000Z/regular-nkn-v4-64mb-r2/`: current route reference. Route `regular_nkn_v4_fast`, protocol `4`, SHA OK, completed terminals, bridge bulk send failures `0`, goodput `1,769,711 B/s`.
+- Older `20260515-*` V6 regular-NKN artifacts remain useful as regression history for the removed regular V6 path, not as production-route baselines.
+
+## Tuna And Controlled Fallback Triage
+
+Active Tuna should report route `file_tuna_v4`, protocol `4`, V4 sender/receiver runtime, and Tuna accelerated file-frame evidence. The active Tuna no-fault gate requires goodput greater than `4,000,000 B/s` when the transport is healthy.
+
+Controlled fallback is restart-based and one-shot. The setup transfer should prove `file_tuna_v4` / protocol `4` and then terminalize or cancel cleanly after Tuna is switched off. The measured transfer must be a fresh `post_tuna_fallback_v6` / protocol `6` transfer. Current evidence shows V6 fallback is slower and more variable than the V4 regular/Tuna path, so fallback speed is informational; route consistency, SHA/integrity, and completed terminals are the gate. After a successful measured fallback, the next new transfer must return to `regular_nkn_v4_fast` / protocol `4`; a repeated `post_tuna_fallback_v6` route means fallback state was not consumed.
+
+Current references:
+
+- `artifacts/filetransfer-route-ab/fallback-improvement-final-20260522T204000Z/tuna-v4-64mb-r2/`: active Tuna V4 passed with `4,087,486 B/s`.
+- `artifacts/filetransfer-route-ab/fallback-improvement-final-20260522T204000Z/tuna-fallback-64mb/`: measured fallback `post_tuna_fallback_v6` passed with SHA OK and completed terminals.
 
 ## Support Capture
 

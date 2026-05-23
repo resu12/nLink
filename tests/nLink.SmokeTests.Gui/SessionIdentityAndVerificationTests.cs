@@ -107,7 +107,7 @@ public sealed class SessionIdentityAndVerificationTests : SessionHeaderAndBanner
             }, transportConfig, helperRuntime, bootstrapHelperIdentityResolver: _ => Task.FromResult<PeerAddress?>(separatelyResolvedAddress), qrCodeService: new NoOpQrCodeService());
             var pending = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(helper, "ResolveBootstrapHelperIdentityAsync", CancellationToken.None));
             await pending;
-            Assert.Equal(string.Empty, helper.HelperIdentityBootstrapText);
+            Assert.Equal(separatelyResolvedAddress.Value, helper.HelperIdentityBootstrapText);
             Assert.False(helper.HasHelperIdentityBootstrapVerificationCode);
             await transport.HostByAddressAsync(CancellationToken.None);
             InvokePrivateMethod(helper, "CacheBootstrapHelperIdentityFromRuntimeIfAvailable");

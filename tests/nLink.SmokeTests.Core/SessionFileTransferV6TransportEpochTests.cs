@@ -1184,6 +1184,81 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         }
     }
 
+    [Fact]
+    public async Task PostTunaFallbackV6_SendTimeoutQueuesExactFrontierRepairAndFreezesNormalSendAhead()
+    {
+        var previousSendTimeout = SessionFileTransferService.V6SenderTransportSendTimeoutOverrideForTests;
+        SessionFileTransferService.V6SenderTransportSendTimeoutOverrideForTests = TimeSpan.FromMilliseconds(100);
+        try
+        {
+            const string transferId = "transfer_v6_post_fallback_send_timeout_frontier";
+            const string sessionId = "session_v6_post_fallback_send_timeout_frontier";
+            var logStart = GetOperationalLogLength();
+            using var senderTransport = new LoopbackFileTransferTransport(sessionId);
+            using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+            senderTransport.IsPostTunaFileFallbackActiveForRouteSelection = true;
+            receiverTransport.IsPostTunaFileFallbackActiveForRouteSelection = true;
+            senderTransport.Connect(receiverTransport);
+            senderTransport.OutboundDataFrameDeliveryOverrideWithLaneAsync = async (_, frame, _, ct) =>
+            {
+                if (frame is FileTransferChunkBatchFrameV6 batch &&
+                    !string.Equals(batch.Priority, "frontier", StringComparison.OrdinalIgnoreCase))
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(30), ct);
+                    return true;
+                }
+
+                return false;
+            };
+
+            using var sender = new SessionFileTransferService();
+            sender.AttachTransport(senderTransport);
+            var receiverSession = await StartManualOutboundV6SenderAsync(
+                sender,
+                senderTransport,
+                receiverTransport,
+                transferId,
+                payloadSize: 1_000_000);
+
+            await receiverSession.SendAsync(
+                new FileTransferReceiverStateFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    Epoch = 1,
+                    ContiguousCommittedChunkIndex = 0,
+                    DurableReceivedHighestChunkIndex = -1,
+                    CreditUntilChunkIndexExclusive = 64,
+                    MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = 0, ChunkCount = 64 }],
+                    BytesCommitted = 0,
+                },
+                CancellationToken.None);
+
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=filetransfer_v6_post_tuna_fallback_send_timeout_frontier_repair_queued",
+                    StringComparison.Ordinal),
+                timeoutMs: 5000);
+
+            await WaitUntilAsync(
+                () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(static batch =>
+                    batch.StartChunkIndex == 0 &&
+                    batch.ChunkCount == 1 &&
+                    string.Equals(batch.Priority, "frontier", StringComparison.OrdinalIgnoreCase)),
+                timeoutMs: 5000);
+
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=filetransfer_v6_post_tuna_fallback_send_timeout_frontier_repair_queued", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_v6_post_tuna_fallback_normal_send_ahead_freeze_started", logTail, StringComparison.Ordinal);
+            Assert.Contains("exact_frontier_requeued_chunk_count=1", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("state=Failed", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            SessionFileTransferService.V6SenderTransportSendTimeoutOverrideForTests = previousSendTimeout;
+        }
+    }
+
     [Theory]
     [InlineData("object_disposed")]
     [InlineData("bridge_not_running")]

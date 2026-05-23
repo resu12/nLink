@@ -86,14 +86,15 @@ Transport/app-layer security contract:
 - release notes and README must distinguish transport security from nLink application-layer security
 - current code may claim nLink application-layer protection for chat, remote control, screen share, file transfer, and session lifecycle traffic after approval
 - current code must still distinguish those nLink guarantees from the remaining trust placed in the bundled NKN bridge/runtime
-- current code must describe file transfer as V6-only, single-file, explicit accept/decline, and protected by nLink session envelope/source validation rather than by assuming NKN alone is sufficient
+- current code must describe file transfer as route-aware, single-file, explicit accept/decline, and protected by nLink session envelope/source validation rather than by assuming NKN alone is sufficient
+- current production file-transfer routes are `regular_nkn_v4_fast` protocol `4`, `file_tuna_v4` protocol `4`, and fresh one-shot `post_tuna_fallback_v6` protocol `6`; a successful post-Tuna fallback transfer must consume that fallback state so the next new transfer returns to regular V4; `diagnostic_regular_nkn_v6` is unsafe opt-in only
 
 Transport abuse-resistance limit matrix:
 - `NknSignalingTransport` high-priority control queue: `256` items max
 - `NknSignalingTransport` low-priority control queue: `256` items max, stale mouse-move entries coalesce to latest
 - `NknSignalingTransport` file-transfer data-session queue: `512` frames and `32 MiB` estimated queued bytes per active data session
 - file-transfer overflow policy: log `filetransfer_data_session_overflow`, fail closed with `ReceiverBufferExhausted`, remove the active data-session registration, and require resume/reopen
-- file-transfer V6 bulk path: sender/source validation is bound to the negotiated remote bulk endpoint
+- file-transfer data-session path: sender/source validation is bound to the negotiated remote bulk endpoint and selected route
 - `NknSignalingTransport` screen-share outbound gate wait budget: `25 ms`
 - `NknSignalingTransport` replay windows: bounded per control, lifecycle, and screen-share family
 - `NknSignalingTransport` high-lane overflow policy:
@@ -107,8 +108,10 @@ Transport abuse-resistance limit matrix:
 - release validation must review both transport-local queue limits and lower-layer payload limits together
 
 File-transfer release gate:
-- run at least one live NKN file-transfer soak on the packaged app after building the bridge/runtime bundle
-- verify completion/integrity, no `filetransfer_data_session_overflow`, no `filetransfer_message_rejected`, no bridge stdout protocol violations, and no unexpected downgrade from the V6 data path
+- run the route acceptance gate before installer creation after building the bridge/runtime bundle
+- verify regular NKN completion/integrity on route `regular_nkn_v4_fast` protocol `4`, no `filetransfer_data_session_overflow`, no `filetransfer_message_rejected`, no bridge stdout protocol violations, no regular-NKN bridge bulk send/clear failures, and no unexpected diagnostic V6 route
+- verify active Tuna completion/integrity on route `file_tuna_v4` protocol `4` with goodput above the active-Tuna floor
+- verify controlled fallback completion/integrity on measured route `post_tuna_fallback_v6` protocol `6`; fallback speed is informational; verify the following new transfer is regular V4 when the fallback transfer completed successfully
 - `post_completion_late_sender_frame` ignored frames are allowed only when they occur after terminal completion for a recently completed transfer; retain the count from the soak summary with the release evidence
 - retain `filetransfer-live-nkn-summary.txt`, `filetransfer-live-nkn-cycles.jsonl`, and the retained log slice with the release evidence
 
