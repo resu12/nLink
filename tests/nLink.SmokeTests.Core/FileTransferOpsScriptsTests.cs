@@ -405,7 +405,7 @@ public sealed class FileTransferOpsScriptsTests
     }
 
     [Fact]
-    public void PreReleaseCheck_RunsRouteAcceptanceAfterPortableBeforeInstaller()
+    public void PreReleaseCheck_RouteAcceptanceIsOptInAfterPortableBeforeInstaller()
     {
         var repoRoot = FindRepoRoot();
         var scriptPath = Path.Combine(repoRoot, "tools", "PreRelease-Check.ps1");
@@ -418,6 +418,8 @@ public sealed class FileTransferOpsScriptsTests
         Assert.True(portableIndex >= 0, "Expected portable build step.");
         Assert.True(routeAcceptanceIndex > portableIndex, "Expected route acceptance after portable build.");
         Assert.True(installerIndex > routeAcceptanceIndex, "Expected installer build after route acceptance.");
+        Assert.Contains("RunFileTransferRouteAcceptanceGate", scriptText, StringComparison.Ordinal);
+        Assert.Contains("File transfer route acceptance gate: SKIPPED", scriptText, StringComparison.Ordinal);
         Assert.Contains("Run-FileTransferRouteAcceptance.ps1", scriptText, StringComparison.Ordinal);
         Assert.Contains("NLINK_TUNA_TEST_WALLET_PASSWORD", scriptText, StringComparison.Ordinal);
         Assert.Contains("FileTransferRouteAcceptanceWalletPassword", scriptText, StringComparison.Ordinal);
