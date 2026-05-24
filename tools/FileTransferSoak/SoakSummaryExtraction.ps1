@@ -347,6 +347,26 @@ function Test-FileTransferRouteTerminalBetween {
     return $false
 }
 
+function Test-FileTransferAllowedLiveFallbackRouteTransition {
+    param(
+        [Parameter(Mandatory = $true)]$Previous,
+        [Parameter(Mandatory = $true)]$Selected
+    )
+
+    $previousRoute = Get-FileTransferEventField -Event $Previous -Name 'route' -Default ''
+    $route = Get-FileTransferEventField -Event $Selected -Name 'route' -Default ''
+    if ($previousRoute -ne 'file_tuna_v4' -or $route -ne 'post_tuna_fallback_v6') {
+        return $false
+    }
+
+    $handoffKind = Get-FileTransferEventField -Event $Selected -Name 'handoff_kind' -Default ''
+    $postTunaFallbackActive = Get-FileTransferEventField -Event $Selected -Name 'post_tuna_fallback_active' -Default '0'
+    $fileTunaActive = Get-FileTransferEventField -Event $Selected -Name 'file_tuna_active' -Default '1'
+    return $handoffKind -eq 'tuna_to_normal_fallback' -and
+        $postTunaFallbackActive -eq '1' -and
+        $fileTunaActive -eq '0'
+}
+
 function Add-FileTransferRouteConsistencyFinding {
     param(
         [Parameter(Mandatory = $true)]$Findings,
@@ -384,7 +404,8 @@ function Get-FileTransferRouteConsistency {
             $previous = $lastSelectedByDirectionKey[$directionKey]
             $previousRoute = Get-FileTransferEventField -Event $previous -Name 'route' -Default ''
             if ($route -ne $previousRoute -and
-                -not (Test-FileTransferRouteTerminalBetween -TerminalEvents $terminalEvents -DirectionKey $directionKey -AfterSequence $previous.Sequence -BeforeSequence $selected.Sequence)) {
+                -not (Test-FileTransferRouteTerminalBetween -TerminalEvents $terminalEvents -DirectionKey $directionKey -AfterSequence $previous.Sequence -BeforeSequence $selected.Sequence) -and
+                -not (Test-FileTransferAllowedLiveFallbackRouteTransition -Previous $previous -Selected $selected)) {
                 Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding ("route changed before prior terminal: transfer_direction={0}; previous_route={1}; new_route={2}; event={3}" -f $directionKey, $previousRoute, $route, (Format-FileTransferEvidenceLine -Event $selected)) -Event $selected
             }
         }

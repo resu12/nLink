@@ -400,7 +400,10 @@ function Test-TunaGuiControlledSetupCancelAccepted {
 }
 
 function Write-TunaGuiControlledRestartFailureSummary {
-    param([Parameter(Mandatory = $true)][string]$ArtifactDir)
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [string]$RouteMode = 'v4-restart-v6-fallback'
+    )
 
     $summaryPath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json'
     if (Test-Path -LiteralPath $summaryPath -PathType Leaf) {
@@ -417,7 +420,7 @@ function Write-TunaGuiControlledRestartFailureSummary {
     $failurePhase = Resolve-TunaGuiControlledRestartFailurePhase -Summary $null -ErrorSummary $errorSummary -FallbackDiagnostics $diagnostics
     $summary = [ordered]@{
         event = 'filetransfer_tuna_gui_handoff_fallback_summary'
-        routeMode = 'v4-restart-v6-fallback'
+        routeMode = $RouteMode
         completed = $false
         integrityOk = $false
         fallbackFailurePhase = $failurePhase
@@ -575,7 +578,7 @@ try {
     if ($guiSmokeExitCode -ne 0) {
         if ($RouteMode -eq 'v4-restart-v6-fallback') {
             Invoke-TunaGuiMeasuredFallbackRetainedAnalysisBestEffort -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir
-            Write-TunaGuiControlledRestartFailureSummary -ArtifactDir $resolvedArtifactDir
+            Write-TunaGuiControlledRestartFailureSummary -ArtifactDir $resolvedArtifactDir -RouteMode $RouteMode
         }
 
         throw "GUI smoke failed with exit code $guiSmokeExitCode. Artifacts: $resolvedArtifactDir"
@@ -585,7 +588,7 @@ try {
     if (-not (Test-Path -LiteralPath $summaryPath -PathType Leaf)) {
         if ($RouteMode -eq 'v4-restart-v6-fallback') {
             Invoke-TunaGuiMeasuredFallbackRetainedAnalysisBestEffort -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir
-            Write-TunaGuiControlledRestartFailureSummary -ArtifactDir $resolvedArtifactDir
+            Write-TunaGuiControlledRestartFailureSummary -ArtifactDir $resolvedArtifactDir -RouteMode $RouteMode
         }
 
         throw "GUI smoke did not write file-transfer Tuna summary. Artifacts: $resolvedArtifactDir"

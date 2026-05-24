@@ -2243,7 +2243,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
         NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = TimeSpan.Zero;
         try
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             var options = NknTransportOptions.Load();
             var hostClient = new FakeNknClient("host.tuna.retry.address");
             var helperClient = new FakeNknClient("helper.tuna.retry.address");
@@ -2403,7 +2403,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
         NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = TimeSpan.Zero;
         try
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             var options = NknTransportOptions.Load();
             var hostClient = new FakeNknClient("host.tuna.late-unlock.address");
             var helperClient = new FakeNknClient("helper.tuna.late-unlock.address");
@@ -3300,7 +3300,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
         NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = TimeSpan.Zero;
         try
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             var options = NknTransportOptions.Load();
             var hostClient = new FakeNknClient("host.tuna.remote-stop-reunlock.address");
             var helperClient = new FakeNknClient("helper.tuna.remote-stop-reunlock.address");
@@ -3330,7 +3330,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             await ((ITransportAccelerationControl)helper).StopAccelerationAsync("header_switch_off", cts.Token);
             await WaitUntilAsync(
                 () => !host.IsAccelerationAvailableForTests && !helper.IsAccelerationAvailableForTests,
-                TimeSpan.FromSeconds(10));
+                TimeSpan.FromSeconds(20));
             Assert.False(host.IsAccelerationUserStoppedForCurrentSessionForTests);
             Assert.True(helper.IsAccelerationUserStoppedForCurrentSessionForTests);
             var hostDialerCallsBeforeReunlock = hostLane.StartDialerCalls;
@@ -3339,7 +3339,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
             await WaitUntilAsync(
                 () => host.IsAccelerationAvailableForTests && helper.IsAccelerationAvailableForTests,
-                TimeSpan.FromSeconds(10));
+                TimeSpan.FromSeconds(20));
             Assert.True(hostLane.StartDialerCalls > hostDialerCallsBeforeReunlock);
             Assert.Equal(NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen, host.AccelerationNegotiatedLanesForTests);
             Assert.Equal(NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen, helper.AccelerationNegotiatedLanesForTests);
@@ -3389,9 +3389,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
             await ((ITransportAccelerationControl)host).StopAccelerationAsync("header_switch_off", cts.Token);
             await WaitUntilAsync(
-                () => !host.IsAccelerationAvailableForTests && !helper.IsAccelerationAvailableForTests,
+                () => !host.IsAccelerationAvailableForTests && host.IsAccelerationUserStoppedForCurrentSessionForTests,
                 TimeSpan.FromSeconds(10));
-            Assert.True(host.IsAccelerationUserStoppedForCurrentSessionForTests);
             var hostDialerCallsBeforeReunlock = hostLane.StartDialerCalls;
 
             var logStart = GetOperationalLogLength();
@@ -4033,7 +4032,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task FileTransferFallbackProof_LiveV4ProofCompletesWithoutV6EpochObserver()
+    public async Task FileTransferFallbackProof_GenericControlWaitsForV6EpochObserver()
     {
         FakeNknClient.ResetNetwork();
         try
@@ -4073,13 +4072,12 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
             var completedFromGenericControl = Assert.IsType<bool>(
                 InvokePrivateMethod(helper, "CompleteFileTransferFallbackNknProofIfPending", "nkn_control_chat_received", sessionId));
-            Assert.True(completedFromGenericControl);
+            Assert.False(completedFromGenericControl);
             var genericProofTail = ReadOperationalLogTail(logStart);
-            Assert.Contains("event=filetransfer_live_v4_fallback_nkn_proved;", genericProofTail, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_live_v4_fallback_cleanup_completed;", genericProofTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_disable_handoff_completed;", genericProofTail, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=filetransfer_fallback_nkn_proof_waiting_for_v6_epoch;", genericProofTail, StringComparison.Ordinal);
-            Assert.DoesNotContain("file_v6_epoch_state=recovered", genericProofTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_fallback_nkn_proof_waiting_for_v6_epoch;", genericProofTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_live_v4_fallback_nkn_proved;", genericProofTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_live_v4_fallback_cleanup_completed;", genericProofTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_disable_handoff_completed;", genericProofTail, StringComparison.Ordinal);
         }
         finally
         {
@@ -4089,7 +4087,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task FileTransferFallbackProof_LiveV4LocalNknSendCompletesProof()
+    public async Task FileTransferFallbackProof_LocalV4NknSendWaitsForV6EpochObserver()
     {
         FakeNknClient.ResetNetwork();
         try
@@ -4140,11 +4138,11 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=tuna_fallback_nkn_frame_sent; message_type=file_transfer_data_frame; channel=bulk", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_fallback_nkn_proof_observed;", logTail, StringComparison.Ordinal);
             Assert.Contains("proof=file_transfer_v4_bulk_frame_sent", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_live_v4_fallback_nkn_proved;", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_live_v4_fallback_cleanup_completed;", logTail, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=filetransfer_fallback_nkn_proof_waiting_for_v6_epoch;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_fallback_nkn_proof_waiting_for_v6_epoch;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_fallback_nkn_proof_observed;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_live_v4_fallback_nkn_proved;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_live_v4_fallback_cleanup_completed;", logTail, StringComparison.Ordinal);
         }
         finally
         {

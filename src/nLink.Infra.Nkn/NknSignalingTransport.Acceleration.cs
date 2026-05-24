@@ -1622,8 +1622,7 @@ public sealed partial class NknSignalingTransport
                "file_transfer_v6_error_frame_received";
 
     private static bool IsLiveV4FileTransferFallbackNknProof(string proofKind)
-        => proofKind.StartsWith("nkn_control_", StringComparison.Ordinal) ||
-           proofKind.StartsWith("file_transfer_v4_", StringComparison.Ordinal);
+        => false;
 
     private static string MapSecureMessageTypeForProof(MsgType messageType)
         => messageType switch

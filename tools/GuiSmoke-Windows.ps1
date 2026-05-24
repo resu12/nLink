@@ -2418,6 +2418,43 @@ function Test-GuiSmokeEnvEnabled {
     return $value -match '^(1|true|yes|on)$'
 }
 
+function Resolve-TunaGuiLiveSwitchOffMinimumCommittedBytes {
+    param([Parameter(Mandatory = $true)][long]$PayloadSizeBytes)
+
+    $overrideText = [string][Environment]::GetEnvironmentVariable('NLINK_TUNA_GUI_LIVE_SWITCH_OFF_MIN_COMMITTED_BYTES')
+    if ([string]::IsNullOrWhiteSpace($overrideText)) {
+        $overrideText = [string][Environment]::GetEnvironmentVariable('NLINK_TUNA_GUI_LIVE_SWITCH_OFF_MIN_PAYLOAD_BYTES')
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($overrideText)) {
+        $overrideBytes = 0L
+        if (-not [long]::TryParse($overrideText, [ref]$overrideBytes) -or $overrideBytes -le 0L) {
+            throw "Invalid NLINK_TUNA_GUI_LIVE_SWITCH_OFF_MIN_COMMITTED_BYTES '$overrideText'. Use a positive byte count."
+        }
+
+        return [Math]::Min($overrideBytes, [Math]::Max(1L, [long]($PayloadSizeBytes * 3 / 4)))
+    }
+
+    $payloadTarget = [Math]::Max(1L, [long]($PayloadSizeBytes / 2))
+    $floorBytes = 16777216L
+    $capBytes = [Math]::Max(1L, [long]($PayloadSizeBytes * 3 / 4))
+    return [Math]::Min([Math]::Max($floorBytes, $payloadTarget), $capBytes)
+}
+
+function Resolve-TunaGuiLiveSwitchOffMinimumElapsedMs {
+    $overrideText = [string][Environment]::GetEnvironmentVariable('NLINK_TUNA_GUI_LIVE_SWITCH_OFF_MIN_ELAPSED_MS')
+    if (-not [string]::IsNullOrWhiteSpace($overrideText)) {
+        $overrideMs = 0
+        if (-not [int]::TryParse($overrideText, [ref]$overrideMs) -or $overrideMs -lt 0) {
+            throw "Invalid NLINK_TUNA_GUI_LIVE_SWITCH_OFF_MIN_ELAPSED_MS '$overrideText'. Use a non-negative millisecond count."
+        }
+
+        return $overrideMs
+    }
+
+    return 5000
+}
+
 function Resolve-RepoPathForGuiSmoke {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -2778,6 +2815,68 @@ function Wait-TunaGuiAcceleratedFilePayloadBeforeFault {
     }
 
     throw "Timed out waiting for Tuna accelerated bulk file payload before fallback fault; min_total_payload_bytes=$MinimumTotalPayloadBytes; total_payload_bytes=$totalPayloadBytes; min_frame_payload_bytes=$MinimumFramePayloadBytes; last_frame_payload_bytes=$lastFramePayloadBytes; timeout_s=$($TimeoutMs / 1000)."
+}
+
+function Wait-TunaGuiLiveSwitchOffTransferProgressBeforeFault {
+    param(
+        [Parameter(Mandatory = $true)][int]$Bookmark,
+        [int]$TimeoutMs = 60000,
+        [long]$MinimumCommittedBytes = 16777216,
+        [int]$MinimumElapsedMs = 3000,
+        [long]$MinimumFramePayloadBytes = 16384,
+        [int]$PollIntervalMs = 100
+    )
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $processedLineCount = 0
+    $acceleratedPayloadBytes = 0L
+    $lastFramePayloadBytes = -1L
+    $maxCommittedBytes = 0L
+    $bestProgressLine = ''
+    while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+        $lines = @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)
+        if ($lines.Count -lt $processedLineCount) {
+            $processedLineCount = 0
+        }
+
+        for ($lineIndex = $processedLineCount; $lineIndex -lt $lines.Count; $lineIndex++) {
+            $line = $lines[$lineIndex]
+            if ($line.IndexOf('event=tuna_accelerated_file_frame_sent', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                $line.IndexOf('channel=bulk', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $fields = ConvertFrom-GuiSmokeSemicolonFields -Message $line
+                $payloadText = Get-GuiSmokeFieldValue -Fields $fields -Name 'payload_bytes' -Default '-1'
+                $payloadBytes = -1L
+                if ([long]::TryParse($payloadText, [ref]$payloadBytes)) {
+                    $lastFramePayloadBytes = [Math]::Max($lastFramePayloadBytes, $payloadBytes)
+                    if ($payloadBytes -ge $MinimumFramePayloadBytes) {
+                        $acceleratedPayloadBytes += $payloadBytes
+                    }
+                }
+            }
+
+            if ($line.IndexOf('event=filetransfer_v4_state_sent', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                $line.IndexOf('bytes_committed=', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $fields = ConvertFrom-GuiSmokeSemicolonFields -Message $line
+                $committedText = Get-GuiSmokeFieldValue -Fields $fields -Name 'bytes_committed' -Default '-1'
+                $committedBytes = -1L
+                if ([long]::TryParse($committedText, [ref]$committedBytes) -and $committedBytes -gt $maxCommittedBytes) {
+                    $maxCommittedBytes = $committedBytes
+                    $bestProgressLine = $line
+                }
+            }
+        }
+        $processedLineCount = $lines.Count
+
+        if ($acceleratedPayloadBytes -gt 0L -and
+            $maxCommittedBytes -ge $MinimumCommittedBytes -and
+            $sw.ElapsedMilliseconds -ge $MinimumElapsedMs) {
+            return $bestProgressLine
+        }
+
+        Start-Sleep -Milliseconds ([Math]::Max(10, $PollIntervalMs))
+    }
+
+    throw "Timed out waiting for receiver-committed Tuna file progress before fallback fault; min_committed_bytes=$MinimumCommittedBytes; committed_bytes=$maxCommittedBytes; accelerated_payload_bytes=$acceleratedPayloadBytes; min_elapsed_ms=$MinimumElapsedMs; elapsed_ms=$($sw.ElapsedMilliseconds); min_frame_payload_bytes=$MinimumFramePayloadBytes; last_frame_payload_bytes=$lastFramePayloadBytes; timeout_s=$($TimeoutMs / 1000)."
 }
 
 function Invoke-TunaGuiPauseResumeProbe {
@@ -3321,6 +3420,9 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     $fallbackEpochRecoveredObserved = $false
     $fallbackEpochWaitingObserved = $false
     $setupPhase = $null
+    $liveSwitchOffMinimumFaultPayloadBytes = 0L
+    $liveSwitchOffMinimumCommittedBytes = 0L
+    $liveSwitchOffMinimumElapsedMs = 0
 
     if ($RouteMode -eq 'preactivated' -or $RouteMode -eq 'post-fallback' -or $RouteMode -eq 'v4-restart-v6-fallback' -or $RouteMode -eq 'live-v4-switch-off') {
         $preconditionBookmark = Get-AppLogBookmark
@@ -3420,32 +3522,49 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         ) -TimeoutMs 90000 -Description 'live V4 switch-off active file Tuna route')
         $observedEvidenceLines.Add($routeLine) | Out-Null
 
-        $acceleratedPayloadLine = [string](Wait-TunaGuiAcceleratedFilePayloadBeforeFault -Bookmark $bookmark -MinimumTotalPayloadBytes 16384L -MinimumFramePayloadBytes 16384L -TimeoutMs 90000 -PollIntervalMs 25)
-        $observedEvidenceLines.Add($acceleratedPayloadLine) | Out-Null
+        $liveSwitchOffMinimumCommittedBytes = Resolve-TunaGuiLiveSwitchOffMinimumCommittedBytes -PayloadSizeBytes $PayloadSizeBytes
+        $liveSwitchOffMinimumFaultPayloadBytes = $liveSwitchOffMinimumCommittedBytes
+        $liveSwitchOffMinimumElapsedMs = Resolve-TunaGuiLiveSwitchOffMinimumElapsedMs
+        $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_switch_off_fault_threshold; minimum_committed_bytes={1}; minimum_elapsed_ms={2}; payload_bytes={3}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $liveSwitchOffMinimumCommittedBytes, $liveSwitchOffMinimumElapsedMs, $PayloadSizeBytes)) | Out-Null
+        Write-Host ("[GUI Smoke][filetransfer_tuna] Waiting for receiver commit >= {0} byte(s) and elapsed >= {1} ms before live switch-off fault." -f $liveSwitchOffMinimumCommittedBytes, $liveSwitchOffMinimumElapsedMs) -ForegroundColor DarkGray
+
+        $progressLine = [string](Wait-TunaGuiLiveSwitchOffTransferProgressBeforeFault -Bookmark $bookmark -MinimumCommittedBytes $liveSwitchOffMinimumCommittedBytes -MinimumElapsedMs $liveSwitchOffMinimumElapsedMs -MinimumFramePayloadBytes 16384L -TimeoutMs 90000 -PollIntervalMs 25)
+        $observedEvidenceLines.Add($progressLine) | Out-Null
 
         Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode
         $fallbackStartedLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
+            @('event=filetransfer_route_selected', 'route=post_tuna_fallback_v6', 'protocol_version=6'),
+            @('event=filetransfer_v6_epoch_started', 'handoff_kind=tuna_to_normal_fallback'),
             @('event=tuna_fallback_started'),
             @('event=tuna_fallback_filetransfer_rebind_requested'),
             @('event=tuna_acceleration_user_stop_filetransfer_fallback_forced'),
             @('event=filetransfer_post_tuna_recovery_started'),
             @('event=tuna_disable_handoff_nkn_pending')
-        ) -TimeoutMs 90000 -Description 'live V4 switch-off fallback started')
+        ) -TimeoutMs 90000 -Description 'live switch-off V6 fallback started')
         $observedEvidenceLines.Add($fallbackStartedLine) | Out-Null
         $fallbackEpochStartedObserved = $true
 
-        $proofLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
-            @('event=filetransfer_live_v4_fallback_nkn_proved'),
-            @('event=tuna_fallback_nkn_frame_received', 'message_type=file_transfer_data_frame', 'channel=bulk')
-        ) -TimeoutMs 150000 -Description 'live V4 fallback NKN proof')
-        $observedEvidenceLines.Add($proofLine) | Out-Null
+        $fallbackRouteLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
+            @('event=filetransfer_route_selected', 'route=post_tuna_fallback_v6', 'protocol_version=6'),
+            @('event=filetransfer_protocol_negotiated', 'route=post_tuna_fallback_v6', 'protocol_version=6')
+        ) -TimeoutMs 90000 -Description 'live switch-off post-Tuna fallback V6 route')
+        $observedEvidenceLines.Add($fallbackRouteLine) | Out-Null
 
-        $cleanupLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
-            @('event=filetransfer_live_v4_fallback_cleanup_completed'),
-            @('event=tuna_disable_handoff_completed')
-        ) -TimeoutMs 150000 -Description 'live V4 fallback cleanup completed')
-        $observedEvidenceLines.Add($cleanupLine) | Out-Null
-        $fallbackEpochRecoveredObserved = $true
+        $fallbackResolutionLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
+            @('event=filetransfer_v6_epoch_recovered', 'handoff_kind=tuna_to_normal_fallback'),
+            @('event=filetransfer_v6_epoch_recovered', 'target_transport=regular_nkn'),
+            @('event=filetransfer_v6_epoch_observed', 'handoff_kind=tuna_to_normal_fallback', 'state=recovered'),
+            @('event=filetransfer_v6_epoch_waiting', 'handoff_kind=tuna_to_normal_fallback'),
+            @('event=filetransfer_v6_epoch_observed', 'handoff_kind=tuna_to_normal_fallback', 'state=waiting_for_target_transport')
+        ) -TimeoutMs 150000 -Description 'live switch-off V6 fallback recovered or waiting')
+        $observedEvidenceLines.Add($fallbackResolutionLine) | Out-Null
+        if (($fallbackResolutionLine.IndexOf('state=waiting_for_target_transport', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -or
+            ($fallbackResolutionLine.IndexOf('event=filetransfer_v6_epoch_waiting', [System.StringComparison]::OrdinalIgnoreCase) -ge 0)) {
+            $fallbackEpochWaitingObserved = $true
+        }
+        else {
+            $fallbackEpochRecoveredObserved = $true
+        }
     }
     elseif ($RouteMode -eq 'handoff-fallback') {
         [void](Wait-FileTransferTerminalOrProgressBeforeAction -Bookmark $bookmark -ProgressTimeoutMs $ProgressTimeoutMs -MinProgressEvents 2 -TimeoutMs 60000)
@@ -3562,8 +3681,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_phase_marker; phase=measured_post_tuna_fallback_v6_terminal; inbound_state={1}; outbound_state={2}; inbound_error={3}; outbound_error={4}; integrity_ok={5}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $inboundState, $outboundState, $inboundError, $outboundError, ($(if ($integrityOk) { 1 } else { 0 })))) | Out-Null
     }
     $goodputBytesPerSecond = if ($sw.Elapsed.TotalSeconds -gt 0) { [Math]::Round($PayloadSizeBytes / $sw.Elapsed.TotalSeconds, 3) } else { 0D }
-    $expectedMeasuredRoute = if ($RouteMode -eq 'preactivated' -or $RouteMode -eq 'live-v4-switch-off') { 'file_tuna_v4' } elseif ($RouteMode -eq 'handoff-fallback') { '(handoff)' } else { 'post_tuna_fallback_v6' }
-    $measuredPhaseName = if ($RouteMode -eq 'preactivated') { 'measured_file_tuna_v4' } elseif ($RouteMode -eq 'live-v4-switch-off') { 'measured_file_tuna_v4_live_switch_off' } elseif ($RouteMode -eq 'v4-restart-v6-fallback') { 'measured_post_tuna_fallback_v6' } elseif ($RouteMode -eq 'post-fallback') { 'measured_post_tuna_fallback_v6' } else { 'measured_handoff_fallback' }
+    $expectedMeasuredRoute = if ($RouteMode -eq 'preactivated') { 'file_tuna_v4' } elseif ($RouteMode -eq 'handoff-fallback') { '(handoff)' } else { 'post_tuna_fallback_v6' }
+    $measuredPhaseName = if ($RouteMode -eq 'preactivated') { 'measured_file_tuna_v4' } elseif ($RouteMode -eq 'live-v4-switch-off') { 'measured_live_post_tuna_fallback_v6' } elseif ($RouteMode -eq 'v4-restart-v6-fallback') { 'measured_post_tuna_fallback_v6' } elseif ($RouteMode -eq 'post-fallback') { 'measured_post_tuna_fallback_v6' } else { 'measured_handoff_fallback' }
     $measuredRoute = Get-GuiSmokeFieldValue -Fields $outbound -Name 'route' -Default (Get-GuiSmokeFieldValue -Fields $inbound -Name 'route' -Default $expectedMeasuredRoute)
     $defaultMeasuredProtocol = if ($measuredRoute -eq 'post_tuna_fallback_v6') { 6 } elseif ($measuredRoute -eq 'file_tuna_v4') { 4 } else { 0 }
     $measuredProtocol = ConvertTo-GuiSmokeInt -Value (Get-GuiSmokeFieldValue -Fields $outbound -Name 'protocol_version' -Default (Get-GuiSmokeFieldValue -Fields $inbound -Name 'protocol_version' -Default ([string]$defaultMeasuredProtocol))) -Default $defaultMeasuredProtocol
@@ -3595,6 +3714,12 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
             $line.IndexOf('channel=bulk', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             $evidence.tunaFallbackNknFileFrameReceived = $true
         }
+
+        if ($line.IndexOf('event=filetransfer_route_selected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $line.IndexOf('route=post_tuna_fallback_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $line.IndexOf('protocol_version=6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $evidence.postTunaFallbackV6RouteObserved = $true
+        }
     }
     if ($pauseProbe) {
         $evidence.pauseSent = $true
@@ -3603,7 +3728,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         $evidence.resumeReceived = $true
     }
 
-    $fallbackModel = if ($RouteMode -eq 'live-v4-switch-off') { 'live_v4' } elseif ($RouteMode -eq 'v4-restart-v6-fallback' -or $RouteMode -eq 'post-fallback') { 'controlled_restart_v6' } else { '(none)' }
+    $fallbackModel = if ($RouteMode -eq 'live-v4-switch-off') { 'live_v6' } elseif ($RouteMode -eq 'v4-restart-v6-fallback' -or $RouteMode -eq 'post-fallback') { 'controlled_restart_v6' } else { '(none)' }
     $singleTransferLiveFallback = $RouteMode -eq 'live-v4-switch-off'
     $summary = [ordered]@{
         event = 'filetransfer_tuna_gui_handoff_fallback_summary'
@@ -3643,6 +3768,9 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         }
         fallbackModel = $fallbackModel
         singleTransferLiveFallback = $singleTransferLiveFallback
+        liveSwitchOffMinimumFaultPayloadBytes = $liveSwitchOffMinimumFaultPayloadBytes
+        liveSwitchOffMinimumCommittedBytes = $liveSwitchOffMinimumCommittedBytes
+        liveSwitchOffMinimumElapsedMs = $liveSwitchOffMinimumElapsedMs
         pauseProbe = [bool]$pauseProbe
         evidence = $evidence
     }
@@ -3684,16 +3812,11 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
 
     }
     elseif ($RouteMode -eq 'live-v4-switch-off') {
-        if (-not $evidence.tunaNegotiated -or -not $evidence.fallbackEpochStarted -or -not $evidence.liveV4FallbackNknProved -or -not $evidence.liveV4FallbackCleanupCompleted) {
-            throw "Tuna GUI live V4 switch-off did not prove same-transfer V4 NKN fallback. Summary: $($evidence | ConvertTo-Json -Compress)"
-        }
-
-        if (-not $evidence.tunaFallbackNknFileFrameSent -or -not $evidence.tunaFallbackNknFileFrameReceived) {
-            throw "Tuna GUI live V4 switch-off did not observe file payload over fallback NKN. Summary: $($evidence | ConvertTo-Json -Compress)"
-        }
-
-        if ($evidence.postTunaFallbackV6RouteObserved -or $evidence.v6SenderStartedCount -gt 0) {
-            throw "Tuna GUI live V4 switch-off unexpectedly started a V6/fresh fallback route. Summary: $($evidence | ConvertTo-Json -Compress)"
+        if (-not $evidence.tunaNegotiated -or
+            -not $evidence.fallbackEpochStarted -or
+            -not $evidence.postTunaFallbackV6RouteObserved -or
+            (-not $evidence.fallbackEpochRecovered -and -not $evidence.fallbackEpochWaiting)) {
+            throw "Tuna GUI live switch-off did not prove same-transfer V6 post-Tuna fallback. Summary: $($evidence | ConvertTo-Json -Compress)"
         }
     }
     elseif (-not $evidence.tunaNegotiated -or -not $evidence.fallbackEpochStarted) {

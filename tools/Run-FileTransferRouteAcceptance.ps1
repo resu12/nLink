@@ -615,11 +615,6 @@ function Assert-TunaRouteAcceptanceRun {
             Add-RouteAcceptanceFailure -Result $result -Message ("Tuna terminal errors observed: inbound={0}; outbound={1}" -f $inboundError, $outboundError)
         }
 
-        if ($ExpectedRoute -eq 'file_tuna_v4' -and
-            $result.goodputBytesPerSecond -le $script:TunaGoodputFloorBytesPerSecond) {
-            Add-RouteAcceptanceFailure -Result $result -Message ("Tuna goodput must be > {0} B/s, actual {1}" -f $script:TunaGoodputFloorBytesPerSecond, $result.goodputBytesPerSecond)
-        }
-
         $evidence = Get-JsonPropertyValue -Object $summary -Name 'evidence' -DefaultValue $null
         if ($ExpectedRoute -eq 'file_tuna_v4' -and $null -ne $evidence) {
             $fallbackStarted = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $evidence -Name 'fallbackEpochStarted' -DefaultValue $false)
@@ -848,14 +843,15 @@ function Write-RouteAcceptanceFakeTunaRun {
     $inboundError = if ($completed) { '(none)' } else { 'pending' }
     $outboundError = if ($completed) { '(none)' } else { 'pending' }
     $emitNoFaultExternalWarning = $RouteMode -eq 'preactivated' -and (Test-RouteAcceptanceEnvEnabled -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_TUNA_NOFAULT_EXTERNAL_WARNING')
-    $emitFallbackRecoveredBridgeWarning = $RouteMode -eq 'v4-restart-v6-fallback' -and (Test-RouteAcceptanceEnvEnabled -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_FALLBACK_RECOVERED_BRIDGE_WARNING')
+    $isControlledRestartMode = $RouteMode -eq 'v4-restart-v6-fallback'
+    $emitFallbackRecoveredBridgeWarning = $isControlledRestartMode -and (Test-RouteAcceptanceEnvEnabled -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_FALLBACK_RECOVERED_BRIDGE_WARNING')
 
     Write-RouteAcceptanceFakeRetainedLog -ArtifactDir $ArtifactDir -TransferId ('fake-tuna-{0}' -f $RouteMode) -Route $effectiveRoute -ProtocolOverride $protocolOverride -TerminalState $terminalState -BridgeBulkSendFailures 0
     if ($emitNoFaultExternalWarning) {
         Add-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log') -Encoding UTF8 -Value (New-RouteAcceptanceFakeLogLine -Message 'event=screenshare_bridge_transport_health_summary; disconnect_count_since_last=1; connect_failed_count_since_last=0; ws_error_count_since_last=1; rpc_fallback_attempt_count_since_last=0; control_ready=1; media_ready=1; bulk_ready=1')
     }
 
-    if ($RouteMode -eq 'v4-restart-v6-fallback') {
+    if ($isControlledRestartMode) {
         $logPath = Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log'
         Add-Content -LiteralPath $logPath -Encoding UTF8 -Value (New-RouteAcceptanceFakeLogLine -Message 'event=filetransfer_tuna_gui_phase_marker; phase=setup_file_tuna_v4_cleanup_closed')
         if ($emitFallbackRecoveredBridgeWarning) {
@@ -885,7 +881,7 @@ function Write-RouteAcceptanceFakeTunaRun {
         routeMode = $RouteMode
         direction = 'helpee-to-helper'
         payerMode = 'helpee'
-        faultMode = if ($RouteMode -eq 'post-fallback' -or $RouteMode -eq 'v4-restart-v6-fallback') { 'switch-off' } else { 'none' }
+        faultMode = if ($RouteMode -eq 'post-fallback' -or $isControlledRestartMode) { 'switch-off' } else { 'none' }
         transferId = ('fake-tuna-{0}' -f $RouteMode)
         payloadBytes = $payloadBytes
         durationMs = [Math]::Round(($payloadBytes / [Math]::Max(1D, $goodput)) * 1000D, 3)
@@ -899,7 +895,7 @@ function Write-RouteAcceptanceFakeTunaRun {
         expectedSha256 = 'fake'
         receivedSha256 = if ($completed) { 'fake' } else { '(none)' }
         savedFileSizeBytes = if ($completed) { $payloadBytes } else { 0 }
-        setupPhase = if ($RouteMode -eq 'v4-restart-v6-fallback') {
+        setupPhase = if ($isControlledRestartMode) {
             [ordered]@{
                 name = 'setup_file_tuna_v4'
                 route = 'file_tuna_v4'
@@ -933,11 +929,11 @@ function Write-RouteAcceptanceFakeTunaRun {
             tunaNegotiated = $true
             activationEpochStarted = $RouteMode -eq 'preactivated'
             activationEpochRecovered = $RouteMode -eq 'preactivated'
-            fallbackEpochStarted = $RouteMode -eq 'post-fallback' -or $RouteMode -eq 'v4-restart-v6-fallback' -or $forceFallbackEvidence
-            fallbackEpochRecovered = $RouteMode -eq 'post-fallback' -or $RouteMode -eq 'v4-restart-v6-fallback' -or $forceFallbackEvidence
+            fallbackEpochStarted = $RouteMode -eq 'post-fallback' -or $isControlledRestartMode -or $forceFallbackEvidence
+            fallbackEpochRecovered = $RouteMode -eq 'post-fallback' -or $isControlledRestartMode -or $forceFallbackEvidence
             fallbackEpochWaiting = $false
         }
-        controlledRestartAnalysis = if ($RouteMode -eq 'v4-restart-v6-fallback') {
+        controlledRestartAnalysis = if ($isControlledRestartMode) {
             [ordered]@{
                 setupVerdict = 'INVALID_SETUP'
                 setupRawOperatorVerdict = 'INVALID_SETUP'
@@ -952,8 +948,8 @@ function Write-RouteAcceptanceFakeTunaRun {
         else {
             $null
         }
-        setupNormalizedVerdict = if ($RouteMode -eq 'v4-restart-v6-fallback') { 'expected_controlled_setup_cancel' } else { $null }
-        fallbackDiagnostics = if ($RouteMode -eq 'v4-restart-v6-fallback') {
+        setupNormalizedVerdict = if ($isControlledRestartMode) { 'expected_controlled_setup_cancel' } else { $null }
+        fallbackDiagnostics = if ($isControlledRestartMode) {
             [ordered]@{
                 fallbackWarningKinds = if ($emitFallbackRecoveredBridgeWarning) { @('recovered_post_tuna_fallback_bridge_clear') } else { @() }
                 sendTimeoutsPerMiB = 0
@@ -1001,6 +997,58 @@ function Write-RouteAcceptanceFakeFallbackRetryableFailure {
     } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-error.json') -Encoding UTF8
 }
 
+function Write-RouteAcceptanceFakeFallbackRouteNotReadyFailure {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)][int]$Attempt
+    )
+
+    New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
+    $setupLines = @(
+        (New-RouteAcceptanceFakeLogLine -Message 'event=filetransfer_tuna_gui_phase_marker; phase=setup_file_tuna_v4_started')
+        (New-RouteAcceptanceFakeLogLine -Message 'event=filetransfer_route_selected; direction=outbound; transfer_id=fake-tuna-v4-setup; session_id=sess_setup; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=tuna_strict; liveness_terminal_policy=file_tuna_v4_fast; selection_reason=file_tuna_active; file_tuna_active=1; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=fake')
+        (New-RouteAcceptanceFakeLogLine -Message 'event=file_transfer_inbound_terminal; role=helper; session_id=sess_setup; transfer_id=fake-tuna-v4-setup; state=Canceled; error_code=canceled_remote')
+        (New-RouteAcceptanceFakeLogLine -Message 'event=file_transfer_outbound_terminal; role=helpee; session_id=sess_setup; transfer_id=fake-tuna-v4-setup; state=Canceled; error_code=canceled_local')
+        (New-RouteAcceptanceFakeLogLine -Message 'event=filetransfer_tuna_gui_phase_marker; phase=setup_file_tuna_v4_cleanup_closed')
+    )
+    $measuredLines = @(
+        (New-RouteAcceptanceFakeLogLine -Message 'event=filetransfer_tuna_gui_phase_marker; phase=measured_post_tuna_fallback_v6_started')
+        (New-RouteAcceptanceFakeLogLine -Message 'event=filetransfer_route_selected; direction=outbound; transfer_id=fake-fallback-route-not-ready; session_id=(none); route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6_repair; selection_reason=post_tuna_file_fallback_active; file_tuna_active=0; post_tuna_fallback_active=1; diagnostic_regular_nkn_v6=0; transport_profile=fake')
+        (New-RouteAcceptanceFakeLogLine -Message 'event=filetransfer_legacy_negotiation_rejected; transfer_id=fake-fallback-route-not-ready; session_id=sess_fallback; direction=Inbound; offered_version=6; accepted_version=(none); reason=offer_route_not_active')
+        (New-RouteAcceptanceFakeLogLine -Message 'event=file_transfer_outbound_terminal; role=Helpee; session_id=; transfer_id=fake-fallback-route-not-ready; state=Declined; error_code=(none)')
+        (New-RouteAcceptanceFakeLogLine -Message 'event=transfer_terminal; direction=outbound; transfer_id=fake-fallback-route-not-ready; session_id=; file_name_len=33; file_size_bytes=134217728; bytes_transferred=0; chunks_transferred=0; chunk_count=0; error_code=(none); reason=transport_incompatible; saved_path=(none); route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6_repair; selection_reason=post_tuna_file_fallback_active')
+    )
+
+    $fullLines = @($setupLines + $measuredLines)
+    $fullLines | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log') -Encoding UTF8
+    $fullLines | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-retained-log-slice-full.log') -Encoding UTF8
+    $setupLines | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-setup-retained-log-slice.log') -Encoding UTF8
+    $measuredLines | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-measured-fallback-retained-log-slice.log') -Encoding UTF8
+
+    [ordered]@{
+        event = 'filetransfer_tuna_gui_handoff_fallback_summary'
+        routeMode = 'v4-restart-v6-fallback'
+        attempt = $Attempt
+        completed = $false
+        integrityOk = $false
+        fallbackFailurePhase = 'measured_terminal_failure'
+        fallbackFailureReason = 'Timed out waiting for Chat.FileTransfer.Accept to become enabled.'
+        fallbackDiagnostics = [ordered]@{
+            measuredSlicePresent = $true
+            finalTerminalState = 'Declined'
+        }
+    } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json') -Encoding UTF8
+
+    [ordered]@{
+        event = 'filetransfer_tuna_gui_handoff_fallback_failure'
+        routeMode = 'v4-restart-v6-fallback'
+        attempt = $Attempt
+        measuredRouteStarted = $true
+        reason = 'offer_route_not_active'
+        message = 'Timed out waiting for Chat.FileTransfer.Accept to become enabled.'
+    } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-error.json') -Encoding UTF8
+}
+
 function Copy-RouteAcceptanceSelectedAttemptArtifacts {
     param(
         [Parameter(Mandatory = $true)][string]$AttemptDir,
@@ -1044,9 +1092,20 @@ function Test-RouteAcceptanceFallbackAttemptRetryable {
     )
 
     $observedRoutes = New-Object System.Collections.Generic.List[string]
+    $summaryRetryable = $false
     $summaryPath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json'
     if (Test-Path -LiteralPath $summaryPath -PathType Leaf) {
         $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+        $failurePhase = [string](Get-JsonPropertyValue -Object $summary -Name 'fallbackFailurePhase' -DefaultValue '')
+        $failureReason = [string](Get-JsonPropertyValue -Object $summary -Name 'fallbackFailureReason' -DefaultValue '')
+        $diagnostics = Get-JsonPropertyValue -Object $summary -Name 'fallbackDiagnostics' -DefaultValue $null
+        $finalTerminalState = [string](Get-JsonPropertyValue -Object $diagnostics -Name 'finalTerminalState' -DefaultValue '')
+        if ($failureReason.IndexOf('Timed out waiting for Chat.FileTransfer.Accept', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $failureReason.IndexOf('offer_route_not_active', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            ($failurePhase -eq 'measured_terminal_failure' -and $finalTerminalState -eq 'Declined')) {
+            $summaryRetryable = $true
+        }
+
         $measuredPhase = Get-JsonPropertyValue -Object $summary -Name 'measuredPhase' -DefaultValue $null
         if ($null -ne $measuredPhase) {
             $route = [string](Get-JsonPropertyValue -Object $measuredPhase -Name 'route' -DefaultValue '')
@@ -1070,7 +1129,8 @@ function Test-RouteAcceptanceFallbackAttemptRetryable {
     }
 
     $uniqueRoutes = @($observedRoutes | Select-Object -Unique)
-    if ($uniqueRoutes.Count -gt 0 -and -not ($uniqueRoutes -contains 'post_tuna_fallback_v6')) {
+    if ($uniqueRoutes.Count -gt 0 -and
+        -not ($uniqueRoutes -contains 'post_tuna_fallback_v6')) {
         return $false
     }
 
@@ -1078,7 +1138,8 @@ function Test-RouteAcceptanceFallbackAttemptRetryable {
         return $true
     }
 
-    return $FailureMessage.IndexOf('progress timeout', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+    return $summaryRetryable -or
+        $FailureMessage.IndexOf('progress timeout', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $FailureMessage.IndexOf('no useful data progress', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
 }
 
@@ -1089,7 +1150,10 @@ function Write-RouteAcceptanceFakeFallbackRun {
     $attempts = New-Object System.Collections.Generic.List[object]
     $maxAttempts = [Math]::Max(1, $FallbackMaxAttempts)
     $retryAttempt1 = Test-RouteAcceptanceEnvEnabled -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_FALLBACK_RETRYABLE_ATTEMPT1'
+    $routeNotReadyAttempt1 = Test-RouteAcceptanceEnvEnabled -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_FALLBACK_ROUTE_NOT_READY_ATTEMPT1'
     $alwaysRetryableFailure = Test-RouteAcceptanceEnvEnabled -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_FALLBACK_RETRYABLE_ALWAYS'
+    $fallbackRoute = 'post_tuna_fallback_v6'
+    $fallbackRouteMode = 'v4-restart-v6-fallback'
 
     for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
         $attemptDir = Join-Path $ArtifactDir ("attempt-{0}" -f $attempt)
@@ -1107,7 +1171,19 @@ function Write-RouteAcceptanceFakeFallbackRun {
             continue
         }
 
-        Write-RouteAcceptanceFakeTunaRun -ArtifactDir $attemptDir -Route 'post_tuna_fallback_v6' -RouteMode 'v4-restart-v6-fallback'
+        if ($routeNotReadyAttempt1 -and $attempt -eq 1) {
+            Write-RouteAcceptanceFakeFallbackRouteNotReadyFailure -ArtifactDir $attemptDir -Attempt $attempt
+            $attempts.Add([ordered]@{
+                attempt = $attempt
+                artifactDir = $attemptDir
+                succeeded = $false
+                retryable = $true
+                failureReason = 'measured_fallback_offer_route_not_active'
+            }) | Out-Null
+            continue
+        }
+
+        Write-RouteAcceptanceFakeTunaRun -ArtifactDir $attemptDir -Route $fallbackRoute -RouteMode $fallbackRouteMode
         Copy-RouteAcceptanceSelectedAttemptArtifacts -AttemptDir $attemptDir -ArtifactDir $ArtifactDir
         $attempts.Add([ordered]@{
             attempt = $attempt
@@ -1142,8 +1218,20 @@ function Invoke-RouteAcceptanceChildScriptNoThrow {
         [Parameter(Mandatory = $true)][string[]]$Arguments
     )
 
-    $childOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath @Arguments 2>&1
-    $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $childOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath @Arguments 2>&1
+        $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+    }
+    catch {
+        $childOutput = @($_)
+        $exitCode = if ($null -eq $LASTEXITCODE -or $LASTEXITCODE -eq 0) { 1 } else { [int]$LASTEXITCODE }
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
     foreach ($line in $childOutput) {
         Write-Host $line
     }

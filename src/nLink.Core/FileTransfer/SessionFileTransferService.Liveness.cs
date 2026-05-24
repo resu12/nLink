@@ -862,12 +862,14 @@ public sealed partial class SessionFileTransferService
         {
             if (postTunaFallbackInboundToSignal is not null)
             {
-                await SendInboundV4StateAsync(
-                        postTunaFallbackInboundToSignal,
-                        "post_tuna_fallback_peer_liveness_repair",
-                        terminalReady: false,
-                        forceSend: true)
-                    .ConfigureAwait(false);
+                await SendInboundV6ReceiverStateAsync(
+                    postTunaFallbackInboundToSignal,
+                    "post_tuna_fallback_peer_liveness_repair",
+                    forceSend: true).ConfigureAwait(false);
+                await SendInboundV6FrontierRequestAsync(
+                    postTunaFallbackInboundToSignal,
+                    "post_tuna_fallback_peer_liveness_repair",
+                    forceSend: true).ConfigureAwait(false);
             }
 
             return false;

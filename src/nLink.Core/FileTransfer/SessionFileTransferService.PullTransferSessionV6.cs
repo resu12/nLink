@@ -4659,7 +4659,8 @@ public sealed partial class SessionFileTransferService
     private async Task<bool> SendInboundV6ReceiverStateAsync(
         InboundTransferContext context,
         string reason,
-        bool forceSend = false)
+        bool forceSend = false,
+        bool terminalReady = false)
     {
         FileTransferReceiverStateFrameV6? state;
         IFileTransferDataSession? dataSession;
@@ -4716,7 +4717,7 @@ public sealed partial class SessionFileTransferService
                 BytesCommitted = context.BytesTransferred,
                 ReceiverMemoryPressure = context.ReceiverBufferPressureActive,
                 ReceiverDiskPressure = false,
-                TerminalReady = false,
+                TerminalReady = terminalReady,
                 TransferPaused = context.UserPaused,
                 TransferPauseReason = context.UserPauseReason,
                 TransportEpoch = context.V6ReceiverTransportEpoch,

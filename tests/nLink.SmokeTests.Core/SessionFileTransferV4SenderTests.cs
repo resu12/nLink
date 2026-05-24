@@ -3287,7 +3287,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
-    public async Task FileTunaV4_LiveSwitchOffRecovery_QueuesV4SafetyReplayAndCompletesSameTransfer()
+    public async Task FileTunaV4_LiveSwitchOffRecovery_PromotesSameTransferToPostTunaFallbackV6()
     {
         const string transferId = "transfer_file_tuna_v4_live_switch_off_replay";
         var logStart = ReadOperationalLogText().Length;
@@ -3329,22 +3329,22 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             timeoutMs: 10000);
         Assert.True(Volatile.Read(ref droppedFrontierBatchCount) > 0);
 
-        Volatile.Write(ref allowFrontierChunk, 1);
         senderTransport.SetConnectedDataSessionsUnavailableForTests(
             "header_switch_off",
             FileTransferTransportHandoffKind.TunaToNormalFallback,
             FileTransferTransportKind.RegularNkn);
-        var liveFallbackRebindObserved = false;
+        var postTunaFallbackV6Observed = false;
         await WaitUntilAsync(
             () =>
             {
-                liveFallbackRebindObserved = liveFallbackRebindObserved ||
+                postTunaFallbackV6Observed = postTunaFallbackV6Observed ||
                     ReadOperationalLogTail(logStart).Contains(
-                        "event=filetransfer_live_v4_fallback_rebind_started; direction=outbound;",
+                        "route=post_tuna_fallback_v6; protocol_version=6;",
                         StringComparison.Ordinal);
-                return liveFallbackRebindObserved;
+                return postTunaFallbackV6Observed;
             },
             timeoutMs: 5000);
+        Volatile.Write(ref allowFrontierChunk, 1);
         senderTransport.SetConnectedDataSessionsAvailableForTests("transport_recovered");
 
         await WaitUntilAsync(
@@ -3353,25 +3353,41 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             timeoutMs: 20000);
 
         Assert.Equal(payload, destination.ToArray()[..payload.Length]);
-        Assert.All(
-            senderTransport.SentDataFrames.Where(frame => frame.TransferId == transferId),
-            static frame => Assert.True(FileTransferProtocol.IsV4DataFrame(frame), $"Expected live FileTunaV4 sender data frame, got {frame.Type}."));
-        Assert.All(
-            receiverTransport.SentDataFrames.Where(frame => frame.TransferId == transferId),
-            static frame => Assert.True(FileTransferProtocol.IsV4DataFrame(frame), $"Expected live FileTunaV4 receiver data frame, got {frame.Type}."));
         var log = ReadOperationalLogTail(logStart);
-        Assert.True(liveFallbackRebindObserved);
+        Assert.True(postTunaFallbackV6Observed);
         Assert.Single(senderTransport.SentOffers.Where(offer => offer.TransferId == transferId));
         Assert.Single(senderTransport.SentSessionOpens.Where(open => open.TransferId == transferId));
         Assert.Empty(senderTransport.SentCancels.Where(cancel => cancel.TransferId == transferId));
         Assert.Empty(receiverTransport.SentCancels.Where(cancel => cancel.TransferId == transferId));
-        Assert.DoesNotContain("event=filetransfer_v6_epoch_started;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v6_epoch_started; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v6_epoch_started; direction=inbound;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_transport_rebind_safety_replay_started;", log, StringComparison.Ordinal);
+        Assert.Contains("reason=post_tuna_fallback_v6_started", log, StringComparison.Ordinal);
+        var postTunaReplayLine = log.Split(Environment.NewLine)
+            .FirstOrDefault(static line =>
+                line.Contains("event=filetransfer_transport_rebind_safety_replay_started;", StringComparison.Ordinal) &&
+                line.Contains("reason=post_tuna_fallback_v6_started", StringComparison.Ordinal));
+        Assert.NotNull(postTunaReplayLine);
+        Assert.Contains("requested_chunk_count=1", postTunaReplayLine, StringComparison.Ordinal);
+        Assert.Contains("post_tuna_v6_frontier_sweep=0", postTunaReplayLine, StringComparison.Ordinal);
+        Assert.DoesNotContain("post_tuna_v6_frontier_sweep=1", log, StringComparison.Ordinal);
+        Assert.Contains("handoff_kind=tuna_to_normal_fallback", log, StringComparison.Ordinal);
+        Assert.Contains("route=post_tuna_fallback_v6", log, StringComparison.Ordinal);
+        Assert.True(
+            senderTransport.SentDataFrames.Where(frame => frame.TransferId == transferId).Any(FileTransferProtocol.IsV6DataFrame),
+            "Expected same-transfer fallback V6 sender frames.");
+        Assert.True(
+            receiverTransport.SentDataFrames.Where(frame => frame.TransferId == transferId).Any(FileTransferProtocol.IsV6DataFrame),
+            "Expected same-transfer fallback V6 receiver frames.");
+        Assert.Contains(
+            receiverTransport.SentDataFrames.Where(frame => frame.TransferId == transferId),
+            static frame => frame is FileTransferReceiverStateFrameV6);
         Assert.DoesNotContain("event=filetransfer_v6_sender_started;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_v6_receiver_started;", log, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task FileTunaV4_LiveSwitchOffRecovery_BoundsHungProofRepairAndCompletesSameTransfer()
+    public async Task FileTunaV4_LiveSwitchOffRecovery_DoesNotUseLiveV4RepairAndCompletesSameTransfer()
     {
         const string transferId = "transfer_file_tuna_v4_live_switch_off_hung_repair";
         const string sessionId = "session_file_tuna_v4_live_switch_off_hung_repair";
@@ -3426,22 +3442,16 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                         range.ChunkCount > 0)),
                 timeoutMs: 10000);
 
-            Volatile.Write(ref allowFrontierChunk, 1);
-            Volatile.Write(ref delayNextLiveFallbackRepair, 1);
             senderTransport.SetConnectedDataSessionsUnavailableForTests(
                 "header_switch_off",
                 FileTransferTransportHandoffKind.TunaToNormalFallback,
                 FileTransferTransportKind.RegularNkn);
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(logStart).Contains(
-                    "event=filetransfer_live_v4_fallback_rebind_started; direction=outbound;",
+                    "route=post_tuna_fallback_v6; protocol_version=6;",
                     StringComparison.Ordinal),
                 timeoutMs: 5000);
-            await WaitUntilAsync(
-                () => ReadOperationalLogTail(logStart).Contains(
-                    "event=filetransfer_v4_transport_send_timeout_deferred_for_live_v4_tuna_fallback;",
-                    StringComparison.Ordinal),
-                timeoutMs: 5000);
+            Volatile.Write(ref allowFrontierChunk, 1);
             senderTransport.SetConnectedDataSessionsAvailableForTests("transport_recovered");
 
             await WaitUntilAsync(
@@ -3450,22 +3460,27 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 timeoutMs: 25000);
 
             Assert.Equal(payload, destination.ToArray()[..payload.Length]);
-            Assert.Equal(1, Volatile.Read(ref delayedLiveFallbackRepairCount));
+            Assert.Equal(0, Volatile.Read(ref delayedLiveFallbackRepairCount));
             Assert.Single(senderTransport.SentOffers.Where(offer => offer.TransferId == transferId));
             Assert.Single(senderTransport.SentSessionOpens.Where(open => open.TransferId == transferId));
             Assert.Empty(senderTransport.SentCancels.Where(cancel => cancel.TransferId == transferId));
             Assert.Empty(receiverTransport.SentCancels.Where(cancel => cancel.TransferId == transferId));
-            Assert.All(
-                senderTransport.SentDataFrames.Where(frame => frame.TransferId == transferId),
-                static frame => Assert.True(FileTransferProtocol.IsV4DataFrame(frame), $"Expected live FileTunaV4 sender data frame, got {frame.Type}."));
-            Assert.All(
-                receiverTransport.SentDataFrames.Where(frame => frame.TransferId == transferId),
-                static frame => Assert.True(FileTransferProtocol.IsV4DataFrame(frame), $"Expected live FileTunaV4 receiver data frame, got {frame.Type}."));
             var log = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=filetransfer_v6_epoch_started; direction=outbound;", log, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_v6_epoch_started; direction=inbound;", log, StringComparison.Ordinal);
             Assert.Contains("event=filetransfer_transport_rebind_safety_replay_started;", log, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_v4_repair_sent;", log, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_live_v4_fallback_cleanup_completed; direction=outbound;", log, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=filetransfer_v6_epoch_started;", log, StringComparison.Ordinal);
+            Assert.Contains("reason=post_tuna_fallback_v6_started", log, StringComparison.Ordinal);
+            Assert.Contains("route=post_tuna_fallback_v6", log, StringComparison.Ordinal);
+            Assert.True(
+                senderTransport.SentDataFrames.Where(frame => frame.TransferId == transferId).Any(FileTransferProtocol.IsV6DataFrame),
+                "Expected same-transfer fallback V6 sender frames.");
+            Assert.True(
+                receiverTransport.SentDataFrames.Where(frame => frame.TransferId == transferId).Any(FileTransferProtocol.IsV6DataFrame),
+                "Expected same-transfer fallback V6 receiver frames.");
+            Assert.Contains(
+                receiverTransport.SentDataFrames.Where(frame => frame.TransferId == transferId),
+                static frame => frame is FileTransferReceiverStateFrameV6);
+            Assert.DoesNotContain("event=filetransfer_live_v4_fallback_cleanup_completed; direction=outbound;", log, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_v6_sender_started;", log, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_v6_receiver_started;", log, StringComparison.Ordinal);
         }
