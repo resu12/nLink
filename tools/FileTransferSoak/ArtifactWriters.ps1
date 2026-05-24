@@ -1284,33 +1284,18 @@ function New-FileTransferProtocolShapeSummaryLines {
     $v4FeedbackFirstSuccessEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_feedback_first_success'))
     $v4FeedbackBothFailedEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_feedback_both_failed'))
     $v4FeedbackSecondaryCompletedEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_feedback_secondary_completed'))
-    $v6ProtocolEvidencePresent = ($v6NegotiatedEvents.Count + $v6ReceiverStartedEvents.Count + $v6SenderStartedEvents.Count) -gt 0
-    if (-not $v6ProtocolEvidencePresent) {
-        foreach ($event in @($Summary.TransferEvents)) {
-            $frameType = Get-FileTransferEventField -Event $event -Name 'frame_type' -Default ''
-            if ($frameType -like 'filetransfer.*.v6') {
-                $v6ProtocolEvidencePresent = $true
-                break
-            }
-        }
-    }
 
-    $unexpectedLegacyFrameEventsDuringV4 = @()
-    if ($v6ProtocolEvidencePresent) {
-        $unexpectedLegacyFrameEventsDuringV4 = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_binary_frame_sent', 'filetransfer_binary_frame_received', 'filetransfer_data_frame_dispatched') |
-            Where-Object {
-                $frameType = Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default ''
-                $frameType -like 'filetransfer.*' -and $frameType -notlike 'filetransfer.*.v6'
-            })
-    }
+    $unexpectedLegacyFrameEventsDuringV4 = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_binary_frame_sent', 'filetransfer_binary_frame_received', 'filetransfer_data_frame_dispatched') |
+        Where-Object {
+            $frameType = Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default ''
+            $frameType -like 'filetransfer.*' -and
+                $frameType -notlike 'filetransfer.*.v4' -and
+                $frameType -notlike 'filetransfer.*.v6'
+        })
     $legacyDataProtocolStartedEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_session_opened') |
         Where-Object {
             $protocolVersion = Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default ''
-            -not [string]::IsNullOrWhiteSpace($protocolVersion) -and
-                (
-                    ($v6ProtocolEvidencePresent -and $protocolVersion -ne '6') -or
-                    (-not $v6ProtocolEvidencePresent -and $protocolVersion -ne '4' -and $protocolVersion -ne '6')
-                )
+            -not [string]::IsNullOrWhiteSpace($protocolVersion) -and $protocolVersion -ne '4' -and $protocolVersion -ne '6'
         })
     $frameTypeLines = New-Object System.Collections.Generic.List[string]
     foreach ($key in @($Summary.FrameTypeCounts.Keys | Sort-Object)) {

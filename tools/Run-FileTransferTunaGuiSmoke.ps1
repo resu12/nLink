@@ -6,8 +6,9 @@ param(
     [string]$PayerMode = "helpee",
     [ValidateSet("none", "switch-off", "sidecar-kill")]
     [string]$Fault = "switch-off",
-    [ValidateSet("handoff-fallback", "preactivated", "post-fallback", "v4-restart-v6-fallback", "live-v4-switch-off")]
+    [ValidateSet("handoff-fallback", "preactivated", "post-fallback", "v4-restart-v6-fallback", "live-v4-switch-off", "live-multi-toggle")]
     [string]$RouteMode = "handoff-fallback",
+    [string]$LiveToggleSequence = "",
     [ValidateSet("helpee-to-helper", "helper-to-helpee")]
     [string]$Direction = "helpee-to-helper",
     [string]$PayloadSize = "128MiB",
@@ -549,6 +550,12 @@ try {
     $env:NLINK_TUNA_GUI_PAYER_MODE = $PayerMode
     $env:NLINK_TUNA_GUI_FAULT = $Fault
     $env:NLINK_TUNA_GUI_ROUTE_MODE = $RouteMode
+    if (-not [string]::IsNullOrWhiteSpace($LiveToggleSequence)) {
+        $env:NLINK_TUNA_GUI_LIVE_MULTI_TOGGLE_SEQUENCE = $LiveToggleSequence
+    }
+    else {
+        Remove-Item Env:NLINK_TUNA_GUI_LIVE_MULTI_TOGGLE_SEQUENCE -ErrorAction SilentlyContinue
+    }
     if ($Mixed) {
         $env:NLINK_TUNA_GUI_MIXED_SCREENSHARE = '1'
     }
@@ -604,7 +611,7 @@ try {
         Invoke-TunaGuiMeasuredFallbackRetainedAnalysis -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir -LogPath $slices.MeasuredPath
         Update-TunaGuiControlledRestartSummary -ArtifactDir $resolvedArtifactDir -FilteredSetupCleanupLineCount ([int]$slices.FilteredSetupCleanupLineCount)
     }
-    elseif ($RouteMode -eq 'preactivated' -or $RouteMode -eq 'live-v4-switch-off') {
+    elseif ($RouteMode -eq 'preactivated' -or $RouteMode -eq 'live-v4-switch-off' -or $RouteMode -eq 'live-multi-toggle') {
         $retainedPath = Join-Path $resolvedArtifactDir 'filetransfer-retained-log-slice.log'
         Invoke-TunaGuiRetainedAnalysis -RepoRoot $repoRoot -AnalysisDir $resolvedArtifactDir -LogPath $retainedPath
     }

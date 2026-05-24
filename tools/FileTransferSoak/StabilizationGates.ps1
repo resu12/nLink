@@ -49,10 +49,6 @@ function Test-FileTransferSummaryHasV6Evidence {
 function Get-FileTransferUnexpectedLegacyFrameEventsDuringV4 {
     param([Parameter(Mandatory = $true)]$Summary)
 
-    if (-not (Test-FileTransferSummaryHasV6Evidence -Summary $Summary)) {
-        return @()
-    }
-
     return @(
         $Summary.TransferEvents |
             Where-Object {
@@ -62,7 +58,9 @@ function Get-FileTransferUnexpectedLegacyFrameEventsDuringV4 {
             } |
             Where-Object {
                 $frameType = Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default ''
-                $frameType -like 'filetransfer.*' -and $frameType -notlike 'filetransfer.*.v6'
+                $frameType -like 'filetransfer.*' -and
+                    $frameType -notlike 'filetransfer.*.v4' -and
+                    $frameType -notlike 'filetransfer.*.v6'
             }
     )
 }
@@ -456,7 +454,6 @@ function Get-FileTransferHardFailureEvents {
 function Get-FileTransferLegacyProtocolStartedEvents {
     param([Parameter(Mandatory = $true)]$Summary)
 
-    $usesV6Protocol = Test-FileTransferSummaryHasV6Evidence -Summary $Summary
     return @(
         $Summary.TransferEvents |
             Where-Object {
@@ -465,11 +462,7 @@ function Get-FileTransferLegacyProtocolStartedEvents {
                 }
 
                 $protocolVersion = Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default ''
-                return -not [string]::IsNullOrWhiteSpace($protocolVersion) -and
-                    (
-                        ($usesV6Protocol -and $protocolVersion -ne '6') -or
-                        (-not $usesV6Protocol -and $protocolVersion -ne '4' -and $protocolVersion -ne '6')
-                    )
+                return -not [string]::IsNullOrWhiteSpace($protocolVersion) -and $protocolVersion -ne '4' -and $protocolVersion -ne '6'
             }
     )
 }
