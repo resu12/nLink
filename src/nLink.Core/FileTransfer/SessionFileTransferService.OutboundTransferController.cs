@@ -154,6 +154,13 @@ public sealed partial class SessionFileTransferService
             chunksTransferred: context.ChunksTransferred,
             chunkCount: context.ChunkCount,
             routeSelection: context.RouteSelection);
+        LogLiveRouteEpochTerminal(
+            FileTransferDirection.Outbound,
+            context.TransferId,
+            sessionId,
+            context.CurrentLiveRouteEpoch,
+            terminalState,
+            context.StatusMessage);
         NotifyRouteCompletedIfNeeded(routeCompletionObserver, context.RouteSelection, terminalState, sessionId, transferId);
     }
 
@@ -290,6 +297,13 @@ public sealed partial class SessionFileTransferService
             chunkCount: context.ChunkCount,
             savedPath: context.SavedFilePath,
             routeSelection: context.RouteSelection);
+        LogLiveRouteEpochTerminal(
+            FileTransferDirection.Inbound,
+            transferId,
+            sessionId,
+            context.CurrentLiveRouteEpoch,
+            terminalState,
+            statusMessage);
         NotifyRouteCompletedIfNeeded(routeCompletionObserver, context.RouteSelection, terminalState, sessionId, transferId);
     }
 

@@ -22,14 +22,32 @@ public sealed partial class SessionFileTransferService
         FileTransferDataFrame frame)
         => ShouldUseV6SparseCreditEnvelope(context)
             ? FileTransferProtocol.IsV6DataFrame(frame)
-            : FileTransferProtocol.IsV4DataFrame(frame);
+            : FileTransferProtocol.IsV4DataFrame(frame) ||
+              ShouldAcceptLiveRouteV6ProbeFrame(context, frame);
 
     private static bool ShouldAcceptSparseCreditRuntimeDataFrame(
         InboundTransferContext context,
         FileTransferDataFrame frame)
         => ShouldUseV6SparseCreditEnvelope(context)
             ? FileTransferProtocol.IsV6DataFrame(frame)
-            : FileTransferProtocol.IsV4DataFrame(frame);
+            : FileTransferProtocol.IsV4DataFrame(frame) ||
+              ShouldAcceptLiveRouteV6ProbeFrame(context, frame);
+
+    private static bool ShouldAcceptLiveRouteV6ProbeFrame(OutboundTransferContext context, FileTransferDataFrame frame)
+        => frame is FileTransferTransportProbeFrameV6 &&
+           context.CurrentLiveRouteEpoch is
+           {
+               HandoffKind: FileTransferTransportHandoffKind.NormalToTunaActivation,
+               TargetTransport: FileTransferTransportKind.Tuna,
+           };
+
+    private static bool ShouldAcceptLiveRouteV6ProbeFrame(InboundTransferContext context, FileTransferDataFrame frame)
+        => frame is FileTransferTransportProbeFrameV6 &&
+           context.CurrentLiveRouteEpoch is
+           {
+               HandoffKind: FileTransferTransportHandoffKind.NormalToTunaActivation,
+               TargetTransport: FileTransferTransportKind.Tuna,
+           };
 
     private bool ShouldBoundOutboundV4TransportSendForV6RegularNknSparseRuntime(OutboundTransferContext context)
     {

@@ -180,6 +180,18 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         {
             FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup,
         };
+        senderTransport.OutboundDataFrameDeliveryOverrideAsync = (_, frame, _) =>
+        {
+            if (frame.TransferId == transferId &&
+                frame is FileTransferTransportProbeFrameV6 probe)
+            {
+                receiverTransport.NextDataFrameTransportKind = string.Equals(probe.TargetTransport, "tuna", StringComparison.OrdinalIgnoreCase)
+                    ? FileTransferTransportKind.Tuna
+                    : FileTransferTransportKind.RegularNkn;
+            }
+
+            return Task.FromResult(false);
+        };
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         sender.AttachTransport(senderTransport);

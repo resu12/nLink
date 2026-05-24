@@ -1209,6 +1209,26 @@ public sealed partial class SessionFileTransferService
         context.V4SenderPumpLastWakeReason = "transport_epoch_recovered";
         context.StatusMessage = GetOutboundResumeStatusMessage(context.State);
         context.SignalV4SenderPump();
+        if (epoch.Kind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
+            epoch.TargetTransport == FileTransferTransportKind.RegularNkn)
+        {
+            LogLiveRouteEpochRecovered(
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentLiveRouteEpoch,
+                reason);
+        }
+        else if (epoch.Kind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
+                 epoch.TargetTransport == FileTransferTransportKind.Tuna)
+        {
+            TryPromoteOutboundPostTunaFallbackV6ToFileTunaV4Locked(
+                context,
+                reason,
+                epoch.Kind,
+                epoch.TargetTransport);
+        }
+
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_v6_epoch_tail_unblocked; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={epoch!.EpochId}; handoff_kind={FormatFileTransferTransportHandoffKind(epoch.Kind)}; source_transport={FormatFileTransferTransportKind(epoch.SourceTransport)}; target_transport={FormatFileTransferTransportKind(epoch.TargetTransport)}; reason={FormatProtocolLogValue(reason)}; committed_chunk={context.RemoteNextExpectedChunkIndex}; highest_observed_chunk={Math.Max(-1, context.ChunksAcceptedForTransport - 1)}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}; remote_credit_until_chunk_index_exclusive={context.RemoteGrantedUntilExclusive}; discarded_v4_repair_frame_count={discardedV4RepairFrameCount}; discarded_v4_repair_chunk_count={discardedV4RepairChunkCount}; discarded_v6_normal_request_count={discardedV6NormalRequestCount}; discarded_v6_priority_request_count={discardedV6PriorityRequestCount}");
@@ -1246,6 +1266,26 @@ public sealed partial class SessionFileTransferService
         context.PullTransportResumeRequestPending = false;
         context.PullTransportRebindGeneration = 0;
         context.StatusMessage = GetInboundResumeStatusMessage(context.State);
+        if (epoch.Kind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
+            epoch.TargetTransport == FileTransferTransportKind.RegularNkn)
+        {
+            LogLiveRouteEpochRecovered(
+                FileTransferDirection.Inbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentLiveRouteEpoch,
+                reason);
+        }
+        else if (epoch.Kind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
+                 epoch.TargetTransport == FileTransferTransportKind.Tuna)
+        {
+            TryPromoteInboundPostTunaFallbackV6ToFileTunaV4Locked(
+                context,
+                reason,
+                epoch.Kind,
+                epoch.TargetTransport);
+        }
+
         return true;
     }
 

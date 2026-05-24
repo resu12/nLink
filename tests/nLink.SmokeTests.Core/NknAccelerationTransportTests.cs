@@ -1104,6 +1104,86 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task PostTunaFallbackV6Route_TunaReactivationDoesNotPauseButAllowsHandoff()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.tuna.activation.post-fallback-no-pause.address");
+            var helperClient = new FakeNknClient("helper.tuna.activation.post-fallback-no-pause.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-tuna-activation-post-fallback-no-pause-id", hostClient.Address));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-tuna-activation-post-fallback-no-pause-id", helperClient.Address));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_tuna_activation_post_fallback_no_pause";
+            InvokePrivateMethod(
+                host,
+                "TrackFileTransferRouteHint",
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                FileTransferProtocol.ProtocolVersionV6,
+                "test_post_tuna_fallback_route");
+            var dataSession = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            var availabilityEvents = new ConcurrentQueue<FileTransferDataSessionAvailabilityChangedEventArgs>();
+            dataSession.AvailabilityChanged += (_, e) => availabilityEvents.Enqueue(e);
+            var logStart = GetOperationalLogLength();
+
+            InvokePrivateMethod(
+                host,
+                "PauseFileTransferDataSessionsForTunaActivationNegotiation",
+                "peer_offer_dialer_starting",
+                sessionId,
+                "runtime_unlock");
+            await Task.Delay(200, cts.Token);
+
+            Assert.True(dataSession.IsAvailable);
+            Assert.DoesNotContain(
+                availabilityEvents,
+                e => !e.IsAvailable &&
+                     e.Reason == "tuna_activation_negotiating");
+
+            InvokePrivateMethod(
+                host,
+                "RequestFileTransferTunaActivationHandoff",
+                sessionId,
+                NknAccelerationLaneKind.File,
+                "tuna_activation_answer_ack");
+            await WaitUntilAsync(
+                () => availabilityEvents.Any(e =>
+                    e.IsAvailable &&
+                    e.RequiresResumeRequest &&
+                    e.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
+                    e.TargetTransport == FileTransferTransportKind.Tuna),
+                TimeSpan.FromSeconds(2));
+
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=filetransfer_tuna_activation_suppressed_for_route;", logTail, StringComparison.Ordinal);
+            Assert.Contains("route=post_tuna_fallback_v6", logTail, StringComparison.Ordinal);
+            Assert.Contains("trigger=availability_broadcast", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_data_session_handoff_invoking;", logTail, StringComparison.Ordinal);
+            Assert.Contains("handoff_kind=normal_to_tuna_activation", logTail, StringComparison.Ordinal);
+            Assert.Contains("target_transport=tuna", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task TransportAccelerationAnswer_NonceMismatchResumesRegularV4ActivationPause()
     {
         FakeNknClient.ResetNetwork();

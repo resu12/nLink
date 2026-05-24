@@ -2384,11 +2384,20 @@ public sealed partial class NknSignalingTransport
             pausedForActivationNegotiation = false;
         }
 
-        PauseFileTransferDataSessionsForTunaActivationNegotiation(
-            "activation_negotiation_pending",
-            sessionId,
-            reason);
-        pausedForActivationNegotiation = true;
+        if (IsFileTransferUsingRegularNknFallbackForCurrentSession())
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=filetransfer_tuna_activation_negotiation_pause_skipped; session_id={SanitizeLogToken(sessionId)}; reason=active_post_tuna_fallback; trigger={SanitizeLogToken(reason)}");
+        }
+        else
+        {
+            PauseFileTransferDataSessionsForTunaActivationNegotiation(
+                "activation_negotiation_pending",
+                sessionId,
+                reason);
+            pausedForActivationNegotiation = true;
+        }
 
         try
         {

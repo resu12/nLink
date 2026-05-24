@@ -848,9 +848,87 @@ public sealed class TunaWalletDiagnosticsTests
             Assert.True(first.Success);
             Assert.True(second.Success);
             Assert.False(context.RuntimeService.HasSessionUnlock);
+            await WaitUntilAsync(
+                () => context.RuntimeService.RuntimeStatus == "locked" && control.StopCalls == 1,
+                TimeSpan.FromSeconds(2));
             Assert.Equal("locked", context.RuntimeService.RuntimeStatus);
             Assert.Equal(1, control.StopCalls);
             Assert.Equal("header_switch_off", control.StopReasons.Single());
+        }
+        finally
+        {
+            DeleteTempRoot(root);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TunaRuntimeUnlockCoordinator_HangingStopDoesNotPinHeaderToggle()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var context = await CreateVerifiedRuntimeContextAsync(
+                root,
+                new FakeTunaWalletVerifier(
+                    TunaWalletValidationResult.Ok("wallet-test-nkn.json", "NKN0123456789PUBLICADDRESS", "1.2500")),
+                stopCompletionTimeout: TimeSpan.FromMilliseconds(50));
+            var control = new RecordingTransportAccelerationControl { HangStop = true };
+            SetPrivateField(context.RuntimeService, "currentTransportControl", control);
+            SetPrivateField(context.RuntimeService, "runtimeStatus", "active");
+
+            var result = await context.RuntimeService.LockOrStopForSessionAsync(
+                "header_switch_off",
+                TunaRuntimeUnlockSource.Header);
+
+            Assert.True(result.Success);
+            Assert.False(context.RuntimeService.HasSessionUnlock);
+            Assert.Equal(1, control.StopCalls);
+            await WaitUntilAsync(
+                () => context.RuntimeService.RuntimeStatus == "locked",
+                TimeSpan.FromSeconds(2));
+            var state = await context.RuntimeService.GetUnlockStateAsync();
+            Assert.True(state.IsVisible);
+            Assert.True(state.CanToggle);
+            Assert.False(state.IsOn);
+            Assert.Equal("Locked", state.StatusText);
+        }
+        finally
+        {
+            DeleteTempRoot(root);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TunaRuntimeUnlockCoordinator_BlockingStopCallDoesNotPinHeaderToggle()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var context = await CreateVerifiedRuntimeContextAsync(
+                root,
+                new FakeTunaWalletVerifier(
+                    TunaWalletValidationResult.Ok("wallet-test-nkn.json", "NKN0123456789PUBLICADDRESS", "1.2500")),
+                stopCompletionTimeout: TimeSpan.FromMilliseconds(50));
+            var control = new RecordingTransportAccelerationControl { BlockBeforeReturningStop = true };
+            SetPrivateField(context.RuntimeService, "currentTransportControl", control);
+            SetPrivateField(context.RuntimeService, "runtimeStatus", "active");
+
+            var result = await context.RuntimeService.LockOrStopForSessionAsync(
+                "header_switch_off",
+                TunaRuntimeUnlockSource.Header);
+
+            Assert.True(result.Success);
+            Assert.False(context.RuntimeService.HasSessionUnlock);
+            await WaitUntilAsync(
+                () => control.StopCalls == 1 && context.RuntimeService.RuntimeStatus == "locked",
+                TimeSpan.FromSeconds(2));
+            var state = await context.RuntimeService.GetUnlockStateAsync();
+            Assert.True(state.IsVisible);
+            Assert.True(state.CanToggle);
+            Assert.False(state.IsOn);
+            Assert.Equal("Locked", state.StatusText);
         }
         finally
         {
@@ -1425,7 +1503,8 @@ public sealed class TunaWalletDiagnosticsTests
     private static async Task<VerifiedRuntimeContext> CreateVerifiedRuntimeContextAsync(
         string root,
         ITunaWalletVerifier verifier,
-        bool enabled = true)
+        bool enabled = true,
+        TimeSpan? stopCompletionTimeout = null)
     {
         var walletPath = Path.Combine(root, "wallet-test-nkn.json");
         await File.WriteAllTextAsync(walletPath, "{}");
@@ -1446,7 +1525,12 @@ public sealed class TunaWalletDiagnosticsTests
             LastRuntimeStatus = enabled ? "locked" : "off",
         });
         var usageStore = new JsonTunaUsageAccountingStore(() => Path.Combine(root, "tuna-usage-accounting.json"));
-        var runtimeService = new TunaRuntimePilotService(preferenceStore, usageStore, walletStore, verifier);
+        var runtimeService = new TunaRuntimePilotService(
+            preferenceStore,
+            usageStore,
+            walletStore,
+            verifier,
+            stopCompletionTimeout: stopCompletionTimeout);
         return new VerifiedRuntimeContext(walletStore, preferenceStore, usageStore, runtimeService, walletPath);
     }
 
@@ -1522,6 +1606,7 @@ public sealed class TunaWalletDiagnosticsTests
     {
         private int requestCalls;
         private int stopCalls;
+        private readonly TaskCompletionSource<object?> stopCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public int RequestCalls => Volatile.Read(ref requestCalls);
 
@@ -1530,6 +1615,10 @@ public sealed class TunaWalletDiagnosticsTests
         public List<string> RequestReasons { get; } = new();
 
         public List<string> StopReasons { get; } = new();
+
+        public bool HangStop { get; init; }
+
+        public bool BlockBeforeReturningStop { get; init; }
 
         public Task RequestAccelerationNegotiationAsync(string reason, CancellationToken ct)
         {
@@ -1548,6 +1637,16 @@ public sealed class TunaWalletDiagnosticsTests
             lock (StopReasons)
             {
                 StopReasons.Add(reason);
+            }
+
+            if (BlockBeforeReturningStop)
+            {
+                Thread.Sleep(TimeSpan.FromSeconds(5));
+            }
+
+            if (HangStop)
+            {
+                return stopCompletion.Task;
             }
 
             return Task.CompletedTask;

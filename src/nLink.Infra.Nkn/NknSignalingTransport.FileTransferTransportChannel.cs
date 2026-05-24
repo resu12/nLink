@@ -1025,6 +1025,12 @@ public sealed partial class NknSignalingTransport
 
         foreach (var session in sessions)
         {
+            TrackFileTransferRouteHintForHandoff(
+                session.TransferId,
+                effectiveHandoffKind,
+                targetTransport,
+                "availability_broadcast");
+
             if (!isAvailable &&
                 IsTunaActivationNegotiationAvailabilityReason(reason) &&
                 ShouldSuppressTunaActivationForFileTransferSession(session, "availability_broadcast"))
@@ -1158,6 +1164,11 @@ public sealed partial class NknSignalingTransport
                 continue;
             }
 
+            TrackFileTransferRouteHintForHandoff(
+                session.TransferId,
+                handoffKind,
+                targetTransport,
+                "handoff_broadcast");
             session.RequestHandoff(normalizedReason, handoffKind, targetTransport);
         }
     }
@@ -1282,7 +1293,14 @@ public sealed partial class NknSignalingTransport
         }
 
         if (!hasRouteHint ||
-            routeHint.Route != FileTransferRoute.RegularNknV4Fast)
+            (routeHint.Route != FileTransferRoute.RegularNknV4Fast &&
+             routeHint.Route != FileTransferRoute.PostTunaFallbackV6))
+        {
+            return false;
+        }
+
+        if (routeHint.Route == FileTransferRoute.PostTunaFallbackV6 &&
+            string.Equals(trigger, "handoff_broadcast", StringComparison.Ordinal))
         {
             return false;
         }
@@ -1328,6 +1346,37 @@ public sealed partial class NknSignalingTransport
                 normalizedProtocolVersion,
                 source,
                 DateTimeOffset.UtcNow);
+        }
+    }
+
+    private void TrackFileTransferRouteHintForHandoff(
+        string? transferId,
+        FileTransferTransportHandoffKind handoffKind,
+        FileTransferTransportKind targetTransport,
+        string source)
+    {
+        if (string.IsNullOrWhiteSpace(transferId))
+        {
+            return;
+        }
+
+        if (handoffKind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
+            targetTransport == FileTransferTransportKind.RegularNkn)
+        {
+            TrackFileTransferRouteHint(
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                FileTransferProtocol.ProtocolVersionV6,
+                source);
+        }
+        else if (handoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
+                 targetTransport == FileTransferTransportKind.Tuna)
+        {
+            TrackFileTransferRouteHint(
+                transferId,
+                FileTransferRouteResolver.FileTunaV4Token,
+                FileTransferProtocol.ProtocolVersionV4,
+                source);
         }
     }
 

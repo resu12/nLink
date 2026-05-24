@@ -303,10 +303,11 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
 
         try
         {
+            NknTunaSidecarProcessOwner? replacedOwner;
             lock (gate)
             {
                 ThrowIfDisposed();
-                StopProcess_NoLock("listener_replaced");
+                replacedOwner = DetachProcessForStop_NoLock("listener_replaced");
                 endpoint = null;
                 expectedRemotePeer = request.ExpectedRemotePeer.Trim();
                 summaryObserved = false;
@@ -315,6 +316,8 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
                 providerPathsStillDegradedCount = 0;
                 latestProviderPathQualitySummary = null;
             }
+
+            replacedOwner?.Stop("listener_replaced");
 
             if (!nextProcess.Start())
             {
@@ -644,34 +647,41 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         }
 
         disposed = true;
+        NknTunaSidecarProcessOwner? ownerToStop;
         lock (gate)
         {
-            StopProcess_NoLock("disposed");
+            ownerToStop = DetachProcessForStop_NoLock("disposed");
             endpoint = null;
         }
+
+        ownerToStop?.Stop("disposed");
     }
 
     public void Stop(string reason)
     {
+        var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "listener_stopped" : reason.Trim();
+        NknTunaSidecarProcessOwner? ownerToStop;
         lock (gate)
         {
-            StopProcess_NoLock(string.IsNullOrWhiteSpace(reason) ? "listener_stopped" : reason.Trim());
+            ownerToStop = DetachProcessForStop_NoLock(normalizedReason);
             endpoint = null;
             expectedRemotePeer = null;
         }
 
-        SetStatus(string.IsNullOrWhiteSpace(reason) ? "listener_stopped" : $"listener_stopped_{reason.Trim()}");
+        ownerToStop?.Stop(normalizedReason);
+        SetStatus(string.IsNullOrWhiteSpace(reason) ? "listener_stopped" : $"listener_stopped_{normalizedReason}");
     }
 
-    private void StopProcess_NoLock(string reason)
+    private NknTunaSidecarProcessOwner? DetachProcessForStop_NoLock(string reason)
     {
         var current = processOwner;
         processOwner = null;
         if (current is not null)
         {
             CompleteIncompleteSession_NoLock(reason);
-            current.Stop(reason);
         }
+
+        return current;
     }
 
     private void CompleteIncompleteSession(string reason)

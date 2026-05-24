@@ -719,12 +719,14 @@ internal sealed class JsonTunaUsageAccountingStore : ITunaUsageAccountingStore
 internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
 {
     private static readonly TimeSpan ListenerRestartUnlockRetention = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan DefaultStopCompletionTimeout = TimeSpan.FromSeconds(10);
     private readonly object gate = new();
     private readonly ITunaRuntimePreferenceStore preferenceStore;
     private readonly ITunaUsageAccountingStore usageStore;
     private readonly ITunaWalletLinkStore walletLinkStore;
     private readonly ITunaWalletVerifier walletVerifier;
     private readonly Func<DateTimeOffset> nowProvider;
+    private readonly TimeSpan stopCompletionTimeout;
     private char[]? unlockedPassword;
     private CancellationTokenSource? listenerRestartUnlockRetentionCts;
     private TunaRuntimePreferenceState preferences;
@@ -754,13 +756,17 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         ITunaUsageAccountingStore usageStore,
         ITunaWalletLinkStore walletLinkStore,
         ITunaWalletVerifier walletVerifier,
-        Func<DateTimeOffset>? nowProvider = null)
+        Func<DateTimeOffset>? nowProvider = null,
+        TimeSpan? stopCompletionTimeout = null)
     {
         this.preferenceStore = preferenceStore ?? throw new ArgumentNullException(nameof(preferenceStore));
         this.usageStore = usageStore ?? throw new ArgumentNullException(nameof(usageStore));
         this.walletLinkStore = walletLinkStore ?? throw new ArgumentNullException(nameof(walletLinkStore));
         this.walletVerifier = walletVerifier ?? throw new ArgumentNullException(nameof(walletVerifier));
         this.nowProvider = nowProvider ?? (() => DateTimeOffset.UtcNow);
+        this.stopCompletionTimeout = stopCompletionTimeout is { } configured && configured > TimeSpan.Zero
+            ? configured
+            : DefaultStopCompletionTimeout;
         preferences = this.preferenceStore.Load();
         usage = this.usageStore.Load();
         runtimeStatus = string.Equals(preferences.LastRuntimeStatus, "switching_to_regular_nkn", StringComparison.Ordinal)
@@ -991,7 +997,12 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                 {
                     try
                     {
-                        await control.StopAccelerationAsync(normalizedReason, CancellationToken.None).ConfigureAwait(false);
+                        await StopAccelerationWithCompletionGuardAsync(
+                                control,
+                                normalizedReason,
+                                source,
+                                CancellationToken.None)
+                            .ConfigureAwait(false);
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
@@ -1561,7 +1572,12 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             {
                 try
                 {
-                    await control.StopAccelerationAsync(normalizedReason, CancellationToken.None).ConfigureAwait(false);
+                    await StopAccelerationWithCompletionGuardAsync(
+                            control,
+                            normalizedReason,
+                            TunaRuntimeUnlockSource.Options,
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -1587,6 +1603,58 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                 }
             },
             CancellationToken.None);
+    }
+
+    private async Task StopAccelerationWithCompletionGuardAsync(
+        ITransportAccelerationControl control,
+        string reason,
+        TunaRuntimeUnlockSource source,
+        CancellationToken ct)
+    {
+        var stopTask = Task.Run(
+            async () =>
+            {
+                await control.StopAccelerationAsync(reason, ct).ConfigureAwait(false);
+            },
+            CancellationToken.None);
+
+        var delayTask = Task.Delay(stopCompletionTimeout, CancellationToken.None);
+        var completed = await Task.WhenAny(stopTask, delayTask).ConfigureAwait(false);
+        if (ReferenceEquals(completed, stopTask))
+        {
+            await stopTask.ConfigureAwait(false);
+            return;
+        }
+
+        LocalOperationalLog.Warn(
+            "NKN.Tuna",
+            $"event=tuna_runtime_stop_completion_timeout; source={source.ToString().ToLowerInvariant()}; reason={SanitizeStatusToken(reason)}; timeout_ms={(long)stopCompletionTimeout.TotalMilliseconds}");
+
+        _ = stopTask.ContinueWith(
+            task =>
+            {
+                if (task.IsFaulted && task.Exception is { } exception)
+                {
+                    LocalOperationalLog.Warn(
+                        "NKN.Tuna",
+                        $"event=tuna_runtime_stop_late_failure; source={source.ToString().ToLowerInvariant()}; reason={SanitizeStatusToken(reason)}; error={SanitizeStatusToken(exception.GetBaseException().GetType().Name)}");
+                }
+                else if (task.IsCanceled)
+                {
+                    LocalOperationalLog.Warn(
+                        "NKN.Tuna",
+                        $"event=tuna_runtime_stop_late_canceled; source={source.ToString().ToLowerInvariant()}; reason={SanitizeStatusToken(reason)}");
+                }
+                else
+                {
+                    LocalOperationalLog.Info(
+                        "NKN.Tuna",
+                        $"event=tuna_runtime_stop_late_completed; source={source.ToString().ToLowerInvariant()}; reason={SanitizeStatusToken(reason)}");
+                }
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 
     private void RecordIncompleteSession(string reason)
