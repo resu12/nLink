@@ -352,6 +352,11 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
+        if (ShouldSuppressTunaActivationForFileTransferSession(session, "opened_during_activation_pause"))
+        {
+            return;
+        }
+
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=filetransfer_data_session_opened_during_tuna_activation_pause; transfer_id={SanitizeLogToken(session.TransferId)}; session_id={SanitizeLogToken(session.SessionId)}; reason=tuna_activation_negotiating; trigger={SanitizeLogToken(trigger)}");
@@ -1020,6 +1025,13 @@ public sealed partial class NknSignalingTransport
 
         foreach (var session in sessions)
         {
+            if (!isAvailable &&
+                IsTunaActivationNegotiationAvailabilityReason(reason) &&
+                ShouldSuppressTunaActivationForFileTransferSession(session, "availability_broadcast"))
+            {
+                continue;
+            }
+
             session.SetAvailability(isAvailable, reason, requiresResumeRequest, effectiveHandoffKind, targetTransport);
         }
     }
@@ -1140,6 +1152,12 @@ public sealed partial class NknSignalingTransport
 
         foreach (var session in sessions)
         {
+            if (IsNormalToTunaActivationHandoff(handoffKind, targetTransport) &&
+                ShouldSuppressTunaActivationForFileTransferSession(session, "handoff_broadcast"))
+            {
+                continue;
+            }
+
             session.RequestHandoff(normalizedReason, handoffKind, targetTransport);
         }
     }
@@ -1251,6 +1269,32 @@ public sealed partial class NknSignalingTransport
     {
         return false;
     }
+
+    private bool ShouldSuppressTunaActivationForFileTransferSession(
+        TransportFileTransferDataSession session,
+        string trigger)
+    {
+        FileTransferRouteHint routeHint;
+        bool hasRouteHint;
+        lock (gate)
+        {
+            hasRouteHint = fileTransferRouteHints.TryGetValue(session.TransferId, out routeHint);
+        }
+
+        if (!hasRouteHint ||
+            routeHint.Route != FileTransferRoute.RegularNknV4Fast)
+        {
+            return false;
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=filetransfer_tuna_activation_suppressed_for_route; session_id={SanitizeLogToken(session.SessionId)}; transfer_id={SanitizeLogToken(session.TransferId)}; route={SanitizeLogToken(routeHint.Token)}; protocol_version={routeHint.ProtocolVersion}; trigger={SanitizeLogToken(trigger)}");
+        return true;
+    }
+
+    private static bool IsTunaActivationNegotiationAvailabilityReason(string? reason)
+        => string.Equals(reason, "tuna_activation_negotiating", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsNormalToTunaActivationHandoff(
         FileTransferTransportHandoffKind handoffKind,

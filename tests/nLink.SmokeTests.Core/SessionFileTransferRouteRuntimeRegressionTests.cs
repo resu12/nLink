@@ -46,6 +46,12 @@ public sealed class SessionFileTransferRouteRuntimeRegressionTests : SessionFile
 
         AssertWireRoute(result, FileTransferRouteResolver.RegularNknV4FastToken, FileTransferProtocol.ProtocolVersionV4);
         Assert.Contains(result.SenderTransport.SentDataFrames, static frame => frame is FileTransferManifestFrameV4 and not FileTransferManifestFrameV6);
+        var regularBatches = result.SenderTransport.SentDataFrames
+            .OfType<FileTransferChunkBatchFrameV4>()
+            .Where(static frame => frame is not FileTransferChunkBatchFrameV6)
+            .ToArray();
+        Assert.NotEmpty(regularBatches);
+        Assert.All(regularBatches, static batch => Assert.True(batch.ForceRegularNknBulk));
         Assert.DoesNotContain(result.SenderTransport.SentDataFrames, static frame => FileTransferProtocol.IsV6DataFrame(frame));
         Assert.DoesNotContain(result.ReceiverTransport.SentDataFrames, static frame => FileTransferProtocol.IsV6DataFrame(frame));
         Assert.DoesNotContain("event=filetransfer_v6_sender_started; transfer_id=" + transferId, result.LogTail, StringComparison.Ordinal);
@@ -66,6 +72,12 @@ public sealed class SessionFileTransferRouteRuntimeRegressionTests : SessionFile
 
         AssertWireRoute(result, FileTransferRouteResolver.FileTunaV4Token, FileTransferProtocol.ProtocolVersionV4);
         Assert.Contains(result.SenderTransport.SentDataFrames, static frame => frame is FileTransferManifestFrameV4 and not FileTransferManifestFrameV6);
+        var tunaBatches = result.SenderTransport.SentDataFrames
+            .OfType<FileTransferChunkBatchFrameV4>()
+            .Where(static frame => frame is not FileTransferChunkBatchFrameV6)
+            .ToArray();
+        Assert.NotEmpty(tunaBatches);
+        Assert.All(tunaBatches, static batch => Assert.False(batch.ForceRegularNknBulk));
         Assert.DoesNotContain(result.SenderTransport.SentDataFrames, static frame => FileTransferProtocol.IsV6DataFrame(frame));
         Assert.DoesNotContain(result.ReceiverTransport.SentDataFrames, static frame => FileTransferProtocol.IsV6DataFrame(frame));
         Assert.DoesNotContain("event=filetransfer_v6_sender_started; transfer_id=" + transferId, result.LogTail, StringComparison.Ordinal);

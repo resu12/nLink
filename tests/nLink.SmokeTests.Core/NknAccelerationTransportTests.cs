@@ -1013,6 +1013,97 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task RegularNknV4Route_TunaActivationDoesNotPauseOrHandoffActiveFileTransfer()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.tuna.activation.regular-v4-no-pause.address");
+            var helperClient = new FakeNknClient("helper.tuna.activation.regular-v4-no-pause.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-tuna-activation-regular-v4-no-pause-id", hostClient.Address));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-tuna-activation-regular-v4-no-pause-id", helperClient.Address));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_tuna_activation_regular_v4_no_pause";
+            InvokePrivateMethod(
+                host,
+                "TrackFileTransferRouteHint",
+                transferId,
+                FileTransferRouteResolver.RegularNknV4FastToken,
+                FileTransferProtocol.ProtocolVersionV4,
+                "test_regular_route");
+            var dataSession = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            var availabilityEvents = new ConcurrentQueue<FileTransferDataSessionAvailabilityChangedEventArgs>();
+            dataSession.AvailabilityChanged += (_, e) => availabilityEvents.Enqueue(e);
+            var logStart = GetOperationalLogLength();
+
+            InvokePrivateMethod(
+                host,
+                "PauseFileTransferDataSessionsForTunaActivationNegotiation",
+                "activation_negotiation_pending",
+                sessionId,
+                "runtime_unlock");
+            await Task.Delay(200, cts.Token);
+
+            Assert.True(dataSession.IsAvailable);
+            Assert.DoesNotContain(
+                availabilityEvents,
+                e => !e.IsAvailable &&
+                     e.Reason == "tuna_activation_negotiating");
+
+            await dataSession.SendAsync(
+                new FileTransferChunkBatchFrameV4
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    StartChunkIndex = 0,
+                    ChunkCount = 1,
+                    DataSegments = new[] { new byte[1024] },
+                    BatchProfile = "v4_default_21k",
+                    ForceRegularNknBulk = true,
+                },
+                cts.Token);
+
+            InvokePrivateMethod(
+                host,
+                "RequestFileTransferTunaActivationHandoff",
+                sessionId,
+                NknAccelerationLaneKind.File,
+                "test_accept");
+            await Task.Delay(200, cts.Token);
+
+            Assert.DoesNotContain(
+                availabilityEvents,
+                e => e.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
+                     e.TargetTransport == FileTransferTransportKind.Tuna);
+
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=filetransfer_tuna_activation_suppressed_for_route;", logTail, StringComparison.Ordinal);
+            Assert.Contains("route=regular_nkn_v4_fast", logTail, StringComparison.Ordinal);
+            Assert.Contains("trigger=availability_broadcast", logTail, StringComparison.Ordinal);
+            Assert.Contains("trigger=handoff_broadcast", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_data_session_send_canceled_for_tuna_activation_pause;", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task TransportAccelerationAnswer_NonceMismatchResumesRegularV4ActivationPause()
     {
         FakeNknClient.ResetNetwork();

@@ -4226,11 +4226,17 @@ public sealed partial class SessionFileTransferService
                 RepairDeliveryMode = repairSend
                     ? repairDeliveryMode
                     : FileTransferV4RepairDeliveryMode.BulkOnly,
+                ForceRegularNknBulk = ShouldForceRegularNknBulkForV4Route(context),
             };
             _ = FileTransferDataFrameCodec.SerializeLegacyV4(batch);
         }
         return new PreparedV4TransportSend(batch, startChunkIndex, dataSegments.Count, totalRawBytes);
     }
+
+    private static bool ShouldForceRegularNknBulkForV4Route(OutboundTransferContext context)
+        => context.RouteSelection.Route == FileTransferRoute.RegularNknV4Fast &&
+           context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+           context.RouteSelection.FrameFamily == FileTransferFrameFamily.V4;
 
     private int ResolveV4MaxBatchSegments(bool repairSend)
     {
