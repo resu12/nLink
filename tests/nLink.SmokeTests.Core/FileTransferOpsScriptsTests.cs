@@ -71,7 +71,8 @@ public sealed class FileTransferOpsScriptsTests
         "Build",
         "TimeoutSeconds",
         "SafeBaselineArtifactDir",
-        "StrongBaselineArtifactDir"
+        "StrongBaselineArtifactDir",
+        "LiveRouteProofMode"
     ];
 
     private static readonly string[] ImplementationFiles =
@@ -166,6 +167,7 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Equal(ExpectedFileTransferOpsModes, ExtractPowerShellValidateSetValues(scriptText, "Mode"));
         Assert.Equal(ExpectedExternalTopologyProfiles, ExtractPowerShellValidateSetValues(scriptText, "ExternalTopologyProfile"));
         Assert.Equal(ExpectedPayloadEfficiencyProfiles, ExtractPowerShellValidateSetValues(scriptText, "PayloadEfficiencyProfile"));
+        Assert.Equal(new[] { "MultiToggle", "None", "SwitchOff" }, ExtractPowerShellValidateSetValues(scriptText, "LiveRouteProofMode"));
         Assert.Equal(ExpectedTopLevelParameters, ExtractTopLevelPowerShellParameterNames(scriptText));
         Assert.Contains("Invoke-FileTransferRetainedAnalysis", scriptText, StringComparison.Ordinal);
         Assert.Contains("--filetransfer-soak", scriptText, StringComparison.Ordinal);
@@ -284,6 +286,8 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Contains("filetransfer-retained-log-slice-full.log", scriptText, StringComparison.Ordinal);
         Assert.Contains("filetransfer-setup-retained-log-slice.log", scriptText, StringComparison.Ordinal);
         Assert.Contains("filetransfer-measured-fallback-retained-log-slice.log", scriptText, StringComparison.Ordinal);
+        Assert.Contains("setupCanceledTerminalIndex", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Test-RouteAcceptanceFallbackSetupTunaV4Evidence", scriptText, StringComparison.Ordinal);
         Assert.Contains("regular_nkn_v4_fast", scriptText, StringComparison.Ordinal);
         Assert.Contains("file_tuna_v4", scriptText, StringComparison.Ordinal);
         Assert.Contains("post_tuna_fallback_v6", scriptText, StringComparison.Ordinal);
@@ -332,11 +336,14 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Contains("singleTransferLiveFallback", guiText, StringComparison.Ordinal);
         Assert.Contains("route=post_tuna_fallback_v6", guiText, StringComparison.Ordinal);
         Assert.Contains("protocol_version=6", guiText, StringComparison.Ordinal);
-        Assert.Contains("event=filetransfer_v6_epoch_recovered", guiText, StringComparison.Ordinal);
         Assert.Contains("filetransfer_live_route_epoch_recovered", guiText, StringComparison.Ordinal);
         Assert.Contains("off_recovered", guiText, StringComparison.Ordinal);
+        Assert.Contains("Get-TunaGuiLiveRouteEpochProof", guiText, StringComparison.Ordinal);
+        Assert.Contains("strict live-route epoch sequence", guiText, StringComparison.Ordinal);
+        Assert.Contains("missing_metadata", guiText, StringComparison.Ordinal);
         Assert.Contains("postTunaFallbackV6RouteObserved", guiText, StringComparison.Ordinal);
         Assert.Contains("same-transfer V6 post-Tuna fallback", guiText, StringComparison.Ordinal);
+        Assert.DoesNotContain("@('event=filetransfer_route_selected', (\"route={0}\" -f $Route)", guiText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -359,7 +366,7 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Contains("liveRouteEpochs", guiText, StringComparison.Ordinal);
         Assert.Contains("liveRouteEpochRouteChanges", guiText, StringComparison.Ordinal);
         Assert.Contains("post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", guiText, StringComparison.Ordinal);
-        Assert.Contains("same-transfer route cycling", guiText, StringComparison.Ordinal);
+        Assert.Contains("same-transfer strict live-route epoch cycling", guiText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -551,6 +558,19 @@ public sealed class FileTransferOpsScriptsTests
         Assert.DoesNotContain("chunks_accepted_for_transport", functionBody, StringComparison.Ordinal);
         Assert.DoesNotContain("chunks_written", functionBody, StringComparison.Ordinal);
         Assert.DoesNotContain("bytes_written", functionBody, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GuiSmokeWindows_AnyAllLogWaitNormalizesSingleNeedleSet()
+    {
+        var repoRoot = FindRepoRoot();
+        var scriptText = File.ReadAllText(Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1"));
+        var functionBody = ExtractPowerShellFunctionBody(scriptText, "Wait-AppLogContainsAnyAllAfterBookmark", "Unlock-TunaFromSessionHeader");
+
+        Assert.Contains("$normalizedNeedleSets = @($NeedleSets)", functionBody, StringComparison.Ordinal);
+        Assert.Contains("$flatStringNeedleSet = $true", functionBody, StringComparison.Ordinal);
+        Assert.Contains("$normalizedNeedleSets = @(, $normalizedNeedleSets)", functionBody, StringComparison.Ordinal);
+        Assert.Contains("foreach ($needleSet in $normalizedNeedleSets)", functionBody, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1030,6 +1050,8 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Equal("0", route["route_mismatch_count"]);
         Assert.Contains("file_tuna_v4", route["selected_routes"], StringComparison.Ordinal);
         Assert.Contains("post_tuna_fallback_v6", route["selected_routes"], StringComparison.Ordinal);
+        Assert.Equal("file_tuna_v4,post_tuna_fallback_v6", route["selected_route_changes"]);
+        Assert.Equal("(none)", route["live_route_epoch_route_changes"]);
     }
 
     [Fact]
@@ -1049,6 +1071,8 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Equal("0", route["route_mismatch_count"]);
         Assert.Contains("file_tuna_v4", route["selected_routes"], StringComparison.Ordinal);
         Assert.Contains("post_tuna_fallback_v6", route["selected_routes"], StringComparison.Ordinal);
+        Assert.Equal("file_tuna_v4,post_tuna_fallback_v6", route["selected_route_changes"]);
+        Assert.Equal("(none)", route["live_route_epoch_route_changes"]);
     }
 
     [Fact]
@@ -1068,6 +1092,9 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Equal("0", route["route_mismatch_count"]);
         Assert.Contains("file_tuna_v4", route["selected_routes"], StringComparison.Ordinal);
         Assert.Contains("post_tuna_fallback_v6", route["selected_routes"], StringComparison.Ordinal);
+        Assert.Equal("file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4", route["selected_route_changes"]);
+        Assert.Equal("post_tuna_fallback_v6,file_tuna_v4", route["live_route_epoch_route_changes"]);
+        Assert.Equal("0", route["live_route_epoch_metadata_missing_count"]);
     }
 
     [Fact]
@@ -1079,11 +1106,13 @@ public sealed class FileTransferOpsScriptsTests
             return;
         }
 
-        var result = await RunAnalyzeFixtureAsync(BuildRouteAwareLiveMultiCycleFixture());
+        var result = await RunAnalyzeFixtureAsync(BuildRouteAwareLiveMultiCycleFixture(), ["-LiveRouteProofMode", "MultiToggle"]);
 
         Assert.Equal(0, result.Script.ExitCode);
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("PASS", verdict["verdict"]);
+        Assert.Equal("MultiToggle", verdict["live_route_epoch_proof_mode"]);
+        Assert.Equal("pass", verdict["live_route_epoch_proof_verdict"]);
         var protocol = ReadArtifactReport(result.ArtifactDir, "protocol-shape-summary.txt");
         Assert.Equal("0", protocol["legacy_data_protocol_started_count"]);
         Assert.Equal("0", protocol["unexpected_legacy_data_frame_during_v4_count"]);
@@ -1092,6 +1121,84 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Equal("0", route["route_mismatch_count"]);
         Assert.Contains("file_tuna_v4", route["selected_routes"], StringComparison.Ordinal);
         Assert.Contains("post_tuna_fallback_v6", route["selected_routes"], StringComparison.Ordinal);
+        Assert.Equal("file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", route["selected_route_changes"]);
+        Assert.Equal("post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", route["live_route_epoch_route_changes"]);
+        Assert.Equal("pass", route["live_route_epoch_proof_verdict"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_LiveSwitchOffProofModeWithStrictLiveRouteEvents_ReturnsPass()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(BuildRouteAwareLiveSwitchOffFixture(), ["-LiveRouteProofMode", "SwitchOff"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("PASS", verdict["verdict"]);
+        Assert.Equal("SwitchOff", verdict["live_route_epoch_proof_mode"]);
+        Assert.Equal("pass", verdict["live_route_epoch_proof_verdict"]);
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("post_tuna_fallback_v6", route["live_route_epoch_route_changes"]);
+        Assert.Equal("0", route["live_route_epoch_metadata_missing_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_LiveProofModeRejectsV6TransportOnlyProof()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildRouteAwareControlledRestartFixture(includeSetupTerminal: false)
+            .ToList();
+        var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
+        Assert.True(firstTerminalIndex > 0);
+        lines.Insert(
+            firstTerminalIndex,
+            LogLine("event=filetransfer_v6_epoch_recovered; direction=outbound; transfer_id=[redacted]; session_id=sess_redacted; transport_epoch=2; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; state=recovered"));
+
+        var result = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "SwitchOff"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("SwitchOff", verdict["live_route_epoch_proof_mode"]);
+        Assert.Equal("fail", verdict["live_route_epoch_proof_verdict"]);
+        Assert.Equal("1", verdict["live_route_epoch_transport_only_count"]);
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("(none)", route["live_route_epoch_route_changes"]);
+        Assert.Contains("missing live route epoch started proof", File.ReadAllText(Path.Combine(result.ArtifactDir, "filetransfer-route-consistency-summary.txt")), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_LiveRouteEpochMissingMetadata_ReturnsProtocolFailure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildRouteAwareLiveSwitchOffFixture()
+            .Select(line => line.Contains("event=filetransfer_live_route_epoch_started", StringComparison.Ordinal)
+                ? line.Replace("route=post_tuna_fallback_v6; ", "", StringComparison.Ordinal)
+                : line)
+            .ToArray();
+
+        var result = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "SwitchOff"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("fail", verdict["live_route_epoch_proof_verdict"]);
+        Assert.NotEqual("0", verdict["live_route_epoch_metadata_missing_count"]);
+        var routeText = File.ReadAllText(Path.Combine(result.ArtifactDir, "filetransfer-route-consistency-summary.txt"));
+        Assert.Contains("live route epoch metadata missing", routeText, StringComparison.Ordinal);
+        Assert.Contains("live_route_epoch_metadata_missing_count=", routeText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1166,15 +1273,15 @@ public sealed class FileTransferOpsScriptsTests
             return;
         }
 
-        var lines = BuildRouteAwareMeasuredFallbackFixture().ToList();
+        var lines = StretchTransferWindowForWarningRate(BuildRouteAwareMeasuredFallbackFixture());
         var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
         Assert.True(firstTerminalIndex > 0);
         lines.InsertRange(
             firstTerminalIndex,
             [
-                LogLine("event=filetransfer_transport_epoch_started_while_unavailable; direction=outbound; transfer_id=[redacted]; session_id=sess_redacted; reason=transport_recovered_unproven; target_transport=regular_nkn"),
-                LogLine("event=nkn_bridge_bulk_queue_state; congested=0; severe=0; queue_depth=0; queued_bytes=0; oldest_queued_age_ms=0; in_flight=0; in_flight_bytes=0; configured_concurrency=4; effective_concurrency=4; cleared_since_last=5"),
-                LogLine("event=nkn_bridge_bulk_send_summary; frames_sent=17; frames_enqueued=22; payload_bytes_sent=847447; payload_bytes_per_second=423724; payload_bytes_enqueued=850237; payload_bytes_enqueued_per_second=425119; send_failures=0; queue_clears=5; queue_depth=0; queued_bytes=0; oldest_queued_age_ms=0; in_flight=0; configured_concurrency=4; effective_concurrency=4; in_flight_max=3; worker_utilization_percent=19; sample_window_ms=2000")
+                LogLine("event=filetransfer_transport_epoch_started_while_unavailable; direction=outbound; transfer_id=[redacted]; session_id=sess_redacted; reason=transport_recovered_unproven; target_transport=regular_nkn", secondsOffset: 20),
+                LogLine("event=nkn_bridge_bulk_queue_state; congested=0; severe=0; queue_depth=0; queued_bytes=0; oldest_queued_age_ms=0; in_flight=0; in_flight_bytes=0; configured_concurrency=4; effective_concurrency=4; cleared_since_last=5", secondsOffset: 30),
+                LogLine("event=nkn_bridge_bulk_send_summary; frames_sent=17; frames_enqueued=22; payload_bytes_sent=847447; payload_bytes_per_second=423724; payload_bytes_enqueued=850237; payload_bytes_enqueued_per_second=425119; send_failures=0; queue_clears=5; queue_depth=0; queued_bytes=0; oldest_queued_age_ms=0; in_flight=0; configured_concurrency=4; effective_concurrency=4; in_flight_max=3; worker_utilization_percent=19; sample_window_ms=2000", secondsOffset: 60)
             ]);
 
         var result = await RunAnalyzeFixtureAsync(lines);
@@ -1182,6 +1289,7 @@ public sealed class FileTransferOpsScriptsTests
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("WARN_EXTERNAL_TRANSPORT", verdict["verdict"]);
         Assert.Equal("recovered_post_tuna_fallback_bridge_clear", verdict["warning_kinds"]);
+        Assert.Equal("(none)", verdict["warning_cap_exceeded_kinds"]);
         Assert.Contains("recovered post-Tuna fallback bridge queue clear", File.ReadAllText(Path.Combine(result.ArtifactDir, "stability-gates-summary.txt")), StringComparison.Ordinal);
         var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
         Assert.Equal("0", stability["hard_failure_count"]);
@@ -1196,15 +1304,15 @@ public sealed class FileTransferOpsScriptsTests
             return;
         }
 
-        var lines = BuildRouteAwareMeasuredFallbackFixture().ToList();
+        var lines = StretchTransferWindowForWarningRate(BuildRouteAwareMeasuredFallbackFixture());
         var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
         Assert.True(firstTerminalIndex > 0);
         lines.InsertRange(
             firstTerminalIndex,
             [
-                LogLine("event=filetransfer_v6_chunk_batch_send_timeout; direction=outbound; transfer_id=[redacted]; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; start_chunk_index=128; chunk_count=32; timeout_ms=2500; transport_epoch=3"),
-                LogLine("event=filetransfer_v6_post_tuna_fallback_send_timeout_requeued; direction=outbound; transfer_id=[redacted]; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; requeued_chunk_count=32; exact_frontier_requeued_chunk_count=1; frontier_chunk_index=96"),
-                LogLine("event=filetransfer_v6_post_tuna_fallback_send_timeout_frontier_repair_queued; direction=outbound; transfer_id=[redacted]; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; frontier_chunk_index=96; removed_prepared_in_flight_count=32; queued_chunk_count=1")
+                LogLine("event=filetransfer_v6_chunk_batch_send_timeout; direction=outbound; transfer_id=[redacted]; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; start_chunk_index=128; chunk_count=32; timeout_ms=2500; transport_epoch=3", secondsOffset: 20),
+                LogLine("event=filetransfer_v6_post_tuna_fallback_send_timeout_requeued; direction=outbound; transfer_id=[redacted]; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; requeued_chunk_count=32; exact_frontier_requeued_chunk_count=1; frontier_chunk_index=96", secondsOffset: 50),
+                LogLine("event=filetransfer_v6_post_tuna_fallback_send_timeout_frontier_repair_queued; direction=outbound; transfer_id=[redacted]; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; frontier_chunk_index=96; removed_prepared_in_flight_count=32; queued_chunk_count=1", secondsOffset: 90)
             ]);
 
         var result = await RunAnalyzeFixtureAsync(lines);
@@ -1214,12 +1322,156 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Equal("repair-reorder-summary.txt", verdict["next_artifact"]);
         Assert.Equal("0", verdict["hard_failure_count"]);
         Assert.Equal("fallback_v6_send_timeout_churn", verdict["warning_kinds"]);
+        Assert.Equal("incident", verdict["warning_cap_count_unit"]);
+        Assert.Equal("fallback_v6_send_timeout_churn:1", verdict["warning_kind_counts"]);
+        Assert.Equal("fallback_v6_send_timeout_churn:3", verdict["warning_kind_raw_event_counts"]);
+        Assert.Equal("fallback_v6_send_timeout_churn:post_tuna_fallback", verdict["warning_cap_contexts"]);
+        Assert.Equal("(none)", verdict["warning_cap_exceeded_kinds"]);
         Assert.Contains("post-Tuna fallback V6 send timeout churn", File.ReadAllText(Path.Combine(result.ArtifactDir, "stability-gates-summary.txt")), StringComparison.Ordinal);
     }
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task AnalyzeRetained_PostTunaFallbackFrontierRepairChurn_ReturnsSpecificExternalWarning()
+    public async Task AnalyzeRetained_PostTunaFallbackRepeatedFrontierRepairSameGap_CountsAsSingleIncident()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = StretchTransferWindowForWarningRate(BuildRouteAwareMeasuredFallbackFixture());
+        var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
+        Assert.True(firstTerminalIndex > 0);
+        var churnLines = new List<string>();
+        for (var i = 0; i < 10; i++)
+        {
+            churnLines.Add(LogLine($"event=filetransfer_v6_frontier_request_sent; direction=inbound; transfer_id=[redacted]; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; frontier_chunk_index=512; requested_chunk_count=1; post_tuna_fallback_survival=1; duplicate_request={i}", secondsOffset: 30));
+        }
+
+        lines.InsertRange(firstTerminalIndex, churnLines);
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("WARN_EXTERNAL_TRANSPORT", verdict["verdict"]);
+        Assert.Equal("fallback_frontier_repair_churn", verdict["warning_kinds"]);
+        Assert.Equal("(none)", verdict["warning_cap_exceeded_kinds"]);
+        Assert.Equal("fallback_frontier_repair_churn:1", verdict["warning_kind_counts"]);
+        Assert.Equal("fallback_frontier_repair_churn:10", verdict["warning_kind_raw_event_counts"]);
+        Assert.Equal("fallback_frontier_repair_churn:post_tuna_fallback", verdict["warning_cap_contexts"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_PostTunaFallbackFrontierRepairSameGapAcrossBuckets_CountsAsSingleIncident()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = StretchTransferWindowForWarningRate(BuildRouteAwareMeasuredFallbackFixture());
+        var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
+        Assert.True(firstTerminalIndex > 0);
+        var churnLines = new List<string>();
+        for (var i = 0; i < 10; i++)
+        {
+            var secondsOffset = 30 + (i * 45);
+            var eventText = (i % 4) switch
+            {
+                0 => "event=filetransfer_v6_frontier_request_sent; direction=inbound; transfer_id=[redacted]; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; start_chunk_index=512; requested_chunk_count=32; post_tuna_fallback_survival=1",
+                1 => "event=filetransfer_v6_post_tuna_fallback_frontier_rescue_requested; direction=inbound; transfer_id=[redacted]; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; frontier_chunk_index=512; requested_chunk_count=32; rescue_step=3",
+                2 => "event=filetransfer_v6_post_tuna_fallback_frontier_rescue_widened; direction=inbound; transfer_id=[redacted]; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; frontier_chunk_index=512; previous_rescue_step=2; rescue_step=3",
+                _ => "event=filetransfer_v6_frontier_request_duplicate_ignored; direction=outbound; transfer_id=[redacted]; session_id=sess_redacted; first_start_chunk_index=512; first_chunk_count=32"
+            };
+            churnLines.Add(LogLine(eventText, secondsOffset: secondsOffset));
+        }
+
+        lines.InsertRange(firstTerminalIndex, churnLines);
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("WARN_EXTERNAL_TRANSPORT", verdict["verdict"]);
+        Assert.Equal("fallback_frontier_repair_churn", verdict["warning_kinds"]);
+        Assert.Equal("(none)", verdict["warning_cap_exceeded_kinds"]);
+        Assert.Equal("fallback_frontier_repair_churn:1", verdict["warning_kind_counts"]);
+        Assert.Equal("fallback_frontier_repair_churn:10", verdict["warning_kind_raw_event_counts"]);
+        Assert.Equal("fallback_frontier_repair_churn:post_tuna_fallback", verdict["warning_cap_contexts"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_PostTunaFallbackRepeatedReceiverStateChurnSameBurst_CountsAsSingleIncident()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = StretchTransferWindowForWarningRate(BuildRouteAwareMeasuredFallbackFixture());
+        var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
+        Assert.True(firstTerminalIndex > 0);
+        var churnLines = new List<string>();
+        for (var i = 0; i < 300; i++)
+        {
+            var eventName = i % 2 == 0
+                ? "filetransfer_v6_receiver_state_deferred"
+                : "filetransfer_v6_receiver_state_coalesced";
+            churnLines.Add(LogLine($"event={eventName}; direction=inbound; transfer_id=[redacted]; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; reason=frontier_stalled; next_chunk_index={512 + i}; highest_received_chunk_index={640 + i}", secondsOffset: 30 + (i % 60)));
+        }
+
+        lines.InsertRange(firstTerminalIndex, churnLines);
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("WARN_EXTERNAL_TRANSPORT", verdict["verdict"]);
+        Assert.Equal("fallback_receiver_state_churn", verdict["warning_kinds"]);
+        Assert.Equal("(none)", verdict["warning_cap_exceeded_kinds"]);
+        Assert.Equal("fallback_receiver_state_churn:1", verdict["warning_kind_counts"]);
+        Assert.Equal("fallback_receiver_state_churn:10", verdict["warning_kind_raw_event_counts"]);
+        Assert.Equal("fallback_receiver_state_churn:post_tuna_fallback", verdict["warning_cap_contexts"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_PostTunaFallbackRepeatedBridgeClearSameBurst_CountsAsSingleIncident()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = StretchTransferWindowForWarningRate(BuildRouteAwareMeasuredFallbackFixture());
+        var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
+        Assert.True(firstTerminalIndex > 0);
+        lines.InsertRange(
+            firstTerminalIndex,
+            [
+                LogLine("event=filetransfer_transport_epoch_started_while_unavailable; direction=outbound; transfer_id=[redacted]; session_id=sess_redacted; reason=transport_recovered_unproven; target_transport=regular_nkn", secondsOffset: 20),
+                LogLine("event=nkn_bridge_bulk_queue_state; congested=0; severe=0; queue_depth=0; queued_bytes=0; oldest_queued_age_ms=0; in_flight=0; in_flight_bytes=0; configured_concurrency=4; effective_concurrency=4; cleared_since_last=5", secondsOffset: 30),
+                LogLine("event=nkn_bridge_bulk_send_summary; frames_sent=8; frames_enqueued=13; payload_bytes_sent=3731; payload_bytes_enqueued=6523; send_failures=0; queue_clears=5; queue_depth=0; queued_bytes=0; oldest_queued_age_ms=0; in_flight=0; configured_concurrency=4; effective_concurrency=4; sample_window_ms=2000", secondsOffset: 45),
+                LogLine("event=nkn_bridge_bulk_queue_state; congested=0; severe=0; queue_depth=0; queued_bytes=0; oldest_queued_age_ms=0; in_flight=0; in_flight_bytes=0; configured_concurrency=4; effective_concurrency=4; cleared_since_last=3", secondsOffset: 60),
+                LogLine("event=nkn_bridge_bulk_send_summary; frames_sent=6; frames_enqueued=9; payload_bytes_sent=3471; payload_bytes_enqueued=5327; send_failures=0; queue_clears=3; queue_depth=0; queued_bytes=0; oldest_queued_age_ms=0; in_flight=0; configured_concurrency=4; effective_concurrency=4; sample_window_ms=2000", secondsOffset: 75),
+                LogLine("event=nkn_bridge_bulk_queue_state; congested=0; severe=0; queue_depth=0; queued_bytes=0; oldest_queued_age_ms=0; in_flight=0; in_flight_bytes=0; configured_concurrency=4; effective_concurrency=4; cleared_since_last=1", secondsOffset: 90),
+                LogLine("event=nkn_bridge_bulk_send_summary; frames_sent=4; frames_enqueued=5; payload_bytes_sent=1946; payload_bytes_enqueued=2436; send_failures=0; queue_clears=1; queue_depth=0; queued_bytes=0; oldest_queued_age_ms=0; in_flight=0; configured_concurrency=4; effective_concurrency=4; sample_window_ms=2000", secondsOffset: 105)
+            ]);
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("WARN_EXTERNAL_TRANSPORT", verdict["verdict"]);
+        Assert.Equal("recovered_post_tuna_fallback_bridge_clear", verdict["warning_kinds"]);
+        Assert.Equal("(none)", verdict["warning_cap_exceeded_kinds"]);
+        Assert.Equal("recovered_post_tuna_fallback_bridge_clear:1", verdict["warning_kind_counts"]);
+        Assert.Equal("recovered_post_tuna_fallback_bridge_clear:6", verdict["warning_kind_raw_event_counts"]);
+        Assert.Equal("recovered_post_tuna_fallback_bridge_clear:post_tuna_fallback", verdict["warning_cap_contexts"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_PostTunaFallbackFrontierRepairChurnOverCap_ReturnsExternalChurnFailure()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -1232,7 +1484,7 @@ public sealed class FileTransferOpsScriptsTests
         var churnLines = new List<string>();
         for (var i = 0; i < 10; i++)
         {
-            churnLines.Add(LogLine($"event=filetransfer_v6_frontier_request_sent; direction=inbound; transfer_id=[redacted]; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; frontier_chunk_index=512; requested_chunk_count=1; post_tuna_fallback_survival=1; duplicate_request={i}"));
+            churnLines.Add(LogLine($"event=filetransfer_v6_frontier_request_sent; direction=inbound; transfer_id=[redacted]; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; frontier_chunk_index={512 + i}; requested_chunk_count=1; post_tuna_fallback_survival=1; duplicate_request=0", secondsOffset: 10 + (i * 40)));
         }
 
         lines.InsertRange(firstTerminalIndex, churnLines);
@@ -1240,10 +1492,12 @@ public sealed class FileTransferOpsScriptsTests
         var result = await RunAnalyzeFixtureAsync(lines);
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
-        Assert.Equal("WARN_EXTERNAL_TRANSPORT", verdict["verdict"]);
-        Assert.Equal("repair-reorder-summary.txt", verdict["next_artifact"]);
-        Assert.Equal("0", verdict["hard_failure_count"]);
+        Assert.Equal("FAIL_EXTERNAL_TRANSPORT_CHURN", verdict["verdict"]);
+        Assert.Equal("stability-gates-summary.txt", verdict["next_artifact"]);
+        Assert.NotEqual("0", verdict["hard_failure_count"]);
         Assert.Equal("fallback_frontier_repair_churn", verdict["warning_kinds"]);
+        Assert.Equal("fallback_frontier_repair_churn", verdict["warning_cap_exceeded_kinds"]);
+        Assert.Equal("fallback_frontier_repair_churn:post_tuna_fallback", verdict["warning_cap_exceeded_contexts"]);
         Assert.Contains("post-Tuna fallback frontier repair churn", File.ReadAllText(Path.Combine(result.ArtifactDir, "stability-gates-summary.txt")), StringComparison.Ordinal);
     }
 
@@ -1975,6 +2229,42 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Equal("hold_inconclusive", promotion["decision"]);
         Assert.Equal("filetransfer_data_session_dispatch_missing", promotion["reason"]);
         Assert.Equal("transport_data_session_lifecycle_dispatch", promotion["next_focus"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_PostTunaFallbackProgressTimeout_EmitsFallbackDiagnostics()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_timeout_diagnostics";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transport=nkn; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; bridge_recovery_policy=post_tuna_fallback_strict; selection_reason=post_tuna_fallback"),
+            LogLine($"event=filetransfer_route_selected; direction=inbound; transport=nkn; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; bridge_recovery_policy=post_tuna_fallback_strict; selection_reason=post_tuna_fallback"),
+            LogLine($"event=filetransfer_v6_receiver_state_sent; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; contiguous_committed_chunk_index=100; durable_received_highest_chunk_index=190; oldest_gap_age_ms=45000"),
+            LogLine($"event=filetransfer_v6_chunk_batch_send_timeout; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; start_chunk_index=101; chunk_count=32; timeout_ms=2500; transport_epoch=3"),
+            LogLine($"event=filetransfer_v6_frontier_request_sent; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; frontier_chunk_index=101; requested_chunk_count=1; post_tuna_fallback_survival=1"),
+            LogLine($"event=filetransfer_v6_receiver_state_deferred; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; next_chunk_index=101; highest_received_chunk_index=190"),
+            LogLine($"event=filetransfer_live_progress_timeout; transfer_id={transferId}; reason=no useful data progress for 120s; total_wait_s=379; progress_timeout_seconds=120; receiver_next_chunk=101; receiver_highest_chunk=190; progress_events=4888"),
+            LogLine($"event=filetransfer_artifact_slice_summary; transfer_id={transferId}; artifact_slice_start_reason=live_soak_failure_context; artifact_slice_end_reason=gui_progress_timeout")
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("INCONCLUSIVE_PROGRESS_TIMEOUT", verdict["verdict"]);
+        Assert.Equal("terminal_evidence_missing", verdict["fallback_v6_terminal_missing_reason"]);
+        Assert.Equal("100", verdict["fallback_v6_last_committed_chunk_index"]);
+        Assert.Equal("190", verdict["fallback_v6_highest_observed_chunk_index"]);
+        Assert.Equal("45000", verdict["fallback_v6_oldest_unrecovered_gap_age_ms"]);
+        Assert.Equal("1", verdict["fallback_v6_chunk_send_timeout_count"]);
+        Assert.Equal("1", verdict["fallback_v6_frontier_request_count"]);
+        Assert.Equal("1", verdict["fallback_v6_receiver_state_deferred_count"]);
+        Assert.Equal("1", verdict["fallback_v6_sender_still_repairing"]);
     }
 
     [Fact]
@@ -2902,20 +3192,20 @@ public sealed class FileTransferOpsScriptsTests
         }
 
         const string transferId = "transfer_primary_quiet_checkpoint_feedback_canceled";
-        var lines = BuildCleanCompletedV4TransferFixture(transferId).ToList();
+        var lines = StretchTransferWindowForWarningRate(BuildCleanCompletedV4TransferFixture(transferId));
         var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
         Assert.True(firstTerminalIndex > 0);
         lines.InsertRange(
             firstTerminalIndex,
             [
-                LogLine($"event=filetransfer_bridge_recovery_policy_selected; direction=outbound; transfer_id={transferId}; session_id=sess_a; runtime_profile=PrimaryRegularNknBulkV6; bridge_recovery_policy=primary_regular_nkn_quiet; selection_reason=conservative_regular_nkn"),
-                LogLine($"event=filetransfer_primary_regular_nkn_bulk_v6_selected; direction=outbound; transfer_id={transferId}; session_id=sess_a; protocol_version=6; runtime_profile=PrimaryRegularNknBulkV6; credit_profile=v4_sparse; frame_profile=v6; recovery_profile=regular_nkn_quiet; bridge_recovery_policy=primary_regular_nkn_quiet; activation=primary_regular_nkn"),
-                LogLine($"event=filetransfer_v4_feedback_both_failed; transport=nkn; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.frontier_request.v6; first_lane=control; second_lane=bulk; first_error=OperationCanceledException; second_error=OperationCanceledException"),
-                LogLine($"event=filetransfer_primary_regular_nkn_frontier_feedback_failed_recoverable; direction=outbound; transfer_id={transferId}; session_id=sess_a; reason=checkpoint_sync_send_timeout; recovery_action=request_bridge_recovery; request_id=v6-regular-nkn-checkpoint-sync:7; frame_type=filetransfer.frontier_request.v6; recovery_mode=regular_nkn_checkpoint_sync; priority=checkpoint_sync; failure_count=2; bridge_recovery_policy=primary_regular_nkn_quiet"),
-                LogLine($"event=filetransfer_primary_regular_nkn_bulk_v6_checkpoint_request_send_timeout; direction=outbound; transfer_id={transferId}; session_id=sess_a; request_id=v6-regular-nkn-checkpoint-sync:7; timeout_ms=7500"),
-                LogLine($"event=filetransfer_primary_regular_nkn_bulk_v6_checkpoint_receive_recovery_requested; direction=outbound; transfer_id={transferId}; session_id=sess_a; reason=checkpoint_sync_send_timeout; request_id=v6-regular-nkn-checkpoint-sync:7; failure_count=2; bridge_recovery_policy=primary_regular_nkn_quiet"),
-                LogLine("event=nkn_bridge_receive_stall_recovery_started; connect_key=test; stall_reason=control_receive_stalled; attempt=1; max_restarts=4; consecutive_zero_receive_windows=2; frames_sent_since_last=6; control_last_received_age_ms=12000; bulk_last_received_age_ms=90"),
-                LogLine("event=nkn_bridge_receive_stall_recovery_completed; connect_key=test; recovery_count=1; elapsed_ms=1200; control_ready=1; bulk_ready=1"),
+                LogLine($"event=filetransfer_bridge_recovery_policy_selected; direction=outbound; transfer_id={transferId}; session_id=sess_a; runtime_profile=PrimaryRegularNknBulkV6; bridge_recovery_policy=primary_regular_nkn_quiet; selection_reason=conservative_regular_nkn", secondsOffset: 10),
+                LogLine($"event=filetransfer_primary_regular_nkn_bulk_v6_selected; direction=outbound; transfer_id={transferId}; session_id=sess_a; protocol_version=6; runtime_profile=PrimaryRegularNknBulkV6; credit_profile=v4_sparse; frame_profile=v6; recovery_profile=regular_nkn_quiet; bridge_recovery_policy=primary_regular_nkn_quiet; activation=primary_regular_nkn", secondsOffset: 10),
+                LogLine($"event=filetransfer_v4_feedback_both_failed; transport=nkn; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.frontier_request.v6; first_lane=control; second_lane=bulk; first_error=OperationCanceledException; second_error=OperationCanceledException", secondsOffset: 20),
+                LogLine($"event=filetransfer_primary_regular_nkn_frontier_feedback_failed_recoverable; direction=outbound; transfer_id={transferId}; session_id=sess_a; reason=checkpoint_sync_send_timeout; recovery_action=request_bridge_recovery; request_id=v6-regular-nkn-checkpoint-sync:7; frame_type=filetransfer.frontier_request.v6; recovery_mode=regular_nkn_checkpoint_sync; priority=checkpoint_sync; failure_count=2; bridge_recovery_policy=primary_regular_nkn_quiet", secondsOffset: 20),
+                LogLine($"event=filetransfer_primary_regular_nkn_bulk_v6_checkpoint_request_send_timeout; direction=outbound; transfer_id={transferId}; session_id=sess_a; request_id=v6-regular-nkn-checkpoint-sync:7; timeout_ms=7500", secondsOffset: 30),
+                LogLine($"event=filetransfer_primary_regular_nkn_bulk_v6_checkpoint_receive_recovery_requested; direction=outbound; transfer_id={transferId}; session_id=sess_a; reason=checkpoint_sync_send_timeout; request_id=v6-regular-nkn-checkpoint-sync:7; failure_count=2; bridge_recovery_policy=primary_regular_nkn_quiet", secondsOffset: 30),
+                LogLine("event=nkn_bridge_receive_stall_recovery_started; connect_key=test; stall_reason=control_receive_stalled; attempt=1; max_restarts=4; consecutive_zero_receive_windows=2; frames_sent_since_last=6; control_last_received_age_ms=12000; bulk_last_received_age_ms=90", secondsOffset: 40),
+                LogLine("event=nkn_bridge_receive_stall_recovery_completed; connect_key=test; recovery_count=1; elapsed_ms=1200; control_ready=1; bulk_ready=1", secondsOffset: 80),
             ]);
 
         var result = await RunAnalyzeFixtureAsync(lines);
@@ -3478,21 +3768,21 @@ public sealed class FileTransferOpsScriptsTests
         }
 
         const string transferId = "transfer_recovered_receive_recovery";
-        var lines = BuildCleanCompletedV4TransferFixture(transferId).ToList();
+        var lines = StretchTransferWindowForWarningRate(BuildCleanCompletedV4TransferFixture(transferId));
         var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
         Assert.True(firstTerminalIndex > 0);
         lines.InsertRange(
             firstTerminalIndex,
             [
-                LogLine("event=nkn_bridge_receive_stall_detected; connect_key=test; reason=control_receive_stalled; consecutive_zero_receive_windows=6; active_file_transfer_sessions=1; active_file_transfer_runtime_sessions=1; frames_sent_since_last=15; control_messages_received_since_last=0; bulk_messages_received_since_last=3; total_messages_received_since_last=3; control_last_received_age_ms=23845; bulk_last_received_age_ms=63; sample_window_ms=2000"),
-                LogLine("event=nkn_bridge_receive_stall_recovery_started; connect_key=test; stall_reason=control_receive_stalled; attempt=2; max_restarts=4; consecutive_zero_receive_windows=6; frames_sent_since_last=15; control_last_received_age_ms=23845; bulk_last_received_age_ms=63"),
-                LogLine($"event=filetransfer_data_session_availability_observed; session_id=sess_a; transfer_id={transferId}; is_available=0; reason=receive_stall_recovery; requires_resume_request=1; handoff_kind=regular_nkn_recovery; target_transport=regular_nkn"),
-                LogLine($"event=filetransfer_v6_epoch_started; direction=inbound; transfer_id={transferId}; session_id=sess_a; transport_epoch=2; handoff_kind=regular_nkn_recovery; source_transport=regular_nkn; target_transport=regular_nkn; reason=receive_stall_recovery; state=target_proof_pending; starting_committed_chunk=10; starting_highest_observed_chunk=9"),
-                LogLine($"event=filetransfer_v6_receiver_state_deferred_for_recovery; transfer_id={transferId}; session_id=sess_a; reason=transport_epoch; transport_epoch=2; recovery_mode=frontier_repair_only; error=InvalidOperationException"),
-                LogLine($"event=filetransfer_v4_feedback_both_failed; transport=nkn; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.receiver_state.v6; first_lane=control; second_lane=bulk; first_error=InvalidOperationException; second_error=InvalidOperationException"),
-                LogLine($"event=filetransfer_v4_feedback_both_failed; transport=nkn; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.frontier_request.v6; first_lane=control; second_lane=bulk; first_error=InvalidOperationException; second_error=InvalidOperationException"),
-                LogLine("event=nkn_bridge_bulk_send_summary; frames_sent=1; frames_enqueued=4; payload_bytes_sent=458; payload_bytes_enqueued=1832; payload_bytes_per_second=229; payload_bytes_enqueued_per_second=916; send_failures=3; queue_clears=0; queue_depth=0; queued_bytes=0; oldest_queued_age_ms=0; in_flight=0; in_flight_bytes=0; configured_concurrency=2; effective_concurrency=2; in_flight_max=1; in_flight_bytes_max=458; worker_utilization_percent=24; worker_idle_slot_samples=50; worker_saturation_percent=0; sample_window_ms=2000"),
-                LogLine("event=nkn_bridge_receive_stall_recovery_receive_resumed; connect_key=test; recovery_count=1; resume_after_recovery_ms=1755; total_messages_received_since_last=13; total_bytes_received_since_last=6246; control_messages_received_since_last=13; media_messages_received_since_last=0; bulk_messages_received_since_last=0")
+                LogLine("event=nkn_bridge_receive_stall_detected; connect_key=test; reason=control_receive_stalled; consecutive_zero_receive_windows=6; active_file_transfer_sessions=1; active_file_transfer_runtime_sessions=1; frames_sent_since_last=15; control_messages_received_since_last=0; bulk_messages_received_since_last=3; total_messages_received_since_last=3; control_last_received_age_ms=23845; bulk_last_received_age_ms=63; sample_window_ms=2000", secondsOffset: 20),
+                LogLine("event=nkn_bridge_receive_stall_recovery_started; connect_key=test; stall_reason=control_receive_stalled; attempt=2; max_restarts=4; consecutive_zero_receive_windows=6; frames_sent_since_last=15; control_last_received_age_ms=23845; bulk_last_received_age_ms=63", secondsOffset: 50),
+                LogLine($"event=filetransfer_data_session_availability_observed; session_id=sess_a; transfer_id={transferId}; is_available=0; reason=receive_stall_recovery; requires_resume_request=1; handoff_kind=regular_nkn_recovery; target_transport=regular_nkn", secondsOffset: 50),
+                LogLine($"event=filetransfer_v6_epoch_started; direction=inbound; transfer_id={transferId}; session_id=sess_a; transport_epoch=2; handoff_kind=regular_nkn_recovery; source_transport=regular_nkn; target_transport=regular_nkn; reason=receive_stall_recovery; state=target_proof_pending; starting_committed_chunk=10; starting_highest_observed_chunk=9", secondsOffset: 50),
+                LogLine($"event=filetransfer_v6_receiver_state_deferred_for_recovery; transfer_id={transferId}; session_id=sess_a; reason=transport_epoch; transport_epoch=2; recovery_mode=frontier_repair_only; error=InvalidOperationException", secondsOffset: 60),
+                LogLine($"event=filetransfer_v4_feedback_both_failed; transport=nkn; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.receiver_state.v6; first_lane=control; second_lane=bulk; first_error=InvalidOperationException; second_error=InvalidOperationException", secondsOffset: 60),
+                LogLine($"event=filetransfer_v4_feedback_both_failed; transport=nkn; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.frontier_request.v6; first_lane=control; second_lane=bulk; first_error=InvalidOperationException; second_error=InvalidOperationException", secondsOffset: 60),
+                LogLine("event=nkn_bridge_bulk_send_summary; frames_sent=1; frames_enqueued=4; payload_bytes_sent=458; payload_bytes_enqueued=1832; payload_bytes_per_second=229; payload_bytes_enqueued_per_second=916; send_failures=3; queue_clears=0; queue_depth=0; queued_bytes=0; oldest_queued_age_ms=0; in_flight=0; in_flight_bytes=0; configured_concurrency=2; effective_concurrency=2; in_flight_max=1; in_flight_bytes_max=458; worker_utilization_percent=24; worker_idle_slot_samples=50; worker_saturation_percent=0; sample_window_ms=2000", secondsOffset: 70),
+                LogLine("event=nkn_bridge_receive_stall_recovery_receive_resumed; connect_key=test; recovery_count=1; resume_after_recovery_ms=1755; total_messages_received_since_last=13; total_bytes_received_since_last=6246; control_messages_received_since_last=13; media_messages_received_since_last=0; bulk_messages_received_since_last=0", secondsOffset: 90)
             ]);
 
         var result = await RunAnalyzeFixtureAsync(lines);
@@ -3527,9 +3817,10 @@ public sealed class FileTransferOpsScriptsTests
             return;
         }
 
-        var lines = BuildCleanCompletedTransferFixture("transfer_external")
-            .Append(LogLine("event=screenshare_bridge_transport_health_summary; disconnect_count_since_last=1; connect_failed_count_since_last=0; ws_error_count_since_last=2; rpc_fallback_attempt_count_since_last=0; control_ready=1; media_ready=1; bulk_ready=1"))
-            .ToArray();
+        var lines = StretchTransferWindowForWarningRate(BuildCleanCompletedTransferFixture("transfer_external"));
+        var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
+        Assert.True(firstTerminalIndex > 0);
+        lines.Insert(firstTerminalIndex, LogLine("event=screenshare_bridge_transport_health_summary; disconnect_count_since_last=1; connect_failed_count_since_last=0; ws_error_count_since_last=2; rpc_fallback_attempt_count_since_last=0; control_ready=1; media_ready=1; bulk_ready=1", secondsOffset: 60));
 
         var result = await RunAnalyzeFixtureAsync(lines);
 
@@ -3537,31 +3828,161 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Equal("WARN_EXTERNAL_TRANSPORT", verdict["verdict"]);
         Assert.Equal("external-transport-health-summary.txt", verdict["next_artifact"]);
         Assert.Equal("external_transport_churn", verdict["warning_kinds"]);
+        Assert.Equal("(none)", verdict["warning_cap_exceeded_kinds"]);
     }
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task AnalyzeRetained_ReadyBridgeSendingButNotReceiving_ReturnsExternalWarning()
+    public async Task AnalyzeRetained_TwoSparseExternalWarnings_RemainWarningUnderCap()
     {
         if (!OperatingSystem.IsWindows())
         {
             return;
         }
 
-        var lines = BuildCleanCompletedTransferFixture("transfer_receive_stall")
-            .Append(LogLine("event=screenshare_bridge_transport_health_summary; disconnect_count_since_last=0; connect_failed_count_since_last=0; ws_error_count_since_last=0; rpc_fallback_attempt_count_since_last=0; control_ready=1; media_ready=1; bulk_ready=1; frames_sent_since_last=12; control_messages_received_since_last=0; media_messages_received_since_last=0; bulk_messages_received_since_last=0; total_messages_received_since_last=0; control_bytes_received_since_last=0; media_bytes_received_since_last=0; bulk_bytes_received_since_last=0; total_bytes_received_since_last=0; control_last_received_age_ms=32000; media_last_received_age_ms=31000; bulk_last_received_age_ms=33000"))
-            .Append(LogLine("event=nkn_bridge_receive_stall_detected; connect_key=test; consecutive_zero_receive_windows=3; frames_sent_since_last=12; total_messages_received_since_last=0; control_last_received_age_ms=32000; media_last_received_age_ms=31000; bulk_last_received_age_ms=33000; sample_window_ms=2000"))
-            .Append(LogLine("event=nkn_bridge_receive_stall_recovery_started; connect_key=test; attempt=1; max_restarts=2; consecutive_zero_receive_windows=3; frames_sent_since_last=12; control_last_received_age_ms=32000; media_last_received_age_ms=31000; bulk_last_received_age_ms=33000"))
-            .Append(LogLine("event=nkn_bridge_inbound_delivery_summary; channel=bulk; messages=4; payload_bytes=4096; subscriber_present_count=4; subscriber_missing_count=0; handler_failure_count=0; source_matches_local_control_count=0; source_matches_local_media_count=0; source_matches_local_bulk_count=0; source_matches_any_local_count=0; topic_count=0; last_source_len=32; last_source_hash=abc123; initial=0"))
-            .Append(LogLine("event=nkn_inbound_envelope_received; channel=bulk; reason=(none); envelope_type=file_transfer_data_frame; payload_len=1024; envelope_payload_len=768; msg_id=msg1; source_len=32; source_matches_local=0; expected_source_available=1; source_matches_expected=1; is_topic=0"))
-            .Append(LogLine("event=nkn_bridge_receive_stall_recovery_unproven; connect_key=test2; recovery_count=1; requires_control_proof=1; requires_bulk_proof=1; total_messages_received_since_last=4; total_bytes_received_since_last=4096; control_messages_received_since_last=0; media_messages_received_since_last=0; bulk_messages_received_since_last=4; control_last_received_age_ms=34000; bulk_last_received_age_ms=100"))
-            .Append(LogLine("event=nkn_bridge_receive_stall_recovery_receive_resumed; connect_key=test2; recovery_count=1; resume_after_recovery_ms=1750; total_messages_received_since_last=4; total_bytes_received_since_last=4096; control_messages_received_since_last=2; media_messages_received_since_last=1; bulk_messages_received_since_last=1"))
-            .ToArray();
+        var lines = StretchTransferWindowForWarningRate(BuildCleanCompletedTransferFixture("transfer_external_sparse"));
+        var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
+        Assert.True(firstTerminalIndex > 0);
+        lines.InsertRange(
+            firstTerminalIndex,
+            [
+                LogLine("event=screenshare_bridge_transport_health_summary; disconnect_count_since_last=1; connect_failed_count_since_last=0; ws_error_count_since_last=0; rpc_fallback_attempt_count_since_last=0; control_ready=1; media_ready=1; bulk_ready=1", secondsOffset: 30),
+                LogLine("event=screenshare_bridge_transport_health_summary; disconnect_count_since_last=0; connect_failed_count_since_last=1; ws_error_count_since_last=0; rpc_fallback_attempt_count_since_last=0; control_ready=1; media_ready=1; bulk_ready=1", secondsOffset: 90)
+            ]);
 
         var result = await RunAnalyzeFixtureAsync(lines);
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("WARN_EXTERNAL_TRANSPORT", verdict["verdict"]);
+        Assert.Equal("external_transport_churn", verdict["warning_kinds"]);
+        Assert.Equal("(none)", verdict["warning_cap_exceeded_kinds"]);
+        Assert.Equal("incident", verdict["warning_cap_count_unit"]);
+        Assert.Equal("external_transport_churn:2", verdict["warning_kind_counts"]);
+        Assert.Equal("external_transport_churn:2", verdict["warning_kind_raw_event_counts"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_FourExternalWarnings_ExceedCountCap()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = StretchTransferWindowForWarningRate(BuildCleanCompletedTransferFixture("transfer_external_count_cap"));
+        var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
+        Assert.True(firstTerminalIndex > 0);
+        lines.InsertRange(
+            firstTerminalIndex,
+            [
+                LogLine("event=screenshare_bridge_transport_health_summary; disconnect_count_since_last=1; connect_failed_count_since_last=0; ws_error_count_since_last=0; rpc_fallback_attempt_count_since_last=0; control_ready=1; media_ready=1; bulk_ready=1", secondsOffset: 10),
+                LogLine("event=screenshare_bridge_transport_health_summary; disconnect_count_since_last=0; connect_failed_count_since_last=1; ws_error_count_since_last=0; rpc_fallback_attempt_count_since_last=0; control_ready=1; media_ready=1; bulk_ready=1", secondsOffset: 30),
+                LogLine("event=screenshare_bridge_transport_health_summary; disconnect_count_since_last=0; connect_failed_count_since_last=0; ws_error_count_since_last=1; rpc_fallback_attempt_count_since_last=0; control_ready=1; media_ready=1; bulk_ready=1", secondsOffset: 60),
+                LogLine("event=screenshare_bridge_transport_health_summary; disconnect_count_since_last=0; connect_failed_count_since_last=0; ws_error_count_since_last=0; rpc_fallback_attempt_count_since_last=1; control_ready=1; media_ready=1; bulk_ready=1", secondsOffset: 90)
+            ]);
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_EXTERNAL_TRANSPORT_CHURN", verdict["verdict"]);
+        Assert.Equal("external_transport_churn", verdict["warning_cap_exceeded_kinds"]);
+        Assert.Equal("external_transport_churn:4", verdict["warning_kind_counts"]);
+        Assert.Equal("external_transport_churn:4", verdict["warning_kind_raw_event_counts"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_ThreeDenseExternalWarnings_ExceedRateCap()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = StretchTransferWindowForWarningRate(BuildCleanCompletedTransferFixture("transfer_external_rate_cap"), terminalOffsetSeconds: 30);
+        var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
+        Assert.True(firstTerminalIndex > 0);
+        lines.InsertRange(
+            firstTerminalIndex,
+            [
+                LogLine("event=screenshare_bridge_transport_health_summary; disconnect_count_since_last=1; connect_failed_count_since_last=0; ws_error_count_since_last=0; rpc_fallback_attempt_count_since_last=0; control_ready=1; media_ready=1; bulk_ready=1", secondsOffset: 5),
+                LogLine("event=screenshare_bridge_transport_health_summary; disconnect_count_since_last=0; connect_failed_count_since_last=1; ws_error_count_since_last=0; rpc_fallback_attempt_count_since_last=0; control_ready=1; media_ready=1; bulk_ready=1", secondsOffset: 10),
+                LogLine("event=screenshare_bridge_transport_health_summary; disconnect_count_since_last=0; connect_failed_count_since_last=0; ws_error_count_since_last=1; rpc_fallback_attempt_count_since_last=0; control_ready=1; media_ready=1; bulk_ready=1", secondsOffset: 20)
+            ]);
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_EXTERNAL_TRANSPORT_CHURN", verdict["verdict"]);
+        Assert.Equal("external_transport_churn", verdict["warning_cap_exceeded_kinds"]);
+        Assert.Equal("external_transport_churn:3", verdict["warning_kind_counts"]);
+        Assert.Equal("external_transport_churn:3", verdict["warning_kind_raw_event_counts"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RepeatedPassiveZeroReceiveHealthSummaries_WarnWithoutCapFailure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = StretchTransferWindowForWarningRate(BuildCleanCompletedTransferFixture("transfer_passive_zero_receive"), terminalOffsetSeconds: 120);
+        var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
+        Assert.True(firstTerminalIndex > 0);
+        lines.InsertRange(
+            firstTerminalIndex,
+            Enumerable.Range(1, 6).Select(index =>
+                LogLine("event=screenshare_bridge_transport_health_summary; disconnect_count_since_last=0; connect_failed_count_since_last=0; ws_error_count_since_last=0; rpc_fallback_attempt_count_since_last=0; control_ready=1; media_ready=1; bulk_ready=1; frames_sent_since_last=12; control_messages_received_since_last=0; media_messages_received_since_last=0; bulk_messages_received_since_last=0; total_messages_received_since_last=0; control_bytes_received_since_last=0; media_bytes_received_since_last=0; bulk_bytes_received_since_last=0; total_bytes_received_since_last=0; control_last_received_age_ms=32000; media_last_received_age_ms=31000; bulk_last_received_age_ms=33000", secondsOffset: index * 10)));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("WARN_EXTERNAL_TRANSPORT", verdict["verdict"]);
+        Assert.Equal("external_transport_churn", verdict["warning_kinds"]);
+        Assert.Equal("(none)", verdict["warning_cap_exceeded_kinds"]);
+        Assert.Equal("(none)", verdict["warning_kind_counts"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_ReadyBridgeSendingButNotReceivingBurst_CountsAsSingleExternalIncident()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = StretchTransferWindowForWarningRate(BuildRouteAwareCompletedFixture(
+            "transfer_receive_stall",
+            route: "regular_nkn_v4_fast",
+            protocolVersion: 4,
+            runtimeProfile: "regular_nkn_v4_fast",
+            bridgeRecoveryPolicy: "regular_nkn_v4_fast",
+            runtimeEventName: "filetransfer_v4_sender_started"));
+        var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
+        Assert.True(firstTerminalIndex > 0);
+        lines.InsertRange(
+            firstTerminalIndex,
+            [
+                LogLine("event=screenshare_bridge_transport_health_summary; disconnect_count_since_last=0; connect_failed_count_since_last=0; ws_error_count_since_last=0; rpc_fallback_attempt_count_since_last=0; control_ready=1; media_ready=1; bulk_ready=1; frames_sent_since_last=12; control_messages_received_since_last=0; media_messages_received_since_last=0; bulk_messages_received_since_last=0; total_messages_received_since_last=0; control_bytes_received_since_last=0; media_bytes_received_since_last=0; bulk_bytes_received_since_last=0; total_bytes_received_since_last=0; control_last_received_age_ms=32000; media_last_received_age_ms=31000; bulk_last_received_age_ms=33000", secondsOffset: 30),
+                LogLine("event=nkn_bridge_receive_stall_detected; connect_key=test; consecutive_zero_receive_windows=3; active_file_transfer_sessions=1; active_file_transfer_runtime_sessions=1; frames_sent_since_last=12; total_messages_received_since_last=0; control_last_received_age_ms=32000; media_last_received_age_ms=31000; bulk_last_received_age_ms=33000; sample_window_ms=2000", secondsOffset: 31),
+                LogLine("event=nkn_bridge_receive_stall_recovery_started; connect_key=test; attempt=1; max_restarts=2; consecutive_zero_receive_windows=3; frames_sent_since_last=12; control_last_received_age_ms=32000; media_last_received_age_ms=31000; bulk_last_received_age_ms=33000", secondsOffset: 32),
+                LogLine("event=nkn_bridge_inbound_delivery_summary; channel=bulk; messages=4; payload_bytes=4096; subscriber_present_count=4; subscriber_missing_count=0; handler_failure_count=0; source_matches_local_control_count=0; source_matches_local_media_count=0; source_matches_local_bulk_count=0; source_matches_any_local_count=0; topic_count=0; last_source_len=32; last_source_hash=abc123; initial=0", secondsOffset: 33),
+                LogLine("event=nkn_inbound_envelope_received; channel=bulk; reason=(none); envelope_type=file_transfer_data_frame; payload_len=1024; envelope_payload_len=768; msg_id=msg1; source_len=32; source_matches_local=0; expected_source_available=1; source_matches_expected=1; is_topic=0", secondsOffset: 34),
+                LogLine("event=nkn_bridge_receive_stall_recovery_unproven; connect_key=test; recovery_count=1; requires_control_proof=1; requires_bulk_proof=1; total_messages_received_since_last=4; total_bytes_received_since_last=4096; control_messages_received_since_last=0; media_messages_received_since_last=0; bulk_messages_received_since_last=4; control_last_received_age_ms=34000; bulk_last_received_age_ms=100", secondsOffset: 35),
+                LogLine("event=nkn_bridge_receive_stall_recovery_receive_resumed; connect_key=test; recovery_count=1; resume_after_recovery_ms=1750; total_messages_received_since_last=4; total_bytes_received_since_last=4096; control_messages_received_since_last=2; media_messages_received_since_last=1; bulk_messages_received_since_last=1", secondsOffset: 36)
+            ]);
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("WARN_EXTERNAL_TRANSPORT", verdict["verdict"]);
+        Assert.Equal("(none)", verdict["warning_cap_exceeded_kinds"]);
+        Assert.Equal("external_transport_churn:1", verdict["warning_kind_counts"]);
+        Assert.Equal("external_transport_churn:4", verdict["warning_kind_raw_event_counts"]);
 
         var external = ReadArtifactReport(result.ArtifactDir, "external-transport-health-summary.txt");
         Assert.Equal("1", external["ready_sending_zero_receive_window_count"]);
@@ -3581,6 +4002,44 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Equal("4", decomposition["inbound_delivery_bulk_messages"]);
         Assert.Equal("1", decomposition["inbound_filetransfer_data_frame_envelope_received_count"]);
         Assert.Equal("external_transport_limited", decomposition["likely_limiter"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_DistinctReceiveStallEpisodesOverCap_ReturnsExternalChurnFailure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = StretchTransferWindowForWarningRate(BuildRouteAwareCompletedFixture(
+            "transfer_receive_stall_episodes",
+            route: "regular_nkn_v4_fast",
+            protocolVersion: 4,
+            runtimeProfile: "regular_nkn_v4_fast",
+            bridgeRecoveryPolicy: "regular_nkn_v4_fast",
+            runtimeEventName: "filetransfer_v4_sender_started"),
+            terminalOffsetSeconds: 620);
+        var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
+        Assert.True(firstTerminalIndex > 0);
+
+        var churnLines = new List<string>();
+        for (var i = 0; i < 4; i++)
+        {
+            churnLines.Add(LogLine($"event=nkn_bridge_receive_stall_detected; connect_key=test-{i}; consecutive_zero_receive_windows=3; active_file_transfer_sessions=1; active_file_transfer_runtime_sessions=1; frames_sent_since_last=12; total_messages_received_since_last=0; control_last_received_age_ms=32000; media_last_received_age_ms=31000; bulk_last_received_age_ms=33000; sample_window_ms=2000", secondsOffset: 20 + (i * 140)));
+        }
+
+        lines.InsertRange(firstTerminalIndex, churnLines);
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_EXTERNAL_TRANSPORT_CHURN", verdict["verdict"]);
+        Assert.Equal("external_transport_churn", verdict["warning_cap_exceeded_kinds"]);
+        Assert.Equal("external_transport_churn:4", verdict["warning_kind_counts"]);
+        Assert.Equal("external_transport_churn:4", verdict["warning_kind_raw_event_counts"]);
+        Assert.Equal("external_transport_churn:regular_nkn", verdict["warning_cap_exceeded_contexts"]);
     }
 
     [Fact]
@@ -3649,15 +4108,17 @@ public sealed class FileTransferOpsScriptsTests
             return;
         }
 
-        var lines = BuildCleanCompletedTransferFixture("transfer_cohab")
-            .Append(LogLine("event=screenshare_bridge_media_send_summary; frames_sent=20; send_failures=0; queue_drops=2; queue_mode=normal; queue_depth=0; oldest_queued_age_ms=0"))
-            .ToArray();
+        var lines = StretchTransferWindowForWarningRate(BuildCleanCompletedTransferFixture("transfer_cohab"));
+        var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
+        Assert.True(firstTerminalIndex > 0);
+        lines.Insert(firstTerminalIndex, LogLine("event=screenshare_bridge_media_send_summary; frames_sent=20; send_failures=0; queue_drops=2; queue_mode=normal; queue_depth=0; oldest_queued_age_ms=0", secondsOffset: 60));
 
         var result = await RunAnalyzeFixtureAsync(lines);
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("WARN_COHABITATION_PRESSURE", verdict["verdict"]);
         Assert.Equal("coexistence-summary.txt", verdict["next_artifact"]);
+        Assert.Equal("(none)", verdict["warning_cap_exceeded_kinds"]);
     }
 
     [Fact]
@@ -4745,8 +5206,26 @@ if (-not $result.RegressionFailed) {
             LogLine($"event=filetransfer_live_route_epoch_started; direction=inbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=2; previous_route=post_tuna_fallback_v6; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=normal_to_tuna_activation; target_transport=tuna; state=started; reason=tuna_reenabled"),
             LogLine($"event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={transferId}; session_id=sess_redacted; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; bridge_recovery_policy=tuna_strict; live_route_epoch=2"),
             LogLine($"event=filetransfer_runtime_started; direction=inbound; role=receiver; transfer_id={transferId}; session_id=sess_redacted; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; bridge_recovery_policy=tuna_strict; live_route_epoch=2"),
+            LogLine($"event=filetransfer_live_route_epoch_recovered; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=2; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=normal_to_tuna_activation; target_transport=tuna; reason=transport_probe_ack"),
+            LogLine($"event=filetransfer_live_route_epoch_recovered; direction=inbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=2; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=normal_to_tuna_activation; target_transport=tuna; reason=transport_probe_ack"),
             LogLine($"event=filetransfer_live_route_epoch_terminal; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=2; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=normal_to_tuna_activation; target_transport=tuna; terminal_state=completed; reason=Transfer complete."),
             LogLine($"event=filetransfer_live_route_epoch_terminal; direction=inbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=2; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=normal_to_tuna_activation; target_transport=tuna; terminal_state=completed; reason=Transfer complete."),
+            LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_redacted; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=(none); integrity_ok=1"),
+            LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_redacted; transfer_id={transferId}; state=Completed; error_code=(none); integrity_ok=1")
+        ];
+    }
+
+    private static string[] BuildRouteAwareLiveSwitchOffFixture()
+    {
+        const string transferId = "[redacted]";
+        return
+        [
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=tuna_strict; liveness_terminal_policy=file_tuna_v4_fast; selection_reason=file_tuna_active; file_tuna_active=1; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=nkn"),
+            LogLine($"event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={transferId}; session_id=sess_redacted; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; bridge_recovery_policy=tuna_strict"),
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6_repair; selection_reason=post_tuna_file_fallback_active; file_tuna_active=0; post_tuna_fallback_active=1; diagnostic_regular_nkn_v6=0; transport_profile=nkn; live_route_epoch=1"),
+            LogLine($"event=filetransfer_live_route_epoch_started; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=1; previous_route=file_tuna_v4; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; state=started; reason=sidecar_read_failed"),
+            LogLine($"event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; bridge_recovery_policy=post_tuna_fallback_strict; live_route_epoch=1"),
+            LogLine($"event=filetransfer_live_route_epoch_recovered; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=1; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; reason=transport_probe_ack"),
             LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_redacted; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=(none); integrity_ok=1"),
             LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_redacted; transfer_id={transferId}; state=Completed; error_code=(none); integrity_ok=1")
         ];
@@ -4764,13 +5243,16 @@ if (-not $result.RegressionFailed) {
             LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6_repair; selection_reason=post_tuna_file_fallback_active; file_tuna_active=0; post_tuna_fallback_active=1; diagnostic_regular_nkn_v6=0; transport_profile=nkn; live_route_epoch=1"),
             LogLine($"event=filetransfer_live_route_epoch_started; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=1; previous_route=file_tuna_v4; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; state=started; reason=first_toggle_off"),
             LogLine($"event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; bridge_recovery_policy=post_tuna_fallback_strict; live_route_epoch=1"),
+            LogLine($"event=filetransfer_live_route_epoch_recovered; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=1; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; reason=transport_probe_ack"),
             LogLine($"event=filetransfer_binary_frame_sent; transfer_id={transferId}; session_id=sess_redacted; frame_type=filetransfer.chunk_batch.v6; chunk_index=8-15; raw_chunk_bytes=172032; chunk_count=8"),
             LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=normal_to_tuna_activation; bridge_recovery_policy=tuna_strict; liveness_terminal_policy=file_tuna_v4_fast; selection_reason=file_tuna_active; file_tuna_active=1; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=nkn; live_route_epoch=2"),
             LogLine($"event=filetransfer_live_route_epoch_started; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=2; previous_route=post_tuna_fallback_v6; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=normal_to_tuna_activation; target_transport=tuna; state=started; reason=tuna_reenabled"),
             LogLine($"event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={transferId}; session_id=sess_redacted; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; bridge_recovery_policy=tuna_strict; live_route_epoch=2"),
+            LogLine($"event=filetransfer_live_route_epoch_recovered; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=2; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=normal_to_tuna_activation; target_transport=tuna; reason=transport_probe_ack"),
             LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6_repair; selection_reason=post_tuna_file_fallback_active; file_tuna_active=0; post_tuna_fallback_active=1; diagnostic_regular_nkn_v6=0; transport_profile=nkn; live_route_epoch=3"),
             LogLine($"event=filetransfer_live_route_epoch_started; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=3; previous_route=file_tuna_v4; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; state=started; reason=second_toggle_off"),
             LogLine($"event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; bridge_recovery_policy=post_tuna_fallback_strict; live_route_epoch=3"),
+            LogLine($"event=filetransfer_live_route_epoch_recovered; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=3; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; reason=transport_probe_ack"),
             LogLine($"event=filetransfer_live_route_epoch_terminal; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=3; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; terminal_state=completed; reason=Transfer complete."),
             LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_redacted; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=(none); integrity_ok=1"),
             LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_redacted; transfer_id={transferId}; state=Completed; error_code=(none); integrity_ok=1")
@@ -4920,8 +5402,26 @@ if (-not $result.RegressionFailed) {
         ];
     }
 
-    private static string LogLine(string message)
-        => $"[2026-04-26 11:17:58Z] [INFO] [FileTransferTest] {message}";
+    private static readonly DateTimeOffset FakeLogStartUtc = new(2026, 4, 26, 11, 17, 58, TimeSpan.Zero);
+
+    private static string LogLine(string message, int secondsOffset = 0)
+        => $"[{FakeLogStartUtc.AddSeconds(secondsOffset).ToString("yyyy-MM-dd HH:mm:ss'Z'", CultureInfo.InvariantCulture)}] [INFO] [FileTransferTest] {message}";
+
+    private static string RetimestampLogLine(string line, int secondsOffset)
+        => Regex.Replace(
+            line,
+            @"^\[[^\]]+\]",
+            $"[{FakeLogStartUtc.AddSeconds(secondsOffset).ToString("yyyy-MM-dd HH:mm:ss'Z'", CultureInfo.InvariantCulture)}]");
+
+    private static List<string> StretchTransferWindowForWarningRate(IEnumerable<string> lines, int terminalOffsetSeconds = 120)
+    {
+        return lines
+            .Select(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal) ||
+                            line.Contains("event=file_transfer_outbound_terminal", StringComparison.Ordinal)
+                ? RetimestampLogLine(line, terminalOffsetSeconds)
+                : line)
+            .ToList();
+    }
 
     private static async Task<AnalyzeFixtureResult> RunAnalyzeFixtureAsync(
         IReadOnlyList<string> logLines,

@@ -29,7 +29,9 @@ param(
     [switch]$Build,
     [int]$TimeoutSeconds = 600,
     [string]$SafeBaselineArtifactDir = "",
-    [string]$StrongBaselineArtifactDir = ""
+    [string]$StrongBaselineArtifactDir = "",
+    [ValidateSet("None", "SwitchOff", "MultiToggle")]
+    [string]$LiveRouteProofMode = "None"
 )
 
 Set-StrictMode -Version Latest
@@ -202,6 +204,7 @@ Assert-ParameterMode -Name "TimeoutSeconds" -AllowedModes @("NknFast", "NknMixed
 Assert-ParameterMode -Name "ProgressTimeoutSeconds" -AllowedModes @("NknFast", "NknMixed")
 Assert-ParameterMode -Name "ExternalTopologyProfile" -AllowedModes @("NknFast", "NknMixed")
 Assert-ParameterMode -Name "PayloadEfficiencyProfile" -AllowedModes @("LocalFast", "LocalImpaired", "LocalMixed", "NknFast", "NknMixed")
+Assert-ParameterMode -Name "LiveRouteProofMode" -AllowedModes @("AnalyzeRetained")
 Assert-PayloadEfficiencyProfileIsSafeForMode
 
 function Invoke-LocalFileTransferSoakMode {
@@ -516,13 +519,14 @@ switch ($Mode) {
             -ArtifactDir $ArtifactDir `
             -TransferId $TransferId `
             -TailMinutes $TailMinutes `
-            -IncludeRawSlices:$IncludeRawSlices
+            -IncludeRawSlices:$IncludeRawSlices `
+            -LiveRouteProofMode $LiveRouteProofMode
 
         Write-Host ("[FileTransferOps] artifact_dir={0}" -f $result.ArtifactDir) -ForegroundColor Green
         Write-Host ("[FileTransferOps] verdict={0}" -f $result.GateResult.Verdict) -ForegroundColor Green
         Write-Host ("[FileTransferOps] first_read=filetransfer-operator-verdict.txt") -ForegroundColor Green
 
-        if ($FailOnGate -and ($result.GateResult.Verdict -eq "FAIL_PROTOCOL_OR_INTEGRITY" -or $result.GateResult.Verdict -like "INCONCLUSIVE*" -or $result.GateResult.Verdict -eq "INVALID_SETUP")) {
+        if ($FailOnGate -and ($result.GateResult.Verdict -eq "FAIL_PROTOCOL_OR_INTEGRITY" -or $result.GateResult.Verdict -eq "FAIL_EXTERNAL_TRANSPORT_CHURN" -or $result.GateResult.Verdict -like "INCONCLUSIVE*" -or $result.GateResult.Verdict -eq "INVALID_SETUP")) {
             exit 1
         }
 

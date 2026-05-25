@@ -718,8 +718,531 @@ function Get-FileTransferRecoveredPressureWarningEvents {
     return $events.ToArray()
 }
 
-function Get-FileTransferStabilizationGateResult {
+function Get-FileTransferWarningKindToken {
+    param([AllowEmptyString()][string]$WarningText)
+
+    if ($WarningText -eq 'external bridge/NKN health churn overlapped the completed transfer') {
+        return 'external_transport_churn'
+    }
+    if ($WarningText -eq 'recovered post-Tuna fallback bridge queue clear overlapped the completed transfer') {
+        return 'recovered_post_tuna_fallback_bridge_clear'
+    }
+    if ($WarningText -eq 'post-Tuna fallback V6 send timeout churn recovered before terminal completion') {
+        return 'fallback_v6_send_timeout_churn'
+    }
+    if ($WarningText -eq 'post-Tuna fallback frontier repair churn recovered before terminal completion') {
+        return 'fallback_frontier_repair_churn'
+    }
+    if ($WarningText -eq 'post-Tuna fallback receiver state churn recovered before terminal completion') {
+        return 'fallback_receiver_state_churn'
+    }
+    if ($WarningText -eq 'screen-share media pressure overlapped the completed transfer') {
+        return 'cohabitation_pressure'
+    }
+    if ($WarningText -eq 'repair/reorder/degraded pressure recovered before terminal completion') {
+        return 'recovered_pressure'
+    }
+    if ($WarningText -eq 'progress_timeout_with_receiver_gap_stall') {
+        return 'progress_timeout_with_receiver_gap_stall'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($WarningText)) {
+        return ($WarningText.ToLowerInvariant() -replace '[^a-z0-9]+', '_' -replace '^_+|_+$', '')
+    }
+
+    return ''
+}
+
+function Get-FileTransferObservationDurationSeconds {
     param([Parameter(Mandatory = $true)]$Summary)
+
+    $start = [datetimeoffset]::MinValue
+    $end = [datetimeoffset]::MinValue
+    if ([datetimeoffset]::TryParse([string]$Summary.FirstTimestamp, [ref]$start) -and
+        [datetimeoffset]::TryParse([string]$Summary.LastTimestamp, [ref]$end) -and
+        $end -gt $start) {
+        return [Math]::Max(1.0, ($end - $start).TotalSeconds)
+    }
+
+    return 1.0
+}
+
+function Test-FileTransferExternalTransportCapWarningEvent {
+    param(
+        [Parameter(Mandatory = $true)]$Event,
+        [bool]$HasActiveReceiveStall
+    )
+
+    if ($Event.EventName -eq 'screenshare_bridge_transport_health_summary') {
+        return (Get-FileTransferEventInt64Field -Event $Event -Name 'disconnect_count_since_last' -Default 0) -gt 0 -or
+            (Get-FileTransferEventInt64Field -Event $Event -Name 'connect_failed_count_since_last' -Default 0) -gt 0 -or
+            (Get-FileTransferEventInt64Field -Event $Event -Name 'ws_error_count_since_last' -Default 0) -gt 0 -or
+            (Get-FileTransferEventInt64Field -Event $Event -Name 'rpc_fallback_attempt_count_since_last' -Default 0) -gt 0
+    }
+
+    if (([string]$Event.EventName).StartsWith('nkn_bridge_receive_stall_', [System.StringComparison]::OrdinalIgnoreCase)) {
+        if ($Event.EventName -eq 'nkn_bridge_receive_stall_detected') {
+            return (Get-FileTransferEventInt64Field -Event $Event -Name 'active_file_transfer_sessions' -Default 0) -gt 0 -or
+                (Get-FileTransferEventInt64Field -Event $Event -Name 'active_file_transfer_runtime_sessions' -Default 0) -gt 0
+        }
+
+        return $HasActiveReceiveStall
+    }
+
+    if ($Event.EventName -eq 'nkn_bridge_control_receive_degraded') {
+        return (Get-FileTransferEventInt64Field -Event $Event -Name 'active_file_transfer_sessions' -Default 0) -gt 0 -or
+            (Get-FileTransferEventInt64Field -Event $Event -Name 'active_file_transfer_runtime_sessions' -Default 0) -gt 0
+    }
+
+    return $true
+}
+
+function Get-FileTransferExternalTransportCapWarningEvents {
+    param([object[]]$Events = @())
+
+    $hasActiveReceiveStall = @(
+        $Events |
+            Where-Object {
+                $_.EventName -eq 'nkn_bridge_receive_stall_detected' -and
+                (
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'active_file_transfer_sessions' -Default 0) -gt 0 -or
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'active_file_transfer_runtime_sessions' -Default 0) -gt 0
+                )
+            }
+    ).Count -gt 0
+
+    return @(
+        $Events |
+            Where-Object { Test-FileTransferExternalTransportCapWarningEvent -Event $_ -HasActiveReceiveStall $hasActiveReceiveStall }
+    )
+}
+
+function Get-FileTransferWarningEventTimeBucket {
+    param(
+        $Event,
+        [int]$BucketSeconds = 30
+    )
+
+    if ($null -eq $Event) {
+        return 'unknown'
+    }
+
+    $timestampProperty = $Event.PSObject.Properties['TimestampUtc']
+    if ($null -ne $timestampProperty -and $null -ne $timestampProperty.Value) {
+        $timestampValue = $timestampProperty.Value
+        $timestamp = [datetimeoffset]::MinValue
+        if ($timestampValue -is [datetimeoffset]) {
+            $timestamp = $timestampValue
+        }
+        elseif ($timestampValue -is [datetime]) {
+            $timestamp = [datetimeoffset]$timestampValue
+        }
+        elseif ([datetimeoffset]::TryParse([string]$timestampValue, [ref]$timestamp)) {
+            # parsed above
+        }
+
+        if ($timestamp -ne [datetimeoffset]::MinValue) {
+            return [string]([Math]::Floor($timestamp.ToUnixTimeSeconds() / [double]$BucketSeconds))
+        }
+    }
+
+    $sequence = 0
+    if ([int]::TryParse([string]$Event.Sequence, [ref]$sequence)) {
+        return [string]([Math]::Floor($sequence / 120.0))
+    }
+
+    return 'unknown'
+}
+
+function Get-FileTransferWarningEventUnixSeconds {
+    param($Event)
+
+    if ($null -eq $Event) {
+        return $null
+    }
+
+    $timestampProperty = $Event.PSObject.Properties['TimestampUtc']
+    if ($null -eq $timestampProperty -or $null -eq $timestampProperty.Value) {
+        return $null
+    }
+
+    $timestampValue = $timestampProperty.Value
+    $timestamp = [datetimeoffset]::MinValue
+    if ($timestampValue -is [datetimeoffset]) {
+        $timestamp = $timestampValue
+    }
+    elseif ($timestampValue -is [datetime]) {
+        $timestamp = [datetimeoffset]$timestampValue
+    }
+    elseif (-not [datetimeoffset]::TryParse([string]$timestampValue, [ref]$timestamp)) {
+        return $null
+    }
+
+    return $timestamp.ToUnixTimeSeconds()
+}
+
+function Test-FileTransferReceiveStallEventsSameWarningIncident {
+    param(
+        $Previous,
+        $Current,
+        [int]$MaxSeconds = 120,
+        [int]$MaxSequenceDistance = 1200
+    )
+
+    if ($null -eq $Previous -or $null -eq $Current) {
+        return $false
+    }
+
+    $previousSeconds = Get-FileTransferWarningEventUnixSeconds -Event $Previous
+    $currentSeconds = Get-FileTransferWarningEventUnixSeconds -Event $Current
+    if ($null -ne $previousSeconds -and $null -ne $currentSeconds) {
+        return [Math]::Abs([long]$currentSeconds - [long]$previousSeconds) -le $MaxSeconds
+    }
+
+    $previousSequence = 0
+    $currentSequence = 0
+    if ([int]::TryParse([string]$Previous.Sequence, [ref]$previousSequence) -and
+        [int]::TryParse([string]$Current.Sequence, [ref]$currentSequence)) {
+        return [Math]::Abs($currentSequence - $previousSequence) -le $MaxSequenceDistance
+    }
+
+    return $false
+}
+
+function Get-FileTransferWarningIncidentKey {
+    param(
+        [Parameter(Mandatory = $true)][string]$Kind,
+        $Event
+    )
+
+    if ($null -eq $Event) {
+        return ('{0}:null' -f $Kind)
+    }
+
+    $eventName = [string]$Event.EventName
+    $transferId = Get-FileTransferEventField -Event $Event -Name 'transfer_id' -Default ''
+    $route = Get-FileTransferEventField -Event $Event -Name 'route' -Default ''
+    $connectKey = Get-FileTransferEventField -Event $Event -Name 'connect_key' -Default ''
+    $attempt = Get-FileTransferEventField -Event $Event -Name 'attempt' -Default ''
+    $recoveryCount = Get-FileTransferEventField -Event $Event -Name 'recovery_count' -Default ''
+    $transportEpoch = Get-FileTransferEventField -Event $Event -Name 'transport_epoch' -Default ''
+    $bucket = Get-FileTransferWarningEventTimeBucket -Event $Event
+
+    if ($Kind -eq 'external_transport_churn') {
+        if ($eventName -eq 'screenshare_bridge_transport_health_summary') {
+            $hasTransportChurn =
+                (Get-FileTransferEventInt64Field -Event $Event -Name 'disconnect_count_since_last' -Default 0) -gt 0 -or
+                (Get-FileTransferEventInt64Field -Event $Event -Name 'connect_failed_count_since_last' -Default 0) -gt 0 -or
+                (Get-FileTransferEventInt64Field -Event $Event -Name 'ws_error_count_since_last' -Default 0) -gt 0 -or
+                (Get-FileTransferEventInt64Field -Event $Event -Name 'rpc_fallback_attempt_count_since_last' -Default 0) -gt 0
+            if ($hasTransportChurn) {
+                return ('{0}:health:{1}' -f $Kind, $Event.Sequence)
+            }
+
+            return ('{0}:receive_stall_health:{1}' -f $Kind, $bucket)
+        }
+
+        if ($eventName.StartsWith('nkn_bridge_receive_stall_', [System.StringComparison]::OrdinalIgnoreCase)) {
+            if ([string]::IsNullOrWhiteSpace($connectKey)) {
+                $connectKey = 'unknown'
+            }
+
+            $wideBucket = Get-FileTransferWarningEventTimeBucket -Event $Event -BucketSeconds 120
+            return ('{0}:receive_stall:{1}:bucket:{2}' -f $Kind, $connectKey, $wideBucket)
+        }
+
+        if ($eventName -eq 'nkn_bridge_control_receive_degraded' -or
+            $eventName -eq 'nkn_bridge_control_receive_recovery_suppressed') {
+            if ([string]::IsNullOrWhiteSpace($connectKey)) {
+                $connectKey = 'unknown'
+            }
+
+            $reason = Get-FileTransferEventField -Event $Event -Name 'reason' -Default ''
+            return ('{0}:control_receive:{1}:{2}:{3}' -f $Kind, $connectKey, $reason, $bucket)
+        }
+
+        return ('{0}:{1}:{2}' -f $Kind, $eventName, $Event.Sequence)
+    }
+
+    if ($Kind -eq 'fallback_v6_send_timeout_churn') {
+        $wideBucket = Get-FileTransferWarningEventTimeBucket -Event $Event -BucketSeconds 120
+        return ('{0}:{1}:{2}:{3}' -f $Kind, $transferId, $route, $wideBucket)
+    }
+
+    if ($Kind -eq 'fallback_frontier_repair_churn') {
+        $frontier = Get-FileTransferEventField -Event $Event -Name 'frontier_chunk_index' -Default ''
+        if ([string]::IsNullOrWhiteSpace($frontier)) {
+            $frontier = Get-FileTransferEventField -Event $Event -Name 'start_chunk_index' -Default ''
+        }
+        if ([string]::IsNullOrWhiteSpace($frontier)) {
+            $frontier = Get-FileTransferEventField -Event $Event -Name 'first_start_chunk_index' -Default ''
+        }
+        if ([string]::IsNullOrWhiteSpace($frontier)) {
+            $frontier = Get-FileTransferEventField -Event $Event -Name 'remote_frontier_chunk_index' -Default ''
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($frontier)) {
+            if ([string]::IsNullOrWhiteSpace($route)) {
+                $route = 'post_tuna_fallback_v6'
+            }
+
+            return ('{0}:{1}:{2}:{3}' -f $Kind, $transferId, $route, $frontier)
+        }
+
+        return ('{0}:{1}:{2}:{3}:{4}' -f $Kind, $transferId, $route, $eventName, $bucket)
+    }
+
+    if ($Kind -eq 'fallback_receiver_state_churn') {
+        $wideBucket = Get-FileTransferWarningEventTimeBucket -Event $Event -BucketSeconds 120
+        return ('{0}:{1}:{2}:{3}' -f $Kind, $transferId, $route, $wideBucket)
+    }
+
+    if ($Kind -eq 'recovered_post_tuna_fallback_bridge_clear') {
+        $wideBucket = Get-FileTransferWarningEventTimeBucket -Event $Event -BucketSeconds 120
+        return ('{0}:{1}' -f $Kind, $wideBucket)
+    }
+
+    return ('{0}:{1}:{2}' -f $Kind, $eventName, $Event.Sequence)
+}
+
+function Get-FileTransferWarningIncidentEvents {
+    param(
+        [Parameter(Mandatory = $true)][string]$Kind,
+        [object[]]$Events = @()
+    )
+
+    $seen = @{}
+    $incidents = New-Object System.Collections.Generic.List[object]
+    $lastReceiveStallIncident = $null
+    foreach ($event in @($Events | Sort-Object Sequence)) {
+        $eventName = [string]$event.EventName
+        if ($Kind -eq 'external_transport_churn' -and
+            $eventName.StartsWith('nkn_bridge_receive_stall_', [System.StringComparison]::OrdinalIgnoreCase)) {
+            if ($null -ne $lastReceiveStallIncident -and
+                (Test-FileTransferReceiveStallEventsSameWarningIncident -Previous $lastReceiveStallIncident -Current $event)) {
+                continue
+            }
+
+            $incidents.Add($event) | Out-Null
+            $lastReceiveStallIncident = $event
+            continue
+        }
+
+        $key = Get-FileTransferWarningIncidentKey -Kind $Kind -Event $event
+        if ($seen.ContainsKey($key)) {
+            continue
+        }
+
+        $seen[$key] = $true
+        $incidents.Add($event) | Out-Null
+    }
+
+    return @($incidents.ToArray())
+}
+
+function Get-FileTransferWarningRouteContext {
+    param(
+        [Parameter(Mandatory = $true)]$Summary,
+        [Parameter(Mandatory = $true)][string]$Kind,
+        [object[]]$Events = @()
+    )
+
+    if ($Kind -like 'fallback_*' -or $Kind -eq 'recovered_post_tuna_fallback_bridge_clear') {
+        return 'post_tuna_fallback'
+    }
+
+    [object[]]$eventRoutes = @(
+        $Events |
+            ForEach-Object { Get-FileTransferEventField -Event $_ -Name 'route' -Default '' } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            Select-Object -Unique
+    )
+
+    [object[]]$selectedRoutes = @()
+    if ($null -ne $Summary.RouteConsistency) {
+        $selectedRoutes = @(
+            $Summary.RouteConsistency.RouteSelectedEvents |
+                ForEach-Object { Get-FileTransferEventField -Event $_ -Name 'route' -Default '' } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                Select-Object -Unique
+        )
+    }
+
+    [object[]]$routes = @($eventRoutes + $selectedRoutes | Select-Object -Unique)
+    if ($routes.Count -eq 0) {
+        return 'unknown'
+    }
+
+    if ($routes -contains 'post_tuna_fallback_v6' -and $routes.Count -gt 1) {
+        return 'mixed'
+    }
+
+    if ($routes -contains 'post_tuna_fallback_v6') {
+        return 'post_tuna_fallback'
+    }
+
+    if ($routes -contains 'file_tuna_v4') {
+        return 'active_tuna'
+    }
+
+    if ($routes -contains 'regular_nkn_v4_fast') {
+        return 'regular_nkn'
+    }
+
+    return 'unknown'
+}
+
+function Get-FileTransferMaxEventField {
+    param(
+        [object[]]$Events = @(),
+        [string[]]$FieldNames = @()
+    )
+
+    $max = -1L
+    foreach ($event in @($Events)) {
+        foreach ($fieldName in @($FieldNames)) {
+            $value = Get-FileTransferEventInt64Field -Event $event -Name $fieldName -Default -1
+            if ($value -gt $max) {
+                $max = $value
+            }
+        }
+    }
+
+    return $max
+}
+
+function Get-FileTransferFallbackV6Diagnostics {
+    param([Parameter(Mandatory = $true)]$Summary)
+
+    [object[]]$fallbackEvents = @(
+        $Summary.TransferEvents |
+            Where-Object {
+                (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -or
+                (Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -like 'filetransfer.*.v6' -or
+                $_.EventName -like 'filetransfer_v6_*'
+            }
+    )
+
+    $hasFallbackRoute = Test-FileTransferSummarySelectedRoute -Summary $Summary -Route 'post_tuna_fallback_v6'
+    if (-not $hasFallbackRoute -and $fallbackEvents.Count -eq 0) {
+        return $null
+    }
+
+    $terminalReason = '(none)'
+    if (-not $Summary.HasTerminalEvidence) {
+        $terminalReason = 'terminal_evidence_missing'
+    }
+    elseif ($Summary.LiveProgressTimeoutCount -gt 0 -and $Summary.TerminalMissingAfterProgressTimeout -ne 0) {
+        $terminalReason = 'progress_timeout_terminal_missing'
+    }
+    elseif (-not (Test-FileTransferTerminalCompleted -TerminalEvents $Summary.TerminalEvents)) {
+        $terminalReason = 'terminal_not_completed'
+    }
+
+    $sendTimeoutEvents = @($fallbackEvents | Where-Object { $_.EventName -eq 'filetransfer_v6_chunk_batch_send_timeout' })
+    $frontierEvents = @($fallbackEvents | Where-Object { $_.EventName -eq 'filetransfer_v6_frontier_request_sent' -or $_.EventName -eq 'filetransfer_v6_frontier_request_duplicate_ignored' })
+    $deferredEvents = @($fallbackEvents | Where-Object { $_.EventName -eq 'filetransfer_v6_receiver_state_deferred' })
+    $coalescedEvents = @($fallbackEvents | Where-Object { $_.EventName -eq 'filetransfer_v6_receiver_state_coalesced' })
+    $repairActiveEvents = @(
+        $fallbackEvents |
+            Where-Object {
+                $_.EventName -eq 'filetransfer_v6_chunk_batch_send_timeout' -or
+                $_.EventName -eq 'filetransfer_v6_post_tuna_fallback_send_timeout_requeued' -or
+                $_.EventName -eq 'filetransfer_v6_post_tuna_fallback_send_timeout_frontier_repair_queued' -or
+                $_.EventName -eq 'filetransfer_v6_frontier_request_sent' -or
+                $_.EventName -eq 'filetransfer_v6_frontier_request_duplicate_ignored' -or
+                $_.EventName -eq 'filetransfer_v6_post_tuna_fallback_frontier_rescue_requested' -or
+                $_.EventName -eq 'filetransfer_v6_post_tuna_fallback_frontier_rescue_widened'
+            }
+    )
+
+    return [pscustomobject]@{
+        HasPostTunaFallbackEvidence = if ($hasFallbackRoute -or $fallbackEvents.Count -gt 0) { 1 } else { 0 }
+        TerminalMissingReason = $terminalReason
+        LastCommittedChunkIndex = Get-FileTransferMaxEventField -Events $fallbackEvents -FieldNames @('contiguous_committed_chunk_index', 'last_committed_chunk_index')
+        HighestObservedChunkIndex = Get-FileTransferMaxEventField -Events $fallbackEvents -FieldNames @('highest_received_chunk_index', 'durable_received_highest_chunk_index', 'receiver_highest_chunk', 'highest_observed_chunk_index')
+        OldestUnrecoveredGapAgeMs = Get-FileTransferMaxEventField -Events $fallbackEvents -FieldNames @('oldest_gap_age_ms', 'gap_stall_age_ms')
+        V6ChunkSendTimeoutCount = $sendTimeoutEvents.Count
+        FrontierRequestCount = $frontierEvents.Count
+        ReceiverStateDeferredCount = $deferredEvents.Count
+        ReceiverStateCoalescedCount = $coalescedEvents.Count
+        SenderRepairActiveEvidenceCount = $repairActiveEvents.Count
+        SenderStillRepairing = if ($repairActiveEvents.Count -gt 0 -and $terminalReason -ne '(none)') { 1 } else { 0 }
+    }
+}
+
+function Get-FileTransferWarningCapResult {
+    param(
+        [Parameter(Mandatory = $true)]$Summary,
+        [object[]]$WarningGroups = @()
+    )
+
+    $countLimit = 3
+    $rateLimit = 0.05
+    $durationSeconds = Get-FileTransferObservationDurationSeconds -Summary $Summary
+    $culture = [System.Globalization.CultureInfo]::InvariantCulture
+    $kindCounts = New-Object System.Collections.Generic.List[string]
+    $rawKindCounts = New-Object System.Collections.Generic.List[string]
+    $kindRates = New-Object System.Collections.Generic.List[string]
+    $kindContexts = New-Object System.Collections.Generic.List[string]
+    $exceededKinds = New-Object System.Collections.Generic.List[string]
+    $exceededContexts = New-Object System.Collections.Generic.List[string]
+    $exceededDetails = New-Object System.Collections.Generic.List[string]
+    $exceededEvents = New-Object System.Collections.Generic.List[object]
+
+    foreach ($group in @($WarningGroups)) {
+        $kind = [string]$group.Kind
+        [object[]]$events = @($group.Events)
+        if ($events.Count -le 0 -or [string]::IsNullOrWhiteSpace($kind)) {
+            continue
+        }
+
+        [object[]]$incidentEvents = @(Get-FileTransferWarningIncidentEvents -Kind $kind -Events $events)
+        $count = $incidentEvents.Count
+        $rawCount = $events.Count
+        if ($count -le 0) {
+            continue
+        }
+
+        $context = Get-FileTransferWarningRouteContext -Summary $Summary -Kind $kind -Events $events
+        $rate = [double]$count / [double]$durationSeconds
+        $kindCounts.Add(('{0}:{1}' -f $kind, $count)) | Out-Null
+        $rawKindCounts.Add(('{0}:{1}' -f $kind, $rawCount)) | Out-Null
+        $kindRates.Add(('{0}:{1}' -f $kind, $rate.ToString('0.###', $culture))) | Out-Null
+        $kindContexts.Add(('{0}:{1}' -f $kind, $context)) | Out-Null
+        if ($count -gt $countLimit -or $rate -gt $rateLimit) {
+            $exceededKinds.Add($kind) | Out-Null
+            $exceededContexts.Add(('{0}:{1}' -f $kind, $context)) | Out-Null
+            $exceededDetails.Add(('warning cap exceeded: kind={0}; context={1}; incident_count={2}; raw_event_count={3}; rate_per_second={4}; count_limit={5}; rate_limit_per_second={6}' -f $kind, $context, $count, $rawCount, $rate.ToString('0.###', $culture), $countLimit, $rateLimit.ToString('0.###', $culture))) | Out-Null
+            foreach ($event in @($incidentEvents | Select-Object -First 10)) {
+                $exceededEvents.Add($event) | Out-Null
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        Policy = 'strict_small'
+        CountUnit = 'incident'
+        CountLimit = $countLimit
+        RateLimitPerSecond = $rateLimit.ToString('0.###', $culture)
+        DurationSeconds = $durationSeconds
+        KindCounts = if ($kindCounts.Count -gt 0) { $kindCounts.ToArray() -join ',' } else { '(none)' }
+        RawKindCounts = if ($rawKindCounts.Count -gt 0) { $rawKindCounts.ToArray() -join ',' } else { '(none)' }
+        KindRatesPerSecond = if ($kindRates.Count -gt 0) { $kindRates.ToArray() -join ',' } else { '(none)' }
+        KindContexts = if ($kindContexts.Count -gt 0) { $kindContexts.ToArray() -join ',' } else { '(none)' }
+        ExceededKinds = @($exceededKinds.ToArray())
+        ExceededKindsText = if ($exceededKinds.Count -gt 0) { $exceededKinds.ToArray() -join ',' } else { '(none)' }
+        ExceededContextsText = if ($exceededContexts.Count -gt 0) { $exceededContexts.ToArray() -join ',' } else { '(none)' }
+        ExceededDetails = @($exceededDetails.ToArray())
+        ExceededEvents = @($exceededEvents.ToArray())
+    }
+}
+
+function Get-FileTransferStabilizationGateResult {
+    param(
+        [Parameter(Mandatory = $true)]$Summary,
+        [ValidateSet('None', 'SwitchOff', 'MultiToggle')]
+        [string]$LiveRouteProofMode = 'None'
+    )
 
     $hardFailures = New-Object System.Collections.Generic.List[string]
     $warnings = New-Object System.Collections.Generic.List[string]
@@ -748,6 +1271,8 @@ function Get-FileTransferStabilizationGateResult {
         }
     }
 
+    $fallbackDiagnostics = Get-FileTransferFallbackV6Diagnostics -Summary $Summary
+
     foreach ($terminal in @($Summary.TerminalEvents)) {
         $state = Get-FileTransferEventField -Event $terminal -Name 'state' -Default ''
         $errorCode = Get-FileTransferEventField -Event $terminal -Name 'error_code' -Default '(none)'
@@ -759,6 +1284,7 @@ function Get-FileTransferStabilizationGateResult {
                 Warnings = @()
                 NextArtifact = 'transfer-terminal-summary.txt'
                 EvidenceEvents = @($terminal)
+                FallbackDiagnostics = $fallbackDiagnostics
             }
         }
 
@@ -798,12 +1324,18 @@ function Get-FileTransferStabilizationGateResult {
         }
     }
 
+    $liveRouteProof = Get-FileTransferLiveRouteEpochProof -TransferEvents $Summary.TransferEvents -Mode $LiveRouteProofMode
+    foreach ($finding in @($liveRouteProof.Findings)) {
+        $operatorFinding = ([string]$finding).Replace('=', ':')
+        Add-FileTransferGateFinding -List $hardFailures -Finding ("live route epoch proof: {0}" -f $operatorFinding)
+    }
+
     if ($hardFailures.Count -gt 0) {
         [object[]]$routeEvidenceEvents = @()
         if ($null -ne $Summary.RouteConsistency) {
             $routeEvidenceEvents = @($Summary.RouteConsistency.EvidenceEvents)
         }
-        $nextArtifact = if ($routeConsistencyFindings.Count -gt 0) {
+        $nextArtifact = if ($routeConsistencyFindings.Count -gt 0 -or $liveRouteProof.Findings.Count -gt 0) {
             'filetransfer-route-consistency-summary.txt'
         }
         else {
@@ -816,7 +1348,9 @@ function Get-FileTransferStabilizationGateResult {
             HardFailures = @($hardFailures)
             Warnings = @()
             NextArtifact = $nextArtifact
-            EvidenceEvents = @($Summary.TerminalEvents + $hardFailureEvents + $legacyProtocolStartedEvents + $unexpectedLegacyFramesDuringV4 + $bridgeBulkFailures + $routeEvidenceEvents | Select-Object -First 20)
+            EvidenceEvents = @($Summary.TerminalEvents + $hardFailureEvents + $legacyProtocolStartedEvents + $unexpectedLegacyFramesDuringV4 + $bridgeBulkFailures + $routeEvidenceEvents + $liveRouteProof.EvidenceEvents | Select-Object -First 20)
+            LiveRouteProof = $liveRouteProof
+            FallbackDiagnostics = $fallbackDiagnostics
         }
     }
 
@@ -833,6 +1367,7 @@ function Get-FileTransferStabilizationGateResult {
             Warnings = @($warnings)
             NextArtifact = 'throughput-decomposition-summary.txt'
             EvidenceEvents = @($progressTimeoutEvents + $Summary.TerminalEvents | Select-Object -First 20)
+            FallbackDiagnostics = $fallbackDiagnostics
         }
     }
 
@@ -850,6 +1385,7 @@ function Get-FileTransferStabilizationGateResult {
             Warnings = @($warnings)
             NextArtifact = 'transfer-terminal-summary.txt'
             EvidenceEvents = @($Summary.TransferEvents | Select-Object -First 20)
+            FallbackDiagnostics = $fallbackDiagnostics
         }
     }
 
@@ -861,6 +1397,7 @@ function Get-FileTransferStabilizationGateResult {
             Warnings = @('only one terminal side is visible in the retained logs')
             NextArtifact = 'transfer-terminal-summary.txt'
             EvidenceEvents = @($Summary.TerminalEvents | Select-Object -First 20)
+            FallbackDiagnostics = $fallbackDiagnostics
         }
     }
 
@@ -872,6 +1409,7 @@ function Get-FileTransferStabilizationGateResult {
             Warnings = @('terminal evidence is present but does not prove clean completion')
             NextArtifact = 'transfer-terminal-summary.txt'
             EvidenceEvents = @($Summary.TerminalEvents | Select-Object -First 20)
+            FallbackDiagnostics = $fallbackDiagnostics
         }
     }
 
@@ -882,11 +1420,66 @@ function Get-FileTransferStabilizationGateResult {
     $fallbackFrontierRepairWarnings = @(Get-FileTransferPostTunaFallbackFrontierRepairWarningEvents -Summary $Summary)
     $fallbackReceiverStateWarnings = @(Get-FileTransferPostTunaFallbackReceiverStateWarningEvents -Summary $Summary)
     $pressureWarnings = @(Get-FileTransferRecoveredPressureWarningEvents -Summary $Summary)
+    $externalCapWarnings = @(Get-FileTransferExternalTransportCapWarningEvents -Events $externalWarnings)
+    $warningGroups = @(
+        [pscustomobject]@{ Kind = 'recovered_post_tuna_fallback_bridge_clear'; Events = @($fallbackBridgeClearWarnings) },
+        [pscustomobject]@{ Kind = 'fallback_v6_send_timeout_churn'; Events = @($fallbackSendTimeoutWarnings) },
+        [pscustomobject]@{ Kind = 'fallback_frontier_repair_churn'; Events = @($fallbackFrontierRepairWarnings) },
+        [pscustomobject]@{ Kind = 'fallback_receiver_state_churn'; Events = @($fallbackReceiverStateWarnings) },
+        [pscustomobject]@{ Kind = 'external_transport_churn'; Events = @($externalCapWarnings) }
+    )
+
+    if ($cohabitationWarnings.Count -gt 0) {
+        Add-FileTransferGateFinding -List $warnings -Finding 'screen-share media pressure overlapped the completed transfer'
+    }
+
+    if ($fallbackBridgeClearWarnings.Count -gt 0) {
+        Add-FileTransferGateFinding -List $warnings -Finding 'recovered post-Tuna fallback bridge queue clear overlapped the completed transfer'
+    }
+
+    if ($fallbackSendTimeoutWarnings.Count -gt 0) {
+        Add-FileTransferGateFinding -List $warnings -Finding 'post-Tuna fallback V6 send timeout churn recovered before terminal completion'
+    }
+
+    if ($fallbackFrontierRepairWarnings.Count -gt 0) {
+        Add-FileTransferGateFinding -List $warnings -Finding 'post-Tuna fallback frontier repair churn recovered before terminal completion'
+    }
+
+    if ($fallbackReceiverStateWarnings.Count -gt 0) {
+        Add-FileTransferGateFinding -List $warnings -Finding 'post-Tuna fallback receiver state churn recovered before terminal completion'
+    }
+
+    if ($externalWarnings.Count -gt 0) {
+        Add-FileTransferGateFinding -List $warnings -Finding 'external bridge/NKN health churn overlapped the completed transfer'
+    }
+
+    if ($pressureWarnings.Count -gt 0) {
+        Add-FileTransferGateFinding -List $warnings -Finding 'repair/reorder/degraded pressure recovered before terminal completion'
+    }
+
+    $warningCap = Get-FileTransferWarningCapResult -Summary $Summary -WarningGroups $warningGroups
+    if ($warningCap.ExceededKinds.Count -gt 0) {
+        $hardFailures = New-Object System.Collections.Generic.List[string]
+        foreach ($detail in @($warningCap.ExceededDetails)) {
+            Add-FileTransferGateFinding -List $hardFailures -Finding $detail
+        }
+
+        return [pscustomobject]@{
+            Verdict = 'FAIL_EXTERNAL_TRANSPORT_CHURN'
+            GateStatus = 'fail'
+            HardFailures = @($hardFailures)
+            Warnings = @($warnings)
+            NextArtifact = 'stability-gates-summary.txt'
+            EvidenceEvents = @($warningCap.ExceededEvents + $Summary.TerminalEvents | Select-Object -First 30)
+            WarningCap = $warningCap
+            LiveRouteProof = $liveRouteProof
+            FallbackDiagnostics = $fallbackDiagnostics
+        }
+    }
 
     if ($cohabitationWarnings.Count -gt 0) {
         $verdict = 'WARN_COHABITATION_PRESSURE'
         $nextArtifact = 'coexistence-summary.txt'
-        Add-FileTransferGateFinding -List $warnings -Finding 'screen-share media pressure overlapped the completed transfer'
     }
     elseif ($fallbackBridgeClearWarnings.Count -gt 0 -or
             $fallbackSendTimeoutWarnings.Count -gt 0 -or
@@ -905,31 +1498,10 @@ function Get-FileTransferStabilizationGateResult {
         else {
             'external-transport-health-summary.txt'
         }
-
-        if ($fallbackBridgeClearWarnings.Count -gt 0) {
-            Add-FileTransferGateFinding -List $warnings -Finding 'recovered post-Tuna fallback bridge queue clear overlapped the completed transfer'
-        }
-
-        if ($fallbackSendTimeoutWarnings.Count -gt 0) {
-            Add-FileTransferGateFinding -List $warnings -Finding 'post-Tuna fallback V6 send timeout churn recovered before terminal completion'
-        }
-
-        if ($fallbackFrontierRepairWarnings.Count -gt 0) {
-            Add-FileTransferGateFinding -List $warnings -Finding 'post-Tuna fallback frontier repair churn recovered before terminal completion'
-        }
-
-        if ($fallbackReceiverStateWarnings.Count -gt 0) {
-            Add-FileTransferGateFinding -List $warnings -Finding 'post-Tuna fallback receiver state churn recovered before terminal completion'
-        }
-
-        if ($externalWarnings.Count -gt 0) {
-            Add-FileTransferGateFinding -List $warnings -Finding 'external bridge/NKN health churn overlapped the completed transfer'
-        }
     }
     elseif ($pressureWarnings.Count -gt 0) {
         $verdict = 'WARN_RECOVERED_PRESSURE'
         $nextArtifact = 'repair-reorder-summary.txt'
-        Add-FileTransferGateFinding -List $warnings -Finding 'repair/reorder/degraded pressure recovered before terminal completion'
     }
 
     $evidence = @($cohabitationWarnings + $fallbackBridgeClearWarnings + $fallbackSendTimeoutWarnings + $fallbackFrontierRepairWarnings + $fallbackReceiverStateWarnings + $externalWarnings + $pressureWarnings + $Summary.TerminalEvents | Select-Object -First 30)
@@ -941,5 +1513,8 @@ function Get-FileTransferStabilizationGateResult {
         Warnings = @($warnings)
         NextArtifact = $nextArtifact
         EvidenceEvents = @($evidence)
+        WarningCap = $warningCap
+        LiveRouteProof = $liveRouteProof
+        FallbackDiagnostics = $fallbackDiagnostics
     }
 }

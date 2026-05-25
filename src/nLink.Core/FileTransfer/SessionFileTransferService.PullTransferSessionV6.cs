@@ -3546,27 +3546,46 @@ public sealed partial class SessionFileTransferService
     {
         for (var current = ex; current is not null; current = current.InnerException)
         {
+            if (current is OperationCanceledException)
+            {
+                return true;
+            }
+
             if (current is ObjectDisposedException)
             {
                 return true;
             }
 
-            if (current is InvalidOperationException invalidOperation)
+            if (IsRecoverableV6DataSessionSendFailureMessage(current.Message))
             {
-                var message = invalidOperation.Message;
-                if (message.Contains("Bridge disconnected", StringComparison.OrdinalIgnoreCase) ||
-                    message.Contains("NKN bridge is not running", StringComparison.OrdinalIgnoreCase) ||
-                    message.Contains("NKN bridge process is not available", StringComparison.OrdinalIgnoreCase) ||
-                    message.Contains("Not connected", StringComparison.OrdinalIgnoreCase) ||
-                    message.Contains("client not ready", StringComparison.OrdinalIgnoreCase) ||
-                    message.Contains("data session is not available", StringComparison.OrdinalIgnoreCase))
+                return true;
+            }
+
+            if (current is AggregateException aggregate)
+            {
+                foreach (var inner in aggregate.Flatten().InnerExceptions)
                 {
-                    return true;
+                    if (!ReferenceEquals(inner, current) &&
+                        IsRecoverableV6DataSessionSendFailure(inner))
+                    {
+                        return true;
+                    }
                 }
             }
         }
 
         return false;
+    }
+
+    private static bool IsRecoverableV6DataSessionSendFailureMessage(string? message)
+    {
+        return !string.IsNullOrWhiteSpace(message) &&
+               (message.Contains("Bridge disconnected", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("NKN bridge is not running", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("NKN bridge process is not available", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("Not connected", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("client not ready", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("data session is not available", StringComparison.OrdinalIgnoreCase));
     }
 
     private void ClearPreparedV6ChunkBatchInFlightMarkers(
@@ -4755,30 +4774,10 @@ public sealed partial class SessionFileTransferService
 
             return true;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (!context.LifetimeCts.IsCancellationRequested)
         {
-            bool recoveryActive;
-            long transportEpoch;
-            string recoveryMode;
-            lock (gate)
+            if (TryDeferInboundV6ControlSendFailureForRecovery(context, "receiver_state", reason, ex))
             {
-                recoveryActive =
-                    ReferenceEquals(inboundTransfer, context) &&
-                    !context.IsTerminal &&
-                    (IsV6TransportEpochUnresolved(context.V6TransportEpoch) ||
-                     context.PullTransportPaused ||
-                     context.PullTransportResumeRequestPending);
-                transportEpoch = context.V6TransportEpoch?.EpochId ?? context.V6ReceiverTransportEpoch;
-                recoveryMode = context.V6TransportEpoch is null
-                    ? "(none)"
-                    : FormatV6TransportEpochState(context.V6TransportEpoch.State);
-            }
-
-            if (recoveryActive)
-            {
-                LocalOperationalLog.Warn(
-                    "FileTransferService",
-                    $"event=filetransfer_v6_receiver_state_deferred_for_recovery; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; transport_epoch={transportEpoch}; recovery_mode={FormatProtocolLogValue(recoveryMode)}; error={FormatProtocolLogValue(ex.GetType().Name)}; message={FormatProtocolLogValue(ex.Message)}");
                 return false;
             }
 
@@ -5003,13 +5002,73 @@ public sealed partial class SessionFileTransferService
 
             return true;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (!context.LifetimeCts.IsCancellationRequested)
         {
+            if (TryDeferInboundV6ControlSendFailureForRecovery(context, "frontier_request", reason, ex))
+            {
+                return false;
+            }
+
             LocalOperationalLog.Warn(
                 "FileTransferService",
                 $"event=filetransfer_v6_frontier_request_failed; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; error={FormatProtocolLogValue(ex.Message)}");
             return false;
         }
+    }
+
+    private bool TryDeferInboundV6ControlSendFailureForRecovery(
+        InboundTransferContext context,
+        string frameKind,
+        string reason,
+        Exception ex)
+    {
+        if (!IsRecoverableV6DataSessionSendFailure(ex))
+        {
+            return false;
+        }
+
+        bool recoveryActive;
+        bool postTunaFallbackSurvival;
+        long transportEpoch;
+        string recoveryMode;
+        bool pullTransportPaused;
+        bool resumeRequestPending;
+        lock (gate)
+        {
+            if (!ReferenceEquals(inboundTransfer, context) || context.IsTerminal)
+            {
+                return true;
+            }
+
+            var unresolvedEpoch = IsV6TransportEpochUnresolved(context.V6TransportEpoch);
+            pullTransportPaused = context.PullTransportPaused;
+            resumeRequestPending = context.PullTransportResumeRequestPending;
+            postTunaFallbackSurvival = IsInboundV6PostTunaFallbackSurvivalPathLocked(context);
+            recoveryActive =
+                unresolvedEpoch ||
+                pullTransportPaused ||
+                resumeRequestPending ||
+                postTunaFallbackSurvival;
+            if (!recoveryActive)
+            {
+                return false;
+            }
+
+            transportEpoch = context.V6TransportEpoch?.EpochId ?? context.V6ReceiverTransportEpoch;
+            recoveryMode = context.V6TransportEpoch is null
+                ? postTunaFallbackSurvival
+                    ? "post_tuna_fallback_survival"
+                    : "(none)"
+                : FormatV6TransportEpochState(context.V6TransportEpoch.State);
+        }
+
+        var eventName = string.Equals(frameKind, "frontier_request", StringComparison.Ordinal)
+            ? "filetransfer_v6_frontier_request_deferred_for_recovery"
+            : "filetransfer_v6_receiver_state_deferred_for_recovery";
+        LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event={eventName}; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; transport_epoch={transportEpoch}; recovery_mode={FormatProtocolLogValue(recoveryMode)}; frame_kind={FormatProtocolLogValue(frameKind)}; pull_transport_paused={(pullTransportPaused ? 1 : 0)}; resume_request_pending={(resumeRequestPending ? 1 : 0)}; post_tuna_fallback_survival={(postTunaFallbackSurvival ? 1 : 0)}; error={FormatProtocolLogValue(ex.GetType().Name)}; message={FormatProtocolLogValue(ex.Message)}");
+        return true;
     }
 
     private static bool ShouldSuppressOutboundV6ReceiveRecoveryForOutstandingBacklogLocked(

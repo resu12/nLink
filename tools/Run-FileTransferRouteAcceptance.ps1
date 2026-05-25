@@ -445,6 +445,36 @@ function Assert-RouteAcceptanceOperatorVerdict {
     Add-RouteAcceptanceFailure -Result $Result -Message ("operator verdict is not accepted for {0}: verdict={1}; warning_kinds={2}" -f $ExpectedRoute, $Result.operatorVerdict, ($(if ($operatorWarningKinds.Count -gt 0) { $operatorWarningKinds -join ',' } else { '(none)' })))
 }
 
+function Test-RouteAcceptanceFallbackSetupTunaV4Evidence {
+    param([Parameter(Mandatory = $true)][string]$ArtifactDir)
+
+    $setupRoutePath = Join-Path $ArtifactDir 'setup-analysis\filetransfer-route-consistency-summary.txt'
+    if (Test-Path -LiteralPath $setupRoutePath -PathType Leaf) {
+        $setupRouteSummary = Read-RouteAcceptanceKeyValueArtifact -Path $setupRoutePath
+        $selectedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $setupRouteSummary -Name 'route_selected_count' -DefaultValue '0')
+        for ($i = 1; $i -le $selectedCount; $i++) {
+            $route = Get-RouteAcceptanceReportValue -Report $setupRouteSummary -Name ("selected.{0}.route" -f $i) -DefaultValue ''
+            $protocol = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $setupRouteSummary -Name ("selected.{0}.protocol_version" -f $i) -DefaultValue '0')
+            if ($route -eq 'file_tuna_v4' -and $protocol -eq 4) {
+                return $true
+            }
+        }
+    }
+
+    $setupLogPath = Join-Path $ArtifactDir 'filetransfer-setup-retained-log-slice.log'
+    if (Test-Path -LiteralPath $setupLogPath -PathType Leaf) {
+        foreach ($line in @(Get-Content -LiteralPath $setupLogPath)) {
+            if ($line.IndexOf('event=filetransfer_route_selected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                $line.IndexOf('route=file_tuna_v4', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                $line.IndexOf('protocol_version=4', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                return $true
+            }
+        }
+    }
+
+    return $false
+}
+
 function Assert-RouteAcceptanceTerminalSummary {
     param([Parameter(Mandatory = $true)]$Result)
 
@@ -586,16 +616,8 @@ function Assert-TunaRouteAcceptanceRun {
         }
 
         if ($ExpectedRoute -eq 'post_tuna_fallback_v6') {
-            $setupPhase = Get-JsonPropertyValue -Object $summary -Name 'setupPhase' -DefaultValue $null
-            if ($null -eq $setupPhase) {
-                Add-RouteAcceptanceFailure -Result $result -Message 'Tuna fallback summary missing setupPhase evidence'
-            }
-            else {
-                $setupRoute = [string](Get-JsonPropertyValue -Object $setupPhase -Name 'route' -DefaultValue '')
-                $setupProtocol = ConvertTo-RouteAcceptanceInt -Value (Get-JsonPropertyValue -Object $setupPhase -Name 'protocolVersion' -DefaultValue 0)
-                if ($setupRoute -ne 'file_tuna_v4' -or $setupProtocol -ne 4) {
-                    Add-RouteAcceptanceFailure -Result $result -Message ("Tuna fallback setup phase mismatch: expected=file_tuna_v4/4; actual={0}/{1}" -f $setupRoute, $setupProtocol)
-                }
+            if (-not (Test-RouteAcceptanceFallbackSetupTunaV4Evidence -ArtifactDir $ArtifactDir)) {
+                Add-RouteAcceptanceFailure -Result $result -Message 'Tuna fallback setup phase missing file_tuna_v4/4 route-selected evidence'
             }
         }
 
@@ -652,9 +674,12 @@ function Get-RouteAcceptanceRouteMetadata {
 }
 
 function New-RouteAcceptanceFakeLogLine {
-    param([Parameter(Mandatory = $true)][string]$Message)
+    param(
+        [Parameter(Mandatory = $true)][string]$Message,
+        [int]$SecondsOffset = 0
+    )
 
-    $timestamp = [datetime]::UtcNow.ToString("yyyy-MM-dd HH:mm:ss'Z'", [System.Globalization.CultureInfo]::InvariantCulture)
+    $timestamp = ([datetime]::UtcNow.AddSeconds($SecondsOffset)).ToString("yyyy-MM-dd HH:mm:ss'Z'", [System.Globalization.CultureInfo]::InvariantCulture)
     return ('[{0}] [INFO] [RouteAcceptanceFake] {1}' -f $timestamp, $Message)
 }
 
@@ -688,9 +713,9 @@ function Write-RouteAcceptanceFakeRetainedLog {
         (New-RouteAcceptanceFakeLogLine -Message ("event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={0}; session_id={1}; route={2}; protocol_version={3}; runtime_profile={4}; frame_family={5}; bridge_recovery_policy={6}" -f $TransferId, $sessionId, $Route, $protocol, $metadata.Runtime, $frameFamily, $metadata.Bridge))
         (New-RouteAcceptanceFakeLogLine -Message ("event=filetransfer_binary_frame_sent; transfer_id={0}; session_id={1}; frame_type={2}; chunk_index=0-31; payload_bytes={3}; serialized_payload_bytes={3}; raw_chunk_bytes={3}; chunk_count=32" -f $TransferId, $sessionId, $frameType, $rawBytes))
         (New-RouteAcceptanceFakeLogLine -Message ("event=filetransfer_binary_frame_received; transfer_id={0}; session_id={1}; frame_type={2}; chunk_index=0-31; raw_chunk_bytes={3}; chunk_count=32" -f $TransferId, $sessionId, $frameType, $rawBytes))
-        (New-RouteAcceptanceFakeLogLine -Message ("event=file_transfer_inbound_terminal; role=helper; session_id={0}; transfer_id={1}; state={2}; error_code={3}; bytes_transferred={4}; saved_path=(none); integrity_ok={5}" -f $sessionId, $TransferId, $TerminalState, $terminalError, $rawBytes, ($(if ($TerminalState -eq 'Completed') { 1 } else { 0 }))))
-        (New-RouteAcceptanceFakeLogLine -Message ("event=file_transfer_outbound_terminal; role=helpee; session_id={0}; transfer_id={1}; state={2}; error_code={3}; bytes_transferred={4}; integrity_ok={5}" -f $sessionId, $TransferId, $TerminalState, $terminalError, $rawBytes, ($(if ($TerminalState -eq 'Completed') { 1 } else { 0 }))))
-        (New-RouteAcceptanceFakeLogLine -Message ("event=nkn_bridge_bulk_send_summary; queue_depth=0; queued_bytes=0; oldest_queued_age_ms=0; frames_sent=1; send_failures={0}; queue_clears=0; payload_bytes_sent={1}; payload_bytes_per_second=6000000; send_p95_ms=1; configured_concurrency=4; effective_concurrency=4" -f $BridgeBulkSendFailures, $rawBytes))
+        (New-RouteAcceptanceFakeLogLine -SecondsOffset 120 -Message ("event=file_transfer_inbound_terminal; role=helper; session_id={0}; transfer_id={1}; state={2}; error_code={3}; bytes_transferred={4}; saved_path=(none); integrity_ok={5}" -f $sessionId, $TransferId, $TerminalState, $terminalError, $rawBytes, ($(if ($TerminalState -eq 'Completed') { 1 } else { 0 }))))
+        (New-RouteAcceptanceFakeLogLine -SecondsOffset 120 -Message ("event=file_transfer_outbound_terminal; role=helpee; session_id={0}; transfer_id={1}; state={2}; error_code={3}; bytes_transferred={4}; integrity_ok={5}" -f $sessionId, $TransferId, $TerminalState, $terminalError, $rawBytes, ($(if ($TerminalState -eq 'Completed') { 1 } else { 0 }))))
+        (New-RouteAcceptanceFakeLogLine -SecondsOffset 110 -Message ("event=nkn_bridge_bulk_send_summary; queue_depth=0; queued_bytes=0; oldest_queued_age_ms=0; frames_sent=1; send_failures={0}; queue_clears=0; payload_bytes_sent={1}; payload_bytes_per_second=6000000; send_p95_ms=1; configured_concurrency=4; effective_concurrency=4" -f $BridgeBulkSendFailures, $rawBytes))
     )
 
     $lines | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log') -Encoding UTF8
@@ -723,14 +748,11 @@ function Select-RouteAcceptanceMeasuredFallbackLogSlice {
         Copy-Item -LiteralPath $logPath -Destination $fullPath -Force
     }
 
-    $measuredPath = Join-Path $ArtifactDir 'filetransfer-measured-fallback-retained-log-slice.log'
-    if (Test-Path -LiteralPath $measuredPath -PathType Leaf) {
-        Copy-Item -LiteralPath $measuredPath -Destination $logPath -Force
-        return
-    }
-
-    $lines = @(Get-Content -LiteralPath $logPath)
+    $sliceSourcePath = if (Test-Path -LiteralPath $fullPath -PathType Leaf) { $fullPath } else { $logPath }
+    $lines = @(Get-Content -LiteralPath $sliceSourcePath)
     $setupStartIndex = -1
+    $firstFallbackIndex = -1
+    $setupCanceledTerminalIndex = -1
     $startIndex = -1
     for ($i = 0; $i -lt $lines.Count; $i++) {
         if ($setupStartIndex -lt 0 -and
@@ -739,11 +761,31 @@ function Select-RouteAcceptanceMeasuredFallbackLogSlice {
             $setupStartIndex = $i
         }
 
-        if ($lines[$i].IndexOf('event=filetransfer_route_selected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+        if ($firstFallbackIndex -lt 0 -and
+            $lines[$i].IndexOf('event=filetransfer_route_selected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $lines[$i].IndexOf('route=post_tuna_fallback_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $firstFallbackIndex = $i
+        }
+
+        if ($firstFallbackIndex -ge 0 -and
+            $setupCanceledTerminalIndex -lt 0 -and
+            $lines[$i].IndexOf('event=file_transfer_', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $lines[$i].IndexOf('_terminal', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $lines[$i].IndexOf('state=Canceled', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $setupCanceledTerminalIndex = $i
+        }
+
+        if ($setupCanceledTerminalIndex -ge 0 -and
+            $i -gt $setupCanceledTerminalIndex -and
+            $lines[$i].IndexOf('event=filetransfer_route_selected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
             $lines[$i].IndexOf('route=post_tuna_fallback_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             $startIndex = $i
             break
         }
+    }
+
+    if ($startIndex -lt 0) {
+        $startIndex = $firstFallbackIndex
     }
 
     if ($startIndex -lt 0) {
@@ -754,7 +796,9 @@ function Select-RouteAcceptanceMeasuredFallbackLogSlice {
         $lines[$setupStartIndex..($startIndex - 1)] | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-setup-retained-log-slice.log') -Encoding UTF8
     }
 
-    $lines[$startIndex..($lines.Count - 1)] | Set-Content -LiteralPath $logPath -Encoding UTF8
+    $measuredLines = $lines[$startIndex..($lines.Count - 1)]
+    $measuredLines | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-measured-fallback-retained-log-slice.log') -Encoding UTF8
+    $measuredLines | Set-Content -LiteralPath $logPath -Encoding UTF8
 }
 
 function Write-RouteAcceptanceFakeRegularRun {
@@ -848,7 +892,7 @@ function Write-RouteAcceptanceFakeTunaRun {
 
     Write-RouteAcceptanceFakeRetainedLog -ArtifactDir $ArtifactDir -TransferId ('fake-tuna-{0}' -f $RouteMode) -Route $effectiveRoute -ProtocolOverride $protocolOverride -TerminalState $terminalState -BridgeBulkSendFailures 0
     if ($emitNoFaultExternalWarning) {
-        Add-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log') -Encoding UTF8 -Value (New-RouteAcceptanceFakeLogLine -Message 'event=screenshare_bridge_transport_health_summary; disconnect_count_since_last=1; connect_failed_count_since_last=0; ws_error_count_since_last=1; rpc_fallback_attempt_count_since_last=0; control_ready=1; media_ready=1; bulk_ready=1')
+        Add-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log') -Encoding UTF8 -Value (New-RouteAcceptanceFakeLogLine -SecondsOffset 60 -Message 'event=screenshare_bridge_transport_health_summary; disconnect_count_since_last=1; connect_failed_count_since_last=0; ws_error_count_since_last=1; rpc_fallback_attempt_count_since_last=0; control_ready=1; media_ready=1; bulk_ready=1')
     }
 
     if ($isControlledRestartMode) {
@@ -856,8 +900,8 @@ function Write-RouteAcceptanceFakeTunaRun {
         Add-Content -LiteralPath $logPath -Encoding UTF8 -Value (New-RouteAcceptanceFakeLogLine -Message 'event=filetransfer_tuna_gui_phase_marker; phase=setup_file_tuna_v4_cleanup_closed')
         if ($emitFallbackRecoveredBridgeWarning) {
             @(
-                (New-RouteAcceptanceFakeLogLine -Message ('event=filetransfer_transport_epoch_started_while_unavailable; direction=outbound; transfer_id=fake-tuna-{0}; session_id=sess_fake; reason=transport_recovered_unproven; target_transport=regular_nkn' -f $RouteMode))
-                (New-RouteAcceptanceFakeLogLine -Message 'event=nkn_bridge_bulk_send_summary; frames_sent=17; frames_enqueued=22; payload_bytes_sent=847447; payload_bytes_per_second=423724; send_failures=0; queue_clears=5; queue_depth=0; queued_bytes=0; oldest_queued_age_ms=0; in_flight=0; configured_concurrency=4; effective_concurrency=4')
+                (New-RouteAcceptanceFakeLogLine -SecondsOffset 40 -Message ('event=filetransfer_transport_epoch_started_while_unavailable; direction=outbound; transfer_id=fake-tuna-{0}; session_id=sess_fake; reason=transport_recovered_unproven; target_transport=regular_nkn' -f $RouteMode))
+                (New-RouteAcceptanceFakeLogLine -SecondsOffset 60 -Message 'event=nkn_bridge_bulk_send_summary; frames_sent=17; frames_enqueued=22; payload_bytes_sent=847447; payload_bytes_per_second=423724; send_failures=0; queue_clears=5; queue_depth=0; queued_bytes=0; oldest_queued_age_ms=0; in_flight=0; configured_concurrency=4; effective_concurrency=4')
             ) | Add-Content -LiteralPath $logPath -Encoding UTF8
         }
         Copy-Item -LiteralPath $logPath -Destination (Join-Path $ArtifactDir 'filetransfer-retained-log-slice-full.log') -Force

@@ -104,7 +104,9 @@ function Invoke-FileTransferRetainedAnalysis {
         [string]$TransferId = '',
         [int]$TailMinutes = 0,
         [switch]$IncludeRawSlices,
-        [switch]$AllTransfers
+        [switch]$AllTransfers,
+        [ValidateSet('None', 'SwitchOff', 'MultiToggle')]
+        [string]$LiveRouteProofMode = 'None'
     )
 
     $resolvedArtifactDir = $ArtifactDir
@@ -116,9 +118,9 @@ function Invoke-FileTransferRetainedAnalysis {
     $events = @(Read-FileTransferLogEvents -LogFiles $logFiles -TailMinutes $TailMinutes)
     $events = @(Add-FileTransferLiveHarnessEvidence -Events $events -LogFiles $logFiles -ArtifactDir $resolvedArtifactDir -TransferId $TransferId -AllTransfers:$AllTransfers)
     $summary = New-FileTransferRetainedSummary -Events $events -LogFiles $logFiles -RequestedTransferId $TransferId -AllTransfers:$AllTransfers
-    $gate = Get-FileTransferStabilizationGateResult -Summary $summary
+    $gate = Get-FileTransferStabilizationGateResult -Summary $summary -LiveRouteProofMode $LiveRouteProofMode
 
-    Write-FileTransferDiagnosticsArtifacts -ArtifactDir $resolvedArtifactDir -Summary $summary -GateResult $gate -IncludeRawSlices:$IncludeRawSlices
+    Write-FileTransferDiagnosticsArtifacts -ArtifactDir $resolvedArtifactDir -Summary $summary -GateResult $gate -LiveRouteProofMode $LiveRouteProofMode -IncludeRawSlices:$IncludeRawSlices
 
     return [pscustomobject]@{
         ArtifactDir = $resolvedArtifactDir

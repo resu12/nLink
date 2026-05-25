@@ -1645,8 +1645,42 @@ function New-FileTransferRepairReorderSummaryLines {
     ) + (Get-FileTransferArtifactEvidenceLines -Events $events -Limit 40)
 }
 
+function Get-FileTransferGateWarningCap {
+    param($GateResult)
+
+    if ($null -eq $GateResult) {
+        return $null
+    }
+
+    $property = $GateResult.PSObject.Properties['WarningCap']
+    if ($null -eq $property) {
+        return $null
+    }
+
+    return $property.Value
+}
+
+function Get-FileTransferGateFallbackDiagnostics {
+    param($GateResult)
+
+    if ($null -eq $GateResult) {
+        return $null
+    }
+
+    $property = $GateResult.PSObject.Properties['FallbackDiagnostics']
+    if ($null -eq $property) {
+        return $null
+    }
+
+    return $property.Value
+}
+
 function New-FileTransferRouteConsistencySummaryLines {
-    param([Parameter(Mandatory = $true)]$Summary)
+    param(
+        [Parameter(Mandatory = $true)]$Summary,
+        [ValidateSet('None', 'SwitchOff', 'MultiToggle')]
+        [string]$LiveRouteProofMode = 'None'
+    )
 
     $routeConsistency = $Summary.RouteConsistency
     [object[]]$routeSelectedEvents = @()
@@ -1665,6 +1699,23 @@ function New-FileTransferRouteConsistencySummaryLines {
             Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
             Select-Object -Unique
     )
+    [object[]]$selectedRouteSequence = @(
+        $routeSelectedEvents |
+            Sort-Object Sequence |
+            ForEach-Object { Get-FileTransferEventField -Event $_ -Name 'route' -Default '' } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+    $selectedRouteChanges = New-Object System.Collections.Generic.List[string]
+    foreach ($route in @($selectedRouteSequence)) {
+        if ($selectedRouteChanges.Count -eq 0 -or
+            -not [string]::Equals($selectedRouteChanges[$selectedRouteChanges.Count - 1], [string]$route, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $selectedRouteChanges.Add([string]$route) | Out-Null
+        }
+    }
+
+    $liveRouteProof = Get-FileTransferLiveRouteEpochProof -TransferEvents $Summary.TransferEvents -Mode $LiveRouteProofMode
+    [object[]]$liveRouteEpochSequence = @($liveRouteProof.Sequence)
+    [object[]]$liveRouteEpochRouteChanges = @($liveRouteProof.RouteChanges)
 
     $lines = New-Object System.Collections.Generic.List[string]
     $lines.Add(("transfer_id={0}" -f $Summary.TransferId)) | Out-Null
@@ -1673,6 +1724,16 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("route_aware_event_count={0}" -f $routeAwareEvents.Length)) | Out-Null
     $lines.Add(("route_mismatch_count={0}" -f $findings.Length)) | Out-Null
     $lines.Add(("selected_routes={0}" -f ($(if ($selectedRoutes.Length -gt 0) { $selectedRoutes -join ',' } else { '(none)' })))) | Out-Null
+    $lines.Add(("selected_route_sequence={0}" -f ($(if ($selectedRouteSequence.Length -gt 0) { $selectedRouteSequence -join ',' } else { '(none)' })))) | Out-Null
+    $lines.Add(("selected_route_changes={0}" -f ($(if ($selectedRouteChanges.Count -gt 0) { $selectedRouteChanges.ToArray() -join ',' } else { '(none)' })))) | Out-Null
+    $lines.Add(("live_route_epoch_proof_mode={0}" -f $LiveRouteProofMode)) | Out-Null
+    $lines.Add(("live_route_epoch_proof_verdict={0}" -f $liveRouteProof.Verdict)) | Out-Null
+    $lines.Add(("live_route_epoch_event_count={0}" -f $liveRouteProof.CompleteEventCount)) | Out-Null
+    $lines.Add(("live_route_epoch_explicit_event_count={0}" -f $liveRouteProof.ExplicitEventCount)) | Out-Null
+    $lines.Add(("live_route_epoch_metadata_missing_count={0}" -f $liveRouteProof.MetadataMissingCount)) | Out-Null
+    $lines.Add(("live_route_epoch_transport_only_count={0}" -f $liveRouteProof.TransportOnlyCount)) | Out-Null
+    $lines.Add(("live_route_epoch_sequence={0}" -f ($(if ($liveRouteEpochSequence.Length -gt 0) { $liveRouteEpochSequence -join ',' } else { '(none)' })))) | Out-Null
+    $lines.Add(("live_route_epoch_route_changes={0}" -f ($(if ($liveRouteEpochRouteChanges.Length -gt 0) { $liveRouteEpochRouteChanges -join ',' } else { '(none)' })))) | Out-Null
 
     $index = 0
     foreach ($event in @($routeSelectedEvents | Sort-Object Sequence)) {
@@ -1693,6 +1754,19 @@ function New-FileTransferRouteConsistencySummaryLines {
         foreach ($finding in @($findings)) {
             $mismatchIndex++
             $lines.Add(("mismatch.{0}={1}" -f $mismatchIndex, $finding)) | Out-Null
+        }
+    }
+    else {
+        $lines.Add('(none)') | Out-Null
+    }
+
+    $lines.Add('') | Out-Null
+    $lines.Add('live_route_epoch_findings:') | Out-Null
+    if ($liveRouteProof.Findings.Count -gt 0) {
+        $proofIndex = 0
+        foreach ($finding in @($liveRouteProof.Findings)) {
+            $proofIndex++
+            $lines.Add(("proof.{0}={1}" -f $proofIndex, $finding)) | Out-Null
         }
     }
     else {
@@ -3159,6 +3233,8 @@ function New-FileTransferStabilityGateSummaryLines {
 
     $gapStallEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_gap_stall_summary'))
     $progressTimeoutWithReceiverGapStall = if ($Summary.LiveProgressTimeoutCount -gt 0 -and $gapStallEvents.Count -gt 0) { 1 } else { 0 }
+    $warningCap = Get-FileTransferGateWarningCap -GateResult $GateResult
+    $fallbackDiagnostics = Get-FileTransferGateFallbackDiagnostics -GateResult $GateResult
 
     return @(
         ("verdict={0}" -f $GateResult.Verdict),
@@ -3166,6 +3242,26 @@ function New-FileTransferStabilityGateSummaryLines {
         ("transfer_id={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.TransferId)) { '(none)' } else { $Summary.TransferId }))),
         ("hard_failure_count={0}" -f $GateResult.HardFailures.Count),
         ("warning_count={0}" -f $GateResult.Warnings.Count),
+        ("warning_cap_policy={0}" -f ($(if ($null -ne $warningCap) { $warningCap.Policy } else { 'strict_small' }))),
+        ("warning_cap_count_unit={0}" -f ($(if ($null -ne $warningCap) { $warningCap.CountUnit } else { 'incident' }))),
+        ("warning_cap_count_limit={0}" -f ($(if ($null -ne $warningCap) { $warningCap.CountLimit } else { 3 }))),
+        ("warning_cap_rate_limit_per_second={0}" -f ($(if ($null -ne $warningCap) { $warningCap.RateLimitPerSecond } else { '0.05' }))),
+        ("warning_kind_counts={0}" -f ($(if ($null -ne $warningCap -and -not [string]::IsNullOrWhiteSpace($warningCap.KindCounts)) { $warningCap.KindCounts } else { '(none)' }))),
+        ("warning_kind_raw_event_counts={0}" -f ($(if ($null -ne $warningCap -and -not [string]::IsNullOrWhiteSpace($warningCap.RawKindCounts)) { $warningCap.RawKindCounts } else { '(none)' }))),
+        ("warning_kind_rates_per_second={0}" -f ($(if ($null -ne $warningCap -and -not [string]::IsNullOrWhiteSpace($warningCap.KindRatesPerSecond)) { $warningCap.KindRatesPerSecond } else { '(none)' }))),
+        ("warning_cap_contexts={0}" -f ($(if ($null -ne $warningCap -and -not [string]::IsNullOrWhiteSpace($warningCap.KindContexts)) { $warningCap.KindContexts } else { '(none)' }))),
+        ("warning_cap_exceeded_kinds={0}" -f ($(if ($null -ne $warningCap -and -not [string]::IsNullOrWhiteSpace($warningCap.ExceededKindsText)) { $warningCap.ExceededKindsText } else { '(none)' }))),
+        ("warning_cap_exceeded_contexts={0}" -f ($(if ($null -ne $warningCap -and -not [string]::IsNullOrWhiteSpace($warningCap.ExceededContextsText)) { $warningCap.ExceededContextsText } else { '(none)' }))),
+        ("fallback_v6_terminal_missing_reason={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.TerminalMissingReason } else { '(none)' }))),
+        ("fallback_v6_last_committed_chunk_index={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.LastCommittedChunkIndex } else { -1 }))),
+        ("fallback_v6_highest_observed_chunk_index={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.HighestObservedChunkIndex } else { -1 }))),
+        ("fallback_v6_oldest_unrecovered_gap_age_ms={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.OldestUnrecoveredGapAgeMs } else { -1 }))),
+        ("fallback_v6_chunk_send_timeout_count={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.V6ChunkSendTimeoutCount } else { 0 }))),
+        ("fallback_v6_frontier_request_count={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.FrontierRequestCount } else { 0 }))),
+        ("fallback_v6_receiver_state_deferred_count={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.ReceiverStateDeferredCount } else { 0 }))),
+        ("fallback_v6_receiver_state_coalesced_count={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.ReceiverStateCoalescedCount } else { 0 }))),
+        ("fallback_v6_sender_repair_active_evidence_count={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.SenderRepairActiveEvidenceCount } else { 0 }))),
+        ("fallback_v6_sender_still_repairing={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.SenderStillRepairing } else { 0 }))),
         ("next_artifact={0}" -f $GateResult.NextArtifact),
         ("gui_progress_timeout_count={0}" -f $Summary.LiveProgressTimeoutCount),
         ("terminal_missing_after_progress_timeout={0}" -f $Summary.TerminalMissingAfterProgressTimeout),
@@ -3520,6 +3616,8 @@ function Write-FileTransferDiagnosticsArtifacts {
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
         [Parameter(Mandatory = $true)]$Summary,
         [Parameter(Mandatory = $true)]$GateResult,
+        [ValidateSet('None', 'SwitchOff', 'MultiToggle')]
+        [string]$LiveRouteProofMode = 'None',
         [switch]$IncludeRawSlices
     )
 
@@ -3556,6 +3654,9 @@ function Write-FileTransferDiagnosticsArtifacts {
             }
         }
     ) | Select-Object -Unique)
+    $warningCap = Get-FileTransferGateWarningCap -GateResult $GateResult
+    $fallbackDiagnostics = Get-FileTransferGateFallbackDiagnostics -GateResult $GateResult
+    $liveRouteProof = Get-FileTransferLiveRouteEpochProof -TransferEvents $Summary.TransferEvents -Mode $LiveRouteProofMode
 
     $verdictLines = @(
         ("verdict={0}" -f $GateResult.Verdict),
@@ -3568,6 +3669,30 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("hard_failure_count={0}" -f $GateResult.HardFailures.Count),
         ("warning_count={0}" -f $GateResult.Warnings.Count),
         ("warning_kinds={0}" -f ($(if ($warningKinds.Count -gt 0) { $warningKinds -join ',' } else { '(none)' }))),
+        ("warning_cap_policy={0}" -f ($(if ($null -ne $warningCap) { $warningCap.Policy } else { 'strict_small' }))),
+        ("warning_cap_count_unit={0}" -f ($(if ($null -ne $warningCap) { $warningCap.CountUnit } else { 'incident' }))),
+        ("warning_cap_count_limit={0}" -f ($(if ($null -ne $warningCap) { $warningCap.CountLimit } else { 3 }))),
+        ("warning_cap_rate_limit_per_second={0}" -f ($(if ($null -ne $warningCap) { $warningCap.RateLimitPerSecond } else { '0.05' }))),
+        ("warning_kind_counts={0}" -f ($(if ($null -ne $warningCap -and -not [string]::IsNullOrWhiteSpace($warningCap.KindCounts)) { $warningCap.KindCounts } else { '(none)' }))),
+        ("warning_kind_raw_event_counts={0}" -f ($(if ($null -ne $warningCap -and -not [string]::IsNullOrWhiteSpace($warningCap.RawKindCounts)) { $warningCap.RawKindCounts } else { '(none)' }))),
+        ("warning_kind_rates_per_second={0}" -f ($(if ($null -ne $warningCap -and -not [string]::IsNullOrWhiteSpace($warningCap.KindRatesPerSecond)) { $warningCap.KindRatesPerSecond } else { '(none)' }))),
+        ("warning_cap_contexts={0}" -f ($(if ($null -ne $warningCap -and -not [string]::IsNullOrWhiteSpace($warningCap.KindContexts)) { $warningCap.KindContexts } else { '(none)' }))),
+        ("warning_cap_exceeded_kinds={0}" -f ($(if ($null -ne $warningCap -and -not [string]::IsNullOrWhiteSpace($warningCap.ExceededKindsText)) { $warningCap.ExceededKindsText } else { '(none)' }))),
+        ("warning_cap_exceeded_contexts={0}" -f ($(if ($null -ne $warningCap -and -not [string]::IsNullOrWhiteSpace($warningCap.ExceededContextsText)) { $warningCap.ExceededContextsText } else { '(none)' }))),
+        ("fallback_v6_terminal_missing_reason={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.TerminalMissingReason } else { '(none)' }))),
+        ("fallback_v6_last_committed_chunk_index={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.LastCommittedChunkIndex } else { -1 }))),
+        ("fallback_v6_highest_observed_chunk_index={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.HighestObservedChunkIndex } else { -1 }))),
+        ("fallback_v6_oldest_unrecovered_gap_age_ms={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.OldestUnrecoveredGapAgeMs } else { -1 }))),
+        ("fallback_v6_chunk_send_timeout_count={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.V6ChunkSendTimeoutCount } else { 0 }))),
+        ("fallback_v6_frontier_request_count={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.FrontierRequestCount } else { 0 }))),
+        ("fallback_v6_receiver_state_deferred_count={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.ReceiverStateDeferredCount } else { 0 }))),
+        ("fallback_v6_receiver_state_coalesced_count={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.ReceiverStateCoalescedCount } else { 0 }))),
+        ("fallback_v6_sender_repair_active_evidence_count={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.SenderRepairActiveEvidenceCount } else { 0 }))),
+        ("fallback_v6_sender_still_repairing={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.SenderStillRepairing } else { 0 }))),
+        ("live_route_epoch_proof_mode={0}" -f $LiveRouteProofMode),
+        ("live_route_epoch_proof_verdict={0}" -f $liveRouteProof.Verdict),
+        ("live_route_epoch_metadata_missing_count={0}" -f $liveRouteProof.MetadataMissingCount),
+        ("live_route_epoch_transport_only_count={0}" -f $liveRouteProof.TransportOnlyCount),
         '',
         'hard_failures:'
     ) + ($(if ($GateResult.HardFailures.Count -gt 0) { @($GateResult.HardFailures) } else { @('(none)') })) + @(
@@ -3584,7 +3709,7 @@ function Write-FileTransferDiagnosticsArtifacts {
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'throughput-decomposition-summary.txt' -Lines (New-FileTransferThroughputDecompositionSummaryLines -Summary $Summary -ArtifactDir $ArtifactDir) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'payload-efficiency-summary.txt' -Lines (New-FileTransferPayloadEfficiencySummaryLines -Summary $Summary) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'protocol-shape-summary.txt' -Lines (New-FileTransferProtocolShapeSummaryLines -Summary $Summary) | Out-Null
-    Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'filetransfer-route-consistency-summary.txt' -Lines (New-FileTransferRouteConsistencySummaryLines -Summary $Summary) | Out-Null
+    Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'filetransfer-route-consistency-summary.txt' -Lines (New-FileTransferRouteConsistencySummaryLines -Summary $Summary -LiveRouteProofMode $LiveRouteProofMode) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'repair-reorder-summary.txt' -Lines (New-FileTransferRepairReorderSummaryLines -Summary $Summary) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'transport-budget-summary.txt' -Lines (New-FileTransferTransportBudgetSummaryLines -Summary $Summary) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'bridge-config-summary.txt' -Lines (New-FileTransferBridgeConfigSummaryLines -Summary $Summary) | Out-Null

@@ -60,6 +60,8 @@ function Select-TunaGuiControlledRestartLogSlices {
 
     $lines = @(Get-Content -LiteralPath $logPath)
     $setupStartIndex = -1
+    $firstFallbackIndex = -1
+    $setupCanceledTerminalIndex = -1
     $startIndex = -1
     for ($i = 0; $i -lt $lines.Count; $i++) {
         if ($setupStartIndex -lt 0 -and
@@ -68,11 +70,31 @@ function Select-TunaGuiControlledRestartLogSlices {
             $setupStartIndex = $i
         }
 
-        if ($lines[$i].IndexOf('event=filetransfer_route_selected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+        if ($firstFallbackIndex -lt 0 -and
+            $lines[$i].IndexOf('event=filetransfer_route_selected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $lines[$i].IndexOf('route=post_tuna_fallback_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $firstFallbackIndex = $i
+        }
+
+        if ($firstFallbackIndex -ge 0 -and
+            $setupCanceledTerminalIndex -lt 0 -and
+            $lines[$i].IndexOf('event=file_transfer_', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $lines[$i].IndexOf('_terminal', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $lines[$i].IndexOf('state=Canceled', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $setupCanceledTerminalIndex = $i
+        }
+
+        if ($setupCanceledTerminalIndex -ge 0 -and
+            $i -gt $setupCanceledTerminalIndex -and
+            $lines[$i].IndexOf('event=filetransfer_route_selected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
             $lines[$i].IndexOf('route=post_tuna_fallback_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             $startIndex = $i
             break
         }
+    }
+
+    if ($startIndex -lt 0) {
+        $startIndex = $firstFallbackIndex
     }
 
     $fullPath = Join-Path $ArtifactDir 'filetransfer-retained-log-slice-full.log'
@@ -132,7 +154,9 @@ function Invoke-TunaGuiRetainedAnalysis {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
         [Parameter(Mandatory = $true)][string]$AnalysisDir,
-        [Parameter(Mandatory = $true)][string]$LogPath
+        [Parameter(Mandatory = $true)][string]$LogPath,
+        [ValidateSet('None', 'SwitchOff', 'MultiToggle')]
+        [string]$LiveRouteProofMode = 'None'
     )
 
     if ([string]::IsNullOrWhiteSpace($LogPath) -or -not (Test-Path -LiteralPath $LogPath -PathType Leaf)) {
@@ -140,7 +164,7 @@ function Invoke-TunaGuiRetainedAnalysis {
     }
 
     New-Item -ItemType Directory -Force -Path $AnalysisDir | Out-Null
-    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RepoRoot 'tools\FileTransfer-Ops.ps1') -Mode AnalyzeRetained -LogPath $LogPath -ArtifactDir $AnalysisDir -TailMinutes 0
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RepoRoot 'tools\FileTransfer-Ops.ps1') -Mode AnalyzeRetained -LogPath $LogPath -ArtifactDir $AnalysisDir -TailMinutes 0 -LiveRouteProofMode $LiveRouteProofMode
     if ($LASTEXITCODE -ne 0) {
         throw "Retained analysis failed with exit code $LASTEXITCODE. Artifacts: $AnalysisDir"
     }
@@ -150,11 +174,13 @@ function Invoke-TunaGuiRetainedAnalysisBestEffort {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
         [Parameter(Mandatory = $true)][string]$AnalysisDir,
-        [Parameter(Mandatory = $true)][string]$LogPath
+        [Parameter(Mandatory = $true)][string]$LogPath,
+        [ValidateSet('None', 'SwitchOff', 'MultiToggle')]
+        [string]$LiveRouteProofMode = 'None'
     )
 
     try {
-        Invoke-TunaGuiRetainedAnalysis -RepoRoot $RepoRoot -AnalysisDir $AnalysisDir -LogPath $LogPath
+        Invoke-TunaGuiRetainedAnalysis -RepoRoot $RepoRoot -AnalysisDir $AnalysisDir -LogPath $LogPath -LiveRouteProofMode $LiveRouteProofMode
     }
     catch {
         Write-Warning ("Retained analysis could not be completed for {0}: {1}" -f $LogPath, $_.Exception.Message)
@@ -379,8 +405,9 @@ function Test-TunaGuiControlledSetupCancelAccepted {
     $outboundState = if ($setup.PSObject.Properties.Name -contains 'outboundState') { [string]$setup.outboundState } else { '' }
     $inboundError = if ($setup.PSObject.Properties.Name -contains 'inboundErrorCode') { [string]$setup.inboundErrorCode } else { '' }
     $outboundError = if ($setup.PSObject.Properties.Name -contains 'outboundErrorCode') { [string]$setup.outboundErrorCode } else { '' }
-    if ($route -ne 'file_tuna_v4' -or
-        $protocol -ne 4 -or
+    $setupRouteAccepted = ($route -eq 'file_tuna_v4' -and $protocol -eq 4) -or
+        ($route -eq 'post_tuna_fallback_v6' -and $protocol -eq 6)
+    if (-not $setupRouteAccepted -or
         $inboundState -ne 'Canceled' -or
         $outboundState -ne 'Canceled' -or
         $inboundError -ne 'canceled_remote' -or
@@ -613,7 +640,8 @@ try {
     }
     elseif ($RouteMode -eq 'preactivated' -or $RouteMode -eq 'live-v4-switch-off' -or $RouteMode -eq 'live-multi-toggle') {
         $retainedPath = Join-Path $resolvedArtifactDir 'filetransfer-retained-log-slice.log'
-        Invoke-TunaGuiRetainedAnalysis -RepoRoot $repoRoot -AnalysisDir $resolvedArtifactDir -LogPath $retainedPath
+        $liveRouteProofMode = if ($RouteMode -eq 'live-v4-switch-off') { 'SwitchOff' } elseif ($RouteMode -eq 'live-multi-toggle') { 'MultiToggle' } else { 'None' }
+        Invoke-TunaGuiRetainedAnalysis -RepoRoot $repoRoot -AnalysisDir $resolvedArtifactDir -LogPath $retainedPath -LiveRouteProofMode $liveRouteProofMode
     }
 
     if (-not [bool]$summary.completed -or -not [bool]$summary.integrityOk) {

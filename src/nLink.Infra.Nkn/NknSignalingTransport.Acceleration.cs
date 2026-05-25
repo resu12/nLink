@@ -731,7 +731,7 @@ public sealed partial class NknSignalingTransport
         }
 
         var normalizedReason = SanitizeLogToken(reason);
-        CompleteTunaFallbackProof("tuna_activation_started");
+        SupersedePostTunaFileFallbackRouteForFileTunaActivation(sessionId, normalizedReason);
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=tuna_activation_filetransfer_handoff_requested; session_id={SanitizeLogToken(sessionId)}; reason={normalizedReason}; lanes={FormatAccelerationLanesForLog(lanes)}");
@@ -744,6 +744,40 @@ public sealed partial class NknSignalingTransport
             FileTransferTransportHandoffKind.NormalToTunaActivation,
             FileTransferTransportKind.Tuna,
             sessionId);
+    }
+
+    private void SupersedePostTunaFileFallbackRouteForFileTunaActivation(string sessionId, string reason)
+    {
+        TunaFallbackProofState? snapshot = null;
+        TunaFallbackLaneState previousFileState = TunaFallbackLaneState.None;
+        V6TransportEpochState? previousFileV6EpochState = null;
+        long previousFileV6TransportEpoch = 0;
+
+        lock (accelerationGate)
+        {
+            if (tunaFallbackProofState is { } state &&
+                string.Equals(state.SessionId, sessionId, StringComparison.Ordinal) &&
+                (state.Lanes & NknAccelerationLaneKind.File) == NknAccelerationLaneKind.File &&
+                state.FileState != TunaFallbackLaneState.None)
+            {
+                snapshot = state;
+                previousFileState = state.FileState;
+                previousFileV6EpochState = state.FileV6EpochState;
+                previousFileV6TransportEpoch = state.FileV6TransportEpoch;
+            }
+        }
+
+        if (snapshot is not null)
+        {
+            var previousFileV6EpochStateToken = previousFileV6EpochState is { } epochState
+                ? FormatFileTransferV6TransportEpochStateForLog(epochState)
+                : "none";
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=filetransfer_post_tuna_fallback_v6_route_superseded; session_id={SanitizeLogToken(sessionId)}; fallback_epoch={snapshot.Epoch}; reason={SanitizeLogToken(reason)}; previous_file_state={FormatTunaFallbackLaneState(previousFileState)}; previous_file_v6_epoch_state={SanitizeLogToken(previousFileV6EpochStateToken)}; previous_file_v6_transport_epoch={previousFileV6TransportEpoch}; next_file_route=file_tuna_v4");
+        }
+
+        CompleteTunaFallbackProof("tuna_activation_started");
     }
 
     private void PauseFileTransferDataSessionsForTunaActivationNegotiation(
@@ -962,10 +996,20 @@ public sealed partial class NknSignalingTransport
     private void CompleteTunaFallbackProof(string reason)
     {
         TunaFallbackProofState? state;
+        var normalizedReason = SanitizeLogToken(reason);
+        var deferredPendingFileRoute = false;
         lock (accelerationGate)
         {
             state = tunaFallbackProofState;
-            tunaFallbackProofState = null;
+            if (state is not null &&
+                ShouldDeferTunaFallbackProofCompletionForPendingFileRouteUnsafe(state, normalizedReason))
+            {
+                deferredPendingFileRoute = true;
+            }
+            else
+            {
+                tunaFallbackProofState = null;
+            }
         }
 
         if (state is null)
@@ -974,18 +1018,51 @@ public sealed partial class NknSignalingTransport
         }
 
         var elapsedMs = Math.Max(0, (long)(DateTimeOffset.UtcNow - state.StartedUtc).TotalMilliseconds);
+        if (deferredPendingFileRoute)
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=tuna_fallback_summary_deferred; session_id={state.SessionId}; fallback_epoch={state.Epoch}; reason={state.Reason}; deferred_reason={normalizedReason}; elapsed_ms={elapsedMs}; lanes={FormatAccelerationLanesForLog(state.Lanes)}; screen_state={FormatTunaFallbackLaneState(state.ScreenState)}; file_state={FormatTunaFallbackLaneState(state.FileState)}; file_v6_epoch_state={FormatTunaFallbackFileV6EpochState(state)}; file_v6_transport_epoch={state.FileV6TransportEpoch}; pending_file_route=1");
+            return;
+        }
+
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=tuna_fallback_summary; session_id={state.SessionId}; fallback_epoch={state.Epoch}; reason={state.Reason}; completed_reason={SanitizeLogToken(reason)}; elapsed_ms={elapsedMs}; lanes={FormatAccelerationLanesForLog(state.Lanes)}; screen_state={FormatTunaFallbackLaneState(state.ScreenState)}; file_state={FormatTunaFallbackLaneState(state.FileState)}; screen_nkn_frames_sent={state.ScreenNknFramesSent}; screen_nkn_frames_received={state.ScreenNknFramesReceived}; screen_frames_applied={state.ScreenFramesApplied}; file_nkn_frames_sent={state.FileNknFramesSent}; file_nkn_frames_received={state.FileNknFramesReceived}; control_nkn_messages_sent={state.ControlNknMessagesSent}; acceleration_used_after_fallback={(state.AccelerationUsedAfterFallback ? 1 : 0)}");
+            $"event=tuna_fallback_summary; session_id={state.SessionId}; fallback_epoch={state.Epoch}; reason={state.Reason}; completed_reason={normalizedReason}; elapsed_ms={elapsedMs}; lanes={FormatAccelerationLanesForLog(state.Lanes)}; screen_state={FormatTunaFallbackLaneState(state.ScreenState)}; file_state={FormatTunaFallbackLaneState(state.FileState)}; screen_nkn_frames_sent={state.ScreenNknFramesSent}; screen_nkn_frames_received={state.ScreenNknFramesReceived}; screen_frames_applied={state.ScreenFramesApplied}; file_nkn_frames_sent={state.FileNknFramesSent}; file_nkn_frames_received={state.FileNknFramesReceived}; control_nkn_messages_sent={state.ControlNknMessagesSent}; acceleration_used_after_fallback={(state.AccelerationUsedAfterFallback ? 1 : 0)}");
         if (IsMixedFallbackLaneSet(state.Lanes))
         {
             LocalOperationalLog.Info(
                 "NKN.Tuna",
-                $"event=tuna_mixed_handoff_summary; session_id={state.SessionId}; fallback_epoch={state.Epoch}; reason={state.Reason}; completed_reason={SanitizeLogToken(reason)}; elapsed_ms={elapsedMs}; screen_state={FormatTunaFallbackLaneState(state.ScreenState)}; file_state={FormatTunaFallbackLaneState(state.FileState)}; screen_frames_applied={state.ScreenFramesApplied}; file_nkn_frames_sent={state.FileNknFramesSent}; file_nkn_frames_received={state.FileNknFramesReceived}; control_nkn_messages_sent={state.ControlNknMessagesSent}");
+                $"event=tuna_mixed_handoff_summary; session_id={state.SessionId}; fallback_epoch={state.Epoch}; reason={state.Reason}; completed_reason={normalizedReason}; elapsed_ms={elapsedMs}; screen_state={FormatTunaFallbackLaneState(state.ScreenState)}; file_state={FormatTunaFallbackLaneState(state.FileState)}; screen_frames_applied={state.ScreenFramesApplied}; file_nkn_frames_sent={state.FileNknFramesSent}; file_nkn_frames_received={state.FileNknFramesReceived}; control_nkn_messages_sent={state.ControlNknMessagesSent}");
         }
 
         NotifyTransportAccelerationStateChanged(reason);
     }
+
+    private bool ShouldDeferTunaFallbackProofCompletionForPendingFileRouteUnsafe(
+        TunaFallbackProofState state,
+        string normalizedReason)
+    {
+        if ((state.Lanes & NknAccelerationLaneKind.File) != NknAccelerationLaneKind.File ||
+            state.FileState is TunaFallbackLaneState.None or TunaFallbackLaneState.Recovered ||
+            IsFinalTunaFallbackProofCompletionReason(normalizedReason))
+        {
+            return false;
+        }
+
+        return IsUserRequestedAccelerationStopReason(normalizedReason) ||
+               IsRemoteUserRequestedAccelerationStopReason(normalizedReason) ||
+               (!string.IsNullOrWhiteSpace(state.SessionId) &&
+                (string.Equals(accelerationUserStoppedSessionId, state.SessionId, StringComparison.Ordinal) ||
+                 string.Equals(accelerationPeerUserStoppedSessionId, state.SessionId, StringComparison.Ordinal)));
+    }
+
+    private static bool IsFinalTunaFallbackProofCompletionReason(string normalizedReason)
+        => normalizedReason is "tuna_activation_started" or
+            "dispose" or
+            "disposed" or
+            "reset_session_tracking" or
+            "session_security_state_not_eligible";
 
     private void ConsumePostTunaFileFallbackRoute(string? sessionId, string? transferId, string reason)
     {
@@ -1043,9 +1120,17 @@ public sealed partial class NknSignalingTransport
             : "none";
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=filetransfer_post_tuna_fallback_v6_route_consumed; session_id={SanitizeLogToken(normalizedSessionId ?? "none")}; transfer_id={SanitizeLogToken(normalizedTransferId)}; fallback_epoch={snapshot.Epoch}; reason={normalizedReason}; previous_file_state={FormatTunaFallbackLaneState(previousFileState)}; previous_file_v6_epoch_state={SanitizeLogToken(previousFileV6EpochStateToken)}; previous_file_v6_transport_epoch={previousFileV6TransportEpoch}; cleared_state={(clearedState ? 1 : 0)}; next_file_route=regular_nkn_v4_fast");
+            $"event=filetransfer_post_tuna_fallback_v6_route_consumed; session_id={SanitizeLogToken(normalizedSessionId ?? "none")}; transfer_id={SanitizeLogToken(normalizedTransferId)}; fallback_epoch={snapshot.Epoch}; reason={normalizedReason}; previous_file_state={FormatTunaFallbackLaneState(previousFileState)}; previous_file_v6_epoch_state={SanitizeLogToken(previousFileV6EpochStateToken)}; previous_file_v6_transport_epoch={previousFileV6TransportEpoch}; cleared_state={(clearedState ? 1 : 0)}; next_file_route={ResolveFileRouteAfterPostTunaFallbackClearedForLog()}");
         NotifyTransportAccelerationStateChanged(normalizedReason);
     }
+
+    private string ResolveFileRouteAfterPostTunaFallbackClearedForLog()
+        => FileTransferRouteResolver.Resolve(new FileTransferRouteResolverInput(
+            IsFileTunaActive: IsFileTransferAccelerationNegotiatedAndHealthy(),
+            IsPostTunaFileFallbackActive: false,
+            IsDiagnosticRegularNknV6RouteEnabled: IsDiagnosticRegularNknV6RouteEnabledCore(),
+            HandoffKind: FileTransferTransportHandoffKind.None,
+            TransportProfileKind: FileTransferTransportProfileKind.Default)).TelemetryToken;
 
     private void MarkTunaFallbackAccelerationUsedAfterProof()
     {

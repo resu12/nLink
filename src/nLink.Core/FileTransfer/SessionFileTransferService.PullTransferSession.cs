@@ -1163,6 +1163,12 @@ public sealed partial class SessionFileTransferService
         context.V6SenderPumpLastWakeReason = "recovered_regular_nkn_epoch_restart_suppressed";
         context.V4SenderPumpLastWakeReason = "recovered_regular_nkn_epoch_restart_suppressed";
         context.SignalV4SenderPump();
+        LogRecoveredRegularNknLiveRouteEpochAfterSuppressedRestart(
+            FileTransferDirection.Outbound,
+            context.TransferId,
+            context.SessionId,
+            context.CurrentLiveRouteEpoch,
+            reason);
 
         LocalOperationalLog.Info(
             "FileTransferService",
@@ -1195,10 +1201,41 @@ public sealed partial class SessionFileTransferService
         context.PullTimeoutStreak = 0;
         context.PullFirstChunkTimeoutCount = 0;
         context.PullRecoverySinceUtc = null;
+        LogRecoveredRegularNknLiveRouteEpochAfterSuppressedRestart(
+            FileTransferDirection.Inbound,
+            context.TransferId,
+            context.SessionId,
+            context.CurrentLiveRouteEpoch,
+            reason);
 
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_v6_epoch_recovered_restart_pause_cleared; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; route={FileTransferRouteResolver.Resolve(context.RouteSelection.Route).TelemetryToken}; recovered_transport_epoch={context.LastRecoveredV6TransportEpoch}; recovered_handoff_kind={FormatFileTransferTransportHandoffKind(context.LastRecoveredV6TransportEpochKind)}; requested_handoff_kind={FormatFileTransferTransportHandoffKind(handoffKind)}; target_transport={FormatFileTransferTransportKind(targetTransport)}; reason={FormatProtocolLogValue(reason)}; was_paused={(wasPaused ? 1 : 0)}");
+    }
+
+    private static void LogRecoveredRegularNknLiveRouteEpochAfterSuppressedRestart(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        LiveRouteEpoch? epoch,
+        string reason)
+    {
+        if (epoch is null ||
+            epoch.RouteSelection.Route != FileTransferRoute.PostTunaFallbackV6 ||
+            epoch.HandoffKind != FileTransferTransportHandoffKind.TunaToNormalFallback ||
+            epoch.TargetTransport != FileTransferTransportKind.RegularNkn ||
+            string.Equals(epoch.State, "recovered", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(epoch.State, "terminal", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        LogLiveRouteEpochRecovered(
+            direction,
+            transferId,
+            sessionId,
+            epoch,
+            reason);
     }
 
     private static void LogOutboundV6TransportEpochWaitingForRequests(

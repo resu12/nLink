@@ -5169,7 +5169,12 @@ public sealed partial class SessionFileTransferService
         }
 
         var replayStartChunkIndex = remoteFrontier;
-        var fallbackFrontierSweep = allowLiveV4TunaReplay &&
+        var postTunaFallbackPeerSilenceSweep = allowPostTunaFallbackV6Repair &&
+            context.PullTransportFrontierOnlyRepairActive &&
+            remoteFrontier < context.ChunkCount &&
+            (string.Equals(reason, "post_fallback_sender_wait", StringComparison.Ordinal) ||
+             string.Equals(reason, "post_tuna_fallback_peer_silence", StringComparison.Ordinal));
+        var fallbackFrontierSweep = (allowLiveV4TunaReplay || postTunaFallbackPeerSilenceSweep) &&
             context.PullTransportFrontierOnlyRepairActive &&
             remoteFrontier < context.ChunkCount;
         if (fallbackFrontierSweep &&
@@ -5184,6 +5189,12 @@ public sealed partial class SessionFileTransferService
             if (context.PullTransportLastSafetyReplayEndChunkIndex < sweepLimitExclusive)
             {
                 replayStartChunkIndex = context.PullTransportLastSafetyReplayEndChunkIndex;
+            }
+            else if (postTunaFallbackPeerSilenceSweep)
+            {
+                replayStartChunkIndex = Math.Min(
+                    context.ChunkCount,
+                    Math.Max(remoteFrontier, context.PullTransportLastSafetyReplayEndChunkIndex));
             }
         }
 

@@ -2623,9 +2623,24 @@ function Wait-AppLogContainsAnyAllAfterBookmark {
     )
 
     $label = if ([string]::IsNullOrWhiteSpace($Description)) { 'any matching app log evidence' } else { $Description }
+    $normalizedNeedleSets = @($NeedleSets)
+    if ($normalizedNeedleSets.Count -gt 0) {
+        $flatStringNeedleSet = $true
+        foreach ($needleSet in $normalizedNeedleSets) {
+            if ($needleSet -isnot [string]) {
+                $flatStringNeedleSet = $false
+                break
+            }
+        }
+
+        if ($flatStringNeedleSet) {
+            $normalizedNeedleSets = @(, $normalizedNeedleSets)
+        }
+    }
+
     return Wait-Until -TimeoutMs $TimeoutMs -PollMs 500 -OnTimeoutMessage "Timed out waiting for app log evidence: $label" -Condition {
         foreach ($line in @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)) {
-            foreach ($needleSet in $NeedleSets) {
+            foreach ($needleSet in $normalizedNeedleSets) {
                 $needles = @($needleSet)
                 $matched = $true
                 foreach ($needle in $needles) {
@@ -2817,18 +2832,152 @@ function Add-TunaGuiLiveRouteEpochObservation {
     }
 
     $fields = ConvertFrom-GuiSmokeSemicolonFields -Message $Line
+    $eventName = Get-GuiSmokeFieldValue -Fields $fields -Name 'event' -Default '(unknown)'
+    $handoffKind = Get-GuiSmokeFieldValue -Fields $fields -Name 'handoff_kind' -Default '(none)'
+    $targetTransport = Get-GuiSmokeFieldValue -Fields $fields -Name 'target_transport' -Default '(none)'
     $route = Get-GuiSmokeFieldValue -Fields $fields -Name 'route' -Default '(unknown)'
     $protocol = ConvertTo-GuiSmokeInt -Value (Get-GuiSmokeFieldValue -Fields $fields -Name 'protocol_version' -Default '0') -Default 0
     $epoch = ConvertTo-GuiSmokeInt -Value (Get-GuiSmokeFieldValue -Fields $fields -Name 'live_route_epoch' -Default '0') -Default 0
+    $missing = New-Object System.Collections.Generic.List[string]
+    if ($eventName -ne 'filetransfer_live_route_epoch_started' -and $eventName -ne 'filetransfer_live_route_epoch_recovered') {
+        $missing.Add('event') | Out-Null
+    }
+    if ([string]::IsNullOrWhiteSpace($route) -or $route -eq '(unknown)') {
+        $missing.Add('route') | Out-Null
+    }
+    if ($protocol -le 0) {
+        $missing.Add('protocol_version') | Out-Null
+    }
+    if ([string]::IsNullOrWhiteSpace($handoffKind) -or $handoffKind -eq '(none)') {
+        $missing.Add('handoff_kind') | Out-Null
+    }
+    if ([string]::IsNullOrWhiteSpace($targetTransport) -or $targetTransport -eq '(none)') {
+        $missing.Add('target_transport') | Out-Null
+    }
+    if ($epoch -le 0) {
+        $missing.Add('live_route_epoch') | Out-Null
+    }
+
     $Observations.Add([ordered]@{
+        order = $Observations.Count + 1
         action = $Action
-        event = Get-GuiSmokeFieldValue -Fields $fields -Name 'event' -Default '(unknown)'
+        event = $eventName
         liveRouteEpoch = $epoch
         route = $route
         protocolVersion = $protocol
-        handoffKind = Get-GuiSmokeFieldValue -Fields $fields -Name 'handoff_kind' -Default '(none)'
-        targetTransport = Get-GuiSmokeFieldValue -Fields $fields -Name 'target_transport' -Default '(none)'
+        handoffKind = $handoffKind
+        targetTransport = $targetTransport
+        metadataComplete = $missing.Count -eq 0
+        missingMetadata = if ($missing.Count -gt 0) { $missing.ToArray() -join ',' } else { '(none)' }
     }) | Out-Null
+}
+
+function Get-TunaGuiLiveRouteExpectation {
+    param([Parameter(Mandatory = $true)][string]$Route)
+
+    if ($Route -eq 'post_tuna_fallback_v6') {
+        return [ordered]@{
+            route = 'post_tuna_fallback_v6'
+            protocolVersion = 6
+            handoffKind = 'tuna_to_normal_fallback'
+            targetTransport = 'regular_nkn'
+        }
+    }
+
+    if ($Route -eq 'file_tuna_v4') {
+        return [ordered]@{
+            route = 'file_tuna_v4'
+            protocolVersion = 4
+            handoffKind = 'normal_to_tuna_activation'
+            targetTransport = 'tuna'
+        }
+    }
+
+    throw "Unsupported live route proof expectation: $Route"
+}
+
+function Test-TunaGuiLiveRouteObservationMatches {
+    param(
+        [Parameter(Mandatory = $true)]$Observation,
+        [Parameter(Mandatory = $true)]$Expectation,
+        [Parameter(Mandatory = $true)][string]$Event
+    )
+
+    return [bool]$Observation['metadataComplete'] -and
+        [string]$Observation['event'] -eq $Event -and
+        [string]$Observation['route'] -eq [string]$Expectation['route'] -and
+        [int]$Observation['protocolVersion'] -eq [int]$Expectation['protocolVersion'] -and
+        [string]$Observation['handoffKind'] -eq [string]$Expectation['handoffKind'] -and
+        [string]$Observation['targetTransport'] -eq [string]$Expectation['targetTransport']
+}
+
+function Get-TunaGuiLiveRouteEpochProof {
+    param(
+        [Parameter(Mandatory = $true)]$Observations,
+        [Parameter(Mandatory = $true)][string[]]$ExpectedRoutes
+    )
+
+    $ordered = @($Observations.ToArray() | Sort-Object { [int]$_['order'] })
+    $metadataMissing = @($ordered | Where-Object { -not [bool]$_['metadataComplete'] })
+    $findings = New-Object System.Collections.Generic.List[string]
+    foreach ($observation in @($metadataMissing)) {
+        $findings.Add(("missing_metadata action={0}; event={1}; missing={2}" -f $observation['action'], $observation['event'], $observation['missingMetadata'])) | Out-Null
+    }
+
+    $lastEpoch = 0
+    $matchedRoutes = New-Object System.Collections.Generic.List[string]
+    foreach ($expectedRoute in @($ExpectedRoutes)) {
+        $expectation = Get-TunaGuiLiveRouteExpectation -Route $expectedRoute
+        $started = $null
+        foreach ($observation in @($ordered)) {
+            $epoch = [int]$observation['liveRouteEpoch']
+            if ($epoch -le $lastEpoch) {
+                continue
+            }
+
+            if (Test-TunaGuiLiveRouteObservationMatches -Observation $observation -Expectation $expectation -Event 'filetransfer_live_route_epoch_started') {
+                $started = $observation
+                break
+            }
+        }
+
+        if ($null -eq $started) {
+            $findings.Add(("missing_started route={0}; after_epoch={1}" -f $expectedRoute, $lastEpoch)) | Out-Null
+            continue
+        }
+
+        $startedEpoch = [int]$started['liveRouteEpoch']
+        $recovered = $null
+        foreach ($observation in @($ordered)) {
+            if ([int]$observation['order'] -le [int]$started['order']) {
+                continue
+            }
+
+            if ([int]$observation['liveRouteEpoch'] -ne $startedEpoch) {
+                continue
+            }
+
+            if (Test-TunaGuiLiveRouteObservationMatches -Observation $observation -Expectation $expectation -Event 'filetransfer_live_route_epoch_recovered') {
+                $recovered = $observation
+                break
+            }
+        }
+
+        if ($null -eq $recovered) {
+            $findings.Add(("missing_recovered route={0}; live_route_epoch={1}" -f $expectedRoute, $startedEpoch)) | Out-Null
+            continue
+        }
+
+        $matchedRoutes.Add($expectedRoute) | Out-Null
+        $lastEpoch = $startedEpoch
+    }
+
+    return [pscustomobject]@{
+        Pass = $findings.Count -eq 0 -and $matchedRoutes.Count -eq $ExpectedRoutes.Count
+        RouteChanges = @($matchedRoutes.ToArray())
+        MetadataMissingCount = $metadataMissing.Count
+        Findings = @($findings.ToArray())
+    }
 }
 
 function Wait-TunaGuiLiveRouteEpochStarted {
@@ -2843,8 +2992,7 @@ function Wait-TunaGuiLiveRouteEpochStarted {
     )
 
     return [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $Bookmark -NeedleSets @(
-        @('event=filetransfer_live_route_epoch_started', ("route={0}" -f $Route), ("protocol_version={0}" -f $ProtocolVersion), ("handoff_kind={0}" -f $HandoffKind), ("target_transport={0}" -f $TargetTransport)),
-        @('event=filetransfer_route_selected', ("route={0}" -f $Route), ("protocol_version={0}" -f $ProtocolVersion), 'live_route_epoch=')
+        @('event=filetransfer_live_route_epoch_started', ("route={0}" -f $Route), ("protocol_version={0}" -f $ProtocolVersion), ("handoff_kind={0}" -f $HandoffKind), ("target_transport={0}" -f $TargetTransport), 'live_route_epoch=')
     ) -TimeoutMs $TimeoutMs -Description $Description)
 }
 
@@ -2860,11 +3008,7 @@ function Wait-TunaGuiLiveRouteEpochRecovered {
     )
 
     return [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $Bookmark -NeedleSets @(
-        @('event=filetransfer_live_route_epoch_recovered', ("route={0}" -f $Route), ("protocol_version={0}" -f $ProtocolVersion), ("handoff_kind={0}" -f $HandoffKind), ("target_transport={0}" -f $TargetTransport)),
-        @('event=filetransfer_v6_epoch_recovered', ("handoff_kind={0}" -f $HandoffKind), ("target_transport={0}" -f $TargetTransport)),
-        @('event=filetransfer_v6_epoch_observed', ("handoff_kind={0}" -f $HandoffKind), 'state=recovered'),
-        @('event=filetransfer_v6_epoch_waiting', ("handoff_kind={0}" -f $HandoffKind)),
-        @('event=filetransfer_v6_epoch_observed', ("handoff_kind={0}" -f $HandoffKind), 'state=waiting_for_target_transport')
+        @('event=filetransfer_live_route_epoch_recovered', ("route={0}" -f $Route), ("protocol_version={0}" -f $ProtocolVersion), ("handoff_kind={0}" -f $HandoffKind), ("target_transport={0}" -f $TargetTransport), 'live_route_epoch=')
     ) -TimeoutMs $TimeoutMs -Description $Description)
 }
 
@@ -3630,21 +3774,9 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         $observedEvidenceLines.Add($progressLine) | Out-Null
 
         Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode
-        $fallbackStartedLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
-            @('event=filetransfer_live_route_epoch_started', 'route=post_tuna_fallback_v6', 'protocol_version=6', 'handoff_kind=tuna_to_normal_fallback', 'target_transport=regular_nkn'),
-            @('event=filetransfer_route_selected', 'route=post_tuna_fallback_v6', 'protocol_version=6'),
-            @('event=filetransfer_v6_epoch_started', 'handoff_kind=tuna_to_normal_fallback'),
-            @('event=tuna_fallback_started'),
-            @('event=tuna_fallback_filetransfer_rebind_requested'),
-            @('event=tuna_acceleration_user_stop_filetransfer_fallback_forced'),
-            @('event=filetransfer_post_tuna_recovery_started'),
-            @('event=tuna_disable_handoff_nkn_pending')
-        ) -TimeoutMs 90000 -Description 'live switch-off V6 fallback started')
+        $fallbackStartedLine = Wait-TunaGuiLiveRouteEpochStarted -Bookmark $bookmark -Route 'post_tuna_fallback_v6' -ProtocolVersion 6 -HandoffKind 'tuna_to_normal_fallback' -TargetTransport 'regular_nkn' -Description 'live switch-off post-Tuna fallback route epoch started'
         $observedEvidenceLines.Add($fallbackStartedLine) | Out-Null
-        if ($fallbackStartedLine.IndexOf('event=filetransfer_live_route_epoch_started', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-            $fallbackStartedLine.IndexOf('event=filetransfer_route_selected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-            Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'off_started' -Line $fallbackStartedLine
-        }
+        Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'off_started' -Line $fallbackStartedLine
         $fallbackEpochStartedObserved = $true
 
         $fallbackRouteLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
@@ -3652,37 +3784,11 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
             @('event=filetransfer_protocol_negotiated', 'route=post_tuna_fallback_v6', 'protocol_version=6')
         ) -TimeoutMs 90000 -Description 'live switch-off post-Tuna fallback V6 route')
         $observedEvidenceLines.Add($fallbackRouteLine) | Out-Null
-        if ($liveRouteEpochObservations.Count -eq 0 -and
-            $fallbackRouteLine.IndexOf('event=filetransfer_route_selected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-            Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'off_started' -Line $fallbackRouteLine
-        }
 
-        $fallbackResolutionLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
-            @('event=filetransfer_live_route_epoch_recovered', 'route=post_tuna_fallback_v6', 'protocol_version=6', 'handoff_kind=tuna_to_normal_fallback', 'target_transport=regular_nkn'),
-            @('event=filetransfer_v6_epoch_recovered', 'handoff_kind=tuna_to_normal_fallback'),
-            @('event=filetransfer_v6_epoch_recovered', 'target_transport=regular_nkn'),
-            @('event=filetransfer_v6_epoch_observed', 'handoff_kind=tuna_to_normal_fallback', 'state=recovered'),
-            @('event=filetransfer_v6_epoch_waiting', 'handoff_kind=tuna_to_normal_fallback'),
-            @('event=filetransfer_v6_epoch_observed', 'handoff_kind=tuna_to_normal_fallback', 'state=waiting_for_target_transport')
-        ) -TimeoutMs 150000 -Description 'live switch-off V6 fallback recovered or waiting')
+        $fallbackResolutionLine = Wait-TunaGuiLiveRouteEpochRecovered -Bookmark $bookmark -Route 'post_tuna_fallback_v6' -ProtocolVersion 6 -HandoffKind 'tuna_to_normal_fallback' -TargetTransport 'regular_nkn' -Description 'live switch-off post-Tuna fallback route epoch recovered'
         $observedEvidenceLines.Add($fallbackResolutionLine) | Out-Null
-        if ($fallbackResolutionLine.IndexOf('event=filetransfer_live_route_epoch_recovered', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-            Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'off_recovered' -Line $fallbackResolutionLine
-        }
-        if (($fallbackResolutionLine.IndexOf('state=waiting_for_target_transport', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -or
-            ($fallbackResolutionLine.IndexOf('event=filetransfer_v6_epoch_waiting', [System.StringComparison]::OrdinalIgnoreCase) -ge 0)) {
-            $fallbackEpochWaitingObserved = $true
-        }
-        else {
-            $fallbackEpochRecoveredObserved = $true
-            if ($fallbackResolutionLine.IndexOf('event=filetransfer_live_route_epoch_recovered', [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
-                $liveFallbackRecoveredLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
-                    @('event=filetransfer_live_route_epoch_recovered', 'route=post_tuna_fallback_v6', 'protocol_version=6', 'handoff_kind=tuna_to_normal_fallback', 'target_transport=regular_nkn')
-                ) -TimeoutMs 10000 -Description 'live switch-off route epoch recovered summary evidence')
-                $observedEvidenceLines.Add($liveFallbackRecoveredLine) | Out-Null
-                Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'off_recovered' -Line $liveFallbackRecoveredLine
-            }
-        }
+        Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'off_recovered' -Line $fallbackResolutionLine
+        $fallbackEpochRecoveredObserved = $true
     }
     elseif ($RouteMode -eq 'live-multi-toggle') {
         if ($FaultMode -eq 'none') {
@@ -3725,16 +3831,10 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'off_started' -Line $fallbackStartedLine
                 $fallbackEpochStartedObserved = $true
 
-                $fallbackResolutionLine = Wait-TunaGuiLiveRouteEpochRecovered -Bookmark $stepBookmark -Route 'post_tuna_fallback_v6' -ProtocolVersion 6 -HandoffKind 'tuna_to_normal_fallback' -TargetTransport 'regular_nkn' -Description 'live multi-toggle Tuna-to-normal fallback route epoch recovered or waiting'
+                $fallbackResolutionLine = Wait-TunaGuiLiveRouteEpochRecovered -Bookmark $stepBookmark -Route 'post_tuna_fallback_v6' -ProtocolVersion 6 -HandoffKind 'tuna_to_normal_fallback' -TargetTransport 'regular_nkn' -Description 'live multi-toggle Tuna-to-normal fallback route epoch recovered'
                 $observedEvidenceLines.Add($fallbackResolutionLine) | Out-Null
                 Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'off_recovered' -Line $fallbackResolutionLine
-                if (($fallbackResolutionLine.IndexOf('state=waiting_for_target_transport', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -or
-                    ($fallbackResolutionLine.IndexOf('event=filetransfer_v6_epoch_waiting', [System.StringComparison]::OrdinalIgnoreCase) -ge 0)) {
-                    $fallbackEpochWaitingObserved = $true
-                }
-                else {
-                    $fallbackEpochRecoveredObserved = $true
-                }
+                $fallbackEpochRecoveredObserved = $true
             }
             else {
                 Write-Host ("[GUI Smoke][filetransfer_tuna] Live multi-toggle step {0}/{1}: re-enabling Tuna for the same transfer." -f $stepNumber, $sequence.Count) -ForegroundColor DarkGray
@@ -4013,24 +4113,29 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
 
     }
     elseif ($RouteMode -eq 'live-v4-switch-off') {
+        $joinedRouteSequence = ($liveRouteEpochRouteChanges.ToArray() -join ',')
+        $liveRouteProof = Get-TunaGuiLiveRouteEpochProof -Observations $liveRouteEpochObservations -ExpectedRoutes @('post_tuna_fallback_v6')
         if (-not $evidence.tunaNegotiated -or
             -not $evidence.fallbackEpochStarted -or
             -not $evidence.postTunaFallbackV6RouteObserved -or
-            (-not $evidence.fallbackEpochRecovered -and -not $evidence.fallbackEpochWaiting)) {
-            throw "Tuna GUI live switch-off did not prove same-transfer V6 post-Tuna fallback. Summary: $($evidence | ConvertTo-Json -Compress)"
+            -not $evidence.fallbackEpochRecovered -or
+            -not $liveRouteProof.Pass -or
+            $joinedRouteSequence -ne 'post_tuna_fallback_v6') {
+            throw "Tuna GUI live switch-off did not prove same-transfer V6 post-Tuna fallback strict live-route epoch sequence. sequence=$joinedRouteSequence findings=$($liveRouteProof.Findings -join '|') metadata_missing=$($liveRouteProof.MetadataMissingCount) Summary: $($evidence | ConvertTo-Json -Compress)"
         }
     }
     elseif ($RouteMode -eq 'live-multi-toggle') {
         $joinedRouteSequence = ($liveRouteEpochRouteChanges.ToArray() -join ',')
+        $liveRouteProof = Get-TunaGuiLiveRouteEpochProof -Observations $liveRouteEpochObservations -ExpectedRoutes @('post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6')
         if (-not $evidence.tunaNegotiated -or
             -not $evidence.fallbackEpochStarted -or
             -not $evidence.activationEpochStarted -or
             -not $evidence.activationEpochRecovered -or
             -not $evidence.postTunaFallbackV6RouteObserved -or
-            (-not $evidence.fallbackEpochRecovered -and -not $evidence.fallbackEpochWaiting) -or
-            $liveRouteEpochObservations.Count -lt 3 -or
-            $joinedRouteSequence.IndexOf('post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6', [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
-            throw "Tuna GUI live multi-toggle did not prove same-transfer route cycling. sequence=$joinedRouteSequence Summary: $($evidence | ConvertTo-Json -Compress)"
+            -not $evidence.fallbackEpochRecovered -or
+            -not $liveRouteProof.Pass -or
+            $joinedRouteSequence -ne 'post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6') {
+            throw "Tuna GUI live multi-toggle did not prove same-transfer strict live-route epoch cycling. sequence=$joinedRouteSequence findings=$($liveRouteProof.Findings -join '|') metadata_missing=$($liveRouteProof.MetadataMissingCount) Summary: $($evidence | ConvertTo-Json -Compress)"
         }
     }
     elseif (-not $evidence.tunaNegotiated -or -not $evidence.fallbackEpochStarted) {

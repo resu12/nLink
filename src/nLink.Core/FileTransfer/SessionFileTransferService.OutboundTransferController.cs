@@ -429,6 +429,12 @@ public sealed partial class SessionFileTransferService
                         CancellationToken.None)
                     .ConfigureAwait(false);
             }
+            catch (OperationCanceledException)
+            {
+                LocalOperationalLog.Warn(
+                    "FileTransferService",
+                    $"event=filetransfer_cancel_control_retry_deferred; transfer_id={transferId}; session_id={sessionId}; attempt={index + 2}; reason={FormatProtocolLogValue(reason ?? CanceledReason)}; error=OperationCanceledException");
+            }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 Warn($"cancel retry loop failed: {ex.Message}");
