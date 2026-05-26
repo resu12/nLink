@@ -247,12 +247,20 @@ function Get-FileTransferV4MissingRangeDueStateMismatchCount {
     $count = 0
     foreach ($due in @($DueEvents)) {
         $epoch = Get-FileTransferEventInt64Field -Event $due -Name 'epoch' -Default -1
+        $frontier = Get-FileTransferEventInt64Field -Event $due -Name 'start_chunk_index' -Default -1
         if ($epoch -lt 0) {
             continue
         }
+        $dueSequence = if ($null -ne $due -and $null -ne $due.PSObject.Properties['Sequence']) { [long]$due.Sequence } else { -1L }
 
         $matchingEmptyState = @($StateSentEvents | Where-Object {
             (Get-FileTransferEventInt64Field -Event $_ -Name 'epoch' -Default -2) -eq $epoch -and
+            ($dueSequence -lt 0 -or (
+                $null -ne $_ -and
+                $null -ne $_.PSObject.Properties['Sequence'] -and
+                [long]$_.Sequence -gt $dueSequence)) -and
+            ($frontier -lt 0 -or
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'contiguous_committed_chunk_index' -Default -2) -eq $frontier) -and
             (Get-FileTransferEventInt64Field -Event $_ -Name 'missing_range_count' -Default 0) -eq 0
         })
         if ($matchingEmptyState.Count -gt 0) {

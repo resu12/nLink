@@ -6,7 +6,7 @@ param(
     [string]$PayerMode = "helpee",
     [ValidateSet("none", "switch-off", "sidecar-kill")]
     [string]$Fault = "switch-off",
-    [ValidateSet("handoff-fallback", "preactivated", "post-fallback", "v4-restart-v6-fallback", "live-v4-switch-off", "live-multi-toggle")]
+    [ValidateSet("handoff-fallback", "preactivated", "post-fallback", "v4-restart-v6-fallback", "live-v4-switch-off", "live-multi-toggle", "live-reactivation-second-transfer")]
     [string]$RouteMode = "handoff-fallback",
     [string]$LiveToggleSequence = "",
     [ValidateSet("helpee-to-helper", "helper-to-helpee")]
@@ -184,6 +184,85 @@ function Invoke-TunaGuiRetainedAnalysisBestEffort {
     }
     catch {
         Write-Warning ("Retained analysis could not be completed for {0}: {1}" -f $LogPath, $_.Exception.Message)
+    }
+}
+
+function Merge-TunaGuiMilestoneEvidenceIntoRetainedLogSlice {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [string]$FileName = 'filetransfer-retained-log-slice.log'
+    )
+
+    $milestonePath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-milestone-evidence.log'
+    $retainedPath = Join-Path $ArtifactDir $FileName
+    if (-not (Test-Path -LiteralPath $milestonePath -PathType Leaf)) {
+        return
+    }
+
+    $milestoneLines = @(
+        Get-Content -LiteralPath $milestonePath -ErrorAction SilentlyContinue |
+            Where-Object {
+                $line = [string]$_
+                $line.IndexOf('event=filetransfer_route_selected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $line.IndexOf('event=filetransfer_live_route_epoch_started', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $line.IndexOf('event=filetransfer_live_route_epoch_recovered', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+            }
+    )
+    if ($milestoneLines.Count -eq 0) {
+        return
+    }
+
+    $existingText = ''
+    if (Test-Path -LiteralPath $retainedPath -PathType Leaf) {
+        $existingText = Get-Content -LiteralPath $retainedPath -Raw -ErrorAction SilentlyContinue
+    }
+
+    $missingLines = New-Object System.Collections.Generic.List[string]
+    foreach ($line in @($milestoneLines)) {
+        $text = [string]$line
+        if ([string]::IsNullOrWhiteSpace($text)) {
+            continue
+        }
+
+        if ($existingText.IndexOf($text, [System.StringComparison]::Ordinal) -lt 0) {
+            $missingLines.Add($text) | Out-Null
+        }
+    }
+
+    if ($missingLines.Count -eq 0) {
+        return
+    }
+
+    $combined = @($missingLines.ToArray())
+    if (-not [string]::IsNullOrEmpty($existingText)) {
+        $combined += $existingText
+    }
+
+    [System.IO.File]::WriteAllText($retainedPath, ($combined -join [Environment]::NewLine), [System.Text.Encoding]::UTF8)
+}
+
+function Invoke-TunaGuiLiveRetainedAnalysisBestEffort {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)][string]$RouteMode
+    )
+
+    if ($RouteMode -ne 'preactivated' -and
+        $RouteMode -ne 'live-v4-switch-off' -and
+        $RouteMode -ne 'live-multi-toggle' -and
+        $RouteMode -ne 'live-reactivation-second-transfer') {
+        return
+    }
+
+    $retainedPath = Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log'
+    $liveRouteProofMode = if ($RouteMode -eq 'live-v4-switch-off') { 'SwitchOff' } elseif ($RouteMode -eq 'live-multi-toggle') { 'MultiToggle' } else { 'None' }
+    Merge-TunaGuiMilestoneEvidenceIntoRetainedLogSlice -ArtifactDir $ArtifactDir
+    Invoke-TunaGuiRetainedAnalysisBestEffort -RepoRoot $RepoRoot -AnalysisDir $ArtifactDir -LogPath $retainedPath -LiveRouteProofMode $liveRouteProofMode
+
+    if ($RouteMode -eq 'live-reactivation-second-transfer') {
+        $secondRetainedPath = Join-Path $ArtifactDir 'filetransfer-second-transfer-retained-log-slice.log'
+        Invoke-TunaGuiRetainedAnalysisBestEffort -RepoRoot $RepoRoot -AnalysisDir (Join-Path $ArtifactDir 'second-transfer-analysis') -LogPath $secondRetainedPath
     }
 }
 
@@ -614,6 +693,9 @@ try {
             Invoke-TunaGuiMeasuredFallbackRetainedAnalysisBestEffort -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir
             Write-TunaGuiControlledRestartFailureSummary -ArtifactDir $resolvedArtifactDir -RouteMode $RouteMode
         }
+        else {
+            Invoke-TunaGuiLiveRetainedAnalysisBestEffort -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir -RouteMode $RouteMode
+        }
 
         throw "GUI smoke failed with exit code $guiSmokeExitCode. Artifacts: $resolvedArtifactDir"
     }
@@ -623,6 +705,9 @@ try {
         if ($RouteMode -eq 'v4-restart-v6-fallback') {
             Invoke-TunaGuiMeasuredFallbackRetainedAnalysisBestEffort -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir
             Write-TunaGuiControlledRestartFailureSummary -ArtifactDir $resolvedArtifactDir -RouteMode $RouteMode
+        }
+        else {
+            Invoke-TunaGuiLiveRetainedAnalysisBestEffort -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir -RouteMode $RouteMode
         }
 
         throw "GUI smoke did not write file-transfer Tuna summary. Artifacts: $resolvedArtifactDir"
@@ -638,10 +723,15 @@ try {
         Invoke-TunaGuiMeasuredFallbackRetainedAnalysis -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir -LogPath $slices.MeasuredPath
         Update-TunaGuiControlledRestartSummary -ArtifactDir $resolvedArtifactDir -FilteredSetupCleanupLineCount ([int]$slices.FilteredSetupCleanupLineCount)
     }
-    elseif ($RouteMode -eq 'preactivated' -or $RouteMode -eq 'live-v4-switch-off' -or $RouteMode -eq 'live-multi-toggle') {
+    elseif ($RouteMode -eq 'preactivated' -or $RouteMode -eq 'live-v4-switch-off' -or $RouteMode -eq 'live-multi-toggle' -or $RouteMode -eq 'live-reactivation-second-transfer') {
         $retainedPath = Join-Path $resolvedArtifactDir 'filetransfer-retained-log-slice.log'
         $liveRouteProofMode = if ($RouteMode -eq 'live-v4-switch-off') { 'SwitchOff' } elseif ($RouteMode -eq 'live-multi-toggle') { 'MultiToggle' } else { 'None' }
+        Merge-TunaGuiMilestoneEvidenceIntoRetainedLogSlice -ArtifactDir $resolvedArtifactDir
         Invoke-TunaGuiRetainedAnalysis -RepoRoot $repoRoot -AnalysisDir $resolvedArtifactDir -LogPath $retainedPath -LiveRouteProofMode $liveRouteProofMode
+        if ($RouteMode -eq 'live-reactivation-second-transfer') {
+            $secondRetainedPath = Join-Path $resolvedArtifactDir 'filetransfer-second-transfer-retained-log-slice.log'
+            Invoke-TunaGuiRetainedAnalysis -RepoRoot $repoRoot -AnalysisDir (Join-Path $resolvedArtifactDir 'second-transfer-analysis') -LogPath $secondRetainedPath
+        }
     }
 
     if (-not [bool]$summary.completed -or -not [bool]$summary.integrityOk) {

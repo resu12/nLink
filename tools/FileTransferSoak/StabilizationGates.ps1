@@ -213,6 +213,11 @@ function Test-FileTransferEventNearRecoveryMarker {
             'filetransfer_primary_regular_nkn_bulk_v6_checkpoint_request_send_failed' { return $true }
             'filetransfer_primary_regular_nkn_bulk_v6_checkpoint_receive_recovery_requested' { return $true }
             'filetransfer_primary_regular_nkn_bulk_v6_checkpoint_receive_recovery_suppressed' { return $true }
+            'filetransfer_v6_regular_nkn_state_refresh_send_timeout' { return $true }
+            'filetransfer_v6_regular_nkn_state_refresh_send_failed' { return $true }
+            'filetransfer_post_tuna_fallback_state_refresh_receive_recovery_requested' { return $true }
+            'filetransfer_post_tuna_fallback_state_refresh_receive_recovery_suppressed' { return $true }
+            'filetransfer_post_tuna_fallback_state_refresh_receive_recovery_deferred' { return $true }
             'filetransfer_data_session_availability_observed' {
                 $isAvailable = Get-FileTransferEventInt64Field -Event $candidate -Name 'is_available' -Default 1
                 $requiresResume = Get-FileTransferEventInt64Field -Event $candidate -Name 'requires_resume_request' -Default 0
@@ -306,6 +311,24 @@ function Test-FileTransferBenignControlledFallbackCancelFeedbackFailure {
     return "$firstError $secondError" -like '*OperationCanceledException*'
 }
 
+function Test-FileTransferPostTunaFallbackV6RecoveryEvidence {
+    param([Parameter(Mandatory = $true)]$Summary)
+
+    if (-not (Test-FileTransferRouteConsistencyClean -Summary $Summary) -or
+        -not (Test-FileTransferSummarySelectedRoute -Summary $Summary -Route 'post_tuna_fallback_v6')) {
+        return $false
+    }
+
+    $fallbackDiagnostics = Get-FileTransferFallbackV6Diagnostics -Summary $Summary
+    if ($null -eq $fallbackDiagnostics) {
+        return $false
+    }
+
+    return [long]$fallbackDiagnostics.SenderRepairActiveEvidenceCount -gt 0 -or
+        [long]$fallbackDiagnostics.FrontierRequestCount -gt 0 -or
+        [long]$fallbackDiagnostics.ReceiverStateDeferredCount -gt 0
+}
+
 function Test-FileTransferRecoverableV6FeedbackFailure {
     param(
         $Event,
@@ -337,6 +360,12 @@ function Test-FileTransferRecoverableV6FeedbackFailure {
     if ($frameType -eq 'filetransfer.frontier_request.v6' -and
         $errorText -like '*OperationCanceledException*' -and
         (Test-FileTransferSummaryUsesPrimaryRegularNknQuietBridgePolicy -Summary $Summary -TransferId $transferId)) {
+        return $true
+    }
+
+    if ($frameType -eq 'filetransfer.frontier_request.v6' -and
+        $errorText -like '*OperationCanceledException*' -and
+        (Test-FileTransferPostTunaFallbackV6RecoveryEvidence -Summary $Summary)) {
         return $true
     }
 
@@ -608,6 +637,11 @@ function Test-FileTransferBenignControlOnlyReceiveEvent {
             return $false
         }
 
+        $activeFileTransferRuntimeSessions = Get-FileTransferEventInt64Field -Event $Event -Name 'active_file_transfer_runtime_sessions' -Default 0
+        if ($activeFileTransferRuntimeSessions -gt 0) {
+            return $true
+        }
+
         $controlLastReceivedAgeMs = Get-FileTransferEventInt64Field -Event $Event -Name 'control_last_received_age_ms' -Default -1
         $bulkReceiveNeverObserved = $controlLastReceivedAgeMs -lt 0 -and $bulkLastReceivedAgeMs -lt 0
         return $bulkReceiveFresh -or $bulkReceiveNeverObserved
@@ -616,12 +650,36 @@ function Test-FileTransferBenignControlOnlyReceiveEvent {
     return $false
 }
 
+function Test-FileTransferEventInsideObservedTransferWindow {
+    param(
+        [Parameter(Mandatory = $true)]$Event,
+        [Parameter(Mandatory = $true)]$Summary
+    )
+
+    if ($null -eq $Event.TimestampUtc) {
+        return $true
+    }
+
+    $start = [datetimeoffset]::MinValue
+    $end = [datetimeoffset]::MaxValue
+    if (-not [datetimeoffset]::TryParse([string]$Summary.FirstTimestamp, [ref]$start) -or
+        -not [datetimeoffset]::TryParse([string]$Summary.LastTimestamp, [ref]$end)) {
+        return $true
+    }
+
+    return $Event.TimestampUtc -ge $start -and $Event.TimestampUtc -le $end
+}
+
 function Get-FileTransferExternalTransportWarningEvents {
     param([Parameter(Mandatory = $true)]$Summary)
 
     return @(
         $Summary.GlobalEvents |
             Where-Object {
+                if (-not (Test-FileTransferEventInsideObservedTransferWindow -Event $_ -Summary $Summary)) {
+                    return $false
+                }
+
                 if (Test-FileTransferBenignControlOnlyReceiveEvent -Event $_) {
                     return $false
                 }
@@ -1118,7 +1176,8 @@ function Get-FileTransferFallbackV6Diagnostics {
             Where-Object {
                 (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -or
                 (Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -like 'filetransfer.*.v6' -or
-                $_.EventName -like 'filetransfer_v6_*'
+                $_.EventName -like 'filetransfer_v6_*' -or
+                $_.EventName -like 'filetransfer_post_tuna_fallback_*'
             }
     )
 
@@ -1151,7 +1210,12 @@ function Get-FileTransferFallbackV6Diagnostics {
                 $_.EventName -eq 'filetransfer_v6_frontier_request_sent' -or
                 $_.EventName -eq 'filetransfer_v6_frontier_request_duplicate_ignored' -or
                 $_.EventName -eq 'filetransfer_v6_post_tuna_fallback_frontier_rescue_requested' -or
-                $_.EventName -eq 'filetransfer_v6_post_tuna_fallback_frontier_rescue_widened'
+                $_.EventName -eq 'filetransfer_v6_post_tuna_fallback_frontier_rescue_widened' -or
+                $_.EventName -eq 'filetransfer_v6_regular_nkn_state_refresh_send_timeout' -or
+                $_.EventName -eq 'filetransfer_v6_regular_nkn_state_refresh_send_failed' -or
+                $_.EventName -eq 'filetransfer_post_tuna_fallback_state_refresh_receive_recovery_requested' -or
+                $_.EventName -eq 'filetransfer_post_tuna_fallback_state_refresh_receive_recovery_suppressed' -or
+                $_.EventName -eq 'filetransfer_post_tuna_fallback_state_refresh_receive_recovery_deferred'
             }
     )
 
