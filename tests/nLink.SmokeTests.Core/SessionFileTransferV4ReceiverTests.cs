@@ -340,6 +340,49 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
     }
 
     [Fact]
+    public async Task V4SparseReceiver_RegularNknFrontierRepairDueMarksControlFeedbackPressure()
+    {
+        const string transferId = "transfer_regular_v4_receiver_frontier_pressure";
+        const string sessionId = "session_regular_v4_receiver_frontier_pressure";
+        var payload = Enumerable.Range(1, 96).Select(static value => (byte)value).ToArray();
+        var sha256 = Convert.ToBase64String(SHA256.HashData(payload));
+        using var destination = new NonDisposingMemoryStream();
+        using var senderTransport = new LoopbackFileTransferTransport(sessionId);
+        using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        senderTransport.Connect(receiverTransport);
+        using var receiver = new SessionFileTransferService();
+        receiver.AttachTransport(receiverTransport);
+
+        var senderSession = await StartInboundRegularNknV4ReceiverAsync(
+            senderTransport,
+            receiver,
+            transferId,
+            sessionId,
+            "regular-v4-frontier-pressure.bin",
+            payload.Length,
+            sha256,
+            (_, _) => Task.FromResult<Stream>(destination));
+
+        await senderSession.SendAsync(
+            CreateRegularNknV4Manifest(sessionId, transferId, "regular-v4-frontier-pressure.bin", payload.Length, chunkSizeBytes: 4, sha256),
+            CancellationToken.None);
+
+        await WaitUntilAsync(
+            () => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV4>().Any(static frame =>
+                frame.MissingRanges.Any(range => range.StartChunkIndex == 0 && range.ChunkCount > 0)),
+            timeoutMs: 5000);
+        await WaitUntilAsync(() => !receiverTransport.RegularV4ControlFeedbackPressures.IsEmpty, timeoutMs: 5000);
+
+        var pressure = Assert.Single(receiverTransport.RegularV4ControlFeedbackPressures.Take(1));
+        Assert.Equal(sessionId, pressure.SessionId);
+        Assert.Equal(transferId, pressure.TransferId);
+        Assert.Equal("regular_v4_receiver_frontier_repair_due", pressure.Reason);
+        Assert.Equal(0, pressure.CreditExhaustedTimeMs);
+        Assert.True(pressure.FrontierLagChunks > 0);
+        Assert.True(pressure.PendingRepairCount > 0);
+    }
+
+    [Fact]
     public async Task V4SparseReceiver_FrontierAdvance_ClearsObsoleteRepairStateBeforeStaleBatch()
     {
         const string transferId = "transfer_v4_repair_obsolete_after_frontier";

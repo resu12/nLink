@@ -38,6 +38,19 @@ public interface IFileTransferReceiveRecoveryController
     void RequestFileTransferReceiveRecovery(FileTransferReceiveRecoveryRequest request);
 }
 
+public sealed record FileTransferRegularV4ControlFeedbackPressure(
+    string SessionId,
+    string TransferId,
+    long CreditExhaustedTimeMs,
+    int FrontierLagChunks,
+    int PendingRepairCount,
+    string Reason);
+
+public interface IFileTransferRegularV4ControlFeedbackPressureObserver
+{
+    void ObserveRegularV4ControlFeedbackPressure(FileTransferRegularV4ControlFeedbackPressure pressure);
+}
+
 public sealed record FileTransferRouteCompletedNotification(
     string SessionId,
     string TransferId,

@@ -527,7 +527,7 @@ public sealed partial class SessionFileTransferService
                     "FileTransferService",
                     $"event=filetransfer_v6_epoch_replay; direction=outbound; transfer_id={transferId}; session_id={sessionId}; transport_epoch={epochId}; reason={FormatProtocolLogValue(reason)}; retry_delay_ms={delayMs}; state={FormatV6TransportEpochState(state)}");
                 await AnnounceAndProbeOutboundV6TransportEpochAsync(context).ConfigureAwait(false);
-                SignalOutboundV4SenderPump(context);
+                SignalOutboundSparseSenderPump(context);
             }
         }
         catch (OperationCanceledException) when (context.LifetimeCts.IsCancellationRequested)
@@ -930,7 +930,7 @@ public sealed partial class SessionFileTransferService
         if (outboundRecovered is not null)
         {
             TouchOutboundV6PeerLiveness(outboundRecovered, "transport_probe_ack");
-            SignalOutboundV4SenderPump(outboundRecovered);
+            SignalOutboundSparseSenderPump(outboundRecovered);
         }
 
         if (inboundRecovered is not null)
@@ -988,7 +988,7 @@ public sealed partial class SessionFileTransferService
         if (outboundRecovered is not null)
         {
             TouchOutboundV6PeerLiveness(outboundRecovered, "repair_proof");
-            SignalOutboundV4SenderPump(outboundRecovered);
+            SignalOutboundSparseSenderPump(outboundRecovered);
         }
 
         return Task.CompletedTask;
@@ -1206,9 +1206,9 @@ public sealed partial class SessionFileTransferService
         context.PullTransportFrontierOnlyRepairActive = false;
         context.PullTransportFrontierOnlyRepairStartChunkIndex = -1;
         context.V6SenderPumpLastWakeReason = "transport_epoch_recovered";
-        context.V4SenderPumpLastWakeReason = "transport_epoch_recovered";
+        context.SparseSenderPumpLastWakeReason = "transport_epoch_recovered";
         context.StatusMessage = GetOutboundResumeStatusMessage(context.State);
-        context.SignalV4SenderPump();
+        context.SignalSparseSenderPump();
         if (epoch.Kind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
             epoch.TargetTransport == FileTransferTransportKind.RegularNkn)
         {

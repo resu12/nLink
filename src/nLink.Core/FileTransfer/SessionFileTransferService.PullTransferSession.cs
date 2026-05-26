@@ -742,9 +742,9 @@ public sealed partial class SessionFileTransferService
         }
         context.V4SenderCreditExhaustedSinceUtc = null;
         context.PullSenderFeedCreditWaitStartedUtc = null;
-        context.V4SenderPumpLastWakeReason = "v6_handoff_recovered";
+        context.SparseSenderPumpLastWakeReason = "v6_handoff_recovered";
         context.StatusMessage = GetOutboundResumeStatusMessage(context.State);
-        context.SignalV4SenderPump();
+        context.SignalSparseSenderPump();
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_v6_handoff_tail_unblocked; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={handoff.EpochId}; reason={FormatProtocolLogValue(reason)}; committed_chunk={committedChunkIndex}; highest_observed_chunk={highestObservedChunkIndex}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}; remote_credit_until_chunk_index_exclusive={context.RemoteGrantedUntilExclusive}; discarded_repair_frame_count={discardedRepairFrameCount}; discarded_repair_chunk_count={discardedRepairChunkCount}");
@@ -822,7 +822,7 @@ public sealed partial class SessionFileTransferService
             context.PullTransportGraceDeadlineUtc = context.PullTransportPausedSinceUtc.Value.AddMilliseconds(PullSessionTransportRecoveryGraceMs);
             context.PullTransportPauseReason = reason;
             context.PullTransportResumeRequestPending = false;
-            context.V4SenderPumpLastWakeReason = "tuna_activation_barrier";
+            context.SparseSenderPumpLastWakeReason = "tuna_activation_barrier";
             return true;
         }
 
@@ -879,9 +879,8 @@ public sealed partial class SessionFileTransferService
 
         if (handoffKind == FileTransferTransportHandoffKind.None &&
             !ShouldPromoteFileTunaV4FallbackToPostTunaV6(
-                context.RouteSelection.Route,
+                context.RouteRuntime,
                 context.NegotiatedDataProtocolVersion,
-                context.RouteSelection.FrameFamily,
                 reason,
                 handoffKind,
                 targetTransport))
@@ -905,7 +904,7 @@ public sealed partial class SessionFileTransferService
             IsPrimaryRegularNknBulkV6ContextLocked(context))
         {
             context.PullTransportResumeRequestPending = true;
-            context.V4SenderPumpLastWakeReason = "primary_regular_nkn_bulk_v6_rebind_waiting_for_available";
+            context.SparseSenderPumpLastWakeReason = "primary_regular_nkn_bulk_v6_rebind_waiting_for_available";
             LogPrimaryRegularNknBulkV6State(context, PrimaryRegularNknBulkV6State.Rebinding, reason);
             LocalOperationalLog.Info(
                 "FileTransferService",
@@ -935,7 +934,7 @@ public sealed partial class SessionFileTransferService
                 FileTransferDirection.Outbound,
                 context.TransferId,
                 context.SessionId,
-                context.RouteSelection.Route,
+                context.RouteRuntime,
                 context.LastRecoveredV6TransportEpoch,
                 context.LastRecoveredV6TransportEpochKind,
                 context.LastRecoveredV6TransportTargetTransport,
@@ -952,7 +951,7 @@ public sealed partial class SessionFileTransferService
         context.PullTransportSafetyReplayRearmCount = 0;
         context.PullTransportFrontierOnlyRepairActive = false;
         context.PullTransportFrontierOnlyRepairStartChunkIndex = -1;
-        context.V4SenderPumpLastWakeReason = "transport_handoff_unavailable";
+        context.SparseSenderPumpLastWakeReason = "transport_handoff_unavailable";
         StartOutboundV6TransportEpochLocked(context, reason, handoffKind, targetTransport);
         if (IsTunaFallbackTransportPauseReason(reason))
         {
@@ -978,9 +977,8 @@ public sealed partial class SessionFileTransferService
 
         if (handoffKind == FileTransferTransportHandoffKind.None &&
             !ShouldPromoteFileTunaV4FallbackToPostTunaV6(
-                context.RouteSelection.Route,
+                context.RouteRuntime,
                 context.NegotiatedDataProtocolVersion,
-                context.RouteSelection.FrameFamily,
                 reason,
                 handoffKind,
                 targetTransport))
@@ -1034,7 +1032,7 @@ public sealed partial class SessionFileTransferService
                 FileTransferDirection.Inbound,
                 context.TransferId,
                 context.SessionId,
-                context.RouteSelection.Route,
+                context.RouteRuntime,
                 context.LastRecoveredV6TransportEpoch,
                 context.LastRecoveredV6TransportEpochKind,
                 context.LastRecoveredV6TransportTargetTransport,
@@ -1090,7 +1088,7 @@ public sealed partial class SessionFileTransferService
                 FileTransferDirection.Outbound,
                 context.TransferId,
                 context.SessionId,
-                context.RouteSelection.Route,
+                context.RouteRuntime,
                 context.LastRecoveredV6TransportEpoch,
                 context.LastRecoveredV6TransportEpochKind,
                 context.LastRecoveredV6TransportTargetTransport,
@@ -1123,7 +1121,7 @@ public sealed partial class SessionFileTransferService
                 FileTransferDirection.Inbound,
                 context.TransferId,
                 context.SessionId,
-                context.RouteSelection.Route,
+                context.RouteRuntime,
                 context.LastRecoveredV6TransportEpoch,
                 context.LastRecoveredV6TransportEpochKind,
                 context.LastRecoveredV6TransportTargetTransport,
@@ -1161,8 +1159,8 @@ public sealed partial class SessionFileTransferService
         context.PullSenderFeedCreditWaitStartedUtc = null;
         context.V4SenderCreditExhaustedSinceUtc = null;
         context.V6SenderPumpLastWakeReason = "recovered_regular_nkn_epoch_restart_suppressed";
-        context.V4SenderPumpLastWakeReason = "recovered_regular_nkn_epoch_restart_suppressed";
-        context.SignalV4SenderPump();
+        context.SparseSenderPumpLastWakeReason = "recovered_regular_nkn_epoch_restart_suppressed";
+        context.SignalSparseSenderPump();
         LogRecoveredRegularNknLiveRouteEpochAfterSuppressedRestart(
             FileTransferDirection.Outbound,
             context.TransferId,
@@ -1172,7 +1170,7 @@ public sealed partial class SessionFileTransferService
 
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_v6_epoch_recovered_restart_pause_cleared; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; route={FileTransferRouteResolver.Resolve(context.RouteSelection.Route).TelemetryToken}; recovered_transport_epoch={context.LastRecoveredV6TransportEpoch}; recovered_handoff_kind={FormatFileTransferTransportHandoffKind(context.LastRecoveredV6TransportEpochKind)}; requested_handoff_kind={FormatFileTransferTransportHandoffKind(handoffKind)}; target_transport={FormatFileTransferTransportKind(targetTransport)}; reason={FormatProtocolLogValue(reason)}; was_paused={(wasPaused ? 1 : 0)}");
+            $"event=filetransfer_v6_epoch_recovered_restart_pause_cleared; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; route={context.RouteRuntime.TelemetryToken}; recovered_transport_epoch={context.LastRecoveredV6TransportEpoch}; recovered_handoff_kind={FormatFileTransferTransportHandoffKind(context.LastRecoveredV6TransportEpochKind)}; requested_handoff_kind={FormatFileTransferTransportHandoffKind(handoffKind)}; target_transport={FormatFileTransferTransportKind(targetTransport)}; reason={FormatProtocolLogValue(reason)}; was_paused={(wasPaused ? 1 : 0)}");
     }
 
     private static void ClearInboundRecoveredV6RegularNknEpochSuppressedPauseLocked(
@@ -1210,7 +1208,7 @@ public sealed partial class SessionFileTransferService
 
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_v6_epoch_recovered_restart_pause_cleared; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; route={FileTransferRouteResolver.Resolve(context.RouteSelection.Route).TelemetryToken}; recovered_transport_epoch={context.LastRecoveredV6TransportEpoch}; recovered_handoff_kind={FormatFileTransferTransportHandoffKind(context.LastRecoveredV6TransportEpochKind)}; requested_handoff_kind={FormatFileTransferTransportHandoffKind(handoffKind)}; target_transport={FormatFileTransferTransportKind(targetTransport)}; reason={FormatProtocolLogValue(reason)}; was_paused={(wasPaused ? 1 : 0)}");
+            $"event=filetransfer_v6_epoch_recovered_restart_pause_cleared; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; route={context.RouteRuntime.TelemetryToken}; recovered_transport_epoch={context.LastRecoveredV6TransportEpoch}; recovered_handoff_kind={FormatFileTransferTransportHandoffKind(context.LastRecoveredV6TransportEpochKind)}; requested_handoff_kind={FormatFileTransferTransportHandoffKind(handoffKind)}; target_transport={FormatFileTransferTransportKind(targetTransport)}; reason={FormatProtocolLogValue(reason)}; was_paused={(wasPaused ? 1 : 0)}");
     }
 
     private static void LogRecoveredRegularNknLiveRouteEpochAfterSuppressedRestart(
@@ -1221,7 +1219,7 @@ public sealed partial class SessionFileTransferService
         string reason)
     {
         if (epoch is null ||
-            epoch.RouteSelection.Route != FileTransferRoute.PostTunaFallbackV6 ||
+            !epoch.RouteSelection.RuntimeDescriptor.UsesPostTunaFallbackV6Runtime ||
             epoch.HandoffKind != FileTransferTransportHandoffKind.TunaToNormalFallback ||
             epoch.TargetTransport != FileTransferTransportKind.RegularNkn ||
             string.Equals(epoch.State, "recovered", StringComparison.OrdinalIgnoreCase) ||
@@ -1266,9 +1264,8 @@ public sealed partial class SessionFileTransferService
 
             if (handoffKind == FileTransferTransportHandoffKind.None &&
                 !ShouldPromoteFileTunaV4FallbackToPostTunaV6(
-                    context.RouteSelection.Route,
+                    context.RouteRuntime,
                     context.NegotiatedDataProtocolVersion,
-                    context.RouteSelection.FrameFamily,
                     reason,
                     handoffKind,
                     targetTransport))
@@ -1297,16 +1294,16 @@ public sealed partial class SessionFileTransferService
                 context.PullTransportFrontierOnlyRepairActive = false;
                 context.PullTransportFrontierOnlyRepairStartChunkIndex = -1;
                 context.V6RegularNknLastCheckpointSyncRequestedUtc = null;
-                context.V4SenderPumpLastWakeReason = "primary_regular_nkn_bulk_v6_rebind";
+                context.SparseSenderPumpLastWakeReason = "primary_regular_nkn_bulk_v6_rebind";
                 LogPrimaryRegularNknBulkV6State(context, PrimaryRegularNknBulkV6State.Rebinding, reason);
                 return true;
             }
 
             if (ShouldSuppressRecoveredV6RegularNknEpochRestart(
-                    FileTransferDirection.Outbound,
-                    context.TransferId,
-                    context.SessionId,
-                    context.RouteSelection.Route,
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                context.RouteRuntime,
                     context.LastRecoveredV6TransportEpoch,
                     context.LastRecoveredV6TransportEpochKind,
                     context.LastRecoveredV6TransportTargetTransport,
@@ -1318,14 +1315,13 @@ public sealed partial class SessionFileTransferService
             }
 
             if (ShouldPromotePostTunaFallbackV6ToFileTunaV4(
-                    context.RouteSelection.Route,
+                    context.RouteRuntime,
                     context.NegotiatedDataProtocolVersion,
-                    context.RouteSelection.FrameFamily,
                     handoffKind,
                     targetTransport))
             {
                 context.PullTransportResumeRequestPending = false;
-                context.V4SenderPumpLastWakeReason = "live_route_tuna_reactivated";
+                context.SparseSenderPumpLastWakeReason = "live_route_tuna_reactivated";
                 return TryPromoteOutboundPostTunaFallbackV6ToFileTunaV4Locked(
                     context,
                     reason,
@@ -1338,7 +1334,7 @@ public sealed partial class SessionFileTransferService
             context.PullTransportSafetyReplayRearmCount = 0;
             context.PullTransportFrontierOnlyRepairActive = false;
             context.PullTransportFrontierOnlyRepairStartChunkIndex = -1;
-            context.V4SenderPumpLastWakeReason = "transport_handoff";
+            context.SparseSenderPumpLastWakeReason = "transport_handoff";
             StartOutboundV6TransportEpochLocked(context, reason, handoffKind, targetTransport);
             if (IsTunaFallbackTransportPauseReason(reason))
             {
@@ -1361,7 +1357,7 @@ public sealed partial class SessionFileTransferService
                 if (!TryPromoteOutboundFileTunaV4FallbackToPostTunaV6Locked(context, reason, handoffKind, targetTransport))
                 {
                     context.PullTransportResumeRequestPending = false;
-                    context.V4SenderPumpLastWakeReason = "transport_resumed";
+                    context.SparseSenderPumpLastWakeReason = "transport_resumed";
                     return true;
                 }
 
@@ -1379,7 +1375,7 @@ public sealed partial class SessionFileTransferService
                 context.PullTransportFrontierOnlyRepairActive = false;
                 context.PullTransportFrontierOnlyRepairStartChunkIndex = -1;
                 context.V6RegularNknLastCheckpointSyncRequestedUtc = null;
-                context.V4SenderPumpLastWakeReason = "primary_regular_nkn_bulk_v6_rebind";
+                context.SparseSenderPumpLastWakeReason = "primary_regular_nkn_bulk_v6_rebind";
                 LogPrimaryRegularNknBulkV6State(context, PrimaryRegularNknBulkV6State.Rebinding, reason);
                 return true;
             }
@@ -1388,7 +1384,7 @@ public sealed partial class SessionFileTransferService
                     FileTransferDirection.Outbound,
                     context.TransferId,
                     context.SessionId,
-                    context.RouteSelection.Route,
+                    context.RouteRuntime,
                     context.LastRecoveredV6TransportEpoch,
                     context.LastRecoveredV6TransportEpochKind,
                     context.LastRecoveredV6TransportTargetTransport,
@@ -1400,14 +1396,13 @@ public sealed partial class SessionFileTransferService
             }
 
             if (ShouldPromotePostTunaFallbackV6ToFileTunaV4(
-                    context.RouteSelection.Route,
+                    context.RouteRuntime,
                     context.NegotiatedDataProtocolVersion,
-                    context.RouteSelection.FrameFamily,
                     handoffKind,
                     targetTransport))
             {
                 context.PullTransportResumeRequestPending = false;
-                context.V4SenderPumpLastWakeReason = "live_route_tuna_reactivated";
+                context.SparseSenderPumpLastWakeReason = "live_route_tuna_reactivated";
                 return TryPromoteOutboundPostTunaFallbackV6ToFileTunaV4Locked(
                     context,
                     reason,
@@ -1420,7 +1415,7 @@ public sealed partial class SessionFileTransferService
             context.PullTransportSafetyReplayRearmCount = 0;
             context.PullTransportFrontierOnlyRepairActive = false;
             context.PullTransportFrontierOnlyRepairStartChunkIndex = -1;
-            context.V4SenderPumpLastWakeReason = "transport_rebind";
+            context.SparseSenderPumpLastWakeReason = "transport_rebind";
             StartOutboundV6TransportEpochLocked(context, reason, handoffKind, targetTransport);
             if (IsTunaFallbackTransportPauseReason(reason))
             {
@@ -1431,7 +1426,7 @@ public sealed partial class SessionFileTransferService
         }
         else
         {
-            context.V4SenderPumpLastWakeReason = "transport_resumed";
+            context.SparseSenderPumpLastWakeReason = "transport_resumed";
         }
 
         return true;
@@ -1458,9 +1453,8 @@ public sealed partial class SessionFileTransferService
 
             if (handoffKind == FileTransferTransportHandoffKind.None &&
                 !ShouldPromoteFileTunaV4FallbackToPostTunaV6(
-                    context.RouteSelection.Route,
+                    context.RouteRuntime,
                     context.NegotiatedDataProtocolVersion,
-                    context.RouteSelection.FrameFamily,
                     reason,
                     handoffKind,
                     targetTransport))
@@ -1502,10 +1496,10 @@ public sealed partial class SessionFileTransferService
             }
 
             if (ShouldSuppressRecoveredV6RegularNknEpochRestart(
-                    FileTransferDirection.Inbound,
-                    context.TransferId,
-                    context.SessionId,
-                    context.RouteSelection.Route,
+                FileTransferDirection.Inbound,
+                context.TransferId,
+                context.SessionId,
+                context.RouteRuntime,
                     context.LastRecoveredV6TransportEpoch,
                     context.LastRecoveredV6TransportEpochKind,
                     context.LastRecoveredV6TransportTargetTransport,
@@ -1517,9 +1511,8 @@ public sealed partial class SessionFileTransferService
             }
 
             if (ShouldPromotePostTunaFallbackV6ToFileTunaV4(
-                    context.RouteSelection.Route,
+                    context.RouteRuntime,
                     context.NegotiatedDataProtocolVersion,
-                    context.RouteSelection.FrameFamily,
                     handoffKind,
                     targetTransport))
             {
@@ -1606,7 +1599,7 @@ public sealed partial class SessionFileTransferService
                     FileTransferDirection.Inbound,
                     context.TransferId,
                     context.SessionId,
-                    context.RouteSelection.Route,
+                    context.RouteRuntime,
                     context.LastRecoveredV6TransportEpoch,
                     context.LastRecoveredV6TransportEpochKind,
                     context.LastRecoveredV6TransportTargetTransport,
@@ -1618,9 +1611,8 @@ public sealed partial class SessionFileTransferService
             }
 
             if (ShouldPromotePostTunaFallbackV6ToFileTunaV4(
-                    context.RouteSelection.Route,
+                    context.RouteRuntime,
                     context.NegotiatedDataProtocolVersion,
-                    context.RouteSelection.FrameFamily,
                     handoffKind,
                     targetTransport))
             {
@@ -1657,23 +1649,22 @@ public sealed partial class SessionFileTransferService
 
     private static bool CanUseV6TransportEpochsLocked(OutboundTransferContext context)
         => context.NegotiatedDataProtocolVersion >= FileTransferProtocol.ProtocolVersionV6 &&
-           context.RouteSelection.FrameFamily == FileTransferFrameFamily.V6;
+           context.RouteRuntime.FrameFamily == FileTransferFrameFamily.V6;
 
     private static bool CanUseV6TransportEpochsLocked(InboundTransferContext context)
         => context.NegotiatedDataProtocolVersion >= FileTransferProtocol.ProtocolVersionV6 &&
-           context.RouteSelection.FrameFamily == FileTransferFrameFamily.V6;
+           context.RouteRuntime.FrameFamily == FileTransferFrameFamily.V6;
 
     private static bool ShouldPromoteFileTunaV4FallbackToPostTunaV6(
-        FileTransferRoute route,
+        FileTransferRouteRuntimeDescriptor routeRuntime,
         int negotiatedProtocolVersion,
-        FileTransferFrameFamily frameFamily,
         string reason,
         FileTransferTransportHandoffKind handoffKind,
         FileTransferTransportKind targetTransport)
     {
-        if (route != FileTransferRoute.FileTunaV4 ||
+        if (!routeRuntime.UsesFileTunaV4Runtime ||
             negotiatedProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
-            frameFamily != FileTransferFrameFamily.V4)
+            routeRuntime.FrameFamily != FileTransferFrameFamily.V4)
         {
             return false;
         }
@@ -1700,9 +1691,8 @@ public sealed partial class SessionFileTransferService
     {
         if (context.IsTerminal ||
             !ShouldPromoteFileTunaV4FallbackToPostTunaV6(
-                context.RouteSelection.Route,
+                context.RouteRuntime,
                 context.NegotiatedDataProtocolVersion,
-                context.RouteSelection.FrameFamily,
                 reason,
                 handoffKind,
                 targetTransport))
@@ -1763,6 +1753,7 @@ public sealed partial class SessionFileTransferService
             runtimeSelection,
             routeSelection,
             liveRouteEpoch.EpochId);
+        StartOutboundPostTunaRecoveryWithSafetyReplayLocked(context, reason);
         return true;
     }
 
@@ -1774,9 +1765,8 @@ public sealed partial class SessionFileTransferService
     {
         if (context.IsTerminal ||
             !ShouldPromoteFileTunaV4FallbackToPostTunaV6(
-                context.RouteSelection.Route,
+                context.RouteRuntime,
                 context.NegotiatedDataProtocolVersion,
-                context.RouteSelection.FrameFamily,
                 reason,
                 handoffKind,
                 targetTransport))
@@ -1837,18 +1827,18 @@ public sealed partial class SessionFileTransferService
             runtimeSelection,
             routeSelection,
             liveRouteEpoch.EpochId);
+        StartInboundPostTunaRecoveryLocked(context, reason);
         return true;
     }
 
     private static bool ShouldPromotePostTunaFallbackV6ToFileTunaV4(
-        FileTransferRoute route,
+        FileTransferRouteRuntimeDescriptor routeRuntime,
         int negotiatedProtocolVersion,
-        FileTransferFrameFamily frameFamily,
         FileTransferTransportHandoffKind handoffKind,
         FileTransferTransportKind targetTransport)
-        => route == FileTransferRoute.PostTunaFallbackV6 &&
+        => routeRuntime.UsesPostTunaFallbackV6Runtime &&
            negotiatedProtocolVersion >= FileTransferProtocol.ProtocolVersionV6 &&
-           frameFamily == FileTransferFrameFamily.V6 &&
+           routeRuntime.FrameFamily == FileTransferFrameFamily.V6 &&
            handoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
            targetTransport == FileTransferTransportKind.Tuna;
 
@@ -1860,9 +1850,8 @@ public sealed partial class SessionFileTransferService
     {
         if (context.IsTerminal ||
             !ShouldPromotePostTunaFallbackV6ToFileTunaV4(
-                context.RouteSelection.Route,
+                context.RouteRuntime,
                 context.NegotiatedDataProtocolVersion,
-                context.RouteSelection.FrameFamily,
                 handoffKind,
                 targetTransport))
         {
@@ -1891,7 +1880,7 @@ public sealed partial class SessionFileTransferService
         ApplyFileTransferRuntimeProfileSelectionLocked(context, runtimeSelection);
         ResetOutboundPostTunaFallbackStateForFileTunaV4Locked(context);
         context.StatusMessage = GetOutboundResumeStatusMessage(context.State);
-        context.V4SenderPumpLastWakeReason = "live_route_tuna_reactivated";
+        context.SparseSenderPumpLastWakeReason = "live_route_tuna_reactivated";
 
         LogFileTransferRouteTransitioned(
             FileTransferDirection.Outbound,
@@ -1939,9 +1928,8 @@ public sealed partial class SessionFileTransferService
     {
         if (context.IsTerminal ||
             !ShouldPromotePostTunaFallbackV6ToFileTunaV4(
-                context.RouteSelection.Route,
+                context.RouteRuntime,
                 context.NegotiatedDataProtocolVersion,
-                context.RouteSelection.FrameFamily,
                 handoffKind,
                 targetTransport))
         {
@@ -2028,7 +2016,7 @@ public sealed partial class SessionFileTransferService
         context.PullTransportResumeRequestPending = false;
         context.V6PostTunaFallbackNormalSendAheadFreezeChunkIndex = -1;
         context.V6PostTunaFallbackNormalSendAheadFreezeUtc = null;
-        context.SignalV4SenderPump();
+        context.SignalSparseSenderPump();
     }
 
     private static void ResetInboundPostTunaFallbackStateForFileTunaV4Locked(InboundTransferContext context)
@@ -2048,10 +2036,9 @@ public sealed partial class SessionFileTransferService
         context.PullTransportResumeRequestPending = false;
     }
 
-    private static bool IsLiveV4TunaFallbackRecoveryContext(
-        FileTransferRoute route,
+    private static bool IsFileTunaV4PostTunaRecoveryContext(
+        FileTransferRouteRuntimeDescriptor routeRuntime,
         int negotiatedProtocolVersion,
-        FileTransferFrameFamily frameFamily,
         string reason,
         FileTransferTransportHandoffKind handoffKind,
         FileTransferTransportKind targetTransport)
@@ -2062,22 +2049,21 @@ public sealed partial class SessionFileTransferService
             handoffKind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
             targetTransport == FileTransferTransportKind.RegularNkn;
 
-        return route == FileTransferRoute.FileTunaV4 &&
+        return routeRuntime.UsesFileTunaV4Runtime &&
             negotiatedProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
-            frameFamily == FileTransferFrameFamily.V4 &&
+            routeRuntime.FrameFamily == FileTransferFrameFamily.V4 &&
             (provedTunaFallbackResume || IsTunaFallbackTransportPauseReason(reason));
     }
 
-    private bool TryStartOutboundLiveV4TunaFallbackRecoveryLocked(
+    private bool TryStartOutboundFileTunaV4PostTunaRecoveryLocked(
         OutboundTransferContext context,
         string reason,
         FileTransferTransportHandoffKind handoffKind,
         FileTransferTransportKind targetTransport)
     {
-        if (!IsLiveV4TunaFallbackRecoveryContext(
-                context.RouteSelection.Route,
+        if (!IsFileTunaV4PostTunaRecoveryContext(
+                context.RouteRuntime,
                 context.NegotiatedDataProtocolVersion,
-                context.RouteSelection.FrameFamily,
                 reason,
                 handoffKind,
                 targetTransport) ||
@@ -2086,11 +2072,11 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        var keepPausedUntilLiveV4Repair =
+        var keepPausedUntilFileTunaV4Repair =
             context.PullTransportPaused &&
             IsTunaFallbackTransportPauseReason(reason) &&
             !string.Equals(NormalizeReason(reason), "transport_recovered", StringComparison.Ordinal);
-        if (keepPausedUntilLiveV4Repair)
+        if (keepPausedUntilFileTunaV4Repair)
         {
             context.PullTransportPauseReason ??= reason;
             context.PullTransportResumeRequestPending = true;
@@ -2111,26 +2097,25 @@ public sealed partial class SessionFileTransferService
         context.PullTransportLastSafetyReplayFrontierChunkIndex = -1;
         context.PullTransportLastSafetyReplayEndChunkIndex = -1;
         context.PullTransportLastSafetyReplayUtc = null;
-        context.V4SenderPumpLastWakeReason = "live_v4_tuna_fallback_rebind";
-        ResetOutboundV4AcceptedAfterPauseLocked(context, "live_v4_tuna_fallback");
+        context.SparseSenderPumpLastWakeReason = "file_tuna_v4_post_tuna_rebind";
+        ResetOutboundV4AcceptedAfterPauseLocked(context, "file_tuna_v4_post_tuna_recovery");
         StartOutboundPostTunaRecoveryLocked(context, reason);
         QueueOutboundV4TransportRebindSafetyReplayLocked(
             context,
-            "live_v4_tuna_fallback",
+            "file_tuna_v4_post_tuna_recovery",
             allowRepeatForSameGeneration: true);
         return true;
     }
 
-    private static bool TryStartInboundLiveV4TunaFallbackRecoveryLocked(
+    private static bool TryStartInboundFileTunaV4PostTunaRecoveryLocked(
         InboundTransferContext context,
         string reason,
         FileTransferTransportHandoffKind handoffKind,
         FileTransferTransportKind targetTransport)
     {
-        if (!IsLiveV4TunaFallbackRecoveryContext(
-                context.RouteSelection.Route,
+        if (!IsFileTunaV4PostTunaRecoveryContext(
+                context.RouteRuntime,
                 context.NegotiatedDataProtocolVersion,
-                context.RouteSelection.FrameFamily,
                 reason,
                 handoffKind,
                 targetTransport) ||
@@ -2165,7 +2150,7 @@ public sealed partial class SessionFileTransferService
         FileTransferDirection direction,
         string transferId,
         string sessionId,
-        FileTransferRoute route,
+        FileTransferRouteRuntimeDescriptor routeRuntime,
         long lastRecoveredEpoch,
         FileTransferTransportHandoffKind lastRecoveredKind,
         FileTransferTransportKind lastRecoveredTarget,
@@ -2182,23 +2167,23 @@ public sealed partial class SessionFileTransferService
 
         if (requestedKind == FileTransferTransportHandoffKind.RegularNknRecovery)
         {
-            if (route == FileTransferRoute.PostTunaFallbackV6)
+            if (routeRuntime.UsesPostTunaFallbackV6Runtime)
             {
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_v6_epoch_recovered_restart_suppressed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; route={FormatProtocolLogValue(FileTransferRouteResolver.Resolve(route).TelemetryToken)}; recovered_transport_epoch={lastRecoveredEpoch}; recovered_handoff_kind={FormatFileTransferTransportHandoffKind(lastRecoveredKind)}; requested_handoff_kind={FormatFileTransferTransportHandoffKind(requestedKind)}; target_transport={FormatFileTransferTransportKind(requestedTarget)}; reason={FormatProtocolLogValue(reason)}");
+                    $"event=filetransfer_v6_epoch_recovered_restart_suppressed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; route={FormatProtocolLogValue(routeRuntime.TelemetryToken)}; recovered_transport_epoch={lastRecoveredEpoch}; recovered_handoff_kind={FormatFileTransferTransportHandoffKind(lastRecoveredKind)}; requested_handoff_kind={FormatFileTransferTransportHandoffKind(requestedKind)}; target_transport={FormatFileTransferTransportKind(requestedTarget)}; reason={FormatProtocolLogValue(reason)}");
                 return true;
             }
 
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_v6_epoch_recovered_restart_allowed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; route={FormatProtocolLogValue(FileTransferRouteResolver.Resolve(route).TelemetryToken)}; recovered_transport_epoch={lastRecoveredEpoch}; recovered_handoff_kind={FormatFileTransferTransportHandoffKind(lastRecoveredKind)}; requested_handoff_kind={FormatFileTransferTransportHandoffKind(requestedKind)}; target_transport={FormatFileTransferTransportKind(requestedTarget)}; reason={FormatProtocolLogValue(reason)}");
+                $"event=filetransfer_v6_epoch_recovered_restart_allowed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; route={FormatProtocolLogValue(routeRuntime.TelemetryToken)}; recovered_transport_epoch={lastRecoveredEpoch}; recovered_handoff_kind={FormatFileTransferTransportHandoffKind(lastRecoveredKind)}; requested_handoff_kind={FormatFileTransferTransportHandoffKind(requestedKind)}; target_transport={FormatFileTransferTransportKind(requestedTarget)}; reason={FormatProtocolLogValue(reason)}");
             return false;
         }
 
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_v6_epoch_recovered_restart_suppressed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; route={FormatProtocolLogValue(FileTransferRouteResolver.Resolve(route).TelemetryToken)}; recovered_transport_epoch={lastRecoveredEpoch}; recovered_handoff_kind={FormatFileTransferTransportHandoffKind(lastRecoveredKind)}; requested_handoff_kind={FormatFileTransferTransportHandoffKind(requestedKind)}; target_transport={FormatFileTransferTransportKind(requestedTarget)}; reason={FormatProtocolLogValue(reason)}");
+            $"event=filetransfer_v6_epoch_recovered_restart_suppressed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; route={FormatProtocolLogValue(routeRuntime.TelemetryToken)}; recovered_transport_epoch={lastRecoveredEpoch}; recovered_handoff_kind={FormatFileTransferTransportHandoffKind(lastRecoveredKind)}; requested_handoff_kind={FormatFileTransferTransportHandoffKind(requestedKind)}; target_transport={FormatFileTransferTransportKind(requestedTarget)}; reason={FormatProtocolLogValue(reason)}");
         return true;
     }
 

@@ -340,6 +340,90 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task FileTransferRouteCompletedNotification_ClearsTransportBusyStateForNextOffer()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.tuna.route-completed-busy.address");
+            var helperClient = new FakeNknClient("helper.tuna.route-completed-busy.address");
+            var hostIdentity = new NknIdentity("host-route-completed-busy-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-route-completed-busy-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+
+            var firstOfferReceived = new TaskCompletionSource<FileTransferOfferV2>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var secondOfferReceived = new TaskCompletionSource<FileTransferOfferV2>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.FileTransferOfferReceived += delegate (object? _, FileTransferOfferReceivedEventArgs e)
+            {
+                if (string.Equals(e.Message.TransferId, "transfer_route_completed_busy_1", StringComparison.Ordinal))
+                {
+                    firstOfferReceived.TrySetResult(e.Message);
+                }
+                else if (string.Equals(e.Message.TransferId, "transfer_route_completed_busy_2", StringComparison.Ordinal))
+                {
+                    secondOfferReceived.TrySetResult(e.Message);
+                }
+            };
+
+            await helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV2
+                {
+                    SessionId = sessionId,
+                    TransferId = "transfer_route_completed_busy_1",
+                    FileName = "first.bin",
+                    FileSizeBytes = 1024L,
+                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    FileTransferRoute = FileTransferRouteResolver.FileTunaV4Token,
+                },
+                cts.Token);
+            await firstOfferReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            helper.ObserveFileTransferRouteCompleted(
+                new FileTransferRouteCompletedNotification(
+                    sessionId,
+                    "transfer_route_completed_busy_1",
+                    FileTransferRouteResolver.FileTunaV4Token,
+                    FileTransferProtocol.ProtocolVersionV4));
+            host.ObserveFileTransferRouteCompleted(
+                new FileTransferRouteCompletedNotification(
+                    sessionId,
+                    "transfer_route_completed_busy_1",
+                    FileTransferRouteResolver.FileTunaV4Token,
+                    FileTransferProtocol.ProtocolVersionV4));
+
+            await helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV2
+                {
+                    SessionId = sessionId,
+                    TransferId = "transfer_route_completed_busy_2",
+                    FileName = "second.bin",
+                    FileSizeBytes = 1024L,
+                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    FileTransferRoute = FileTransferRouteResolver.FileTunaV4Token,
+                },
+                cts.Token);
+
+            var secondOffer = await secondOfferReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            Assert.Equal("transfer_route_completed_busy_2", secondOffer.TransferId);
+            var logTail = ReadOperationalLogText();
+            Assert.DoesNotContain("concurrent_transfer_busy", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public void FileTransferRouteStatus_DiagnosticRegularNknV6_IsDisabledByReleaseDefault()
     {
         using var diagnostic = new EnvironmentOverride("NLINK_FILETRANSFER_DIAGNOSTIC_REGULAR_NKN_V6", null);
@@ -4379,6 +4463,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.False(completedFromGenericControl);
             var genericProofTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=filetransfer_fallback_nkn_proof_waiting_for_v6_epoch;", genericProofTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_post_tuna_fallback_nkn_proved;", genericProofTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_post_tuna_fallback_cleanup_completed;", genericProofTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_live_v4_fallback_nkn_proved;", genericProofTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_live_v4_fallback_cleanup_completed;", genericProofTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_disable_handoff_completed;", genericProofTail, StringComparison.Ordinal);
@@ -4445,6 +4531,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Contains("proof=file_transfer_v4_bulk_frame_sent", logTail, StringComparison.Ordinal);
             Assert.Contains("event=filetransfer_fallback_nkn_proof_waiting_for_v6_epoch;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_fallback_nkn_proof_observed;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_post_tuna_fallback_nkn_proved;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_post_tuna_fallback_cleanup_completed;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_live_v4_fallback_nkn_proved;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_live_v4_fallback_cleanup_completed;", logTail, StringComparison.Ordinal);
         }

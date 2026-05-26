@@ -315,8 +315,7 @@ public sealed partial class SessionFileTransferService
         string transferId)
     {
         if (observer is null ||
-            terminalState != FileTransferTransferState.Completed ||
-            routeSelection.Route != FileTransferRoute.PostTunaFallbackV6)
+            terminalState != FileTransferTransferState.Completed)
         {
             return;
         }

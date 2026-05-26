@@ -373,7 +373,7 @@ public sealed partial class SessionFileTransferService
             if (outboundEpochToProbe is not null)
             {
                 await AnnounceAndProbeOutboundV6TransportEpochAsync(outboundEpochToProbe).ConfigureAwait(false);
-                SignalOutboundV4SenderPump(outboundEpochToProbe);
+                SignalOutboundSparseSenderPump(outboundEpochToProbe);
             }
 
             return false;
@@ -387,7 +387,7 @@ public sealed partial class SessionFileTransferService
         {
             if (outboundToSignal is not null)
             {
-                SignalOutboundV4SenderPump(outboundToSignal);
+                SignalOutboundSparseSenderPump(outboundToSignal);
             }
 
             return false;
@@ -401,7 +401,7 @@ public sealed partial class SessionFileTransferService
         {
             if (postTunaFallbackOutboundToSignal is not null)
             {
-                SignalOutboundV4SenderPump(postTunaFallbackOutboundToSignal);
+                SignalOutboundSparseSenderPump(postTunaFallbackOutboundToSignal);
             }
 
             return false;
@@ -422,7 +422,7 @@ public sealed partial class SessionFileTransferService
             if (outboundToProbe is not null)
             {
                 await AnnounceAndProbeOutboundV6TransportEpochAsync(outboundToProbe).ConfigureAwait(false);
-                SignalOutboundV4SenderPump(outboundToProbe);
+                SignalOutboundSparseSenderPump(outboundToProbe);
             }
 
             return false;
@@ -460,7 +460,7 @@ public sealed partial class SessionFileTransferService
 
             if (sparseRuntimeOutboundToSignal is not null)
             {
-                SignalOutboundV4SenderPump(sparseRuntimeOutboundToSignal);
+                SignalOutboundSparseSenderPump(sparseRuntimeOutboundToSignal);
             }
 
             return false;
@@ -532,7 +532,7 @@ public sealed partial class SessionFileTransferService
             context.V6EpochLivenessDeferralCount++;
             context.V6EpochLivenessDeferralUtc = now;
             context.PullTransportResumeRequestPending = true;
-            context.V4SenderPumpLastWakeReason = "post_tuna_fallback_peer_liveness_repair";
+            context.SparseSenderPumpLastWakeReason = "post_tuna_fallback_peer_liveness_repair";
 
             deferralCount = context.V6PeerLivenessRecoveryDeferralCount;
             remoteFrontier = context.RemoteNextExpectedChunkIndex;
@@ -601,7 +601,7 @@ public sealed partial class SessionFileTransferService
             context.V6EpochLivenessDeferralCount++;
             context.V6EpochLivenessDeferralUtc = now;
             context.PullTransportResumeRequestPending = true;
-                context.V4SenderPumpLastWakeReason = IsPrimaryRegularNknBulkV6ContextLocked(context)
+                context.SparseSenderPumpLastWakeReason = IsPrimaryRegularNknBulkV6ContextLocked(context)
                     ? "primary_regular_nkn_bulk_v6_checkpoint_liveness_recovery"
                     : "v6_sparse_runtime_peer_liveness_recovery";
 
@@ -647,7 +647,7 @@ public sealed partial class SessionFileTransferService
             context.V6EpochLivenessDeferralCount++;
             context.V6EpochLivenessDeferralUtc = now;
             context.PullTransportResumeRequestPending = true;
-            context.V4SenderPumpLastWakeReason = "peer_liveness_epoch_waiting";
+            context.SparseSenderPumpLastWakeReason = "peer_liveness_epoch_waiting";
             context.StatusMessage = GetV6TransportEpochStatus(context.V6TransportEpoch!);
 
             transportEpoch = context.V6TransportEpoch!.EpochId;
@@ -721,7 +721,7 @@ public sealed partial class SessionFileTransferService
             context.V6PeerLivenessRecoveryDeferredUtc = now;
             context.V6EpochLivenessDeferralCount++;
             context.V6EpochLivenessDeferralUtc = now;
-            context.V4SenderPumpLastWakeReason = "regular_nkn_feedback_repair";
+            context.SparseSenderPumpLastWakeReason = "regular_nkn_feedback_repair";
 
             deferralCount = context.V6PeerLivenessRecoveryDeferralCount;
             remoteFrontier = context.RemoteNextExpectedChunkIndex;
@@ -786,7 +786,7 @@ public sealed partial class SessionFileTransferService
             context.PullTransportSafetyReplayRearmCount = 0;
             context.PullTransportFrontierOnlyRepairActive = false;
             context.PullTransportFrontierOnlyRepairStartChunkIndex = -1;
-            context.V4SenderPumpLastWakeReason = "peer_liveness_recovery";
+            context.SparseSenderPumpLastWakeReason = "peer_liveness_recovery";
             StartOutboundV6TransportEpochLocked(
                 context,
                 "peer_liveness_stale_receive_recovery",

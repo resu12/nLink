@@ -71,7 +71,7 @@ public sealed partial class SessionFileTransferService
                 context.PullSentChunkCacheBytes = 0;
                 context.PullSenderFeedCreditWaitStartedUtc = null;
                 context.V4SenderCreditExhaustedSinceUtc = null;
-                if (context.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6)
+                if (context.RouteRuntime.UsesPostTunaFallbackV6Runtime)
                 {
                     StartOutboundPostTunaRecoveryLocked(context, "post_tuna_fallback_v6_route");
                 }
@@ -140,7 +140,7 @@ public sealed partial class SessionFileTransferService
                 {
                     if (await HandlePausedOutboundTransportAsync(context).ConfigureAwait(false))
                     {
-                        await StopOutboundV4SenderPumpAsync(context, senderPumpTask).ConfigureAwait(false);
+                        await StopOutboundSparseSenderPumpAsync(context, senderPumpTask).ConfigureAwait(false);
                         return;
                     }
 
@@ -168,11 +168,11 @@ public sealed partial class SessionFileTransferService
                 {
                     case FileTransferReceiverStateFrameV6 state:
                         ApplyOutboundV6ReceiverState(context, state, received.TransportKind);
-                        SignalOutboundV4SenderPump(context);
+                        SignalOutboundSparseSenderPump(context);
                         break;
                     case FileTransferFrontierRequestFrameV6 frontierRequest:
                         ApplyOutboundV6FrontierRequest(context, frontierRequest, received.TransportKind);
-                        SignalOutboundV4SenderPump(context);
+                        SignalOutboundSparseSenderPump(context);
                         break;
                     case FileTransferTransportEpochFrameV6:
                         LogPullDataFrameIgnored(context.TransferId, context.SessionId, frame, "transport_epoch_control_required");
@@ -245,7 +245,7 @@ public sealed partial class SessionFileTransferService
         OutboundTransferContext context,
         FileTransferDirection direction)
     {
-        if (context.RouteSelection.Route != FileTransferRoute.PostTunaFallbackV6)
+        if (!context.RouteRuntime.UsesPostTunaFallbackV6Runtime)
         {
             return;
         }
@@ -259,7 +259,7 @@ public sealed partial class SessionFileTransferService
         InboundTransferContext context,
         FileTransferDirection direction)
     {
-        if (context.RouteSelection.Route != FileTransferRoute.PostTunaFallbackV6)
+        if (!context.RouteRuntime.UsesPostTunaFallbackV6Runtime)
         {
             return;
         }
@@ -2381,7 +2381,7 @@ public sealed partial class SessionFileTransferService
                         context.V6SenderPumpLastWakeReason = "transport_paused";
                     }
 
-                    waitForSignal = context.ResetAndGetV4SenderPumpSignalTask();
+                    waitForSignal = context.ResetAndGetSparseSenderPumpSignalTask();
                 }
                 else if (TryStartOutboundV6ReceiveRecoveryForFeedbackStallLocked(
                              context,
@@ -2395,7 +2395,7 @@ public sealed partial class SessionFileTransferService
                     priorityRequestCount = context.V6PriorityRequestedChunks.Count;
                     normalRequestCount = context.V6NormalRequestedChunks.Count;
                     requestWaitReason = "receiver_feedback_stalled";
-                    waitForSignal = context.ResetAndGetV4SenderPumpSignalTask();
+                    waitForSignal = context.ResetAndGetSparseSenderPumpSignalTask();
                 }
                 else if (TryDequeueOutboundV6ChunkRunLocked(context, stream.CanSeek, out chunkIndicesToSend, out metadata))
                 {
@@ -2413,7 +2413,7 @@ public sealed partial class SessionFileTransferService
                     requestWaitReason = priorityRequestCount == 0 && normalRequestCount == 0
                         ? "no_active_requests"
                         : context.V6SenderPumpLastWakeReason;
-                    waitForSignal = context.ResetAndGetV4SenderPumpSignalTask();
+                    waitForSignal = context.ResetAndGetSparseSenderPumpSignalTask();
                 }
 
             }
@@ -2426,7 +2426,7 @@ public sealed partial class SessionFileTransferService
             if (feedbackStaleOutboundToProbe is not null)
             {
                 await AnnounceAndProbeOutboundV6TransportEpochAsync(feedbackStaleOutboundToProbe).ConfigureAwait(false);
-                SignalOutboundV4SenderPump(feedbackStaleOutboundToProbe);
+                SignalOutboundSparseSenderPump(feedbackStaleOutboundToProbe);
             }
 
             if (chunkIndicesToSend is { Count: > 0 })
@@ -2822,7 +2822,7 @@ public sealed partial class SessionFileTransferService
         if (outboundToProbe is not null)
         {
             await AnnounceAndProbeOutboundV6TransportEpochAsync(outboundToProbe).ConfigureAwait(false);
-            SignalOutboundV4SenderPump(outboundToProbe);
+            SignalOutboundSparseSenderPump(outboundToProbe);
         }
     }
 
@@ -3437,7 +3437,7 @@ public sealed partial class SessionFileTransferService
             ClearPreparedV6ChunkBatchInFlightMarkers(context, prepared);
             if (wakeSenderPumpAfterClear)
             {
-                SignalOutboundV4SenderPump(context);
+                SignalOutboundSparseSenderPump(context);
             }
         }
     }
@@ -3538,7 +3538,7 @@ public sealed partial class SessionFileTransferService
             RaiseTransferChanged(snapshot);
         }
 
-        SignalOutboundV4SenderPump(context);
+        SignalOutboundSparseSenderPump(context);
         return true;
     }
 
@@ -3705,7 +3705,7 @@ public sealed partial class SessionFileTransferService
         reason = "not_post_tuna_fallback";
         if (!ReferenceEquals(outboundTransfer, context) ||
             context.IsTerminal ||
-            context.RouteSelection.Route != FileTransferRoute.PostTunaFallbackV6)
+            !context.RouteRuntime.UsesPostTunaFallbackV6Runtime)
         {
             return 0;
         }
@@ -3846,7 +3846,7 @@ public sealed partial class SessionFileTransferService
                     context,
                     prepared,
                     out requeueReason);
-                if (context.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6)
+                if (context.RouteRuntime.UsesPostTunaFallbackV6Runtime)
                 {
                     exactFrontierRequeuedChunkCount = RequeuePostTunaFallbackTimeoutFrontierRepairLocked(
                         context,
@@ -3862,7 +3862,7 @@ public sealed partial class SessionFileTransferService
         LocalOperationalLog.Warn(
             "FileTransferService",
             $"event=filetransfer_v6_chunk_batch_send_timeout_requeue; transfer_id={context.TransferId}; session_id={context.SessionId}; start_chunk_index={prepared.StartChunkIndex}; batch_chunk_count={prepared.SegmentCount}; requeued_chunk_count={requeuedChunkCount}; reason={FormatProtocolLogValue(requeueReason)}; request_key={FormatProtocolLogValue(prepared.Metadata.RequestKey)}; priority={(prepared.Metadata.Priority ? 1 : 0)}; transport_epoch={prepared.Metadata.TransportEpoch}; regular_nkn_primary={(prepared.UseRegularNknPrimaryDelivery ? 1 : 0)}; regular_nkn_redundant={(prepared.UseRegularNknRedundantDelivery ? 1 : 0)}; repair_request_id={FormatProtocolLogValue(prepared.Metadata.RepairRequestId ?? "(none)")}");
-        if (context.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6)
+        if (context.RouteRuntime.UsesPostTunaFallbackV6Runtime)
         {
             LocalOperationalLog.Warn(
                 "FileTransferService",
@@ -4189,7 +4189,7 @@ public sealed partial class SessionFileTransferService
                 context.V6LastFrontierRequestId = null;
                 ResetInboundV6FrontierStallGraceLocked(context);
                 ResetInboundV6PostTunaFallbackFrontierRescueLocked(context);
-                if (context.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6)
+                if (context.RouteRuntime.UsesPostTunaFallbackV6Runtime)
                 {
                     StartInboundPostTunaRecoveryLocked(context, "post_tuna_fallback_v6_route");
                 }
@@ -5248,7 +5248,7 @@ public sealed partial class SessionFileTransferService
                 FileTransferDirection.Outbound,
                 context.TransferId,
                 context.SessionId,
-                context.RouteSelection.Route,
+                context.RouteRuntime,
                 context.LastRecoveredV6TransportEpoch,
                 context.LastRecoveredV6TransportEpochKind,
                 context.LastRecoveredV6TransportTargetTransport,
@@ -5275,7 +5275,7 @@ public sealed partial class SessionFileTransferService
         DateTimeOffset now,
         string reason)
     {
-        if (context.RouteSelection.Route != FileTransferRoute.PostTunaFallbackV6 ||
+        if (!context.RouteRuntime.UsesPostTunaFallbackV6Runtime ||
             context.RemoteNextExpectedChunkIndex >= context.ChunkCount ||
             context.UserPaused ||
             context.PeerPaused ||
@@ -5355,7 +5355,7 @@ public sealed partial class SessionFileTransferService
     }
 
     private static bool IsOutboundV6PostTunaFallbackNormalSendAheadFreezeActiveLocked(OutboundTransferContext context)
-        => context.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6 &&
+        => context.RouteRuntime.UsesPostTunaFallbackV6Runtime &&
            context.V6PostTunaFallbackNormalSendAheadFreezeChunkIndex >= 0 &&
            context.RemoteNextExpectedChunkIndex <= context.V6PostTunaFallbackNormalSendAheadFreezeChunkIndex;
 
@@ -5363,7 +5363,7 @@ public sealed partial class SessionFileTransferService
         OutboundTransferContext context,
         string reason)
     {
-        if (context.RouteSelection.Route != FileTransferRoute.PostTunaFallbackV6 ||
+        if (!context.RouteRuntime.UsesPostTunaFallbackV6Runtime ||
             context.RemoteNextExpectedChunkIndex >= context.ChunkCount)
         {
             return;
@@ -5387,7 +5387,7 @@ public sealed partial class SessionFileTransferService
         int previousRemoteFrontier,
         string reason)
     {
-        if (context.RouteSelection.Route != FileTransferRoute.PostTunaFallbackV6 ||
+        if (!context.RouteRuntime.UsesPostTunaFallbackV6Runtime ||
             context.V6PostTunaFallbackNormalSendAheadFreezeChunkIndex < 0 ||
             context.RemoteNextExpectedChunkIndex <= context.V6PostTunaFallbackNormalSendAheadFreezeChunkIndex)
         {
@@ -5546,7 +5546,7 @@ public sealed partial class SessionFileTransferService
     }
 
     private static bool IsInboundV6PostTunaFallbackSurvivalPathLocked(InboundTransferContext context)
-        => context.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6 &&
+        => context.RouteRuntime.UsesPostTunaFallbackV6Runtime &&
            context.NegotiatedDataProtocolVersion >= FileTransferProtocol.ProtocolVersionV6 &&
            context.V6DestinationMode == V6ReceiveDestinationMode.SparseSeekable &&
            !IsV6TransportEpochUnresolved(context.V6TransportEpoch) &&

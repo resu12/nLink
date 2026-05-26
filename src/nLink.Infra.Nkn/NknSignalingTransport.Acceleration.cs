@@ -258,8 +258,59 @@ public sealed partial class NknSignalingTransport
             targetTransport: FileTransferTransportKind.RegularNkn);
     }
 
+    public void ObserveRegularV4ControlFeedbackPressure(FileTransferRegularV4ControlFeedbackPressure pressure)
+    {
+        var sessionId = string.IsNullOrWhiteSpace(pressure.SessionId)
+            ? currentSessionSecurityState.SessionId?.Value
+            : pressure.SessionId.Trim();
+        var transferId = string.IsNullOrWhiteSpace(pressure.TransferId) ? "(none)" : pressure.TransferId.Trim();
+        var reason = string.IsNullOrWhiteSpace(pressure.Reason)
+            ? "regular_v4_control_feedback_pressure"
+            : SanitizeLogToken(pressure.Reason);
+
+        if (client is not RealNknClientAdapter realClient)
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=filetransfer_regular_v4_control_feedback_pressure_unsupported; session_id={SanitizeLogToken(sessionId ?? "none")}; transfer_id={SanitizeLogToken(transferId)}; reason={reason}");
+            return;
+        }
+
+        realClient.ReportRegularV4ControlFeedbackPressure(
+            transferId,
+            reason,
+            pressure.CreditExhaustedTimeMs,
+            pressure.FrontierLagChunks,
+            pressure.PendingRepairCount);
+    }
+
     public void ObserveFileTransferRouteCompleted(FileTransferRouteCompletedNotification notification)
     {
+        var normalizedTransferId = string.IsNullOrWhiteSpace(notification.TransferId)
+            ? string.Empty
+            : notification.TransferId.Trim();
+        if (!string.IsNullOrWhiteSpace(normalizedTransferId))
+        {
+            var clearedTransportState = false;
+            lock (controlSecureStateGate)
+            {
+                if (fileTransferStates.TryGetValue(normalizedTransferId, out var currentState) &&
+                    !currentState.IsTerminal)
+                {
+                    CommitFileTransferStateLocked(
+                        normalizedTransferId,
+                        currentState with { Phase = FileTransferTransportPhase.Completed });
+                    clearedTransportState = true;
+                }
+            }
+
+            if (clearedTransportState)
+            {
+                Log(
+                    $"event=filetransfer_transport_state_completed_by_service_terminal; transfer_id={SanitizeLogToken(normalizedTransferId)}; session_id={SanitizeLogToken(notification.SessionId)}; route={SanitizeLogToken(notification.RouteToken)}; protocol_version={notification.ProtocolVersion}");
+            }
+        }
+
         if (!string.Equals(notification.RouteToken, FileTransferRouteResolver.PostTunaFallbackV6Token, StringComparison.Ordinal) ||
             notification.ProtocolVersion != FileTransferProtocol.ProtocolVersionV6)
         {
@@ -1171,7 +1222,7 @@ public sealed partial class NknSignalingTransport
         if (!IsFileTransferFallbackNknProofPending() ||
             !TryDeserializeFileTransferDataFrameFromWire(payload, out var frame) ||
             frame is null ||
-            !TryMapLiveV4FileTransferFallbackNknProofKind(frame, "sent", out var proofKind))
+            !TryMapPostTunaFileTransferFallbackNknProofKind(frame, "sent", out var proofKind))
         {
             return;
         }
@@ -1416,7 +1467,7 @@ public sealed partial class NknSignalingTransport
                 fileTransferFallbackControlProofObserved = true;
                 requiresV6EpochRecovery =
                     (lanes & NknAccelerationLaneKind.File) == NknAccelerationLaneKind.File &&
-                    !IsLiveV4FileTransferFallbackNknProof(normalizedProofKind);
+                    !IsPostTunaFileTransferFallbackNknProof(normalizedProofKind);
                 bulkProofObserved = fileTransferFallbackBulkProofObserved;
                 controlProofObserved = fileTransferFallbackControlProofObserved;
                 if (requiresV6EpochRecovery)
@@ -1468,11 +1519,11 @@ public sealed partial class NknSignalingTransport
 
         if ((lanes & NknAccelerationLaneKind.File) == NknAccelerationLaneKind.File)
         {
-            if (IsLiveV4FileTransferFallbackNknProof(normalizedProofKind))
+            if (IsPostTunaFileTransferFallbackNknProof(normalizedProofKind))
             {
                 LocalOperationalLog.Info(
                     "NKN.Tuna",
-                    $"event=filetransfer_live_v4_fallback_nkn_proved; session_id={SanitizeLogToken(pendingSessionId ?? "none")}; reason={reason}; proof={normalizedProofKind}; lanes={FormatAccelerationLanesForLog(lanes)}");
+                    $"event=filetransfer_post_tuna_fallback_nkn_proved; session_id={SanitizeLogToken(pendingSessionId ?? "none")}; reason={reason}; proof={normalizedProofKind}; lanes={FormatAccelerationLanesForLog(lanes)}");
             }
 
             MarkTunaFallbackLaneState(
@@ -1486,11 +1537,11 @@ public sealed partial class NknSignalingTransport
                 requiresResumeRequest: true,
                 handoffKind: FileTransferTransportHandoffKind.TunaToNormalFallback,
                 targetTransport: FileTransferTransportKind.RegularNkn);
-            if (IsLiveV4FileTransferFallbackNknProof(normalizedProofKind))
+            if (IsPostTunaFileTransferFallbackNknProof(normalizedProofKind))
             {
                 LocalOperationalLog.Info(
                     "NKN.Tuna",
-                    $"event=filetransfer_live_v4_fallback_cleanup_completed; session_id={SanitizeLogToken(pendingSessionId ?? "none")}; reason={reason}; proof={normalizedProofKind}; lanes={FormatAccelerationLanesForLog(lanes)}");
+                    $"event=filetransfer_post_tuna_fallback_cleanup_completed; session_id={SanitizeLogToken(pendingSessionId ?? "none")}; reason={reason}; proof={normalizedProofKind}; lanes={FormatAccelerationLanesForLog(lanes)}");
             }
         }
 
@@ -1657,7 +1708,7 @@ public sealed partial class NknSignalingTransport
         return proofKind.Length > 0;
     }
 
-    private static bool TryMapLiveV4FileTransferFallbackNknProofKind(
+    private static bool TryMapPostTunaFileTransferFallbackNknProofKind(
         FileTransferDataFrame frame,
         string direction,
         out string proofKind)
@@ -1706,7 +1757,7 @@ public sealed partial class NknSignalingTransport
                "file_transfer_v6_cancel_frame_received" or
                "file_transfer_v6_error_frame_received";
 
-    private static bool IsLiveV4FileTransferFallbackNknProof(string proofKind)
+    private static bool IsPostTunaFileTransferFallbackNknProof(string proofKind)
         => false;
 
     private static string MapSecureMessageTypeForProof(MsgType messageType)

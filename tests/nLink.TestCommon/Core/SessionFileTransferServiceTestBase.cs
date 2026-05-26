@@ -166,7 +166,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         return builder.ToString();
     }
 
-    protected sealed class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferRouteCompletionObserver, ITransportAccelerationStatus
+    protected sealed class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRouteCompletionObserver, ITransportAccelerationStatus
     {
         private readonly string sessionId;
         private readonly ConcurrentDictionary<string, LoopbackDataSession> dataSessions = new(StringComparer.Ordinal);
@@ -233,6 +233,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         public ConcurrentQueue<FileTransferDataFrame> SentDataFrames { get; } = [];
         public ConcurrentQueue<FileTransferV6TransportEpochSnapshot> ObservedV6TransportEpochs { get; } = [];
         public ConcurrentQueue<FileTransferReceiveRecoveryRequest> ReceiveRecoveryRequests { get; } = [];
+        public ConcurrentQueue<FileTransferRegularV4ControlFeedbackPressure> RegularV4ControlFeedbackPressures { get; } = [];
         public ConcurrentQueue<FileTransferRouteCompletedNotification> RouteCompletionNotifications { get; } = [];
 
         public event EventHandler<IncomingJoinRequestEventArgs>? IncomingJoinRequest;
@@ -272,6 +273,9 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
 
         public void RequestFileTransferReceiveRecovery(FileTransferReceiveRecoveryRequest request)
             => ReceiveRecoveryRequests.Enqueue(request);
+
+        public void ObserveRegularV4ControlFeedbackPressure(FileTransferRegularV4ControlFeedbackPressure pressure)
+            => RegularV4ControlFeedbackPressures.Enqueue(pressure);
 
         public void ObserveFileTransferRouteCompleted(FileTransferRouteCompletedNotification notification)
         {

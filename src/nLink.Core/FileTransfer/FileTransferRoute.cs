@@ -31,6 +31,26 @@ internal enum FileTransferRouteRuntimeProfile
     PrimaryRegularNknBulkV6,
 }
 
+internal enum FileTransferRouteSenderPumpFamily
+{
+    V4SparseCredit,
+    V6RequestDriven,
+    V6SparseCredit,
+}
+
+internal enum FileTransferRouteReceiverPumpFamily
+{
+    V4SparseCredit,
+    V6RequestDriven,
+    V6SparseCredit,
+}
+
+internal enum FileTransferRouteFeedbackEnvelopeFamily
+{
+    V4,
+    V6,
+}
+
 internal enum FileTransferRouteBridgeRecoveryPolicy
 {
     RegularNknV4Fast,
@@ -43,7 +63,6 @@ internal enum FileTransferRouteLivenessTerminalPolicy
 {
     RegularNknV4Fast,
     FileTunaV4Fast,
-    TunaV6Strict,
     PostTunaFallbackV6Repair,
     DiagnosticRegularNknV6,
 }
@@ -96,7 +115,99 @@ internal readonly record struct FileTransferRouteSelection(
     FileTransferTransportHandoffKind HandoffKind,
     FileTransferRouteBridgeRecoveryPolicy BridgeRecoveryPolicy,
     FileTransferRouteLivenessTerminalPolicy LivenessTerminalPolicy,
-    string SelectionReason);
+    string SelectionReason)
+{
+    public FileTransferRouteRuntimeDescriptor RuntimeDescriptor =>
+        FileTransferRouteRuntimeDescriptor.FromSelection(this);
+}
+
+internal readonly record struct FileTransferRouteRuntimeDescriptor(
+    FileTransferRoute Route,
+    string TelemetryToken,
+    int ProtocolVersion,
+    FileTransferRouteRuntimeProfile RuntimeProfile,
+    FileTransferFrameFamily FrameFamily,
+    FileTransferRouteSenderPumpFamily SenderPumpFamily,
+    FileTransferRouteReceiverPumpFamily ReceiverPumpFamily,
+    FileTransferRouteFeedbackEnvelopeFamily FeedbackEnvelopeFamily,
+    FileTransferRouteBridgeRecoveryPolicy BridgeRecoveryPolicy,
+    FileTransferRouteLivenessTerminalPolicy LivenessTerminalPolicy,
+    bool IsDiagnosticOnly,
+    bool AllowsPostTunaFallbackRecovery)
+{
+    public static FileTransferRouteRuntimeDescriptor FromSelection(FileTransferRouteSelection selection)
+        => selection.Route switch
+        {
+            FileTransferRoute.FileTunaV4 => new FileTransferRouteRuntimeDescriptor(
+                selection.Route,
+                selection.TelemetryToken,
+                selection.ProtocolVersion,
+                selection.RuntimeProfile,
+                selection.FrameFamily,
+                FileTransferRouteSenderPumpFamily.V4SparseCredit,
+                FileTransferRouteReceiverPumpFamily.V4SparseCredit,
+                FileTransferRouteFeedbackEnvelopeFamily.V4,
+                selection.BridgeRecoveryPolicy,
+                selection.LivenessTerminalPolicy,
+                IsDiagnosticOnly: false,
+                AllowsPostTunaFallbackRecovery: false),
+            FileTransferRoute.PostTunaFallbackV6 => new FileTransferRouteRuntimeDescriptor(
+                selection.Route,
+                selection.TelemetryToken,
+                selection.ProtocolVersion,
+                selection.RuntimeProfile,
+                selection.FrameFamily,
+                FileTransferRouteSenderPumpFamily.V6RequestDriven,
+                FileTransferRouteReceiverPumpFamily.V6RequestDriven,
+                FileTransferRouteFeedbackEnvelopeFamily.V6,
+                selection.BridgeRecoveryPolicy,
+                selection.LivenessTerminalPolicy,
+                IsDiagnosticOnly: false,
+                AllowsPostTunaFallbackRecovery: true),
+            FileTransferRoute.DiagnosticRegularNknV6 => new FileTransferRouteRuntimeDescriptor(
+                selection.Route,
+                selection.TelemetryToken,
+                selection.ProtocolVersion,
+                selection.RuntimeProfile,
+                selection.FrameFamily,
+                FileTransferRouteSenderPumpFamily.V6SparseCredit,
+                FileTransferRouteReceiverPumpFamily.V6SparseCredit,
+                FileTransferRouteFeedbackEnvelopeFamily.V6,
+                selection.BridgeRecoveryPolicy,
+                selection.LivenessTerminalPolicy,
+                IsDiagnosticOnly: true,
+                AllowsPostTunaFallbackRecovery: false),
+            _ => new FileTransferRouteRuntimeDescriptor(
+                FileTransferRoute.RegularNknV4Fast,
+                selection.TelemetryToken,
+                selection.ProtocolVersion,
+                selection.RuntimeProfile,
+                selection.FrameFamily,
+                FileTransferRouteSenderPumpFamily.V4SparseCredit,
+                FileTransferRouteReceiverPumpFamily.V4SparseCredit,
+                FileTransferRouteFeedbackEnvelopeFamily.V4,
+                selection.BridgeRecoveryPolicy,
+                selection.LivenessTerminalPolicy,
+                IsDiagnosticOnly: false,
+                AllowsPostTunaFallbackRecovery: false),
+        };
+
+    public bool UsesRegularNknV4FastRuntime => Route == FileTransferRoute.RegularNknV4Fast;
+
+    public bool UsesFileTunaV4Runtime => Route == FileTransferRoute.FileTunaV4;
+
+    public bool UsesPostTunaFallbackV6Runtime => Route == FileTransferRoute.PostTunaFallbackV6;
+
+    public bool UsesDiagnosticRegularNknV6Runtime => Route == FileTransferRoute.DiagnosticRegularNknV6;
+
+    public bool UsesV4SparsePump => SenderPumpFamily == FileTransferRouteSenderPumpFamily.V4SparseCredit;
+
+    public bool UsesV6RequestPump => SenderPumpFamily == FileTransferRouteSenderPumpFamily.V6RequestDriven;
+
+    public bool UsesV6SparsePump => SenderPumpFamily == FileTransferRouteSenderPumpFamily.V6SparseCredit;
+
+    public bool UsesV6FeedbackEnvelope => FeedbackEnvelopeFamily == FileTransferRouteFeedbackEnvelopeFamily.V6;
+}
 
 internal static class FileTransferRouteResolver
 {

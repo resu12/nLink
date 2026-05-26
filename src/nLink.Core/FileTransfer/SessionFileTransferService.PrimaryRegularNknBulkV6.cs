@@ -49,14 +49,12 @@ public sealed partial class SessionFileTransferService
     }
 
     private static bool IsPrimaryRegularNknBulkV6ContextLocked(OutboundTransferContext context)
-        => context.RuntimeProfile == FileTransferRuntimeProfile.PrimaryRegularNknBulkV6 &&
-           context.V6RegularNknBulkSparseProfileActive &&
+        => context.RouteRuntime.UsesV6SparsePump &&
            context.NegotiatedDataProtocolVersion >= FileTransferProtocol.ProtocolVersionV6 &&
            IsOutboundV6PrimaryRegularNknWithoutTunaRecoveryLocked(context);
 
     private static bool IsPrimaryRegularNknBulkV6ContextLocked(InboundTransferContext context)
-        => context.RuntimeProfile == FileTransferRuntimeProfile.PrimaryRegularNknBulkV6 &&
-           context.V6RegularNknBulkSparseProfileActive &&
+        => context.RouteRuntime.UsesV6SparsePump &&
            context.NegotiatedDataProtocolVersion >= FileTransferProtocol.ProtocolVersionV6 &&
            IsInboundV6PrimaryRegularNknWithoutTunaRecoveryLocked(context);
 

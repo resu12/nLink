@@ -76,6 +76,13 @@ public sealed class FileTransferRouteResolverTests : SessionFileTransferServiceT
         Assert.Equal(FileTransferRouteBridgeRecoveryPolicy.TunaStrictRecovery, selection.BridgeRecoveryPolicy);
         Assert.Equal(FileTransferRouteLivenessTerminalPolicy.FileTunaV4Fast, selection.LivenessTerminalPolicy);
         Assert.Equal("file_tuna_active", selection.SelectionReason);
+        AssertRouteRuntimeDescriptor(
+            selection,
+            FileTransferRouteSenderPumpFamily.V4SparseCredit,
+            FileTransferRouteReceiverPumpFamily.V4SparseCredit,
+            FileTransferRouteFeedbackEnvelopeFamily.V4,
+            isDiagnosticOnly: false,
+            allowsPostTunaFallbackRecovery: false);
     }
 
     [Fact]
@@ -97,6 +104,13 @@ public sealed class FileTransferRouteResolverTests : SessionFileTransferServiceT
         Assert.Equal(FileTransferRouteBridgeRecoveryPolicy.PostTunaFallbackStrictRecovery, selection.BridgeRecoveryPolicy);
         Assert.Equal(FileTransferRouteLivenessTerminalPolicy.PostTunaFallbackV6Repair, selection.LivenessTerminalPolicy);
         Assert.Equal("post_tuna_file_fallback_active", selection.SelectionReason);
+        AssertRouteRuntimeDescriptor(
+            selection,
+            FileTransferRouteSenderPumpFamily.V6RequestDriven,
+            FileTransferRouteReceiverPumpFamily.V6RequestDriven,
+            FileTransferRouteFeedbackEnvelopeFamily.V6,
+            isDiagnosticOnly: false,
+            allowsPostTunaFallbackRecovery: true);
     }
 
     [Fact]
@@ -119,6 +133,13 @@ public sealed class FileTransferRouteResolverTests : SessionFileTransferServiceT
         Assert.Equal(FileTransferRouteBridgeRecoveryPolicy.PrimaryRegularNknQuietRecovery, diagnosticSelection.BridgeRecoveryPolicy);
         Assert.Equal(FileTransferRouteLivenessTerminalPolicy.DiagnosticRegularNknV6, diagnosticSelection.LivenessTerminalPolicy);
         Assert.Equal("diagnostic_regular_nkn_v6_opt_in", diagnosticSelection.SelectionReason);
+        AssertRouteRuntimeDescriptor(
+            diagnosticSelection,
+            FileTransferRouteSenderPumpFamily.V6SparseCredit,
+            FileTransferRouteReceiverPumpFamily.V6SparseCredit,
+            FileTransferRouteFeedbackEnvelopeFamily.V6,
+            isDiagnosticOnly: true,
+            allowsPostTunaFallbackRecovery: false);
     }
 
     [Fact]
@@ -135,6 +156,20 @@ public sealed class FileTransferRouteResolverTests : SessionFileTransferServiceT
         Assert.Equal(FileTransferProtocol.ProtocolVersionV6, selection.ProtocolVersion);
         Assert.Equal("post_tuna_fallback_v6", selection.TelemetryToken);
         Assert.Equal(FileTransferTransportHandoffKind.TunaToNormalFallback, selection.HandoffKind);
+    }
+
+    [Fact]
+    public void ProductionFileTransferSource_DoesNotReviveStaleLiveV4OrFileTunaV6Vocabulary()
+    {
+        var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var fileTransferSourceRoot = Path.Combine(repoRoot, "src");
+        var source = string.Join(
+            "\n",
+            Directory.EnumerateFiles(fileTransferSourceRoot, "*.cs", SearchOption.TopDirectoryOnly)
+                .Select(File.ReadAllText));
+
+        Assert.DoesNotContain("live_v4", source, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("file_tuna_v6", source, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -171,5 +206,36 @@ public sealed class FileTransferRouteResolverTests : SessionFileTransferServiceT
         Assert.Equal(FileTransferRouteBridgeRecoveryPolicy.RegularNknV4Fast, selection.BridgeRecoveryPolicy);
         Assert.Equal(FileTransferRouteLivenessTerminalPolicy.RegularNknV4Fast, selection.LivenessTerminalPolicy);
         Assert.Equal(reason, selection.SelectionReason);
+        AssertRouteRuntimeDescriptor(
+            selection,
+            FileTransferRouteSenderPumpFamily.V4SparseCredit,
+            FileTransferRouteReceiverPumpFamily.V4SparseCredit,
+            FileTransferRouteFeedbackEnvelopeFamily.V4,
+            isDiagnosticOnly: false,
+            allowsPostTunaFallbackRecovery: false);
+    }
+
+    private static void AssertRouteRuntimeDescriptor(
+        FileTransferRouteSelection selection,
+        FileTransferRouteSenderPumpFamily senderPumpFamily,
+        FileTransferRouteReceiverPumpFamily receiverPumpFamily,
+        FileTransferRouteFeedbackEnvelopeFamily feedbackEnvelopeFamily,
+        bool isDiagnosticOnly,
+        bool allowsPostTunaFallbackRecovery)
+    {
+        var descriptor = selection.RuntimeDescriptor;
+
+        Assert.Equal(selection.Route, descriptor.Route);
+        Assert.Equal(selection.TelemetryToken, descriptor.TelemetryToken);
+        Assert.Equal(selection.ProtocolVersion, descriptor.ProtocolVersion);
+        Assert.Equal(selection.RuntimeProfile, descriptor.RuntimeProfile);
+        Assert.Equal(selection.FrameFamily, descriptor.FrameFamily);
+        Assert.Equal(selection.BridgeRecoveryPolicy, descriptor.BridgeRecoveryPolicy);
+        Assert.Equal(selection.LivenessTerminalPolicy, descriptor.LivenessTerminalPolicy);
+        Assert.Equal(senderPumpFamily, descriptor.SenderPumpFamily);
+        Assert.Equal(receiverPumpFamily, descriptor.ReceiverPumpFamily);
+        Assert.Equal(feedbackEnvelopeFamily, descriptor.FeedbackEnvelopeFamily);
+        Assert.Equal(isDiagnosticOnly, descriptor.IsDiagnosticOnly);
+        Assert.Equal(allowsPostTunaFallbackRecovery, descriptor.AllowsPostTunaFallbackRecovery);
     }
 }

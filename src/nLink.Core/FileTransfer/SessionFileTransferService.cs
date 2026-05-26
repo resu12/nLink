@@ -198,6 +198,8 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int PullV4FileOnlySparseSoftLimitedRecoveryHoldMsMax = 4000;
     private const int PullV4FileOnlySparseToleratedReorderThreshold = 64;
     private const int PullV4FileOnlySparseSoftLimitedReorderThresholdDefault = 512;
+    private const int PullV4RegularNknControlFeedbackPressureMinCreditExhaustedMs = 30_000;
+    private const int PullV4RegularNknControlFeedbackPressureMinFrontierLagChunks = 64;
     private const int PullV4FileOnlySparseSoftLimitedReorderThresholdMin = 64;
     private const int PullV4FileOnlySparseSoftLimitedReorderThresholdMax = 2048;
     private const int PullV4FileOnlySparseSoftGapStallMsDefault = 1500;
@@ -1134,9 +1136,9 @@ public sealed partial class SessionFileTransferService : IDisposable
                 direction = FileTransferDirection.Outbound;
                 state = outboundTransfer.State;
                 transportPaused = outboundTransfer.PullTransportPaused;
-                outboundTransfer.V4SenderPumpLastWakeReason = "user_paused";
+                outboundTransfer.SparseSenderPumpLastWakeReason = "user_paused";
                 outboundTransfer.ResetV6SenderPipelineCancellation();
-                outboundTransfer.SignalV4SenderPump();
+                outboundTransfer.SignalSparseSenderPump();
                 pausedOutboundContext = !string.IsNullOrWhiteSpace(outboundTransfer.SessionId)
                     ? outboundTransfer
                     : null;
@@ -1238,7 +1240,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 state = outboundTransfer.State;
                 transportPaused = outboundTransfer.PullTransportPaused;
                 ResetOutboundV4AcceptedForUserResumeLocked(outboundTransfer);
-                outboundTransfer.V4SenderPumpLastWakeReason = "user_resumed";
+                outboundTransfer.SparseSenderPumpLastWakeReason = "user_resumed";
                 resumedOutboundPumpContext = outboundTransfer;
                 resumedOutboundContext = !string.IsNullOrWhiteSpace(outboundTransfer.SessionId)
                     ? outboundTransfer
@@ -1286,7 +1288,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 CancellationToken.None);
         }
 
-        resumedOutboundPumpContext?.SignalV4SenderPump();
+        resumedOutboundPumpContext?.SignalSparseSenderPump();
 
         if (resumedInboundContext is not null)
         {
@@ -1494,86 +1496,88 @@ public sealed partial class SessionFileTransferService : IDisposable
                 return;
             }
 
-            switch (context.RouteSelection.Route)
+            var routeRuntime = context.RouteRuntime;
+            if (routeRuntime.UsesV4SparsePump)
             {
-                case FileTransferRoute.RegularNknV4Fast:
-                case FileTransferRoute.FileTunaV4:
-                    LogV4Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Outbound, context.RouteSelection);
-                    if ((sessionScreenShareActive || sessionScreenShareDegraded) && !ShouldAllowV4DuringScreenShare())
-                    {
-                        await FailOutboundV4Async(
-                            context,
-                            dataSession: null,
-                            V4FileOnlyRequiredErrorCode,
-                            "V4 file-transfer send is currently file-only.",
-                            notifyPeer: false).ConfigureAwait(false);
-                        return;
-                    }
-
-                    LogV4MixedScreenShareEnabled(context.TransferId, context.SessionId, FileTransferDirection.Outbound, context.RouteSelection);
-                    await RunOutboundRegularNknV4Async(context).ConfigureAwait(false);
-                    return;
-
-                case FileTransferRoute.PostTunaFallbackV6:
-                    LogV6Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Outbound, context.RouteSelection);
-                    if ((sessionScreenShareActive || sessionScreenShareDegraded) && !ShouldAllowV4DuringScreenShare())
-                    {
-                        await FailOutboundV4Async(
-                            context,
-                            dataSession: null,
-                            V4FileOnlyRequiredErrorCode,
-                            "V6 file-transfer send is currently file-only.",
-                            notifyPeer: false).ConfigureAwait(false);
-                        return;
-                    }
-
-                    LogV4MixedScreenShareEnabled(context.TransferId, context.SessionId, FileTransferDirection.Outbound, context.RouteSelection);
-                    var v6RuntimeSelection = ResolveFileTransferRuntimeProfile(context);
-                    LogFileTransferBridgeRecoveryPolicySelected(
-                        context.TransferId,
-                        context.SessionId,
-                        FileTransferDirection.Outbound,
-                        v6RuntimeSelection,
-                        context.RouteSelection);
-                    await RunOutboundV6SenderAsync(context).ConfigureAwait(false);
-                    return;
-
-                case FileTransferRoute.DiagnosticRegularNknV6:
-                    LogV6Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Outbound, context.RouteSelection);
-                    if ((sessionScreenShareActive || sessionScreenShareDegraded) && !ShouldAllowV4DuringScreenShare())
-                    {
-                        await FailOutboundV4Async(
-                            context,
-                            dataSession: null,
-                            V4FileOnlyRequiredErrorCode,
-                            "V6 file-transfer send is currently file-only.",
-                            notifyPeer: false).ConfigureAwait(false);
-                        return;
-                    }
-
-                    LogV4MixedScreenShareEnabled(context.TransferId, context.SessionId, FileTransferDirection.Outbound, context.RouteSelection);
-                    var diagnosticRuntimeSelection = ResolveFileTransferRuntimeProfile(context);
-                    LogFileTransferBridgeRecoveryPolicySelected(
-                        context.TransferId,
-                        context.SessionId,
-                        FileTransferDirection.Outbound,
-                        diagnosticRuntimeSelection,
-                        context.RouteSelection);
-                    LogPrimaryRegularNknBulkV6Selected(context.TransferId, context.SessionId, FileTransferDirection.Outbound, diagnosticRuntimeSelection, context.RouteSelection);
-                    await RunOutboundPrimaryRegularNknBulkV6Async(context).ConfigureAwait(false);
-                    return;
-
-                default:
-                    await TransitionOutboundToTerminalAsync(
+                LogV4Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Outbound, context.RouteSelection);
+                if ((sessionScreenShareActive || sessionScreenShareDegraded) && !ShouldAllowV4DuringScreenShare())
+                {
+                    await FailOutboundV4Async(
                         context,
-                        FileTransferTransferState.Failed,
-                        errorCode: TransportIncompatibleErrorCode,
-                        statusMessage: "Unsupported file-transfer route.",
-                        notifyPeer: false,
-                        cancelReason: null,
-                        ct: CancellationToken.None).ConfigureAwait(false);
+                        dataSession: null,
+                        V4FileOnlyRequiredErrorCode,
+                        "V4 file-transfer send is currently file-only.",
+                        notifyPeer: false).ConfigureAwait(false);
                     return;
+                }
+
+                LogV4MixedScreenShareEnabled(context.TransferId, context.SessionId, FileTransferDirection.Outbound, context.RouteSelection);
+                await RunOutboundRegularNknV4Async(context).ConfigureAwait(false);
+                return;
             }
+
+            if (routeRuntime.UsesV6RequestPump)
+            {
+                LogV6Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Outbound, context.RouteSelection);
+                if ((sessionScreenShareActive || sessionScreenShareDegraded) && !ShouldAllowV4DuringScreenShare())
+                {
+                    await FailOutboundV4Async(
+                        context,
+                        dataSession: null,
+                        V4FileOnlyRequiredErrorCode,
+                        "V6 file-transfer send is currently file-only.",
+                        notifyPeer: false).ConfigureAwait(false);
+                    return;
+                }
+
+                LogV4MixedScreenShareEnabled(context.TransferId, context.SessionId, FileTransferDirection.Outbound, context.RouteSelection);
+                var v6RuntimeSelection = ResolveFileTransferRuntimeProfile(context);
+                LogFileTransferBridgeRecoveryPolicySelected(
+                    context.TransferId,
+                    context.SessionId,
+                    FileTransferDirection.Outbound,
+                    v6RuntimeSelection,
+                    context.RouteSelection);
+                await RunOutboundV6SenderAsync(context).ConfigureAwait(false);
+                return;
+            }
+
+            if (routeRuntime.UsesV6SparsePump)
+            {
+                LogV6Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Outbound, context.RouteSelection);
+                if ((sessionScreenShareActive || sessionScreenShareDegraded) && !ShouldAllowV4DuringScreenShare())
+                {
+                    await FailOutboundV4Async(
+                        context,
+                        dataSession: null,
+                        V4FileOnlyRequiredErrorCode,
+                        "V6 file-transfer send is currently file-only.",
+                        notifyPeer: false).ConfigureAwait(false);
+                    return;
+                }
+
+                LogV4MixedScreenShareEnabled(context.TransferId, context.SessionId, FileTransferDirection.Outbound, context.RouteSelection);
+                var diagnosticRuntimeSelection = ResolveFileTransferRuntimeProfile(context);
+                LogFileTransferBridgeRecoveryPolicySelected(
+                    context.TransferId,
+                    context.SessionId,
+                    FileTransferDirection.Outbound,
+                    diagnosticRuntimeSelection,
+                    context.RouteSelection);
+                LogPrimaryRegularNknBulkV6Selected(context.TransferId, context.SessionId, FileTransferDirection.Outbound, diagnosticRuntimeSelection, context.RouteSelection);
+                await RunOutboundPrimaryRegularNknBulkV6Async(context).ConfigureAwait(false);
+                return;
+            }
+
+            await TransitionOutboundToTerminalAsync(
+                context,
+                FileTransferTransferState.Failed,
+                errorCode: TransportIncompatibleErrorCode,
+                statusMessage: "Unsupported file-transfer route.",
+                notifyPeer: false,
+                cancelReason: null,
+                ct: CancellationToken.None).ConfigureAwait(false);
+            return;
         }
         catch (OperationCanceledException) when (context.LifetimeCts.IsCancellationRequested)
         {
@@ -2142,7 +2146,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             return;
         }
 
-        if (context.RouteSelection.Route is FileTransferRoute.RegularNknV4Fast or FileTransferRoute.FileTunaV4)
+        if (context.RouteRuntime.UsesV4SparsePump)
         {
             LogV4Negotiated(message.TransferId, message.SessionId, FileTransferDirection.Inbound, context.RouteSelection);
             if ((sessionScreenShareActive || sessionScreenShareDegraded) && !ShouldAllowV4DuringScreenShare())
@@ -2205,7 +2209,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             return;
         }
 
-        if (context.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6)
+        if (context.RouteRuntime.UsesV6RequestPump)
         {
             LogV6Negotiated(message.TransferId, message.SessionId, FileTransferDirection.Inbound, context.RouteSelection);
             if ((sessionScreenShareActive || sessionScreenShareDegraded) && !ShouldAllowV4DuringScreenShare())
@@ -2282,7 +2286,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             return;
         }
 
-        if (context.RouteSelection.Route == FileTransferRoute.DiagnosticRegularNknV6)
+        if (context.RouteRuntime.UsesV6SparsePump)
         {
             LogV6Negotiated(message.TransferId, message.SessionId, FileTransferDirection.Inbound, context.RouteSelection);
             if ((sessionScreenShareActive || sessionScreenShareDegraded) && !ShouldAllowV4DuringScreenShare())
@@ -2427,8 +2431,6 @@ public sealed partial class SessionFileTransferService : IDisposable
         bool inboundActivationPauseResumed = false;
         bool outboundEpochStartedWhileUnavailable = false;
         bool inboundEpochStartedWhileUnavailable = false;
-        bool outboundLiveV4FallbackStartedWhileUnavailable = false;
-        bool inboundLiveV4FallbackStartedWhileUnavailable = false;
 
         lock (gate)
         {
@@ -2543,7 +2545,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                     ScheduleOutboundV4TransportPauseControlRetry(outboundPaused, paused: true, effectiveReason);
                 }
 
-                SignalOutboundV4SenderPump(outboundPaused);
+                SignalOutboundSparseSenderPump(outboundPaused);
             }
         }
 
@@ -2556,15 +2558,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             }
         }
 
-        if (outboundLiveV4FallbackStartedWhileUnavailable && outboundToResume is not null)
-        {
-            LogTransportPaused(FileTransferDirection.Outbound, outboundToResume.TransferId, outboundToResume.SessionId, effectiveReason);
-            LocalOperationalLog.Info(
-                "FileTransferService",
-                $"event=filetransfer_live_v4_fallback_rebind_started; direction=outbound; transfer_id={outboundToResume.TransferId}; session_id={outboundToResume.SessionId}; reason={FormatProtocolLogValue(effectiveReason)}; rebind_generation={outboundToResume.PullTransportRebindGeneration}; remote_committed_chunk={outboundToResume.RemoteNextExpectedChunkIndex}; highest_sent_chunk={Math.Max(-1, outboundToResume.ChunksAcceptedForTransport - 1)}; availability_state=unavailable");
-            SignalOutboundV4SenderPump(outboundToResume);
-        }
-        else if (outboundResumed && outboundToResume is not null)
+        if (outboundResumed && outboundToResume is not null)
         {
             LogTransportResumed(FileTransferDirection.Outbound, outboundToResume.TransferId, outboundToResume.SessionId, effectiveReason, effectiveRequiresResumeRequest);
             if (outboundActivationPauseResumed)
@@ -2621,7 +2615,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                         $"event=filetransfer_transport_rebind_generation_started; direction=outbound; transfer_id={outboundToResume.TransferId}; session_id={outboundToResume.SessionId}; reason={FormatProtocolLogValue(effectiveReason)}; rebind_generation={outboundToResume.PullTransportRebindGeneration}; remote_committed_chunk={outboundToResume.RemoteNextExpectedChunkIndex}; highest_sent_chunk={Math.Max(-1, outboundToResume.ChunksAcceptedForTransport - 1)}");
                 }
 
-                SignalOutboundV4SenderPump(outboundToResume);
+                SignalOutboundSparseSenderPump(outboundToResume);
             }
         }
         else if (outboundEpochStartedWhileUnavailable && outboundToResume is not null)
@@ -2635,32 +2629,10 @@ public sealed partial class SessionFileTransferService : IDisposable
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=filetransfer_transport_epoch_started_while_unavailable; direction=outbound; transfer_id={outboundToResume.TransferId}; session_id={outboundToResume.SessionId}; reason={FormatProtocolLogValue(effectiveReason)}; rebind_generation={outboundToResume.PullTransportRebindGeneration}; target_transport={FormatFileTransferTransportKind(effectiveTargetTransport)}");
-            SignalOutboundV4SenderPump(outboundToResume);
+            SignalOutboundSparseSenderPump(outboundToResume);
         }
 
-        if (inboundLiveV4FallbackStartedWhileUnavailable && inboundToResume is not null)
-        {
-            LogTransportResumed(FileTransferDirection.Inbound, inboundToResume.TransferId, inboundToResume.SessionId, effectiveReason, effectiveRequiresResumeRequest);
-            LocalOperationalLog.Info(
-                "FileTransferService",
-                $"event=filetransfer_live_v4_fallback_rebind_started; direction=inbound; transfer_id={inboundToResume.TransferId}; session_id={inboundToResume.SessionId}; reason={FormatProtocolLogValue(effectiveReason)}; rebind_generation={inboundToResume.PullTransportRebindGeneration}; committed_chunk={inboundToResume.NextChunkIndex}; highest_received_chunk={inboundToResume.PullHighestReceivedChunkIndex}; availability_state=unavailable");
-            try
-            {
-                var sent = await MaybeSendTransportRebindStateAsync(inboundToResume).ConfigureAwait(false);
-
-                LocalOperationalLog.Info(
-                    "FileTransferService",
-                    $"event=filetransfer_transport_rebind_state_forced; direction=inbound; transfer_id={inboundToResume.TransferId}; session_id={inboundToResume.SessionId}; reason={FormatProtocolLogValue(effectiveReason)}; rebind_generation={inboundToResume.PullTransportRebindGeneration}; state_sent={(sent ? 1 : 0)}; committed_chunk={inboundToResume.NextChunkIndex}; highest_received_chunk={inboundToResume.PullHighestReceivedChunkIndex}");
-                ScheduleInboundTransportRebindRetries(inboundToResume, effectiveReason, inboundToResume.PullTransportRebindGeneration);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                LocalOperationalLog.Warn(
-                    "FileTransferService",
-                    $"event=filetransfer_transport_rebind_failed; direction=inbound; transfer_id={inboundToResume.TransferId}; session_id={inboundToResume.SessionId}; reason={FormatProtocolLogValue(effectiveReason)}; rebind_generation={inboundToResume.PullTransportRebindGeneration}; error={FormatProtocolLogValue(ex.Message)}");
-            }
-        }
-        else if (inboundResumed && inboundToResume is not null)
+        if (inboundResumed && inboundToResume is not null)
         {
             LogTransportResumed(FileTransferDirection.Inbound, inboundToResume.TransferId, inboundToResume.SessionId, effectiveReason, effectiveRequiresResumeRequest);
             if (inboundActivationPauseResumed)
@@ -3064,7 +3036,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 "FileTransferService",
                 $"event=filetransfer_lifecycle_priority_received; kind=pause_control; transfer_id={message.TransferId}; session_id={message.SessionId}; direction=outbound; paused={(message.Paused ? 1 : 0)}; reason={FormatProtocolLogValue(NormalizeReason(message.Reason) ?? "(none)")}");
             ApplyOutboundV4PauseControl(outbound, frame);
-            SignalOutboundV4SenderPump(outbound);
+            SignalOutboundSparseSenderPump(outbound);
             return Task.CompletedTask;
         }
 
@@ -3843,25 +3815,25 @@ public sealed partial class SessionFileTransferService : IDisposable
         OutboundTransferContext context,
         FileTransferRuntimeProfileSelection selection)
     {
+        context.RouteRuntime = selection.RouteRuntime;
         context.RuntimeProfile = selection.Profile;
         context.BridgeRecoveryPolicy = selection.BridgeRecoveryPolicy;
-        context.V6RegularNknBulkSparseProfileActive = selection.UsesRegularNknSparseEngine;
     }
 
     private static void ApplyFileTransferRuntimeProfileSelectionLocked(
         InboundTransferContext context,
         FileTransferRuntimeProfileSelection selection)
     {
+        context.RouteRuntime = selection.RouteRuntime;
         context.RuntimeProfile = selection.Profile;
         context.BridgeRecoveryPolicy = selection.BridgeRecoveryPolicy;
-        context.V6RegularNknBulkSparseProfileActive = selection.UsesRegularNknSparseEngine;
     }
 
     private static bool ShouldUseV6RegularNknSparseRuntime(OutboundTransferContext context)
-        => context.V6RegularNknBulkSparseProfileActive;
+        => context.RouteRuntime.UsesV6SparsePump;
 
     private static bool ShouldUseV6RegularNknSparseRuntime(InboundTransferContext context)
-        => context.V6RegularNknBulkSparseProfileActive;
+        => context.RouteRuntime.UsesV6SparsePump;
 
     private static bool IsPrimaryRegularNknBulkV6ProfileEnabled(IFileTransferSignalingTransport? currentTransport)
         => ResolveTransportProfileKind(currentTransport) == FileTransferTransportProfileKind.ConservativeNknStartup;
@@ -4063,7 +4035,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     private static bool IsActiveV4MixedOutboundTransferLocked(OutboundTransferContext? context)
         => context is not null &&
            !context.IsTerminal &&
-           context.RouteSelection.FrameFamily == FileTransferFrameFamily.V4 &&
+           context.RouteRuntime.FrameFamily == FileTransferFrameFamily.V4 &&
            (context.V4MixedScreenShareTransfer ||
             context.State is FileTransferTransferState.PreparingMetadata
                 or FileTransferTransferState.AwaitingStart
@@ -4073,7 +4045,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     private static bool IsActiveV4MixedInboundTransferLocked(InboundTransferContext? context)
         => context is not null &&
            !context.IsTerminal &&
-           context.RouteSelection.FrameFamily == FileTransferFrameFamily.V4 &&
+           context.RouteRuntime.FrameFamily == FileTransferFrameFamily.V4 &&
            (context.V4MixedScreenShareTransfer ||
             context.State is FileTransferTransferState.AwaitingMetadata
                 or FileTransferTransferState.Receiving
@@ -4262,7 +4234,6 @@ public sealed partial class SessionFileTransferService : IDisposable
             FileTransferRouteLivenessTerminalPolicy.PostTunaFallbackV6Repair => "post_tuna_fallback_v6_repair",
             FileTransferRouteLivenessTerminalPolicy.DiagnosticRegularNknV6 => "diagnostic_regular_nkn_v6",
             FileTransferRouteLivenessTerminalPolicy.FileTunaV4Fast => "file_tuna_v4_fast",
-            FileTransferRouteLivenessTerminalPolicy.TunaV6Strict => "tuna_v6_strict",
             _ => "regular_nkn_v4_fast",
         };
 
@@ -4551,40 +4522,59 @@ public sealed partial class SessionFileTransferService : IDisposable
     }
 
     private readonly record struct FileTransferRuntimeProfileSelection(
+        FileTransferRouteRuntimeDescriptor RouteRuntime,
         FileTransferRuntimeProfile Profile,
         FileTransferBridgeRecoveryPolicy BridgeRecoveryPolicy,
         string Reason)
     {
         public static FileTransferRuntimeProfileSelection Default(string reason)
-            => new(FileTransferRuntimeProfile.Default, FileTransferBridgeRecoveryPolicy.TunaStrictRecovery, reason);
+            => FromRouteRuntime(
+                FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast).RuntimeDescriptor,
+                reason);
 
         public static FileTransferRuntimeProfileSelection RegularNknV4Fast(string reason)
-            => new(FileTransferRuntimeProfile.Default, FileTransferBridgeRecoveryPolicy.RegularNknV4Fast, reason);
+            => FromRouteRuntime(
+                FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast).RuntimeDescriptor,
+                reason);
 
         public static FileTransferRuntimeProfileSelection FileTunaV4Fast(string reason)
-            => new(FileTransferRuntimeProfile.Default, FileTransferBridgeRecoveryPolicy.TunaStrictRecovery, reason);
+            => FromRouteRuntime(
+                FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4).RuntimeDescriptor,
+                reason);
 
         public static FileTransferRuntimeProfileSelection PostTunaFallback(string reason)
-            => new(FileTransferRuntimeProfile.Default, FileTransferBridgeRecoveryPolicy.PostTunaFallbackStrictRecovery, reason);
+            => FromRouteRuntime(
+                FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6).RuntimeDescriptor,
+                reason);
 
         public static FileTransferRuntimeProfileSelection PrimaryRegularNknBulkV6(string reason)
-            => new(
-                FileTransferRuntimeProfile.PrimaryRegularNknBulkV6,
-                FileTransferBridgeRecoveryPolicy.PrimaryRegularNknQuietRecovery,
+            => FromRouteRuntime(
+                FileTransferRouteResolver.Resolve(FileTransferRoute.DiagnosticRegularNknV6).RuntimeDescriptor,
                 reason);
 
         public static FileTransferRuntimeProfileSelection FromRouteSelection(FileTransferRouteSelection routeSelection)
-            => routeSelection.Route switch
-            {
-                FileTransferRoute.RegularNknV4Fast => RegularNknV4Fast(routeSelection.SelectionReason),
-                FileTransferRoute.FileTunaV4 => FileTunaV4Fast(routeSelection.SelectionReason),
-                FileTransferRoute.PostTunaFallbackV6 => PostTunaFallback(routeSelection.SelectionReason),
-                FileTransferRoute.DiagnosticRegularNknV6 => PrimaryRegularNknBulkV6(routeSelection.SelectionReason),
-                _ => Default(routeSelection.SelectionReason),
-            };
+            => FromRouteRuntime(routeSelection.RuntimeDescriptor, routeSelection.SelectionReason);
 
-        public bool UsesRegularNknSparseEngine =>
-            Profile is FileTransferRuntimeProfile.PrimaryRegularNknBulkV6;
+        private static FileTransferRuntimeProfileSelection FromRouteRuntime(
+            FileTransferRouteRuntimeDescriptor routeRuntime,
+            string reason)
+            => new(
+                routeRuntime,
+                routeRuntime.UsesV6SparsePump
+                    ? FileTransferRuntimeProfile.PrimaryRegularNknBulkV6
+                    : FileTransferRuntimeProfile.Default,
+                routeRuntime.BridgeRecoveryPolicy switch
+                {
+                    FileTransferRouteBridgeRecoveryPolicy.RegularNknV4Fast =>
+                        FileTransferBridgeRecoveryPolicy.RegularNknV4Fast,
+                    FileTransferRouteBridgeRecoveryPolicy.PostTunaFallbackStrictRecovery =>
+                        FileTransferBridgeRecoveryPolicy.PostTunaFallbackStrictRecovery,
+                    FileTransferRouteBridgeRecoveryPolicy.PrimaryRegularNknQuietRecovery =>
+                        FileTransferBridgeRecoveryPolicy.PrimaryRegularNknQuietRecovery,
+                    _ => FileTransferBridgeRecoveryPolicy.TunaStrictRecovery,
+                },
+                reason);
+
     }
 
     private sealed class LiveRouteEpoch
@@ -4655,11 +4645,12 @@ public sealed partial class SessionFileTransferService : IDisposable
         public FileTransferRouteSelection RouteSelection { get; set; } =
             FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
 
+        public FileTransferRouteRuntimeDescriptor RouteRuntime { get; set; } =
+            FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast).RuntimeDescriptor;
+
         public LiveRouteEpoch? CurrentLiveRouteEpoch { get; set; }
 
         public int LastLiveRouteEpochId { get; set; }
-
-        public bool V6RegularNknBulkSparseProfileActive { get; set; }
 
         public FileTransferRuntimeProfile RuntimeProfile { get; set; }
 
@@ -4765,6 +4756,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         public long V6RegularNknStateRefreshSequence { get; set; }
 
         public int V6RegularNknStateRefreshSendInFlight { get; set; }
+
+        public int V6RegularNknStateRefreshFailureCount { get; set; }
 
         public DateTimeOffset? V6RegularNknLastCheckpointSyncRequestedUtc { get; set; }
 
@@ -5062,23 +5055,23 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public bool V4MixedScreenShareTransfer { get; set; }
 
-        public string V4SenderPumpLastWakeReason { get; set; } = "startup";
+        public string SparseSenderPumpLastWakeReason { get; set; } = "startup";
 
         public string V4SenderPumpLastRepairRequestKey { get; set; } = "(none)";
 
         public DateTimeOffset? V4SenderCreditExhaustedSinceUtc { get; set; }
 
-        private TaskCompletionSource<bool> pullV4SenderPumpSignal = CreateSignal();
+        private TaskCompletionSource<bool> pullSparseSenderPumpSignal = CreateSignal();
 
-        public Task ResetAndGetV4SenderPumpSignalTask()
+        public Task ResetAndGetSparseSenderPumpSignalTask()
         {
-            pullV4SenderPumpSignal = CreateSignal();
-            return pullV4SenderPumpSignal.Task;
+            pullSparseSenderPumpSignal = CreateSignal();
+            return pullSparseSenderPumpSignal.Task;
         }
 
-        public void SignalV4SenderPump()
+        public void SignalSparseSenderPump()
         {
-            pullV4SenderPumpSignal.TrySetResult(true);
+            pullSparseSenderPumpSignal.TrySetResult(true);
         }
 
         public FileTransferPayloadEfficiencyProfile PayloadEfficiencyProfile { get; set; } = FileTransferPayloadEfficiencyProfile.Current;
@@ -5299,6 +5292,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             FileSizeBytes = offer.FileSizeBytes;
             OfferedDataProtocolVersion = offer.PreferredDataProtocolVersion ?? 0;
             RouteSelection = routeSelection;
+            RouteRuntime = routeSelection.RuntimeDescriptor;
             NegotiatedDataProtocolVersion = routeSelection.ProtocolVersion;
         }
 
@@ -5320,11 +5314,11 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public FileTransferRouteSelection RouteSelection { get; set; }
 
+        public FileTransferRouteRuntimeDescriptor RouteRuntime { get; set; }
+
         public LiveRouteEpoch? CurrentLiveRouteEpoch { get; set; }
 
         public int LastLiveRouteEpochId { get; set; }
-
-        public bool V6RegularNknBulkSparseProfileActive { get; set; }
 
         public FileTransferRuntimeProfile RuntimeProfile { get; set; }
 
