@@ -87,7 +87,7 @@ Transport/app-layer security contract:
 - current code may claim nLink application-layer protection for chat, remote control, screen share, file transfer, and session lifecycle traffic after approval
 - current code must still distinguish those nLink guarantees from the remaining trust placed in the bundled NKN bridge/runtime
 - current code must describe file transfer as route-aware, single-file, explicit accept/decline, and protected by nLink session envelope/source validation rather than by assuming NKN alone is sufficient
-- current production file-transfer routes are `regular_nkn_v4_fast` protocol `4`, `file_tuna_v4` protocol `4`, and fresh one-shot `post_tuna_fallback_v6` protocol `6`; a successful post-Tuna fallback transfer must consume that fallback state so the next new transfer returns to regular V4; `diagnostic_regular_nkn_v6` is unsafe opt-in only
+- current production file-transfer routes are `regular_nkn_v4_fast` protocol `4`, `file_tuna_v4` protocol `4`, and one-shot live `post_tuna_fallback_v6` protocol `6`; a successful final post-Tuna fallback transfer must consume that fallback state so the next new transfer resolves from current transport state (`file_tuna_v4` when Tuna is active, otherwise regular V4); `diagnostic_regular_nkn_v6` is unsafe opt-in only
 
 Transport abuse-resistance limit matrix:
 - `NknSignalingTransport` high-priority control queue: `256` items max
@@ -111,7 +111,7 @@ File-transfer release gate:
 - run the route acceptance gate before installer creation after building the bridge/runtime bundle
 - verify regular NKN completion/integrity on route `regular_nkn_v4_fast` protocol `4`, no `filetransfer_data_session_overflow`, no `filetransfer_message_rejected`, no bridge stdout protocol violations, no regular-NKN bridge bulk send/clear failures, and no unexpected diagnostic V6 route
 - verify active Tuna completion/integrity on route `file_tuna_v4` protocol `4` with goodput above the active-Tuna floor
-- verify controlled fallback completion/integrity on measured route `post_tuna_fallback_v6` protocol `6`; fallback speed is informational; verify the following new transfer is regular V4 when the fallback transfer completed successfully
+- verify live fallback completion/integrity on final route `post_tuna_fallback_v6` protocol `6` with explicit live-route epoch proof; fallback speed is separated as performance variance; verify the following new transfer resolves from current transport state when the fallback transfer completed successfully
 - `post_completion_late_sender_frame` ignored frames are allowed only when they occur after terminal completion for a recently completed transfer; retain the count from the soak summary with the release evidence
 - retain `filetransfer-live-nkn-summary.txt`, `filetransfer-live-nkn-cycles.jsonl`, and the retained log slice with the release evidence
 

@@ -84,9 +84,9 @@ Current regular-NKN reference artifacts:
 
 ## Tuna And Controlled Fallback Triage
 
-Active Tuna should report route `file_tuna_v4`, protocol `4`, V4 sender/receiver runtime, and Tuna accelerated file-frame evidence. The active Tuna no-fault gate requires goodput greater than `4,000,000 B/s` when the transport is healthy.
+Active Tuna should report route `file_tuna_v4`, protocol `4`, V4 sender/receiver runtime, and Tuna accelerated file-frame evidence. Phase 4 compares active-Tuna goodput with the locked baseline and reruns once for goodput-only misses; persistent goodput misses are performance acceptance failures, not route/runtime correctness failures when integrity and strict route evidence are clean.
 
-Controlled fallback is restart-based and one-shot. The setup transfer should prove `file_tuna_v4` / protocol `4` and then terminalize or cancel cleanly after Tuna is switched off. The measured transfer must be a fresh `post_tuna_fallback_v6` / protocol `6` transfer. Current evidence shows V6 fallback is slower and more variable than the V4 regular/Tuna path, so fallback speed is informational; route consistency, SHA/integrity, and completed terminals are the gate. After a successful measured fallback, the next new transfer must return to `regular_nkn_v4_fast` / protocol `4`; a repeated `post_tuna_fallback_v6` route means fallback state was not consumed.
+Live fallback is epoch-based and one-shot for the affected transfer. When Tuna is switched off during `file_tuna_v4`, the same transfer should show explicit `filetransfer_live_route_epoch_started` and `filetransfer_live_route_epoch_recovered` evidence for `post_tuna_fallback_v6` / protocol `6`, handoff `tuna_to_normal_fallback`, target transport `regular_nkn`. Current evidence shows V6 fallback is slower and more variable than the V4 regular/Tuna path, so fallback speed is informational; route consistency, SHA/integrity, and completed terminals are the correctness gate. After successful fallback completion, stale fallback state must be consumed and the next new transfer must resolve from current transport state: `file_tuna_v4` when Tuna is active, otherwise `regular_nkn_v4_fast`.
 
 Current references:
 

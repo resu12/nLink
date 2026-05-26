@@ -172,9 +172,9 @@ The environment variable is `NLINK_FILETRANSFER_PAYLOAD_EFFICIENCY_PROFILE`. Mix
 
 ## Flow Control And Recovery
 
-Regular NKN and active file Tuna use the V4 runtime. V4 progress is receiver-confirmed and may repair missing ranges while preserving terminal correctness and SHA verification. If Tuna is disabled during an active `file_tuna_v4` transfer, that same transfer remains V4 and recovers over regular NKN; it is not canceled and restarted as V6.
+Regular NKN and active file Tuna start on the V4 runtime. V4 progress is receiver-confirmed and may repair missing ranges while preserving terminal correctness and SHA verification. If Tuna is disabled or fails during an active `file_tuna_v4` transfer, the same transfer live-transitions to `post_tuna_fallback_v6` / protocol `6`; it is not canceled/restarted and it must not become active `file_tuna_v6`. If Tuna is reactivated during the same transfer, the route can live-transition back to `file_tuna_v4`, and another switch-off can transition again to `post_tuna_fallback_v6`.
 
-Post-Tuna fallback uses a fresh one-shot V6 measured transfer. It is receiver-driven: the receiver reports what it has durably accepted and requests missing ranges; the sender pumps only within advertised budget or explicit frontier repair. Current production evidence shows this V6 fallback path is slower and more variable than the V4 regular/Tuna path, so V6 is not a throughput optimization. It is retained only as a one-shot recovery route after Tuna fallback, plus explicit unsafe diagnostics. After a successful `post_tuna_fallback_v6` transfer, the fallback route is consumed and the next new file transfer returns to regular V4 unless Tuna is active again.
+Post-Tuna fallback is a one-shot recovery route for the affected transfer. It is receiver-driven: the receiver reports what it has durably accepted and requests missing ranges; the sender pumps only within advertised budget or explicit frontier repair. Current production evidence shows this V6 fallback path is slower and more variable than the V4 regular/Tuna path, so V6 is not a throughput optimization. It is retained only as live recovery after Tuna fallback, plus explicit unsafe diagnostics. After a successful `post_tuna_fallback_v6` completion, the fallback state is consumed and the next new file transfer resolves from current transport state: `file_tuna_v4` when Tuna is active, otherwise `regular_nkn_v4_fast`.
 
 Recovery behaviors include:
 
@@ -189,18 +189,18 @@ Recovery behaviors include:
 
 The transfer treats integrity and terminal correctness as more important than raw throughput.
 
-## Controlled Post-Tuna Fallback
+## Live Post-Tuna Fallback
 
-Active file Tuna is V4. When Tuna stops during an active `file_tuna_v4` transfer, nLink does not mutate that live session into V6. The live transfer proves regular-NKN fallback in place and can complete naturally, cancel, or fail with normal terminal semantics.
+Active file Tuna is V4. When Tuna stops during an active `file_tuna_v4` transfer, nLink live-transitions that same transfer into the `post_tuna_fallback_v6` recovery route. The transfer keeps its lifecycle, consent, terminal, and SHA semantics while route/protocol/frame handling switches to the fallback descriptor.
 
-The controlled fallback model is restart-based:
+The live fallback model is epoch-based:
 
-1. A setup transfer proves `file_tuna_v4`.
-2. Tuna is stopped or forced unavailable.
-3. Setup cleanup reaches terminal/cleanup evidence.
-4. A fresh measured transfer resolves one-shot `post_tuna_fallback_v6`.
-5. The measured transfer must complete with protocol `6`, route consistency, SHA/integrity OK, and completed terminals.
-6. If that measured transfer completes successfully, the post-fallback V6 route is consumed and the next new transfer resolves to regular V4.
+1. The transfer starts as `file_tuna_v4` / protocol `4`.
+2. Tuna is stopped, disabled, or becomes unavailable.
+3. A live route epoch starts and recovers with route `post_tuna_fallback_v6`, protocol `6`, handoff `tuna_to_normal_fallback`, and target transport `regular_nkn`.
+4. The same transfer continues over the fallback V6 request/repair path and must complete with route consistency, SHA/integrity OK, and completed terminals.
+5. If Tuna is reactivated before terminal completion, a later live route epoch can return the same transfer to `file_tuna_v4` / protocol `4`.
+6. If the final terminal route is `post_tuna_fallback_v6`, successful completion consumes the fallback state; the next new transfer resolves from current transport state rather than stale fallback state.
 
 Fallback speed is informational. Survival, route correctness, integrity, and clean terminal completion are the gate.
 
@@ -286,10 +286,14 @@ For deterministic local regression checks:
 powershell -ExecutionPolicy Bypass -File .\tools\FileTransfer-Ops.ps1 -Mode LocalFast
 ```
 
-Before installer creation, the route acceptance gate must pass:
+Before installer creation, Phase 4 route acceptance must pass:
 
-- regular NKN 64 MiB quick and 128 MiB target: `regular_nkn_v4_fast`, protocol `4`, SHA OK, completed terminals, no regular bridge bulk failures; goodput is recorded for release notes and regression triage but is not a hard pre-installer gate on public NKN.
-- active Tuna 128 MiB no-fault: `file_tuna_v4`, protocol `4`, SHA OK, completed terminals, goodput greater than `4,000,000 B/s`.
-- controlled fallback 128 MiB: setup `file_tuna_v4` may cancel cleanly; measured transfer must be `post_tuna_fallback_v6`, protocol `6`, SHA OK, completed terminals. Fallback speed is informational.
+- regular NKN 64 MiB: `regular_nkn_v4_fast`, protocol `4`, SHA OK, completed terminals, no regular bridge bulk failures, and no warning evidence.
+- active Tuna 64 MiB: `file_tuna_v4`, protocol `4`, SHA OK, completed terminals, and no active `file_tuna_v6` evidence.
+- live switch-off from each side: final `post_tuna_fallback_v6`, protocol `6`, explicit live-route epoch started/recovered proof, SHA OK, completed terminals, hard failures `0`, and warning caps not exceeded.
+- live off/on/off: route sequence `file_tuna_v4 -> post_tuna_fallback_v6 -> file_tuna_v4 -> post_tuna_fallback_v6` with strictly ordered live-route epoch proof.
+- second transfer after live reactivation: first transfer proves `post_tuna_fallback_v6 -> file_tuna_v4`, then the next transfer selects `file_tuna_v4`, protocol `4`.
+
+Goodput is compared to the locked Phase 0 baseline with one rerun for goodput-only misses. A persistent goodput miss is a performance acceptance failure; it is not treated as route/runtime correctness failure when SHA, terminal, route, protocol, hard-failure, warning-cap, and live-epoch proof are all clean.
 
 For operator flow and artifact interpretation, use [`docs/file-transfer-operability.md`](file-transfer-operability.md).

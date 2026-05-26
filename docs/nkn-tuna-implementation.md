@@ -281,9 +281,9 @@ File-transfer routing is explicit:
 
 - regular NKN uses `regular_nkn_v4_fast`, protocol `4`,
 - active file Tuna uses `file_tuna_v4`, protocol `4`,
-- controlled post-Tuna fallback uses a fresh one-shot `post_tuna_fallback_v6`, protocol `6`.
+- live post-Tuna fallback uses one-shot `post_tuna_fallback_v6`, protocol `6`, for the affected transfer.
 
-When Tuna stops during an active `file_tuna_v4` transfer, nLink does not mutate that live transfer into V6. The live transfer stays V4 and proves regular-NKN recovery in place. The controlled fallback model starts a fresh measured `post_tuna_fallback_v6` transfer after setup cleanup evidence is present. That measured V6 route is a one-shot recovery route: after it completes successfully, the fallback state is consumed and the next new file transfer returns to regular V4 unless a new fallback event occurs.
+When Tuna stops during an active `file_tuna_v4` transfer, nLink live-transitions that same transfer into `post_tuna_fallback_v6` over regular NKN. If Tuna comes back during the same transfer, a later live route epoch can return it to `file_tuna_v4`; another switch-off can transition it back to `post_tuna_fallback_v6`. That V6 route is a one-shot recovery route: after final fallback completion succeeds, the fallback state is consumed and the next new file transfer resolves from current transport state (`file_tuna_v4` when Tuna is active, otherwise `regular_nkn_v4_fast`).
 
 The measured fallback V6 transfer uses transport-epoch proof. New tail traffic on the target transport is blocked until the receiver proves the exact committed frontier can advance there. Generic bridge `Ready` or Tuna `Ready` is not enough to mark the transfer recovered.
 

@@ -4,7 +4,7 @@ File sharing is route-aware. Keep stabilization work focused on the current prod
 
 - regular NKN -> `regular_nkn_v4_fast`, protocol `4`,
 - active file Tuna -> `file_tuna_v4`, protocol `4`,
-- controlled post-Tuna fallback -> fresh one-shot `post_tuna_fallback_v6`, protocol `6`,
+- live post-Tuna fallback -> one-shot `post_tuna_fallback_v6`, protocol `6`, for the affected transfer,
 - diagnostic regular-NKN V6 -> explicit unsafe opt-in only.
 
 ## Principles

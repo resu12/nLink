@@ -4,7 +4,7 @@ This workflow targets the current route-aware file-transfer model:
 
 - regular NKN -> `regular_nkn_v4_fast`, protocol `4`,
 - active file Tuna -> `file_tuna_v4`, protocol `4`,
-- controlled post-Tuna fallback -> fresh one-shot `post_tuna_fallback_v6`, protocol `6`,
+- live post-Tuna fallback -> one-shot `post_tuna_fallback_v6`, protocol `6`, for the affected transfer,
 - diagnostic regular-NKN V6 -> `diagnostic_regular_nkn_v6`, explicit unsafe developer/test opt-in only.
 
 V5 and legacy active `file_tuna_v6` evidence are obsolete protocol inputs and should fail retained analysis or payload parsing. Do not re-enable legacy data-protocol compatibility during soak triage.
@@ -20,7 +20,7 @@ V5 and legacy active `file_tuna_v6` evidence are obsolete protocol inputs and sh
 - Regular NKN promotion uses a `1.5 MB/s` app-goodput target. Prefer stability, terminal correctness, and payload efficiency over chasing higher burst speed on variable public NKN paths.
 - Active Tuna no-fault acceptance uses a strict `> 4,000,000 B/s` goodput floor.
 - Controlled fallback has no speed floor; survival, SHA/integrity, terminals, and route correctness are the gate.
-- A successful controlled fallback must consume the post-fallback state; the next new file transfer should be `regular_nkn_v4_fast` / protocol `4`, not another `post_tuna_fallback_v6`, unless a new fallback event occurs.
+- A successful final `post_tuna_fallback_v6` completion must consume the post-fallback state; the next new file transfer resolves from current transport state (`file_tuna_v4` when Tuna is active, otherwise `regular_nkn_v4_fast`), not stale fallback state.
 
 ## Common Runs
 
@@ -78,7 +78,7 @@ Recent route reference cells:
 
 - `artifacts/filetransfer-route-ab/fallback-improvement-final-20260522T204000Z/regular-nkn-v4-64mb-r2/`: regular NKN V4 passed with SHA OK, completed terminals, no bridge bulk send failures, and `1,769,711 B/s`.
 - `artifacts/filetransfer-route-ab/fallback-improvement-final-20260522T204000Z/tuna-v4-64mb-r2/`: active Tuna V4 passed with SHA OK, completed terminals, and `4,087,486 B/s`.
-- `artifacts/filetransfer-route-ab/fallback-improvement-final-20260522T204000Z/tuna-fallback-64mb/`: controlled fallback passed with setup `file_tuna_v4` canceled cleanly and measured `post_tuna_fallback_v6` completed at `1,419,766 B/s`.
+- `artifacts/filetransfer-route-ab/fallback-improvement-final-20260522T204000Z/tuna-fallback-64mb/`: historical restart-style fallback reference. Keep it for regression history only; current Phase 4 acceptance requires live-route epoch proof on the same transfer.
 
 Older V6 regular-NKN artifacts remain useful as regression history only. They are not current production-route baselines.
 
@@ -98,12 +98,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Run-FileTransferRout
 
 The gate writes `route-acceptance-summary.txt` and `route-acceptance-summary.json` under `artifacts/filetransfer-route-acceptance/<timestamp>/`.
 
-Required matrix:
+Required Phase 4 matrix:
 
-- regular NKN 64 MiB quick,
-- regular NKN 128 MiB target,
-- active Tuna V4 128 MiB no-fault,
-- controlled restart fallback 128 MiB.
+- regular NKN 64 MiB: `regular_nkn_v4_fast`, protocol `4`,
+- active Tuna V4 64 MiB: `file_tuna_v4`, protocol `4`,
+- live switch-off from helpee: final `post_tuna_fallback_v6`, protocol `6`,
+- live switch-off from helper: final `post_tuna_fallback_v6`, protocol `6`,
+- live off/on/off: route changes `post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6`,
+- second transfer after live reactivation: first transfer proves `post_tuna_fallback_v6,file_tuna_v4`, then the next transfer selects `file_tuna_v4`, protocol `4`.
 
 Fallback retry is allowed only for retryable pre-measured failures, such as measured fallback never starting or a progress timeout before measured fallback produced terminal/integrity evidence. Route mismatch, protocol mismatch, missing `filetransfer_route_selected`, SHA failure, terminal failure, zombie terminal, diagnostic V6 during acceptance, or regular-NKN bridge bulk failure must not be retried into a pass.
 
@@ -124,12 +126,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Run-FileTransferTuna
   -PayloadSize 128MiB
 ```
 
-Controlled V4 setup -> V6 fallback restart:
+Live V4 -> V6 fallback switch-off:
 
 ```powershell
 $env:NLINK_TUNA_TEST_WALLET_PASSWORD = "<session-only test wallet password>"
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Run-FileTransferTunaGuiSmoke.ps1 `
-  -RouteMode v4-restart-v6-fallback `
+  -RouteMode live-v4-switch-off `
   -Fault switch-off `
   -WalletPath ".\artifacts\tuna-poc\wallet-test-nkn.json" `
   -PayerMode helpee `
@@ -149,20 +151,20 @@ For active Tuna, required evidence includes:
 - terminal sender/receiver completion,
 - SHA match.
 
-For controlled fallback, required evidence includes:
+For live fallback, required evidence includes:
 
-- setup phase `setup_file_tuna_v4`,
-- setup route `file_tuna_v4`,
-- setup protocol `4`,
-- clean local setup cancel/cleanup marker before measured fallback starts,
-- measured phase `measured_post_tuna_fallback_v6`,
-- measured route `post_tuna_fallback_v6`,
-- measured protocol `6`,
+- initial measured route `file_tuna_v4`,
+- initial measured protocol `4`,
+- explicit `filetransfer_live_route_epoch_started` and `filetransfer_live_route_epoch_recovered`,
+- live route epoch route `post_tuna_fallback_v6`,
+- live route epoch protocol `6`,
+- handoff `tuna_to_normal_fallback`,
+- target transport `regular_nkn`,
 - terminal sender/receiver completion,
-- SHA match.
-- next-transfer route `regular_nkn_v4_fast` / protocol `4` after successful measured fallback completion.
+- SHA match,
+- next-transfer route resolves from current transport state after successful fallback completion.
 
-The measured fallback retained slice is authoritative for fallback gating:
+The measured retained slice and live-route epoch proof are authoritative for fallback gating:
 
 - `filetransfer-retained-log-slice-full.log` keeps the complete run,
 - `filetransfer-setup-retained-log-slice.log` keeps setup evidence,
