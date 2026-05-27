@@ -7988,6 +7988,7 @@ public sealed partial class SessionRuntime
             BridgeLifecycleEventKind.Spawned => "bridge_spawned",
             BridgeLifecycleEventKind.Ready => "bridge_ready",
             BridgeLifecycleEventKind.Exited => "bridge_exited",
+            BridgeLifecycleEventKind.ReceiveStallRecoveryCompleted => "bridge_receive_stall_recovery_completed",
             _ => "bridge_unknown"
         };
 

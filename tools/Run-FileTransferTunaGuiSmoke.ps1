@@ -6,7 +6,7 @@ param(
     [string]$PayerMode = "helpee",
     [ValidateSet("none", "switch-off", "sidecar-kill")]
     [string]$Fault = "switch-off",
-    [ValidateSet("handoff-fallback", "preactivated", "post-fallback", "v4-restart-v6-fallback", "live-v4-switch-off", "live-multi-toggle", "live-reactivation-second-transfer")]
+    [ValidateSet("handoff-fallback", "preactivated", "post-fallback", "v4-restart-v6-fallback", "live-v4-switch-off", "live-multi-toggle", "live-reactivation-second-transfer", "live-regular-activation-cycle")]
     [string]$RouteMode = "handoff-fallback",
     [string]$LiveToggleSequence = "",
     [ValidateSet("helpee-to-helper", "helper-to-helpee")]
@@ -155,7 +155,7 @@ function Invoke-TunaGuiRetainedAnalysis {
         [Parameter(Mandatory = $true)][string]$RepoRoot,
         [Parameter(Mandatory = $true)][string]$AnalysisDir,
         [Parameter(Mandatory = $true)][string]$LogPath,
-        [ValidateSet('None', 'SwitchOff', 'MultiToggle')]
+        [ValidateSet('None', 'SwitchOff', 'MultiToggle', 'RegularActivationCycle')]
         [string]$LiveRouteProofMode = 'None'
     )
 
@@ -175,7 +175,7 @@ function Invoke-TunaGuiRetainedAnalysisBestEffort {
         [Parameter(Mandatory = $true)][string]$RepoRoot,
         [Parameter(Mandatory = $true)][string]$AnalysisDir,
         [Parameter(Mandatory = $true)][string]$LogPath,
-        [ValidateSet('None', 'SwitchOff', 'MultiToggle')]
+        [ValidateSet('None', 'SwitchOff', 'MultiToggle', 'RegularActivationCycle')]
         [string]$LiveRouteProofMode = 'None'
     )
 
@@ -251,12 +251,13 @@ function Invoke-TunaGuiLiveRetainedAnalysisBestEffort {
     if ($RouteMode -ne 'preactivated' -and
         $RouteMode -ne 'live-v4-switch-off' -and
         $RouteMode -ne 'live-multi-toggle' -and
-        $RouteMode -ne 'live-reactivation-second-transfer') {
+        $RouteMode -ne 'live-reactivation-second-transfer' -and
+        $RouteMode -ne 'live-regular-activation-cycle') {
         return
     }
 
     $retainedPath = Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log'
-    $liveRouteProofMode = if ($RouteMode -eq 'live-v4-switch-off') { 'SwitchOff' } elseif ($RouteMode -eq 'live-multi-toggle') { 'MultiToggle' } else { 'None' }
+    $liveRouteProofMode = if ($RouteMode -eq 'live-v4-switch-off') { 'SwitchOff' } elseif ($RouteMode -eq 'live-multi-toggle') { 'MultiToggle' } elseif ($RouteMode -eq 'live-regular-activation-cycle') { 'RegularActivationCycle' } else { 'None' }
     Merge-TunaGuiMilestoneEvidenceIntoRetainedLogSlice -ArtifactDir $ArtifactDir
     Invoke-TunaGuiRetainedAnalysisBestEffort -RepoRoot $RepoRoot -AnalysisDir $ArtifactDir -LogPath $retainedPath -LiveRouteProofMode $liveRouteProofMode
 
@@ -723,9 +724,9 @@ try {
         Invoke-TunaGuiMeasuredFallbackRetainedAnalysis -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir -LogPath $slices.MeasuredPath
         Update-TunaGuiControlledRestartSummary -ArtifactDir $resolvedArtifactDir -FilteredSetupCleanupLineCount ([int]$slices.FilteredSetupCleanupLineCount)
     }
-    elseif ($RouteMode -eq 'preactivated' -or $RouteMode -eq 'live-v4-switch-off' -or $RouteMode -eq 'live-multi-toggle' -or $RouteMode -eq 'live-reactivation-second-transfer') {
+    elseif ($RouteMode -eq 'preactivated' -or $RouteMode -eq 'live-v4-switch-off' -or $RouteMode -eq 'live-multi-toggle' -or $RouteMode -eq 'live-reactivation-second-transfer' -or $RouteMode -eq 'live-regular-activation-cycle') {
         $retainedPath = Join-Path $resolvedArtifactDir 'filetransfer-retained-log-slice.log'
-        $liveRouteProofMode = if ($RouteMode -eq 'live-v4-switch-off') { 'SwitchOff' } elseif ($RouteMode -eq 'live-multi-toggle') { 'MultiToggle' } else { 'None' }
+        $liveRouteProofMode = if ($RouteMode -eq 'live-v4-switch-off') { 'SwitchOff' } elseif ($RouteMode -eq 'live-multi-toggle') { 'MultiToggle' } elseif ($RouteMode -eq 'live-regular-activation-cycle') { 'RegularActivationCycle' } else { 'None' }
         Merge-TunaGuiMilestoneEvidenceIntoRetainedLogSlice -ArtifactDir $resolvedArtifactDir
         Invoke-TunaGuiRetainedAnalysis -RepoRoot $repoRoot -AnalysisDir $resolvedArtifactDir -LogPath $retainedPath -LiveRouteProofMode $liveRouteProofMode
         if ($RouteMode -eq 'live-reactivation-second-transfer') {

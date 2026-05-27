@@ -14,7 +14,10 @@ function Add-FileTransferGateFinding {
 }
 
 function Test-FileTransferTerminalCompleted {
-    param([object[]]$TerminalEvents)
+    param(
+        [AllowEmptyCollection()]
+        [object[]]$TerminalEvents
+    )
 
     foreach ($event in @($TerminalEvents)) {
         $state = Get-FileTransferEventField -Event $event -Name 'state' -Default ''
@@ -1237,7 +1240,8 @@ function Get-FileTransferFallbackV6Diagnostics {
 function Get-FileTransferWarningCapResult {
     param(
         [Parameter(Mandatory = $true)]$Summary,
-        [object[]]$WarningGroups = @()
+        [object[]]$WarningGroups = @(),
+        $FallbackDiagnostics = $null
     )
 
     $countLimit = 3
@@ -1252,6 +1256,8 @@ function Get-FileTransferWarningCapResult {
     $exceededContexts = New-Object System.Collections.Generic.List[string]
     $exceededDetails = New-Object System.Collections.Generic.List[string]
     $exceededEvents = New-Object System.Collections.Generic.List[object]
+    $exemptedKinds = New-Object System.Collections.Generic.List[string]
+    $exemptedDetails = New-Object System.Collections.Generic.List[string]
 
     foreach ($group in @($WarningGroups)) {
         $kind = [string]$group.Kind
@@ -1273,7 +1279,21 @@ function Get-FileTransferWarningCapResult {
         $rawKindCounts.Add(('{0}:{1}' -f $kind, $rawCount)) | Out-Null
         $kindRates.Add(('{0}:{1}' -f $kind, $rate.ToString('0.###', $culture))) | Out-Null
         $kindContexts.Add(('{0}:{1}' -f $kind, $context)) | Out-Null
-        if ($count -gt $countLimit -or $rate -gt $rateLimit) {
+        $countExceeded = $count -gt $countLimit
+        $rateExceeded = $rate -gt $rateLimit
+        if ($countExceeded -or $rateExceeded) {
+            if ((Test-FileTransferWarningCapCountExemption `
+                    -Summary $Summary `
+                    -FallbackDiagnostics $FallbackDiagnostics `
+                    -Kind $kind `
+                    -Context $context `
+                    -CountExceeded $countExceeded `
+                    -RateExceeded $rateExceeded)) {
+                $exemptedKinds.Add($kind) | Out-Null
+                $exemptedDetails.Add(('warning cap count exemption: kind={0}; context={1}; incident_count={2}; raw_event_count={3}; rate_per_second={4}; count_limit={5}; rate_limit_per_second={6}; reason=completed_post_tuna_fallback_frontier_rate_under_cap' -f $kind, $context, $count, $rawCount, $rate.ToString('0.###', $culture), $countLimit, $rateLimit.ToString('0.###', $culture))) | Out-Null
+                continue
+            }
+
             $exceededKinds.Add($kind) | Out-Null
             $exceededContexts.Add(('{0}:{1}' -f $kind, $context)) | Out-Null
             $exceededDetails.Add(('warning cap exceeded: kind={0}; context={1}; incident_count={2}; raw_event_count={3}; rate_per_second={4}; count_limit={5}; rate_limit_per_second={6}' -f $kind, $context, $count, $rawCount, $rate.ToString('0.###', $culture), $countLimit, $rateLimit.ToString('0.###', $culture))) | Out-Null
@@ -1298,13 +1318,51 @@ function Get-FileTransferWarningCapResult {
         ExceededContextsText = if ($exceededContexts.Count -gt 0) { $exceededContexts.ToArray() -join ',' } else { '(none)' }
         ExceededDetails = @($exceededDetails.ToArray())
         ExceededEvents = @($exceededEvents.ToArray())
+        ExemptedKindsText = if ($exemptedKinds.Count -gt 0) { $exemptedKinds.ToArray() -join ',' } else { '(none)' }
+        ExemptedDetails = @($exemptedDetails.ToArray())
     }
+}
+
+function Test-FileTransferWarningCapCountExemption {
+    param(
+        [Parameter(Mandatory = $true)]$Summary,
+        $FallbackDiagnostics = $null,
+        [Parameter(Mandatory = $true)][string]$Kind,
+        [Parameter(Mandatory = $true)][string]$Context,
+        [Parameter(Mandatory = $true)][bool]$CountExceeded,
+        [Parameter(Mandatory = $true)][bool]$RateExceeded
+    )
+
+    if ($Kind -ne 'fallback_frontier_repair_churn' -or
+        $Context -ne 'post_tuna_fallback' -or
+        -not $CountExceeded -or
+        $RateExceeded) {
+        return $false
+    }
+
+    if ($Summary.InboundTerminalEvents.Count -eq 0 -or
+        $Summary.OutboundTerminalEvents.Count -eq 0 -or
+        -not (Test-FileTransferTerminalCompleted -TerminalEvents $Summary.TerminalEvents)) {
+        return $false
+    }
+
+    if ($null -ne $FallbackDiagnostics) {
+        if ([string]$FallbackDiagnostics.TerminalMissingReason -ne '(none)') {
+            return $false
+        }
+
+        if ([int]$FallbackDiagnostics.SenderStillRepairing -ne 0) {
+            return $false
+        }
+    }
+
+    return $true
 }
 
 function Get-FileTransferStabilizationGateResult {
     param(
         [Parameter(Mandatory = $true)]$Summary,
-        [ValidateSet('None', 'SwitchOff', 'MultiToggle')]
+        [ValidateSet('None', 'SwitchOff', 'MultiToggle', 'RegularActivationCycle')]
         [string]$LiveRouteProofMode = 'None'
     )
 
@@ -1521,7 +1579,7 @@ function Get-FileTransferStabilizationGateResult {
         Add-FileTransferGateFinding -List $warnings -Finding 'repair/reorder/degraded pressure recovered before terminal completion'
     }
 
-    $warningCap = Get-FileTransferWarningCapResult -Summary $Summary -WarningGroups $warningGroups
+    $warningCap = Get-FileTransferWarningCapResult -Summary $Summary -WarningGroups $warningGroups -FallbackDiagnostics $fallbackDiagnostics
     if ($warningCap.ExceededKinds.Count -gt 0) {
         $hardFailures = New-Object System.Collections.Generic.List[string]
         foreach ($detail in @($warningCap.ExceededDetails)) {

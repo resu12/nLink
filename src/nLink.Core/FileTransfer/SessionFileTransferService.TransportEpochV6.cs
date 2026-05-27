@@ -793,6 +793,7 @@ public sealed partial class SessionFileTransferService
 
         var target = ParseFileTransferTransportKind(message.TargetTransport);
         var kind = ParseFileTransferTransportHandoffKind(message.HandoffKind);
+        var reason = NormalizeReason(message.Reason) ?? "peer_transport_epoch";
         if (context.V6TransportEpoch is { } current &&
             IsV6TransportEpochUnresolved(current))
         {
@@ -854,6 +855,7 @@ public sealed partial class SessionFileTransferService
 
         var target = ParseFileTransferTransportKind(message.TargetTransport);
         var kind = ParseFileTransferTransportHandoffKind(message.HandoffKind);
+        var reason = NormalizeReason(message.Reason) ?? "peer_transport_epoch";
         if (context.V6TransportEpoch is { } current &&
             IsV6TransportEpochUnresolved(current))
         {
@@ -872,6 +874,14 @@ public sealed partial class SessionFileTransferService
             TerminalizeV6TransportEpochLocked(FileTransferDirection.Inbound, context.TransferId, context.SessionId, current, "superseded_by_peer_epoch");
         }
 
+        if (!CanUseV6TransportEpochsLocked(context) &&
+            TryPromoteInboundFileTunaV4FallbackToPostTunaV6Locked(context, reason, kind, target))
+        {
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_v6_peer_epoch_promoted_live_route; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={message.TransportEpoch}; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}; handoff_kind={FormatFileTransferTransportHandoffKind(kind)}; target_transport={FormatFileTransferTransportKind(NormalizeV6TargetTransport(kind, target))}; reason={FormatProtocolLogValue(reason)}");
+        }
+
         var epoch = new V6TransportEpoch
         {
             EpochId = message.TransportEpoch,
@@ -879,7 +889,7 @@ public sealed partial class SessionFileTransferService
             SourceTransport = ParseFileTransferTransportKind(message.SourceTransport),
             TargetTransport = target == FileTransferTransportKind.Unknown ? FileTransferTransportKind.RegularNkn : target,
             Direction = FileTransferDirection.Inbound,
-            Reason = NormalizeReason(message.Reason) ?? "peer_transport_epoch",
+            Reason = reason,
             State = ParseV6TransportEpochState(message.State),
             StartingCommittedChunkIndex = Math.Clamp(context.NextChunkIndex, 0, context.ChunkCount),
             StartingHighestObservedChunkIndex = context.PullHighestReceivedChunkIndex,
@@ -1051,6 +1061,78 @@ public sealed partial class SessionFileTransferService
         return CompleteOutboundV6TransportEpochLocked(context, reason);
     }
 
+    private bool TryRecoverOutboundV6RegularNknEpochFromLegacyV4PeerStateLocked(
+        OutboundTransferContext context,
+        FileTransferStateFrameV4 state,
+        FileTransferTransportKind receivedTransportKind,
+        string reason)
+    {
+        var epoch = context.V6TransportEpoch;
+        if (!IsV6TransportEpochUnresolved(epoch) ||
+            epoch!.TargetTransport != FileTransferTransportKind.RegularNkn ||
+            receivedTransportKind != FileTransferTransportKind.RegularNkn ||
+            state.Epoch <= 0 ||
+            (epoch.Kind != FileTransferTransportHandoffKind.RegularNknRecovery &&
+             epoch.Kind != FileTransferTransportHandoffKind.TunaToNormalFallback))
+        {
+            return false;
+        }
+
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_v6_regular_nkn_legacy_v4_state_proof_accepted; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={epoch.EpochId}; handoff_kind={FormatFileTransferTransportHandoffKind(epoch.Kind)}; target_transport={FormatFileTransferTransportKind(epoch.TargetTransport)}; reason={FormatProtocolLogValue(reason)}; state_epoch={state.Epoch}; committed_chunk={state.ContiguousCommittedChunkIndex}; durable_received_highest_chunk_index={state.DurableReceivedHighestChunkIndex}; missing_range_count={state.MissingRanges.Count}; remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}");
+        return CompleteOutboundV6TransportEpochLocked(context, reason);
+    }
+
+    private bool TryRecoverInboundV6RegularNknEpochFromChunkProofLocked(
+        InboundTransferContext context,
+        FileTransferChunkBatchFrameV6 batch,
+        FileTransferTransportKind receivedTransportKind,
+        int observedChunkCount,
+        string reason)
+    {
+        var epoch = context.V6TransportEpoch;
+        if (!IsV6TransportEpochUnresolved(epoch) ||
+            epoch!.EpochId != batch.TransportEpoch ||
+            epoch.TargetTransport != FileTransferTransportKind.RegularNkn ||
+            receivedTransportKind != FileTransferTransportKind.RegularNkn ||
+            observedChunkCount <= 0 ||
+            (epoch.Kind != FileTransferTransportHandoffKind.RegularNknRecovery &&
+             epoch.Kind != FileTransferTransportHandoffKind.TunaToNormalFallback))
+        {
+            return false;
+        }
+
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_v6_regular_nkn_chunk_probe_accepted; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={batch.TransportEpoch}; handoff_kind={FormatFileTransferTransportHandoffKind(epoch.Kind)}; target_transport={FormatFileTransferTransportKind(epoch.TargetTransport)}; reason={FormatProtocolLogValue(reason)}; start_chunk_index={batch.StartChunkIndex}; batch_chunk_count={batch.ChunkCount}; observed_chunk_count={observedChunkCount}; committed_chunk={context.NextChunkIndex}; highest_observed_chunk={context.PullHighestReceivedChunkIndex}");
+        return CompleteInboundV6TransportEpochLocked(context, reason);
+    }
+
+    private bool TryRecoverInboundV6RegularNknEpochFromLegacyV4ChunkProofLocked(
+        InboundTransferContext context,
+        FileTransferChunkBatchFrameV4 batch,
+        FileTransferTransportKind receivedTransportKind,
+        string reason)
+    {
+        var epoch = context.V6TransportEpoch;
+        var observedChunkCount = Math.Min(Math.Max(0, batch.ChunkCount), batch.DataSegments.Count);
+        if (!IsV6TransportEpochUnresolved(epoch) ||
+            epoch!.TargetTransport != FileTransferTransportKind.RegularNkn ||
+            receivedTransportKind != FileTransferTransportKind.RegularNkn ||
+            observedChunkCount <= 0 ||
+            (epoch.Kind != FileTransferTransportHandoffKind.RegularNknRecovery &&
+             epoch.Kind != FileTransferTransportHandoffKind.TunaToNormalFallback))
+        {
+            return false;
+        }
+
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_v6_regular_nkn_legacy_v4_chunk_probe_accepted; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={epoch.EpochId}; handoff_kind={FormatFileTransferTransportHandoffKind(epoch.Kind)}; target_transport={FormatFileTransferTransportKind(epoch.TargetTransport)}; reason={FormatProtocolLogValue(reason)}; start_chunk_index={batch.StartChunkIndex}; batch_chunk_count={batch.ChunkCount}; observed_chunk_count={observedChunkCount}; committed_chunk={context.NextChunkIndex}; highest_observed_chunk={context.PullHighestReceivedChunkIndex}");
+        return CompleteInboundV6TransportEpochLocked(context, reason);
+    }
+
     private static bool IsRecoverableUnmatchedV6FrontierRepairProof(
         OutboundTransferContext context,
         V6TransportEpoch epoch,
@@ -1178,6 +1260,7 @@ public sealed partial class SessionFileTransferService
             context.RemoteNextExpectedChunkIndex,
             Math.Max(-1, context.ChunksAcceptedForTransport - 1));
         context.LastRecoveredV6TransportEpoch = Math.Max(context.LastRecoveredV6TransportEpoch, epoch!.EpochId);
+        context.LastRecoveredV6TransportLiveRouteEpochId = context.CurrentLiveRouteEpoch?.EpochId ?? 0;
         context.LastRecoveredV6TransportEpochKind = epoch.Kind;
         context.LastRecoveredV6TransportTargetTransport = epoch.TargetTransport;
         context.V6TransportEpoch = null;
@@ -1252,6 +1335,7 @@ public sealed partial class SessionFileTransferService
             context.NextChunkIndex,
             context.PullHighestReceivedChunkIndex);
         context.LastRecoveredV6TransportEpoch = Math.Max(context.LastRecoveredV6TransportEpoch, epoch!.EpochId);
+        context.LastRecoveredV6TransportLiveRouteEpochId = context.CurrentLiveRouteEpoch?.EpochId ?? 0;
         context.LastRecoveredV6TransportEpochKind = epoch.Kind;
         context.LastRecoveredV6TransportTargetTransport = epoch.TargetTransport;
         // Keep stamping receiver requests with the recovered epoch until a new epoch or

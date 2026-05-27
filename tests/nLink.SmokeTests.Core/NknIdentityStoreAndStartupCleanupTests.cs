@@ -778,6 +778,45 @@ public sealed class NknIdentityStoreAndStartupCleanupTests : SessionRuntimeConne
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public async Task NknIdentityStore_WithInjectedProtectedBackend_SerializesConcurrentSamePathAccess()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-protected-seed-concurrent", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            var backend = new ContentionDetectingProtectedSeedBackend();
+            using var backendOverride = NknSecretStore.OverrideBackendForTests(backend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "protected-seed-concurrent-test");
+            var tasks = Enumerable.Range(0, 8)
+                .Select(_ => Task.Run(() =>
+                {
+                    var identity = NknIdentityStore.LoadOrCreate(options);
+                    var seedBase64 = NknIdentityStore.ReadSeedBase64ForConnect(keyPath);
+                    return (identity.Address, seedBase64);
+                }))
+                .ToArray();
+
+            var results = await Task.WhenAll(tasks);
+
+            Assert.Equal(1, backend.MaxConcurrentAccess);
+            Assert.Single(results.Select(static result => result.Address).Distinct(StringComparer.Ordinal));
+            Assert.All(results, result => Assert.False(string.IsNullOrWhiteSpace(result.seedBase64)));
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public void NknIdentityStore_WithInjectedProtectedBackend_MigratesLegacySeedBase64_AndClearsJsonSeed()
     {
         var tempDir = Path.Combine(Path.GetTempPath(), "nlink-protected-seed-migrate-injected", Guid.NewGuid().ToString("N"));
@@ -838,6 +877,72 @@ public sealed class NknIdentityStoreAndStartupCleanupTests : SessionRuntimeConne
             catch
             {
             }
+        }
+    }
+
+    private sealed class ContentionDetectingProtectedSeedBackend : NknSecretStore.IProtectedSeedBackend
+    {
+        private readonly Dictionary<string, byte[]> storedSeeds = new(StringComparer.OrdinalIgnoreCase);
+        private int activeAccess;
+        private int maxConcurrentAccess;
+
+        public int MaxConcurrentAccess => Volatile.Read(ref maxConcurrentAccess);
+
+        public byte[]? TryLoadSeed(string keyPath)
+        {
+            using var _ = EnterProtectedSeedAccess();
+            lock (storedSeeds)
+            {
+                return storedSeeds.TryGetValue(Path.GetFullPath(keyPath), out var seed)
+                    ? seed.ToArray()
+                    : null;
+            }
+        }
+
+        public void SaveSeed(string keyPath, ReadOnlySpan<byte> seedBytes)
+        {
+            using var _ = EnterProtectedSeedAccess();
+            lock (storedSeeds)
+            {
+                storedSeeds[Path.GetFullPath(keyPath)] = seedBytes.ToArray();
+            }
+        }
+
+        public void DeleteSeed(string keyPath)
+        {
+            using var _ = EnterProtectedSeedAccess();
+            lock (storedSeeds)
+            {
+                storedSeeds.Remove(Path.GetFullPath(keyPath));
+            }
+        }
+
+        private IDisposable EnterProtectedSeedAccess()
+        {
+            var active = Interlocked.Increment(ref activeAccess);
+            int previous;
+            do
+            {
+                previous = Volatile.Read(ref maxConcurrentAccess);
+                if (active <= previous)
+                {
+                    break;
+                }
+            }
+            while (Interlocked.CompareExchange(ref maxConcurrentAccess, active, previous) != previous);
+
+            Thread.Sleep(10);
+            return new DelegateDisposable(() => Interlocked.Decrement(ref activeAccess));
+        }
+    }
+
+    private sealed class DelegateDisposable(Action dispose) : IDisposable
+    {
+        private Action? dispose = dispose;
+
+        public void Dispose()
+        {
+            Interlocked.Exchange(ref dispose, null)?.Invoke();
         }
     }
 

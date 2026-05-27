@@ -105,7 +105,7 @@ function Invoke-FileTransferRetainedAnalysis {
         [int]$TailMinutes = 0,
         [switch]$IncludeRawSlices,
         [switch]$AllTransfers,
-        [ValidateSet('None', 'SwitchOff', 'MultiToggle')]
+        [ValidateSet('None', 'SwitchOff', 'MultiToggle', 'RegularActivationCycle')]
         [string]$LiveRouteProofMode = 'None'
     )
 

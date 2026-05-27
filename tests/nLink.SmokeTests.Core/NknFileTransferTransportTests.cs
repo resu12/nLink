@@ -881,6 +881,124 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task NknTransport_PostTunaFallbackV6FrontierCancellation_DefersHardBothFailedEvidence()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            int logStartIndex = CoreSmokeTestsBase.GetOperationalLogLength();
+            using CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(8.0));
+            NknTransportOptions options = NknTransportOptions.Load();
+            FakeNknClient hostClient = new FakeNknClient("host.filetransfer.post-fallback.frontier-defer.address");
+            FakeNknClient helperClient = new FakeNknClient("helper.filetransfer.post-fallback.frontier-defer.address");
+            using NknSignalingTransport host = new NknSignalingTransport(hostClient, options, new NknIdentity("host-post-fallback-frontier-defer-id", hostClient.Address));
+            using NknSignalingTransport helper = new NknSignalingTransport(helperClient, options, new NknIdentity("helper-post-fallback-frontier-defer-id", helperClient.Address));
+
+            string sessionId = await CoreSmokeTestsBase.ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_post_fallback_frontier_defer";
+            IFileTransferDataSession receiverRecoverySession = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            CoreSmokeTestsBase.InvokePrivateMethod(
+                host,
+                "TrackFileTransferRouteHint",
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                FileTransferProtocol.ProtocolVersionV6,
+                "test_post_tuna_fallback_route");
+            hostClient.BeforeSendCoreAsync = (_, payload, _, ct) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(payload, out Envelope envelope) &&
+                    envelope.Type == MsgType.FileTransferDataFrame)
+                {
+                    throw new OperationCanceledException("Injected post-Tuna fallback feedback cancellation.", ct);
+                }
+
+                return Task.CompletedTask;
+            };
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                async () => await receiverRecoverySession.SendAsync(
+                    new FileTransferFrontierRequestFrameV6
+                    {
+                        SessionId = sessionId,
+                        TransferId = transferId,
+                        TransportEpoch = 7,
+                        RepairRequestId = "v6:7:1539:1",
+                        MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = 1539, ChunkCount = 1 }],
+                        Priority = "frontier",
+                        RecoveryMode = "frontier_repair_only",
+                    },
+                    cts.Token));
+
+            string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
+            Assert.Contains("event=filetransfer_v6_post_tuna_fallback_feedback_both_failed_deferred_for_recovery;", logTail, StringComparison.Ordinal);
+            Assert.Contains($"route={FileTransferRouteResolver.PostTunaFallbackV6Token}", logTail, StringComparison.Ordinal);
+            Assert.Contains($"protocol_version={FileTransferProtocol.ProtocolVersionV6}", logTail, StringComparison.Ordinal);
+            Assert.Contains($"frame_type={FileTransferProtocol.FrontierRequestFrameTypeV6}", logTail, StringComparison.Ordinal);
+            Assert.Contains("reason=post_tuna_fallback_recovery_active", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_v4_feedback_both_failed;", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_RegularV6FrontierCancellation_StillLogsHardBothFailedEvidence()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            int logStartIndex = CoreSmokeTestsBase.GetOperationalLogLength();
+            using CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(8.0));
+            NknTransportOptions options = NknTransportOptions.Load();
+            FakeNknClient hostClient = new FakeNknClient("host.filetransfer.regular.frontier-hard.address");
+            FakeNknClient helperClient = new FakeNknClient("helper.filetransfer.regular.frontier-hard.address");
+            using NknSignalingTransport host = new NknSignalingTransport(hostClient, options, new NknIdentity("host-regular-frontier-hard-id", hostClient.Address));
+            using NknSignalingTransport helper = new NknSignalingTransport(helperClient, options, new NknIdentity("helper-regular-frontier-hard-id", helperClient.Address));
+
+            string sessionId = await CoreSmokeTestsBase.ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_regular_frontier_hard";
+            IFileTransferDataSession receiverRecoverySession = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            hostClient.BeforeSendCoreAsync = (_, payload, _, ct) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(payload, out Envelope envelope) &&
+                    envelope.Type == MsgType.FileTransferDataFrame)
+                {
+                    throw new OperationCanceledException("Injected regular feedback cancellation.", ct);
+                }
+
+                return Task.CompletedTask;
+            };
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                async () => await receiverRecoverySession.SendAsync(
+                    new FileTransferFrontierRequestFrameV6
+                    {
+                        SessionId = sessionId,
+                        TransferId = transferId,
+                        TransportEpoch = 7,
+                        RepairRequestId = "v6:7:42:1",
+                        MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = 42, ChunkCount = 1 }],
+                        Priority = "frontier",
+                        RecoveryMode = "frontier_repair_only",
+                    },
+                    cts.Token));
+
+            string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
+            Assert.Contains("event=filetransfer_v4_feedback_both_failed;", logTail, StringComparison.Ordinal);
+            Assert.Contains($"frame_type={FileTransferProtocol.FrontierRequestFrameTypeV6}", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_v6_post_tuna_fallback_feedback_both_failed_deferred_for_recovery;", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task NknTransport_FileTransferDataSession_RoutesV6RecoveryFramesOnRegularNkn()
     {
         FakeNknClient.ResetNetwork();

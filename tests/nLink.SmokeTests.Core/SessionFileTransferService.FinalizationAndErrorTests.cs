@@ -53,6 +53,113 @@ public sealed class SessionFileTransferServiceFinalizationAndErrorTests : Sessio
     }
 
     [Fact]
+    public async Task AwaitingAcceptance_RetriesOfferWhenInitialOfferIsLost()
+    {
+        const string transferId = "transfer_service_offer_retry";
+        var payload = Enumerable.Range(0, 4096).Select(static i => (byte)(i % 251)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport("session_service_offer_retry");
+        using var receiverTransport = new LoopbackFileTransferTransport("session_service_offer_retry");
+        senderTransport.Connect(receiverTransport);
+
+        var offerAttempts = 0;
+        senderTransport.OutboundOfferDeliveryOverrideAsync = (_, _, _) =>
+            Task.FromResult(Interlocked.Increment(ref offerAttempts) == 1);
+
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("retry-offer.bin", payload.Length, transferId, ChunkSizeBytes: 2048),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+
+        await WaitUntilAsync(
+            () => receiver.Snapshot.InboundState == FileTransferTransferState.PendingDecision,
+            timeoutMs: 6000);
+
+        Assert.True(Volatile.Read(ref offerAttempts) >= 2);
+        Assert.Equal(FileTransferTransferState.AwaitingAcceptance, sender.Snapshot.OutboundState);
+    }
+
+    [Fact]
+    public async Task DuplicateOfferForPendingInbound_DoesNotDeclineAsBusy()
+    {
+        const string transferId = "transfer_service_duplicate_offer_pending";
+        var payload = Enumerable.Range(0, 4096).Select(static i => (byte)(i % 251)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport("session_service_duplicate_offer_pending");
+        using var receiverTransport = new LoopbackFileTransferTransport("session_service_duplicate_offer_pending");
+        senderTransport.Connect(receiverTransport);
+
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("duplicate-offer.bin", payload.Length, transferId, ChunkSizeBytes: 2048),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => receiver.Snapshot.InboundState == FileTransferTransferState.PendingDecision);
+        await senderTransport.SendFileTransferOfferAsync(
+            new FileTransferOfferV2
+            {
+                SessionId = string.Empty,
+                TransferId = transferId,
+                FileName = "duplicate-offer.bin",
+                FileSizeBytes = payload.Length,
+                PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                FileTransferRoute = "regular_nkn_v4_fast",
+            },
+            CancellationToken.None);
+
+        await Task.Delay(200);
+
+        Assert.Empty(receiverTransport.SentDeclines);
+        Assert.Equal(FileTransferTransferState.PendingDecision, receiver.Snapshot.InboundState);
+        Assert.Equal(FileTransferTransferState.AwaitingAcceptance, sender.Snapshot.OutboundState);
+    }
+
+    [Fact]
+    public async Task DuplicateOfferAfterAccept_ResendsAcceptAndUnsticksSender()
+    {
+        const string transferId = "transfer_service_duplicate_offer_resends_accept";
+        var payload = Enumerable.Range(0, 8192).Select(static i => (byte)(i % 251)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport("session_service_duplicate_offer_resends_accept");
+        using var receiverTransport = new LoopbackFileTransferTransport("session_service_duplicate_offer_resends_accept");
+        senderTransport.Connect(receiverTransport);
+
+        var acceptAttempts = 0;
+        receiverTransport.OutboundAcceptDeliveryOverrideAsync = (_, _, _) =>
+            Task.FromResult(Interlocked.Increment(ref acceptAttempts) == 1);
+
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("resend-accept.bin", payload.Length, transferId, ChunkSizeBytes: 2048),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => receiver.Snapshot.InboundState == FileTransferTransferState.PendingDecision);
+        await receiver.AcceptIncomingTransferAsync(
+            transferId,
+            (_, _) => Task.FromResult(FileTransferReceiveDestination.FromStream(new MemoryStream())),
+            CancellationToken.None);
+
+        await WaitUntilAsync(
+            () => sender.Snapshot.OutboundState == FileTransferTransferState.Completed &&
+                  receiver.Snapshot.InboundState == FileTransferTransferState.Completed,
+            timeoutMs: 8000);
+
+        Assert.True(Volatile.Read(ref acceptAttempts) >= 2);
+    }
+
+    [Fact]
     public async Task SuccessfulReceive_WritesPartFileUntilVerification_ThenMovesToFinalPath()
     {
         const string transferId = "transfer_service_temp_finalize";

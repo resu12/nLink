@@ -19,6 +19,7 @@ namespace NLink.Infra.Nkn;
 public sealed partial class NknSignalingTransport
 {
     private static readonly TimeSpan FileTransferTerminalTombstoneRetention = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan TunaActivationPauseCancellationRecoveryWindow = TimeSpan.FromSeconds(10);
 
     public async Task SendFileTransferOfferAsync(FileTransferOfferV2 message, CancellationToken ct)
     {
@@ -348,11 +349,6 @@ public sealed partial class NknSignalingTransport
         if (!session.IsAvailable ||
             !TryGetActiveFileTransferTunaActivationPauseForCurrentSession(out var pausedSessionId) ||
             !string.Equals(pausedSessionId, session.SessionId, StringComparison.Ordinal))
-        {
-            return;
-        }
-
-        if (ShouldSuppressTunaActivationForFileTransferSession(session, "opened_during_activation_pause"))
         {
             return;
         }
@@ -1031,13 +1027,6 @@ public sealed partial class NknSignalingTransport
                 targetTransport,
                 "availability_broadcast");
 
-            if (!isAvailable &&
-                IsTunaActivationNegotiationAvailabilityReason(reason) &&
-                ShouldSuppressTunaActivationForFileTransferSession(session, "availability_broadcast"))
-            {
-                continue;
-            }
-
             session.SetAvailability(isAvailable, reason, requiresResumeRequest, effectiveHandoffKind, targetTransport);
         }
     }
@@ -1158,12 +1147,6 @@ public sealed partial class NknSignalingTransport
 
         foreach (var session in sessions)
         {
-            if (IsNormalToTunaActivationHandoff(handoffKind, targetTransport) &&
-                ShouldSuppressTunaActivationForFileTransferSession(session, "handoff_broadcast"))
-            {
-                continue;
-            }
-
             TrackFileTransferRouteHintForHandoff(
                 session.TransferId,
                 handoffKind,
@@ -1242,16 +1225,15 @@ public sealed partial class NknSignalingTransport
             }
 
             intent = candidate;
-            fileTransferRouteHints.TryGetValue(session.TransferId, out var candidateRouteHint);
-            routeHint = candidateRouteHint;
-            if (IsNormalToTunaActivationHandoff(candidate.HandoffKind, candidate.TargetTransport))
+            if (fileTransferRouteHints.TryGetValue(session.TransferId, out var candidateRouteHint))
             {
-                pendingFileTransferV6HandoffsBySession.Remove(session.SessionId);
-                LocalOperationalLog.Info(
-                    "NKN.Tuna",
-                    $"event=filetransfer_v6_pending_handoff_suppressed_for_route; session_id={SanitizeLogToken(session.SessionId)}; transfer_id={SanitizeLogToken(session.TransferId)}; reason={candidate.Reason}; trigger={SanitizeLogToken(trigger)}; route={SanitizeLogToken(routeHint?.Token ?? "(unknown)")}; protocol_version={(routeHint?.ProtocolVersion ?? 0)}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(candidate.HandoffKind)}; target_transport={FormatFileTransferTransportKindForLog(candidate.TargetTransport)}");
-                return false;
+                routeHint = candidateRouteHint;
             }
+        }
+
+        if (ShouldSuppressPendingRegularNknHandoffForActiveFileTunaRoute(session, intent, routeHint, trigger))
+        {
+            return false;
         }
 
         LocalOperationalLog.Info(
@@ -1276,38 +1258,104 @@ public sealed partial class NknSignalingTransport
         return true;
     }
 
-    private bool TryRequestCurrentTunaActivationHandoffForFileTransferSession(TransportFileTransferDataSession session, string trigger)
-    {
-        return false;
-    }
-
-    private bool ShouldSuppressTunaActivationForFileTransferSession(
+    private bool ShouldSuppressPendingRegularNknHandoffForActiveFileTunaRoute(
         TransportFileTransferDataSession session,
+        FileTransferV6PendingHandoffIntent intent,
+        FileTransferRouteHint? routeHint,
         string trigger)
     {
-        FileTransferRouteHint routeHint;
-        bool hasRouteHint;
+        if (intent.TargetTransport != FileTransferTransportKind.RegularNkn ||
+            intent.HandoffKind is not (FileTransferTransportHandoffKind.TunaToNormalFallback or FileTransferTransportHandoffKind.RegularNknRecovery) ||
+            routeHint?.Route != FileTransferRoute.FileTunaV4)
+        {
+            return false;
+        }
+
+        bool fileTunaHealthy;
+        lock (accelerationGate)
+        {
+            fileTunaHealthy =
+                IsAccelerationNegotiatedAndHealthyUnsafe(session.SessionId) &&
+                (accelerationNegotiatedLanes & NknAccelerationLaneKind.File) == NknAccelerationLaneKind.File &&
+                !string.Equals(accelerationUserStoppedSessionId, session.SessionId, StringComparison.Ordinal);
+        }
+
+        if (!fileTunaHealthy)
+        {
+            return false;
+        }
+
+        var removed = false;
         lock (gate)
         {
-            hasRouteHint = fileTransferRouteHints.TryGetValue(session.TransferId, out routeHint);
-        }
-
-        if (!hasRouteHint ||
-            (routeHint.Route != FileTransferRoute.RegularNknV4Fast &&
-             routeHint.Route != FileTransferRoute.PostTunaFallbackV6))
-        {
-            return false;
-        }
-
-        if (routeHint.Route == FileTransferRoute.PostTunaFallbackV6 &&
-            string.Equals(trigger, "handoff_broadcast", StringComparison.Ordinal))
-        {
-            return false;
+            if (pendingFileTransferV6HandoffsBySession.TryGetValue(session.SessionId, out var current) &&
+                ReferenceEquals(current, intent))
+            {
+                removed = pendingFileTransferV6HandoffsBySession.Remove(session.SessionId);
+            }
         }
 
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=filetransfer_tuna_activation_suppressed_for_route; session_id={SanitizeLogToken(session.SessionId)}; transfer_id={SanitizeLogToken(session.TransferId)}; route={SanitizeLogToken(routeHint.Token)}; protocol_version={routeHint.ProtocolVersion}; trigger={SanitizeLogToken(trigger)}");
+            $"event=filetransfer_v6_pending_handoff_suppressed_for_active_tuna_route; session_id={SanitizeLogToken(session.SessionId)}; transfer_id={SanitizeLogToken(session.TransferId)}; reason={intent.Reason}; trigger={SanitizeLogToken(trigger)}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(intent.HandoffKind)}; target_transport={FormatFileTransferTransportKindForLog(intent.TargetTransport)}; route={SanitizeLogToken(routeHint.Value.Token)}; protocol_version={routeHint.Value.ProtocolVersion}; route_hint_source={SanitizeLogToken(routeHint.Value.Source)}; cleared={(removed ? 1 : 0)}");
+        return true;
+    }
+
+    private bool TryRequestCurrentTunaActivationHandoffForFileTransferSession(TransportFileTransferDataSession session, string trigger)
+    {
+        if (session.IsDisposed)
+        {
+            return false;
+        }
+
+        var currentSessionId = currentSessionSecurityState.SessionId?.Value;
+        FileTransferRouteHint? routeHint = null;
+        lock (gate)
+        {
+            if (!fileTransferDataSessions.TryGetValue(session.TransferId, out var current) ||
+                !ReferenceEquals(current, session))
+            {
+                return false;
+            }
+
+            if (fileTransferRouteHints.TryGetValue(session.TransferId, out var candidateRouteHint))
+            {
+                routeHint = candidateRouteHint;
+            }
+        }
+
+        if (routeHint?.Route == FileTransferRoute.FileTunaV4)
+        {
+            return false;
+        }
+
+        lock (accelerationGate)
+        {
+            if (accelerationLane?.IsAvailable != true ||
+                (accelerationNegotiatedLanes & NknAccelerationLaneKind.File) != NknAccelerationLaneKind.File ||
+                string.IsNullOrWhiteSpace(accelerationSessionId) ||
+                string.IsNullOrWhiteSpace(currentSessionId) ||
+                !string.Equals(accelerationSessionId, currentSessionId, StringComparison.Ordinal) ||
+                !string.Equals(accelerationSessionId, session.SessionId, StringComparison.Ordinal) ||
+                string.Equals(accelerationUserStoppedSessionId, currentSessionId, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        const string reason = "active_tuna_session_registered";
+        TrackFileTransferRouteHintForHandoff(
+            session.TransferId,
+            FileTransferTransportHandoffKind.NormalToTunaActivation,
+            FileTransferTransportKind.Tuna,
+            "active_tuna_session_registered");
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=filetransfer_v6_active_tuna_handoff_synthesized; session_id={SanitizeLogToken(session.SessionId)}; transfer_id={SanitizeLogToken(session.TransferId)}; reason={reason}; trigger={SanitizeLogToken(trigger)}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(FileTransferTransportHandoffKind.NormalToTunaActivation)}; target_transport={FormatFileTransferTransportKindForLog(FileTransferTransportKind.Tuna)}");
+        session.RequestHandoff(
+            reason,
+            FileTransferTransportHandoffKind.NormalToTunaActivation,
+            FileTransferTransportKind.Tuna);
         return true;
     }
 
@@ -5534,6 +5582,8 @@ public sealed partial class NknSignalingTransport
         private int chunkBatchTransportSummaryMaxChunkCount;
         private CancellationTokenSource tunaActivationPauseCts = new();
         private string availabilityReason = "available";
+        private string? lastTunaActivationPauseReason;
+        private long lastTunaActivationPauseRecoveredUtcTicks;
         private EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? availabilityChanged;
 
         public TransportFileTransferDataSession(NknSignalingTransport owner, string sessionId, string transferId)
@@ -5683,12 +5733,12 @@ public sealed partial class NknSignalingTransport
                         forceRegularNknBulk: ShouldForceRegularNknBulk(frame))
                     .ConfigureAwait(false);
             }
-            catch (OperationCanceledException) when (!ct.IsCancellationRequested && IsUnavailableForTunaActivationPause(out var pauseReason))
+            catch (OperationCanceledException ex) when (!ct.IsCancellationRequested && IsTunaActivationPauseSendCancellation(out var pauseReason))
             {
                 LocalOperationalLog.Warn(
                     "SessionSecurity",
                     $"event=filetransfer_data_session_send_canceled_for_tuna_activation_pause; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; reason={SanitizeLogToken(pauseReason)}");
-                throw;
+                throw new InvalidOperationException($"File-transfer data session is unavailable: {pauseReason}.", ex);
             }
             finally
             {
@@ -5708,6 +5758,32 @@ public sealed partial class NknSignalingTransport
             reason = Volatile.Read(ref availabilityReason) ?? string.Empty;
             return Volatile.Read(ref available) == 0 &&
                    IsTunaActivationNegotiationAvailabilityReason(reason);
+        }
+
+        private bool IsTunaActivationPauseSendCancellation(out string reason)
+        {
+            if (IsUnavailableForTunaActivationPause(out reason))
+            {
+                return true;
+            }
+
+            var recoveredTicks = Volatile.Read(ref lastTunaActivationPauseRecoveredUtcTicks);
+            if (recoveredTicks <= 0)
+            {
+                reason = string.Empty;
+                return false;
+            }
+
+            var age = DateTimeOffset.UtcNow - new DateTimeOffset(recoveredTicks, TimeSpan.Zero);
+            if (age < TimeSpan.Zero ||
+                age > TunaActivationPauseCancellationRecoveryWindow)
+            {
+                reason = string.Empty;
+                return false;
+            }
+
+            reason = Volatile.Read(ref lastTunaActivationPauseReason) ?? "tuna_activation_negotiating";
+            return IsTunaActivationNegotiationAvailabilityReason(reason);
         }
 
         private static bool IsTunaActivationNegotiationAvailabilityReason(string? reason)
@@ -5783,10 +5859,123 @@ public sealed partial class NknSignalingTransport
                 return;
             }
 
+            if (ShouldDeferRedundantFeedbackBothFailedForTunaActivationPause(first.Error, second.Error, out var pauseReason))
+            {
+                LocalOperationalLog.Warn(
+                    "SessionSecurity",
+                    $"event=filetransfer_v4_feedback_deferred_for_tuna_activation_pause; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; first_lane={first.Lane}; second_lane={second.Lane}; first_error={first.Error?.GetType().Name ?? "(none)"}; second_error={second.Error?.GetType().Name ?? "(none)"}; reason={SanitizeLogToken(pauseReason)}");
+                throw new InvalidOperationException($"File-transfer data session is unavailable: {pauseReason}.", first.Error ?? second.Error);
+            }
+
+            if (ShouldDeferRedundantFeedbackBothFailedForPostTunaFallbackRecovery(frame, protocolVersion, first.Error, second.Error, out var fallbackReason))
+            {
+                LocalOperationalLog.Warn(
+                    "SessionSecurity",
+                    $"event=filetransfer_v6_post_tuna_fallback_feedback_both_failed_deferred_for_recovery; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; route={FileTransferRouteResolver.PostTunaFallbackV6Token}; protocol_version={FileTransferProtocol.ProtocolVersionV6}; frame_type={frame.Type}; first_lane={first.Lane}; second_lane={second.Lane}; first_error={first.Error?.GetType().Name ?? "(none)"}; second_error={second.Error?.GetType().Name ?? "(none)"}; reason={SanitizeLogToken(fallbackReason)}");
+                throw first.Error ?? second.Error ?? new InvalidOperationException(bothFailedMessage);
+            }
+
             LocalOperationalLog.Warn(
                 "SessionSecurity",
                 $"event={GetFeedbackEventName(protocolVersion, "both_failed")}; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; first_lane={first.Lane}; second_lane={second.Lane}; first_error={first.Error?.GetType().Name ?? "(none)"}; second_error={second.Error?.GetType().Name ?? "(none)"}");
             throw first.Error ?? second.Error ?? new InvalidOperationException(bothFailedMessage);
+        }
+
+        private bool ShouldDeferRedundantFeedbackBothFailedForTunaActivationPause(
+            Exception? firstError,
+            Exception? secondError,
+            out string pauseReason)
+        {
+            if (!IsTunaActivationPauseSendCancellation(out pauseReason) &&
+                !IsUnavailableForTunaActivationPause(out pauseReason))
+            {
+                return false;
+            }
+
+            return IsTunaActivationPauseFeedbackFailure(firstError) &&
+                   IsTunaActivationPauseFeedbackFailure(secondError);
+        }
+
+        private bool ShouldDeferRedundantFeedbackBothFailedForPostTunaFallbackRecovery(
+            FileTransferDataFrame frame,
+            int protocolVersion,
+            Exception? firstError,
+            Exception? secondError,
+            out string reason)
+        {
+            reason = string.Empty;
+            if (protocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+                !IsPostTunaFallbackRecoverableFeedbackFrame(frame))
+            {
+                return false;
+            }
+
+            if (!owner.HasActivePostTunaFallbackFileTransferRouteHint(SessionId))
+            {
+                return false;
+            }
+
+            if (!IsPostTunaFallbackRecoverableFeedbackFailure(firstError) ||
+                !IsPostTunaFallbackRecoverableFeedbackFailure(secondError))
+            {
+                return false;
+            }
+
+            reason = "post_tuna_fallback_recovery_active";
+            return true;
+        }
+
+        private static bool IsPostTunaFallbackRecoverableFeedbackFrame(FileTransferDataFrame frame)
+            => frame.Type is FileTransferProtocol.ReceiverStateFrameTypeV6
+                or FileTransferProtocol.FrontierRequestFrameTypeV6;
+
+        private static bool IsPostTunaFallbackRecoverableFeedbackFailure(Exception? ex)
+        {
+            if (ex is null)
+            {
+                return false;
+            }
+
+            if (ex is OperationCanceledException)
+            {
+                return true;
+            }
+
+            if (ex is AggregateException aggregate)
+            {
+                return aggregate.InnerExceptions.Count > 0 &&
+                       aggregate.InnerExceptions.All(IsPostTunaFallbackRecoverableFeedbackFailure);
+            }
+
+            return IsPostTunaFallbackRecoverableFeedbackFailure(ex.InnerException);
+        }
+
+        private static bool IsTunaActivationPauseFeedbackFailure(Exception? ex)
+        {
+            if (ex is null)
+            {
+                return false;
+            }
+
+            if (ex is OperationCanceledException)
+            {
+                return true;
+            }
+
+            if (ex is InvalidOperationException &&
+                ex.Message.Contains("File-transfer data session is unavailable", StringComparison.OrdinalIgnoreCase) &&
+                ex.Message.Contains("tuna_activation_negotiating", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (ex is AggregateException aggregate)
+            {
+                return aggregate.InnerExceptions.Count > 0 &&
+                       aggregate.InnerExceptions.All(IsTunaActivationPauseFeedbackFailure);
+            }
+
+            return IsTunaActivationPauseFeedbackFailure(ex.InnerException);
         }
 
         private async Task<RedundantFeedbackSendResult> SendRedundantFeedbackCopyAsync(
@@ -6404,15 +6593,32 @@ public sealed partial class NknSignalingTransport
             var previousReason = Volatile.Read(ref availabilityReason);
             var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "transport_state_changed" : reason.Trim();
             var activationBarrier = !isAvailable && IsTunaActivationNegotiationAvailabilityReason(normalizedReason);
+            if (ShouldSuppressTransportLifecycleAvailabilityDuringTunaActivationPause(
+                    isAvailable,
+                    normalizedReason,
+                    requiresResumeRequest,
+                    handoffKind,
+                    targetTransport))
+            {
+                return;
+            }
+
             var previous = Interlocked.Exchange(ref available, next);
             Volatile.Write(ref availabilityReason, normalizedReason);
             if (activationBarrier)
             {
+                Volatile.Write(ref lastTunaActivationPauseReason, normalizedReason);
                 CancelTunaActivationPauseSends();
             }
 
             if (isAvailable && previous == 0)
             {
+                if (IsTunaActivationNegotiationAvailabilityReason(previousReason))
+                {
+                    Volatile.Write(ref lastTunaActivationPauseReason, previousReason);
+                    Volatile.Write(ref lastTunaActivationPauseRecoveredUtcTicks, DateTimeOffset.UtcNow.UtcTicks);
+                }
+
                 ResetTunaActivationPauseSends();
             }
 
@@ -6458,6 +6664,31 @@ public sealed partial class NknSignalingTransport
                     targetTransport));
         }
 
+        private bool ShouldSuppressTransportLifecycleAvailabilityDuringTunaActivationPause(
+            bool isAvailable,
+            string normalizedReason,
+            bool requiresResumeRequest,
+            FileTransferTransportHandoffKind handoffKind,
+            FileTransferTransportKind targetTransport)
+        {
+            if (!IsUnavailableForTunaActivationPause(out var pauseReason) ||
+                !IsTransportLifecycleAvailabilityReason(normalizedReason) ||
+                IsNormalToTunaActivationHandoff(handoffKind, targetTransport))
+            {
+                return false;
+            }
+
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=filetransfer_tuna_activation_negotiation_availability_suppressed; transfer_id={SanitizeLogToken(TransferId)}; session_id={SanitizeLogToken(SessionId)}; pause_reason={SanitizeLogToken(pauseReason)}; incoming_reason={SanitizeLogToken(normalizedReason)}; incoming_available={(isAvailable ? 1 : 0)}; requires_resume_request={(requiresResumeRequest ? 1 : 0)}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(handoffKind)}; target_transport={FormatFileTransferTransportKindForLog(targetTransport)}");
+            return true;
+        }
+
+        private static bool IsTransportLifecycleAvailabilityReason(string? reason)
+            => string.Equals(reason, "receive_stall_recovery", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(reason, "transport_recovered", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(reason, "transport_recovered_unproven", StringComparison.OrdinalIgnoreCase);
+
         public void RequestHandoff(
             string reason,
             FileTransferTransportHandoffKind handoffKind,
@@ -6467,6 +6698,20 @@ public sealed partial class NknSignalingTransport
                 handoffKind == FileTransferTransportHandoffKind.None)
             {
                 return;
+            }
+
+            if (IsNormalToTunaActivationHandoff(handoffKind, targetTransport))
+            {
+                var previousReason = Volatile.Read(ref availabilityReason);
+                if (IsTunaActivationNegotiationAvailabilityReason(previousReason))
+                {
+                    Volatile.Write(ref lastTunaActivationPauseReason, previousReason);
+                }
+
+                Volatile.Write(ref available, 1);
+                Volatile.Write(ref availabilityReason, string.IsNullOrWhiteSpace(reason) ? "tuna_activation_handoff" : reason.Trim());
+                Volatile.Write(ref lastTunaActivationPauseRecoveredUtcTicks, DateTimeOffset.UtcNow.UtcTicks);
+                ResetTunaActivationPauseSends();
             }
 
             var handler = availabilityChanged;

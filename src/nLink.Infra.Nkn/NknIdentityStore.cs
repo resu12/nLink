@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -12,10 +13,21 @@ internal static class NknIdentityStore
     private const int MaxRecoveryQuarantineFiles = 20;
     private const string AutoRecoveredIdentityUserWarning = "Local protected identity storage was unreadable. nLink created a new local identity. Previous helper address and invites are no longer valid.";
     private static readonly TimeSpan MaxRecoveryQuarantineAge = TimeSpan.FromDays(30);
+    private static readonly ConcurrentDictionary<string, object> IdentityPathLocks = new(StringComparer.OrdinalIgnoreCase);
     private static Func<string>? defaultSharedKeyPathOverrideForTests;
     private static Func<string>? recoveryDirectoryOverrideForTests;
 
     public static NknIdentity LoadOrCreate(NknTransportOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        lock (GetIdentityPathLock(options.KeyPath))
+        {
+            return LoadOrCreateUnlocked(options);
+        }
+    }
+
+    private static NknIdentity LoadOrCreateUnlocked(NknTransportOptions options)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(options.KeyPath)!);
         NknSecretStore.EnsureProtectedSeedStorageAvailable(options.KeyPath);
@@ -73,54 +85,63 @@ internal static class NknIdentityStore
     {
         ArgumentNullException.ThrowIfNull(options);
 
-        Directory.CreateDirectory(Path.GetDirectoryName(options.KeyPath)!);
-        NknSecretStore.EnsureProtectedSeedStorageAvailable(options.KeyPath);
-
-        var keyPath = Path.GetFullPath(options.KeyPath);
-        if (File.Exists(keyPath))
+        lock (GetIdentityPathLock(options.KeyPath))
         {
-            File.Delete(keyPath);
+            Directory.CreateDirectory(Path.GetDirectoryName(options.KeyPath)!);
+            NknSecretStore.EnsureProtectedSeedStorageAvailable(options.KeyPath);
+
+            var keyPath = Path.GetFullPath(options.KeyPath);
+            if (File.Exists(keyPath))
+            {
+                File.Delete(keyPath);
+            }
+
+            NknSecretStore.DeleteSeed(keyPath);
+
+            var identity = LoadOrCreateUnlocked(options);
+            PersistenceDiagnostics.Record(
+                domain: "nkn_identity_store",
+                operation: "manual_identity_regeneration",
+                severity: PersistenceDiagnosticSeverity.Info,
+                outcome: PersistenceDiagnosticOutcome.Partial,
+                reason: "user_requested",
+                userWarning: "Helper address was regenerated. Previous helper address and invites are no longer valid.");
+            return identity;
         }
-
-        NknSecretStore.DeleteSeed(keyPath);
-
-        var identity = LoadOrCreate(options);
-        PersistenceDiagnostics.Record(
-            domain: "nkn_identity_store",
-            operation: "manual_identity_regeneration",
-            severity: PersistenceDiagnosticSeverity.Info,
-            outcome: PersistenceDiagnosticOutcome.Partial,
-            reason: "user_requested",
-            userWarning: "Helper address was regenerated. Previous helper address and invites are no longer valid.");
-        return identity;
     }
 
     internal static string? ReadSeedBase64ForConnect(string keyPath)
     {
-        NknSecretStore.EnsureProtectedSeedStorageAvailable(keyPath);
-
-        var protectedSeedBase64 = NknSecretStore.ReadSeedBase64ForConnect(keyPath);
-        if (!string.IsNullOrWhiteSpace(protectedSeedBase64))
+        lock (GetIdentityPathLock(keyPath))
         {
-            return protectedSeedBase64;
-        }
+            NknSecretStore.EnsureProtectedSeedStorageAvailable(keyPath);
 
-        var legacySeedBytes = TryParseSeed(ReadLegacySeedBase64(keyPath));
-        if (legacySeedBytes is not null)
-        {
-            NknSecretStore.SaveSeed(keyPath, legacySeedBytes);
-            RewriteIdentityWithoutLegacySeed(keyPath);
-            PersistenceDiagnostics.Record(
-                domain: "nkn_identity_store",
-                operation: "migrate_legacy_seed",
-                severity: PersistenceDiagnosticSeverity.Info,
-                outcome: PersistenceDiagnosticOutcome.Partial,
-                reason: "legacy_json_seed_migrated");
-            return Convert.ToBase64String(legacySeedBytes);
-        }
+            var protectedSeedBase64 = NknSecretStore.ReadSeedBase64ForConnect(keyPath);
+            if (!string.IsNullOrWhiteSpace(protectedSeedBase64))
+            {
+                return protectedSeedBase64;
+            }
 
-        throw new InvalidOperationException($"Protected NKN seed is unavailable for '{keyPath}'.");
+            var legacySeedBytes = TryParseSeed(ReadLegacySeedBase64(keyPath));
+            if (legacySeedBytes is not null)
+            {
+                NknSecretStore.SaveSeed(keyPath, legacySeedBytes);
+                RewriteIdentityWithoutLegacySeed(keyPath);
+                PersistenceDiagnostics.Record(
+                    domain: "nkn_identity_store",
+                    operation: "migrate_legacy_seed",
+                    severity: PersistenceDiagnosticSeverity.Info,
+                    outcome: PersistenceDiagnosticOutcome.Partial,
+                    reason: "legacy_json_seed_migrated");
+                return Convert.ToBase64String(legacySeedBytes);
+            }
+
+            throw new InvalidOperationException($"Protected NKN seed is unavailable for '{keyPath}'.");
+        }
     }
+
+    private static object GetIdentityPathLock(string keyPath)
+        => IdentityPathLocks.GetOrAdd(Path.GetFullPath(keyPath), static _ => new object());
 
     private static byte[]? TryParseSeed(string? seedBase64)
     {

@@ -2223,15 +2223,35 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_listener_startup_stage', 'stage=listener_ready'))
     $tunaActive = Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_acceleration_timeline', 'active=1')
     $routeSelected = Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=filetransfer_route_selected')
-    $offerSent = (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('message_type=file_transfer_offer')) -or
+    $activationOfferNotObserved = (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_acceleration_activation_offer_not_observed')) -or
+        (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('reason=offer_send_not_observed')) -or
+        (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_acceleration_control_send_wait_timeout', 'purpose=offer'))
+    $activationOfferWaitingAnswer = (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_acceleration_offer_queued')) -or
+        (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('status=waiting_for_answer')) -or
+        (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_acceleration_offer_replay_sent'))
+    $measuredOfferSent = (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('message_type=file_transfer_offer')) -or
         (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=offer_sent'))
-    $offerReceived = Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=offer_received')
+    $measuredOfferReceived = Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=offer_received')
+    $activationOfferSent = (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_acceleration_offer_queued')) -or
+        (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_acceleration_offer_replay_sent'))
+    $activationOfferReceived = Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_acceleration_offer_received_raw')
+    $activationPhaseEvidence = (-not $tunaActive) -and ($activationOfferNotObserved -or $activationOfferWaitingAnswer -or $activationOfferSent -or $activationOfferReceived)
+    $offerSent = if ($activationPhaseEvidence) { $activationOfferSent } else { $measuredOfferSent }
+    $offerReceived = if ($activationPhaseEvidence) { $activationOfferReceived } else { $measuredOfferReceived }
     $terminalObserved = Test-TunaGuiLogLinesContain -Lines $lines -Needles @('_terminal')
 
     $phase = 'unknown'
     $reason = 'unknown'
     if ($ErrorMessage.IndexOf('Chat.FileTransfer.Accept', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-        if (-not $tunaActive -and ($listenerUnavailable -or $listenerSidecarUnavailable)) {
+        if (-not $tunaActive -and $activationOfferNotObserved) {
+            $phase = 'activation_offer_send'
+            $reason = 'activation_offer_not_observed'
+        }
+        elseif (-not $tunaActive -and $activationOfferWaitingAnswer) {
+            $phase = 'activation_offer_answer'
+            $reason = 'activation_offer_sent_waiting_answer'
+        }
+        elseif (-not $tunaActive -and ($listenerUnavailable -or $listenerSidecarUnavailable)) {
             $phase = 'preactivation_readiness'
             $reason = 'preflight_listener_unavailable'
         }
@@ -2252,6 +2272,14 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             $reason = 'offer_received_accept_not_enabled'
         }
     }
+    elseif (-not $tunaActive -and $activationOfferNotObserved) {
+        $phase = 'activation_offer_send'
+        $reason = 'activation_offer_not_observed'
+    }
+    elseif (-not $tunaActive -and $activationOfferWaitingAnswer) {
+        $phase = 'activation_offer_answer'
+        $reason = 'activation_offer_sent_waiting_answer'
+    }
     elseif (-not $tunaActive -and ($listenerUnavailable -or $listenerSidecarUnavailable)) {
         $phase = 'preactivation_readiness'
         $reason = 'preflight_listener_unavailable'
@@ -2270,6 +2298,12 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         ListenerReady = [bool]$listenerReady
         TunaActive = [bool]$tunaActive
         RouteSelected = [bool]$routeSelected
+        ActivationOfferNotObserved = [bool]$activationOfferNotObserved
+        ActivationOfferWaitingAnswer = [bool]$activationOfferWaitingAnswer
+        ActivationOfferSent = [bool]$activationOfferSent
+        ActivationOfferReceived = [bool]$activationOfferReceived
+        MeasuredOfferSent = [bool]$measuredOfferSent
+        MeasuredOfferReceived = [bool]$measuredOfferReceived
         OfferSent = [bool]$offerSent
         OfferReceived = [bool]$offerReceived
         TerminalObserved = [bool]$terminalObserved
@@ -2289,7 +2323,7 @@ function Wait-TunaGuiFileTransferAcceptOrThrow {
     }
     catch {
         $classification = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark $Bookmark -ErrorMessage $_.Exception.Message -RouteMode $RouteMode
-        throw ("Tuna GUI measured file-transfer accept did not become enabled: phase={0}; reason={1}; route_mode={2}; tuna_active={3}; listener_ready={4}; listener_unavailable={5}; route_selected={6}; offer_sent={7}; offer_received={8}; terminal_observed={9}; original_error={10}" -f `
+        throw ("Tuna GUI measured file-transfer accept did not become enabled: phase={0}; reason={1}; route_mode={2}; tuna_active={3}; listener_ready={4}; listener_unavailable={5}; route_selected={6}; activation_offer_not_observed={7}; activation_offer_waiting_answer={8}; activation_offer_sent={9}; activation_offer_received={10}; measured_offer_sent={11}; measured_offer_received={12}; offer_sent={13}; offer_received={14}; terminal_observed={15}; original_error={16}" -f `
             $classification.Phase,
             $classification.Reason,
             $classification.RouteMode,
@@ -2297,6 +2331,12 @@ function Wait-TunaGuiFileTransferAcceptOrThrow {
             ($(if ($classification.ListenerReady) { 1 } else { 0 })),
             ($(if ($classification.ListenerUnavailable -or $classification.ListenerSidecarUnavailable) { 1 } else { 0 })),
             ($(if ($classification.RouteSelected) { 1 } else { 0 })),
+            ($(if ($classification.ActivationOfferNotObserved) { 1 } else { 0 })),
+            ($(if ($classification.ActivationOfferWaitingAnswer) { 1 } else { 0 })),
+            ($(if ($classification.ActivationOfferSent) { 1 } else { 0 })),
+            ($(if ($classification.ActivationOfferReceived) { 1 } else { 0 })),
+            ($(if ($classification.MeasuredOfferSent) { 1 } else { 0 })),
+            ($(if ($classification.MeasuredOfferReceived) { 1 } else { 0 })),
             ($(if ($classification.OfferSent) { 1 } else { 0 })),
             ($(if ($classification.OfferReceived) { 1 } else { 0 })),
             ($(if ($classification.TerminalObserved) { 1 } else { 0 })),
@@ -2997,12 +3037,15 @@ function Get-TunaGuiRouteMode {
     if ([string]::IsNullOrWhiteSpace($value)) { return 'handoff-fallback' }
 
     $normalized = $value.Trim().ToLowerInvariant()
-    if ($normalized -in @('handoff-fallback', 'preactivated', 'post-fallback', 'v4-restart-v6-fallback', 'live-v4-switch-off', 'live-multi-toggle', 'live-reactivation-second-transfer')) { return $normalized }
-    throw "Invalid NLINK_TUNA_GUI_ROUTE_MODE '$value'. Use handoff-fallback, preactivated, post-fallback, v4-restart-v6-fallback, live-v4-switch-off, live-multi-toggle, or live-reactivation-second-transfer."
+    if ($normalized -in @('handoff-fallback', 'preactivated', 'post-fallback', 'v4-restart-v6-fallback', 'live-v4-switch-off', 'live-multi-toggle', 'live-reactivation-second-transfer', 'live-regular-activation-cycle')) { return $normalized }
+    throw "Invalid NLINK_TUNA_GUI_ROUTE_MODE '$value'. Use handoff-fallback, preactivated, post-fallback, v4-restart-v6-fallback, live-v4-switch-off, live-multi-toggle, live-reactivation-second-transfer, or live-regular-activation-cycle."
 }
 
 function Get-TunaGuiLiveMultiToggleSequence {
-    param([string]$DefaultValue = 'off,on,off')
+    param(
+        [string]$DefaultValue = 'off,on,off',
+        [switch]$AllowInitialOn
+    )
 
     $value = [string]$env:NLINK_TUNA_GUI_LIVE_MULTI_TOGGLE_SEQUENCE
     if ([string]::IsNullOrWhiteSpace($value)) {
@@ -3024,7 +3067,7 @@ function Get-TunaGuiLiveMultiToggleSequence {
         }
     }
 
-    if ($tokens[0] -ne 'off') {
+    if (-not $AllowInitialOn -and $tokens[0] -ne 'off') {
         throw "Invalid NLINK_TUNA_GUI_LIVE_MULTI_TOGGLE_SEQUENCE '$value'. The first live toggle must be off."
     }
 
@@ -4122,17 +4165,36 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'off_recovered' -Line $fallbackResolutionLine
         $fallbackEpochRecoveredObserved = $true
     }
-    elseif ($RouteMode -eq 'live-multi-toggle' -or $RouteMode -eq 'live-reactivation-second-transfer') {
+    elseif ($RouteMode -eq 'live-multi-toggle' -or $RouteMode -eq 'live-reactivation-second-transfer' -or $RouteMode -eq 'live-regular-activation-cycle') {
         if ($FaultMode -eq 'none') {
             throw "$RouteMode route mode requires a fallback fault."
         }
 
-        $sequence = if ($RouteMode -eq 'live-reactivation-second-transfer') { @(Get-TunaGuiLiveMultiToggleSequence -DefaultValue 'off,on') } else { @(Get-TunaGuiLiveMultiToggleSequence) }
-        $routeLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
-            @('event=filetransfer_route_selected', 'route=file_tuna_v4', 'protocol_version=4'),
-            @('event=filetransfer_runtime_started', 'route=file_tuna_v4', 'protocol_version=4'),
-            @('event=filetransfer_v4_sender_started', 'route=file_tuna_v4')
-        ) -TimeoutMs 90000 -Description 'live multi-toggle active file Tuna V4 route')
+        $sequence = if ($RouteMode -eq 'live-reactivation-second-transfer') {
+            @(Get-TunaGuiLiveMultiToggleSequence -DefaultValue 'off,on')
+        }
+        elseif ($RouteMode -eq 'live-regular-activation-cycle') {
+            @(Get-TunaGuiLiveMultiToggleSequence -DefaultValue 'on,off,on,off' -AllowInitialOn)
+        }
+        else {
+            @(Get-TunaGuiLiveMultiToggleSequence)
+        }
+        $routeNeedleSets = if ($RouteMode -eq 'live-regular-activation-cycle') {
+            @(
+                @('event=filetransfer_route_selected', 'route=regular_nkn_v4_fast', 'protocol_version=4'),
+                @('event=filetransfer_runtime_started', 'route=regular_nkn_v4_fast', 'protocol_version=4'),
+                @('event=filetransfer_v4_sender_started', 'route=regular_nkn_v4_fast')
+            )
+        }
+        else {
+            @(
+                @('event=filetransfer_route_selected', 'route=file_tuna_v4', 'protocol_version=4'),
+                @('event=filetransfer_runtime_started', 'route=file_tuna_v4', 'protocol_version=4'),
+                @('event=filetransfer_v4_sender_started', 'route=file_tuna_v4')
+            )
+        }
+        $routeDescription = if ($RouteMode -eq 'live-regular-activation-cycle') { 'live regular activation cycle initial regular NKN V4 route' } else { 'live multi-toggle active file Tuna V4 route' }
+        $routeLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets $routeNeedleSets -TimeoutMs 90000 -Description $routeDescription)
         $observedEvidenceLines.Add($routeLine) | Out-Null
 
         $liveSwitchOffMinimumCommittedBytes = Resolve-TunaGuiLiveSwitchOffMinimumCommittedBytes -PayloadSizeBytes $PayloadSizeBytes
@@ -4140,6 +4202,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         $liveSwitchOffMinimumElapsedMs = Resolve-TunaGuiLiveSwitchOffMinimumElapsedMs
         $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_sequence; route_mode={1}; sequence={2}; minimum_committed_bytes={3}; minimum_elapsed_ms={4}; payload_bytes={5}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $RouteMode, ($sequence -join ','), $liveSwitchOffMinimumCommittedBytes, $liveSwitchOffMinimumElapsedMs, $PayloadSizeBytes)) | Out-Null
 
+        $lastActivationPayloadBookmark = $null
         for ($stepIndex = 0; $stepIndex -lt $sequence.Count; $stepIndex++) {
             $action = [string]$sequence[$stepIndex]
             $stepNumber = $stepIndex + 1
@@ -4148,12 +4211,19 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 if ($stepIndex -eq 0) {
                     $progressLine = [string](Wait-TunaGuiLiveSwitchOffTransferProgressBeforeFault -Bookmark $bookmark -MinimumCommittedBytes $liveSwitchOffMinimumCommittedBytes -MinimumElapsedMs $liveSwitchOffMinimumElapsedMs -MinimumFramePayloadBytes 16384L -TimeoutMs 90000 -PollIntervalMs 25)
                 }
+                elseif (($RouteMode -eq 'live-multi-toggle' -or $RouteMode -eq 'live-regular-activation-cycle') -and
+                    $stepIndex -eq ($sequence.Count - 1) -and
+                    $stepIndex -gt 0 -and
+                    [string]::Equals([string]$sequence[$stepIndex - 1], 'on', [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $progressLine = "[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_progress_wait_skipped; route_mode={1}; step={2}; action=off; reason=final_off_after_reactivation" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $RouteMode, $stepNumber
+                }
                 else {
-                    $progressBookmark = Get-AppLogBookmark
+                    $progressBookmark = if ($null -ne $lastActivationPayloadBookmark) { $lastActivationPayloadBookmark } else { Get-AppLogBookmark }
                     $progressLine = [string](Wait-TunaGuiAcceleratedFilePayloadBeforeFault -Bookmark $progressBookmark -MinimumTotalPayloadBytes 1048576L -MinimumFramePayloadBytes 16384L -TimeoutMs 90000 -PollIntervalMs 25)
                 }
 
                 $observedEvidenceLines.Add($progressLine) | Out-Null
+                $lastActivationPayloadBookmark = $null
                 $stepBookmark = Get-AppLogBookmark
                 $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step; step={1}; action=off" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber)) | Out-Null
                 Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode
@@ -4176,20 +4246,22 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
             else {
                 Write-Host ("[GUI Smoke][filetransfer_tuna] Live toggle step {0}/{1}: re-enabling Tuna for the same transfer." -f $stepNumber, $sequence.Count) -ForegroundColor DarkGray
                 $stepBookmark = Get-AppLogBookmark
+                $lastActivationPayloadBookmark = $stepBookmark
                 $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step; step={1}; action=on" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber)) | Out-Null
                 Unlock-TunaPayers -Context $Context -PayerMode $PayerMode -Password $WalletPassword
 
-                $activationStartedLine = Wait-TunaGuiLiveRouteEpochStarted -Bookmark $stepBookmark -Route 'file_tuna_v4' -ProtocolVersion 4 -HandoffKind 'normal_to_tuna_activation' -TargetTransport 'tuna' -Description 'live multi-toggle normal-to-Tuna route epoch started'
+                $activationProofTimeoutMs = if ($RouteMode -eq 'live-regular-activation-cycle') { 240000 } else { 90000 }
+                $activationStartedLine = Wait-TunaGuiLiveRouteEpochStarted -Bookmark $stepBookmark -Route 'file_tuna_v4' -ProtocolVersion 4 -HandoffKind 'normal_to_tuna_activation' -TargetTransport 'tuna' -Description 'live multi-toggle normal-to-Tuna route epoch started' -TimeoutMs $activationProofTimeoutMs
                 $observedEvidenceLines.Add($activationStartedLine) | Out-Null
                 Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'on_started' -Line $activationStartedLine
                 $activationEpochStartedObserved = $true
 
                 $activationRouteLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $stepBookmark -NeedleSets @(
                     @('event=filetransfer_route_selected', 'route=file_tuna_v4', 'protocol_version=4')
-                ) -TimeoutMs 90000 -Description 'live multi-toggle file Tuna V4 route selection')
+                ) -TimeoutMs $activationProofTimeoutMs -Description 'live multi-toggle file Tuna V4 route selection')
                 $observedEvidenceLines.Add($activationRouteLine) | Out-Null
 
-                $activationRecoveredLine = Wait-TunaGuiLiveRouteEpochRecovered -Bookmark $stepBookmark -Route 'file_tuna_v4' -ProtocolVersion 4 -HandoffKind 'normal_to_tuna_activation' -TargetTransport 'tuna' -Description 'live multi-toggle normal-to-Tuna route epoch recovered'
+                $activationRecoveredLine = Wait-TunaGuiLiveRouteEpochRecovered -Bookmark $stepBookmark -Route 'file_tuna_v4' -ProtocolVersion 4 -HandoffKind 'normal_to_tuna_activation' -TargetTransport 'tuna' -Description 'live multi-toggle normal-to-Tuna route epoch recovered' -TimeoutMs $activationProofTimeoutMs
                 $observedEvidenceLines.Add($activationRecoveredLine) | Out-Null
                 Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'on_recovered' -Line $activationRecoveredLine
                 $activationEpochRecoveredObserved = $true
@@ -4313,7 +4385,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     }
     $goodputBytesPerSecond = if ($sw.Elapsed.TotalSeconds -gt 0) { [Math]::Round($PayloadSizeBytes / $sw.Elapsed.TotalSeconds, 3) } else { 0D }
     $expectedMeasuredRoute = if ($RouteMode -eq 'preactivated' -or $RouteMode -eq 'live-reactivation-second-transfer') { 'file_tuna_v4' } elseif ($RouteMode -eq 'handoff-fallback') { '(handoff)' } else { 'post_tuna_fallback_v6' }
-    $measuredPhaseName = if ($RouteMode -eq 'preactivated') { 'measured_file_tuna_v4' } elseif ($RouteMode -eq 'live-v4-switch-off') { 'measured_live_post_tuna_fallback_v6' } elseif ($RouteMode -eq 'live-multi-toggle') { 'measured_live_multi_toggle' } elseif ($RouteMode -eq 'live-reactivation-second-transfer') { 'measured_live_reactivation_file_tuna_v4' } elseif ($RouteMode -eq 'v4-restart-v6-fallback') { 'measured_post_tuna_fallback_v6' } elseif ($RouteMode -eq 'post-fallback') { 'measured_post_tuna_fallback_v6' } else { 'measured_handoff_fallback' }
+    $measuredPhaseName = if ($RouteMode -eq 'preactivated') { 'measured_file_tuna_v4' } elseif ($RouteMode -eq 'live-v4-switch-off') { 'measured_live_post_tuna_fallback_v6' } elseif ($RouteMode -eq 'live-multi-toggle') { 'measured_live_multi_toggle' } elseif ($RouteMode -eq 'live-reactivation-second-transfer') { 'measured_live_reactivation_file_tuna_v4' } elseif ($RouteMode -eq 'live-regular-activation-cycle') { 'measured_live_regular_activation_cycle' } elseif ($RouteMode -eq 'v4-restart-v6-fallback') { 'measured_post_tuna_fallback_v6' } elseif ($RouteMode -eq 'post-fallback') { 'measured_post_tuna_fallback_v6' } else { 'measured_handoff_fallback' }
     $measuredRoute = Get-GuiSmokeFieldValue -Fields $outbound -Name 'route' -Default (Get-GuiSmokeFieldValue -Fields $inbound -Name 'route' -Default $expectedMeasuredRoute)
     $defaultMeasuredProtocol = if ($measuredRoute -eq 'post_tuna_fallback_v6') { 6 } elseif ($measuredRoute -eq 'file_tuna_v4') { 4 } else { 0 }
     $measuredProtocol = ConvertTo-GuiSmokeInt -Value (Get-GuiSmokeFieldValue -Fields $outbound -Name 'protocol_version' -Default (Get-GuiSmokeFieldValue -Fields $inbound -Name 'protocol_version' -Default ([string]$defaultMeasuredProtocol))) -Default $defaultMeasuredProtocol
@@ -4361,8 +4433,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         $evidence.resumeReceived = $true
     }
 
-    $fallbackModel = if ($RouteMode -eq 'live-v4-switch-off') { 'live_v6' } elseif ($RouteMode -eq 'live-multi-toggle') { 'live_multi_toggle_v6' } elseif ($RouteMode -eq 'live-reactivation-second-transfer') { 'live_reactivation_v4' } elseif ($RouteMode -eq 'v4-restart-v6-fallback' -or $RouteMode -eq 'post-fallback') { 'controlled_restart_v6' } else { '(none)' }
-    $singleTransferLiveFallback = $RouteMode -eq 'live-v4-switch-off' -or $RouteMode -eq 'live-multi-toggle' -or $RouteMode -eq 'live-reactivation-second-transfer'
+    $fallbackModel = if ($RouteMode -eq 'live-v4-switch-off') { 'live_v6' } elseif ($RouteMode -eq 'live-multi-toggle') { 'live_multi_toggle_v6' } elseif ($RouteMode -eq 'live-reactivation-second-transfer') { 'live_reactivation_v4' } elseif ($RouteMode -eq 'live-regular-activation-cycle') { 'live_regular_activation_cycle_v6' } elseif ($RouteMode -eq 'v4-restart-v6-fallback' -or $RouteMode -eq 'post-fallback') { 'controlled_restart_v6' } else { '(none)' }
+    $singleTransferLiveFallback = $RouteMode -eq 'live-v4-switch-off' -or $RouteMode -eq 'live-multi-toggle' -or $RouteMode -eq 'live-reactivation-second-transfer' -or $RouteMode -eq 'live-regular-activation-cycle'
     $liveRouteEpochArray = @($liveRouteEpochObservations.ToArray())
     $liveRouteEpochSequence = @($liveRouteEpochArray | ForEach-Object { [string]($_['route']) } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_ -ne '(unknown)' })
     $liveRouteEpochRouteChanges = New-Object System.Collections.Generic.List[string]
@@ -4636,6 +4708,20 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
             throw "Tuna GUI live multi-toggle did not prove same-transfer strict live-route epoch cycling. sequence=$joinedRouteSequence findings=$($liveRouteProof.Findings -join '|') metadata_missing=$($liveRouteProof.MetadataMissingCount) Summary: $($evidence | ConvertTo-Json -Compress)"
         }
     }
+    elseif ($RouteMode -eq 'live-regular-activation-cycle') {
+        $joinedRouteSequence = ($liveRouteEpochRouteChanges.ToArray() -join ',')
+        $liveRouteProof = Get-TunaGuiLiveRouteEpochProof -Observations $liveRouteEpochObservations -ExpectedRoutes @('file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6')
+        if (-not $evidence.tunaNegotiated -or
+            -not $evidence.fallbackEpochStarted -or
+            -not $evidence.activationEpochStarted -or
+            -not $evidence.activationEpochRecovered -or
+            -not $evidence.postTunaFallbackV6RouteObserved -or
+            -not $evidence.fallbackEpochRecovered -or
+            -not $liveRouteProof.Pass -or
+            $joinedRouteSequence -ne 'file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6') {
+            throw "Tuna GUI live regular activation cycle did not prove same-transfer regular-to-Tuna and fallback/reactivation strict live-route epoch cycling. sequence=$joinedRouteSequence findings=$($liveRouteProof.Findings -join '|') metadata_missing=$($liveRouteProof.MetadataMissingCount) Summary: $($evidence | ConvertTo-Json -Compress)"
+        }
+    }
     elseif (-not $evidence.tunaNegotiated -or -not $evidence.fallbackEpochStarted) {
         throw "Tuna GUI post-fallback file-transfer did not prove fallback precondition before the measured transfer. Summary: $($evidence | ConvertTo-Json -Compress)"
     }
@@ -4803,6 +4889,12 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
             listenerReady = [bool]$failureClassification.ListenerReady
             listenerUnavailable = [bool]($failureClassification.ListenerUnavailable -or $failureClassification.ListenerSidecarUnavailable)
             routeSelected = [bool]$failureClassification.RouteSelected
+            activationOfferNotObserved = [bool]$failureClassification.ActivationOfferNotObserved
+            activationOfferWaitingAnswer = [bool]$failureClassification.ActivationOfferWaitingAnswer
+            activationOfferSent = [bool]$failureClassification.ActivationOfferSent
+            activationOfferReceived = [bool]$failureClassification.ActivationOfferReceived
+            measuredOfferSent = [bool]$failureClassification.MeasuredOfferSent
+            measuredOfferReceived = [bool]$failureClassification.MeasuredOfferReceived
             offerSent = [bool]$failureClassification.OfferSent
             offerReceived = [bool]$failureClassification.OfferReceived
             terminalObserved = [bool]$failureClassification.TerminalObserved

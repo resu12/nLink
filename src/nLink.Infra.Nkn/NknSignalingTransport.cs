@@ -2387,6 +2387,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         {
             var recoveryReason = string.IsNullOrWhiteSpace(e.ExitReasonText) ? "receive_stall_recovery" : e.ExitReasonText;
             var sessionId = currentSessionSecurityState.SessionId?.Value;
+            MarkFileTransferTunaActivationBridgeRecoveryStarted(recoveryReason);
             if (ShouldSuppressFileTransferTransportRecoveredForTunaActivationPause("receive_stall_recovery_started", out _))
             {
                 return;
@@ -2468,6 +2469,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
 
         if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryReceiveResumed)
         {
+            MarkFileTransferTunaActivationBridgeRecoverySettled("receive_resumed");
             if (IsFileTransferFallbackNknProofPending())
             {
                 var sessionId = SanitizeLogToken(currentSessionSecurityState.SessionId?.Value ?? "none");
@@ -2498,6 +2500,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
 
         if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryExhausted)
         {
+            MarkFileTransferTunaActivationBridgeRecoverySettled("receive_stall_recovery_exhausted");
             var sessionId = SanitizeLogToken(currentSessionSecurityState.SessionId?.Value ?? "none");
             var reason = string.IsNullOrWhiteSpace(e.ExitReasonText)
                 ? "control_receive_stalled_max_restarts"

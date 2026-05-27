@@ -30,7 +30,7 @@ param(
     [int]$TimeoutSeconds = 600,
     [string]$SafeBaselineArtifactDir = "",
     [string]$StrongBaselineArtifactDir = "",
-    [ValidateSet("None", "SwitchOff", "MultiToggle")]
+    [ValidateSet("None", "SwitchOff", "MultiToggle", "RegularActivationCycle")]
     [string]$LiveRouteProofMode = "None"
 )
 

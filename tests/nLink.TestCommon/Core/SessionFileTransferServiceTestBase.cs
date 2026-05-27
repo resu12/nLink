@@ -207,6 +207,8 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         public int MaxConcurrentDataSessionSends => Volatile.Read(ref maxConcurrentDataSessionSends);
         public Func<LoopbackFileTransferTransport, FileTransferDataFrame, CancellationToken, Task<bool>>? OutboundDataFrameDeliveryOverrideAsync { get; set; }
         public Func<LoopbackFileTransferTransport, FileTransferDataFrame, bool, CancellationToken, Task<bool>>? OutboundDataFrameDeliveryOverrideWithLaneAsync { get; set; }
+        public Func<LoopbackFileTransferTransport, FileTransferOfferV2, CancellationToken, Task<bool>>? OutboundOfferDeliveryOverrideAsync { get; set; }
+        public Func<LoopbackFileTransferTransport, FileTransferAcceptV1, CancellationToken, Task<bool>>? OutboundAcceptDeliveryOverrideAsync { get; set; }
         public Func<LoopbackFileTransferTransport, FileTransferCancelV1, CancellationToken, Task<bool>>? OutboundCancelDeliveryOverrideAsync { get; set; }
         public Func<LoopbackFileTransferTransport, FileTransferPauseControlV6, CancellationToken, Task<bool>>? OutboundPauseControlDeliveryOverrideAsync { get; set; }
         public Func<LoopbackFileTransferTransport, FileTransferHeartbeatV6, CancellationToken, Task<bool>>? OutboundHeartbeatDeliveryOverrideAsync { get; set; }
@@ -302,14 +304,22 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
 
             var payload = message with { SessionId = NormalizeSessionId(message.SessionId) };
             SentOffers.Enqueue(payload);
-            return DeliverAsync(payload, (target, delivered) => target.FileTransferOfferReceived?.Invoke(target, new FileTransferOfferReceivedEventArgs(delivered, "loopback-peer")), ct);
+            return DeliverMaybeAsync(
+                payload,
+                static (transport, delivered, token) => transport.OutboundOfferDeliveryOverrideAsync?.Invoke(transport.peer!, delivered, token) ?? Task.FromResult(false),
+                (target, delivered) => target.FileTransferOfferReceived?.Invoke(target, new FileTransferOfferReceivedEventArgs(delivered, "loopback-peer")),
+                ct);
         }
 
         public Task SendFileTransferAcceptAsync(FileTransferAcceptV1 message, CancellationToken ct)
         {
             var payload = message with { SessionId = NormalizeSessionId(message.SessionId) };
             SentAccepts.Enqueue(payload);
-            return DeliverAsync(payload, (target, delivered) => target.FileTransferAcceptReceived?.Invoke(target, new FileTransferAcceptReceivedEventArgs(delivered, "loopback-peer")), ct);
+            return DeliverMaybeAsync(
+                payload,
+                static (transport, delivered, token) => transport.OutboundAcceptDeliveryOverrideAsync?.Invoke(transport.peer!, delivered, token) ?? Task.FromResult(false),
+                (target, delivered) => target.FileTransferAcceptReceived?.Invoke(target, new FileTransferAcceptReceivedEventArgs(delivered, "loopback-peer")),
+                ct);
         }
 
         public Task SendFileTransferDeclineAsync(FileTransferDeclineV1 message, CancellationToken ct)

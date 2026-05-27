@@ -1686,7 +1686,7 @@ function Get-FileTransferGateFallbackDiagnostics {
 function New-FileTransferRouteConsistencySummaryLines {
     param(
         [Parameter(Mandatory = $true)]$Summary,
-        [ValidateSet('None', 'SwitchOff', 'MultiToggle')]
+        [ValidateSet('None', 'SwitchOff', 'MultiToggle', 'RegularActivationCycle')]
         [string]$LiveRouteProofMode = 'None'
     )
 
@@ -3260,6 +3260,7 @@ function New-FileTransferStabilityGateSummaryLines {
         ("warning_cap_contexts={0}" -f ($(if ($null -ne $warningCap -and -not [string]::IsNullOrWhiteSpace($warningCap.KindContexts)) { $warningCap.KindContexts } else { '(none)' }))),
         ("warning_cap_exceeded_kinds={0}" -f ($(if ($null -ne $warningCap -and -not [string]::IsNullOrWhiteSpace($warningCap.ExceededKindsText)) { $warningCap.ExceededKindsText } else { '(none)' }))),
         ("warning_cap_exceeded_contexts={0}" -f ($(if ($null -ne $warningCap -and -not [string]::IsNullOrWhiteSpace($warningCap.ExceededContextsText)) { $warningCap.ExceededContextsText } else { '(none)' }))),
+        ("warning_cap_exempted_kinds={0}" -f ($(if ($null -ne $warningCap -and $null -ne $warningCap.PSObject.Properties['ExemptedKindsText'] -and -not [string]::IsNullOrWhiteSpace($warningCap.ExemptedKindsText)) { $warningCap.ExemptedKindsText } else { '(none)' }))),
         ("fallback_v6_terminal_missing_reason={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.TerminalMissingReason } else { '(none)' }))),
         ("fallback_v6_last_committed_chunk_index={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.LastCommittedChunkIndex } else { -1 }))),
         ("fallback_v6_highest_observed_chunk_index={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.HighestObservedChunkIndex } else { -1 }))),
@@ -3624,7 +3625,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
         [Parameter(Mandatory = $true)]$Summary,
         [Parameter(Mandatory = $true)]$GateResult,
-        [ValidateSet('None', 'SwitchOff', 'MultiToggle')]
+        [ValidateSet('None', 'SwitchOff', 'MultiToggle', 'RegularActivationCycle')]
         [string]$LiveRouteProofMode = 'None',
         [switch]$IncludeRawSlices
     )
@@ -3687,6 +3688,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("warning_cap_contexts={0}" -f ($(if ($null -ne $warningCap -and -not [string]::IsNullOrWhiteSpace($warningCap.KindContexts)) { $warningCap.KindContexts } else { '(none)' }))),
         ("warning_cap_exceeded_kinds={0}" -f ($(if ($null -ne $warningCap -and -not [string]::IsNullOrWhiteSpace($warningCap.ExceededKindsText)) { $warningCap.ExceededKindsText } else { '(none)' }))),
         ("warning_cap_exceeded_contexts={0}" -f ($(if ($null -ne $warningCap -and -not [string]::IsNullOrWhiteSpace($warningCap.ExceededContextsText)) { $warningCap.ExceededContextsText } else { '(none)' }))),
+        ("warning_cap_exempted_kinds={0}" -f ($(if ($null -ne $warningCap -and $null -ne $warningCap.PSObject.Properties['ExemptedKindsText'] -and -not [string]::IsNullOrWhiteSpace($warningCap.ExemptedKindsText)) { $warningCap.ExemptedKindsText } else { '(none)' }))),
         ("fallback_v6_terminal_missing_reason={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.TerminalMissingReason } else { '(none)' }))),
         ("fallback_v6_last_committed_chunk_index={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.LastCommittedChunkIndex } else { -1 }))),
         ("fallback_v6_highest_observed_chunk_index={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.HighestObservedChunkIndex } else { -1 }))),

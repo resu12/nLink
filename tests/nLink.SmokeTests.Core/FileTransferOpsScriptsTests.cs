@@ -135,6 +135,7 @@ public sealed class FileTransferOpsScriptsTests
         "live-switch-off-helpee-64mb",
         "live-switch-off-helper-64mb",
         "live-multi-toggle-off-on-off-64mb",
+        "regular-v4-live-activation-off-on-off-64mb",
         "second-transfer-after-reactivation"
     ];
 
@@ -177,7 +178,7 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Equal(ExpectedFileTransferOpsModes, ExtractPowerShellValidateSetValues(scriptText, "Mode"));
         Assert.Equal(ExpectedExternalTopologyProfiles, ExtractPowerShellValidateSetValues(scriptText, "ExternalTopologyProfile"));
         Assert.Equal(ExpectedPayloadEfficiencyProfiles, ExtractPowerShellValidateSetValues(scriptText, "PayloadEfficiencyProfile"));
-        Assert.Equal(new[] { "MultiToggle", "None", "SwitchOff" }, ExtractPowerShellValidateSetValues(scriptText, "LiveRouteProofMode"));
+        Assert.Equal(new[] { "MultiToggle", "None", "RegularActivationCycle", "SwitchOff" }, ExtractPowerShellValidateSetValues(scriptText, "LiveRouteProofMode"));
         Assert.Equal(ExpectedTopLevelParameters, ExtractTopLevelPowerShellParameterNames(scriptText));
         Assert.Contains("Invoke-FileTransferRetainedAnalysis", scriptText, StringComparison.Ordinal);
         Assert.Contains("--filetransfer-soak", scriptText, StringComparison.Ordinal);
@@ -287,6 +288,7 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Contains("GoodputOnlyRerunLimit = 1", scriptText, StringComparison.Ordinal);
         Assert.Contains("phase4-ab-acceptance-summary.txt", scriptText, StringComparison.Ordinal);
         Assert.Contains("second-transfer-after-reactivation", scriptText, StringComparison.Ordinal);
+        Assert.Contains("regular-v4-live-activation-off-on-off-64mb", scriptText, StringComparison.Ordinal);
         Assert.Contains("file_tuna_v6 route is not allowed", scriptText, StringComparison.Ordinal);
         Assert.Contains("network_variance_policy=public_nkn_paired_rerun", scriptText, StringComparison.Ordinal);
         Assert.Contains("capped_external_transport_churn_requires_clean_rerun", scriptText, StringComparison.Ordinal);
@@ -365,8 +367,15 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Contains("failureReason", scriptText, StringComparison.Ordinal);
         Assert.Contains("offer_sent_accept_not_enabled", scriptText, StringComparison.Ordinal);
         Assert.Contains("preflight_listener_unavailable", scriptText, StringComparison.Ordinal);
+        Assert.Contains("activation_offer_not_observed", scriptText, StringComparison.Ordinal);
+        Assert.Contains("activation_offer_sent_waiting_answer", scriptText, StringComparison.Ordinal);
+        Assert.Contains("event=tuna_acceleration_activation_offer_not_observed", scriptText, StringComparison.Ordinal);
+        Assert.Contains("event=tuna_acceleration_control_send_wait_timeout", scriptText, StringComparison.Ordinal);
+        Assert.Contains("activationOfferReceived", scriptText, StringComparison.Ordinal);
+        Assert.Contains("measuredOfferReceived", scriptText, StringComparison.Ordinal);
         Assert.Contains("offerReceived", scriptText, StringComparison.Ordinal);
         Assert.Contains("message_type=file_transfer_offer", scriptText, StringComparison.Ordinal);
+        Assert.Contains("event=tuna_acceleration_offer_received_raw", scriptText, StringComparison.Ordinal);
         Assert.Contains("event=offer_received", scriptText, StringComparison.Ordinal);
     }
 
@@ -418,6 +427,27 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Contains("liveRouteEpochRouteChanges", guiText, StringComparison.Ordinal);
         Assert.Contains("post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", guiText, StringComparison.Ordinal);
         Assert.Contains("same-transfer strict live-route epoch cycling", guiText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RunFileTransferTunaGuiSmoke_LiveRegularActivationCycleStartsRegularThenCyclesRoutes()
+    {
+        var repoRoot = FindRepoRoot();
+        var wrapperPath = Path.Combine(repoRoot, "tools", "Run-FileTransferTunaGuiSmoke.ps1");
+        var guiPath = Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1");
+        var wrapperText = File.ReadAllText(wrapperPath);
+        var guiText = File.ReadAllText(guiPath);
+
+        Assert.Contains("\"live-regular-activation-cycle\"", wrapperText, StringComparison.Ordinal);
+        Assert.Contains("'live-regular-activation-cycle'", guiText, StringComparison.Ordinal);
+        Assert.Contains("regular_nkn_v4_fast", guiText, StringComparison.Ordinal);
+        Assert.Contains("on,off,on,off", guiText, StringComparison.Ordinal);
+        Assert.Contains("RegularActivationCycle", wrapperText, StringComparison.Ordinal);
+        Assert.Contains("measured_live_regular_activation_cycle", guiText, StringComparison.Ordinal);
+        Assert.Contains("$activationProofTimeoutMs = if ($RouteMode -eq 'live-regular-activation-cycle') { 240000 } else { 90000 }", guiText, StringComparison.Ordinal);
+        Assert.Contains("final_off_after_reactivation", guiText, StringComparison.Ordinal);
+        Assert.Contains("file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", guiText, StringComparison.Ordinal);
+        Assert.Contains("regular-to-Tuna and fallback/reactivation strict live-route epoch cycling", guiText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1217,6 +1247,29 @@ public sealed class FileTransferOpsScriptsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_LiveRegularActivationCycleRouteChangesBeforeTerminal_ReturnsRouteConsistencyPass()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(BuildRouteAwareLiveRegularActivationCycleFixture(), ["-LiveRouteProofMode", "RegularActivationCycle"]);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("PASS", verdict["verdict"]);
+        Assert.Equal("RegularActivationCycle", verdict["live_route_epoch_proof_mode"]);
+        Assert.Equal("pass", verdict["live_route_epoch_proof_verdict"]);
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("pass", route["route_consistency_verdict"]);
+        Assert.Equal("regular_nkn_v4_fast,file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", route["selected_route_changes"]);
+        Assert.Equal("file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", route["live_route_epoch_route_changes"]);
+        Assert.Equal("pass", route["live_route_epoch_proof_verdict"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_LiveSwitchOffProofModeWithStrictLiveRouteEvents_ReturnsPass()
     {
         if (!OperatingSystem.IsWindows())
@@ -1560,20 +1613,60 @@ public sealed class FileTransferOpsScriptsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task AnalyzeRetained_PostTunaFallbackFrontierRepairChurnOverCap_ReturnsExternalChurnFailure()
+    public async Task AnalyzeRetained_PostTunaFallbackFrontierRepairCountOverCapRateUnderCap_RemainsWarning()
     {
         if (!OperatingSystem.IsWindows())
         {
             return;
         }
 
-        var lines = BuildRouteAwareMeasuredFallbackFixture().ToList();
+        var lines = StretchTransferWindowForWarningRate(BuildRouteAwareMeasuredFallbackFixture(), terminalOffsetSeconds: 240);
+        var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
+        Assert.True(firstTerminalIndex > 0);
+        var churnLines = new List<string>();
+        for (var i = 0; i < 5; i++)
+        {
+            churnLines.Add(LogLine($"event=filetransfer_v6_frontier_request_sent; direction=inbound; transfer_id=[redacted]; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; frontier_chunk_index={512 + i}; requested_chunk_count=1; post_tuna_fallback_survival=1; duplicate_request=0", secondsOffset: 10 + (i * 40)));
+            churnLines.Add(LogLine($"event=filetransfer_v6_frontier_request_duplicate_ignored; direction=outbound; transfer_id=[redacted]; session_id=sess_redacted; first_start_chunk_index={512 + i}; first_chunk_count=1", secondsOffset: 11 + (i * 40)));
+        }
+
+        lines.InsertRange(firstTerminalIndex, churnLines);
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("WARN_EXTERNAL_TRANSPORT", verdict["verdict"]);
+        Assert.Equal("repair-reorder-summary.txt", verdict["next_artifact"]);
+        Assert.Equal("0", verdict["hard_failure_count"]);
+        Assert.Equal("fallback_frontier_repair_churn", verdict["warning_kinds"]);
+        Assert.Equal("(none)", verdict["warning_cap_exceeded_kinds"]);
+        Assert.Equal("fallback_frontier_repair_churn", verdict["warning_cap_exempted_kinds"]);
+        Assert.Equal("fallback_frontier_repair_churn:5", verdict["warning_kind_counts"]);
+        Assert.Equal("fallback_frontier_repair_churn:10", verdict["warning_kind_raw_event_counts"]);
+        Assert.Equal("fallback_frontier_repair_churn:post_tuna_fallback", verdict["warning_cap_contexts"]);
+        Assert.Contains("post-Tuna fallback frontier repair churn", File.ReadAllText(Path.Combine(result.ArtifactDir, "stability-gates-summary.txt")), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_PostTunaFallbackFrontierRepairRateOverCap_ReturnsExternalChurnFailure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = StretchTransferWindowForWarningRate(BuildRouteAwareMeasuredFallbackFixture(), terminalOffsetSeconds: 30);
         var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
         Assert.True(firstTerminalIndex > 0);
         var churnLines = new List<string>();
         for (var i = 0; i < 10; i++)
         {
-            churnLines.Add(LogLine($"event=filetransfer_v6_frontier_request_sent; direction=inbound; transfer_id=[redacted]; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; frontier_chunk_index={512 + i}; requested_chunk_count=1; post_tuna_fallback_survival=1; duplicate_request=0", secondsOffset: 10 + (i * 40)));
+            var frontier = 512 + (i % 4);
+            var eventText = i % 2 == 0
+                ? $"event=filetransfer_v6_frontier_request_sent; direction=inbound; transfer_id=[redacted]; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; frontier_chunk_index={frontier}; requested_chunk_count=1; post_tuna_fallback_survival=1; duplicate_request=0"
+                : $"event=filetransfer_v6_frontier_request_duplicate_ignored; direction=outbound; transfer_id=[redacted]; session_id=sess_redacted; first_start_chunk_index={frontier}; first_chunk_count=1";
+            churnLines.Add(LogLine(eventText, secondsOffset: 5 + i));
         }
 
         lines.InsertRange(firstTerminalIndex, churnLines);
@@ -1586,8 +1679,8 @@ public sealed class FileTransferOpsScriptsTests
         Assert.NotEqual("0", verdict["hard_failure_count"]);
         Assert.Equal("fallback_frontier_repair_churn", verdict["warning_kinds"]);
         Assert.Equal("fallback_frontier_repair_churn", verdict["warning_cap_exceeded_kinds"]);
+        Assert.Equal("(none)", verdict["warning_cap_exempted_kinds"]);
         Assert.Equal("fallback_frontier_repair_churn:post_tuna_fallback", verdict["warning_cap_exceeded_contexts"]);
-        Assert.Contains("post-Tuna fallback frontier repair churn", File.ReadAllText(Path.Combine(result.ArtifactDir, "stability-gates-summary.txt")), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -4677,7 +4770,7 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("PASS", summary["verdict"]);
             Assert.Equal("PASS", summary["correctness_verdict"]);
             Assert.Equal("PASS", summary["performance_verdict"]);
-            Assert.Equal("6", summary["run_count"]);
+            Assert.Equal("7", summary["run_count"]);
             Assert.Equal("0", summary["failure_count"]);
             Assert.Equal("0", summary["correctness_failure_count"]);
             Assert.Equal("0", summary["performance_failure_count"]);
@@ -4691,6 +4784,8 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("6", summary["live-switch-off-helper-64mb.protocol"]);
             Assert.Equal("file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", summary["live-multi-toggle-off-on-off-64mb.selected_route_sequence"]);
             Assert.Equal("post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", summary["live-multi-toggle-off-on-off-64mb.live_route_epoch_route_changes"]);
+            Assert.Equal("regular_nkn_v4_fast,file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", summary["regular-v4-live-activation-off-on-off-64mb.selected_route_sequence"]);
+            Assert.Equal("file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", summary["regular-v4-live-activation-off-on-off-64mb.live_route_epoch_route_changes"]);
             Assert.Equal("file_tuna_v4", summary["second-transfer-after-reactivation.final_route"]);
             Assert.Equal("file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4", summary["second-transfer-after-reactivation.selected_route_sequence"]);
             Assert.Equal("post_tuna_fallback_v6,file_tuna_v4", summary["second-transfer-after-reactivation.live_route_epoch_route_changes"]);
@@ -4792,7 +4887,7 @@ if (-not $result.RegressionFailed) {
             Assert.NotEqual(0, result.ExitCode);
             var summary = ReadArtifactReport(runRoot, "phase4-ab-acceptance-summary.txt");
             Assert.Equal("FAIL", summary["verdict"]);
-            Assert.Equal("6", summary["run_count"]);
+            Assert.Equal("7", summary["run_count"]);
             Assert.Equal("measured_accept_wait", summary["active-tuna-v4-64mb.setup_failure_phase"]);
             Assert.Equal("offer_sent_accept_not_enabled", summary["active-tuna-v4-64mb.setup_failure_reason"]);
             Assert.Contains("scenario execution failed", File.ReadAllText(Path.Combine(runRoot, "phase4-ab-acceptance-summary.txt")), StringComparison.Ordinal);
@@ -4839,7 +4934,7 @@ if (-not $result.RegressionFailed) {
             var summaryText = File.ReadAllText(Path.Combine(runRoot, "phase4-ab-acceptance-summary.txt"));
             var summary = ReadArtifactReport(runRoot, "phase4-ab-acceptance-summary.txt");
             Assert.Equal("FAIL", summary["verdict"]);
-            Assert.Equal("6", summary["run_count"]);
+            Assert.Equal("7", summary["run_count"]);
             Assert.Equal("1", summary["active-tuna-v4-64mb.retry_used"]);
             Assert.Equal("1", summary["active-tuna-v4-64mb.selected_attempt"]);
             Assert.Equal("file_tuna_v4", summary["active-tuna-v4-64mb.final_route"]);
@@ -6151,6 +6246,38 @@ if (-not $result.RegressionFailed) {
             LogLine($"event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; bridge_recovery_policy=post_tuna_fallback_strict; live_route_epoch=3"),
             LogLine($"event=filetransfer_live_route_epoch_recovered; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=3; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; reason=transport_probe_ack"),
             LogLine($"event=filetransfer_live_route_epoch_terminal; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=3; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; terminal_state=completed; reason=Transfer complete."),
+            LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_redacted; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=(none); integrity_ok=1"),
+            LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_redacted; transfer_id={transferId}; state=Completed; error_code=(none); integrity_ok=1")
+        ];
+    }
+
+    private static string[] BuildRouteAwareLiveRegularActivationCycleFixture()
+    {
+        const string transferId = "[redacted]";
+        return
+        [
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default; file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=nkn"),
+            LogLine($"event=filetransfer_session_opened; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; bridge_recovery_policy=regular_nkn_v4_fast; reason=role=Sender"),
+            LogLine($"event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={transferId}; session_id=sess_redacted; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; bridge_recovery_policy=regular_nkn_v4_fast"),
+            LogLine($"event=filetransfer_binary_frame_sent; transfer_id={transferId}; session_id=sess_redacted; frame_type=filetransfer.chunk_batch.v4; chunk_index=0-7; raw_chunk_bytes=172032; chunk_count=8"),
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=normal_to_tuna_activation; bridge_recovery_policy=tuna_strict; liveness_terminal_policy=file_tuna_v4_fast; selection_reason=file_tuna_active; file_tuna_active=1; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=nkn; live_route_epoch=1"),
+            LogLine($"event=filetransfer_live_route_epoch_started; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=1; previous_route=regular_nkn_v4_fast; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=normal_to_tuna_activation; target_transport=tuna; state=started; reason=tuna_unlocked_during_regular_transfer"),
+            LogLine($"event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={transferId}; session_id=sess_redacted; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; bridge_recovery_policy=tuna_strict; live_route_epoch=1"),
+            LogLine($"event=filetransfer_live_route_epoch_recovered; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=1; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=normal_to_tuna_activation; target_transport=tuna; reason=transport_probe_ack"),
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6_repair; selection_reason=post_tuna_file_fallback_active; file_tuna_active=0; post_tuna_fallback_active=1; diagnostic_regular_nkn_v6=0; transport_profile=nkn; live_route_epoch=2"),
+            LogLine($"event=filetransfer_live_route_epoch_started; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=2; previous_route=file_tuna_v4; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; state=started; reason=first_toggle_off"),
+            LogLine($"event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; bridge_recovery_policy=post_tuna_fallback_strict; live_route_epoch=2"),
+            LogLine($"event=filetransfer_live_route_epoch_recovered; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=2; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; reason=transport_probe_ack"),
+            LogLine($"event=filetransfer_binary_frame_sent; transfer_id={transferId}; session_id=sess_redacted; frame_type=filetransfer.chunk_batch.v6; chunk_index=8-15; raw_chunk_bytes=172032; chunk_count=8"),
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=normal_to_tuna_activation; bridge_recovery_policy=tuna_strict; liveness_terminal_policy=file_tuna_v4_fast; selection_reason=file_tuna_active; file_tuna_active=1; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=nkn; live_route_epoch=3"),
+            LogLine($"event=filetransfer_live_route_epoch_started; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=3; previous_route=post_tuna_fallback_v6; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=normal_to_tuna_activation; target_transport=tuna; state=started; reason=tuna_reenabled"),
+            LogLine($"event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={transferId}; session_id=sess_redacted; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; bridge_recovery_policy=tuna_strict; live_route_epoch=3"),
+            LogLine($"event=filetransfer_live_route_epoch_recovered; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=3; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=normal_to_tuna_activation; target_transport=tuna; reason=transport_probe_ack"),
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6_repair; selection_reason=post_tuna_file_fallback_active; file_tuna_active=0; post_tuna_fallback_active=1; diagnostic_regular_nkn_v6=0; transport_profile=nkn; live_route_epoch=4"),
+            LogLine($"event=filetransfer_live_route_epoch_started; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=4; previous_route=file_tuna_v4; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; state=started; reason=second_toggle_off"),
+            LogLine($"event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; bridge_recovery_policy=post_tuna_fallback_strict; live_route_epoch=4"),
+            LogLine($"event=filetransfer_live_route_epoch_recovered; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=4; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; reason=transport_probe_ack"),
+            LogLine($"event=filetransfer_live_route_epoch_terminal; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=4; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; terminal_state=completed; reason=Transfer complete."),
             LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_redacted; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=(none); integrity_ok=1"),
             LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_redacted; transfer_id={transferId}; state=Completed; error_code=(none); integrity_ok=1")
         ];

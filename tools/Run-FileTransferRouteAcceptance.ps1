@@ -1642,7 +1642,7 @@ function Write-RouteAcceptanceFakePhase4Run {
 function Invoke-RouteAcceptanceRetainedAnalysis {
     param(
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
-        [ValidateSet("None", "SwitchOff", "MultiToggle")]
+        [ValidateSet("None", "SwitchOff", "MultiToggle", "RegularActivationCycle")]
         [string]$LiveRouteProofMode = "None"
     )
 
@@ -2382,6 +2382,7 @@ function Get-Phase4RouteAcceptanceScenarios {
         (New-Phase4RouteAcceptanceScenario -Name 'live-switch-off-helpee-64mb' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 67108864L -BaselineScenario 'live-switch-off-helpee-64mb' -Baseline $baselines['live-switch-off-helpee-64mb'] -RouteMode 'live-v4-switch-off' -Fault 'switch-off' -PayerMode 'helpee' -LiveProofMode 'SwitchOff')
         (New-Phase4RouteAcceptanceScenario -Name 'live-switch-off-helper-64mb' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 67108864L -BaselineScenario 'live-switch-off-helper-64mb' -Baseline $baselines['live-switch-off-helper-64mb'] -RouteMode 'live-v4-switch-off' -Fault 'switch-off' -PayerMode 'helper' -LiveProofMode 'SwitchOff')
         (New-Phase4RouteAcceptanceScenario -Name 'live-multi-toggle-off-on-off-64mb' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 67108864L -BaselineScenario 'live-multi-toggle-off-on-off-64mb' -Baseline $baselines['live-multi-toggle-off-on-off-64mb'] -RouteMode 'live-multi-toggle' -Fault 'switch-off' -PayerMode 'helpee' -LiveToggleSequence 'off,on,off' -LiveProofMode 'MultiToggle')
+        (New-Phase4RouteAcceptanceScenario -Name 'regular-v4-live-activation-off-on-off-64mb' -Kind 'tuna' -ExpectedRouteChanges @('regular_nkn_v4_fast', 'file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 67108864L -RouteMode 'live-regular-activation-cycle' -Fault 'switch-off' -PayerMode 'helpee' -LiveToggleSequence 'on,off,on,off' -LiveProofMode 'RegularActivationCycle')
         (New-Phase4RouteAcceptanceScenario -Name 'second-transfer-after-reactivation' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4') -PayloadBytes 67108864L -RouteMode 'live-reactivation-second-transfer' -Fault 'switch-off' -PayerMode 'helpee' -LiveToggleSequence 'off,on' -LiveProofMode 'None')
     )
 }
@@ -2590,7 +2591,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         }
     }
 
-    $expectedRunCount = 6
+    $expectedRunCount = 7
     if ($script:RunResults.Count -ne $expectedRunCount) {
         $failureLines += ("expected {0} runs, observed {1}" -f $expectedRunCount, $script:RunResults.Count)
     }

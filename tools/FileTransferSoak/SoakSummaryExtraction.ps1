@@ -328,7 +328,9 @@ function Get-FileTransferSelectedRouteForEvent {
 
 function Test-FileTransferRouteTerminalBetween {
     param(
-        [Parameter(Mandatory = $true)][object[]]$TerminalEvents,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$TerminalEvents,
         [Parameter(Mandatory = $true)][string]$DirectionKey,
         [Parameter(Mandatory = $true)][long]$AfterSequence,
         [Parameter(Mandatory = $true)][long]$BeforeSequence
@@ -362,6 +364,14 @@ function Test-FileTransferAllowedLiveFallbackRouteTransition {
         return $handoffKind -eq 'tuna_to_normal_fallback' -and
             $postTunaFallbackActive -eq '1' -and
             $fileTunaActive -eq '0'
+    }
+
+    if ($previousRoute -eq 'regular_nkn_v4_fast' -and $route -eq 'file_tuna_v4') {
+        $postTunaFallbackActive = Get-FileTransferEventField -Event $Selected -Name 'post_tuna_fallback_active' -Default '1'
+        $fileTunaActive = Get-FileTransferEventField -Event $Selected -Name 'file_tuna_active' -Default '0'
+        return $handoffKind -eq 'normal_to_tuna_activation' -and
+            $postTunaFallbackActive -eq '0' -and
+            $fileTunaActive -eq '1'
     }
 
     if ($previousRoute -eq 'post_tuna_fallback_v6' -and $route -eq 'file_tuna_v4') {
@@ -612,7 +622,7 @@ function Test-FileTransferLiveRouteEpochEventMatches {
 function Get-FileTransferLiveRouteEpochProof {
     param(
         [object[]]$TransferEvents,
-        [ValidateSet('None', 'SwitchOff', 'MultiToggle')]
+        [ValidateSet('None', 'SwitchOff', 'MultiToggle', 'RegularActivationCycle')]
         [string]$Mode = 'None'
     )
 
@@ -666,6 +676,9 @@ function Get-FileTransferLiveRouteEpochProof {
     }
     elseif ($Mode -eq 'MultiToggle') {
         $expectedRoutes = @('post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6')
+    }
+    elseif ($Mode -eq 'RegularActivationCycle') {
+        $expectedRoutes = @('file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6')
     }
 
     $lastEpoch = 0L
