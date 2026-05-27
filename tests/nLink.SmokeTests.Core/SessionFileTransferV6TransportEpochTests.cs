@@ -1701,6 +1701,125 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
     }
 
     [Fact]
+    public async Task V6Epoch_PostTunaFallbackFrontierCancellationRemainsRecoverableUntilTerminalCompletion()
+    {
+        const string transferId = "transfer_v6_post_fallback_frontier_canceled_then_completed";
+        const string sessionId = "session_v6_post_fallback_frontier_canceled_then_completed";
+        const int chunkSize = 4;
+        var logStart = GetOperationalLogLength();
+        var payload = Enumerable.Range(0, 16).Select(static index => (byte)(index + 1)).ToArray();
+        var sha256 = Convert.ToBase64String(SHA256.HashData(payload));
+        var injectFrontierFailure = 0;
+        var injectedFailureCount = 0;
+        using var destination = new NonDisposingMemoryStream();
+        using var senderTransport = new LoopbackFileTransferTransport(sessionId)
+        {
+            IsPostTunaFileFallbackActiveForRouteSelection = true,
+        };
+        using var receiverTransport = new LoopbackFileTransferTransport(sessionId)
+        {
+            IsPostTunaFileFallbackActiveForRouteSelection = true,
+        };
+        receiverTransport.OutboundDataFrameDeliveryOverrideWithLaneAsync = (_, frame, _, _) =>
+        {
+            var shouldFail =
+                Volatile.Read(ref injectFrontierFailure) != 0 &&
+                string.Equals(frame.TransferId, transferId, StringComparison.Ordinal) &&
+                frame is FileTransferFrontierRequestFrameV6;
+            if (!shouldFail ||
+                Interlocked.CompareExchange(ref injectedFailureCount, 1, 0) != 0)
+            {
+                return Task.FromResult(false);
+            }
+
+            return Task.FromException<bool>(
+                new OperationCanceledException("Injected recoverable post-Tuna fallback frontier cancellation."));
+        };
+        senderTransport.Connect(receiverTransport);
+        using var receiver = new SessionFileTransferService();
+        receiver.AttachTransport(receiverTransport);
+
+        var senderSession = await StartManualInboundPostTunaFallbackV6ReceiverAsync(
+            senderTransport,
+            receiver,
+            transferId,
+            sessionId,
+            "post-fallback-frontier-cancel-then-complete.bin",
+            payload.Length,
+            sha256,
+            (_, _) => Task.FromResult<Stream>(destination));
+
+        await senderSession.SendAsync(
+            CreateManifest(sessionId, transferId, "post-fallback-frontier-cancel-then-complete.bin", payload.Length, chunkSize, sha256),
+            CancellationToken.None);
+        await WaitUntilAsync(
+            () => receiverTransport.SentDataFrames.OfType<FileTransferFrontierRequestFrameV6>().Any(frame =>
+                frame.TransferId == transferId &&
+                frame.MissingRanges.Count > 0),
+            timeoutMs: 5000);
+        var firstRequest = receiverTransport.SentDataFrames
+            .OfType<FileTransferFrontierRequestFrameV6>()
+            .Last(frame => frame.TransferId == transferId && frame.MissingRanges.Count > 0);
+        var firstChunk = firstRequest.MissingRanges[0].StartChunkIndex;
+        Volatile.Write(ref injectFrontierFailure, 1);
+
+        await senderSession.SendAsync(
+            new FileTransferChunkBatchFrameV6
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                TransportEpoch = firstRequest.TransportEpoch,
+                RepairRequestId = firstRequest.RepairRequestId,
+                StartChunkIndex = firstChunk,
+                ChunkCount = 1,
+                DataSegments = [payload.Skip(firstChunk * chunkSize).Take(chunkSize).ToArray()],
+                Priority = "frontier",
+                RecoveryMode = "frontier_repair_only",
+            },
+            CancellationToken.None);
+        await WaitUntilAsync(
+            () => ReadOperationalLogTail(logStart).Contains(
+                "event=filetransfer_v6_frontier_request_deferred_for_recovery",
+                StringComparison.Ordinal),
+            timeoutMs: 5000);
+
+        for (var chunkIndex = 0; chunkIndex < payload.Length / chunkSize; chunkIndex++)
+        {
+            if (chunkIndex == firstChunk)
+            {
+                continue;
+            }
+
+            await senderSession.SendAsync(
+                new FileTransferChunkBatchFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    TransportEpoch = firstRequest.TransportEpoch,
+                    RepairRequestId = firstRequest.RepairRequestId,
+                    StartChunkIndex = chunkIndex,
+                    ChunkCount = 1,
+                    DataSegments = [payload.Skip(chunkIndex * chunkSize).Take(chunkSize).ToArray()],
+                    Priority = "frontier",
+                    RecoveryMode = "frontier_repair_only",
+                },
+                CancellationToken.None);
+        }
+
+        await WaitUntilAsync(
+            () => receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
+            timeoutMs: 5000);
+
+        Assert.Equal(1, Volatile.Read(ref injectedFailureCount));
+        Assert.Empty(receiverTransport.SentErrors);
+        Assert.Equal(payload, destination.ToArray());
+        var finalLogTail = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_v6_frontier_request_deferred_for_recovery", finalLogTail, StringComparison.Ordinal);
+        Assert.Contains("post_tuna_fallback_survival=1", finalLogTail, StringComparison.Ordinal);
+        Assert.Contains("route=post_tuna_fallback_v6", finalLogTail, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task V6Epoch_PostTunaFallbackForcedControlRetriesHonorSameFrontierCadence()
     {
         const string transferId = "transfer_v6_post_fallback_control_coalesces_forced_retry";

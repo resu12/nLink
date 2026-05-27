@@ -2383,11 +2383,20 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
 
     private void OnBridgeLifecycle(object? sender, BridgeLifecycleEvent e)
     {
+        if (e.Kind == BridgeLifecycleEventKind.QueueCleared)
+        {
+            HandleRuntimeUnlockOfferQueueCleared(e);
+        }
+
         if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryStarted)
         {
             var recoveryReason = string.IsNullOrWhiteSpace(e.ExitReasonText) ? "receive_stall_recovery" : e.ExitReasonText;
             var sessionId = currentSessionSecurityState.SessionId?.Value;
             MarkFileTransferTunaActivationBridgeRecoveryStarted(recoveryReason);
+            InterruptRuntimeUnlockOfferForBridgeRecovery(
+                "offer_interrupted_by_bridge_recovery",
+                recoveryReason,
+                "receive_stall_recovery_started");
             if (ShouldSuppressFileTransferTransportRecoveredForTunaActivationPause("receive_stall_recovery_started", out _))
             {
                 return;
@@ -2439,6 +2448,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
 
         if (e.Kind == BridgeLifecycleEventKind.Ready)
         {
+            ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed("bridge_ready");
             if (IsFileTransferFallbackNknProofPending())
             {
                 var sessionId = SanitizeLogToken(currentSessionSecurityState.SessionId?.Value ?? "none");
@@ -2505,6 +2515,10 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             var reason = string.IsNullOrWhiteSpace(e.ExitReasonText)
                 ? "control_receive_stalled_max_restarts"
                 : SanitizeLogToken(e.ExitReasonText);
+            InterruptRuntimeUnlockOfferForBridgeRecovery(
+                "offer_interrupted_by_bridge_recovery",
+                reason,
+                "receive_stall_recovery_exhausted");
             if (HasActiveFileTransferDataSessionsForRecovery())
             {
                 if (ShouldSuppressFileTransferControlReceiveStallRecoveryBroadcast(

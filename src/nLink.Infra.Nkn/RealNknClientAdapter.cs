@@ -86,6 +86,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private long bulkBridgeMessageCountSinceLastLog;
     private long bulkBridgeMessagePayloadBytesSinceLastLog;
     private long lastBulkBridgeMessageSummaryLogTick;
+    private long lastObservedControlQueueClears;
+    private long lastObservedBulkQueueClears;
     private readonly InboundDeliveryCounters controlInboundDeliveryCounters = new();
     private readonly InboundDeliveryCounters mediaInboundDeliveryCounters = new();
     private readonly InboundDeliveryCounters bulkInboundDeliveryCounters = new();
@@ -1377,6 +1379,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             $"payload_bytes_sent={payloadBytesSent}; payload_bytes_per_second={payloadBytesPerSecond}; " +
             $"send_failures={sendFailures}; queue_clears={queueClears}; queue_depth={queueDepth}; queued_bytes={queuedBytes}; " +
             $"oldest_queued_age_ms={oldestQueuedAgeMs}; in_flight={inFlight}; send_timeout_ms={sendTimeoutMs}; sample_window_ms={sampleWindowMs}");
+        EmitBridgeQueueClearIfAdvanced("control", queueClears, ref lastObservedControlQueueClears, "control_send_summary");
     }
 
     private void HandleBridgeMediaSendSummary(JsonElement root)
@@ -1512,6 +1515,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             $"bulk_send_started_to_bulk_send_resolved_p95_ms={bulkSendStartedToBulkSendResolvedP95Ms}; " +
             $"bulk_send_started_to_bulk_send_resolved_max_ms={bulkSendStartedToBulkSendResolvedMaxMs}; " +
             $"send_p95_ms={sendP95Ms}; send_max_ms={sendMaxMs}; frames_sent={framesSent}; frames_enqueued={framesEnqueued}; payload_bytes_sent={payloadBytesSent}; payload_bytes_per_second={payloadBytesPerSecond}; payload_bytes_enqueued={payloadBytesEnqueued}; payload_bytes_enqueued_per_second={payloadBytesEnqueuedPerSecond}; inter_enqueue_gap_p95_ms={interEnqueueGapP95Ms}; inter_enqueue_gap_max_ms={interEnqueueGapMaxMs}; send_failures={sendFailures}; queue_clears={queueClears}; queue_depth={queueDepth}; queued_bytes={queuedBytes}; oldest_queued_age_ms={oldestQueuedAgeMs}; in_flight={inFlight}; in_flight_bytes={inFlightBytes}; configured_concurrency={configuredConcurrency}; effective_concurrency={effectiveConcurrency}; in_flight_max={inFlightMax}; in_flight_bytes_max={inFlightBytesMax}; worker_utilization_percent={workerUtilizationPercent}; worker_idle_slot_samples={workerIdleSlotSamples}; worker_saturation_percent={workerSaturationPercent}; drain_wake_count={drainWakeCount}; send_mode={sendMode}; send_mode_fanout_frames={sendModeFanoutFrames}; send_mode_round_robin_frames={sendModeRoundRobinFrames}; send_mode_single_frames={sendModeSingleFrames}; send_mode_redundant2_frames={sendModeRedundant2Frames}; send_mode_fallback_frames={sendModeFallbackFrames}; sample_window_ms={sampleWindowMs}");
+        EmitBridgeQueueClearIfAdvanced("bulk", queueClears, ref lastObservedBulkQueueClears, "bulk_send_summary");
 
         EvaluateFileTransferBulkPolicy(
             sendMode,
@@ -2604,7 +2608,60 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 $"event=nkn_bridge_bulk_queue_state; congested={(nextState.IsCongested ? 1 : 0)}; severe={(nextState.IsSevere ? 1 : 0)}; queue_depth={nextState.QueueDepth}; queued_bytes={nextState.QueuedBytes}; oldest_queued_age_ms={nextState.OldestQueuedAgeMs}; in_flight={nextState.InFlightCount}; in_flight_bytes={nextState.InFlightBytes}; configured_concurrency={nextState.ConfiguredConcurrency}; effective_concurrency={nextState.EffectiveConcurrency}; cleared_since_last={nextState.ClearedSinceLast}");
         }
 
+        if (nextState.ClearedSinceLast > 0)
+        {
+            EmitBridgeQueueCleared("bulk", queueClears: 0, clearedSinceLast: nextState.ClearedSinceLast, source: "bulk_queue_state");
+        }
+
         changed?.TrySetResult(bulkQueueStateVersion);
+    }
+
+    private void EmitBridgeQueueClearIfAdvanced(
+        string lane,
+        long queueClears,
+        ref long lastObservedQueueClears,
+        string source)
+    {
+        if (queueClears <= 0)
+        {
+            return;
+        }
+
+        var previous = Volatile.Read(ref lastObservedQueueClears);
+        if (queueClears <= previous)
+        {
+            return;
+        }
+
+        Interlocked.Exchange(ref lastObservedQueueClears, queueClears);
+        EmitBridgeQueueCleared(lane, queueClears, queueClears - previous, source);
+    }
+
+    private void EmitBridgeQueueCleared(
+        string lane,
+        long queueClears,
+        long clearedSinceLast,
+        string source)
+    {
+        var normalizedLane = string.Equals(lane, "control", StringComparison.OrdinalIgnoreCase)
+            ? "control"
+            : "bulk";
+        var normalizedSource = string.IsNullOrWhiteSpace(source) ? "unknown" : source.Trim();
+        Log(
+            $"event=nkn_bridge_queue_cleared; lane={normalizedLane}; queue_clears={Math.Max(0, queueClears)}; cleared_since_last={Math.Max(0, clearedSinceLast)}; source={SanitizeLogToken(normalizedSource)}");
+        EmitBridgeLifecycle(new BridgeLifecycleEvent(
+            BridgeLifecycleEventKind.QueueCleared,
+            StartMode: null,
+            Pid: null,
+            ReadyTimeMs: null,
+            PingRttMs: null,
+            UptimeMs: null,
+            ExitCode: null,
+            ExitReasonKind: null,
+            ExitReasonText: $"{normalizedLane}_queue_cleared",
+            QueueLane: normalizedLane,
+            QueueClears: Math.Max(0, queueClears),
+            ClearedSinceLast: Math.Max(0, clearedSinceLast)));
     }
 
     private static string FormatBridgeScreenShareQueueMode(BridgeScreenShareQueueMode mode)

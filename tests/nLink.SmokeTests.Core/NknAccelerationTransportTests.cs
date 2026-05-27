@@ -2878,8 +2878,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Contains("event=tuna_activation_control_send_recovery_requested;", logTail, StringComparison.Ordinal);
             Assert.Contains("reason=tuna_activation_offer_send_timeout", logTail, StringComparison.Ordinal);
             Assert.Contains("accepted=0", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_activation_control_send_recovery_joined_existing;", logTail, StringComparison.Ordinal);
-            Assert.Contains("existing_recovery=1", logTail, StringComparison.Ordinal);
+            Assert.Contains("interruption_reason=offer_interrupted_by_bridge_recovery", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_runtime_unlock_retry_after_recovery_armed;", logTail, StringComparison.Ordinal);
             Assert.Contains("retry_scheduled=0", logTail, StringComparison.Ordinal);
             Assert.Contains("retry_after_recovery_armed=1", logTail, StringComparison.Ordinal);
@@ -3043,7 +3042,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=tuna_activation_control_send_recovery_requested;", logTail, StringComparison.Ordinal);
             Assert.Contains("accepted=0", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_activation_control_send_recovery_joined_existing;", logTail, StringComparison.Ordinal);
+            Assert.Contains("interruption_reason=offer_interrupted_by_bridge_recovery", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_runtime_unlock_retry_after_recovery_armed;", logTail, StringComparison.Ordinal);
             Assert.Contains("retry_scheduled=0", logTail, StringComparison.Ordinal);
             Assert.Contains("retry_after_recovery_armed=1", logTail, StringComparison.Ordinal);
@@ -3085,6 +3084,231 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests = previousOfferAnswerTimeout;
             NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests = previousOfferReplayDelay;
             NknSignalingTransport.RuntimeUnlockOfferSendRecoveryRequestOverrideForTests = previousRecoveryRequest;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TransportAccelerationOffer_RuntimeUnlockBridgeRecoveryInterruptsUnreceivedGeneration()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.tuna.runtime-unlock.bridge-recovery-interrupt.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            var helperClient = new FakeNknClient("helper.tuna.runtime-unlock.bridge-recovery-interrupt.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-tuna-runtime-unlock-bridge-recovery-interrupt-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                new RetryableTunaAccelerationSession(canListen: false, failedDialAttemptsBeforeSuccess: 0));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-tuna-runtime-unlock-bridge-recovery-interrupt-id", helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                new RetryableTunaAccelerationSession(canListen: false, failedDialAttemptsBeforeSuccess: 0));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            var logStart = GetOperationalLogLength();
+
+            host.SeedRuntimeUnlockOfferCriticalSectionForTests(
+                sessionId,
+                nonce: "runtime_unlock_bridge_recovery_nonce",
+                payerDecisionId: 101,
+                generation: 9,
+                observedSend: true,
+                observedLane: "control_priority");
+
+            InvokePrivateMethod(
+                host,
+                "OnBridgeLifecycle",
+                host,
+                new BridgeLifecycleEvent(
+                    BridgeLifecycleEventKind.ReceiveStallRecoveryStarted,
+                    StartMode: null,
+                    Pid: null,
+                    ReadyTimeMs: null,
+                    PingRttMs: null,
+                    UptimeMs: null,
+                    ExitCode: null,
+                    ExitReasonKind: null,
+                    ExitReasonText: "runtime_unlock_bridge_recovery_started"));
+
+            var state = host.RuntimeUnlockOfferStateForTests;
+            Assert.False(state.HasOutboundOffer);
+            Assert.True(state.IsRetired);
+            Assert.Equal("offer_interrupted_by_bridge_recovery", state.RetiredReason);
+            Assert.True(state.RetryArmed);
+            Assert.False(state.RetryQueued);
+
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=tuna_acceleration_activation_offer_not_observed;", logTail, StringComparison.Ordinal);
+            Assert.Contains("interruption_reason=offer_interrupted_by_bridge_recovery", logTail, StringComparison.Ordinal);
+            Assert.Contains("observed_send=1", logTail, StringComparison.Ordinal);
+            Assert.Contains("observed_lane=control_priority", logTail, StringComparison.Ordinal);
+            Assert.Contains("retry_after_recovery_armed=1", logTail, StringComparison.Ordinal);
+            Assert.Contains("answer_timeout_scheduled=0", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TransportAccelerationOffer_RuntimeUnlockQueueClearInterruptsUnreceivedGeneration()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.tuna.runtime-unlock.queue-clear-interrupt.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            var helperClient = new FakeNknClient("helper.tuna.runtime-unlock.queue-clear-interrupt.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-tuna-runtime-unlock-queue-clear-interrupt-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                new RetryableTunaAccelerationSession(canListen: false, failedDialAttemptsBeforeSuccess: 0));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-tuna-runtime-unlock-queue-clear-interrupt-id", helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                new RetryableTunaAccelerationSession(canListen: false, failedDialAttemptsBeforeSuccess: 0));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            var logStart = GetOperationalLogLength();
+
+            host.SeedRuntimeUnlockOfferCriticalSectionForTests(
+                sessionId,
+                nonce: "runtime_unlock_queue_clear_nonce",
+                payerDecisionId: 102,
+                generation: 10,
+                observedSend: true,
+                observedLane: "bulk_queue_fallback");
+
+            InvokePrivateMethod(
+                host,
+                "OnBridgeLifecycle",
+                host,
+                new BridgeLifecycleEvent(
+                    BridgeLifecycleEventKind.QueueCleared,
+                    StartMode: null,
+                    Pid: null,
+                    ReadyTimeMs: null,
+                    PingRttMs: null,
+                    UptimeMs: null,
+                    ExitCode: null,
+                    ExitReasonKind: null,
+                    ExitReasonText: "bulk_queue_cleared",
+                    QueueLane: "bulk",
+                    QueueClears: 4,
+                    ClearedSinceLast: 2));
+
+            var state = host.RuntimeUnlockOfferStateForTests;
+            Assert.False(state.HasOutboundOffer);
+            Assert.True(state.IsRetired);
+            Assert.Equal("offer_interrupted_by_queue_clear", state.RetiredReason);
+            Assert.True(state.RetryArmed);
+
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=tuna_acceleration_activation_offer_not_observed;", logTail, StringComparison.Ordinal);
+            Assert.Contains("interruption_reason=offer_interrupted_by_queue_clear", logTail, StringComparison.Ordinal);
+            Assert.Contains("queue_lane=bulk", logTail, StringComparison.Ordinal);
+            Assert.Contains("queue_clears=4", logTail, StringComparison.Ordinal);
+            Assert.Contains("cleared_since_last=2", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TransportAccelerationOffer_RuntimeUnlockQueueClearAfterPeerReceiveDoesNotRetireGeneration()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.tuna.runtime-unlock.queue-clear-peer-received.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            var helperClient = new FakeNknClient("helper.tuna.runtime-unlock.queue-clear-peer-received.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-tuna-runtime-unlock-queue-clear-peer-received-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                new RetryableTunaAccelerationSession(canListen: false, failedDialAttemptsBeforeSuccess: 0));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-tuna-runtime-unlock-queue-clear-peer-received-id", helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                new RetryableTunaAccelerationSession(canListen: false, failedDialAttemptsBeforeSuccess: 0));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            var logStart = GetOperationalLogLength();
+
+            host.SeedRuntimeUnlockOfferCriticalSectionForTests(
+                sessionId,
+                nonce: "runtime_unlock_queue_clear_peer_nonce",
+                payerDecisionId: 103,
+                generation: 11,
+                observedSend: true,
+                observedLane: "control_priority",
+                peerReceived: true);
+
+            InvokePrivateMethod(
+                host,
+                "OnBridgeLifecycle",
+                host,
+                new BridgeLifecycleEvent(
+                    BridgeLifecycleEventKind.QueueCleared,
+                    StartMode: null,
+                    Pid: null,
+                    ReadyTimeMs: null,
+                    PingRttMs: null,
+                    UptimeMs: null,
+                    ExitCode: null,
+                    ExitReasonKind: null,
+                    ExitReasonText: "control_queue_cleared",
+                    QueueLane: "control",
+                    QueueClears: 1,
+                    ClearedSinceLast: 1));
+
+            var state = host.RuntimeUnlockOfferStateForTests;
+            Assert.True(state.HasOutboundOffer);
+            Assert.False(state.IsRetired);
+            Assert.True(state.PeerReceived);
+            Assert.False(state.RetryArmed);
+            Assert.DoesNotContain(
+                "event=tuna_acceleration_activation_offer_not_observed;",
+                ReadOperationalLogTail(logStart),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
             FakeNknClient.ResetNetwork();
         }
     }
