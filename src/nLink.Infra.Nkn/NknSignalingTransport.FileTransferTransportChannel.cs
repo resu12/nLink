@@ -150,6 +150,7 @@ public sealed partial class NknSignalingTransport
         await SendFileTransferCancelEnvelopeAsync(
                 message.TransferId,
                 FileTransferPayloadCodec.Serialize(message),
+                message.Reason,
                 ct)
             .ConfigureAwait(false);
     }
@@ -316,6 +317,7 @@ public sealed partial class NknSignalingTransport
             {
                 fileTransferDataSessions.Remove(normalizedTransferId);
                 fileTransferRouteHints.Remove(normalizedTransferId);
+                fileTransferPostTunaFallbackRepairProofHints.Remove(normalizedTransferId);
                 LocalOperationalLog.Warn(
                     "SessionSecurity",
                     $"event=filetransfer_data_session_recreated; transport=nkn; transfer_id={normalizedTransferId}; session_id={normalizedSessionId}; reason=disposed_existing_session_on_open");
@@ -572,6 +574,7 @@ public sealed partial class NknSignalingTransport
     private async Task SendFileTransferCancelEnvelopeAsync(
         string transferId,
         byte[] plaintextPayload,
+        string? reason,
         CancellationToken ct)
     {
         var normalizedTransferId = NormalizeRequiredFileTransferId(transferId);
@@ -627,12 +630,56 @@ public sealed partial class NknSignalingTransport
         var bulkResult = bulkTask is null
             ? new CancelCopySendResult("bulk", false, null)
             : await bulkTask.ConfigureAwait(false);
-        if (!controlResult.Succeeded && !bulkResult.Succeeded)
+        var isSessionEndCancel = string.Equals(reason, "session_end", StringComparison.OrdinalIgnoreCase);
+        var controlRetryResult = new CancelCopySendResult("control_retry", false, null);
+        if (isSessionEndCancel &&
+            !controlResult.Succeeded &&
+            !ct.IsCancellationRequested)
+        {
+            controlRetryResult = await SendFileTransferCancelCopyAsync(
+                    remoteEndpoint,
+                    controlEnvelope,
+                    useBulkLane: false,
+                    lane: "control_retry",
+                    ct)
+                .ConfigureAwait(false);
+        }
+
+        var bulkRetryResult = new CancelCopySendResult("bulk_retry", false, null);
+        if (isSessionEndCancel &&
+            !bulkResult.Succeeded &&
+            !string.IsNullOrWhiteSpace(remoteBulkEndpoint) &&
+            !ct.IsCancellationRequested)
+        {
+            var bulkPayload = CreateSecureFileTransferPayload(
+                MsgType.FileTransferCancel,
+                normalizedTransferId,
+                plaintextPayload,
+                useBulkIdentity: true);
+            var bulkEnvelope = CreateEnvelope(envelopeCode, MsgType.FileTransferCancel, bulkPayload, replyTo: null);
+            bulkRetryResult = await SendFileTransferCancelCopyAsync(
+                    remoteBulkEndpoint,
+                    bulkEnvelope,
+                    useBulkLane: true,
+                    lane: "bulk_retry",
+                    ct)
+                .ConfigureAwait(false);
+        }
+
+        var deliveredAny = controlResult.Succeeded ||
+                           bulkResult.Succeeded ||
+                           controlRetryResult.Succeeded ||
+                           bulkRetryResult.Succeeded;
+        if (!deliveredAny)
         {
             LocalOperationalLog.Warn(
                 "SessionSecurity",
-                $"event=filetransfer_cancel_redundant_both_failed; transport=nkn; transfer_id={normalizedTransferId}; control_error={controlResult.Error?.GetType().Name ?? "(none)"}; bulk_error={bulkResult.Error?.GetType().Name ?? "(none)"}");
-            throw controlResult.Error ?? bulkResult.Error ?? new InvalidOperationException("File-transfer cancel send failed on both lanes.");
+                $"event=filetransfer_cancel_redundant_both_failed; transport=nkn; transfer_id={normalizedTransferId}; reason={SanitizeLogToken(reason ?? "(none)")}; control_error={controlResult.Error?.GetType().Name ?? "(none)"}; control_retry_error={controlRetryResult.Error?.GetType().Name ?? "(none)"}; bulk_error={bulkResult.Error?.GetType().Name ?? "(none)"}; bulk_retry_error={bulkRetryResult.Error?.GetType().Name ?? "(none)"}");
+            throw controlResult.Error ??
+                  bulkResult.Error ??
+                  controlRetryResult.Error ??
+                  bulkRetryResult.Error ??
+                  new InvalidOperationException("File-transfer cancel send failed on all lanes.");
         }
 
         if (!TryValidateAndTrackFileTransferMessage(MsgType.FileTransferCancel, normalizedTransferId, inbound: false, applyStateChange: true, out _))
@@ -645,7 +692,7 @@ public sealed partial class NknSignalingTransport
         LogFileTransferEnvelopeEvent("sent", MsgType.FileTransferCancel, normalizedTransferId, source: LocalPeerAddress);
         LocalOperationalLog.Info(
             "SessionSecurity",
-            $"event=filetransfer_cancel_redundant_sent; transport=nkn; transfer_id={normalizedTransferId}; control_sent={(controlResult.Succeeded ? 1 : 0)}; bulk_sent={(bulkResult.Succeeded ? 1 : 0)}");
+            $"event=filetransfer_cancel_redundant_sent; transport=nkn; transfer_id={normalizedTransferId}; reason={SanitizeLogToken(reason ?? "(none)")}; control_sent={(controlResult.Succeeded ? 1 : 0)}; control_retry={(controlRetryResult.Succeeded ? 1 : 0)}; bulk_sent={(bulkResult.Succeeded ? 1 : 0)}; bulk_retry={(bulkRetryResult.Succeeded ? 1 : 0)}; delivered_any={(deliveredAny ? 1 : 0)}");
     }
 
     private async Task<CancelCopySendResult> SendFileTransferCancelCopyAsync(
@@ -668,7 +715,7 @@ public sealed partial class NknSignalingTransport
 
             return new CancelCopySendResult(lane, true, null);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex)
         {
             LocalOperationalLog.Warn(
                 "SessionSecurity",
@@ -978,6 +1025,7 @@ public sealed partial class NknSignalingTransport
             {
                 fileTransferDataSessions.Remove(staleTransferId);
                 fileTransferRouteHints.Remove(staleTransferId);
+                fileTransferPostTunaFallbackRepairProofHints.Remove(staleTransferId);
             }
 
             staleSessionCount = staleTransferIds.Length;
@@ -5527,6 +5575,7 @@ public sealed partial class NknSignalingTransport
             {
                 fileTransferDataSessions.Remove(session.TransferId);
                 fileTransferRouteHints.Remove(session.TransferId);
+                fileTransferPostTunaFallbackRepairProofHints.Remove(session.TransferId);
                 removed = true;
                 LocalOperationalLog.Info(
                     "SessionSecurity",
@@ -5941,6 +5990,11 @@ public sealed partial class NknSignalingTransport
                 return true;
             }
 
+            if (IsPostTunaFallbackBridgeRecoveryFeedbackFailure(ex))
+            {
+                return true;
+            }
+
             if (ex is AggregateException aggregate)
             {
                 return aggregate.InnerExceptions.Count > 0 &&
@@ -5948,6 +6002,20 @@ public sealed partial class NknSignalingTransport
             }
 
             return IsPostTunaFallbackRecoverableFeedbackFailure(ex.InnerException);
+        }
+
+        private static bool IsPostTunaFallbackBridgeRecoveryFeedbackFailure(Exception ex)
+        {
+            if (ex is not InvalidOperationException)
+            {
+                return false;
+            }
+
+            return ex.Message.Contains("NKN bridge is not running", StringComparison.OrdinalIgnoreCase) ||
+                   ex.Message.Contains("bridge is not running", StringComparison.OrdinalIgnoreCase) ||
+                   ex.Message.Contains("NKN bridge process is not available", StringComparison.OrdinalIgnoreCase) ||
+                   ex.Message.Contains("Bridge disconnected", StringComparison.OrdinalIgnoreCase) ||
+                   ex.Message.Contains("Not connected", StringComparison.OrdinalIgnoreCase);
         }
 
         private static bool IsTunaActivationPauseFeedbackFailure(Exception? ex)

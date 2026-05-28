@@ -209,6 +209,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
     private readonly Dictionary<TransportState, long> transportStateEntryTimestamps = new();
     private readonly Dictionary<string, double> lastDurationMetricsMs = new(StringComparer.Ordinal);
     private readonly object watchdogGate = new();
+    private readonly object explicitDisconnectGate = new();
     private readonly SessionRuntimeWatchdogOptions watchdogOptions;
     private readonly Func<TimeSpan, CancellationToken, Task> watchdogDelayAsync;
     private readonly ITransportTelemetrySink telemetrySink;
@@ -261,6 +262,8 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
     private volatile bool resetInProgress;
     private volatile bool startInProgress;
     private volatile bool remoteSessionEndHandling;
+    private int fileTransferSessionEndInferenceStarted;
+    private Task? explicitDisconnectTask;
     private volatile bool disposed;
     private long connectAttempt;
     private string sessionId = string.Empty;

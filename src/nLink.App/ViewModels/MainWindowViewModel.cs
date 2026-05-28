@@ -10,7 +10,7 @@ namespace NLink.App.ViewModels;
 
 public class MainWindowViewModel : ViewModelBase, IDisposable
 {
-    private static readonly TimeSpan WindowClosePreparationTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan WindowClosePreparationTimeout = TimeSpan.FromSeconds(3);
     private readonly AppServiceRegistry services;
     private readonly TransportRuntimeConfig transportConfig;
     private readonly ShareMessageConfig shareMessageConfig;
@@ -31,6 +31,8 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
     private readonly INetworkEventSource networkEventSource;
     private readonly NetworkResilienceCoordinator networkResilienceCoordinator;
     private readonly HomePageViewModel homePage;
+    private readonly object endSessionGate = new();
+    private Task? endSessionTask;
     private ViewModelBase? lastNonDiagnosticsPage;
     private ViewModelBase currentPage;
     private bool disposed;
@@ -125,7 +127,21 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
 
     private void EndSessionOnly()
     {
-        _ = sessionRuntime.DisconnectAsync();
+        _ = GetOrStartEndSessionTask();
+    }
+
+    private Task GetOrStartEndSessionTask()
+    {
+        lock (endSessionGate)
+        {
+            if (endSessionTask is { IsCompleted: false })
+            {
+                return endSessionTask;
+            }
+
+            endSessionTask = sessionRuntime.DisconnectAsync();
+            return endSessionTask;
+        }
     }
 
     private void ShowDiagnosticsPage()
@@ -198,7 +214,7 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
         resourceRuntimeTracker.Dispose();
     }
 
-    public Task PrepareForWindowCloseAsync()
+    public async Task PrepareForWindowCloseAsync()
     {
         var closeAwarePage = CurrentPage as IWindowCloseAware;
         if (closeAwarePage is null && CurrentPage is DiagnosticsPageViewModel)
@@ -206,7 +222,29 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
             closeAwarePage = lastNonDiagnosticsPage as IWindowCloseAware;
         }
 
-        return PreparePageForWindowCloseAsync(closeAwarePage);
+        await PrepareWindowCloseAsync(closeAwarePage, GetOrStartEndSessionTask, WindowClosePreparationTimeout)
+            .ConfigureAwait(false);
+    }
+
+    internal static async Task PrepareWindowCloseAsync(
+        IWindowCloseAware? closeAwarePage,
+        Func<Task> getOrStartEndSessionTask,
+        TimeSpan timeout)
+    {
+        ArgumentNullException.ThrowIfNull(getOrStartEndSessionTask);
+
+        var endSession = getOrStartEndSessionTask();
+        var preparePage = PreparePageForWindowCloseAsync(closeAwarePage);
+        try
+        {
+            await Task.WhenAll(endSession, preparePage)
+                .WaitAsync(timeout)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            // Best-effort close path. App shutdown still proceeds.
+        }
     }
 
     internal static async Task PreparePageForWindowCloseAsync(IWindowCloseAware? closeAwarePage)

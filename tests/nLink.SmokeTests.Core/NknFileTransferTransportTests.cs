@@ -945,6 +945,72 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task NknTransport_PostTunaFallbackV6BridgeUnavailable_DefersHardBothFailedEvidence()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            int logStartIndex = CoreSmokeTestsBase.GetOperationalLogLength();
+            using CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(8.0));
+            NknTransportOptions options = NknTransportOptions.Load();
+            FakeNknClient hostClient = new FakeNknClient("host.filetransfer.post-fallback.bridge-defer.address");
+            FakeNknClient helperClient = new FakeNknClient("helper.filetransfer.post-fallback.bridge-defer.address");
+            using NknSignalingTransport host = new NknSignalingTransport(hostClient, options, new NknIdentity("host-post-fallback-bridge-defer-id", hostClient.Address));
+            using NknSignalingTransport helper = new NknSignalingTransport(helperClient, options, new NknIdentity("helper-post-fallback-bridge-defer-id", helperClient.Address));
+
+            string sessionId = await CoreSmokeTestsBase.ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_post_fallback_bridge_defer";
+            IFileTransferDataSession receiverRecoverySession = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            CoreSmokeTestsBase.InvokePrivateMethod(
+                host,
+                "TrackFileTransferRouteHint",
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                FileTransferProtocol.ProtocolVersionV6,
+                "test_post_tuna_fallback_route");
+            hostClient.BeforeSendCoreAsync = (_, payload, _, _) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(payload, out Envelope envelope) &&
+                    envelope.Type == MsgType.FileTransferDataFrame)
+                {
+                    throw new InvalidOperationException("NKN bridge is not running.");
+                }
+
+                return Task.CompletedTask;
+            };
+
+            await Assert.ThrowsAnyAsync<InvalidOperationException>(
+                async () => await receiverRecoverySession.SendAsync(
+                    new FileTransferFrontierRequestFrameV6
+                    {
+                        SessionId = sessionId,
+                        TransferId = transferId,
+                        TransportEpoch = 7,
+                        RepairRequestId = "v6:7:1539:1",
+                        MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = 1539, ChunkCount = 1 }],
+                        Priority = "frontier",
+                        RecoveryMode = "waiting_for_target_transport",
+                    },
+                    cts.Token));
+
+            string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
+            Assert.Contains("event=filetransfer_v6_post_tuna_fallback_feedback_both_failed_deferred_for_recovery;", logTail, StringComparison.Ordinal);
+            Assert.Contains($"route={FileTransferRouteResolver.PostTunaFallbackV6Token}", logTail, StringComparison.Ordinal);
+            Assert.Contains($"protocol_version={FileTransferProtocol.ProtocolVersionV6}", logTail, StringComparison.Ordinal);
+            Assert.Contains($"frame_type={FileTransferProtocol.FrontierRequestFrameTypeV6}", logTail, StringComparison.Ordinal);
+            Assert.Contains("first_error=InvalidOperationException", logTail, StringComparison.Ordinal);
+            Assert.Contains("second_error=InvalidOperationException", logTail, StringComparison.Ordinal);
+            Assert.Contains("reason=post_tuna_fallback_recovery_active", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_v4_feedback_both_failed;", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task NknTransport_RegularV6FrontierCancellation_StillLogsHardBothFailedEvidence()
     {
         FakeNknClient.ResetNetwork();
@@ -2075,6 +2141,82 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
 
             FileTransferCancelV1 cancel = await cancelReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
             Assert.Equal("bulk_cancel_copy", cancel.Reason);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_FileTransferSessionEndCancel_BulkCopySurvivesControlFailure()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            int logStartIndex = CoreSmokeTestsBase.GetOperationalLogLength();
+            using CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(8.0));
+            NknTransportOptions options = NknTransportOptions.Load();
+            FakeNknClient hostClient = new FakeNknClient("host.filetransfer.session-end-bulk-cancel.address");
+            FakeNknClient helperClient = new FakeNknClient("helper.filetransfer.session-end-bulk-cancel.address");
+            NknIdentity hostIdentity = new NknIdentity("host-session-end-bulk-cancel-id", hostClient.Address);
+            NknIdentity helperIdentity = new NknIdentity("helper-session-end-bulk-cancel-id", helperClient.Address);
+            using NknSignalingTransport host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using NknSignalingTransport helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            string sessionId = await CoreSmokeTestsBase.ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_nkn_session_end_bulk_cancel";
+
+            TaskCompletionSource<FileTransferOfferV2> offerReceived = new TaskCompletionSource<FileTransferOfferV2>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<FileTransferCancelV1> cancelReceived = new TaskCompletionSource<FileTransferCancelV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.FileTransferOfferReceived += delegate (object? _, FileTransferOfferReceivedEventArgs e)
+            {
+                if (string.Equals(e.Message.TransferId, transferId, StringComparison.Ordinal))
+                {
+                    offerReceived.TrySetResult(e.Message);
+                }
+            };
+            host.FileTransferCancelReceived += delegate (object? _, FileTransferCancelReceivedEventArgs e)
+            {
+                if (string.Equals(e.Message.TransferId, transferId, StringComparison.Ordinal))
+                {
+                    cancelReceived.TrySetResult(e.Message);
+                }
+            };
+
+            await helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV2
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "session-end-bulk-cancel.bin",
+                    FileSizeBytes = 4096L,
+                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                },
+                cts.Token);
+            await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+
+            helperClient.BeforeSendCoreAsync = static (_, _, channel, _) =>
+                channel == NknBridgeChannel.Control
+                    ? Task.FromException(new InvalidOperationException("control_lane_unavailable"))
+                    : Task.CompletedTask;
+
+            await helper.SendFileTransferCancelAsync(
+                new FileTransferCancelV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    Reason = "session_end",
+                },
+                cts.Token);
+
+            FileTransferCancelV1 cancel = await cancelReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+            Assert.Equal("session_end", cancel.Reason);
+            string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
+            Assert.Contains("event=filetransfer_cancel_redundant_sent", logTail, StringComparison.Ordinal);
+            Assert.Contains("reason=session_end", logTail, StringComparison.Ordinal);
+            Assert.Contains("bulk_sent=1", logTail, StringComparison.Ordinal);
+            Assert.Contains("delivered_any=1", logTail, StringComparison.Ordinal);
         }
         finally
         {

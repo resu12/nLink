@@ -316,9 +316,98 @@ public sealed partial class NknSignalingTransport
 
         var envelope = CreateEnvelope(envelopeCode, MsgType.SessionEnd, payload, replyTo: null);
         SessionTimeline.Record("SessionEndSent");
-        await SendEnvelopeWithAckRetryAsync(remoteEndpoint, envelope, ct);
-        Log($"SendSessionEndAsync sent SessionEnd with Ack (msg_id={envelope.MessageId})");
+        var bulkCopyTask = string.IsNullOrWhiteSpace(remoteBulkEndpoint)
+            ? null
+            : SendSessionEndCopyAsync(remoteBulkEndpoint, envelope, useBulkLane: true, lane: "bulk", ct);
+        Exception? ackError = null;
+        try
+        {
+            await SendEnvelopeWithAckRetryAsync(remoteEndpoint, envelope, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            ackError = ex;
+        }
+
+        var bulkCopyResult = bulkCopyTask is null
+            ? new SessionEndCopySendResult("bulk", false, null)
+            : await bulkCopyTask.ConfigureAwait(false);
+        var controlCopyResult = new SessionEndCopySendResult("control_copy", false, null);
+        if (ackError is not null && !ct.IsCancellationRequested)
+        {
+            controlCopyResult = await SendSessionEndCopyAsync(
+                    remoteEndpoint,
+                    envelope,
+                    useBulkLane: false,
+                    lane: "control_copy",
+                    ct)
+                .ConfigureAwait(false);
+        }
+
+        var bulkRetryResult = new SessionEndCopySendResult("bulk_retry", false, null);
+        if (!bulkCopyResult.Succeeded &&
+            !string.IsNullOrWhiteSpace(remoteBulkEndpoint) &&
+            !ct.IsCancellationRequested)
+        {
+            bulkRetryResult = await SendSessionEndCopyAsync(
+                    remoteBulkEndpoint,
+                    envelope,
+                    useBulkLane: true,
+                    lane: "bulk_retry",
+                    ct)
+                .ConfigureAwait(false);
+        }
+
+        var deliveredAny = ackError is null ||
+                           bulkCopyResult.Succeeded ||
+                           controlCopyResult.Succeeded ||
+                           bulkRetryResult.Succeeded;
+
+        if (!deliveredAny)
+        {
+            throw ackError ??
+                  bulkCopyResult.Error ??
+                  controlCopyResult.Error ??
+                  bulkRetryResult.Error ??
+                  new InvalidOperationException("Session end send failed on all lanes.");
+        }
+
+        LocalOperationalLog.Info(
+            "SessionSecurity",
+            $"event=session_end_redundant_sent; transport=nkn; session_id={SanitizeLogToken(sessionId.Value)}; reason=user_exit; control_ack={(ackError is null ? 1 : 0)}; control_copy={(controlCopyResult.Succeeded ? 1 : 0)}; bulk_copy={(bulkCopyResult.Succeeded || bulkRetryResult.Succeeded ? 1 : 0)}; bulk_sent={(bulkCopyResult.Succeeded ? 1 : 0)}; bulk_retry={(bulkRetryResult.Succeeded ? 1 : 0)}; delivered_any={(deliveredAny ? 1 : 0)}; control_error={ackError?.GetType().Name ?? "(none)"}; control_copy_error={controlCopyResult.Error?.GetType().Name ?? "(none)"}; bulk_error={bulkCopyResult.Error?.GetType().Name ?? "(none)"}; bulk_retry_error={bulkRetryResult.Error?.GetType().Name ?? "(none)"}");
+        Log($"SendSessionEndAsync sent SessionEnd with Ack or redundant copy (msg_id={envelope.MessageId}, control_ack={(ackError is null ? 1 : 0)}, control_copy={(controlCopyResult.Succeeded ? 1 : 0)}, bulk_copy={(bulkCopyResult.Succeeded || bulkRetryResult.Succeeded ? 1 : 0)})");
     }
+
+    private async Task<SessionEndCopySendResult> SendSessionEndCopyAsync(
+        string destination,
+        Envelope envelope,
+        bool useBulkLane,
+        string lane,
+        CancellationToken ct)
+    {
+        try
+        {
+            if (useBulkLane)
+            {
+                await SendBulkEnvelopeAsync(destination, envelope, ct).ConfigureAwait(false);
+            }
+            else
+            {
+                await SendEnvelopeAsync(destination, envelope, ct).ConfigureAwait(false);
+            }
+
+            return new SessionEndCopySendResult(lane, true, null);
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=session_end_redundant_{lane}_failed; transport=nkn; error={ex.GetType().Name}");
+            return new SessionEndCopySendResult(lane, false, ex);
+        }
+    }
+
+    private readonly record struct SessionEndCopySendResult(string Lane, bool Succeeded, Exception? Error);
 
     public async Task SendPendingJoinCancelAsync(CancellationToken ct)
     {

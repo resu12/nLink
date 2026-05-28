@@ -99,6 +99,63 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
     }
 
     [Fact]
+    public void SessionRuntime_FileTransferSessionEndCancel_EndsConnectedSession()
+    {
+        var helperAddress = new PeerAddress("helper.file.session.end");
+        var helpeeAddress = new PeerAddress("helpee.file.session.end");
+        var sessionId = new SessionId("sess_file_session_end");
+        var grant = new SessionGrant(
+            helperAddress,
+            CapabilityGrant.Chat | CapabilityGrant.FileTransfer,
+            sessionId,
+            DateTimeOffset.UtcNow.AddMinutes(5));
+        var securityState = CreateVerifiedSecurityState(helpeeAddress, helperAddress, sessionId)
+            .WithApproval(grant);
+        using var runtime = new SessionRuntime(
+            () => new ScriptedSignalingTransport(localPeerAddress: helperAddress.Value),
+            SessionRuntimeWatchdogOptions.Default with { Enabled = false });
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
+        SetPrivateField(runtime, "statusText", "Connected");
+        SetPrivateField(runtime, "transportState", TransportState.Connected);
+        SetPrivateField(runtime, "sessionSecurityState", securityState);
+        SetPrivateField(runtime, "currentSessionGrant", grant);
+        SetPrivateField(
+            runtime,
+            "sessionFlowState",
+            new SessionFlowState(
+                Phase: SessionFlowPhase.ActiveSession,
+                LastEndOrigin: SessionFlowEndOrigin.None,
+                LocalEndInProgress: false,
+                HadActiveSession: true,
+                FailureReason: string.Empty));
+        var remoteEnded = 0;
+        runtime.RemoteSessionEnded += (_, _) => remoteEnded++;
+
+        var transfer = new FileTransferTransferSnapshot(
+            sessionId.Value,
+            "ft_peer_session_end",
+            FileTransferDirection.Inbound,
+            FileTransferTransferState.Canceled,
+            "peer-ended.bin",
+            1024,
+            Sha256Base64: null,
+            BytesTransferred: 128,
+            ChunksTransferred: 1,
+            ChunkCount: 8,
+            ChunkSizeBytes: 128,
+            ErrorCode: FileTransferResultCodes.CanceledRemote,
+            StatusMessage: "session_end");
+        var snapshot = new SessionFileTransferSnapshot(Outbound: null, Inbound: transfer);
+
+        InvokePrivateMethod(runtime, "OnFileTransferChanged", runtime, new SessionFileTransferSnapshotChangedEventArgs(snapshot));
+
+        Assert.Equal(1, remoteEnded);
+        Assert.True(runtime.LastDisconnectWasRemoteEnd);
+        Assert.Equal(SessionFlowEndOrigin.Remote, runtime.FlowSnapshot.LastEndOrigin);
+    }
+
+    [Fact]
     public void SessionRuntime_DefaultHumanApprovalTimers_AreAligned()
     {
         using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport());
@@ -768,6 +825,50 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public async Task SessionRuntime_NknRemoteSessionEnd_BulkCopySurvivesControlFailure()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var options = NknTransportOptions.Load();
+            var helpeeClient = new FakeNknClient("helpee.session-end.bulk-copy.addr." + Guid.NewGuid().ToString("N"));
+            var helperClient = new FakeNknClient("helper.session-end.bulk-copy.addr." + Guid.NewGuid().ToString("N"));
+            using var helpeeTransport = new NknSignalingTransport(helpeeClient, options, new NknIdentity("helpee-bulk-session-end-test", helpeeClient.Address));
+            using var helperTransport = new NknSignalingTransport(helperClient, options, new NknIdentity("helper-bulk-session-end-test", helperClient.Address));
+            using var helpeeRuntime = new SessionRuntime(() => helpeeTransport);
+            using var helperRuntime = new SessionRuntime(() => helperTransport);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await helpeeRuntime.StartHelpeeAsync(cts.Token);
+            var invite = CreateValidatedInviteForTarget(
+                GetHostedAddressOrThrow(helpeeRuntime),
+                out var rawToken,
+                boundHelperAddress: new PeerAddress(helperTransport.LocalPeerAddress));
+            await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
+            await WaitUntilAsync(() => helpeeRuntime.State == SessionRuntimeState.IncomingJoinRequest, TimeSpan.FromSeconds(2));
+            await helpeeRuntime.ApproveAsync(cts.Token);
+            await WaitUntilAsync(() => helpeeRuntime.State == SessionRuntimeState.Connected && helperRuntime.State == SessionRuntimeState.Connected, TimeSpan.FromSeconds(2));
+
+            helperClient.BeforeSendCoreAsync = static (_, _, channel, _) =>
+                channel == NknBridgeChannel.Control
+                    ? Task.FromException(new InvalidOperationException("control_lane_unavailable"))
+                    : Task.CompletedTask;
+
+            await helperRuntime.DisconnectAsync();
+
+            await WaitUntilAsync(
+                () => helpeeRuntime.State == SessionRuntimeState.Failed &&
+                      string.Equals(helpeeRuntime.StatusText, "The helper ended the session.", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(3));
+            Assert.Equal("The helper ended the session.", helpeeRuntime.StatusText);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public async Task SessionRuntime_NknHelperEndWhileApprovalPending_PreventsStaleHelpeeApproval()
     {
         FakeNknClient.ResetNetwork();
@@ -812,6 +913,41 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
         scripted.RaiseDisconnected();
         await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Failed && string.Equals(runtime.StatusText, "Connection lost.", StringComparison.Ordinal), TimeSpan.FromSeconds(2));
         Assert.Equal("Connection lost.", runtime.StatusText);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void SessionRuntime_BridgeReceiveStallRecoveryExhausted_ConnectedSessionShowsConnectionLost()
+    {
+        using var runtime = new SessionRuntime(
+            () => new ScriptedSignalingTransport(),
+            SessionRuntimeWatchdogOptions.Default with { Enabled = false });
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
+        SetPrivateField(runtime, "statusText", "Connected");
+        SetPrivateField(runtime, "transportState", TransportState.Connected);
+        var disconnectedCount = 0;
+        runtime.Disconnected += (_, _) => disconnectedCount++;
+
+        InvokePrivateMethod(
+            runtime,
+            "OnBridgeLifecycle",
+            null,
+            new BridgeLifecycleEvent(
+                BridgeLifecycleEventKind.ReceiveStallRecoveryExhausted,
+                StartMode: null,
+                Pid: null,
+                ReadyTimeMs: null,
+                PingRttMs: null,
+                UptimeMs: null,
+                ExitCode: null,
+                ExitReasonKind: null,
+                ExitReasonText: "post_tuna_fallback_receive_unproven"));
+
+        Assert.Equal(SessionRuntimeState.Failed, runtime.State);
+        Assert.Equal("Connection lost.", runtime.StatusText);
+        Assert.False(runtime.LastDisconnectWasRemoteEnd);
+        Assert.Equal(1, disconnectedCount);
     }
 
     [Trait("Category", "LegacySmoke")]
