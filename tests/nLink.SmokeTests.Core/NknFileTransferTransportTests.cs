@@ -7,6 +7,7 @@ using System.Linq;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using NLink.App.Configuration;
@@ -28,6 +29,236 @@ namespace NLink.SmokeTests;
 [Trait("Area", "Core")]
 public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
 {
+    [Fact]
+    public async Task NknTransport_SessionHeartbeat_ControlAckRaisesLivenessProof()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.session.heartbeat.address");
+            var helperClient = new FakeNknClient("helper.session.heartbeat.address");
+            using var host = new NknSignalingTransport(hostClient, options, new NknIdentity("host-heartbeat", hostClient.Address));
+            using var helper = new NknSignalingTransport(helperClient, options, new NknIdentity("helper-heartbeat", helperClient.Address));
+            var sessionId = await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat).ConfigureAwait(false);
+            var hostProofs = new ConcurrentQueue<SessionLivenessProofEventArgs>();
+            var helperProofs = new ConcurrentQueue<SessionLivenessProofEventArgs>();
+            host.SessionLivenessProofReceived += (_, e) => hostProofs.Enqueue(e);
+            helper.SessionLivenessProofReceived += (_, e) => helperProofs.Enqueue(e);
+
+            await helper.SendSessionHeartbeatAsync(
+                    new SessionHeartbeatMessage(
+                        sessionId,
+                        Generation: 1,
+                        Sequence: 1,
+                        SentUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                        Role: "helper"),
+                    cts.Token)
+                .ConfigureAwait(false);
+
+            await WaitUntilAsync(
+                () => hostProofs.Any(e => e.ProofKind == "heartbeat_received" && e.Sequence == 1) &&
+                      helperProofs.Any(e => e.ProofKind == "heartbeat_ack" && e.Sequence == 1),
+                TimeSpan.FromSeconds(2));
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    public async Task NknTransport_SessionHeartbeat_BulkDuplicateIsAcceptedWhenControlAckFails()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.session.heartbeat.bulk.address");
+            var helperClient = new FakeNknClient("helper.session.heartbeat.bulk.address");
+            using var host = new NknSignalingTransport(hostClient, options, new NknIdentity("host-heartbeat-bulk", hostClient.Address));
+            using var helper = new NknSignalingTransport(helperClient, options, new NknIdentity("helper-heartbeat-bulk", helperClient.Address));
+            var sessionId = await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat).ConfigureAwait(false);
+            var hostProofs = new ConcurrentQueue<SessionLivenessProofEventArgs>();
+            var helperProofs = new ConcurrentQueue<SessionLivenessProofEventArgs>();
+            host.SessionLivenessProofReceived += (_, e) => hostProofs.Enqueue(e);
+            helper.SessionLivenessProofReceived += (_, e) => helperProofs.Enqueue(e);
+            helperClient.BeforeSendCoreAsync = static (_, payload, channel, _) =>
+            {
+                if (channel == NknBridgeChannel.Control &&
+                    EnvelopeCodec.TryDeserialize(payload, out var envelope) &&
+                    envelope.Type == MsgType.SessionHeartbeat)
+                {
+                    throw new IOException("drop heartbeat control");
+                }
+
+                return Task.CompletedTask;
+            };
+
+            await helper.SendSessionHeartbeatAsync(
+                    new SessionHeartbeatMessage(
+                        sessionId,
+                        Generation: 2,
+                        Sequence: 3,
+                        SentUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                        Role: "helper"),
+                    cts.Token)
+                .ConfigureAwait(false);
+
+            await WaitUntilAsync(
+                () => hostProofs.Any(e => e.ProofKind == "heartbeat_received" && e.Sequence == 3 && e.Lane == "bulk"),
+                TimeSpan.FromSeconds(2));
+            Assert.DoesNotContain(helperProofs, e => e.ProofKind == "heartbeat_ack" && e.Sequence == 3);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    public async Task NknTransport_SessionHeartbeat_WrongSessionDoesNotRaiseProof()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.session.heartbeat.reject.address");
+            var helperClient = new FakeNknClient("helper.session.heartbeat.reject.address");
+            using var host = new NknSignalingTransport(hostClient, options, new NknIdentity("host-heartbeat-reject", hostClient.Address));
+            using var helper = new NknSignalingTransport(helperClient, options, new NknIdentity("helper-heartbeat-reject", helperClient.Address));
+            await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat).ConfigureAwait(false);
+            var hostProofs = new ConcurrentQueue<SessionLivenessProofEventArgs>();
+            host.SessionLivenessProofReceived += (_, e) => hostProofs.Enqueue(e);
+
+            await helper.SendSessionHeartbeatAsync(
+                    new SessionHeartbeatMessage(
+                        "wrong_session",
+                        Generation: 3,
+                        Sequence: 1,
+                        SentUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                        Role: "helper"),
+                    cts.Token)
+                .ConfigureAwait(false);
+            await Task.Delay(100, cts.Token).ConfigureAwait(false);
+
+            Assert.Empty(hostProofs);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    public async Task NknTransport_SessionHeartbeat_WrongPeerSourceDoesNotRaiseProof()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.session.heartbeat.source-reject.address");
+            var helperClient = new FakeNknClient("helper.session.heartbeat.source-reject.address");
+            var spoofClient = new FakeNknClient("spoof.session.heartbeat.source-reject.address");
+            using var host = new NknSignalingTransport(hostClient, options, new NknIdentity("host-heartbeat-source-reject", hostClient.Address));
+            using var helper = new NknSignalingTransport(helperClient, options, new NknIdentity("helper-heartbeat-source-reject", helperClient.Address));
+            var sessionId = await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat).ConfigureAwait(false);
+            await spoofClient.ConnectAsync(cts.Token).ConfigureAwait(false);
+            var hostProofs = new ConcurrentQueue<SessionLivenessProofEventArgs>();
+            host.SessionLivenessProofReceived += (_, e) => hostProofs.Enqueue(e);
+
+            var envelope = BuildSecureLifecycleEnvelope(
+                helper,
+                MsgType.SessionHeartbeat,
+                BuildSessionHeartbeatPayload(sessionId, generation: 4, sequence: 1),
+                requestId: null,
+                sequence: 401);
+            await spoofClient.SendAsync(hostClient.ConnectedAddress, EnvelopeCodec.Serialize(envelope), cts.Token).ConfigureAwait(false);
+            await Task.Delay(100, cts.Token).ConfigureAwait(false);
+
+            Assert.Empty(hostProofs);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    public async Task NknTransport_SessionHeartbeat_ReplayedSecureSequenceDoesNotRaiseSecondProof()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.session.heartbeat.replay.address");
+            var helperClient = new FakeNknClient("helper.session.heartbeat.replay.address");
+            using var host = new NknSignalingTransport(hostClient, options, new NknIdentity("host-heartbeat-replay", hostClient.Address));
+            using var helper = new NknSignalingTransport(helperClient, options, new NknIdentity("helper-heartbeat-replay", helperClient.Address));
+            var sessionId = await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat).ConfigureAwait(false);
+            var hostProofs = new ConcurrentQueue<SessionLivenessProofEventArgs>();
+            host.SessionLivenessProofReceived += (_, e) => hostProofs.Enqueue(e);
+            var wire = EnvelopeCodec.Serialize(
+                BuildSecureLifecycleEnvelope(
+                    helper,
+                    MsgType.SessionHeartbeat,
+                    BuildSessionHeartbeatPayload(sessionId, generation: 5, sequence: 1),
+                    requestId: null,
+                    sequence: 501));
+
+            await helperClient.SendAsync(hostClient.ConnectedAddress, wire, cts.Token).ConfigureAwait(false);
+            await WaitUntilAsync(
+                () => hostProofs.Count(e => e.ProofKind == "heartbeat_received" && e.Sequence == 1) == 1,
+                TimeSpan.FromSeconds(2));
+            await helperClient.SendAsync(hostClient.ConnectedAddress, wire, cts.Token).ConfigureAwait(false);
+            await Task.Delay(100, cts.Token).ConfigureAwait(false);
+
+            Assert.Equal(1, hostProofs.Count(e => e.ProofKind == "heartbeat_received" && e.Sequence == 1));
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    public async Task NknTransport_SessionHeartbeat_MalformedPayloadDoesNotRaiseProof()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.session.heartbeat.malformed.address");
+            var helperClient = new FakeNknClient("helper.session.heartbeat.malformed.address");
+            using var host = new NknSignalingTransport(hostClient, options, new NknIdentity("host-heartbeat-malformed", hostClient.Address));
+            using var helper = new NknSignalingTransport(helperClient, options, new NknIdentity("helper-heartbeat-malformed", helperClient.Address));
+            await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat).ConfigureAwait(false);
+            var hostProofs = new ConcurrentQueue<SessionLivenessProofEventArgs>();
+            host.SessionLivenessProofReceived += (_, e) => hostProofs.Enqueue(e);
+            var envelope = BuildSecureLifecycleEnvelope(
+                helper,
+                MsgType.SessionHeartbeat,
+                Encoding.UTF8.GetBytes("""{"sessionId":"","generation":0,"sequence":0,"sentUtcMs":0}"""),
+                requestId: null,
+                sequence: 601);
+
+            await helperClient.SendAsync(hostClient.ConnectedAddress, EnvelopeCodec.Serialize(envelope), cts.Token).ConfigureAwait(false);
+            await Task.Delay(100, cts.Token).ConfigureAwait(false);
+
+            Assert.Empty(hostProofs);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
     [Trait("Category", "Smoke")]
     [Fact]
     public async Task NknTransport_InboundBulkParseFailure_LogsStructuredEnvelopeDrop()
@@ -3247,6 +3478,23 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
         using CancellationTokenSource receiveCts = new CancellationTokenSource(timeout);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             async () => await session.ReceiveAsync(receiveCts.Token));
+    }
+
+    private static byte[] BuildSessionHeartbeatPayload(
+        string sessionId,
+        long generation,
+        long sequence,
+        string role = "helper")
+    {
+        return JsonSerializer.SerializeToUtf8Bytes(
+            new Dictionary<string, object?>
+            {
+                ["sessionId"] = sessionId,
+                ["generation"] = generation,
+                ["sequence"] = sequence,
+                ["sentUtcMs"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                ["role"] = role,
+            });
     }
 
     private static Envelope BuildSecureLegacyFileTransferEnvelope(

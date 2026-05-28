@@ -2060,6 +2060,7 @@ public sealed partial class SessionRuntime
             }
             ResetRemoteControlState("reset_core");
             CancelWatchdog();
+            CancelSessionLivenessWatchdog("reset_core");
 
             if (oldTransport is not null)
             {
@@ -2719,6 +2720,7 @@ public sealed partial class SessionRuntime
             "transport_approved"));
         TransitionTo(TransportState.Connected, "transport_approved");
         SetState(SessionRuntimeState.Connected, "Connected");
+        StartSessionLivenessWatchdog("transport_approved");
         Approved?.Invoke(this, EventArgs.Empty);
     }
 
@@ -2852,6 +2854,8 @@ public sealed partial class SessionRuntime
             return;
         }
 
+        CancelSessionLivenessWatchdog("transport_disconnected");
+
         // A transport-level disconnect often follows an explicit SessionEnd envelope.
         // In that case the user-facing state/message was already handled in OnRemoteSessionEnded.
         // Do not clear the remote-end marker or overwrite the helper UI with a generic error.
@@ -2975,6 +2979,7 @@ public sealed partial class SessionRuntime
             return;
         }
 
+        CancelSessionLivenessWatchdog(reason);
         if (remoteControlSessionState.ControlState != ControlState.Off)
         {
             MarkRemoteControlStopPriority(
@@ -10652,6 +10657,11 @@ public sealed partial class SessionRuntime
         if (role == SessionRuntimeRole.Helpee && nextState == SessionRuntimeState.Waiting)
         {
             CancelWatchdog();
+        }
+
+        if (nextState != SessionRuntimeState.Connected)
+        {
+            CancelSessionLivenessWatchdog($"session_state_{nextState}");
         }
 
         LocalOperationalLog.Info(

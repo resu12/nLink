@@ -171,6 +171,136 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
         Assert.Equal(
             SessionApprovalTimeouts.DefaultHumanDecisionTimeout,
             Assert.IsType<TimeSpan>(outboundDecisionTimeoutField.GetValue(runtime)));
+        Assert.Equal(TimeSpan.FromSeconds(2), SessionRuntimeWatchdogOptions.Default.SessionLivenessHeartbeatInterval);
+        Assert.Equal(TimeSpan.FromSeconds(6), SessionRuntimeWatchdogOptions.Default.SessionLivenessSuspectTimeout);
+        Assert.Equal(TimeSpan.FromSeconds(18), SessionRuntimeWatchdogOptions.Default.SessionLivenessTimeout);
+    }
+
+    [Fact]
+    public async Task SessionRuntime_SessionLivenessWatchdog_StartsOnlyAfterApprovedConnected()
+    {
+        var delay = new ControlledDelayScheduler();
+        var heartbeatCount = 0;
+        var scripted = new ScriptedSignalingTransport(
+            onSendSessionHeartbeatAsync: (message, _) =>
+            {
+                Interlocked.Increment(ref heartbeatCount);
+                Assert.False(string.IsNullOrWhiteSpace(message.SessionId));
+                return Task.CompletedTask;
+            });
+        var options = SessionRuntimeWatchdogOptions.Default with
+        {
+            SessionLivenessHeartbeatInterval = TimeSpan.FromSeconds(1),
+            SessionLivenessSuspectTimeout = TimeSpan.FromSeconds(3),
+            SessionLivenessTimeout = TimeSpan.FromSeconds(9),
+        };
+        using var runtime = new SessionRuntime(() => scripted, options, delay.DelayAsync);
+        runtime.SetRoleForTests(SessionRuntimeRole.Helpee);
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        scripted.SetSessionSecurityStateForTests(CreateApprovedSecurityState(new PeerAddress(scripted.LocalPeerAddress), new PeerAddress("scripted.helper.liveness")));
+
+        Assert.Equal(0, delay.PendingCount);
+        InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+        delay.CompleteLatest();
+        await WaitUntilAsync(() => Volatile.Read(ref heartbeatCount) > 0, TimeSpan.FromSeconds(1));
+
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.Equal("Connected", runtime.StatusText);
+    }
+
+    [Fact]
+    public async Task SessionRuntime_SessionLivenessProof_PreventsTimeout()
+    {
+        var delay = new ControlledDelayScheduler();
+        var now = DateTimeOffset.UtcNow;
+        var scripted = new ScriptedSignalingTransport(onSendSessionHeartbeatAsync: static (_, _) => Task.CompletedTask);
+        var options = SessionRuntimeWatchdogOptions.Default with
+        {
+            SessionLivenessHeartbeatInterval = TimeSpan.FromSeconds(1),
+            SessionLivenessSuspectTimeout = TimeSpan.FromSeconds(3),
+            SessionLivenessTimeout = TimeSpan.FromSeconds(9),
+        };
+        using var runtime = new SessionRuntime(() => scripted, options, delay.DelayAsync, nowProvider: () => now);
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        var securityState = CreateApprovedSecurityState(new PeerAddress("scripted.helpee.liveness"), new PeerAddress(scripted.LocalPeerAddress));
+        scripted.SetSessionSecurityStateForTests(securityState);
+        InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+
+        now = now.AddSeconds(8);
+        scripted.InjectSessionLivenessProof(securityState.SessionId!.Value.Value, sequence: 7);
+        delay.CompleteLatest();
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+        now = now.AddSeconds(8);
+        delay.CompleteLatest();
+        await Task.Delay(100);
+
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.Equal("Connected", runtime.StatusText);
+    }
+
+    [Fact]
+    public async Task SessionRuntime_SessionLivenessTimeout_TransitionsToConnectionLost()
+    {
+        var delay = new ControlledDelayScheduler();
+        var now = DateTimeOffset.UtcNow;
+        var scripted = new ScriptedSignalingTransport(onSendSessionHeartbeatAsync: static (_, _) => Task.CompletedTask);
+        var options = SessionRuntimeWatchdogOptions.Default with
+        {
+            SessionLivenessHeartbeatInterval = TimeSpan.FromSeconds(1),
+            SessionLivenessSuspectTimeout = TimeSpan.FromSeconds(3),
+            SessionLivenessTimeout = TimeSpan.FromSeconds(9),
+        };
+        using var runtime = new SessionRuntime(() => scripted, options, delay.DelayAsync, nowProvider: () => now);
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        scripted.SetSessionSecurityStateForTests(CreateApprovedSecurityState(new PeerAddress("scripted.helpee.timeout"), new PeerAddress(scripted.LocalPeerAddress)));
+        var disconnected = 0;
+        runtime.Disconnected += (_, _) => disconnected++;
+        InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+
+        now = now.AddSeconds(10);
+        delay.CompleteLatest();
+        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Failed, TimeSpan.FromSeconds(2));
+
+        Assert.Equal("Connection lost.", runtime.StatusText);
+        Assert.False(runtime.LastDisconnectWasRemoteEnd);
+        Assert.Equal(1, disconnected);
+    }
+
+    [Fact]
+    public async Task SessionRuntime_RemoteSessionEnd_CancelsLivenessTimeoutAndPreservesRemoteEndedCopy()
+    {
+        var delay = new ControlledDelayScheduler();
+        var now = DateTimeOffset.UtcNow;
+        var scripted = new ScriptedSignalingTransport(onSendSessionHeartbeatAsync: static (_, _) => Task.CompletedTask);
+        var options = SessionRuntimeWatchdogOptions.Default with
+        {
+            SessionLivenessHeartbeatInterval = TimeSpan.FromSeconds(1),
+            SessionLivenessSuspectTimeout = TimeSpan.FromSeconds(3),
+            SessionLivenessTimeout = TimeSpan.FromSeconds(9),
+        };
+        using var runtime = new SessionRuntime(() => scripted, options, delay.DelayAsync, nowProvider: () => now);
+        runtime.SetRoleForTests(SessionRuntimeRole.Helpee);
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        scripted.SetSessionSecurityStateForTests(CreateApprovedSecurityState(new PeerAddress(scripted.LocalPeerAddress), new PeerAddress("scripted.helper.remote.end")));
+        InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+
+        InvokePrivateMethod(runtime, "OnRemoteSessionEnded", scripted, EventArgs.Empty);
+        await WaitUntilAsync(() => runtime.LastDisconnectWasRemoteEnd, TimeSpan.FromSeconds(1));
+        now = now.AddSeconds(10);
+        await Task.Delay(100);
+
+        Assert.True(runtime.LastDisconnectWasRemoteEnd);
+        Assert.NotEqual("Connection lost.", runtime.StatusText);
     }
 
     [Trait("Category", "LegacySmoke")]

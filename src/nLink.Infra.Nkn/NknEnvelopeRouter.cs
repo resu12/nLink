@@ -29,6 +29,7 @@ internal sealed class NknEnvelopeRouter
             case MsgType.Chat:
             case MsgType.Ack:
             case MsgType.SessionEnd:
+            case MsgType.SessionHeartbeat:
             case MsgType.SessionHandshakeStart:
             case MsgType.SessionHandshakeChallenge:
             case MsgType.SessionHandshakeResponse:
@@ -94,7 +95,7 @@ internal sealed class NknLifecycleChannel
 
     public NknLifecycleChannel(NknSignalingTransport owner) => this.owner = owner;
 
-    public void Handle(NknInboundEnvelopeContext inboundContext) => owner.RouteLifecycleEnvelope(inboundContext.Source, inboundContext.Envelope);
+    public void Handle(NknInboundEnvelopeContext inboundContext) => owner.RouteLifecycleEnvelope(inboundContext);
 
     public void HandleUnexpected(Envelope env) => owner.HandleUnexpectedEnvelopeType(env);
 }

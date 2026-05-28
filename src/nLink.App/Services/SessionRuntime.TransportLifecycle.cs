@@ -159,6 +159,11 @@ public sealed partial class SessionRuntime
                 owner.ApplyTransportSecurityState(securityTransport.CurrentSessionSecurityState);
             }
 
+            if (nextTransport is ISessionLivenessSignalingTransport livenessTransport)
+            {
+                livenessTransport.SessionLivenessProofReceived += owner.OnSessionLivenessProofReceived;
+            }
+
             if (nextTransport is ITransportAccelerationStatus accelerationTransport)
             {
                 accelerationTransport.TransportAccelerationStateChanged += owner.OnTransportAccelerationStateChanged;
@@ -214,6 +219,11 @@ public sealed partial class SessionRuntime
             if (nextTransport is ISessionSecuritySignalingTransport securityTransport)
             {
                 securityTransport.SessionSecurityStateChanged -= owner.OnTransportSessionSecurityStateChanged;
+            }
+
+            if (nextTransport is ISessionLivenessSignalingTransport livenessTransport)
+            {
+                livenessTransport.SessionLivenessProofReceived -= owner.OnSessionLivenessProofReceived;
             }
 
             if (nextTransport is ITransportAccelerationStatus accelerationTransport)

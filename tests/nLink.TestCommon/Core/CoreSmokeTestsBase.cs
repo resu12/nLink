@@ -866,6 +866,7 @@ internal static Envelope BuildSecureLifecycleEnvelope(
                     MsgType.Approve => "approve",
                     MsgType.Reject => "reject",
                     MsgType.SessionEnd => "session_end",
+                    MsgType.SessionHeartbeat => "session_heartbeat",
                     _ => throw new ArgumentOutOfRangeException(nameof(msgType), msgType, "Unsupported lifecycle message."),
                 },
                 SessionId: sessionId,

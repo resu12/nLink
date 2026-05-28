@@ -138,7 +138,10 @@ internal sealed record SessionRuntimeWatchdogOptions(
     TimeSpan BridgeStartingTimeout,
     TimeSpan ConnectingTimeout,
     TimeSpan HandshakeTimeout,
-    TimeSpan ReconnectingTimeout)
+    TimeSpan ReconnectingTimeout,
+    TimeSpan SessionLivenessHeartbeatInterval,
+    TimeSpan SessionLivenessSuspectTimeout,
+    TimeSpan SessionLivenessTimeout)
 {
     public static SessionRuntimeWatchdogOptions Default { get; } = new(
         Enabled: true,
@@ -146,7 +149,10 @@ internal sealed record SessionRuntimeWatchdogOptions(
         BridgeStartingTimeout: TimeSpan.FromSeconds(8),
         ConnectingTimeout: TimeSpan.FromSeconds(20),
         HandshakeTimeout: SessionApprovalTimeouts.DefaultHumanDecisionTimeout,
-        ReconnectingTimeout: TimeSpan.FromSeconds(8));
+        ReconnectingTimeout: TimeSpan.FromSeconds(8),
+        SessionLivenessHeartbeatInterval: TimeSpan.FromSeconds(2),
+        SessionLivenessSuspectTimeout: TimeSpan.FromSeconds(6),
+        SessionLivenessTimeout: TimeSpan.FromSeconds(18));
 }
 
 internal static class SessionApprovalTimeouts

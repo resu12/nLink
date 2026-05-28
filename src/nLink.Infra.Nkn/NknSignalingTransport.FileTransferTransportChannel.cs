@@ -3624,7 +3624,7 @@ public sealed partial class NknSignalingTransport
         MsgType messageType,
         out SessionSecureEnvelopePayload securePayload)
     {
-        securePayload = default;
+        securePayload = null!;
 
         if (currentSessionSecurityState.SessionId is not SessionId sessionId)
         {
@@ -3716,6 +3716,12 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
+        RaiseSessionLivenessProof(
+            securePayload.Metadata.SessionId.Value,
+            generation: 0,
+            securePayload.Metadata.Sequence,
+            MapSecureControlMessageType(messageType),
+            "control");
         return true;
     }
 
@@ -3839,7 +3845,7 @@ public sealed partial class NknSignalingTransport
         SessionReplayWindow replayWindow,
         out SessionSecureEnvelopePayload securePayload)
     {
-        securePayload = default;
+        securePayload = null!;
 
         if (key is null || key.Length == 0)
         {
@@ -3888,6 +3894,15 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
+        if (!string.Equals(messageType, "session_heartbeat", StringComparison.Ordinal))
+        {
+            RaiseSessionLivenessProof(
+                securePayload.Metadata.SessionId.Value,
+                generation: 0,
+                securePayload.Metadata.Sequence,
+                messageType,
+                "lifecycle");
+        }
         return true;
     }
 
@@ -3897,7 +3912,7 @@ public sealed partial class NknSignalingTransport
         MsgType messageType,
         out SessionSecureEnvelopePayload securePayload)
     {
-        securePayload = default;
+        securePayload = null!;
 
         if (currentSessionSecurityState.SessionId is not SessionId sessionId)
         {
@@ -3990,6 +4005,12 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
+        RaiseSessionLivenessProof(
+            securePayload.Metadata.SessionId.Value,
+            generation: 0,
+            securePayload.Metadata.Sequence,
+            MapSecureScreenShareMessageType(messageType),
+            "screen_share");
         return true;
     }
 
@@ -4019,7 +4040,7 @@ public sealed partial class NknSignalingTransport
         out SessionSecureEnvelopePayload securePayload,
         NknBridgeChannel? channel = null)
     {
-        securePayload = default;
+        securePayload = null!;
 
         if (currentSessionSecurityState.SessionId is not SessionId sessionId)
         {
@@ -4097,6 +4118,12 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
+        RaiseSessionLivenessProof(
+            securePayload.Metadata.SessionId.Value,
+            generation: 0,
+            securePayload.Metadata.Sequence,
+            MapSecureFileTransferMessageType(messageType),
+            channel?.ToString().ToLowerInvariant() ?? "file_transfer");
         return true;
     }
 
@@ -5127,6 +5154,7 @@ public sealed partial class NknSignalingTransport
             MsgType.Approve => "approve",
             MsgType.Reject => "reject",
             MsgType.SessionEnd => "session_end",
+            MsgType.SessionHeartbeat => "session_heartbeat",
             _ => throw new ArgumentOutOfRangeException(nameof(messageType), messageType, "Unsupported secure lifecycle message type."),
         };
     }

@@ -83,6 +83,51 @@ public interface ITransportAccelerationControl
     Task StopAccelerationAsync(string reason, CancellationToken ct);
 }
 
+public interface ISessionLivenessSignalingTransport
+{
+    event EventHandler<SessionLivenessProofEventArgs>? SessionLivenessProofReceived;
+
+    Task SendSessionHeartbeatAsync(SessionHeartbeatMessage message, CancellationToken ct);
+}
+
+public sealed record SessionHeartbeatMessage(
+    string SessionId,
+    long Generation,
+    long Sequence,
+    long SentUtcMs,
+    string Role);
+
+public sealed class SessionLivenessProofEventArgs : EventArgs
+{
+    public SessionLivenessProofEventArgs(
+        string sessionId,
+        long generation,
+        long sequence,
+        long observedUtcMs,
+        string proofKind,
+        string lane)
+    {
+        SessionId = string.IsNullOrWhiteSpace(sessionId) ? string.Empty : sessionId.Trim();
+        Generation = generation;
+        Sequence = sequence;
+        ObservedUtcMs = observedUtcMs;
+        ProofKind = string.IsNullOrWhiteSpace(proofKind) ? "unknown" : proofKind.Trim();
+        Lane = string.IsNullOrWhiteSpace(lane) ? "unknown" : lane.Trim();
+    }
+
+    public string SessionId { get; }
+
+    public long Generation { get; }
+
+    public long Sequence { get; }
+
+    public long ObservedUtcMs { get; }
+
+    public string ProofKind { get; }
+
+    public string Lane { get; }
+}
+
 public sealed class IncomingJoinRequestEventArgs : EventArgs
 {
     private readonly Func<ApprovalDecision?, CancellationToken, Task> approveAsync;

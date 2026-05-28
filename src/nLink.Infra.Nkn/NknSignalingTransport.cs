@@ -16,7 +16,7 @@ using NLink.Core.SessionSecurity;
 namespace NLink.Infra.Nkn;
 
 #pragma warning disable CS0067
-public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, ITransportAccelerationStatus, ITransportAccelerationControl, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IScreenShareTransportBackpressureProbe, IScreenShareTransportPolicyController, IFileTransferSignalingTransport, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRouteCompletionObserver, IAuthoritativeConnectedAddressSource
+public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, ISessionLivenessSignalingTransport, ITransportAccelerationStatus, ITransportAccelerationControl, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IScreenShareTransportBackpressureProbe, IScreenShareTransportPolicyController, IFileTransferSignalingTransport, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRouteCompletionObserver, IAuthoritativeConnectedAddressSource
 {
     private readonly record struct FileTransferV6TransportEpochKey(
         string SessionId,
@@ -375,6 +375,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
 
     public event EventHandler? Disconnected;
     public event EventHandler<TransportSessionSecurityStateChangedEventArgs>? SessionSecurityStateChanged;
+    public event EventHandler<SessionLivenessProofEventArgs>? SessionLivenessProofReceived;
     public event EventHandler<TransportAccelerationStateChangedEventArgs>? TransportAccelerationStateChanged;
 
     public event EventHandler? RemoteSessionEnded;
@@ -427,6 +428,43 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
                 return transportAccelerationStatusReason;
             }
         }
+    }
+
+    private void RaiseSessionLivenessProof(
+        string? sessionId,
+        long generation,
+        long sequence,
+        string proofKind,
+        string lane)
+    {
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? null : sessionId.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedSessionId))
+        {
+            return;
+        }
+
+        var currentSessionId = currentSessionSecurityState.SessionId?.Value;
+        if (string.IsNullOrWhiteSpace(currentSessionId) ||
+            !string.Equals(normalizedSessionId, currentSessionId, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var normalizedProofKind = string.IsNullOrWhiteSpace(proofKind) ? "unknown" : proofKind.Trim();
+        var normalizedLane = string.IsNullOrWhiteSpace(lane) ? "unknown" : lane.Trim();
+        var observedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        LocalOperationalLog.Info(
+            "SessionSecurity",
+            $"event=session_liveness_proof_received; transport=nkn; session_id={SanitizeLogToken(normalizedSessionId)}; generation={generation}; sequence={sequence}; proof_kind={normalizedProofKind}; lane={normalizedLane}; observed_utc_ms={observedUtcMs}");
+        SessionLivenessProofReceived?.Invoke(
+            this,
+            new SessionLivenessProofEventArgs(
+                normalizedSessionId,
+                generation,
+                sequence,
+                observedUtcMs,
+                normalizedProofKind,
+                normalizedLane));
     }
 
     private static bool IsDiagnosticRegularNknV6RouteEnabledCore()
@@ -2940,6 +2978,12 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             return false;
         }
 
+        RaiseSessionLivenessProof(
+            securePayload.Metadata.SessionId.Value,
+            generation: 0,
+            securePayload.Metadata.Sequence,
+            "chat_message",
+            "control");
         return true;
     }
 }

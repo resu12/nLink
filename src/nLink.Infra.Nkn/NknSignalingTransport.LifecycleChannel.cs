@@ -378,6 +378,113 @@ public sealed partial class NknSignalingTransport
         Log($"SendSessionEndAsync sent SessionEnd with Ack or redundant copy (msg_id={envelope.MessageId}, control_ack={(ackError is null ? 1 : 0)}, control_copy={(controlCopyResult.Succeeded ? 1 : 0)}, bulk_copy={(bulkCopyResult.Succeeded || bulkRetryResult.Succeeded ? 1 : 0)})");
     }
 
+    public async Task SendSessionHeartbeatAsync(SessionHeartbeatMessage message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ThrowIfDisposed();
+
+        if (ct.IsCancellationRequested)
+        {
+            await Task.FromCanceled(ct);
+            return;
+        }
+
+        if (!TryGetCurrentEnvelopeCode(out var envelopeCode) ||
+            string.IsNullOrWhiteSpace(remoteEndpoint) ||
+            currentSessionSecurityState.SessionId is not SessionId sessionId ||
+            !string.Equals(message.SessionId, sessionId.Value, StringComparison.Ordinal))
+        {
+            var reason = !TryGetCurrentEnvelopeCode(out _)
+                ? "missing_envelope_code"
+                : string.IsNullOrWhiteSpace(remoteEndpoint)
+                    ? "missing_remote_endpoint"
+                    : currentSessionSecurityState.SessionId is not SessionId
+                        ? "missing_session_id"
+                        : "session_id_mismatch";
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=session_liveness_heartbeat_send_skipped; transport=nkn; reason={reason}; requested_session_id={SanitizeLogToken(message.SessionId)}; current_session_id={SanitizeLogToken(currentSessionSecurityState.SessionId?.Value ?? "(none)")}; generation={message.Generation}; sequence={message.Sequence}");
+            return;
+        }
+
+        var heartbeatPayload = new SessionHeartbeatPayload
+        {
+            sessionId = sessionId.Value,
+            generation = message.Generation,
+            sequence = message.Sequence,
+            sentUtcMs = message.SentUtcMs,
+            role = string.IsNullOrWhiteSpace(message.Role) ? "unknown" : message.Role.Trim(),
+        };
+        var payload = CreateSecureLifecyclePayload(
+            MsgType.SessionHeartbeat,
+            requestId: null,
+            JsonSerializer.SerializeToUtf8Bytes(heartbeatPayload));
+        var envelope = CreateEnvelope(envelopeCode, MsgType.SessionHeartbeat, payload, replyTo: null);
+        Task<SessionHeartbeatCopySendResult>? bulkCopyTask = null;
+
+        Exception? ackError = null;
+        try
+        {
+            await SendEnvelopeWithAckRetryAsync(
+                    remoteEndpoint,
+                    envelope,
+                    ct,
+                    afterPendingAckRegistered: () =>
+                    {
+                        if (!string.IsNullOrWhiteSpace(remoteBulkEndpoint))
+                        {
+                            bulkCopyTask = SendSessionHeartbeatCopyAsync(remoteBulkEndpoint, envelope, lane: "bulk", ct);
+                        }
+                    })
+                .ConfigureAwait(false);
+            RaiseSessionLivenessProof(
+                sessionId.Value,
+                message.Generation,
+                message.Sequence,
+                "heartbeat_ack",
+                "control_ack");
+        }
+        catch (Exception ex)
+        {
+            ackError = ex;
+        }
+
+        var bulkCopyResult = bulkCopyTask is null
+            ? new SessionHeartbeatCopySendResult("bulk", false, null)
+            : await bulkCopyTask.ConfigureAwait(false);
+        var deliveredAny = ackError is null || bulkCopyResult.Succeeded;
+        LocalOperationalLog.Info(
+            "SessionSecurity",
+            $"event=session_liveness_heartbeat_sent; transport=nkn; session_id={SanitizeLogToken(sessionId.Value)}; generation={message.Generation}; sequence={message.Sequence}; control_ack={(ackError is null ? 1 : 0)}; bulk_copy={(bulkCopyResult.Succeeded ? 1 : 0)}; delivered_any={(deliveredAny ? 1 : 0)}; control_error={ackError?.GetType().Name ?? "(none)"}; bulk_error={bulkCopyResult.Error?.GetType().Name ?? "(none)"}");
+
+        if (!deliveredAny)
+        {
+            throw ackError ??
+                  bulkCopyResult.Error ??
+                  new InvalidOperationException("Session heartbeat send failed on all lanes.");
+        }
+    }
+
+    private async Task<SessionHeartbeatCopySendResult> SendSessionHeartbeatCopyAsync(
+        string destination,
+        Envelope envelope,
+        string lane,
+        CancellationToken ct)
+    {
+        try
+        {
+            await SendBulkEnvelopeAsync(destination, envelope, ct).ConfigureAwait(false);
+            return new SessionHeartbeatCopySendResult(lane, true, null);
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=session_liveness_heartbeat_{lane}_failed; transport=nkn; error={ex.GetType().Name}");
+            return new SessionHeartbeatCopySendResult(lane, false, ex);
+        }
+    }
+
     private async Task<SessionEndCopySendResult> SendSessionEndCopyAsync(
         string destination,
         Envelope envelope,
@@ -408,6 +515,7 @@ public sealed partial class NknSignalingTransport
     }
 
     private readonly record struct SessionEndCopySendResult(string Lane, bool Succeeded, Exception? Error);
+    private readonly record struct SessionHeartbeatCopySendResult(string Lane, bool Succeeded, Exception? Error);
 
     public async Task SendPendingJoinCancelAsync(CancellationToken ct)
     {
@@ -483,8 +591,10 @@ public sealed partial class NknSignalingTransport
         Log($"SendPendingJoinCancelAsync sent Reject with Ack (msg_id={envelope.MessageId}, reply_to={envelope.ReplyTo})");
     }
 
-    internal void RouteLifecycleEnvelope(string source, Envelope env)
+    internal void RouteLifecycleEnvelope(NknInboundEnvelopeContext inboundContext)
     {
+        var source = inboundContext.Source;
+        var env = inboundContext.Envelope;
         switch (env.Type)
         {
             case MsgType.JoinRequest:
@@ -504,6 +614,9 @@ public sealed partial class NknSignalingTransport
                 break;
             case MsgType.SessionEnd:
                 HandleSessionEnd(source, env);
+                break;
+            case MsgType.SessionHeartbeat:
+                HandleSessionHeartbeat(inboundContext);
                 break;
             case MsgType.SessionHandshakeStart:
                 HandleSessionHandshakeStart(source, env);
@@ -1633,6 +1746,111 @@ public sealed partial class NknSignalingTransport
         RemoteSessionEnded?.Invoke(this, EventArgs.Empty);
     }
 
+    private void HandleSessionHeartbeat(NknInboundEnvelopeContext inboundContext)
+    {
+        var source = inboundContext.Source;
+        var env = inboundContext.Envelope;
+        if (!TryDecryptLifecyclePayload(
+                source,
+                env.MessageId,
+                "session_heartbeat",
+                env.Payload,
+                TryGetControlSessionSharedKey(),
+                new SessionSecureEnvelopeExpectation(
+                    Family: SessionSecureMessageFamily.Lifecycle,
+                    MessageType: "session_heartbeat",
+                    SessionId: currentSessionSecurityState.SessionId,
+                    SenderIdentity: TryResolveExpectedRemotePeerAddressForLifecycle()),
+                inboundLifecycleReplayWindow,
+                out var securePayload))
+        {
+            return;
+        }
+
+        if (!TryParseSessionHeartbeatPayload(securePayload.Plaintext, out var heartbeat))
+        {
+            NknRuntimeDiagnostics.SetLastError("session_heartbeat_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("session_heartbeat_payload_invalid");
+            Log($"SessionHeartbeat payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateSessionHeartbeatMessageSession(
+                heartbeat.sessionId,
+                env.MessageId,
+                source,
+                inboundContext.Channel))
+        {
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(source))
+        {
+            SendAckFireAndForget(source, env.Code, env.MessageId);
+        }
+
+        var lane = inboundContext.Channel.ToString().ToLowerInvariant();
+        LocalOperationalLog.Info(
+            "SessionSecurity",
+            $"event=session_liveness_heartbeat_received; transport=nkn; session_id={SanitizeLogToken(heartbeat.sessionId)}; generation={heartbeat.generation.GetValueOrDefault()}; sequence={heartbeat.sequence.GetValueOrDefault()}; lane={lane}; source={source ?? "(none)"}; role={SanitizeLogToken(heartbeat.role ?? "unknown")}; msg_id={env.MessageId}");
+        RaiseSessionLivenessProof(
+            heartbeat.sessionId,
+            heartbeat.generation.GetValueOrDefault(),
+            heartbeat.sequence.GetValueOrDefault(),
+            "heartbeat_received",
+            lane);
+    }
+
+    private bool TryValidateSessionHeartbeatMessageSession(
+        string? messageSessionId,
+        string messageId,
+        string? source,
+        NknBridgeChannel channel)
+    {
+        var expectedSessionId = currentSessionSecurityState.SessionId?.Value;
+        var expectedControlSource = ResolveExpectedRemotePeerAddressForCurrentSession();
+        var expectedBulkSource = ResolveExpectedRemoteBulkPeerAddressForCurrentSession();
+        var normalizedMessageSessionId = string.IsNullOrWhiteSpace(messageSessionId) ? null : messageSessionId.Trim();
+        var normalizedSource = string.IsNullOrWhiteSpace(source) ? null : source.Trim();
+        string failureReason;
+
+        if (string.IsNullOrWhiteSpace(normalizedMessageSessionId))
+        {
+            failureReason = "missing_session_id";
+        }
+        else if (string.IsNullOrWhiteSpace(expectedSessionId))
+        {
+            failureReason = "session_unavailable";
+        }
+        else if (!string.Equals(normalizedMessageSessionId, expectedSessionId, StringComparison.Ordinal))
+        {
+            failureReason = "session_id_mismatch";
+        }
+        else if (!string.IsNullOrWhiteSpace(expectedControlSource) && string.IsNullOrWhiteSpace(normalizedSource))
+        {
+            failureReason = "missing_source_identity";
+        }
+        else if (AddressMatchesForSessionPolicy(normalizedSource, expectedControlSource) ||
+                 (channel == NknBridgeChannel.Bulk &&
+                  !string.IsNullOrWhiteSpace(expectedBulkSource) &&
+                  AddressMatchesForSessionPolicy(normalizedSource, expectedBulkSource)))
+        {
+            return true;
+        }
+        else
+        {
+            failureReason = "source_identity_mismatch";
+        }
+
+        NknRuntimeDiagnostics.SetLastError($"session_heartbeat_{failureReason}");
+        NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"session_heartbeat_{failureReason}");
+        LocalOperationalLog.Warn(
+            "SessionSecurity",
+            $"event=control_message_rejected; message_type=session_heartbeat; reason={failureReason}; session_id={normalizedMessageSessionId ?? "(none)"}; expected_session_id={expectedSessionId ?? "(none)"}; source={normalizedSource ?? "(none)"}; expected_source={expectedControlSource ?? "(none)"}; expected_bulk_source={expectedBulkSource ?? "(none)"}; channel={channel.ToString().ToLowerInvariant()}; msg_id={messageId}");
+        Log($"SessionHeartbeat rejected (msg_id={messageId}, reason={failureReason})");
+        return false;
+    }
+
     private void HandleScreenShareFrame(NknInboundEnvelopeContext inboundContext)
     {
         if (!TryDecryptScreenSharePayload(inboundContext.Source, inboundContext.Envelope, MsgType.ScreenShareFrame, out var securePayload))
@@ -2237,7 +2455,11 @@ public sealed partial class NknSignalingTransport
         }
     }
 
-    private async Task SendEnvelopeWithAckRetryAsync(string destination, Envelope envelope, CancellationToken ct)
+    private async Task SendEnvelopeWithAckRetryAsync(
+        string destination,
+        Envelope envelope,
+        CancellationToken ct,
+        Action? afterPendingAckRegistered = null)
     {
         var ackWait = new TaskCompletionSource<AckWaitOutcome>(TaskCreationOptions.RunContinuationsAsynchronously);
         var pendingAck = new PendingAckWait(destination, envelope.Type, ackWait);
@@ -2248,6 +2470,7 @@ public sealed partial class NknSignalingTransport
 
         try
         {
+            afterPendingAckRegistered?.Invoke();
             for (var attempt = 0; attempt <= AckRetryDelays.Length; attempt++)
             {
                 ct.ThrowIfCancellationRequested();
@@ -2453,6 +2676,7 @@ public sealed partial class NknSignalingTransport
         return type switch
         {
             MsgType.Chat => false,
+            MsgType.SessionHeartbeat => false,
             MsgType.HelpRequest => false,
             MsgType.HelpRequestDecision => false,
             _ => true,
@@ -3333,11 +3557,17 @@ public sealed partial class NknSignalingTransport
 
         try
         {
-            parsed = JsonSerializer.Deserialize<RejectPayload>(payload);
-            return parsed is not null &&
-                   !string.IsNullOrWhiteSpace(parsed.sessionId) &&
-                   !string.IsNullOrWhiteSpace(parsed.helpeeEcdhPublicKey) &&
-                   !string.IsNullOrWhiteSpace(parsed.secureEnvelopeBase64);
+            var dto = JsonSerializer.Deserialize<RejectPayload>(payload);
+            if (dto is null ||
+                string.IsNullOrWhiteSpace(dto.sessionId) ||
+                string.IsNullOrWhiteSpace(dto.helpeeEcdhPublicKey) ||
+                string.IsNullOrWhiteSpace(dto.secureEnvelopeBase64))
+            {
+                return false;
+            }
+
+            parsed = dto;
+            return true;
         }
         catch
         {
@@ -3382,8 +3612,44 @@ public sealed partial class NknSignalingTransport
 
         try
         {
-            parsed = JsonSerializer.Deserialize<SessionEndPayload>(payload);
-            return parsed is not null && !string.IsNullOrWhiteSpace(parsed.sessionId);
+            var dto = JsonSerializer.Deserialize<SessionEndPayload>(payload);
+            if (dto is null || string.IsNullOrWhiteSpace(dto.sessionId))
+            {
+                return false;
+            }
+
+            parsed = dto;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool TryParseSessionHeartbeatPayload(byte[] payload, out SessionHeartbeatPayload parsed)
+    {
+        parsed = default!;
+
+        if (payload is null || payload.Length == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            var dto = JsonSerializer.Deserialize<SessionHeartbeatPayload>(payload);
+            if (dto is null ||
+                string.IsNullOrWhiteSpace(dto.sessionId) ||
+                dto.generation.GetValueOrDefault() <= 0 ||
+                dto.sequence.GetValueOrDefault() <= 0 ||
+                dto.sentUtcMs.GetValueOrDefault() <= 0)
+            {
+                return false;
+            }
+
+            parsed = dto;
+            return true;
         }
         catch
         {
@@ -3523,6 +3789,15 @@ public sealed partial class NknSignalingTransport
     {
         public string? sessionId { get; set; }
         public string? reason { get; set; }
+    }
+
+    private sealed class SessionHeartbeatPayload
+    {
+        public string? sessionId { get; set; }
+        public long? generation { get; set; }
+        public long? sequence { get; set; }
+        public long? sentUtcMs { get; set; }
+        public string? role { get; set; }
     }
 
     private sealed class RejectPayload

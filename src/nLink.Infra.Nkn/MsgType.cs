@@ -53,4 +53,5 @@ internal enum MsgType
     FileTransferTransportProbe = 48,
     FileTransferRepairProof = 49,
     TransportAccelerationAnswerAck = 50,
+    SessionHeartbeat = 51,
 }
