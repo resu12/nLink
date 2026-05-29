@@ -8064,6 +8064,7 @@ public sealed partial class SessionRuntime
             BridgeLifecycleEventKind.ReceiveStallRecoveryCompleted => "bridge_receive_stall_recovery_completed",
             BridgeLifecycleEventKind.ReceiveStallRecoveryReceiveResumed => "bridge_receive_stall_recovery_receive_resumed",
             BridgeLifecycleEventKind.ReceiveStallRecoveryExhausted => "bridge_receive_stall_recovery_exhausted",
+            BridgeLifecycleEventKind.ReceiveStallRecoveryDeferred => "bridge_receive_stall_recovery_deferred",
             _ => "bridge_unknown"
         };
 
@@ -8098,6 +8099,8 @@ public sealed partial class SessionRuntime
             connectAttempt,
             transportKind,
             sessionIdForLog));
+
+        ObserveSessionLivenessBridgeRecoveryEvent(e);
 
         if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryExhausted)
         {
@@ -8177,6 +8180,7 @@ public sealed partial class SessionRuntime
 
     private void OnFileTransferChanged(object? sender, SessionFileTransferSnapshotChangedEventArgs e)
     {
+        latestFileTransferSnapshot = e.Snapshot;
         var screenShareActive = IsSessionScreenShareActive();
         fileTransferHost.LogSnapshot(e.Snapshot);
         _ = TryHandlePeerSessionEndFromFileTransferCancel(e.Snapshot);
@@ -10735,7 +10739,9 @@ public sealed partial class SessionRuntime
     private static async Task TrySendRemoteSessionEndAsync(
         ISignalingTransport? oldTransport,
         SessionRuntimeRole oldRole,
-        SessionRuntimeState oldState)
+        SessionRuntimeState oldState,
+        string reason = "user_exit",
+        TimeSpan? timeout = null)
     {
         if (oldTransport is NknSignalingTransport pendingJoinTransport &&
             oldState == SessionRuntimeState.Connecting &&
@@ -10768,19 +10774,19 @@ public sealed partial class SessionRuntime
         }
 
         var nknTransport = (NknSignalingTransport)oldTransport!;
-        using var cts = new CancellationTokenSource(DisposeOperationTimeout);
+        using var cts = new CancellationTokenSource(timeout ?? DisposeOperationTimeout);
         try
         {
-            await nknTransport.SendSessionEndAsync(cts.Token).ConfigureAwait(false);
+            await nknTransport.SendSessionEndAsync(reason, cts.Token).ConfigureAwait(false);
             LocalOperationalLog.Info(
                 "Session",
-                "event=remote_session_end_sent; mode=session_end; result=success");
+                $"event=remote_session_end_sent; mode=session_end; result=success; reason={reason}");
         }
         catch (Exception ex)
         {
             LocalOperationalLog.Warn(
                 "Session",
-                $"event=remote_session_end_sent; mode=session_end; result=failed; error={ex.GetType().Name}");
+                $"event=remote_session_end_sent; mode=session_end; result=failed; reason={reason}; error={ex.GetType().Name}");
         }
     }
 

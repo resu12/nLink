@@ -288,7 +288,10 @@ public sealed partial class NknSignalingTransport
         Log($"SendChatMessageAsync sent Chat with Ack (payload_len={payload.Length}, msg_id={envelope.MessageId})");
     }
 
-    public async Task SendSessionEndAsync(CancellationToken ct)
+    public Task SendSessionEndAsync(CancellationToken ct)
+        => SendSessionEndAsync("user_exit", ct);
+
+    public async Task SendSessionEndAsync(string? reason, CancellationToken ct)
     {
         ThrowIfDisposed();
 
@@ -305,13 +308,14 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
+        var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "user_exit" : reason.Trim();
         var payload = CreateSecureLifecyclePayload(
             MsgType.SessionEnd,
             requestId: null,
             JsonSerializer.SerializeToUtf8Bytes(new SessionEndPayload
             {
                 sessionId = sessionId.Value,
-                reason = "user_exit",
+                reason = normalizedReason,
             }));
 
         var envelope = CreateEnvelope(envelopeCode, MsgType.SessionEnd, payload, replyTo: null);
@@ -374,7 +378,7 @@ public sealed partial class NknSignalingTransport
 
         LocalOperationalLog.Info(
             "SessionSecurity",
-            $"event=session_end_redundant_sent; transport=nkn; session_id={SanitizeLogToken(sessionId.Value)}; reason=user_exit; control_ack={(ackError is null ? 1 : 0)}; control_copy={(controlCopyResult.Succeeded ? 1 : 0)}; bulk_copy={(bulkCopyResult.Succeeded || bulkRetryResult.Succeeded ? 1 : 0)}; bulk_sent={(bulkCopyResult.Succeeded ? 1 : 0)}; bulk_retry={(bulkRetryResult.Succeeded ? 1 : 0)}; delivered_any={(deliveredAny ? 1 : 0)}; control_error={ackError?.GetType().Name ?? "(none)"}; control_copy_error={controlCopyResult.Error?.GetType().Name ?? "(none)"}; bulk_error={bulkCopyResult.Error?.GetType().Name ?? "(none)"}; bulk_retry_error={bulkRetryResult.Error?.GetType().Name ?? "(none)"}");
+            $"event=session_end_redundant_sent; transport=nkn; session_id={SanitizeLogToken(sessionId.Value)}; reason={SanitizeLogToken(normalizedReason)}; control_ack={(ackError is null ? 1 : 0)}; control_copy={(controlCopyResult.Succeeded ? 1 : 0)}; bulk_copy={(bulkCopyResult.Succeeded || bulkRetryResult.Succeeded ? 1 : 0)}; bulk_sent={(bulkCopyResult.Succeeded ? 1 : 0)}; bulk_retry={(bulkRetryResult.Succeeded ? 1 : 0)}; delivered_any={(deliveredAny ? 1 : 0)}; control_error={ackError?.GetType().Name ?? "(none)"}; control_copy_error={controlCopyResult.Error?.GetType().Name ?? "(none)"}; bulk_error={bulkCopyResult.Error?.GetType().Name ?? "(none)"}; bulk_retry_error={bulkRetryResult.Error?.GetType().Name ?? "(none)"}");
         Log($"SendSessionEndAsync sent SessionEnd with Ack or redundant copy (msg_id={envelope.MessageId}, control_ack={(ackError is null ? 1 : 0)}, control_copy={(controlCopyResult.Succeeded ? 1 : 0)}, bulk_copy={(bulkCopyResult.Succeeded || bulkRetryResult.Succeeded ? 1 : 0)})");
     }
 

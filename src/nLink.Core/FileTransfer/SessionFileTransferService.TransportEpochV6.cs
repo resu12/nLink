@@ -172,6 +172,7 @@ public sealed partial class SessionFileTransferService
         }
 
         var epochId = Math.Max(context.LastRecoveredV6TransportEpoch + 1, Math.Max(1, context.PullTransportRebindGeneration));
+        var senderLocalAvailabilityUntilExclusive = ResolveOutboundSenderLocalAvailabilityUntilExclusiveLocked(context);
         var epoch = new V6TransportEpoch
         {
             EpochId = epochId,
@@ -182,9 +183,9 @@ public sealed partial class SessionFileTransferService
             Reason = NormalizeReason(reason) ?? "transport_epoch",
             State = V6TransportEpochState.TargetProofPending,
             StartingCommittedChunkIndex = Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, context.ChunkCount),
-            StartingHighestObservedChunkIndex = Math.Max(-1, context.ChunksAcceptedForTransport - 1),
+            StartingHighestObservedChunkIndex = Math.Max(-1, senderLocalAvailabilityUntilExclusive - 1),
             LastObservedCommittedChunkIndex = Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, context.ChunkCount),
-            LastObservedHighestChunkIndex = Math.Max(-1, context.ChunksAcceptedForTransport - 1),
+            LastObservedHighestChunkIndex = Math.Max(-1, senderLocalAvailabilityUntilExclusive - 1),
             ProbeId = $"v6-probe:{epochId}:{Guid.NewGuid():N}",
         };
         context.V6TransportEpoch = epoch;
@@ -811,6 +812,7 @@ public sealed partial class SessionFileTransferService
             TerminalizeV6TransportEpochLocked(FileTransferDirection.Outbound, context.TransferId, context.SessionId, current, "superseded_by_peer_epoch");
         }
 
+        var senderLocalAvailabilityUntilExclusive = ResolveOutboundSenderLocalAvailabilityUntilExclusiveLocked(context);
         var epoch = new V6TransportEpoch
         {
             EpochId = message.TransportEpoch,
@@ -821,9 +823,9 @@ public sealed partial class SessionFileTransferService
             Reason = NormalizeReason(message.Reason) ?? "peer_transport_epoch",
             State = ParseV6TransportEpochState(message.State),
             StartingCommittedChunkIndex = Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, context.ChunkCount),
-            StartingHighestObservedChunkIndex = Math.Max(-1, context.ChunksAcceptedForTransport - 1),
+            StartingHighestObservedChunkIndex = Math.Max(-1, senderLocalAvailabilityUntilExclusive - 1),
             LastObservedCommittedChunkIndex = Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, context.ChunkCount),
-            LastObservedHighestChunkIndex = Math.Max(-1, context.ChunksAcceptedForTransport - 1),
+            LastObservedHighestChunkIndex = Math.Max(-1, senderLocalAvailabilityUntilExclusive - 1),
             ProbeId = $"v6-probe:{message.TransportEpoch}:{Guid.NewGuid():N}",
         };
         context.V6TransportEpoch = epoch;
@@ -946,7 +948,26 @@ public sealed partial class SessionFileTransferService
         if (inboundRecovered is not null)
         {
             TouchInboundV6PeerLiveness(inboundRecovered, "transport_probe_ack");
+            var replayGeneration = 0;
+            var shouldScheduleReplay = false;
+            lock (gate)
+            {
+                shouldScheduleReplay = ArmInboundV6PostTunaFallbackProofReplayLocked(
+                    inboundRecovered,
+                    "transport_probe_ack",
+                    out replayGeneration);
+            }
+
+            if (shouldScheduleReplay)
+            {
+                ScheduleInboundV6PostTunaFallbackProofReplay(
+                    inboundRecovered,
+                    replayGeneration,
+                    "transport_probe_ack");
+            }
+
             _ = SendInboundV6ReceiverStateAsync(inboundRecovered, "transport_probe_ack", forceSend: true);
+            _ = SendInboundV6FrontierRequestAsync(inboundRecovered, "transport_probe_ack", forceSend: true);
         }
 
         return Task.CompletedTask;
@@ -1210,7 +1231,7 @@ public sealed partial class SessionFileTransferService
         }
 
         var remoteFrontier = Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, context.ChunkCount);
-        var acceptedUntil = Math.Clamp(context.ChunksAcceptedForTransport, 0, context.ChunkCount);
+        var acceptedUntil = ResolveOutboundDiagnosticV6EpochSenderTailExclusiveLocked(context, epoch);
         if (acceptedUntil <= 0 ||
             remoteFrontier < acceptedUntil ||
             state.DurableReceivedHighestChunkIndex >= acceptedUntil)
@@ -1239,12 +1260,99 @@ public sealed partial class SessionFileTransferService
         return true;
     }
 
+    private static int ResolveOutboundDiagnosticV6EpochSenderTailExclusiveLocked(
+        OutboundTransferContext context,
+        V6TransportEpoch epoch)
+    {
+        var acceptedUntil = Math.Clamp(context.ChunksAcceptedForTransport, 0, context.ChunkCount);
+        if (!context.RouteRuntime.UsesDiagnosticRegularNknV6Runtime ||
+            epoch.Kind != FileTransferTransportHandoffKind.NormalToTunaActivation ||
+            epoch.TargetTransport != FileTransferTransportKind.Tuna)
+        {
+            return acceptedUntil;
+        }
+
+        return Math.Clamp(
+            Math.Max(
+                Math.Max(acceptedUntil, epoch.StartingHighestObservedChunkIndex + 1),
+                ResolveOutboundSenderLocalAvailabilityUntilExclusiveLocked(context)),
+            0,
+            context.ChunkCount);
+    }
+
+    private static int ResolveOutboundSenderLocalAvailabilityUntilExclusiveLocked(OutboundTransferContext context)
+    {
+        var acceptedUntil = Math.Clamp(context.ChunksAcceptedForTransport, 0, context.ChunkCount);
+        var highestChunkIndex = acceptedUntil - 1;
+        highestChunkIndex = Math.Max(highestChunkIndex, MaxChunkIndexOrMinusOne(context.SentAwaitingAck.Keys));
+        highestChunkIndex = Math.Max(highestChunkIndex, MaxChunkIndexOrMinusOne(context.V6ChunkSendsInFlight.Keys));
+        highestChunkIndex = Math.Max(highestChunkIndex, MaxChunkIndexOrMinusOne(context.LastChunkSentUtc.Keys));
+        highestChunkIndex = Math.Max(highestChunkIndex, MaxChunkIndexOrMinusOne(context.PullSentChunkCache.Keys));
+        return Math.Clamp(highestChunkIndex + 1, 0, context.ChunkCount);
+    }
+
+    private static int ResolveOutboundRepairAcceptedUntilExclusiveLocked(OutboundTransferContext context)
+    {
+        var acceptedUntil = Math.Clamp(context.ChunksAcceptedForTransport, 0, context.ChunkCount);
+        if (!context.RouteRuntime.UsesDiagnosticRegularNknV6Runtime)
+        {
+            return acceptedUntil;
+        }
+
+        if (context.V6TransportEpoch is { } epoch &&
+            IsV6TransportEpochUnresolved(epoch) &&
+            epoch.Kind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
+            epoch.TargetTransport == FileTransferTransportKind.Tuna)
+        {
+            acceptedUntil = Math.Max(acceptedUntil, epoch.StartingHighestObservedChunkIndex + 1);
+        }
+
+        return Math.Clamp(
+            Math.Max(acceptedUntil, ResolveOutboundSenderLocalAvailabilityUntilExclusiveLocked(context)),
+            0,
+            context.ChunkCount);
+    }
+
+    private static int MaxChunkIndexOrMinusOne(IEnumerable<int> chunkIndices)
+    {
+        var max = -1;
+        foreach (var chunkIndex in chunkIndices)
+        {
+            if (chunkIndex > max)
+            {
+                max = chunkIndex;
+            }
+        }
+
+        return max;
+    }
+
+    private static bool ShouldRestoreOutboundDiagnosticV6EpochSenderTailLocked(
+        OutboundTransferContext context,
+        V6TransportEpoch epoch,
+        string reason)
+        => context.RouteRuntime.UsesDiagnosticRegularNknV6Runtime &&
+           epoch.Kind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
+           epoch.TargetTransport == FileTransferTransportKind.Tuna &&
+           (string.Equals(reason, "frontier_caught_up_to_accepted_tail", StringComparison.Ordinal) ||
+            string.Equals(reason, "frontier_repair_proof", StringComparison.Ordinal));
+
     private bool CompleteOutboundV6TransportEpochLocked(OutboundTransferContext context, string reason)
     {
         var epoch = context.V6TransportEpoch;
         if (!IsV6TransportEpochUnresolved(epoch))
         {
             return false;
+        }
+
+        var restoreDiagnosticSenderTail = ShouldRestoreOutboundDiagnosticV6EpochSenderTailLocked(context, epoch!, reason);
+        var diagnosticSenderTailExclusive = restoreDiagnosticSenderTail
+            ? ResolveOutboundDiagnosticV6EpochSenderTailExclusiveLocked(context, epoch!)
+            : Math.Clamp(context.ChunksAcceptedForTransport, 0, context.ChunkCount);
+        var observedHighestChunkIndex = Math.Max(-1, context.ChunksAcceptedForTransport - 1);
+        if (restoreDiagnosticSenderTail)
+        {
+            observedHighestChunkIndex = Math.Max(observedHighestChunkIndex, diagnosticSenderTailExclusive - 1);
         }
 
         var discardedV4RepairFrameCount = context.PullV4SenderPumpRepairQueue.Count;
@@ -1258,7 +1366,7 @@ public sealed partial class SessionFileTransferService
             V6TransportEpochState.Recovered,
             reason,
             context.RemoteNextExpectedChunkIndex,
-            Math.Max(-1, context.ChunksAcceptedForTransport - 1));
+            observedHighestChunkIndex);
         context.LastRecoveredV6TransportEpoch = Math.Max(context.LastRecoveredV6TransportEpoch, epoch!.EpochId);
         context.LastRecoveredV6TransportLiveRouteEpochId = context.CurrentLiveRouteEpoch?.EpochId ?? 0;
         context.LastRecoveredV6TransportEpochKind = epoch.Kind;
@@ -1288,6 +1396,19 @@ public sealed partial class SessionFileTransferService
         context.PullTransportSafetyReplayRearmCount = 0;
         context.PullTransportFrontierOnlyRepairActive = false;
         context.PullTransportFrontierOnlyRepairStartChunkIndex = -1;
+        if (restoreDiagnosticSenderTail &&
+            diagnosticSenderTailExclusive > context.ChunksAcceptedForTransport)
+        {
+            var previousAccepted = context.ChunksAcceptedForTransport;
+            context.ChunksAcceptedForTransport = diagnosticSenderTailExclusive;
+            context.BytesAcceptedForTransport = context.ChunksAcceptedForTransport >= context.ChunkCount
+                ? context.FileSizeBytes
+                : Math.Min(context.FileSizeBytes, (long)context.ChunksAcceptedForTransport * Math.Max(1, context.ChunkSizeBytes));
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_v6_epoch_sender_tail_restored; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={epoch.EpochId}; handoff_kind={FormatFileTransferTransportHandoffKind(epoch.Kind)}; target_transport={FormatFileTransferTransportKind(epoch.TargetTransport)}; reason={FormatProtocolLogValue(reason)}; previous_chunks_accepted_for_transport={previousAccepted}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}; epoch_starting_highest_observed_chunk={epoch.StartingHighestObservedChunkIndex}");
+        }
+
         context.V6SenderPumpLastWakeReason = "transport_epoch_recovered";
         context.SparseSenderPumpLastWakeReason = "transport_epoch_recovered";
         context.StatusMessage = GetOutboundResumeStatusMessage(context.State);

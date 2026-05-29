@@ -119,6 +119,54 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
     }
 
     [Fact]
+    public async Task NknTransport_BridgeReceiveResumedPeerTrafficRaisesLivenessProof()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.session.bridge-proof.address");
+            var helperClient = new FakeNknClient("helper.session.bridge-proof.address");
+            using var host = new NknSignalingTransport(hostClient, options, new NknIdentity("host-bridge-proof", hostClient.Address));
+            using var helper = new NknSignalingTransport(helperClient, options, new NknIdentity("helper-bridge-proof", helperClient.Address));
+            var sessionId = await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat).ConfigureAwait(false);
+            var proofs = new ConcurrentQueue<SessionLivenessProofEventArgs>();
+            host.SessionLivenessProofReceived += (_, e) => proofs.Enqueue(e);
+
+            CoreSmokeTestsBase.InvokePrivateMethod(
+                host,
+                "OnBridgeLifecycle",
+                host,
+                new BridgeLifecycleEvent(
+                    BridgeLifecycleEventKind.ReceiveStallRecoveryReceiveResumed,
+                    StartMode: null,
+                    Pid: null,
+                    ReadyTimeMs: null,
+                    PingRttMs: null,
+                    UptimeMs: null,
+                    ExitCode: null,
+                    ExitReasonKind: null,
+                    ExitReasonText: "receive_stall_recovery_receive_resumed",
+                    TotalMessagesReceivedSinceLast: 1,
+                    ControlMessagesReceivedSinceLast: 0,
+                    MediaMessagesReceivedSinceLast: 0,
+                    BulkMessagesReceivedSinceLast: 1));
+
+            await WaitUntilAsync(
+                () => proofs.Any(e =>
+                    e.SessionId == sessionId &&
+                    e.ProofKind == "bridge_receive_stall_recovery_receive_resumed" &&
+                    e.Lane == "bridge_bulk"),
+                TimeSpan.FromSeconds(1));
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
     public async Task NknTransport_SessionHeartbeat_WrongSessionDoesNotRaiseProof()
     {
         FakeNknClient.ResetNetwork();

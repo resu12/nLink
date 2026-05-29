@@ -289,6 +289,26 @@ function Test-FileTransferRouteAwareEvent {
         ($null -ne $Event.Fields -and $Event.Fields.ContainsKey('route'))
 }
 
+function Test-FileTransferLegHistoryRouteEvent {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    return $Event.EventName -eq 'filetransfer_leg_frozen'
+}
+
+function Test-FileTransferRouteEventCanPrecedeSelection {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    if ($Event.EventName -ne 'filetransfer_leg_started') {
+        return $false
+    }
+
+    $reason = Get-FileTransferEventField -Event $Event -Name 'reason' -Default ''
+    return $reason -eq 'new_transfer' -or
+        $reason -eq 'offer_received' -or
+        $reason -eq 'live_route_tuna_activated' -or
+        $reason -eq 'live_route_tuna_reactivated'
+}
+
 function Get-FileTransferSelectedRouteForEvent {
     param(
         [Parameter(Mandatory = $true)]$Event,
@@ -405,6 +425,43 @@ function Add-FileTransferRouteConsistencyFinding {
     }
 }
 
+function Add-FileTransferRouteSelfConsistencyFindings {
+    param(
+        [Parameter(Mandatory = $true)]$Findings,
+        [Parameter(Mandatory = $true)]$EvidenceEvents,
+        [Parameter(Mandatory = $true)]$Event,
+        [Parameter(Mandatory = $true)][string]$Context
+    )
+
+    $eventRoute = Get-FileTransferEventField -Event $Event -Name 'route' -Default ''
+    if ([string]::IsNullOrWhiteSpace($eventRoute)) {
+        return
+    }
+
+    $expectedProtocol = Get-FileTransferRouteExpectedProtocol -Route $eventRoute
+    if ([string]::IsNullOrWhiteSpace($expectedProtocol)) {
+        Add-FileTransferRouteConsistencyFinding -Findings $Findings -EvidenceEvents $EvidenceEvents -Finding ("{0} unknown route: {1}" -f $Context, (Format-FileTransferEvidenceLine -Event $Event)) -Event $Event
+        return
+    }
+
+    $eventProtocol = Get-FileTransferEventField -Event $Event -Name 'protocol_version' -Default ''
+    if (-not [string]::IsNullOrWhiteSpace($eventProtocol) -and $eventProtocol -ne $expectedProtocol) {
+        Add-FileTransferRouteConsistencyFinding -Findings $Findings -EvidenceEvents $EvidenceEvents -Finding ("{0} route protocol mismatch: route={1}; expected_protocol={2}; actual_protocol={3}; event={4}" -f $Context, $eventRoute, $expectedProtocol, $eventProtocol, (Format-FileTransferEvidenceLine -Event $Event)) -Event $Event
+    }
+
+    $expectedRuntimeProfile = Get-FileTransferRouteExpectedRuntimeProfile -Route $eventRoute
+    $eventRuntimeProfile = Normalize-FileTransferRouteRuntimeProfile -Value (Get-FileTransferEventField -Event $Event -Name 'runtime_profile' -Default '')
+    if (-not [string]::IsNullOrWhiteSpace($eventRuntimeProfile) -and -not [string]::IsNullOrWhiteSpace($expectedRuntimeProfile) -and $eventRuntimeProfile -ne $expectedRuntimeProfile) {
+        Add-FileTransferRouteConsistencyFinding -Findings $Findings -EvidenceEvents $EvidenceEvents -Finding ("{0} route runtime mismatch: route={1}; expected_runtime={2}; actual_runtime={3}; event={4}" -f $Context, $eventRoute, $expectedRuntimeProfile, $eventRuntimeProfile, (Format-FileTransferEvidenceLine -Event $Event)) -Event $Event
+    }
+
+    $expectedBridgePolicy = Get-FileTransferRouteExpectedBridgePolicy -Route $eventRoute
+    $eventBridgePolicy = Get-FileTransferEventField -Event $Event -Name 'bridge_recovery_policy' -Default ''
+    if (-not [string]::IsNullOrWhiteSpace($eventBridgePolicy) -and -not [string]::IsNullOrWhiteSpace($expectedBridgePolicy) -and $eventBridgePolicy -ne $expectedBridgePolicy) {
+        Add-FileTransferRouteConsistencyFinding -Findings $Findings -EvidenceEvents $EvidenceEvents -Finding ("{0} route bridge policy mismatch: route={1}; expected_bridge_policy={2}; actual_bridge_policy={3}; event={4}" -f $Context, $eventRoute, $expectedBridgePolicy, $eventBridgePolicy, (Format-FileTransferEvidenceLine -Event $Event)) -Event $Event
+    }
+}
+
 function Get-FileTransferRouteConsistency {
     param([object[]]$TransferEvents)
 
@@ -477,6 +534,16 @@ function Get-FileTransferRouteConsistency {
 
     foreach ($event in @($routeAwareEvents)) {
         if ($event.EventName -eq 'filetransfer_route_selected') {
+            continue
+        }
+
+        if (Test-FileTransferLegHistoryRouteEvent -Event $event) {
+            Add-FileTransferRouteSelfConsistencyFindings -Findings $findings -EvidenceEvents $evidenceEvents -Event $event -Context 'transfer leg history'
+            continue
+        }
+
+        if (Test-FileTransferRouteEventCanPrecedeSelection -Event $event) {
+            Add-FileTransferRouteSelfConsistencyFindings -Findings $findings -EvidenceEvents $evidenceEvents -Event $event -Context 'preselection transfer leg'
             continue
         }
 
@@ -575,8 +642,13 @@ function Get-FileTransferLiveRouteExpectation {
 function Test-FileTransferLiveRouteEpochEventName {
     param($Event)
 
-    return $null -ne $Event -and
-        ([string]$Event.EventName).StartsWith('filetransfer_live_route_epoch_', [System.StringComparison]::OrdinalIgnoreCase)
+    if ($null -eq $Event) {
+        return $false
+    }
+
+    $eventName = [string]$Event.EventName
+    return [string]::Equals($eventName, 'filetransfer_live_route_epoch_started', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($eventName, 'filetransfer_live_route_epoch_recovered', [System.StringComparison]::OrdinalIgnoreCase)
 }
 
 function Test-FileTransferLiveRouteEpochMetadataComplete {
@@ -591,6 +663,12 @@ function Test-FileTransferLiveRouteEpochMetadataComplete {
     $handoffKind = Get-FileTransferEventField -Event $Event -Name 'handoff_kind' -Default ''
     $targetTransport = Get-FileTransferEventField -Event $Event -Name 'target_transport' -Default ''
     $liveRouteEpoch = Get-FileTransferEventInt64Field -Event $Event -Name 'live_route_epoch' -Default 0
+    $transferId = if ([string]::IsNullOrWhiteSpace([string]$Event.TransferId)) {
+        Get-FileTransferEventField -Event $Event -Name 'transfer_id' -Default ''
+    } else {
+        [string]$Event.TransferId
+    }
+    $sessionId = Get-FileTransferEventField -Event $Event -Name 'session_id' -Default ''
 
     return -not [string]::IsNullOrWhiteSpace($route) -and
         $route -ne '(unknown)' -and
@@ -599,7 +677,13 @@ function Test-FileTransferLiveRouteEpochMetadataComplete {
         $handoffKind -ne '(none)' -and
         -not [string]::IsNullOrWhiteSpace($targetTransport) -and
         $targetTransport -ne '(none)' -and
-        $liveRouteEpoch -gt 0
+        $liveRouteEpoch -gt 0 -and
+        -not [string]::IsNullOrWhiteSpace($transferId) -and
+        $transferId -ne '(none)' -and
+        $transferId -ne '(unknown)' -and
+        -not [string]::IsNullOrWhiteSpace($sessionId) -and
+        $sessionId -ne '(none)' -and
+        $sessionId -ne '(unknown)'
 }
 
 function Test-FileTransferLiveRouteEpochEventMatches {
@@ -650,8 +734,121 @@ function Get-FileTransferLiveRouteEpochProof {
             Sort-Object Sequence
     )
 
+    [object[]]$routeSelectedEvents = @(
+        Get-FileTransferEventsByName -Events $TransferEvents -Names @('filetransfer_route_selected') |
+            Sort-Object Sequence
+    )
+    $selectedRouteSequence = @(
+        $routeSelectedEvents |
+            ForEach-Object { Get-FileTransferEventField -Event $_ -Name 'route' -Default '' } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+    $selectedRouteChanges = New-Object System.Collections.Generic.List[string]
+    foreach ($route in @($selectedRouteSequence)) {
+        if ($selectedRouteChanges.Count -eq 0 -or
+            -not [string]::Equals($selectedRouteChanges[$selectedRouteChanges.Count - 1], [string]$route, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $selectedRouteChanges.Add([string]$route) | Out-Null
+        }
+    }
+
+    $findings = New-Object System.Collections.Generic.List[string]
+    $evidence = New-Object System.Collections.Generic.List[object]
+    foreach ($event in @($metadataMissingEvents)) {
+        $findings.Add(("live route epoch metadata missing: {0}" -f (Format-FileTransferEvidenceLine -Event $event))) | Out-Null
+        $evidence.Add($event) | Out-Null
+    }
+
+    $scopedCompleteEvents = @($completeEvents)
+    if ($Mode -ne 'None') {
+        [object[]]$expectedTransferIds = @(
+            $routeSelectedEvents |
+                ForEach-Object {
+                    if ([string]::IsNullOrWhiteSpace([string]$_.TransferId)) {
+                        Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default ''
+                    } else {
+                        [string]$_.TransferId
+                    }
+                } |
+                Where-Object {
+                    -not [string]::IsNullOrWhiteSpace($_) -and
+                    $_ -ne '(none)' -and
+                    $_ -ne '(unknown)' -and
+                    $_ -ne '(all)'
+                } |
+                Select-Object -Unique
+        )
+        [object[]]$expectedSessionIds = @(
+            $routeSelectedEvents |
+                ForEach-Object { Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '' } |
+                Where-Object {
+                    -not [string]::IsNullOrWhiteSpace($_) -and
+                    $_ -ne '(none)' -and
+                    $_ -ne '(unknown)'
+                } |
+                Select-Object -Unique
+        )
+
+        if ($expectedTransferIds.Count -gt 1) {
+            $findings.Add(("live route proof is not single-transfer scoped: transfer_ids={0}" -f ($expectedTransferIds -join ','))) | Out-Null
+        }
+        elseif ($expectedTransferIds.Count -eq 1) {
+            $expectedTransferId = [string]$expectedTransferIds[0]
+            [object[]]$transferScopeMismatches = @(
+                $scopedCompleteEvents |
+                    Where-Object {
+                        $eventTransferId = if ([string]::IsNullOrWhiteSpace([string]$_.TransferId)) {
+                            Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default ''
+                        } else {
+                            [string]$_.TransferId
+                        }
+                        -not [string]::Equals($eventTransferId, $expectedTransferId, [System.StringComparison]::Ordinal)
+                    }
+            )
+            foreach ($event in @($transferScopeMismatches)) {
+                $findings.Add(("live route epoch transfer scope mismatch: expected_transfer_id={0}; {1}" -f $expectedTransferId, (Format-FileTransferEvidenceLine -Event $event))) | Out-Null
+                $evidence.Add($event) | Out-Null
+            }
+            $scopedCompleteEvents = @(
+                $scopedCompleteEvents |
+                    Where-Object {
+                        $eventTransferId = if ([string]::IsNullOrWhiteSpace([string]$_.TransferId)) {
+                            Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default ''
+                        } else {
+                            [string]$_.TransferId
+                        }
+                        [string]::Equals($eventTransferId, $expectedTransferId, [System.StringComparison]::Ordinal)
+                    }
+            )
+        }
+
+        if ($expectedSessionIds.Count -gt 1) {
+            $findings.Add(("live route proof is not single-session scoped: session_ids={0}" -f ($expectedSessionIds -join ','))) | Out-Null
+        }
+        elseif ($expectedSessionIds.Count -eq 1) {
+            $expectedSessionId = [string]$expectedSessionIds[0]
+            [object[]]$sessionScopeMismatches = @(
+                $scopedCompleteEvents |
+                    Where-Object {
+                        $eventSessionId = Get-FileTransferEventField -Event $_ -Name 'session_id' -Default ''
+                        -not [string]::Equals($eventSessionId, $expectedSessionId, [System.StringComparison]::Ordinal)
+                    }
+            )
+            foreach ($event in @($sessionScopeMismatches)) {
+                $findings.Add(("live route epoch session scope mismatch: expected_session_id={0}; {1}" -f $expectedSessionId, (Format-FileTransferEvidenceLine -Event $event))) | Out-Null
+                $evidence.Add($event) | Out-Null
+            }
+            $scopedCompleteEvents = @(
+                $scopedCompleteEvents |
+                    Where-Object {
+                        $eventSessionId = Get-FileTransferEventField -Event $_ -Name 'session_id' -Default ''
+                        [string]::Equals($eventSessionId, $expectedSessionId, [System.StringComparison]::Ordinal)
+                    }
+            )
+        }
+    }
+
     $sequence = @(
-        $completeEvents |
+        $scopedCompleteEvents |
             ForEach-Object { Get-FileTransferEventField -Event $_ -Name 'route' -Default '' } |
             Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
     )
@@ -663,13 +860,6 @@ function Get-FileTransferLiveRouteEpochProof {
         }
     }
 
-    $findings = New-Object System.Collections.Generic.List[string]
-    $evidence = New-Object System.Collections.Generic.List[object]
-    foreach ($event in @($metadataMissingEvents)) {
-        $findings.Add(("live route epoch metadata missing: {0}" -f (Format-FileTransferEvidenceLine -Event $event))) | Out-Null
-        $evidence.Add($event) | Out-Null
-    }
-
     $expectedRoutes = @()
     if ($Mode -eq 'SwitchOff') {
         $expectedRoutes = @('post_tuna_fallback_v6')
@@ -679,6 +869,11 @@ function Get-FileTransferLiveRouteEpochProof {
     }
     elseif ($Mode -eq 'RegularActivationCycle') {
         $expectedRoutes = @('file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6')
+        $expectedSelectedRouteChanges = @('regular_nkn_v4_fast', 'file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6')
+        $actualSelectedRouteChanges = $selectedRouteChanges.ToArray()
+        if (($actualSelectedRouteChanges -join ',') -ne ($expectedSelectedRouteChanges -join ',')) {
+            $findings.Add(("selected route changes mismatch: mode={0}; expected={1}; actual={2}" -f $Mode, ($expectedSelectedRouteChanges -join ','), ($(if ($actualSelectedRouteChanges.Count -gt 0) { $actualSelectedRouteChanges -join ',' } else { '(none)' })))) | Out-Null
+        }
     }
 
     $lastEpoch = 0L
@@ -691,7 +886,7 @@ function Get-FileTransferLiveRouteEpochProof {
         }
 
         $started = $null
-        foreach ($event in @($completeEvents)) {
+        foreach ($event in @($scopedCompleteEvents)) {
             $epoch = Get-FileTransferEventInt64Field -Event $event -Name 'live_route_epoch' -Default 0
             if ($epoch -le $lastEpoch) {
                 continue
@@ -710,7 +905,7 @@ function Get-FileTransferLiveRouteEpochProof {
 
         $startedEpoch = Get-FileTransferEventInt64Field -Event $started -Name 'live_route_epoch' -Default 0
         $recovered = $null
-        foreach ($event in @($completeEvents)) {
+        foreach ($event in @($scopedCompleteEvents)) {
             if ($event.Sequence -le $started.Sequence) {
                 continue
             }
@@ -736,6 +931,13 @@ function Get-FileTransferLiveRouteEpochProof {
         $matchedRoutes.Add($expectedRoute) | Out-Null
         $evidence.Add($started) | Out-Null
         $evidence.Add($recovered) | Out-Null
+    }
+
+    if ($Mode -ne 'None' -and $expectedRoutes.Count -gt 0) {
+        $actualRouteChanges = $routeChanges.ToArray()
+        if (($actualRouteChanges -join ',') -ne ($expectedRoutes -join ',')) {
+            $findings.Add(("live route epoch route changes mismatch: mode={0}; expected={1}; actual={2}" -f $Mode, ($expectedRoutes -join ','), ($(if ($actualRouteChanges.Count -gt 0) { $actualRouteChanges -join ',' } else { '(none)' })))) | Out-Null
+        }
     }
 
     $verdict = 'not_required'
@@ -927,6 +1129,32 @@ function New-FileTransferRetainedSummary {
 
     if ($transferEvents.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($selectedTransferId)) {
         $transferEvents = @($allEvents | Where-Object { $_.TransferId -eq $selectedTransferId })
+    }
+
+    if ($transferEvents.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($selectedTransferId) -and $selectedTransferId -ne '(all)') {
+        [object[]]$selectedSessionIds = @(
+            $transferEvents |
+                ForEach-Object { Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '' } |
+                Where-Object {
+                    -not [string]::IsNullOrWhiteSpace($_) -and
+                    $_ -ne '(none)' -and
+                    $_ -ne '(unknown)'
+                } |
+                Select-Object -Unique
+        )
+        if ($selectedSessionIds.Count -gt 0) {
+            [object[]]$orphanLiveRouteEvents = @(
+                $allEvents |
+                    Where-Object {
+                        (Test-FileTransferLiveRouteEpochEventName -Event $_) -and
+                        [string]::IsNullOrWhiteSpace([string]$_.TransferId) -and
+                        ($selectedSessionIds -contains (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default ''))
+                    }
+            )
+            if ($orphanLiveRouteEvents.Count -gt 0) {
+                $transferEvents = @($transferEvents + $orphanLiveRouteEvents | Sort-Object Sequence)
+            }
+        }
     }
 
     $terminalEvents = @(Get-FileTransferTerminalEvents -Events $transferEvents)

@@ -636,6 +636,45 @@ public sealed class SessionRuntimeFlowSnapshotTests
         Assert.Equal(SessionFlowPostTerminalAction.ReturnToWaitingPreserveBootstrap, runtime.FlowSnapshot.PostTerminalAction);
     }
 
+    [Fact]
+    public async Task HelpeeSessionLivenessTimeout_RemainsVisibleEvenWhenActiveSessionFlagWasLost()
+    {
+        using var transport = new TestSessionSecurityTransport("helpee.liveness.timeout.visible");
+        using var runtime = new SessionRuntime(() => transport);
+        await runtime.StartHelpeeAsync(CancellationToken.None);
+
+        SetPrivateField(
+            runtime,
+            "sessionFlowState",
+            new SessionFlowState(
+                Phase: SessionFlowPhase.HelpeeWaiting,
+                LastEndOrigin: SessionFlowEndOrigin.Failed,
+                LocalEndInProgress: false,
+                HadActiveSession: false,
+                FailureReason: "session_liveness_timeout"));
+        SetPrivateField(runtime, "role", SessionRuntimeRole.Helpee);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Failed);
+        SetPrivateField(runtime, "transportState", TransportState.Failed);
+        SetPrivateField(runtime, "statusText", "Connection lost.");
+        SetPrivateField<TransportFailure?>(runtime, "lastTransportFailure", null);
+
+        InvokePrivateMethod(
+            runtime,
+            "PublishSessionFlowEvent",
+            new SessionFlowEvent(
+                SessionFlowEventKind.FailureObserved,
+                SessionRuntimeRole.Helpee,
+                SessionRuntimeState.Failed,
+                TransportState.Failed,
+                "session_liveness_timeout"));
+
+        Assert.Equal(SessionTerminalKind.Failed, runtime.FlowSnapshot.TerminalKind);
+        Assert.NotEqual(SessionUiPhase.Waiting, runtime.FlowSnapshot.UiPhase);
+        Assert.Equal("Connection lost.", runtime.FlowSnapshot.TerminalStatusText);
+        Assert.Equal("Failed", runtime.FlowSnapshot.DisplayConnectionState);
+        Assert.Equal(SessionFlowPostTerminalAction.None, runtime.FlowSnapshot.PostTerminalAction);
+    }
+
     private static SessionSecurityState CreateApprovedSecurityState(
         PeerAddress helpeeIdentity,
         PeerAddress helperIdentity,

@@ -31,6 +31,8 @@ public sealed partial class NknSignalingTransport
     private static readonly TimeSpan AccelerationAnswerAckReplayDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan FileTransferTunaActivationPauseMax = TimeSpan.FromSeconds(75);
     private static readonly TimeSpan FileTransferTunaActivationBridgeRecoveryWait = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan RuntimeUnlockRecoverySoftSettleDelay = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan RuntimeUnlockQueueAcceptedObservedEscapeTtl = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan RemotePayerIntentFreshness = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan TunaFallbackProofLogWindow = TimeSpan.FromMinutes(1);
     private const long TunaFallbackProofLogEveryFrames = 5000;
@@ -52,9 +54,11 @@ public sealed partial class NknSignalingTransport
     internal static TimeSpan? AccelerationControlDirectSendWaitOverrideForTests;
     internal static TimeSpan? AccelerationControlBulkBypassWaitOverrideForTests;
     internal static TimeSpan? FileTransferTunaActivationBridgeRecoveryWaitOverrideForTests;
+    internal static TimeSpan? RuntimeUnlockRecoverySoftSettleDelayOverrideForTests;
     internal static TimeSpan? HelperPaidOfferHelpeePriorityDelayOverrideForTests;
     internal static TimeSpan? HelperPaidOfferHelpeeIntentGraceDelayOverrideForTests;
     internal static Func<NknSignalingTransport, bool>? RuntimeUnlockOfferQueueAcceptedPressureOverrideForTests;
+    internal static Func<NknSignalingTransport, string?>? RuntimeUnlockOfferObservedSendBlockerReasonOverrideForTests;
     internal static Func<NknSignalingTransport, string, string?, bool>? RuntimeUnlockOfferSendRecoveryRequestOverrideForTests;
     private readonly object accelerationGate = new();
     private readonly object accelerationBridgeRecoveryGate = new();
@@ -92,6 +96,10 @@ public sealed partial class NknSignalingTransport
     private long pendingAccelerationAnswerAckPayerDecisionId;
     private long pendingAccelerationAnswerAckGeneration;
     private RuntimeUnlockOfferProofState? runtimeUnlockOfferProofState;
+    private long runtimeUnlockQueueAcceptedObservedEscapeGeneration;
+    private long runtimeUnlockQueueAcceptedObservedEscapePayerDecisionId;
+    private long runtimeUnlockQueueAcceptedObservedEscapeTick;
+    private string? runtimeUnlockQueueAcceptedObservedEscapeReason;
     private int transportAccelerationActivePublished;
     private string transportAccelerationStatusReason = "inactive";
     private string? accelerationUserStoppedSessionId;
@@ -378,6 +386,14 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
+        if (IsSessionLivenessReceiveRecoveryReason(reason))
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=filetransfer_session_liveness_receive_recovery_availability_preserved; session_id={SanitizeLogToken(sessionId ?? "none")}; transfer_id={SanitizeLogToken(transferId)}; direction={direction}; reason={reason}; trigger=core_receive_recovery_requested");
+            return;
+        }
+
         if (ShouldUseFileTransferV6EpochForRegularNknRecovery(sessionId))
         {
             MarkFileTransferFallbackNknProofPending(
@@ -404,6 +420,12 @@ public sealed partial class NknSignalingTransport
             handoffKind: FileTransferTransportHandoffKind.None,
             targetTransport: FileTransferTransportKind.RegularNkn);
     }
+
+    private static bool IsSessionLivenessReceiveRecoveryReason(string? reason)
+        => string.Equals(
+            reason?.Trim(),
+            "session_liveness_timeout_pending",
+            StringComparison.OrdinalIgnoreCase);
 
     public void ObserveRegularV4ControlFeedbackPressure(FileTransferRegularV4ControlFeedbackPressure pressure)
     {
@@ -898,6 +920,7 @@ public sealed partial class NknSignalingTransport
             LocalOperationalLog.Warn(
                 "NKN.Tuna",
                 $"event=filetransfer_fallback_nkn_probe_started; session_id={sessionId}; reason={normalizedReason}; trigger=cap_handoff_immediate; delay_ms=0; lanes={FormatAccelerationLanesForLog(lanes)}");
+            ArmPostTunaFallbackProofSendWindow(normalizedReason, "cap_handoff_immediate", sessionId);
             SetFileTransferDataSessionsAvailability(
                 isAvailable: false,
                 reason: "transport_recovered_unproven",
@@ -1269,6 +1292,7 @@ public sealed partial class NknSignalingTransport
         var waitStartedTick = Stopwatch.GetTimestamp();
         var loggedWait = false;
         var loggedRegularV4PressureBypass = false;
+        var loggedRegularV4ReceiveStallWait = false;
         string? lastBlockerReason = null;
         long lastBlockerRemainingMs = 0;
         long bridgeRecoveryStartedTick = 0;
@@ -1292,11 +1316,32 @@ public sealed partial class NknSignalingTransport
 
             var regularV4BlockerReason = string.Empty;
             var regularV4BlockerRemainingMs = 0L;
+            var realClient = client as RealNknClientAdapter;
             var hasRegularV4SendBlocker =
-                client is RealNknClientAdapter realClient &&
+                realClient is not null &&
                 realClient.TryGetFileTransferRegularV4ActivationSendBlocker(
                     out regularV4BlockerReason,
                     out regularV4BlockerRemainingMs);
+            if (hasRegularV4SendBlocker &&
+                realClient is not null &&
+                IsCurrentRuntimeUnlockActivationOffer() &&
+                !TryGetActiveFileTransferTunaActivationPause(sessionId, out _) &&
+                realClient.TryGetFileTransferRegularV4ActivationSendBlocker(
+                    out var nonPressureBlockerReason,
+                    out var nonPressureBlockerRemainingMs,
+                    includeRegularV4Pressure: false))
+            {
+                regularV4BlockerReason = nonPressureBlockerReason;
+                regularV4BlockerRemainingMs = nonPressureBlockerRemainingMs;
+                if (!loggedRegularV4ReceiveStallWait)
+                {
+                    LocalOperationalLog.Warn(
+                        "NKN.Tuna",
+                        $"event=tuna_activation_control_send_waiting_for_regular_v4_recovery; session_id={SanitizeLogToken(sessionId ?? "none")}; purpose={SanitizeLogToken(purpose)}; blocker_reason={SanitizeLogToken(nonPressureBlockerReason)}; blocker_remaining_ms={nonPressureBlockerRemainingMs}; regular_v4_pressure_reason={SanitizeLogToken(regularV4BlockerReason)}; regular_v4_pressure_remaining_ms={regularV4BlockerRemainingMs}; recovery_age_ms={FormatElapsedMilliseconds(bridgeRecoveryStartedTick)}; wait_budget_ms={(long)waitBudget.TotalMilliseconds}; reason=runtime_unlock_regular_v4_receive_stall");
+                    loggedRegularV4ReceiveStallWait = true;
+                }
+            }
+
             if (hasRegularV4SendBlocker &&
                 TryGetActiveFileTransferTunaActivationPause(sessionId, out _) &&
                 IsRegularV4PressureActivationSendBlocker(regularV4BlockerReason))
@@ -1357,12 +1402,21 @@ public sealed partial class NknSignalingTransport
                     return true;
                 }
 
-                if (ShouldBypassPostTunaFallbackReceiveStallForRuntimeUnlockOffer(lastBlockerReason, sessionId))
+                if (ShouldBypassRegularV4ReceiveStallForRuntimeUnlockOffer(lastBlockerReason, sessionId))
                 {
+                    ArmRuntimeUnlockQueueAcceptedObservedEscape("regular_v4_receive_stall_bypass");
                     LocalOperationalLog.Info(
                         "NKN.Tuna",
-                        $"event=tuna_activation_control_send_post_tuna_fallback_recovery_bypassed; session_id={SanitizeLogToken(sessionId ?? "none")}; purpose={SanitizeLogToken(purpose)}; blocker_reason={SanitizeLogToken(lastBlockerReason ?? "unknown")}; blocker_remaining_ms={lastBlockerRemainingMs}; recovery_age_ms={FormatElapsedMilliseconds(bridgeRecoveryStartedTick)}; wait_budget_ms={(long)waitBudget.TotalMilliseconds}; reason=runtime_unlock_offer_reactivation_wait_elapsed");
+                        $"event=tuna_activation_control_send_regular_v4_receive_stall_bypassed; session_id={SanitizeLogToken(sessionId ?? "none")}; purpose={SanitizeLogToken(purpose)}; blocker_reason={SanitizeLogToken(lastBlockerReason ?? "unknown")}; blocker_remaining_ms={lastBlockerRemainingMs}; recovery_age_ms={FormatElapsedMilliseconds(bridgeRecoveryStartedTick)}; wait_budget_ms={(long)waitBudget.TotalMilliseconds}; reason=runtime_unlock_offer_receive_stall_wait_elapsed");
                     return true;
+                }
+
+                if (ShouldDeferPostTunaFallbackReceiveStallForRuntimeUnlockOffer(lastBlockerReason, sessionId))
+                {
+                    LocalOperationalLog.Warn(
+                        "NKN.Tuna",
+                        $"event=tuna_activation_control_send_post_tuna_fallback_recovery_deferred; session_id={SanitizeLogToken(sessionId ?? "none")}; purpose={SanitizeLogToken(purpose)}; blocker_reason={SanitizeLogToken(lastBlockerReason ?? "unknown")}; blocker_remaining_ms={lastBlockerRemainingMs}; recovery_age_ms={FormatElapsedMilliseconds(bridgeRecoveryStartedTick)}; wait_budget_ms={(long)waitBudget.TotalMilliseconds}; reason=runtime_unlock_offer_waiting_for_post_tuna_fallback_receive_proof");
+                    return false;
                 }
 
                 LocalOperationalLog.Warn(
@@ -1406,7 +1460,54 @@ public sealed partial class NknSignalingTransport
             includeRegularV4Pressure: false);
     }
 
-    private bool ShouldBypassPostTunaFallbackReceiveStallForRuntimeUnlockOffer(
+    private bool ShouldBypassRegularV4ReceiveStallForRuntimeUnlockOffer(string? blockerReason, string? sessionId)
+    {
+        if (!ShouldBypassRuntimeUnlockReceiveStallAfterBoundedWait(blockerReason) ||
+            !IsCurrentRuntimeUnlockActivationOffer() ||
+            string.IsNullOrWhiteSpace(sessionId))
+        {
+            return false;
+        }
+
+        var normalizedSessionId = sessionId.Trim();
+        return HasActiveRegularV4FileTransferRouteHint(normalizedSessionId) &&
+               !HasActivePostTunaFallbackFileTransferRouteHint(normalizedSessionId) &&
+               !TryGetUnresolvedFileTransferV6TransportEpochForCurrentSession(out _);
+    }
+
+    private void ArmRuntimeUnlockQueueAcceptedObservedEscape(string reason)
+    {
+        lock (accelerationGate)
+        {
+            if (string.IsNullOrWhiteSpace(outboundAccelerationOfferNonce) ||
+                !IsRuntimeUnlockActivationReason(outboundAccelerationOfferTrigger) ||
+                runtimeUnlockOfferProofState is not { Retired: false } state ||
+                outboundAccelerationOfferGeneration != state.Generation ||
+                outboundAccelerationOfferPayerDecisionId != state.PayerDecisionId)
+            {
+                return;
+            }
+
+            var sanitizedReason = SanitizeLogToken(reason);
+            runtimeUnlockQueueAcceptedObservedEscapeGeneration = state.Generation;
+            runtimeUnlockQueueAcceptedObservedEscapePayerDecisionId = state.PayerDecisionId;
+            runtimeUnlockQueueAcceptedObservedEscapeTick = Stopwatch.GetTimestamp();
+            runtimeUnlockQueueAcceptedObservedEscapeReason = sanitizedReason;
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=tuna_acceleration_control_queue_observed_escape_armed; session_id={SanitizeLogToken(state.SessionId)}; generation={state.Generation}; payer_decision_id={state.PayerDecisionId}; reason={sanitizedReason}");
+        }
+    }
+
+    private void ClearRuntimeUnlockQueueAcceptedObservedEscapeLocked()
+    {
+        runtimeUnlockQueueAcceptedObservedEscapeGeneration = 0;
+        runtimeUnlockQueueAcceptedObservedEscapePayerDecisionId = 0;
+        runtimeUnlockQueueAcceptedObservedEscapeTick = 0;
+        runtimeUnlockQueueAcceptedObservedEscapeReason = null;
+    }
+
+    private bool ShouldDeferPostTunaFallbackReceiveStallForRuntimeUnlockOffer(
         string? blockerReason,
         string? sessionId)
     {
@@ -1454,9 +1555,128 @@ public sealed partial class NknSignalingTransport
         return false;
     }
 
+    private bool HasFreshPostTunaFallbackReceiverFrontierProofHint(
+        string? sessionId,
+        out FileTransferPostTunaFallbackRepairProofHint proofHint)
+    {
+        proofHint = default;
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return false;
+        }
+
+        var normalizedSessionId = sessionId.Trim();
+        var now = DateTimeOffset.UtcNow;
+        lock (gate)
+        {
+            var staleTransferIds = fileTransferPostTunaFallbackRepairProofHints
+                .Where(pair => now - pair.Value.ObservedUtc > FileTransferPostTunaFallbackRepairProofFreshness)
+                .Select(static pair => pair.Key)
+                .ToArray();
+            foreach (var staleTransferId in staleTransferIds)
+            {
+                fileTransferPostTunaFallbackRepairProofHints.Remove(staleTransferId);
+            }
+
+            foreach (var session in fileTransferDataSessions.Values)
+            {
+                if (session.IsDisposed ||
+                    !string.Equals(session.SessionId, normalizedSessionId, StringComparison.Ordinal) ||
+                    !fileTransferRouteHints.TryGetValue(session.TransferId, out var routeHint) ||
+                    routeHint.Route != FileTransferRoute.PostTunaFallbackV6 ||
+                    !fileTransferPostTunaFallbackRepairProofHints.TryGetValue(session.TransferId, out var candidate) ||
+                    !string.Equals(candidate.SessionId, normalizedSessionId, StringComparison.Ordinal) ||
+                    now - candidate.ObservedUtc > FileTransferPostTunaFallbackRepairProofFreshness)
+                {
+                    continue;
+                }
+
+                proofHint = candidate;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool ShouldProtectPostTunaFallbackAvailabilityDuringRuntimeUnlockRecovery(
+        string? sessionId,
+        string recoveryReason,
+        string trigger,
+        out string protectReason)
+    {
+        protectReason = "none";
+        if (!IsRuntimeUnlockPostTunaFallbackOfferRecoveryReason(recoveryReason) ||
+            !HasFreshPostTunaFallbackReceiverFrontierProofHint(sessionId, out var proofHint))
+        {
+            return false;
+        }
+
+        var proofAgeMs = Math.Max(0, (long)(DateTimeOffset.UtcNow - proofHint.ObservedUtc).TotalMilliseconds);
+        protectReason = $"fresh_{proofHint.ProofKind}_{proofHint.Direction}";
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=filetransfer_post_tuna_fallback_runtime_unlock_recovery_availability_protected; session_id={SanitizeLogToken(sessionId ?? "none")}; transfer_id={SanitizeLogToken(proofHint.TransferId)}; reason={SanitizeLogToken(recoveryReason)}; trigger={SanitizeLogToken(trigger)}; proof={SanitizeLogToken(proofHint.ProofKind)}; proof_direction={SanitizeLogToken(proofHint.Direction)}; proof_age_ms={proofAgeMs}; freshness_ms={(long)FileTransferPostTunaFallbackRepairProofFreshness.TotalMilliseconds}");
+        return true;
+    }
+
+    private static bool IsRuntimeUnlockPostTunaFallbackOfferRecoveryReason(string? reason)
+    {
+        var normalized = SanitizeLogToken(reason);
+        return normalized.StartsWith(
+            "post_tuna_fallback_tuna_activation_offer",
+            StringComparison.OrdinalIgnoreCase);
+    }
+
     private bool ShouldPauseRuntimeUnlockOfferOnQueueAccepted()
     {
         return TryGetRuntimeUnlockOfferQueueAcceptedPressureReason(out _);
+    }
+
+    private bool ShouldPauseRegularNknV4FileTransferForRuntimeUnlock(string sessionId)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return false;
+        }
+
+        if (HasActivePostTunaFallbackFileTransferRouteHint(sessionId))
+        {
+            return false;
+        }
+
+        if (TryGetUnresolvedFileTransferV6TransportEpochForCurrentSession(out var pendingEpoch) &&
+            string.Equals(pendingEpoch.SessionId, sessionId, StringComparison.Ordinal) &&
+            IsPostTunaFallbackRegularNknEpoch(pendingEpoch))
+        {
+            return false;
+        }
+
+        if (client is RealNknClientAdapter realClient &&
+            realClient.HasActiveFileTransferRuntimeForActivationSend())
+        {
+            return true;
+        }
+
+        lock (gate)
+        {
+            foreach (var session in fileTransferDataSessions.Values)
+            {
+                if (session.IsDisposed ||
+                    !string.Equals(session.SessionId, sessionId, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (fileTransferRouteHints.TryGetValue(session.TransferId, out var routeHint) &&
+                    routeHint.Route == FileTransferRoute.RegularNknV4Fast)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     private string? GetRuntimeUnlockOfferQueueAcceptedObservedReason()
@@ -1482,17 +1702,55 @@ public sealed partial class NknSignalingTransport
 
         if (client is not RealNknClientAdapter realClient)
         {
-            return false;
+            return TryGetRuntimeUnlockQueueAcceptedObservedEscapeReason(out reason);
         }
 
-        if (!realClient.TryGetFileTransferRegularV4ActivationSendBlocker(out var blockerReason, out _) ||
-            !IsRegularV4PressureActivationSendBlocker(blockerReason))
+        if (realClient.TryGetFileTransferRegularV4ActivationSendPressure(out var pressureReason, out _))
         {
-            return false;
+            reason = SanitizeLogToken(pressureReason ?? "regular_v4_pressure");
+            return true;
         }
 
-        reason = SanitizeLogToken(blockerReason ?? "regular_v4_pressure");
-        return true;
+        if (TryGetRuntimeUnlockQueueAcceptedObservedEscapeReason(out reason))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool TryGetRuntimeUnlockQueueAcceptedObservedEscapeReason(out string reason)
+    {
+        reason = string.Empty;
+        lock (accelerationGate)
+        {
+            if (string.IsNullOrWhiteSpace(outboundAccelerationOfferNonce) ||
+                !IsRuntimeUnlockActivationReason(outboundAccelerationOfferTrigger) ||
+                runtimeUnlockOfferProofState is not { Retired: false } state ||
+                runtimeUnlockQueueAcceptedObservedEscapeGeneration != state.Generation ||
+                runtimeUnlockQueueAcceptedObservedEscapePayerDecisionId != state.PayerDecisionId ||
+                runtimeUnlockQueueAcceptedObservedEscapeTick <= 0 ||
+                string.IsNullOrWhiteSpace(runtimeUnlockQueueAcceptedObservedEscapeReason))
+            {
+                return false;
+            }
+
+            if (Stopwatch.GetElapsedTime(runtimeUnlockQueueAcceptedObservedEscapeTick) >
+                RuntimeUnlockQueueAcceptedObservedEscapeTtl)
+            {
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=tuna_acceleration_control_queue_observed_escape_expired; session_id={SanitizeLogToken(state.SessionId)}; generation={state.Generation}; payer_decision_id={state.PayerDecisionId}; reason={SanitizeLogToken(runtimeUnlockQueueAcceptedObservedEscapeReason)}");
+                runtimeUnlockQueueAcceptedObservedEscapeGeneration = 0;
+                runtimeUnlockQueueAcceptedObservedEscapePayerDecisionId = 0;
+                runtimeUnlockQueueAcceptedObservedEscapeTick = 0;
+                runtimeUnlockQueueAcceptedObservedEscapeReason = null;
+                return false;
+            }
+
+            reason = SanitizeLogToken(runtimeUnlockQueueAcceptedObservedEscapeReason);
+            return true;
+        }
     }
 
     private bool IsCurrentRuntimeUnlockActivationOffer()
@@ -1558,8 +1816,34 @@ public sealed partial class NknSignalingTransport
         }
 
         var hasActivationPause = TryGetActiveFileTransferTunaActivationPause(activationSessionId, out var sessionId);
+        var postTunaFallbackOfferRecovery = false;
+        var regularV4RuntimeUnlockOfferRecovery = false;
+        var activeFileTransferRuntimeUnlockOfferRecovery = false;
+        if (!hasActivationPause)
+        {
+            postTunaFallbackOfferRecovery =
+                TryGetPostTunaFallbackRuntimeUnlockOfferRecoverySession(activationSessionId, out sessionId);
+        }
+
         if (!hasActivationPause &&
-            !TryGetPostTunaFallbackRuntimeUnlockOfferRecoverySession(activationSessionId, out sessionId))
+            !postTunaFallbackOfferRecovery)
+        {
+            regularV4RuntimeUnlockOfferRecovery =
+                TryGetRegularV4RuntimeUnlockOfferRecoverySession(activationSessionId, out sessionId);
+        }
+
+        if (!hasActivationPause &&
+            !postTunaFallbackOfferRecovery &&
+            !regularV4RuntimeUnlockOfferRecovery)
+        {
+            activeFileTransferRuntimeUnlockOfferRecovery =
+                TryGetRuntimeUnlockOfferActiveFileTransferRecoverySession(activationSessionId, out sessionId);
+        }
+
+        if (!hasActivationPause &&
+            !postTunaFallbackOfferRecovery &&
+            !regularV4RuntimeUnlockOfferRecovery &&
+            !activeFileTransferRuntimeUnlockOfferRecovery)
         {
             return false;
         }
@@ -1568,6 +1852,12 @@ public sealed partial class NknSignalingTransport
         var reason = string.Equals(purpose, "offer_replay", StringComparison.OrdinalIgnoreCase)
             ? "tuna_activation_offer_replay_send_timeout"
             : "tuna_activation_offer_send_timeout";
+        var bridgeRecoveryReason = reason;
+        if (postTunaFallbackOfferRecovery)
+        {
+            bridgeRecoveryReason = $"post_tuna_fallback_{reason}";
+        }
+
         recoveryReason = reason;
         recoverySessionId = sessionId;
         var accepted = RuntimeUnlockOfferSendRecoveryRequestOverrideForTests?.Invoke(this, reason, sessionId);
@@ -1581,15 +1871,17 @@ public sealed partial class NknSignalingTransport
                 return false;
             }
 
-            accepted = realClient.RequestFileTransferReceiveStallRecovery(reason);
+            accepted = realClient.RequestFileTransferReceiveStallRecovery(bridgeRecoveryReason);
         }
 
         LocalOperationalLog.Warn(
             "NKN.Tuna",
-            $"event=tuna_activation_control_send_recovery_requested; session_id={SanitizeLogToken(sessionId ?? "none")}; purpose={normalizedPurpose}; trigger={SanitizeLogToken(trigger)}; reason={SanitizeLogToken(reason)}; accepted={(accepted.Value ? 1 : 0)}");
+            $"event=tuna_activation_control_send_recovery_requested; session_id={SanitizeLogToken(sessionId ?? "none")}; purpose={normalizedPurpose}; trigger={SanitizeLogToken(trigger)}; reason={SanitizeLogToken(reason)}; bridge_reason={SanitizeLogToken(bridgeRecoveryReason)}; post_tuna_fallback_offer_recovery={(postTunaFallbackOfferRecovery ? 1 : 0)}; accepted={(accepted.Value ? 1 : 0)}");
         if (!accepted.Value &&
             ShouldJoinExistingFileTransferTunaActivationOfferSendRecovery(
                 hasActivationPause,
+                regularV4RuntimeUnlockOfferRecovery,
+                activeFileTransferRuntimeUnlockOfferRecovery,
                 activationSessionId,
                 sessionId))
         {
@@ -1610,6 +1902,8 @@ public sealed partial class NknSignalingTransport
 
     private bool ShouldJoinExistingFileTransferTunaActivationOfferSendRecovery(
         bool hasActivationPause,
+        bool regularV4RuntimeUnlockOfferRecovery,
+        bool activeFileTransferRuntimeUnlockOfferRecovery,
         string? activationSessionId,
         string? recoverySessionId)
     {
@@ -1621,6 +1915,20 @@ public sealed partial class NknSignalingTransport
         if (hasActivationPause)
         {
             return true;
+        }
+
+        if (regularV4RuntimeUnlockOfferRecovery &&
+            TryGetRegularV4RuntimeUnlockOfferRecoverySession(activationSessionId, out var regularSessionId))
+        {
+            return string.IsNullOrWhiteSpace(recoverySessionId) ||
+                   string.Equals(regularSessionId, recoverySessionId, StringComparison.Ordinal);
+        }
+
+        if (activeFileTransferRuntimeUnlockOfferRecovery &&
+            TryGetRuntimeUnlockOfferActiveFileTransferRecoverySession(activationSessionId, out var activeFileTransferSessionId))
+        {
+            return string.IsNullOrWhiteSpace(recoverySessionId) ||
+                   string.Equals(activeFileTransferSessionId, recoverySessionId, StringComparison.Ordinal);
         }
 
         if (!TryGetActivePostTunaFallbackRuntimeUnlockOfferRecoverySession(activationSessionId, out var activeSessionId) &&
@@ -1693,6 +2001,110 @@ public sealed partial class NknSignalingTransport
         return HasActivePostTunaFallbackFileTransferRouteHint(sessionId);
     }
 
+    private bool TryGetRuntimeUnlockOfferActiveFileTransferRecoverySession(
+        string? requestedSessionId,
+        out string? sessionId)
+    {
+        sessionId = string.IsNullOrWhiteSpace(requestedSessionId)
+            ? currentSessionSecurityState.SessionId?.Value
+            : requestedSessionId.Trim();
+        if (string.IsNullOrWhiteSpace(sessionId) ||
+            !IsCurrentRuntimeUnlockActivationOffer())
+        {
+            return false;
+        }
+
+        lock (accelerationGate)
+        {
+            if (string.IsNullOrWhiteSpace(outboundAccelerationOfferNonce) ||
+                !IsRuntimeUnlockActivationReason(outboundAccelerationOfferTrigger) ||
+                IsAccelerationNegotiatedAndHealthyUnsafe(sessionId))
+            {
+                return false;
+            }
+        }
+
+        lock (gate)
+        {
+            foreach (var session in fileTransferDataSessions.Values)
+            {
+                if (!session.IsDisposed &&
+                    string.Equals(session.SessionId, sessionId, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return client is RealNknClientAdapter realClient &&
+               realClient.HasActiveFileTransferRuntimeForActivationSend();
+    }
+
+    private bool TryGetRegularV4RuntimeUnlockOfferRecoverySession(
+        string? requestedSessionId,
+        out string? sessionId)
+    {
+        sessionId = string.IsNullOrWhiteSpace(requestedSessionId)
+            ? currentSessionSecurityState.SessionId?.Value
+            : requestedSessionId.Trim();
+        if (string.IsNullOrWhiteSpace(sessionId) ||
+            !IsCurrentRuntimeUnlockActivationOffer())
+        {
+            return false;
+        }
+
+        lock (accelerationGate)
+        {
+            if (string.IsNullOrWhiteSpace(outboundAccelerationOfferNonce) ||
+                !IsRuntimeUnlockActivationReason(outboundAccelerationOfferTrigger) ||
+                IsAccelerationNegotiatedAndHealthyUnsafe(sessionId))
+            {
+                return false;
+            }
+        }
+
+        if (!HasActiveRegularV4FileTransferRouteHint(sessionId))
+        {
+            return false;
+        }
+
+        if (RuntimeUnlockOfferQueueAcceptedPressureOverrideForTests?.Invoke(this) == true)
+        {
+            return true;
+        }
+
+        return client is RealNknClientAdapter realClient &&
+               realClient.TryGetFileTransferRegularV4ActivationSendBlocker(out var blockerReason, out _) &&
+               IsRegularV4PressureActivationSendBlocker(blockerReason);
+    }
+
+    private bool HasActiveRegularV4FileTransferRouteHint(string sessionId)
+    {
+        lock (gate)
+        {
+            foreach (var session in fileTransferDataSessions.Values)
+            {
+                if (session.IsDisposed ||
+                    !string.Equals(session.SessionId, sessionId, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (!fileTransferRouteHints.TryGetValue(session.TransferId, out var routeHint))
+                {
+                    return true;
+                }
+
+                if (routeHint.Route == FileTransferRoute.RegularNknV4Fast)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     private static bool IsRegularV4PressureActivationSendBlocker(string? reason)
         => string.Equals(reason, "regular_v4_activation_send_pressure", StringComparison.OrdinalIgnoreCase) ||
            string.Equals(reason, "regular_v4_control_feedback_pressure", StringComparison.OrdinalIgnoreCase);
@@ -1700,6 +2112,12 @@ public sealed partial class NknSignalingTransport
     private static bool IsReceiveStallActivationSendBlocker(string? reason)
         => string.Equals(reason, "receive_stall_recovery_in_progress", StringComparison.OrdinalIgnoreCase) ||
            string.Equals(reason, "receive_stall_recovery_awaiting_receive_proof", StringComparison.OrdinalIgnoreCase);
+
+    private static bool ShouldDeferRuntimeUnlockSoftSettleForReceiveStallBlocker(string? reason, long remainingMs)
+        => IsReceiveStallActivationSendBlocker(reason) && remainingMs > 0;
+
+    private static bool ShouldBypassRuntimeUnlockReceiveStallAfterBoundedWait(string? reason)
+        => IsReceiveStallActivationSendBlocker(reason);
 
     private static string FormatElapsedMilliseconds(long startedTick)
     {
@@ -1957,9 +2375,15 @@ public sealed partial class NknSignalingTransport
         string? sessionId)
     {
         RecordTunaFallbackNknFrame("sent", MsgType.FileTransferDataFrame, channel, payloadBytes, sessionId);
+        if (!TryDeserializeFileTransferDataFrameFromWire(payload, out var frame) ||
+            frame is null)
+        {
+            return;
+        }
+
+        RecordPostTunaFallbackReceiverFrontierProofHint(frame, "sent", sessionId);
+
         if (!IsFileTransferFallbackNknProofPending() ||
-            !TryDeserializeFileTransferDataFrameFromWire(payload, out var frame) ||
-            frame is null ||
             !TryMapPostTunaFileTransferFallbackNknProofKind(frame, "sent", out var proofKind))
         {
             return;
@@ -1976,10 +2400,70 @@ public sealed partial class NknSignalingTransport
         }
 
         RecordTunaFallbackNknFrame("received", MsgType.FileTransferDataFrame, channel, payloadBytes, sessionId);
+        RecordPostTunaFallbackReceiverFrontierProofHint(frame, "received", sessionId);
         if (TryMapFileTransferFallbackNknProofKind(frame, out var proofKind))
         {
             _ = CompleteFileTransferFallbackNknProofIfPending(proofKind, sessionId);
         }
+    }
+
+    private void RecordPostTunaFallbackReceiverFrontierProofHint(
+        FileTransferDataFrame frame,
+        string direction,
+        string? sessionId)
+    {
+        if (!TryMapPostTunaFallbackReceiverFrontierProofKind(frame, out var proofKind))
+        {
+            return;
+        }
+
+        var normalizedTransferId = string.IsNullOrWhiteSpace(frame.TransferId)
+            ? null
+            : frame.TransferId.Trim();
+        var normalizedSessionId = !string.IsNullOrWhiteSpace(frame.SessionId)
+            ? frame.SessionId.Trim()
+            : string.IsNullOrWhiteSpace(sessionId)
+                ? null
+                : sessionId.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedTransferId) ||
+            string.IsNullOrWhiteSpace(normalizedSessionId))
+        {
+            return;
+        }
+
+        lock (gate)
+        {
+            if (!fileTransferDataSessions.TryGetValue(normalizedTransferId, out var session) ||
+                session.IsDisposed ||
+                !string.Equals(session.SessionId, normalizedSessionId, StringComparison.Ordinal) ||
+                !fileTransferRouteHints.TryGetValue(normalizedTransferId, out var routeHint) ||
+                routeHint.Route != FileTransferRoute.PostTunaFallbackV6)
+            {
+                return;
+            }
+
+            fileTransferPostTunaFallbackRepairProofHints[normalizedTransferId] =
+                new FileTransferPostTunaFallbackRepairProofHint(
+                    normalizedSessionId,
+                    normalizedTransferId,
+                    proofKind,
+                    SanitizeLogToken(direction),
+                    DateTimeOffset.UtcNow);
+        }
+    }
+
+    private static bool TryMapPostTunaFallbackReceiverFrontierProofKind(
+        FileTransferDataFrame frame,
+        out string proofKind)
+    {
+        proofKind = frame switch
+        {
+            FileTransferReceiverStateFrameV6 => "receiver_state",
+            FileTransferFrontierRequestFrameV6 => "frontier_request",
+            _ => string.Empty,
+        };
+
+        return proofKind.Length > 0;
     }
 
     private void RecordTunaFallbackNknControlSent(MsgType messageType)
@@ -2545,6 +3029,7 @@ public sealed partial class NknSignalingTransport
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=filetransfer_fallback_nkn_probe_scheduled; session_id={SanitizeLogToken(sessionId ?? "none")}; reason={SanitizeLogToken(reason)}; trigger={SanitizeLogToken(trigger)}; delay_ms={(long)FileTransferFallbackUnprovenProbeDelay.TotalMilliseconds}; lanes={FormatAccelerationLanesForLog(lanes)}");
+        ArmPostTunaFallbackProofSendWindow(reason, trigger, sessionId);
 
         _ = Task.Run(
             async () =>
@@ -2577,6 +3062,7 @@ public sealed partial class NknSignalingTransport
                     LocalOperationalLog.Warn(
                         "NKN.Tuna",
                         $"event=filetransfer_fallback_nkn_probe_started; session_id={SanitizeLogToken(probeSessionId ?? "none")}; reason={SanitizeLogToken(probeReason)}; trigger={SanitizeLogToken(trigger)}; delay_ms={(long)FileTransferFallbackUnprovenProbeDelay.TotalMilliseconds}; lanes={FormatAccelerationLanesForLog(probeLanes)}");
+                    ArmPostTunaFallbackProofSendWindow(probeReason, $"probe_started:{trigger}", probeSessionId);
                     SetFileTransferDataSessionsAvailability(
                         isAvailable: false,
                         reason: "transport_recovered_unproven",
@@ -2591,6 +3077,14 @@ public sealed partial class NknSignalingTransport
                         $"event=filetransfer_fallback_nkn_probe_failed; reason={SanitizeLogToken(reason)}; trigger={SanitizeLogToken(trigger)}; error={SanitizeLogToken(ex.GetType().Name)}");
                 }
             });
+    }
+
+    private void ArmPostTunaFallbackProofSendWindow(string reason, string trigger, string? sessionId)
+    {
+        if (client is RealNknClientAdapter realClient)
+        {
+            realClient.ArmPostTunaFallbackProofSendWindow(reason, trigger, sessionId);
+        }
     }
 
     private static FileTransferTransportHandoffKind ResolveFileTransferFallbackProbeHandoffKind(string? reason, string? trigger)
@@ -3319,17 +3813,7 @@ public sealed partial class NknSignalingTransport
 
         if (!tunaSession.CanOfferListener)
         {
-            if (isRuntimeUnlockActivation && pausedForActivationNegotiation)
-            {
-                LocalOperationalLog.Info(
-                    "NKN.Tuna",
-                    $"event=filetransfer_tuna_activation_negotiation_regular_nkn_pause_retained; session_id={SanitizeLogToken(sessionId)}; reason=listener_unavailable; trigger={SanitizeLogToken(reason)}");
-            }
-            else
-            {
-                ResumeActivationPauseIfNeeded("tuna_activation_failed_regular_v4_resumed", "listener_unavailable");
-            }
-
+            ResumeActivationPauseIfNeeded("tuna_activation_failed_regular_v4_resumed", "listener_unavailable");
             RejectAccelerationOfferPreflight(reason, "listener_unavailable", retryable: true, eligibleLanes);
             return;
         }
@@ -3376,9 +3860,12 @@ public sealed partial class NknSignalingTransport
 
         NotifyTransportAccelerationStateChanged("selected_payer_starting_listener");
         NotifyTransportAccelerationStateChanged("listener_starting");
-        if (isRuntimeUnlockActivation)
+        if (isRuntimeUnlockActivation &&
+            ShouldPauseRegularNknV4FileTransferForRuntimeUnlock(sessionId))
         {
-            PauseActivationIfNeeded("listener_starting_active_regular_transfer");
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=filetransfer_tuna_activation_negotiation_regular_nkn_pause_deferred; session_id={SanitizeLogToken(sessionId)}; reason=runtime_unlock_listener_starting; trigger={SanitizeLogToken(reason)}");
         }
 
         if (!await tunaSession.EnsureListenerSidecarConnectedAsync(remoteEndpoint, ct).ConfigureAwait(false) ||
@@ -3477,6 +3964,7 @@ public sealed partial class NknSignalingTransport
             if (isRuntimeUnlockActivation)
             {
                 runtimeUnlockRecoveryRetryState = null;
+                ClearRuntimeUnlockQueueAcceptedObservedEscapeLocked();
             }
         }
 
@@ -3569,7 +4057,13 @@ public sealed partial class NknSignalingTransport
                 }
                 else
                 {
-                    ScheduleAccelerationNegotiationRetry(retryReason);
+                    var retryScheduled = ScheduleAccelerationNegotiationRetry(retryReason);
+                    if (!retryScheduled)
+                    {
+                        LocalOperationalLog.Warn(
+                            "NKN.Tuna",
+                            $"event=tuna_acceleration_activation_offer_retry_not_scheduled; trigger={SanitizeLogToken(reason)}; session_id={SanitizeLogToken(sessionId)}; payer_decision_id={payerDecisionId}; generation={offerGeneration}; retry_reason={SanitizeLogToken(retryReason)}");
+                    }
                 }
             }
             else
@@ -3873,6 +4367,20 @@ public sealed partial class NknSignalingTransport
                 return false;
             }
 
+            if (ShouldPreserveRuntimeUnlockOfferAcrossBridgeInterruptionUnsafe(state, queueLane))
+            {
+                LogRuntimeUnlockObservedOfferPreservedDuringBridgeInterruption(
+                    state,
+                    reason,
+                    recoveryReason,
+                    trigger,
+                    observedLane,
+                    queueLane,
+                    queueClears,
+                    clearedSinceLast);
+                return false;
+            }
+
             state.Retired = true;
             state.RetiredReason = SanitizeLogToken(reason);
             state.RetryReason = "runtime_unlock_offer_send_not_observed";
@@ -3899,6 +4407,57 @@ public sealed partial class NknSignalingTransport
             "runtime_unlock_offer_send_not_observed",
             recoveryReason);
         return true;
+    }
+
+    private bool ShouldPreserveRuntimeUnlockOfferAcrossBridgeInterruptionUnsafe(
+        RuntimeUnlockOfferProofState state,
+        string? queueLane)
+    {
+        if (state.PeerReceived)
+        {
+            return true;
+        }
+
+        if (!state.ObservedSend ||
+            string.IsNullOrWhiteSpace(state.ObservedSendLane))
+        {
+            return false;
+        }
+
+        var observedLane = state.ObservedSendLane.Trim();
+        if (!string.IsNullOrWhiteSpace(queueLane))
+        {
+            var normalizedQueueLane = queueLane.Trim();
+            if (string.Equals(observedLane, "bulk_queue_fallback", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(normalizedQueueLane, "bulk", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (string.Equals(observedLane, "control_queue_explicit_observed", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(normalizedQueueLane, "control", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+        }
+
+        return string.Equals(observedLane, "control_priority", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(observedLane, "control_to_bulk_endpoint", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void LogRuntimeUnlockObservedOfferPreservedDuringBridgeInterruption(
+        RuntimeUnlockOfferProofState state,
+        string reason,
+        string recoveryReason,
+        string trigger,
+        string? observedLane,
+        string? queueLane,
+        long queueClears,
+        long clearedSinceLast)
+    {
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=tuna_acceleration_runtime_unlock_observed_offer_preserved; trigger={SanitizeLogToken(state.Trigger)}; session_id={SanitizeLogToken(state.SessionId)}; payer_decision_id={state.PayerDecisionId}; generation={state.Generation}; interruption_reason={SanitizeLogToken(reason)}; interruption_trigger={SanitizeLogToken(trigger)}; recovery_reason={SanitizeLogToken(recoveryReason)}; observed_send={(state.ObservedSend ? 1 : 0)}; observed_lane={SanitizeLogToken(observedLane ?? state.ObservedSendLane)}; peer_received={(state.PeerReceived ? 1 : 0)}; queue_lane={SanitizeLogToken(queueLane)}; queue_clears={Math.Max(0, queueClears)}; cleared_since_last={Math.Max(0, clearedSinceLast)}");
     }
 
     private void ArmRuntimeUnlockRetryAfterRecovery(
@@ -3931,16 +4490,253 @@ public sealed partial class NknSignalingTransport
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=tuna_acceleration_runtime_unlock_retry_after_recovery_armed; session_id={SanitizeLogToken(normalizedSessionId)}; retired_generation={retiredOfferGeneration}; retry_reason={SanitizeLogToken(retryReason)}; recovery_reason={SanitizeLogToken(recoveryReason)}");
-        if (!IsFileTransferTunaActivationBridgeRecoveryActive())
+        if (ShouldDeferRuntimeUnlockRetryForActivePostTunaFallbackRepair(normalizedSessionId))
+        {
+            ScheduleRuntimeUnlockRetryAfterFallbackRepairSoftSettle(
+                retiredOfferGeneration,
+                normalizedSessionId);
+        }
+        else if (!IsFileTransferTunaActivationBridgeRecoveryActive())
         {
             ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed("recovery_already_settled");
         }
+        else
+        {
+            ScheduleRuntimeUnlockRetryAfterFallbackRepairSoftSettle(
+                retiredOfferGeneration,
+                normalizedSessionId);
+        }
+    }
+
+    private void ScheduleRuntimeUnlockRetryAfterFallbackRepairSoftSettle(
+        long retiredOfferGeneration,
+        string sessionId)
+    {
+        var delay = RuntimeUnlockRecoverySoftSettleDelayOverrideForTests ??
+            FileTransferTunaActivationBridgeRecoveryWaitOverrideForTests ??
+            RuntimeUnlockRecoverySoftSettleDelay;
+        if (delay < TimeSpan.Zero)
+        {
+            delay = TimeSpan.Zero;
+        }
+
+        _ = Task.Run(
+            async () =>
+            {
+                try
+                {
+                    await Task.Delay(delay, CancellationToken.None).ConfigureAwait(false);
+                    if (disposed ||
+                        !ShouldSoftSettleRuntimeUnlockRetryAfterFallbackRepair(
+                            retiredOfferGeneration,
+                            sessionId,
+                            out var settleReason))
+                    {
+                        return;
+                    }
+
+                    LocalOperationalLog.Info(
+                        "NKN.Tuna",
+                        $"event=tuna_acceleration_runtime_unlock_retry_after_fallback_repair_soft_settle; session_id={SanitizeLogToken(sessionId)}; retired_generation={retiredOfferGeneration}; settle_reason={SanitizeLogToken(settleReason)}; delay_ms={(long)delay.TotalMilliseconds}");
+                    ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed("post_tuna_fallback_repair_soft_settle");
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    LocalOperationalLog.Warn(
+                        "NKN.Tuna",
+                        $"event=tuna_acceleration_runtime_unlock_retry_after_fallback_repair_soft_settle_failed; session_id={SanitizeLogToken(sessionId)}; retired_generation={retiredOfferGeneration}; error={ex.GetType().Name}");
+                }
+            },
+            CancellationToken.None);
+    }
+
+    private bool ShouldDeferRuntimeUnlockRetryForActivePostTunaFallbackRepair(string sessionId)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId) ||
+            !ShouldKeepPostTunaFallbackDataSessionsAvailableDuringTunaActivation(
+                sessionId,
+                out _))
+        {
+            return false;
+        }
+
+        if (TryGetFileTransferFallbackControlProofPendingSnapshot(
+                out var pendingSessionId,
+                out _,
+                out var pendingLanes) &&
+            (pendingLanes & NknAccelerationLaneKind.File) == NknAccelerationLaneKind.File &&
+            IsSameSessionOrUnknown(pendingSessionId, sessionId))
+        {
+            return true;
+        }
+
+        if (TryGetUnresolvedFileTransferV6TransportEpochForCurrentSession(out var pendingEpoch) &&
+            string.Equals(pendingEpoch.SessionId, sessionId.Trim(), StringComparison.Ordinal) &&
+            pendingEpoch.TargetTransport == FileTransferTransportKind.RegularNkn)
+        {
+            return true;
+        }
+
+        if (client is not RealNknClientAdapter realClient)
+        {
+            return false;
+        }
+
+        return realClient.TryGetFileTransferRegularV4ActivationSendBlocker(
+                   out var blockerReason,
+                   out _,
+                   includeRegularV4Pressure: false) &&
+               IsReceiveStallActivationSendBlocker(blockerReason);
+    }
+
+    private bool ShouldSoftSettleRuntimeUnlockRetryAfterFallbackRepair(
+        long retiredOfferGeneration,
+        string sessionId,
+        out string settleReason)
+    {
+        settleReason = "none";
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? string.Empty : sessionId.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedSessionId))
+        {
+            return false;
+        }
+
+        var currentSessionId = currentSessionSecurityState.SessionId?.Value;
+        if (string.IsNullOrWhiteSpace(currentSessionId) ||
+            !string.Equals(currentSessionId.Trim(), normalizedSessionId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (TryGetFileTransferFallbackControlProofPendingSnapshot(
+                out var pendingSessionId,
+                out var pendingReason,
+                out var pendingLanes) &&
+            (pendingLanes & NknAccelerationLaneKind.File) == NknAccelerationLaneKind.File &&
+            IsSameSessionOrUnknown(pendingSessionId, normalizedSessionId))
+        {
+            lock (accelerationGate)
+            {
+                var state = runtimeUnlockRecoveryRetryState;
+                if (state is null ||
+                    state.RetryQueued ||
+                    state.RetiredOfferGeneration != retiredOfferGeneration ||
+                    !string.Equals(state.SessionId, normalizedSessionId, StringComparison.Ordinal))
+                {
+                    return false;
+                }
+            }
+
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=tuna_acceleration_runtime_unlock_retry_after_fallback_repair_soft_settle_deferred; session_id={SanitizeLogToken(normalizedSessionId)}; retired_generation={retiredOfferGeneration}; blocker_reason={SanitizeLogToken(pendingReason)}; blocker_remaining_ms=0; file_state=pending_control_proof; fallback_epoch=0");
+            ScheduleRuntimeUnlockRetryAfterFallbackRepairSoftSettle(
+                retiredOfferGeneration,
+                normalizedSessionId);
+            return false;
+        }
+
+        if (HasActiveRegularV4FileTransferRouteHint(normalizedSessionId))
+        {
+            lock (accelerationGate)
+            {
+                var state = runtimeUnlockRecoveryRetryState;
+                if (state is null ||
+                    state.RetryQueued ||
+                    state.RetiredOfferGeneration != retiredOfferGeneration ||
+                    !string.Equals(state.SessionId, normalizedSessionId, StringComparison.Ordinal))
+                {
+                    return false;
+                }
+            }
+
+            if (client is RealNknClientAdapter regularV4RealClient &&
+                regularV4RealClient.TryGetFileTransferRegularV4ActivationSendBlocker(
+                    out var regularV4BlockerReason,
+                    out var regularV4BlockerRemainingMs,
+                    includeRegularV4Pressure: false) &&
+                IsReceiveStallActivationSendBlocker(regularV4BlockerReason))
+            {
+                if (ShouldDeferRuntimeUnlockSoftSettleForReceiveStallBlocker(
+                        regularV4BlockerReason,
+                        regularV4BlockerRemainingMs))
+                {
+                    LocalOperationalLog.Warn(
+                        "NKN.Tuna",
+                        $"event=tuna_acceleration_runtime_unlock_retry_after_regular_v4_soft_settle_deferred; session_id={SanitizeLogToken(normalizedSessionId)}; retired_generation={retiredOfferGeneration}; blocker_reason={SanitizeLogToken(regularV4BlockerReason)}; blocker_remaining_ms={regularV4BlockerRemainingMs}");
+                    ScheduleRuntimeUnlockRetryAfterFallbackRepairSoftSettle(
+                        retiredOfferGeneration,
+                        normalizedSessionId);
+                    return false;
+                }
+
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=tuna_acceleration_runtime_unlock_retry_after_regular_v4_soft_settle_elapsed; session_id={SanitizeLogToken(normalizedSessionId)}; retired_generation={retiredOfferGeneration}; blocker_reason={SanitizeLogToken(regularV4BlockerReason)}; blocker_remaining_ms={regularV4BlockerRemainingMs}");
+                settleReason = "active_regular_v4_recovery_soft_settle_elapsed";
+                return true;
+            }
+
+            settleReason = "active_regular_v4_recovery_soft_settle";
+            return true;
+        }
+
+        TunaFallbackLaneState fileState;
+        long fallbackEpoch;
+        lock (accelerationGate)
+        {
+            var state = runtimeUnlockRecoveryRetryState;
+            if (state is null ||
+                state.RetryQueued ||
+                state.RetiredOfferGeneration != retiredOfferGeneration ||
+                !string.Equals(state.SessionId, normalizedSessionId, StringComparison.Ordinal) ||
+                !TryGetCurrentTunaFallbackProofStateUnsafe(normalizedSessionId, out var fallbackState) ||
+                (fallbackState.Lanes & NknAccelerationLaneKind.File) != NknAccelerationLaneKind.File ||
+                fallbackState.FileState is TunaFallbackLaneState.None or TunaFallbackLaneState.Recovered)
+            {
+                return false;
+            }
+
+            fileState = fallbackState.FileState;
+            fallbackEpoch = fallbackState.Epoch;
+        }
+
+        if (client is RealNknClientAdapter realClient &&
+            realClient.TryGetFileTransferRegularV4ActivationSendBlocker(
+                out var blockerReason,
+                out var blockerRemainingMs,
+                includeRegularV4Pressure: false) &&
+            IsReceiveStallActivationSendBlocker(blockerReason))
+        {
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=tuna_acceleration_runtime_unlock_retry_after_fallback_repair_soft_settle_deferred; session_id={SanitizeLogToken(normalizedSessionId)}; retired_generation={retiredOfferGeneration}; blocker_reason={SanitizeLogToken(blockerReason)}; blocker_remaining_ms={blockerRemainingMs}; file_state={FormatTunaFallbackLaneState(fileState)}; fallback_epoch={fallbackEpoch}");
+            ScheduleRuntimeUnlockRetryAfterFallbackRepairSoftSettle(
+                retiredOfferGeneration,
+                normalizedSessionId);
+            return false;
+        }
+
+        if (TryGetUnresolvedFileTransferV6TransportEpochForCurrentSession(out var pendingEpoch) &&
+            IsPostTunaFallbackRegularNknEpoch(pendingEpoch) &&
+            ShouldAllowRuntimeUnlockRetryForActivePostTunaFallbackRepair(pendingEpoch))
+        {
+            settleReason = "active_post_tuna_fallback_v6_repair";
+            return true;
+        }
+
+        if (HasActivePostTunaFallbackFileTransferRouteHint(normalizedSessionId))
+        {
+            settleReason = $"active_post_tuna_fallback_route_{FormatTunaFallbackLaneState(fileState)}_{fallbackEpoch}";
+            return true;
+        }
+
+        return false;
     }
 
     private void ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed(string trigger)
     {
-        RuntimeUnlockRecoveryRetryState? stateToSchedule = null;
-        var queuedBehindActiveNegotiation = false;
+        RuntimeUnlockRecoveryRetryState? stateSnapshot;
         lock (accelerationGate)
         {
             var state = runtimeUnlockRecoveryRetryState;
@@ -3954,6 +4750,52 @@ public sealed partial class NknSignalingTransport
                 !string.Equals(currentSessionId.Trim(), state.SessionId, StringComparison.Ordinal))
             {
                 runtimeUnlockRecoveryRetryState = null;
+                return;
+            }
+
+            stateSnapshot = state;
+        }
+
+        if (stateSnapshot is null)
+        {
+            return;
+        }
+
+        if (ShouldDeferRuntimeUnlockRetryForActivePostTunaFallbackRepair(stateSnapshot.SessionId))
+        {
+            lock (accelerationGate)
+            {
+                var state = runtimeUnlockRecoveryRetryState;
+                if (state is null ||
+                    state.RetryQueued ||
+                    state.RetiredOfferGeneration != stateSnapshot.RetiredOfferGeneration ||
+                    !string.Equals(state.SessionId, stateSnapshot.SessionId, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                state.Settled = true;
+            }
+
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=tuna_acceleration_runtime_unlock_retry_after_recovery_deferred_for_fallback_repair; session_id={SanitizeLogToken(stateSnapshot.SessionId)}; retired_generation={stateSnapshot.RetiredOfferGeneration}; retry_reason={SanitizeLogToken(stateSnapshot.RetryReason)}; recovery_reason={SanitizeLogToken(stateSnapshot.RecoveryReason)}; trigger={SanitizeLogToken(trigger)}");
+            ScheduleRuntimeUnlockRetryAfterFallbackRepairSoftSettle(
+                stateSnapshot.RetiredOfferGeneration,
+                stateSnapshot.SessionId);
+            return;
+        }
+
+        RuntimeUnlockRecoveryRetryState? stateToSchedule = null;
+        var queuedBehindActiveNegotiation = false;
+        lock (accelerationGate)
+        {
+            var state = runtimeUnlockRecoveryRetryState;
+            if (state is null ||
+                state.RetryQueued ||
+                state.RetiredOfferGeneration != stateSnapshot.RetiredOfferGeneration ||
+                !string.Equals(state.SessionId, stateSnapshot.SessionId, StringComparison.Ordinal))
+            {
                 return;
             }
 
@@ -4543,8 +5385,28 @@ public sealed partial class NknSignalingTransport
                 ct)
             .ConfigureAwait(false))
         {
+            if (requireObservedSend &&
+                TryRequestFileTransferTunaActivationOfferSendRecovery(
+                    purpose,
+                    activationSessionId,
+                    "bridge_recovery_wait_timeout",
+                    out var recoveryReason,
+                    out var recoverySessionId))
+            {
+                return AccelerationControlSendResult.RecoveryRequestedResult(
+                    recoveryReason ?? "tuna_activation_offer_send_timeout",
+                    recoverySessionId);
+            }
+
             return AccelerationControlSendResult.Failed;
         }
+
+        var queueObservedReason = requireObservedSend
+            ? queueAcceptedAsObservedReason?.Invoke()
+            : null;
+        Func<string?>? bulkQueueFallbackSkipReason = requireObservedSend
+            ? () => GetRuntimeUnlockBulkQueueFallbackObservedProofSkipReason(queueObservedReason)
+            : null;
 
         var bytes = EnvelopeCodec.Serialize(envelope);
         var controlTask = QueueControlEnvelopeAsync(target, envelope, ControlOutboundLane.High, ct);
@@ -4565,16 +5427,19 @@ public sealed partial class NknSignalingTransport
             LocalOperationalLog.Info(
                 "NKN.Tuna",
                 $"event=tuna_acceleration_control_bulk_bypass_started; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(envelope.Type)}; delay_ms=0; mode=control_to_bulk_endpoint");
-            bulkTask = SendAccelerationControlBulkCopyAsync(remoteBulkEndpoint, envelope, bytes, purpose, ct);
+            bulkTask = SendAccelerationControlBulkCopyAsync(
+                remoteBulkEndpoint,
+                envelope,
+                bytes,
+                purpose,
+                ct,
+                bulkQueueFallbackSkipReason);
             ObserveAccelerationControlSendTask(bulkTask, purpose, "control_to_bulk_endpoint");
         }
 
         if (IsAccelerationControlQueueAccepted(controlTask, ct, out var queueRejected))
         {
             var queueCompletedSuccessfully = controlTask.IsCompletedSuccessfully && controlTask.Result;
-            var queueObservedReason = requireObservedSend
-                ? queueAcceptedAsObservedReason?.Invoke()
-                : null;
             LocalOperationalLog.Info(
                 "NKN.Tuna",
                 $"event=tuna_acceleration_control_queue_accepted; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(envelope.Type)}; completed={(controlTask.IsCompletedSuccessfully ? 1 : 0)}");
@@ -4618,6 +5483,14 @@ public sealed partial class NknSignalingTransport
         {
             attempts.Add(new AccelerationControlSendAttempt(MapAccelerationControlSendAttemptAsync(controlTask, AccelerationObservedLaneControlQueue)));
         }
+        else if (!string.IsNullOrWhiteSpace(queueObservedReason))
+        {
+            attempts.Add(new AccelerationControlSendAttempt(MapAccelerationControlQueueAcceptedObservedAttemptAsync(
+                controlTask,
+                purpose,
+                envelope.Type,
+                queueObservedReason)));
+        }
         else
         {
             LocalOperationalLog.Info(
@@ -4651,6 +5524,58 @@ public sealed partial class NknSignalingTransport
         }
 
         return observedSend;
+    }
+
+    private string? GetRuntimeUnlockBulkQueueFallbackObservedProofSkipReason(string? queueObservedReason)
+    {
+        if (!IsCurrentRuntimeUnlockActivationOffer())
+        {
+            return null;
+        }
+
+        if (RuntimeUnlockOfferObservedSendBlockerReasonOverrideForTests?.Invoke(this) is { Length: > 0 } overrideReason)
+        {
+            return SanitizeLogToken(overrideReason);
+        }
+
+        if (IsRuntimeUnlockActiveFileTransferObservedSendBlocker(queueObservedReason) ||
+            string.Equals(queueObservedReason, "test_regular_v4_pressure", StringComparison.OrdinalIgnoreCase))
+        {
+            return SanitizeLogToken(queueObservedReason);
+        }
+
+        if (client is not RealNknClientAdapter realClient)
+        {
+            return null;
+        }
+
+        if (realClient.TryGetFileTransferRegularV4ActivationSendBlocker(
+                out var blockerReason,
+                out _,
+                includeRegularV4Pressure: true) &&
+            IsRuntimeUnlockActiveFileTransferObservedSendBlocker(blockerReason))
+        {
+            return SanitizeLogToken(blockerReason);
+        }
+
+        return realClient.HasActiveFileTransferRuntimeForActivationSend()
+            ? "active_file_transfer_runtime"
+            : null;
+    }
+
+    private static bool IsRuntimeUnlockActiveFileTransferObservedSendBlocker(string? reason)
+    {
+        if (IsRegularV4PressureActivationSendBlocker(reason) ||
+            IsReceiveStallActivationSendBlocker(reason))
+        {
+            return true;
+        }
+
+        return string.Equals(reason, "all_zero_receive_window", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(reason, "control_zero_receive_window", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(reason, "bulk_zero_receive_window", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(reason, "regular_v4_receive_stall_bypass", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(reason, "recent_zero_receive_health", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsAccelerationControlQueueAccepted(
@@ -4690,6 +5615,23 @@ public sealed partial class NknSignalingTransport
         => await attempt.ConfigureAwait(false)
             ? AccelerationControlSendResult.Success(lane)
             : AccelerationControlSendResult.Failed;
+
+    private static async Task<AccelerationControlSendResult> MapAccelerationControlQueueAcceptedObservedAttemptAsync(
+        Task<bool> attempt,
+        string purpose,
+        MsgType messageType,
+        string queueObservedReason)
+    {
+        if (!await attempt.ConfigureAwait(false))
+        {
+            return AccelerationControlSendResult.Failed;
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=tuna_acceleration_control_queue_accepted_as_observed; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(messageType)}; reason={SanitizeLogToken(queueObservedReason)}");
+        return AccelerationControlSendResult.Success(AccelerationObservedLaneControlQueueExplicitObserved);
+    }
 
     private static async Task<AccelerationControlSendResult> WaitForFirstSuccessfulAccelerationControlSendAsync(
         List<AccelerationControlSendAttempt> attempts,
@@ -4777,7 +5719,8 @@ public sealed partial class NknSignalingTransport
         Envelope envelope,
         byte[] bytes,
         string purpose,
-        CancellationToken ct)
+        CancellationToken ct,
+        Func<string?>? skipBulkQueueFallbackObservedProofReason = null)
     {
         try
         {
@@ -4799,6 +5742,15 @@ public sealed partial class NknSignalingTransport
             LocalOperationalLog.Warn(
                 "NKN.Tuna",
                 $"event=tuna_acceleration_control_bulk_bypass_priority_failed; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(envelope.Type)}; error={ex.GetType().Name}");
+        }
+
+        var skipReason = skipBulkQueueFallbackObservedProofReason?.Invoke();
+        if (!string.IsNullOrWhiteSpace(skipReason))
+        {
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=tuna_acceleration_control_bulk_queue_fallback_skipped; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(envelope.Type)}; reason=runtime_unlock_active_filetransfer_requires_direct_observed_send; blocker_reason={SanitizeLogToken(skipReason)}");
+            return AccelerationControlSendResult.Failed;
         }
 
         try
@@ -5320,23 +6272,42 @@ public sealed partial class NknSignalingTransport
             $"event=tuna_acceleration_remote_down; reason={SanitizeLogToken(down.Reason)}; lanes={string.Join(",", down.SupportedLanes)}");
     }
 
-    private void ScheduleAccelerationNegotiationRetry(string reason)
+    private bool ScheduleAccelerationNegotiationRetry(string reason)
     {
-        if (disposed ||
-            accelerationLane is not INknTunaAccelerationSession ||
-            IsAccelerationNegotiatedAndHealthy() ||
-            !IsSessionAccelerationEligible(out _))
+        var normalizedReason = SanitizeLogToken(reason);
+        var isRuntimeUnlockActivationRetry = IsRuntimeUnlockActivationRetryReason(normalizedReason);
+        if (disposed)
         {
-            return;
+            LogAccelerationRetryNotScheduled(normalizedReason, "disposed");
+            return false;
+        }
+
+        if (accelerationLane is not INknTunaAccelerationSession)
+        {
+            LogAccelerationRetryNotScheduled(normalizedReason, "missing_acceleration_lane");
+            return false;
+        }
+
+        if (IsAccelerationNegotiatedAndHealthy() &&
+            !ShouldAllowRuntimeUnlockRetryDespiteHealthyTransport(normalizedReason))
+        {
+            LogAccelerationRetryNotScheduled(normalizedReason, "already_healthy");
+            return false;
+        }
+
+        if (!IsSessionAccelerationEligible(out _))
+        {
+            LogAccelerationRetryNotScheduled(normalizedReason, "session_not_eligible");
+            return false;
         }
 
         if (TryGetUnresolvedFileTransferV6TransportEpochForCurrentSession(out var pendingEpoch) &&
-            !ShouldAllowAccelerationRetryDespiteUnresolvedV6Epoch(pendingEpoch, reason, "preflight"))
+            !ShouldAllowAccelerationRetryDespiteUnresolvedV6Epoch(pendingEpoch, normalizedReason, "preflight"))
         {
             LocalOperationalLog.Warn(
                 "NKN.Tuna",
-                $"event=tuna_acceleration_retry_blocked_v6_epoch_unresolved; reason={SanitizeLogToken(reason)}; session_id={SanitizeLogToken(pendingEpoch.SessionId)}; transfer_id={SanitizeLogToken(pendingEpoch.TransferId)}; direction={pendingEpoch.Direction.ToString().ToLowerInvariant()}; transport_epoch={pendingEpoch.TransportEpoch}; state={FormatFileTransferV6TransportEpochStateForLog(pendingEpoch.State)}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(pendingEpoch.HandoffKind)}; target_transport={FormatFileTransferTransportKindForLog(pendingEpoch.TargetTransport)}");
-            return;
+                $"event=tuna_acceleration_retry_blocked_v6_epoch_unresolved; reason={normalizedReason}; session_id={SanitizeLogToken(pendingEpoch.SessionId)}; transfer_id={SanitizeLogToken(pendingEpoch.TransferId)}; direction={pendingEpoch.Direction.ToString().ToLowerInvariant()}; transport_epoch={pendingEpoch.TransportEpoch}; state={FormatFileTransferV6TransportEpochStateForLog(pendingEpoch.State)}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(pendingEpoch.HandoffKind)}; target_transport={FormatFileTransferTransportKindForLog(pendingEpoch.TargetTransport)}");
+            return false;
         }
 
         if (TryGetFileTransferFallbackControlProofPendingSnapshot(out var pendingSessionId, out var pendingReason, out var pendingLanes) &&
@@ -5344,16 +6315,15 @@ public sealed partial class NknSignalingTransport
                 pendingSessionId,
                 pendingReason,
                 pendingLanes,
-                reason,
+                normalizedReason,
                 "preflight"))
         {
             LocalOperationalLog.Warn(
                 "NKN.Tuna",
-                $"event=tuna_acceleration_retry_blocked_fallback_control_unproven; reason={SanitizeLogToken(reason)}; fallback_reason={SanitizeLogToken(pendingReason)}; session_id={SanitizeLogToken(pendingSessionId ?? "none")}; lanes={FormatAccelerationLanesForLog(pendingLanes)}");
-            return;
+                $"event=tuna_acceleration_retry_blocked_fallback_control_unproven; reason={normalizedReason}; fallback_reason={SanitizeLogToken(pendingReason)}; session_id={SanitizeLogToken(pendingSessionId ?? "none")}; lanes={FormatAccelerationLanesForLog(pendingLanes)}");
+            return false;
         }
 
-        var isRuntimeUnlockActivationRetry = IsRuntimeUnlockActivationRetryReason(reason);
         var maxAttempts = isRuntimeUnlockActivationRetry
             ? RuntimeUnlockAccelerationNegotiationMaxRetryAttempts
             : AccelerationNegotiationMaxRetryAttempts;
@@ -5362,55 +6332,77 @@ public sealed partial class NknSignalingTransport
         {
             LocalOperationalLog.Warn(
                 "NKN.Tuna",
-                $"event=tuna_acceleration_retry_exhausted; reason={SanitizeLogToken(reason)}; attempts={attempt - 1}");
+                $"event=tuna_acceleration_retry_exhausted; reason={normalizedReason}; attempts={attempt - 1}");
             if (TryGetActiveFileTransferTunaActivationPauseForCurrentSession(out var pausedSessionId))
             {
                     LocalOperationalLog.Warn(
                         "NKN.Tuna",
-                        $"event=filetransfer_tuna_activation_retry_exhausted_resuming_regular_nkn; reason={SanitizeLogToken(reason)}; session_id={SanitizeLogToken(pausedSessionId ?? "none")}; attempts={attempt - 1}");
+                        $"event=filetransfer_tuna_activation_retry_exhausted_resuming_regular_nkn; reason={normalizedReason}; session_id={SanitizeLogToken(pausedSessionId ?? "none")}; attempts={attempt - 1}");
                 ResumeFileTransferDataSessionsAfterTunaActivationNegotiation(
-                    $"retry_exhausted_{SanitizeLogToken(reason)}",
+                    $"retry_exhausted_{normalizedReason}",
                     pausedSessionId,
                     "retry_exhausted");
-                return;
+                return false;
             }
 
             ResumeFileTransferDataSessionsAfterTunaActivationNegotiation(
-                $"retry_exhausted_{SanitizeLogToken(reason)}",
+                $"retry_exhausted_{normalizedReason}",
                 currentSessionSecurityState.SessionId?.Value,
                 "retry_exhausted");
-            return;
+            return false;
         }
 
-        var useListenerReadyFastRetry = ShouldUseListenerReadyFastRetry(reason);
+        var useListenerReadyFastRetry = ShouldUseListenerReadyFastRetry(normalizedReason);
         var delay = useListenerReadyFastRetry
             ? AccelerationListenerReadyRetryDelay
             : TimeSpan.FromMilliseconds(
                 AccelerationNegotiationRetryBaseDelay.TotalMilliseconds * Math.Pow(2, attempt - 1));
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=tuna_acceleration_retry_scheduled; reason={SanitizeLogToken(reason)}; attempt={attempt}; max_attempts={maxAttempts}; delay_ms={(int)delay.TotalMilliseconds}; listener_ready_reuse={(useListenerReadyFastRetry ? 1 : 0)}");
+            $"event=tuna_acceleration_retry_scheduled; reason={normalizedReason}; attempt={attempt}; max_attempts={maxAttempts}; delay_ms={(int)delay.TotalMilliseconds}; listener_ready_reuse={(useListenerReadyFastRetry ? 1 : 0)}");
         _ = Task.Run(
             async () =>
             {
                 try
                 {
                     await Task.Delay(delay, CancellationToken.None).ConfigureAwait(false);
-                    if (disposed ||
-                        IsAccelerationNegotiatedAndHealthy() ||
-                        HasPendingOutboundAccelerationOffer() ||
-                        HasPendingAccelerationAnswerAck() ||
-                        !IsSessionAccelerationEligible(out _))
+                    if (disposed)
                     {
+                        LogAccelerationRetryNotScheduled(normalizedReason, "delayed_disposed");
+                        return;
+                    }
+
+                    if (IsAccelerationNegotiatedAndHealthy() &&
+                        !ShouldAllowRuntimeUnlockRetryDespiteHealthyTransport(normalizedReason))
+                    {
+                        LogAccelerationRetryNotScheduled(normalizedReason, "delayed_already_healthy");
+                        return;
+                    }
+
+                    if (HasPendingOutboundAccelerationOffer())
+                    {
+                        LogAccelerationRetryNotScheduled(normalizedReason, "delayed_pending_offer");
+                        return;
+                    }
+
+                    if (HasPendingAccelerationAnswerAck())
+                    {
+                        LogAccelerationRetryNotScheduled(normalizedReason, "delayed_pending_answer_ack");
+                        return;
+                    }
+
+                    if (!IsSessionAccelerationEligible(out _))
+                    {
+                        LogAccelerationRetryNotScheduled(normalizedReason, "delayed_session_not_eligible");
                         return;
                     }
 
                     if (TryGetUnresolvedFileTransferV6TransportEpochForCurrentSession(out var delayedPendingEpoch) &&
-                        !ShouldAllowAccelerationRetryDespiteUnresolvedV6Epoch(delayedPendingEpoch, reason, "delayed"))
+                        !ShouldAllowAccelerationRetryDespiteUnresolvedV6Epoch(delayedPendingEpoch, normalizedReason, "delayed"))
                     {
                         LocalOperationalLog.Warn(
                             "NKN.Tuna",
-                            $"event=tuna_acceleration_retry_skipped_v6_epoch_unresolved; reason={SanitizeLogToken(reason)}; session_id={SanitizeLogToken(delayedPendingEpoch.SessionId)}; transfer_id={SanitizeLogToken(delayedPendingEpoch.TransferId)}; direction={delayedPendingEpoch.Direction.ToString().ToLowerInvariant()}; transport_epoch={delayedPendingEpoch.TransportEpoch}; state={FormatFileTransferV6TransportEpochStateForLog(delayedPendingEpoch.State)}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(delayedPendingEpoch.HandoffKind)}; target_transport={FormatFileTransferTransportKindForLog(delayedPendingEpoch.TargetTransport)}");
+                            $"event=tuna_acceleration_retry_skipped_v6_epoch_unresolved; reason={normalizedReason}; session_id={SanitizeLogToken(delayedPendingEpoch.SessionId)}; transfer_id={SanitizeLogToken(delayedPendingEpoch.TransferId)}; direction={delayedPendingEpoch.Direction.ToString().ToLowerInvariant()}; transport_epoch={delayedPendingEpoch.TransportEpoch}; state={FormatFileTransferV6TransportEpochStateForLog(delayedPendingEpoch.State)}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(delayedPendingEpoch.HandoffKind)}; target_transport={FormatFileTransferTransportKindForLog(delayedPendingEpoch.TargetTransport)}");
                         return;
                     }
 
@@ -5419,32 +6411,92 @@ public sealed partial class NknSignalingTransport
                             delayedPendingSessionId,
                             delayedPendingReason,
                             delayedPendingLanes,
-                            reason,
+                            normalizedReason,
                             "delayed"))
                     {
                         LocalOperationalLog.Warn(
                             "NKN.Tuna",
-                            $"event=tuna_acceleration_retry_skipped_fallback_control_unproven; reason={SanitizeLogToken(reason)}; fallback_reason={SanitizeLogToken(delayedPendingReason)}; session_id={SanitizeLogToken(delayedPendingSessionId ?? "none")}; lanes={FormatAccelerationLanesForLog(delayedPendingLanes)}");
+                            $"event=tuna_acceleration_retry_skipped_fallback_control_unproven; reason={normalizedReason}; fallback_reason={SanitizeLogToken(delayedPendingReason)}; session_id={SanitizeLogToken(delayedPendingSessionId ?? "none")}; lanes={FormatAccelerationLanesForLog(delayedPendingLanes)}");
                         return;
                     }
 
                     LocalOperationalLog.Info(
                         "NKN.Tuna",
-                        $"event=tuna_acceleration_retry_fired; reason={SanitizeLogToken(reason)}; listener_ready_reuse={(useListenerReadyFastRetry ? 1 : 0)}");
+                        $"event=tuna_acceleration_retry_fired; reason={normalizedReason}; listener_ready_reuse={(useListenerReadyFastRetry ? 1 : 0)}");
                     ScheduleAccelerationNegotiationIfEligible(
                         isRuntimeUnlockActivationRetry ||
-                        string.Equals(SanitizeLogToken(reason), "peer_user_stopped_tuna", StringComparison.Ordinal)
+                        string.Equals(normalizedReason, "peer_user_stopped_tuna", StringComparison.Ordinal)
                             ? "runtime_unlock"
-                            : $"retry_{reason}");
+                            : $"retry_{normalizedReason}");
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     LocalOperationalLog.Warn(
                         "NKN.Tuna",
-                        $"event=tuna_acceleration_retry_failed; reason={SanitizeLogToken(reason)}; error={ex.GetType().Name}");
+                        $"event=tuna_acceleration_retry_failed; reason={normalizedReason}; error={ex.GetType().Name}");
                 }
             },
             CancellationToken.None);
+        return true;
+    }
+
+    private void LogAccelerationRetryNotScheduled(string reason, string skipReason)
+    {
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=tuna_acceleration_retry_not_scheduled; reason={SanitizeLogToken(reason)}; skip_reason={SanitizeLogToken(skipReason)}");
+    }
+
+    private bool ShouldAllowRuntimeUnlockRetryDespiteHealthyTransport(string reason)
+    {
+        if (!IsRuntimeUnlockActivationRetryReason(reason))
+        {
+            return false;
+        }
+
+        var sessionId = currentSessionSecurityState.SessionId?.Value;
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return false;
+        }
+
+        if (HasActiveRegularV4FileTransferRouteHint(sessionId) ||
+            HasActivePostTunaFallbackFileTransferRouteHint(sessionId))
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=tuna_acceleration_retry_allowed_despite_healthy_transport; reason={SanitizeLogToken(reason)}; session_id={SanitizeLogToken(sessionId)}; active_filetransfer_route=1");
+            return true;
+        }
+
+        if (HasActiveFileTransferDataSessionForSession(sessionId))
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=tuna_acceleration_retry_allowed_despite_healthy_transport; reason={SanitizeLogToken(reason)}; session_id={SanitizeLogToken(sessionId)}; active_filetransfer_session=1");
+            return true;
+        }
+
+        return TryGetUnresolvedFileTransferV6TransportEpochForCurrentSession(out var pendingEpoch) &&
+               IsPostTunaFallbackRegularNknEpoch(pendingEpoch) &&
+               ShouldAllowRuntimeUnlockRetryForActivePostTunaFallbackRepair(pendingEpoch);
+    }
+
+    private bool HasActiveFileTransferDataSessionForSession(string sessionId)
+    {
+        lock (gate)
+        {
+            foreach (var session in fileTransferDataSessions.Values)
+            {
+                if (!session.IsDisposed &&
+                    string.Equals(session.SessionId, sessionId, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     private static bool IsRegularNknRecoveryEpoch(FileTransferV6TransportEpochSnapshot snapshot)
@@ -5463,19 +6515,23 @@ public sealed partial class NknSignalingTransport
         if (IsPostTunaFallbackRegularNknEpoch(pendingEpoch) &&
             IsRuntimeUnlockActivationRetryReason(reason))
         {
-            if (!ShouldAllowRuntimeUnlockRetryForActivePostTunaFallbackRepair(pendingEpoch))
-            {
-                return false;
-            }
-
             LocalOperationalLog.Info(
                 "NKN.Tuna",
-                $"event=tuna_acceleration_retry_allowed_post_tuna_fallback_unresolved; reason={SanitizeLogToken(reason)}; stage={SanitizeLogToken(stage)}; session_id={SanitizeLogToken(pendingEpoch.SessionId)}; transfer_id={SanitizeLogToken(pendingEpoch.TransferId)}; direction={pendingEpoch.Direction.ToString().ToLowerInvariant()}; transport_epoch={pendingEpoch.TransportEpoch}; state={FormatFileTransferV6TransportEpochStateForLog(pendingEpoch.State)}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(pendingEpoch.HandoffKind)}; target_transport={FormatFileTransferTransportKindForLog(pendingEpoch.TargetTransport)}");
-            return true;
+                $"event=tuna_acceleration_retry_blocked_post_tuna_fallback_unresolved; reason={SanitizeLogToken(reason)}; stage={SanitizeLogToken(stage)}; session_id={SanitizeLogToken(pendingEpoch.SessionId)}; transfer_id={SanitizeLogToken(pendingEpoch.TransferId)}; direction={pendingEpoch.Direction.ToString().ToLowerInvariant()}; transport_epoch={pendingEpoch.TransportEpoch}; state={FormatFileTransferV6TransportEpochStateForLog(pendingEpoch.State)}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(pendingEpoch.HandoffKind)}; target_transport={FormatFileTransferTransportKindForLog(pendingEpoch.TargetTransport)}");
+            return false;
         }
 
         if (!IsRegularNknRecoveryEpoch(pendingEpoch))
         {
+            return false;
+        }
+
+        if (IsRuntimeUnlockActivationRetryReason(reason) &&
+            HasActivePostTunaFallbackFileTransferRouteHint(pendingEpoch.SessionId))
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=tuna_acceleration_retry_blocked_regular_nkn_recovery_for_post_tuna_fallback; reason={SanitizeLogToken(reason)}; stage={SanitizeLogToken(stage)}; session_id={SanitizeLogToken(pendingEpoch.SessionId)}; transfer_id={SanitizeLogToken(pendingEpoch.TransferId)}; direction={pendingEpoch.Direction.ToString().ToLowerInvariant()}; transport_epoch={pendingEpoch.TransportEpoch}; state={FormatFileTransferV6TransportEpochStateForLog(pendingEpoch.State)}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(pendingEpoch.HandoffKind)}; target_transport={FormatFileTransferTransportKindForLog(pendingEpoch.TargetTransport)}");
             return false;
         }
 
@@ -5539,6 +6595,23 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
+        if (IsRuntimeUnlockActivationRecoveryFailure(pendingReason) &&
+            HasActiveRegularV4FileTransferRouteHint(normalizedPendingSessionId))
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=tuna_acceleration_retry_allowed_runtime_unlock_recovery_unproven; reason={SanitizeLogToken(retryReason)}; fallback_reason={SanitizeLogToken(pendingReason)}; stage={SanitizeLogToken(stage)}; session_id={SanitizeLogToken(normalizedPendingSessionId)}; lanes={FormatAccelerationLanesForLog(pendingLanes)}; active_regular_v4_route=1");
+            return true;
+        }
+
+        if (HasActivePostTunaFallbackFileTransferRouteHint(normalizedPendingSessionId))
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=tuna_acceleration_retry_blocked_fallback_control_unproven_for_post_tuna_fallback; reason={SanitizeLogToken(retryReason)}; fallback_reason={SanitizeLogToken(pendingReason)}; stage={SanitizeLogToken(stage)}; session_id={SanitizeLogToken(normalizedPendingSessionId)}; lanes={FormatAccelerationLanesForLog(pendingLanes)}");
+            return false;
+        }
+
         TunaFallbackLaneState fileState;
         V6TransportEpochState? fileV6EpochState;
         long fileV6TransportEpoch;
@@ -5567,6 +6640,10 @@ public sealed partial class NknSignalingTransport
         return true;
     }
 
+    private static bool IsSameSessionOrUnknown(string? candidateSessionId, string sessionId)
+        => string.IsNullOrWhiteSpace(candidateSessionId) ||
+           string.Equals(candidateSessionId.Trim(), sessionId.Trim(), StringComparison.Ordinal);
+
     private void RejectAccelerationOfferPreflight(
         string trigger,
         string reason,
@@ -5587,7 +6664,10 @@ public sealed partial class NknSignalingTransport
 
         if (shouldRetry)
         {
-            ScheduleAccelerationNegotiationRetry($"preflight_{normalizedReason}");
+            var retryReason = IsRuntimeUnlockNegotiationReason(normalizedTrigger)
+                ? $"runtime_unlock_preflight_{normalizedReason}"
+                : $"preflight_{normalizedReason}";
+            ScheduleAccelerationNegotiationRetry(retryReason);
         }
     }
 

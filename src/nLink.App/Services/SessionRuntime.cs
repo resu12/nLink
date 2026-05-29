@@ -249,6 +249,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
     private readonly object remoteControlMouseMoveQueueGate = new();
     private readonly object fileTransferTerminalLogGate = new();
     private readonly HashSet<string> loggedFileTransferTerminalKeys = new(StringComparer.Ordinal);
+    private SessionFileTransferSnapshot latestFileTransferSnapshot = new(null, null);
     private string? preservedDevLocalPeerAddress;
     private string lastAuthorizationDenialReason = "(none)";
 

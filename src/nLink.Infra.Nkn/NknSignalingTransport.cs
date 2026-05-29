@@ -47,6 +47,13 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         string Source,
         DateTimeOffset RecordedUtc);
 
+    private readonly record struct FileTransferPostTunaFallbackRepairProofHint(
+        string SessionId,
+        string TransferId,
+        string ProofKind,
+        string Direction,
+        DateTimeOffset ObservedUtc);
+
     private sealed class RecoveryBurstLease
     {
         public string SessionId { get; init; } = string.Empty;
@@ -94,6 +101,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private static readonly TimeSpan ScreenShareControlBootstrapFollowerRetryDelay = TimeSpan.FromMilliseconds(140);
     private static readonly TimeSpan ScreenShareLaneRecentDropWindow = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan FileTransferFallbackUnprovenProbeDelay = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan FileTransferPostTunaFallbackRepairProofFreshness = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan FileTransferCancelEchoMinInterval = TimeSpan.FromMilliseconds(750);
     private static readonly TimeSpan FileTransferControlReceiveStallRecoveryBroadcastCooldown = TimeSpan.FromSeconds(30);
 
@@ -138,6 +146,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private readonly Dictionary<string, DateTimeOffset> fileTransferCancelEchoLastSent = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TransportFileTransferDataSession> fileTransferDataSessions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FileTransferRouteHint> fileTransferRouteHints = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, FileTransferPostTunaFallbackRepairProofHint> fileTransferPostTunaFallbackRepairProofHints = new(StringComparer.Ordinal);
     private readonly HashSet<string> fileTransferDataSessionRemoteOpenSuppressed = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FileTransferV6PendingHandoffIntent> pendingFileTransferV6HandoffsBySession = new(StringComparer.Ordinal);
     private readonly object fileTransferFallbackProofGate = new();
@@ -151,6 +160,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private long observedFileTransferV6TransportEpochTerminalCount;
     private FileTransferV6TransportEpochSnapshot? lastRecoveredFileTransferV6RegularNknEpoch;
     private long fileTransferControlReceiveStallRecoveryBroadcastLastTick;
+    private long bridgeReceiveStallLivenessProofSequence;
     private readonly SortedDictionary<long, InboundFileTransferDispatchWork> pendingInboundFileTransferControlDispatch = new();
     private readonly NknLifecycleChannel lifecycleChannel;
     private readonly NknSecureControlChannel controlChannel;
@@ -209,6 +219,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private bool fileTransferFallbackProofProbeScheduled;
     private bool fileTransferFallbackBulkProofObserved;
     private bool fileTransferFallbackControlProofObserved;
+    private int bridgeReceiveStallRecoveryActive;
     private SessionId? activeApprovedSessionId;
     private PeerAddress? activeApprovedHelperAddress;
     private LinkedListNode<QueuedControlEnvelope>? queuedLowPriorityMouseMoveNode;
@@ -2428,6 +2439,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
 
         if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryStarted)
         {
+            Volatile.Write(ref bridgeReceiveStallRecoveryActive, 1);
             var recoveryReason = string.IsNullOrWhiteSpace(e.ExitReasonText) ? "receive_stall_recovery" : e.ExitReasonText;
             var sessionId = currentSessionSecurityState.SessionId?.Value;
             MarkFileTransferTunaActivationBridgeRecoveryStarted(recoveryReason);
@@ -2435,12 +2447,31 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
                 "offer_interrupted_by_bridge_recovery",
                 recoveryReason,
                 "receive_stall_recovery_started");
-            if (ShouldSuppressFileTransferTransportRecoveredForTunaActivationPause("receive_stall_recovery_started", out _))
+            var sessionLivenessReceiveRecovery = IsSessionLivenessReceiveRecoveryReason(recoveryReason);
+            var protectedActivePostTunaFallbackRepair =
+                ShouldProtectPostTunaFallbackAvailabilityDuringRuntimeUnlockRecovery(
+                    sessionId,
+                    recoveryReason,
+                    "receive_stall_recovery_started",
+                    out _);
+            if (!protectedActivePostTunaFallbackRepair &&
+                ShouldSuppressFileTransferTransportRecoveredForTunaActivationPause("receive_stall_recovery_started", out _))
             {
                 return;
             }
 
-            if (ShouldUseFileTransferV6EpochForRegularNknRecovery(sessionId))
+            if (protectedActivePostTunaFallbackRepair)
+            {
+                // Runtime-unlock offer recovery still retires/retries the Tuna offer, but it must
+                // not publish transport unavailability into an actively repairing fallback V6 route.
+            }
+            else if (sessionLivenessReceiveRecovery)
+            {
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=filetransfer_session_liveness_receive_recovery_availability_preserved; session_id={SanitizeLogToken(sessionId ?? "none")}; transfer_id=(unknown); direction=unknown; reason={SanitizeLogToken(recoveryReason)}; trigger=receive_stall_recovery_started");
+            }
+            else if (ShouldUseFileTransferV6EpochForRegularNknRecovery(sessionId))
             {
                 var handoffKind = FileTransferTransportHandoffKind.RegularNknRecovery;
                 var markProofPending = true;
@@ -2463,11 +2494,22 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
                         lanes: NknAccelerationLaneKind.File);
                 }
 
+                var deferResumeUntilRecoveryCompletes = ShouldDeferPostTunaFallbackReceiveStallRecoveryStart(
+                    recoveryReason,
+                    sessionId,
+                    handoffKind);
+                if (deferResumeUntilRecoveryCompletes)
+                {
+                    LocalOperationalLog.Info(
+                        "NKN.Tuna",
+                        $"event=filetransfer_post_tuna_fallback_receive_recovery_start_handoff_deferred; session_id={SanitizeLogToken(sessionId ?? "none")}; reason={SanitizeLogToken(recoveryReason)}; handoff_kind={handoffKind.ToString().ToLowerInvariant()}; trigger=receive_stall_recovery_started");
+                }
+
                 SetFileTransferDataSessionsAvailability(
                     isAvailable: false,
                     reason: "receive_stall_recovery",
-                    requiresResumeRequest: true,
-                    handoffKind: handoffKind,
+                    requiresResumeRequest: !deferResumeUntilRecoveryCompletes,
+                    handoffKind: deferResumeUntilRecoveryCompletes ? FileTransferTransportHandoffKind.None : handoffKind,
                     targetTransport: FileTransferTransportKind.RegularNkn);
             }
             else
@@ -2486,68 +2528,52 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
 
         if (e.Kind == BridgeLifecycleEventKind.Ready)
         {
-            ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed("bridge_ready");
-            if (IsFileTransferFallbackNknProofPending())
+            if (ShouldDeferBridgeProcessReadyUntilReceiveStallRecoveryCompletes(e))
             {
                 var sessionId = SanitizeLogToken(currentSessionSecurityState.SessionId?.Value ?? "none");
                 LocalOperationalLog.Info(
                     "NKN.Tuna",
-                    $"event=filetransfer_fallback_nkn_ready_unproven; session_id={sessionId}; reason=bridge_ready_waiting_for_receive_proof");
-                SetFileTransferDataSessionsAvailability(
-                    isAvailable: false,
-                    reason: "transport_recovered_unproven",
-                    requiresResumeRequest: true,
-                    handoffKind: FileTransferTransportHandoffKind.RegularNknRecovery,
-                    targetTransport: FileTransferTransportKind.RegularNkn);
-                ScheduleFileTransferFallbackNknProbeIfPending("bridge_ready_unproven");
+                    $"event=filetransfer_bridge_ready_deferred_until_receive_stall_recovery_completed; session_id={sessionId}; proof_pending={(IsFileTransferFallbackNknProofPending() ? 1 : 0)}; start_mode={e.StartMode?.ToString().ToLowerInvariant() ?? "none"}");
             }
             else
             {
-                if (!ShouldSuppressFileTransferTransportRecoveredForTunaActivationPause("bridge_ready", out _))
-                {
-                    SetFileTransferDataSessionsAvailability(
-                        isAvailable: true,
-                        reason: "transport_recovered",
-                        requiresResumeRequest: false,
-                        handoffKind: FileTransferTransportHandoffKind.None,
-                        targetTransport: FileTransferTransportKind.RegularNkn);
-                }
+                HandleFileTransferBridgeRecovered(
+                    runtimeUnlockTrigger: "bridge_ready",
+                    recoveredReason: "bridge_ready",
+                    pendingLogEvent: "filetransfer_fallback_nkn_ready_unproven",
+                    pendingLogReason: "bridge_ready_waiting_for_receive_proof",
+                    probeTrigger: "bridge_ready_unproven");
             }
+        }
+
+        if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryCompleted)
+        {
+            MarkFileTransferTunaActivationBridgeRecoverySettled("receive_stall_recovery_completed");
+            Volatile.Write(ref bridgeReceiveStallRecoveryActive, 0);
+            HandleFileTransferBridgeRecovered(
+                runtimeUnlockTrigger: "receive_stall_recovery_completed",
+                recoveredReason: "receive_stall_recovery_completed",
+                pendingLogEvent: "filetransfer_fallback_nkn_recovery_completed_unproven",
+                pendingLogReason: "receive_stall_recovery_completed_waiting_for_receive_proof",
+                probeTrigger: "receive_stall_recovery_completed_unproven");
         }
 
         if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryReceiveResumed)
         {
+            RaiseBridgeReceiveStallSessionLivenessProof(e);
             MarkFileTransferTunaActivationBridgeRecoverySettled("receive_resumed");
-            if (IsFileTransferFallbackNknProofPending())
-            {
-                var sessionId = SanitizeLogToken(currentSessionSecurityState.SessionId?.Value ?? "none");
-                LocalOperationalLog.Info(
-                    "NKN.Tuna",
-                    $"event=filetransfer_fallback_nkn_receive_resumed_unproven; session_id={sessionId}; reason=waiting_for_file_transfer_bulk_receive_proof");
-                SetFileTransferDataSessionsAvailability(
-                    isAvailable: false,
-                    reason: "transport_recovered_unproven",
-                    requiresResumeRequest: true,
-                    handoffKind: FileTransferTransportHandoffKind.RegularNknRecovery,
-                    targetTransport: FileTransferTransportKind.RegularNkn);
-                ScheduleFileTransferFallbackNknProbeIfPending("receive_resumed_unproven");
-            }
-            else
-            {
-                if (!ShouldSuppressFileTransferTransportRecoveredForTunaActivationPause("receive_resumed", out _))
-                {
-                    SetFileTransferDataSessionsAvailability(
-                        isAvailable: true,
-                        reason: "transport_recovered",
-                        requiresResumeRequest: false,
-                        handoffKind: FileTransferTransportHandoffKind.None,
-                        targetTransport: FileTransferTransportKind.RegularNkn);
-                }
-            }
+            Volatile.Write(ref bridgeReceiveStallRecoveryActive, 0);
+            HandleFileTransferBridgeRecovered(
+                runtimeUnlockTrigger: "receive_resumed",
+                recoveredReason: "receive_resumed",
+                pendingLogEvent: "filetransfer_fallback_nkn_receive_resumed_unproven",
+                pendingLogReason: "waiting_for_file_transfer_bulk_receive_proof",
+                probeTrigger: "receive_resumed_unproven");
         }
 
         if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryExhausted)
         {
+            Volatile.Write(ref bridgeReceiveStallRecoveryActive, 0);
             MarkFileTransferTunaActivationBridgeRecoverySettled("receive_stall_recovery_exhausted");
             var sessionId = SanitizeLogToken(currentSessionSecurityState.SessionId?.Value ?? "none");
             var reason = string.IsNullOrWhiteSpace(e.ExitReasonText)
@@ -2585,6 +2611,21 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
                     handoffKind: FileTransferTransportHandoffKind.RegularNknRecovery,
                     targetTransport: FileTransferTransportKind.RegularNkn);
                 ScheduleFileTransferFallbackNknProbeIfPending("receive_stall_recovery_exhausted");
+                if (IsRuntimeUnlockActivationRecoveryFailure(reason))
+                {
+                    LocalOperationalLog.Warn(
+                        "NKN.Tuna",
+                        $"event=filetransfer_activation_recovery_exhausted_session_disconnect_suppressed; session_id={sessionId}; reason={reason}; active_file_transfer_session=1");
+                    BridgeLifecycle?.Invoke(
+                        this,
+                        e with
+                        {
+                            Kind = BridgeLifecycleEventKind.ReceiveStallRecoveryDeferred,
+                            ExitReasonText = $"reason=runtime_unlock_recovery_exhausted:stall={reason}:connect=core_filetransfer_request"
+                        });
+                    return;
+                }
+
                 BridgeLifecycle?.Invoke(this, e);
                 return;
             }
@@ -2601,6 +2642,119 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         }
 
         BridgeLifecycle?.Invoke(this, e);
+    }
+
+    private bool ShouldDeferBridgeProcessReadyUntilReceiveStallRecoveryCompletes(BridgeLifecycleEvent e)
+    {
+        if (Volatile.Read(ref bridgeReceiveStallRecoveryActive) == 0)
+        {
+            return false;
+        }
+
+        // Ready with a start mode is emitted by the local bridge hello/pong path.
+        // During receive-stall recovery that only proves the child process is alive;
+        // NKN control/bulk clients may still be reconnecting and cannot yet carry
+        // post-Tuna fallback checkpoint/frontier proof.
+        return e.StartMode.HasValue;
+    }
+
+    private void HandleFileTransferBridgeRecovered(
+        string runtimeUnlockTrigger,
+        string recoveredReason,
+        string pendingLogEvent,
+        string pendingLogReason,
+        string probeTrigger)
+    {
+        ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed(runtimeUnlockTrigger);
+        if (IsFileTransferFallbackNknProofPending())
+        {
+            var sessionId = SanitizeLogToken(currentSessionSecurityState.SessionId?.Value ?? "none");
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event={pendingLogEvent}; session_id={sessionId}; reason={pendingLogReason}");
+            SetFileTransferDataSessionsAvailability(
+                isAvailable: false,
+                reason: "transport_recovered_unproven",
+                requiresResumeRequest: true,
+                handoffKind: FileTransferTransportHandoffKind.RegularNknRecovery,
+                targetTransport: FileTransferTransportKind.RegularNkn);
+            ScheduleFileTransferFallbackNknProbeIfPending(probeTrigger);
+            return;
+        }
+
+        if (!ShouldSuppressFileTransferTransportRecoveredForTunaActivationPause(recoveredReason, out _))
+        {
+            SetFileTransferDataSessionsAvailability(
+                isAvailable: true,
+                reason: "transport_recovered",
+                requiresResumeRequest: false,
+                handoffKind: FileTransferTransportHandoffKind.None,
+                targetTransport: FileTransferTransportKind.RegularNkn);
+        }
+    }
+
+    private void RaiseBridgeReceiveStallSessionLivenessProof(BridgeLifecycleEvent e)
+    {
+        if (e.TotalMessagesReceivedSinceLast <= 0)
+        {
+            return;
+        }
+
+        var sessionId = currentSessionSecurityState.SessionId?.Value;
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return;
+        }
+
+        var lane =
+            e.ControlMessagesReceivedSinceLast > 0 ? "bridge_control" :
+            e.BulkMessagesReceivedSinceLast > 0 ? "bridge_bulk" :
+            e.MediaMessagesReceivedSinceLast > 0 ? "bridge_media" :
+            "bridge";
+        RaiseSessionLivenessProof(
+            sessionId,
+            generation: 0,
+            Interlocked.Increment(ref bridgeReceiveStallLivenessProofSequence),
+            "bridge_receive_stall_recovery_receive_resumed",
+            lane);
+    }
+
+    private static bool IsRuntimeUnlockActivationRecoveryFailure(string reason)
+        => !string.IsNullOrWhiteSpace(reason) &&
+           reason.Contains("tuna_activation_offer_send_timeout", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsPostTunaFallbackReceiveStallRecoveryReason(string? reason)
+        => !string.IsNullOrWhiteSpace(reason) &&
+           reason.Trim().StartsWith("post_tuna_fallback", StringComparison.OrdinalIgnoreCase);
+
+    private bool ShouldDeferPostTunaFallbackReceiveStallRecoveryStart(
+        string? reason,
+        string? sessionId,
+        FileTransferTransportHandoffKind handoffKind)
+    {
+        if (IsPostTunaFallbackReceiveStallRecoveryReason(reason) ||
+            handoffKind == FileTransferTransportHandoffKind.TunaToNormalFallback ||
+            IsFileTransferFallbackNknProofPending())
+        {
+            return true;
+        }
+
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId)
+            ? currentSessionSecurityState.SessionId?.Value
+            : sessionId.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedSessionId))
+        {
+            return false;
+        }
+
+        lock (accelerationGate)
+        {
+            return TryGetCurrentTunaFallbackProofStateUnsafe(normalizedSessionId, out var state) &&
+                   (state.Lanes & NknAccelerationLaneKind.File) == NknAccelerationLaneKind.File &&
+                   state.FileState is TunaFallbackLaneState.Pending or
+                       TunaFallbackLaneState.WaitingForRegularNkn or
+                       TunaFallbackLaneState.MediaReady;
+        }
     }
 
     private void OnSecureScreenShareFrameReady(object? sender, ScreenShareVideoFrameReadyEventArgs e)

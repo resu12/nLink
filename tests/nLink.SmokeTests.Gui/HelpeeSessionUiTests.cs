@@ -340,6 +340,102 @@ public sealed class HelpeeSessionUiTests : SessionHeaderAndBannerTestBase
         Assert.False(helpee.RequestHelpCommand.CanExecute(null));
     }
 
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelpeeViewModel_AcceptedActiveSessionFailure_KeepsConnectionLostVisible()
+    {
+        using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport());
+        var helperTarget = new PeerAddress("nlink-helper.accepted.active.failure");
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, CreateNknTestConfig(), runtime);
+
+        SetPrivateField(
+            runtime,
+            "<PendingOutboundHelpRequestDecision>k__BackingField",
+            new HelpRequestDecisionMessage(
+                "hr_accepted_active_failure",
+                new PeerAddress("helpee.accepted.active.failure"),
+                helperTarget,
+                Accepted: true,
+                Reason: null));
+        SetPrivateField(runtime, "state", SessionRuntimeState.Failed);
+        SetPrivateField(runtime, "transportState", TransportState.Failed);
+        SetPrivateField(runtime, "statusText", "Connection lost.");
+        SetPrivateField(runtime, "currentFlowSnapshot", runtime.FlowSnapshot with
+        {
+            Phase = SessionFlowPhase.Failed,
+            UiPhase = SessionUiPhase.Failed,
+            Role = SessionRuntimeRole.Helpee,
+            RuntimeState = SessionRuntimeState.Failed,
+            TransportState = TransportState.Failed,
+            LastEndOrigin = SessionFlowEndOrigin.Failed,
+            TerminalKind = SessionTerminalKind.Failed,
+            TerminalStatusText = "Connection lost.",
+            FailureTitle = "Connection lost",
+            FailureMessage = "Connection lost. Check the connection and try again.",
+            FailureActionText = "Try again",
+            ShouldClearConversationUi = true,
+            ShouldSuppressConnectedControls = true,
+            DisplayStatusText = "Connection lost.",
+            DisplayConnectionState = "Failed",
+            ShowRetryAction = true,
+            ShowDiagnosticsAction = true,
+            PostTerminalAction = SessionFlowPostTerminalAction.None,
+            FailureReason = "session_liveness_timeout",
+        });
+
+        InvokePrivateMethod(helpee, "SyncFromRuntime");
+
+        Assert.Equal(SessionUiPhase.Failed, helpee.EffectivePhase);
+        Assert.Equal("Failed", helpee.ConnectionState);
+        Assert.Equal("Connection lost.", helpee.ConnectionStatus);
+        Assert.Equal("Connection lost", helpee.HeaderStatusText);
+        Assert.True(helpee.ShowFailurePanel);
+        Assert.False(helpee.RequestHelpCommand.CanExecute(null));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelpeeViewModel_LivenessTimeoutBlocksAutomaticWaitingRestart()
+    {
+        using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport());
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, CreateNknTestConfig(), runtime);
+
+        SetPrivateField(runtime, "state", SessionRuntimeState.Failed);
+        SetPrivateField(runtime, "transportState", TransportState.Failed);
+        SetPrivateField(runtime, "statusText", "Connection lost.");
+        SetPrivateField(runtime, "currentFlowSnapshot", runtime.FlowSnapshot with
+        {
+            Phase = SessionFlowPhase.Failed,
+            UiPhase = SessionUiPhase.Failed,
+            Role = SessionRuntimeRole.Helpee,
+            RuntimeState = SessionRuntimeState.Failed,
+            TransportState = TransportState.Failed,
+            LastEndOrigin = SessionFlowEndOrigin.Failed,
+            TerminalKind = SessionTerminalKind.Failed,
+            TerminalStatusText = "Connection lost.",
+            FailureTitle = "Connection lost",
+            FailureMessage = "The session ended due to a connection problem.",
+            FailureActionText = "Retry",
+            ShouldClearConversationUi = true,
+            ShouldSuppressConnectedControls = true,
+            DisplayStatusText = "Connection lost.",
+            DisplayConnectionState = "Failed",
+            ShowRetryAction = true,
+            ShowDiagnosticsAction = true,
+            PostTerminalAction = SessionFlowPostTerminalAction.None,
+            FailureReason = "session_liveness_timeout",
+        });
+
+        InvokePrivateMethod(helpee, "SyncFromRuntime");
+        InvokePrivateMethod(helpee, "RestartWaitingSession", false, false, null);
+
+        Assert.Equal(SessionUiPhase.Failed, helpee.EffectivePhase);
+        Assert.Equal("Failed", helpee.ConnectionState);
+        Assert.Equal("Connection lost.", helpee.ConnectionStatus);
+        Assert.True(helpee.ShowFailurePanel);
+        Assert.False(helpee.RequestHelpCommand.CanExecute(null));
+    }
+
     [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeeViewModel_HelperDisconnectsDuringPendingHelpRequest_ReturnsToStartingSetupState()

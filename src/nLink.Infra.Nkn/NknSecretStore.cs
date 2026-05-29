@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using NLink.Core.Diagnostics;
 
 namespace NLink.Infra.Nkn;
@@ -11,6 +12,8 @@ internal static class NknSecretStore
 {
     private const string SecretFileSuffix = ".seed";
     private const string SecretPurpose = "nLink.NknIdentitySeed.v2";
+    private const int TransientSecretReadRetryCount = 5;
+    private const int TransientSecretReadRetryDelayMs = 50;
     private static Func<IProtectedSeedBackend>? backendOverrideForTests;
 
     public static bool SupportsProtectedSeedStorage => OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() || OperatingSystem.IsLinux();
@@ -181,7 +184,7 @@ internal static class NknSecretStore
                 return null;
             }
 
-            var protectedBase64 = File.ReadAllText(secretPath).Trim();
+            var protectedBase64 = ReadAllTextWithTransientAccessRetry(secretPath).Trim();
             if (string.IsNullOrWhiteSpace(protectedBase64))
             {
                 return null;
@@ -210,6 +213,24 @@ internal static class NknSecretStore
             }
         }
     }
+
+    private static string ReadAllTextWithTransientAccessRetry(string path)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return File.ReadAllText(path);
+            }
+            catch (Exception ex) when (IsTransientFileAccess(ex) && attempt < TransientSecretReadRetryCount)
+            {
+                Thread.Sleep(TransientSecretReadRetryDelayMs * (attempt + 1));
+            }
+        }
+    }
+
+    private static bool IsTransientFileAccess(Exception ex)
+        => ex is IOException or UnauthorizedAccessException;
 
     [SupportedOSPlatform("macos")]
     private sealed class MacOsKeychainSeedBackend : IProtectedSeedBackend

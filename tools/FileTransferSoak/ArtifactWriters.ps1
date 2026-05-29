@@ -3640,6 +3640,10 @@ function Write-FileTransferDiagnosticsArtifacts {
             elseif ($text -eq 'recovered post-Tuna fallback bridge queue clear overlapped the completed transfer') {
                 'recovered_post_tuna_fallback_bridge_clear'
             }
+            elseif ($text -eq 'recovered runtime-unlock bridge queue clear overlapped the completed transfer' -or
+                $text -eq 'recovered runtime unlock bridge queue clear overlapped the completed transfer') {
+                'recovered_runtime_unlock_bridge_clear'
+            }
             elseif ($text -eq 'post-Tuna fallback V6 send timeout churn recovered before terminal completion') {
                 'fallback_v6_send_timeout_churn'
             }

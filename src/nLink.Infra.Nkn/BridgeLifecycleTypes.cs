@@ -9,6 +9,7 @@ internal enum BridgeLifecycleEventKind
     ReceiveStallRecoveryCompleted,
     ReceiveStallRecoveryReceiveResumed,
     ReceiveStallRecoveryExhausted,
+    ReceiveStallRecoveryDeferred,
     QueueCleared,
 }
 
@@ -38,7 +39,11 @@ internal readonly record struct BridgeLifecycleEvent(
     string ExitReasonText,
     string? QueueLane = null,
     long QueueClears = 0,
-    long ClearedSinceLast = 0);
+    long ClearedSinceLast = 0,
+    long TotalMessagesReceivedSinceLast = 0,
+    long ControlMessagesReceivedSinceLast = 0,
+    long MediaMessagesReceivedSinceLast = 0,
+    long BulkMessagesReceivedSinceLast = 0);
 
 internal readonly record struct BridgeExitClassification(
     BridgeExitReasonKind ReasonKind,

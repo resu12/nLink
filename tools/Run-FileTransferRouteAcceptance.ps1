@@ -2382,7 +2382,7 @@ function Get-Phase4RouteAcceptanceScenarios {
         (New-Phase4RouteAcceptanceScenario -Name 'live-switch-off-helpee-64mb' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 67108864L -BaselineScenario 'live-switch-off-helpee-64mb' -Baseline $baselines['live-switch-off-helpee-64mb'] -RouteMode 'live-v4-switch-off' -Fault 'switch-off' -PayerMode 'helpee' -LiveProofMode 'SwitchOff')
         (New-Phase4RouteAcceptanceScenario -Name 'live-switch-off-helper-64mb' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 67108864L -BaselineScenario 'live-switch-off-helper-64mb' -Baseline $baselines['live-switch-off-helper-64mb'] -RouteMode 'live-v4-switch-off' -Fault 'switch-off' -PayerMode 'helper' -LiveProofMode 'SwitchOff')
         (New-Phase4RouteAcceptanceScenario -Name 'live-multi-toggle-off-on-off-64mb' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 67108864L -BaselineScenario 'live-multi-toggle-off-on-off-64mb' -Baseline $baselines['live-multi-toggle-off-on-off-64mb'] -RouteMode 'live-multi-toggle' -Fault 'switch-off' -PayerMode 'helpee' -LiveToggleSequence 'off,on,off' -LiveProofMode 'MultiToggle')
-        (New-Phase4RouteAcceptanceScenario -Name 'regular-v4-live-activation-off-on-off-64mb' -Kind 'tuna' -ExpectedRouteChanges @('regular_nkn_v4_fast', 'file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 67108864L -RouteMode 'live-regular-activation-cycle' -Fault 'switch-off' -PayerMode 'helpee' -LiveToggleSequence 'on,off,on,off' -LiveProofMode 'RegularActivationCycle')
+        (New-Phase4RouteAcceptanceScenario -Name 'regular-v4-live-activation-off-on-off-128mb' -Kind 'tuna' -ExpectedRouteChanges @('regular_nkn_v4_fast', 'file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 134217728L -RouteMode 'live-regular-activation-cycle' -Fault 'switch-off' -PayerMode 'helpee' -LiveToggleSequence 'on,off,on,off' -LiveProofMode 'RegularActivationCycle')
         (New-Phase4RouteAcceptanceScenario -Name 'second-transfer-after-reactivation' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4') -PayloadBytes 67108864L -RouteMode 'live-reactivation-second-transfer' -Fault 'switch-off' -PayerMode 'helpee' -LiveToggleSequence 'off,on' -LiveProofMode 'None')
     )
 }
@@ -2458,6 +2458,25 @@ function Get-Phase4FailureClass {
     return 'correctness'
 }
 
+function Get-Phase4ScenarioPayloadSizeText {
+    param([Parameter(Mandatory = $true)]$Scenario)
+
+    $payloadBytes = [long]$Scenario.PayloadBytes
+    if ($payloadBytes -eq 134217728L) {
+        return '128MiB'
+    }
+
+    if ($payloadBytes -eq 67108864L) {
+        return '64MiB'
+    }
+
+    if ($payloadBytes -gt 0 -and ($payloadBytes % 1048576L) -eq 0) {
+        return ('{0}MiB' -f [long]($payloadBytes / 1048576L))
+    }
+
+    return ([string]$payloadBytes)
+}
+
 function Invoke-Phase4RouteAcceptanceScenario {
     param(
         [Parameter(Mandatory = $true)]$Scenario,
@@ -2472,6 +2491,7 @@ function Invoke-Phase4RouteAcceptanceScenario {
 
     $artifactDir = Join-Path $RunRoot ([string]$Scenario.Name)
     New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+    $payloadSize = Get-Phase4ScenarioPayloadSizeText -Scenario $Scenario
 
     $scenarioExecutionFailure = ''
     try {
@@ -2479,7 +2499,7 @@ function Invoke-Phase4RouteAcceptanceScenario {
             Write-RouteAcceptanceFakePhase4Run -Scenario $Scenario -ArtifactDir $artifactDir
         }
         elseif ($Scenario.Kind -eq 'regular') {
-            Invoke-RegularNknRouteAcceptanceRun -RepoRoot $RepoRoot -ArtifactDir $artifactDir -PayloadSize '64MiB' -ResolvedExePath $ResolvedExePath
+            Invoke-RegularNknRouteAcceptanceRun -RepoRoot $RepoRoot -ArtifactDir $artifactDir -PayloadSize $payloadSize -ResolvedExePath $ResolvedExePath
         }
         else {
             Invoke-TunaRouteAcceptanceRun `
@@ -2492,7 +2512,7 @@ function Invoke-Phase4RouteAcceptanceScenario {
                 -RouteMode ([string]$Scenario.RouteMode) `
                 -Fault ([string]$Scenario.Fault) `
                 -PayerMode ([string]$Scenario.PayerMode) `
-                -PayloadSize '64MiB' `
+                -PayloadSize $payloadSize `
                 -LiveToggleSequence ([string]$Scenario.LiveToggleSequence)
         }
     }
@@ -2517,7 +2537,7 @@ function Invoke-Phase4RouteAcceptanceScenario {
                     Write-RouteAcceptanceFakePhase4Run -Scenario $Scenario -ArtifactDir $rerunDir -RerunAttempt $rerun
                 }
                 elseif ($Scenario.Kind -eq 'regular') {
-                    Invoke-RegularNknRouteAcceptanceRun -RepoRoot $RepoRoot -ArtifactDir $rerunDir -PayloadSize '64MiB' -ResolvedExePath $ResolvedExePath
+                    Invoke-RegularNknRouteAcceptanceRun -RepoRoot $RepoRoot -ArtifactDir $rerunDir -PayloadSize $payloadSize -ResolvedExePath $ResolvedExePath
                 }
                 else {
                     Invoke-TunaRouteAcceptanceRun `
@@ -2530,7 +2550,7 @@ function Invoke-Phase4RouteAcceptanceScenario {
                         -RouteMode ([string]$Scenario.RouteMode) `
                         -Fault ([string]$Scenario.Fault) `
                         -PayerMode ([string]$Scenario.PayerMode) `
-                        -PayloadSize '64MiB' `
+                        -PayloadSize $payloadSize `
                         -LiveToggleSequence ([string]$Scenario.LiveToggleSequence)
                 }
             }

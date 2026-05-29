@@ -219,7 +219,7 @@ public sealed partial class SessionFileTransferService
                 return valid;
             }
 
-            accepted = context.ChunksAcceptedForTransport;
+            accepted = ResolveOutboundRepairAcceptedUntilExclusiveLocked(context);
             remoteNextExpected = context.RemoteNextExpectedChunkIndex;
             foreach (var chunkIndex in requestedChunkIndices)
             {

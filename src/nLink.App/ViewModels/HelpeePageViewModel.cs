@@ -1372,6 +1372,13 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         bool preservePeerEndedNotice,
         string? preservedPeerEndedText = null)
     {
+        if (ShouldKeepVisibleTerminalFailureBeforeAutoRestart())
+        {
+            AppLog.Info("Helpee waiting-session restart blocked; reason=visible_terminal_failure");
+            ApplyTerminalPresentationFromFlow(sessionRuntime.FlowSnapshot);
+            return;
+        }
+
         autoRegeneratingAfterDisconnect = false;
         localEndCommandInFlight = false;
         lastAppliedPostTerminalActionKey = string.Empty;
@@ -1493,8 +1500,27 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             ConnectionState = "Waiting";
         });
 
-        StartHosting();
+        StartHosting(allowAfterVisibleTerminalFailure: true);
         EnsureInviteSnapshot(forceNewToken: true);
+    }
+
+    private bool ShouldKeepVisibleTerminalFailureBeforeAutoRestart()
+    {
+        if (disposed)
+        {
+            return false;
+        }
+
+        var flow = sessionRuntime.FlowSnapshot;
+        if (flow.TerminalKind == SessionTerminalKind.Failed &&
+            (string.Equals(flow.FailureReason, "session_liveness_timeout", StringComparison.Ordinal) ||
+             string.Equals(flow.TerminalStatusText, "Connection lost.", StringComparison.Ordinal)))
+        {
+            return true;
+        }
+
+        return sessionRuntime.State == SessionRuntimeState.Failed &&
+               string.Equals(sessionRuntime.StatusText, "Connection lost.", StringComparison.Ordinal);
     }
 
     private void ShowPeerEndedNotice(string text)
@@ -2259,8 +2285,15 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             preservePeerEndedNotice: false);
     }
 
-    private void StartHosting()
+    private void StartHosting(bool allowAfterVisibleTerminalFailure = false)
     {
+        if (!allowAfterVisibleTerminalFailure &&
+            ShouldKeepVisibleTerminalFailureBeforeAutoRestart())
+        {
+            AppLog.Info("Helpee hosting auto-restart blocked; reason=visible_terminal_failure");
+            return;
+        }
+
         PrepareForNewSession();
         EnsureInviteSnapshot(forceNewToken: false);
 
@@ -3758,6 +3791,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         return sessionRuntime.PendingOutboundHelpRequestDecision is { Accepted: true } &&
                flow.Role == SessionRuntimeRole.Helpee &&
                !flow.ApprovalActive &&
+               flow.TerminalKind == SessionTerminalKind.None &&
+               !string.Equals(flow.FailureReason, "session_liveness_timeout", StringComparison.Ordinal) &&
                flow.RuntimeState is SessionRuntimeState.Failed or SessionRuntimeState.Disconnected or SessionRuntimeState.Rejected &&
                flow.Phase is SessionFlowPhase.HelpeeWaiting or SessionFlowPhase.Failed or SessionFlowPhase.Ended &&
                flow.LastEndOrigin is SessionFlowEndOrigin.Remote or SessionFlowEndOrigin.Failed or SessionFlowEndOrigin.Rejected;

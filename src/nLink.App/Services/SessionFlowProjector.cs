@@ -194,6 +194,7 @@ internal static class SessionFlowProjector
 
         if (projectedPhase is SessionFlowPhase.ListenerWaiting or SessionFlowPhase.HelpeeWaiting &&
             input.Reduced.LastEndOrigin == SessionFlowEndOrigin.Failed &&
+            !IsSessionLivenessTimeout(input.Reduced.FailureReason) &&
             ((input.Role == SessionRuntimeRole.Helper && input.ShouldReturnHelperListenerToWaiting) ||
              (input.Role != SessionRuntimeRole.Helper && !input.Reduced.HadActiveSession)))
         {
@@ -407,11 +408,16 @@ internal static class SessionFlowProjector
                 => SessionFlowPostTerminalAction.ReturnToWaitingPreserveBootstrap,
             SessionRuntimeRole.Helpee when terminalPresentation.Kind is SessionTerminalKind.LocalEnded or SessionTerminalKind.PeerEnded
                 => SessionFlowPostTerminalAction.ReturnToWaiting,
-            SessionRuntimeRole.Helpee when terminalPresentation.Kind == SessionTerminalKind.Failed && !input.Reduced.HadActiveSession
+            SessionRuntimeRole.Helpee when terminalPresentation.Kind == SessionTerminalKind.Failed &&
+                                           !input.Reduced.HadActiveSession &&
+                                           !IsSessionLivenessTimeout(input.Reduced.FailureReason)
                 => SessionFlowPostTerminalAction.ReturnToWaitingPreserveBootstrap,
             _ => SessionFlowPostTerminalAction.None,
         };
     }
+
+    private static bool IsSessionLivenessTimeout(string? reason)
+        => string.Equals(reason?.Trim(), "session_liveness_timeout", StringComparison.Ordinal);
 
     private static string GetWaitingStatusTextForRole(SessionRuntimeRole role)
     {

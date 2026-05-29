@@ -2,6 +2,7 @@ using NLink.App.Services;
 using NLink.App.Services.RemoteControl;
 using NLink.Core;
 using NLink.Core.Diagnostics;
+using NLink.Core.FileTransfer;
 using NLink.Core.RemoteControl;
 using NLink.Core.SessionConnect;
 using NLink.Core.SessionSecurity;
@@ -86,7 +87,7 @@ internal sealed class CountingRemoteInputInjector : IRemoteInputInjector
     }
 }
 
-internal sealed class ScriptedSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, ILocalPeerAddressSignalingTransport, ISessionSecuritySignalingTransport, ISessionLivenessSignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IHelpRequestSignalingTransport
+internal sealed class ScriptedSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, ILocalPeerAddressSignalingTransport, ISessionSecuritySignalingTransport, ISessionLivenessSignalingTransport, ITransportAccelerationStatus, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IHelpRequestSignalingTransport, IFileTransferReceiveRecoveryController
 {
     private readonly Func<string, CancellationToken, Task> onJoinByAddressAsync;
     private readonly Func<string, ValidatedInviteV1, CancellationToken, Task> onJoinByInviteAsync;
@@ -104,6 +105,7 @@ internal sealed class ScriptedSignalingTransport : ISignalingTransport, IAddress
     private readonly Func<ControlStateSnapshotV1, CancellationToken, Task> onSendControlStateSnapshotAsync;
     private readonly Func<ControlDisplayInfoMessageV1, CancellationToken, Task> onSendControlDisplayInfoAsync;
     private readonly Func<SessionHeartbeatMessage, CancellationToken, Task> onSendSessionHeartbeatAsync;
+    private readonly Action<FileTransferReceiveRecoveryRequest> onRequestFileTransferReceiveRecovery;
     private SessionSecurityState currentSessionSecurityState = SessionSecurityState.Empty;
 
     public ScriptedSignalingTransport(
@@ -124,6 +126,7 @@ internal sealed class ScriptedSignalingTransport : ISignalingTransport, IAddress
         Func<ControlStateSnapshotV1, CancellationToken, Task>? onSendControlStateSnapshotAsync = null,
         Func<ControlDisplayInfoMessageV1, CancellationToken, Task>? onSendControlDisplayInfoAsync = null,
         Func<SessionHeartbeatMessage, CancellationToken, Task>? onSendSessionHeartbeatAsync = null,
+        Action<FileTransferReceiveRecoveryRequest>? onRequestFileTransferReceiveRecovery = null,
         bool localSupportsRemoteControl = true,
         bool remoteSupportsRemoteControl = true)
     {
@@ -144,6 +147,7 @@ internal sealed class ScriptedSignalingTransport : ISignalingTransport, IAddress
         this.onSendControlStateSnapshotAsync = onSendControlStateSnapshotAsync ?? ((_, _) => Task.CompletedTask);
         this.onSendControlDisplayInfoAsync = onSendControlDisplayInfoAsync ?? ((_, _) => Task.CompletedTask);
         this.onSendSessionHeartbeatAsync = onSendSessionHeartbeatAsync ?? ((_, _) => Task.CompletedTask);
+        this.onRequestFileTransferReceiveRecovery = onRequestFileTransferReceiveRecovery ?? (_ => { });
         LocalSupportsRemoteControl = localSupportsRemoteControl;
         RemoteSupportsRemoteControl = remoteSupportsRemoteControl;
     }
@@ -171,7 +175,11 @@ internal sealed class ScriptedSignalingTransport : ISignalingTransport, IAddress
     public event EventHandler<RemoteControlStateSnapshotReceivedEventArgs>? RemoteControlStateSnapshotReceived;
     public event EventHandler<RemoteControlDisplayInfoReceivedEventArgs>? RemoteControlDisplayInfoReceived;
     public event EventHandler<SessionLivenessProofEventArgs>? SessionLivenessProofReceived;
+    public event EventHandler<TransportAccelerationStateChangedEventArgs>? TransportAccelerationStateChanged;
     public SessionSecurityState CurrentSessionSecurityState => currentSessionSecurityState;
+    public bool IsTransportAccelerationActive { get; private set; }
+    public bool ShouldUseFileTransferV6ForAcceleration { get; private set; }
+    public string TransportAccelerationStatusReason { get; private set; } = "test_regular_nkn";
 
     public void Dispose()
     {
@@ -197,6 +205,7 @@ internal sealed class ScriptedSignalingTransport : ISignalingTransport, IAddress
     public Task SendControlStateSnapshotAsync(ControlStateSnapshotV1 message, CancellationToken ct) => onSendControlStateSnapshotAsync(message, ct);
     public Task SendControlDisplayInfoAsync(ControlDisplayInfoMessageV1 message, CancellationToken ct) => onSendControlDisplayInfoAsync(message, ct);
     public Task SendSessionHeartbeatAsync(SessionHeartbeatMessage message, CancellationToken ct) => onSendSessionHeartbeatAsync(message, ct);
+    public void RequestFileTransferReceiveRecovery(FileTransferReceiveRecoveryRequest request) => onRequestFileTransferReceiveRecovery(request);
 
     public void RaiseDisconnected()
     {
@@ -230,6 +239,21 @@ internal sealed class ScriptedSignalingTransport : ISignalingTransport, IAddress
                 DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 proofKind,
                 lane));
+    }
+
+    public void SetTransportAccelerationForTests(
+        bool isActive,
+        string reason,
+        bool shouldUseFileTransferV6ForAcceleration = false)
+    {
+        IsTransportAccelerationActive = isActive;
+        ShouldUseFileTransferV6ForAcceleration = shouldUseFileTransferV6ForAcceleration;
+        TransportAccelerationStatusReason = string.IsNullOrWhiteSpace(reason) ? "unknown" : reason.Trim();
+        TransportAccelerationStateChanged?.Invoke(
+            this,
+            new TransportAccelerationStateChangedEventArgs(
+                IsTransportAccelerationActive,
+                TransportAccelerationStatusReason));
     }
 
     public void InjectIncomingControlRequest(ControlRequestMessageV1 message, string? peerId)

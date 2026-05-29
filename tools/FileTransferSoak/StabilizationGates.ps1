@@ -184,7 +184,17 @@ function Test-FileTransferEventNearRecoveryMarker {
         return $false
     }
 
-    foreach ($candidate in @($Summary.GlobalEvents + $Summary.TransferEvents)) {
+    [object[]]$candidateEvents = @()
+    $allEventsProperty = $Summary.PSObject.Properties['AllEvents']
+    if ($null -ne $allEventsProperty) {
+        $candidateEvents = @($Summary.AllEvents)
+    }
+
+    if ($candidateEvents.Count -eq 0) {
+        $candidateEvents = @($Summary.GlobalEvents + $Summary.TransferEvents)
+    }
+
+    foreach ($candidate in @($candidateEvents)) {
         if ($null -eq $candidate) {
             continue
         }
@@ -250,6 +260,71 @@ function Test-FileTransferEventNearRecoveryMarker {
     }
 
     return $false
+}
+
+function Test-FileTransferEventNearRuntimeUnlockRecoveryMarker {
+    param(
+        $Event,
+        [Parameter(Mandatory = $true)]$Summary,
+        [int]$SequenceWindow = 360
+    )
+
+    if ($null -eq $Event) {
+        return $false
+    }
+
+    $eventSequence = 0
+    if (-not [int]::TryParse([string]$Event.Sequence, [ref]$eventSequence)) {
+        return $false
+    }
+
+    $hasUnobservedRuntimeUnlockOffer = $false
+    $hasRecoveryOrRetryProof = $false
+    [object[]]$candidateEvents = @()
+    $allEventsProperty = $Summary.PSObject.Properties['AllEvents']
+    if ($null -ne $allEventsProperty) {
+        $candidateEvents = @($Summary.AllEvents)
+    }
+
+    if ($candidateEvents.Count -eq 0) {
+        $candidateEvents = @($Summary.GlobalEvents + $Summary.TransferEvents)
+    }
+
+    foreach ($candidate in @($candidateEvents)) {
+        if ($null -eq $candidate) {
+            continue
+        }
+
+        $candidateSequence = 0
+        if (-not [int]::TryParse([string]$candidate.Sequence, [ref]$candidateSequence)) {
+            continue
+        }
+
+        if ([Math]::Abs($candidateSequence - $eventSequence) -gt $SequenceWindow) {
+            continue
+        }
+
+        switch ($candidate.EventName) {
+            'tuna_acceleration_activation_offer_not_observed' {
+                $trigger = Get-FileTransferEventField -Event $candidate -Name 'trigger' -Default ''
+                $reason = Get-FileTransferEventField -Event $candidate -Name 'reason' -Default ''
+                $retryReason = Get-FileTransferEventField -Event $candidate -Name 'retry_reason' -Default ''
+                if ($trigger -eq 'runtime_unlock' -or
+                    $reason -like '*runtime_unlock*' -or
+                    $retryReason -like '*runtime_unlock*') {
+                    $hasUnobservedRuntimeUnlockOffer = $true
+                }
+            }
+            'tuna_activation_control_send_recovery_requested' { $hasRecoveryOrRetryProof = $true }
+            'tuna_acceleration_runtime_unlock_retry_after_recovery_armed' { $hasRecoveryOrRetryProof = $true }
+            'tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled' { $hasRecoveryOrRetryProof = $true }
+            'filetransfer_tuna_activation_negotiation_regular_nkn_resumed' { $hasRecoveryOrRetryProof = $true }
+            'nkn_bridge_receive_stall_recovery_receive_resumed' { $hasRecoveryOrRetryProof = $true }
+            'bridge_ready' { $hasRecoveryOrRetryProof = $true }
+        }
+    }
+
+    return $hasUnobservedRuntimeUnlockOffer -and $hasRecoveryOrRetryProof
 }
 
 function Test-FileTransferSummaryUsesPrimaryRegularNknQuietBridgePolicy {
@@ -452,6 +527,40 @@ function Test-FileTransferRecoverablePostTunaFallbackBridgeClear {
     return Test-FileTransferEventNearRecoveryMarker -Event $Event -Summary $Summary -SequenceWindow 260
 }
 
+function Test-FileTransferRecoverableRuntimeUnlockBridgeClear {
+    param(
+        $Event,
+        [Parameter(Mandatory = $true)]$Summary
+    )
+
+    if ($null -eq $Event) {
+        return $false
+    }
+
+    if (-not (Test-FileTransferCleanTerminalCompletion -Summary $Summary) -or
+        -not (Test-FileTransferRouteConsistencyClean -Summary $Summary)) {
+        return $false
+    }
+
+    if ($Event.EventName -ne 'nkn_bridge_bulk_send_summary' -and
+        $Event.EventName -ne 'nkn_bridge_bulk_queue_state') {
+        return $false
+    }
+
+    $sendFailures = Get-FileTransferEventInt64Field -Event $Event -Name 'send_failures' -Default 0
+    if ($sendFailures -gt 0) {
+        return $false
+    }
+
+    $queueClears = Get-FileTransferEventInt64Field -Event $Event -Name 'queue_clears' -Default 0
+    $clearedSinceLast = Get-FileTransferEventInt64Field -Event $Event -Name 'cleared_since_last' -Default 0
+    if ($queueClears -le 0 -and $clearedSinceLast -le 0) {
+        return $false
+    }
+
+    return Test-FileTransferEventNearRuntimeUnlockRecoveryMarker -Event $Event -Summary $Summary -SequenceWindow 360
+}
+
 function Get-FileTransferHardFailureEvents {
     param([Parameter(Mandatory = $true)]$Summary)
 
@@ -507,6 +616,7 @@ function Get-FileTransferBridgeBulkFailureEvents {
             Where-Object {
                 -not (Test-FileTransferRecoverableBridgeBulkFailure -Event $_ -Summary $Summary) -and
                 -not (Test-FileTransferRecoverablePostTunaFallbackBridgeClear -Event $_ -Summary $Summary) -and
+                -not (Test-FileTransferRecoverableRuntimeUnlockBridgeClear -Event $_ -Summary $Summary) -and
                 (
                     ($_.EventName -eq 'nkn_bridge_bulk_send_summary' -and
                         ((Get-FileTransferEventInt64Field -Event $_ -Name 'send_failures' -Default 0) -gt 0 -or
@@ -524,6 +634,15 @@ function Get-FileTransferPostTunaFallbackBridgeClearWarningEvents {
     return @(
         $Summary.GlobalEvents |
             Where-Object { Test-FileTransferRecoverablePostTunaFallbackBridgeClear -Event $_ -Summary $Summary }
+    )
+}
+
+function Get-FileTransferRuntimeUnlockBridgeClearWarningEvents {
+    param([Parameter(Mandatory = $true)]$Summary)
+
+    return @(
+        $Summary.GlobalEvents |
+            Where-Object { Test-FileTransferRecoverableRuntimeUnlockBridgeClear -Event $_ -Summary $Summary }
     )
 }
 
@@ -788,6 +907,10 @@ function Get-FileTransferWarningKindToken {
     if ($WarningText -eq 'recovered post-Tuna fallback bridge queue clear overlapped the completed transfer') {
         return 'recovered_post_tuna_fallback_bridge_clear'
     }
+    if ($WarningText -eq 'recovered runtime-unlock bridge queue clear overlapped the completed transfer' -or
+        $WarningText -eq 'recovered runtime unlock bridge queue clear overlapped the completed transfer') {
+        return 'recovered_runtime_unlock_bridge_clear'
+    }
     if ($WarningText -eq 'post-Tuna fallback V6 send timeout churn recovered before terminal completion') {
         return 'fallback_v6_send_timeout_churn'
     }
@@ -996,6 +1119,11 @@ function Get-FileTransferWarningIncidentKey {
                 (Get-FileTransferEventInt64Field -Event $Event -Name 'ws_error_count_since_last' -Default 0) -gt 0 -or
                 (Get-FileTransferEventInt64Field -Event $Event -Name 'rpc_fallback_attempt_count_since_last' -Default 0) -gt 0
             if ($hasTransportChurn) {
+                if (-not [string]::IsNullOrWhiteSpace($connectKey)) {
+                    $wideBucket = Get-FileTransferWarningEventTimeBucket -Event $Event -BucketSeconds 120
+                    return ('{0}:health:{1}:bucket:{2}' -f $Kind, $connectKey, $wideBucket)
+                }
+
                 return ('{0}:health:{1}' -f $Kind, $Event.Sequence)
             }
 
@@ -1062,6 +1190,11 @@ function Get-FileTransferWarningIncidentKey {
         return ('{0}:{1}' -f $Kind, $wideBucket)
     }
 
+    if ($Kind -eq 'recovered_runtime_unlock_bridge_clear') {
+        $wideBucket = Get-FileTransferWarningEventTimeBucket -Event $Event -BucketSeconds 120
+        return ('{0}:{1}' -f $Kind, $wideBucket)
+    }
+
     return ('{0}:{1}:{2}' -f $Kind, $eventName, $Event.Sequence)
 }
 
@@ -1109,6 +1242,10 @@ function Get-FileTransferWarningRouteContext {
 
     if ($Kind -like 'fallback_*' -or $Kind -eq 'recovered_post_tuna_fallback_bridge_clear') {
         return 'post_tuna_fallback'
+    }
+
+    if ($Kind -eq 'recovered_runtime_unlock_bridge_clear') {
+        return 'runtime_unlock'
     }
 
     [object[]]$eventRoutes = @(
@@ -1538,6 +1675,7 @@ function Get-FileTransferStabilizationGateResult {
     $cohabitationWarnings = @(Get-FileTransferCohabitationWarningEvents -Summary $Summary)
     $externalWarnings = @(Get-FileTransferExternalTransportWarningEvents -Summary $Summary)
     $fallbackBridgeClearWarnings = @(Get-FileTransferPostTunaFallbackBridgeClearWarningEvents -Summary $Summary)
+    $runtimeUnlockBridgeClearWarnings = @(Get-FileTransferRuntimeUnlockBridgeClearWarningEvents -Summary $Summary)
     $fallbackSendTimeoutWarnings = @(Get-FileTransferPostTunaFallbackSendTimeoutWarningEvents -Summary $Summary)
     $fallbackFrontierRepairWarnings = @(Get-FileTransferPostTunaFallbackFrontierRepairWarningEvents -Summary $Summary)
     $fallbackReceiverStateWarnings = @(Get-FileTransferPostTunaFallbackReceiverStateWarningEvents -Summary $Summary)
@@ -1545,6 +1683,7 @@ function Get-FileTransferStabilizationGateResult {
     $externalCapWarnings = @(Get-FileTransferExternalTransportCapWarningEvents -Events $externalWarnings)
     $warningGroups = @(
         [pscustomobject]@{ Kind = 'recovered_post_tuna_fallback_bridge_clear'; Events = @($fallbackBridgeClearWarnings) },
+        [pscustomobject]@{ Kind = 'recovered_runtime_unlock_bridge_clear'; Events = @($runtimeUnlockBridgeClearWarnings) },
         [pscustomobject]@{ Kind = 'fallback_v6_send_timeout_churn'; Events = @($fallbackSendTimeoutWarnings) },
         [pscustomobject]@{ Kind = 'fallback_frontier_repair_churn'; Events = @($fallbackFrontierRepairWarnings) },
         [pscustomobject]@{ Kind = 'fallback_receiver_state_churn'; Events = @($fallbackReceiverStateWarnings) },
@@ -1557,6 +1696,10 @@ function Get-FileTransferStabilizationGateResult {
 
     if ($fallbackBridgeClearWarnings.Count -gt 0) {
         Add-FileTransferGateFinding -List $warnings -Finding 'recovered post-Tuna fallback bridge queue clear overlapped the completed transfer'
+    }
+
+    if ($runtimeUnlockBridgeClearWarnings.Count -gt 0) {
+        Add-FileTransferGateFinding -List $warnings -Finding 'recovered runtime-unlock bridge queue clear overlapped the completed transfer'
     }
 
     if ($fallbackSendTimeoutWarnings.Count -gt 0) {
@@ -1604,6 +1747,7 @@ function Get-FileTransferStabilizationGateResult {
         $nextArtifact = 'coexistence-summary.txt'
     }
     elseif ($fallbackBridgeClearWarnings.Count -gt 0 -or
+            $runtimeUnlockBridgeClearWarnings.Count -gt 0 -or
             $fallbackSendTimeoutWarnings.Count -gt 0 -or
             $fallbackFrontierRepairWarnings.Count -gt 0 -or
             $fallbackReceiverStateWarnings.Count -gt 0 -or
@@ -1617,6 +1761,9 @@ function Get-FileTransferStabilizationGateResult {
         elseif ($fallbackBridgeClearWarnings.Count -gt 0) {
             'stability-gates-summary.txt'
         }
+        elseif ($runtimeUnlockBridgeClearWarnings.Count -gt 0) {
+            'stability-gates-summary.txt'
+        }
         else {
             'external-transport-health-summary.txt'
         }
@@ -1626,7 +1773,7 @@ function Get-FileTransferStabilizationGateResult {
         $nextArtifact = 'repair-reorder-summary.txt'
     }
 
-    $evidence = @($cohabitationWarnings + $fallbackBridgeClearWarnings + $fallbackSendTimeoutWarnings + $fallbackFrontierRepairWarnings + $fallbackReceiverStateWarnings + $externalWarnings + $pressureWarnings + $Summary.TerminalEvents | Select-Object -First 30)
+    $evidence = @($cohabitationWarnings + $fallbackBridgeClearWarnings + $runtimeUnlockBridgeClearWarnings + $fallbackSendTimeoutWarnings + $fallbackFrontierRepairWarnings + $fallbackReceiverStateWarnings + $externalWarnings + $pressureWarnings + $Summary.TerminalEvents | Select-Object -First 30)
 
     return [pscustomobject]@{
         Verdict = $verdict
