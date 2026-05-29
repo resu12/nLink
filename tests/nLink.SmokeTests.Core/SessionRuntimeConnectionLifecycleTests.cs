@@ -37,6 +37,13 @@ namespace NLink.SmokeTests;
 [Trait("Area", "Core")]
 public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConnectionTestBase
 {
+    [Fact(Skip = "Phase 1 coordinator not implemented")]
+    public void RecoveryStateContract_LivenessDefersForRuntimeUnlockRetryUntilCoordinatorDecision()
+    {
+        throw new NotImplementedException(
+            "Session liveness should defer while the same-session runtime-unlock retry is pending or dispatching, then terminalize only after the recovery coordinator reports no recovery path.");
+    }
+
     [Fact]
     public void SessionRuntime_FileTransferPeerDisconnected_DoesNotEndConnectedSession()
     {

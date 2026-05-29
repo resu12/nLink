@@ -3243,11 +3243,17 @@ function New-FileTransferStabilityGateSummaryLines {
     $progressTimeoutWithReceiverGapStall = if ($Summary.LiveProgressTimeoutCount -gt 0 -and $gapStallEvents.Count -gt 0) { 1 } else { 0 }
     $warningCap = Get-FileTransferGateWarningCap -GateResult $GateResult
     $fallbackDiagnostics = Get-FileTransferGateFallbackDiagnostics -GateResult $GateResult
+    $recoveryClassification = Get-FileTransferRecoveryFailureClassification -Summary $Summary
 
     return @(
         ("verdict={0}" -f $GateResult.Verdict),
         ("gate_status={0}" -f $GateResult.GateStatus),
         ("transfer_id={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.TransferId)) { '(none)' } else { $Summary.TransferId }))),
+        ("recovery_failure_class={0}" -f $recoveryClassification.Class),
+        ("runtime_unlock_offer_not_observed_count={0}" -f $recoveryClassification.RuntimeUnlockOfferNotObservedCount),
+        ("runtime_unlock_retry_scheduled_count={0}" -f $recoveryClassification.RuntimeUnlockRetryScheduledCount),
+        ("runtime_unlock_retry_queued_behind_active_negotiation_count={0}" -f $recoveryClassification.RuntimeUnlockRetryQueuedBehindActiveNegotiationCount),
+        ("session_liveness_timeout_after_runtime_unlock_count={0}" -f $recoveryClassification.SessionLivenessTimeoutAfterRuntimeUnlockCount),
         ("hard_failure_count={0}" -f $GateResult.HardFailures.Count),
         ("warning_count={0}" -f $GateResult.Warnings.Count),
         ("warning_cap_policy={0}" -f ($(if ($null -ne $warningCap) { $warningCap.Policy } else { 'strict_small' }))),
@@ -3620,6 +3626,93 @@ function Write-FileTransferV4PromotionDecision {
     $object | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'v4-promotion-decision.json') -Encoding UTF8
 }
 
+function Get-FileTransferRecoveryFailureClassification {
+    param(
+        [Parameter(Mandatory = $true)]$Summary
+    )
+
+    [object[]]$events = @()
+    if ($null -ne $Summary.PSObject.Properties['AllEvents']) {
+        $events = @($Summary.AllEvents)
+    }
+
+    if ($events.Count -eq 0) {
+        $events = @($Summary.GlobalEvents + $Summary.TransferEvents)
+    }
+
+    $runtimeUnlockOfferNotObservedEvents = @($events | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_activation_offer_not_observed' -and
+        (
+            (Get-FileTransferEventField -Event $_ -Name 'trigger' -Default '') -eq 'runtime_unlock' -or
+            (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -like '*runtime_unlock*' -or
+            (Get-FileTransferEventField -Event $_ -Name 'retry_reason' -Default '') -like '*runtime_unlock*'
+        )
+    })
+    $runtimeUnlockRetryScheduledEvents = @($events | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled'
+    })
+    $runtimeUnlockRetryQueuedBehindActiveNegotiationEvents = @($runtimeUnlockRetryScheduledEvents | Where-Object {
+        (Get-FileTransferEventField -Event $_ -Name 'queued_behind_active_negotiation' -Default '0') -eq '1'
+    })
+    $sessionLivenessTimeoutEvents = @($events | Where-Object { $_.EventName -eq 'session_liveness_timeout' })
+    $peerDisconnectedTerminalEvents = @($events | Where-Object {
+        ($_.EventName -eq 'file_transfer_outbound_terminal' -or
+         $_.EventName -eq 'file_transfer_inbound_terminal' -or
+         $_.EventName -eq 'transfer_terminal') -and
+        (Get-FileTransferEventField -Event $_ -Name 'error_code' -Default '') -eq 'peer_disconnected'
+    })
+    $fileTunaV6Events = @($events | Where-Object {
+        (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'file_tuna_v6'
+    })
+
+    $routeChanges = New-Object System.Collections.Generic.List[string]
+    $lastRoute = ''
+    foreach ($event in @($events | Sort-Object Sequence)) {
+        if ($event.EventName -ne 'filetransfer_route_selected') {
+            continue
+        }
+
+        $route = Get-FileTransferEventField -Event $event -Name 'route' -Default ''
+        if ([string]::IsNullOrWhiteSpace($route) -or $route -eq $lastRoute) {
+            continue
+        }
+
+        $routeChanges.Add($route) | Out-Null
+        $lastRoute = $route
+    }
+
+    $class = '(none)'
+    if ($fileTunaV6Events.Count -gt 0) {
+        $class = 'active_file_tuna_v6_evidence'
+    }
+    elseif ($runtimeUnlockOfferNotObservedEvents.Count -gt 0 -and
+        $runtimeUnlockRetryScheduledEvents.Count -gt 0 -and
+        $runtimeUnlockRetryQueuedBehindActiveNegotiationEvents.Count -gt 0 -and
+        $sessionLivenessTimeoutEvents.Count -gt 0 -and
+        $peerDisconnectedTerminalEvents.Count -gt 0 -and
+        $routeChanges.Count -eq 1 -and
+        $routeChanges[0] -eq 'regular_nkn_v4_fast') {
+        $class = 'runtime_unlock_recovery_coordination'
+    }
+    elseif ($runtimeUnlockOfferNotObservedEvents.Count -gt 0 -and $sessionLivenessTimeoutEvents.Count -gt 0) {
+        $class = 'runtime_unlock_liveness_timeout'
+    }
+    elseif ($runtimeUnlockOfferNotObservedEvents.Count -gt 0) {
+        $class = 'runtime_unlock_offer_not_observed'
+    }
+    elseif ($sessionLivenessTimeoutEvents.Count -gt 0) {
+        $class = 'session_liveness_timeout'
+    }
+
+    [pscustomobject]@{
+        Class = $class
+        RuntimeUnlockOfferNotObservedCount = $runtimeUnlockOfferNotObservedEvents.Count
+        RuntimeUnlockRetryScheduledCount = $runtimeUnlockRetryScheduledEvents.Count
+        RuntimeUnlockRetryQueuedBehindActiveNegotiationCount = $runtimeUnlockRetryQueuedBehindActiveNegotiationEvents.Count
+        SessionLivenessTimeoutAfterRuntimeUnlockCount = if ($runtimeUnlockOfferNotObservedEvents.Count -gt 0) { $sessionLivenessTimeoutEvents.Count } else { 0 }
+    }
+}
+
 function Write-FileTransferDiagnosticsArtifacts {
     param(
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
@@ -3670,12 +3763,18 @@ function Write-FileTransferDiagnosticsArtifacts {
     $warningCap = Get-FileTransferGateWarningCap -GateResult $GateResult
     $fallbackDiagnostics = Get-FileTransferGateFallbackDiagnostics -GateResult $GateResult
     $liveRouteProof = Get-FileTransferLiveRouteEpochProof -TransferEvents $Summary.TransferEvents -Mode $LiveRouteProofMode
+    $recoveryClassification = Get-FileTransferRecoveryFailureClassification -Summary $Summary
 
     $verdictLines = @(
         ("verdict={0}" -f $GateResult.Verdict),
         ("gate_status={0}" -f $GateResult.GateStatus),
         ("transfer_id={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.TransferId)) { '(none)' } else { $Summary.TransferId }))),
         ("next_artifact={0}" -f $GateResult.NextArtifact),
+        ("recovery_failure_class={0}" -f $recoveryClassification.Class),
+        ("runtime_unlock_offer_not_observed_count={0}" -f $recoveryClassification.RuntimeUnlockOfferNotObservedCount),
+        ("runtime_unlock_retry_scheduled_count={0}" -f $recoveryClassification.RuntimeUnlockRetryScheduledCount),
+        ("runtime_unlock_retry_queued_behind_active_negotiation_count={0}" -f $recoveryClassification.RuntimeUnlockRetryQueuedBehindActiveNegotiationCount),
+        ("session_liveness_timeout_after_runtime_unlock_count={0}" -f $recoveryClassification.SessionLivenessTimeoutAfterRuntimeUnlockCount),
         ("observed_start_utc={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.FirstTimestamp)) { '(unknown)' } else { $Summary.FirstTimestamp }))),
         ("observed_end_utc={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.LastTimestamp)) { '(unknown)' } else { $Summary.LastTimestamp }))),
         ("analyzed_files={0}" -f $analyzedFiles),

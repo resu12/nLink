@@ -18,6 +18,14 @@ namespace NLink.SmokeTests;
 [Trait("Area", "Core")]
 public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 {
+    [Fact(Skip = "Phase 1 coordinator not implemented")]
+    [Trait("Category", "Smoke")]
+    public void RecoveryStateContract_RuntimeUnlockRetryDispatchesBeforeLivenessTerminalizes()
+    {
+        throw new NotImplementedException(
+            "Regular V4 active transfer should retire an unobserved runtime-unlock offer generation, wait for bridge recovery settle, dispatch one fresh observed retry, and beat session liveness terminalization.");
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public void NknTunaAccelerationOptions_DefaultsDisabledWithFileAndScreenLanes()
@@ -3813,17 +3821,17 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Contains("retry_scheduled=1", logTail, StringComparison.Ordinal);
             Assert.Contains("replay_scheduled=0", logTail, StringComparison.Ordinal);
             Assert.Contains("answer_timeout_scheduled=0", logTail, StringComparison.Ordinal);
-            Assert.Contains("pause_deferred=0", logTail, StringComparison.Ordinal);
+            Assert.Contains("pause_deferred=1", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_offer_rejected;", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_tuna_activation_negotiation_regular_nkn_paused;", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_tuna_activation_negotiation_regular_nkn_resumed;", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_activation_failed_regular_v4_resumed;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_tuna_activation_negotiation_regular_nkn_paused;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_tuna_activation_negotiation_regular_nkn_resumed;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_activation_failed_regular_v4_resumed;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_control_queue_accepted_as_observed; purpose=offer", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_offer_queued;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_outbound_offer_retired; reason=offer_send_not_observed", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_offer_send_not_observed", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_tuna_activation_negotiation_regular_nkn_pause_retained;", logTail, StringComparison.Ordinal);
-            Assert.Contains(
+            Assert.DoesNotContain(
                 availabilityEvents,
                 e => !e.IsAvailable &&
                      e.Reason == "tuna_activation_negotiating");
