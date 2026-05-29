@@ -2087,6 +2087,52 @@ public sealed class FileTransferOpsScriptsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockContractRetryDispatchedWithoutLivenessTimeout_IsNotRecoveryCoordinationFailure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRecoveryContractDispatchedFixture(),
+            ["-LiveRouteProofMode", "None"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("(none)", verdict["recovery_failure_class"]);
+        Assert.Equal("1", verdict["runtime_unlock_offer_not_observed_count"]);
+        Assert.Equal("0", verdict["session_liveness_timeout_after_runtime_unlock_count"]);
+
+        var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
+        Assert.Equal("(none)", stability["recovery_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryDispatchedButOfferObservationBlocked_ClassifiesNextBlocker()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchedButOfferObservationBlockedFixture(),
+            ["-LiveRouteProofMode", "RegularActivationCycle"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("runtime_unlock_offer_observation_blocked_by_receive_recovery", verdict["recovery_failure_class"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatched_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_offer_not_observed_count"]);
+        Assert.Equal("1", verdict["session_liveness_timeout_after_runtime_unlock_count"]);
+        Assert.NotEqual("runtime_unlock_recovery_coordination", verdict["recovery_failure_class"]);
+
+        var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
+        Assert.Equal("runtime_unlock_offer_observation_blocked_by_receive_recovery", stability["recovery_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_BridgeConfigSummary_RecordsFrozenDefaults()
     {
         if (!OperatingSystem.IsWindows())
@@ -6731,6 +6777,43 @@ if (-not $result.RegressionFailed) {
             LogLine($"event=file_transfer_outbound_terminal; role=Helpee; session_id={sessionId}; transfer_id={transferId}; state=Failed; error_code=peer_disconnected", secondsOffset: 91),
             LogLine($"event=transfer_terminal; direction=outbound; transfer_id={transferId}; session_id={sessionId}; file_name_len=33; file_size_bytes=134217728; bytes_transferred=0; chunks_transferred=0; chunk_count=6242; error_code=peer_disconnected; reason=Peer disconnected.; saved_path=(none); route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4", secondsOffset: 92),
             LogLine($"event=file_transfer_inbound_terminal; role=Helper; session_id={sessionId}; transfer_id={transferId}; state=Failed; error_code=peer_disconnected; saved_path=(none)", secondsOffset: 93)
+        ];
+    }
+
+    private static string[] BuildRuntimeUnlockRecoveryContractDispatchedFixture()
+    {
+        const string transferId = "transfer_runtime_unlock_contract_dispatched";
+        const string sessionId = "sess_runtime_unlock_contract_dispatched";
+        return
+        [
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id={sessionId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4; file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=conservative_nkn_startup", secondsOffset: 0),
+            LogLine($"event=tuna_acceleration_activation_offer_not_observed; trigger=runtime_unlock; session_id={sessionId}; payer_decision_id=7; generation=3; retry_scheduled=0; retry_after_recovery_armed=1; recovery_requested=1; recovery_reason=tuna_activation_offer_send_timeout; retry_reason=runtime_unlock_offer_send_not_observed", secondsOffset: 20),
+            LogLine($"event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled; session_id={sessionId}; retired_generation=3; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=tuna_activation_offer_send_timeout; trigger=receive_resumed; queued_behind_active_negotiation=1", secondsOffset: 45),
+            LogLine($"event=session_recovery_contract_retry_dispatched; session_id={sessionId}; transfer_id={transferId}; contract_generation=1; offer_generation=3; kind=runtime_unlock_activation; state=retrydispatched; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=tuna_activation_offer_send_timeout; recovery_pending=0; recovery_settled=1; retry_required=1; retry_dispatching=1; retry_dispatched=1; retry_observed=0; queued_behind_active_negotiation=1", secondsOffset: 48),
+            LogLine($"event=session_recovery_contract_retry_observed; session_id={sessionId}; transfer_id={transferId}; contract_generation=1; offer_generation=3; kind=runtime_unlock_activation; state=retryobserved; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=tuna_activation_offer_send_timeout; recovery_pending=0; recovery_settled=1; retry_required=0; retry_dispatching=0; retry_dispatched=1; retry_observed=1; queued_behind_active_negotiation=1", secondsOffset: 52),
+            LogLine($"event=file_transfer_outbound_terminal; role=Helpee; session_id={sessionId}; transfer_id={transferId}; state=Completed; error_code=(none); sha256_match=1", secondsOffset: 90),
+            LogLine($"event=transfer_terminal; direction=outbound; transfer_id={transferId}; session_id={sessionId}; file_name_len=33; file_size_bytes=134217728; bytes_transferred=134217728; chunks_transferred=6242; chunk_count=6242; error_code=(none); reason=Completed.; saved_path=(none); route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4", secondsOffset: 91)
+        ];
+    }
+
+    private static string[] BuildRuntimeUnlockRetryDispatchedButOfferObservationBlockedFixture()
+    {
+        const string transferId = "transfer_runtime_unlock_offer_observation_blocked";
+        const string sessionId = "sess_runtime_unlock_offer_observation_blocked";
+        return
+        [
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id={sessionId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4; file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=conservative_nkn_startup", secondsOffset: 0),
+            LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id={sessionId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4; file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=conservative_nkn_startup", secondsOffset: 1),
+            LogLine($"event=filetransfer_v4_sender_started; direction=outbound; transfer_id={transferId}; session_id={sessionId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; bridge_recovery_policy=regular_nkn_v4_fast", secondsOffset: 5),
+            LogLine($"event=tuna_acceleration_activation_offer_not_observed; trigger=runtime_unlock; session_id={sessionId}; payer_decision_id=7; generation=3; retry_scheduled=0; retry_after_recovery_armed=1; recovery_requested=1; recovery_reason=tuna_activation_offer_send_timeout; retry_reason=runtime_unlock_offer_send_not_observed", secondsOffset: 20),
+            LogLine($"event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled; session_id={sessionId}; retired_generation=3; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=tuna_activation_offer_send_timeout; trigger=receive_resumed; queued_behind_active_negotiation=1", secondsOffset: 45),
+            LogLine($"event=session_recovery_contract_retry_dispatched; session_id={sessionId}; transfer_id={transferId}; contract_generation=1; offer_generation=3; kind=runtime_unlock_activation; state=retrydispatched; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=tuna_activation_offer_send_timeout; recovery_pending=0; recovery_settled=1; retry_required=0; retry_dispatching=1; retry_dispatched=1; retry_observed=0; queued_behind_active_negotiation=1", secondsOffset: 48),
+            LogLine($"event=tuna_activation_control_send_waiting_for_regular_v4_recovery; session_id={sessionId}; purpose=offer; blocker_reason=receive_stall_recovery_in_progress; blocker_remaining_ms=0; regular_v4_pressure_reason=receive_stall_recovery_in_progress; regular_v4_pressure_remaining_ms=0; recovery_age_ms=5276; wait_budget_ms=5000; reason=runtime_unlock_regular_v4_receive_stall", secondsOffset: 49),
+            LogLine($"event=tuna_acceleration_control_bulk_queue_fallback_skipped; purpose=offer; message_type=transport_acceleration_offer; reason=runtime_unlock_active_filetransfer_requires_direct_observed_send; blocker_reason=regular_v4_receive_stall_bypass", secondsOffset: 50),
+            LogLine($"event=tuna_acceleration_offer_rejected; reason=runtime_unlock; session_id={sessionId}; lanes=file; payer_decision_id=8; generation=4; observed_lane=(none); queue_local_only=0; recovery_requested=1; recovery_reason=tuna_activation_offer_send_timeout", secondsOffset: 51),
+            LogLine($"event=session_liveness_timeout; session_id={sessionId}; generation=1; silence_ms=90000; terminal_timeout_ms=18000; role=Helper", secondsOffset: 90),
+            LogLine($"event=file_transfer_outbound_terminal; role=Helpee; session_id={sessionId}; transfer_id={transferId}; state=Failed; error_code=peer_disconnected", secondsOffset: 91),
+            LogLine($"event=transfer_terminal; direction=outbound; transfer_id={transferId}; session_id={sessionId}; file_name_len=33; file_size_bytes=134217728; bytes_transferred=0; chunks_transferred=0; chunk_count=6242; error_code=peer_disconnected; reason=Peer disconnected.; saved_path=(none); route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4", secondsOffset: 92)
         ];
     }
 

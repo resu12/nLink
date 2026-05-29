@@ -3253,6 +3253,8 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_offer_not_observed_count={0}" -f $recoveryClassification.RuntimeUnlockOfferNotObservedCount),
         ("runtime_unlock_retry_scheduled_count={0}" -f $recoveryClassification.RuntimeUnlockRetryScheduledCount),
         ("runtime_unlock_retry_queued_behind_active_negotiation_count={0}" -f $recoveryClassification.RuntimeUnlockRetryQueuedBehindActiveNegotiationCount),
+        ("runtime_unlock_retry_dispatched_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchedCount),
+        ("runtime_unlock_offer_observation_blocked_count={0}" -f $recoveryClassification.RuntimeUnlockOfferObservationBlockedCount),
         ("session_liveness_timeout_after_runtime_unlock_count={0}" -f $recoveryClassification.SessionLivenessTimeoutAfterRuntimeUnlockCount),
         ("hard_failure_count={0}" -f $GateResult.HardFailures.Count),
         ("warning_count={0}" -f $GateResult.Warnings.Count),
@@ -3654,6 +3656,22 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockRetryQueuedBehindActiveNegotiationEvents = @($runtimeUnlockRetryScheduledEvents | Where-Object {
         (Get-FileTransferEventField -Event $_ -Name 'queued_behind_active_negotiation' -Default '0') -eq '1'
     })
+    $sessionRecoveryContractRetryDispatchedEvents = @($events | Where-Object {
+        $_.EventName -eq 'session_recovery_contract_retry_dispatched'
+    })
+    $runtimeUnlockOfferRejectedWithoutObservationEvents = @($events | Where-Object {
+        $_.EventName -eq 'tuna_acceleration_offer_rejected' -and
+        (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'runtime_unlock' -and
+        (Get-FileTransferEventField -Event $_ -Name 'observed_lane' -Default '') -eq '(none)'
+    })
+    $runtimeUnlockReceiveRecoveryBlockedOfferEvents = @($events | Where-Object {
+        ($_.EventName -eq 'tuna_activation_control_send_waiting_for_regular_v4_recovery') -or
+        ($_.EventName -eq 'tuna_activation_control_send_regular_v4_receive_stall_bypassed') -or
+        (
+            $_.EventName -eq 'tuna_acceleration_control_bulk_queue_fallback_skipped' -and
+            (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'runtime_unlock_active_filetransfer_requires_direct_observed_send'
+        )
+    })
     $sessionLivenessTimeoutEvents = @($events | Where-Object { $_.EventName -eq 'session_liveness_timeout' })
     $peerDisconnectedTerminalEvents = @($events | Where-Object {
         ($_.EventName -eq 'file_transfer_outbound_terminal' -or
@@ -3686,6 +3704,21 @@ function Get-FileTransferRecoveryFailureClassification {
         $class = 'active_file_tuna_v6_evidence'
     }
     elseif ($runtimeUnlockOfferNotObservedEvents.Count -gt 0 -and
+        $sessionRecoveryContractRetryDispatchedEvents.Count -gt 0 -and
+        $sessionLivenessTimeoutEvents.Count -eq 0 -and
+        $peerDisconnectedTerminalEvents.Count -eq 0) {
+        $class = '(none)'
+    }
+    elseif ($runtimeUnlockOfferNotObservedEvents.Count -gt 0 -and
+        $sessionRecoveryContractRetryDispatchedEvents.Count -gt 0 -and
+        ($runtimeUnlockOfferRejectedWithoutObservationEvents.Count -gt 0 -or $runtimeUnlockReceiveRecoveryBlockedOfferEvents.Count -gt 0) -and
+        $sessionLivenessTimeoutEvents.Count -gt 0 -and
+        $peerDisconnectedTerminalEvents.Count -gt 0 -and
+        $routeChanges.Count -eq 1 -and
+        $routeChanges[0] -eq 'regular_nkn_v4_fast') {
+        $class = 'runtime_unlock_offer_observation_blocked_by_receive_recovery'
+    }
+    elseif ($runtimeUnlockOfferNotObservedEvents.Count -gt 0 -and
         $runtimeUnlockRetryScheduledEvents.Count -gt 0 -and
         $runtimeUnlockRetryQueuedBehindActiveNegotiationEvents.Count -gt 0 -and
         $sessionLivenessTimeoutEvents.Count -gt 0 -and
@@ -3709,6 +3742,8 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockOfferNotObservedCount = $runtimeUnlockOfferNotObservedEvents.Count
         RuntimeUnlockRetryScheduledCount = $runtimeUnlockRetryScheduledEvents.Count
         RuntimeUnlockRetryQueuedBehindActiveNegotiationCount = $runtimeUnlockRetryQueuedBehindActiveNegotiationEvents.Count
+        RuntimeUnlockRetryDispatchedCount = $sessionRecoveryContractRetryDispatchedEvents.Count
+        RuntimeUnlockOfferObservationBlockedCount = $runtimeUnlockOfferRejectedWithoutObservationEvents.Count + $runtimeUnlockReceiveRecoveryBlockedOfferEvents.Count
         SessionLivenessTimeoutAfterRuntimeUnlockCount = if ($runtimeUnlockOfferNotObservedEvents.Count -gt 0) { $sessionLivenessTimeoutEvents.Count } else { 0 }
     }
 }
@@ -3774,6 +3809,8 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_offer_not_observed_count={0}" -f $recoveryClassification.RuntimeUnlockOfferNotObservedCount),
         ("runtime_unlock_retry_scheduled_count={0}" -f $recoveryClassification.RuntimeUnlockRetryScheduledCount),
         ("runtime_unlock_retry_queued_behind_active_negotiation_count={0}" -f $recoveryClassification.RuntimeUnlockRetryQueuedBehindActiveNegotiationCount),
+        ("runtime_unlock_retry_dispatched_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchedCount),
+        ("runtime_unlock_offer_observation_blocked_count={0}" -f $recoveryClassification.RuntimeUnlockOfferObservationBlockedCount),
         ("session_liveness_timeout_after_runtime_unlock_count={0}" -f $recoveryClassification.SessionLivenessTimeoutAfterRuntimeUnlockCount),
         ("observed_start_utc={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.FirstTimestamp)) { '(unknown)' } else { $Summary.FirstTimestamp }))),
         ("observed_end_utc={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.LastTimestamp)) { '(unknown)' } else { $Summary.LastTimestamp }))),

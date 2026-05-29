@@ -32,6 +32,9 @@ public sealed partial class NknSignalingTransport
     private static readonly TimeSpan FileTransferTunaActivationPauseMax = TimeSpan.FromSeconds(75);
     private static readonly TimeSpan FileTransferTunaActivationBridgeRecoveryWait = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan RuntimeUnlockRecoverySoftSettleDelay = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan RuntimeUnlockRecoveryContractRetryDeadline = TimeSpan.FromSeconds(35);
+    private static readonly TimeSpan RuntimeUnlockRecoveryContractLivenessDeferral = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan RuntimeUnlockRecoveryContractStaleNegotiationWindow = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan RuntimeUnlockQueueAcceptedObservedEscapeTtl = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan RemotePayerIntentFreshness = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan TunaFallbackProofLogWindow = TimeSpan.FromMinutes(1);
@@ -55,6 +58,7 @@ public sealed partial class NknSignalingTransport
     internal static TimeSpan? AccelerationControlBulkBypassWaitOverrideForTests;
     internal static TimeSpan? FileTransferTunaActivationBridgeRecoveryWaitOverrideForTests;
     internal static TimeSpan? RuntimeUnlockRecoverySoftSettleDelayOverrideForTests;
+    internal static TimeSpan? RuntimeUnlockRecoveryContractStaleNegotiationWindowOverrideForTests;
     internal static TimeSpan? HelperPaidOfferHelpeePriorityDelayOverrideForTests;
     internal static TimeSpan? HelperPaidOfferHelpeeIntentGraceDelayOverrideForTests;
     internal static Func<NknSignalingTransport, bool>? RuntimeUnlockOfferQueueAcceptedPressureOverrideForTests;
@@ -89,6 +93,7 @@ public sealed partial class NknSignalingTransport
     private long fileTransferTunaActivationBridgeRecoveryStartedTick;
     private long fileTransferTunaActivationBridgeRecoverySettledTick;
     private int fileTransferTunaActivationBridgeRecoveryActive;
+    private long runtimeUnlockRecoveryContractNextGeneration;
     private RuntimeUnlockRecoveryRetryState? runtimeUnlockRecoveryRetryState;
     private string? pendingAccelerationAnswerAckSessionId;
     private string? pendingAccelerationAnswerAckNonce;
@@ -193,9 +198,13 @@ public sealed partial class NknSignalingTransport
 
     private sealed class RuntimeUnlockRecoveryRetryState
     {
+        public required long ContractGeneration { get; init; }
+
         public required long RetiredOfferGeneration { get; init; }
 
         public required string SessionId { get; init; }
+
+        public string? TransferId { get; init; }
 
         public required string RetryReason { get; init; }
 
@@ -203,9 +212,23 @@ public sealed partial class NknSignalingTransport
 
         public required long CreatedUtcMs { get; init; }
 
+        public long RetryDeadlineUtcMs { get; init; }
+
+        public long LivenessDeferralDeadlineUtcMs { get; init; }
+
+        public SessionRecoveryContractState ContractState { get; set; } = SessionRecoveryContractState.RecoveryPending;
+
         public bool Settled { get; set; }
 
         public bool RetryQueued { get; set; }
+
+        public bool RetryDispatching { get; set; }
+
+        public bool RetryDispatched { get; set; }
+
+        public bool RetryObserved { get; set; }
+
+        public bool QueuedBehindActiveNegotiation { get; set; }
     }
 
     private readonly record struct AccelerationControlSendResult(
@@ -1800,6 +1823,103 @@ public sealed partial class NknSignalingTransport
     private static bool IsTunaActivationOfferSendPurpose(string? purpose)
         => string.Equals(purpose, "offer", StringComparison.OrdinalIgnoreCase) ||
            string.Equals(purpose, "offer_replay", StringComparison.OrdinalIgnoreCase);
+
+    public bool TryGetActiveSessionRecoveryContract(
+        string sessionId,
+        out SessionRecoveryContractSnapshot snapshot)
+    {
+        snapshot = default!;
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? string.Empty : sessionId.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedSessionId))
+        {
+            return false;
+        }
+
+        lock (accelerationGate)
+        {
+            var state = runtimeUnlockRecoveryRetryState;
+            if (state is null ||
+                !string.Equals(state.SessionId, normalizedSessionId, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            snapshot = CreateSessionRecoveryContractSnapshotUnsafe(state);
+            return true;
+        }
+    }
+
+    private SessionRecoveryContractSnapshot CreateSessionRecoveryContractSnapshotUnsafe(
+        RuntimeUnlockRecoveryRetryState state)
+        => new(
+            state.SessionId,
+            state.TransferId,
+            state.ContractGeneration,
+            state.RetiredOfferGeneration,
+            SessionRecoveryContractKind.RuntimeUnlockActivation,
+            state.ContractState,
+            state.RetryReason,
+            state.RecoveryReason,
+            DateTimeOffset.FromUnixTimeMilliseconds(state.CreatedUtcMs),
+            DateTimeOffset.FromUnixTimeMilliseconds(state.RetryDeadlineUtcMs),
+            DateTimeOffset.FromUnixTimeMilliseconds(state.LivenessDeferralDeadlineUtcMs),
+            RecoveryPending: !state.Settled && state.ContractState == SessionRecoveryContractState.RecoveryPending,
+            RecoverySettled: state.Settled,
+            RetryRequired: IsSessionRecoveryContractRetryRequired(state),
+            RetryDispatching: state.RetryDispatching,
+            RetryDispatched: state.RetryDispatched,
+            RetryObserved: state.RetryObserved,
+            QueuedBehindActiveNegotiation: state.QueuedBehindActiveNegotiation);
+
+    private static bool IsSessionRecoveryContractRetryRequired(RuntimeUnlockRecoveryRetryState state)
+        => !state.RetryObserved &&
+           state.ContractState is SessionRecoveryContractState.RecoveryPending or
+               SessionRecoveryContractState.RecoverySettled or
+               SessionRecoveryContractState.RetryQueued or
+               SessionRecoveryContractState.RetryDispatching;
+
+    private void LogRuntimeUnlockRecoveryContract(string eventName, string? sessionId)
+    {
+        RuntimeUnlockRecoveryRetryState? stateSnapshot;
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? string.Empty : sessionId.Trim();
+        lock (accelerationGate)
+        {
+            stateSnapshot = runtimeUnlockRecoveryRetryState;
+            if (stateSnapshot is null ||
+                (!string.IsNullOrWhiteSpace(normalizedSessionId) &&
+                 !string.Equals(stateSnapshot.SessionId, normalizedSessionId, StringComparison.Ordinal)))
+            {
+                return;
+            }
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event={SanitizeLogToken(eventName)}; session_id={SanitizeLogToken(stateSnapshot.SessionId)}; transfer_id={SanitizeLogToken(stateSnapshot.TransferId ?? "(none)")}; contract_generation={stateSnapshot.ContractGeneration}; offer_generation={stateSnapshot.RetiredOfferGeneration}; kind=runtime_unlock_activation; state={SanitizeLogToken(stateSnapshot.ContractState.ToString().ToLowerInvariant())}; retry_reason={SanitizeLogToken(stateSnapshot.RetryReason)}; recovery_reason={SanitizeLogToken(stateSnapshot.RecoveryReason)}; recovery_pending={(!stateSnapshot.Settled ? 1 : 0)}; recovery_settled={(stateSnapshot.Settled ? 1 : 0)}; retry_required={(IsSessionRecoveryContractRetryRequired(stateSnapshot) ? 1 : 0)}; retry_dispatching={(stateSnapshot.RetryDispatching ? 1 : 0)}; retry_dispatched={(stateSnapshot.RetryDispatched ? 1 : 0)}; retry_observed={(stateSnapshot.RetryObserved ? 1 : 0)}; queued_behind_active_negotiation={(stateSnapshot.QueuedBehindActiveNegotiation ? 1 : 0)}; retry_deadline_utc_ms={stateSnapshot.RetryDeadlineUtcMs}; liveness_deferral_deadline_utc_ms={stateSnapshot.LivenessDeferralDeadlineUtcMs}");
+    }
+
+    private string? TryGetFirstActiveFileTransferIdForSession(string sessionId)
+    {
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? string.Empty : sessionId.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedSessionId))
+        {
+            return null;
+        }
+
+        lock (gate)
+        {
+            foreach (var session in fileTransferDataSessions.Values)
+            {
+                if (!session.IsDisposed &&
+                    string.Equals(session.SessionId, normalizedSessionId, StringComparison.Ordinal))
+                {
+                    return session.TransferId;
+                }
+            }
+        }
+
+        return null;
+    }
 
     private bool TryRequestFileTransferTunaActivationOfferSendRecovery(
         string purpose,
@@ -3659,7 +3779,43 @@ public sealed partial class NknSignalingTransport
         {
             if (isRuntimeUnlockActivation)
             {
+                if (TrySupersedeStaleActiveNegotiationForRuntimeUnlockRecoveryContract(reason) &&
+                    Interlocked.CompareExchange(ref accelerationNegotiationScheduled, 1, 0) == 0)
+                {
+                    NotifyTransportAccelerationStateChanged($"negotiation_scheduled_{reason}");
+                    _ = Task.Run(
+                        async () =>
+                        {
+                            try
+                            {
+                                MarkRuntimeUnlockRecoveryContractRetryDispatched(reason);
+                                await TrySendAccelerationOfferAsync(
+                                        reason,
+                                        ResolvePayerDecisionIdForNegotiation(reason),
+                                        CancellationToken.None)
+                                    .ConfigureAwait(false);
+                            }
+                            catch (Exception ex) when (ex is not OperationCanceledException)
+                            {
+                                LocalOperationalLog.Warn(
+                                    "NKN.Tuna",
+                                    $"event=tuna_acceleration_negotiation_failed; reason={SanitizeLogToken(reason)}; error={ex.GetType().Name}");
+                            }
+                            finally
+                            {
+                                Interlocked.Exchange(ref accelerationNegotiationScheduled, 0);
+                                if (Interlocked.Exchange(ref pendingRuntimeUnlockAccelerationNegotiation, 0) != 0)
+                                {
+                                    ScheduleAccelerationNegotiationIfEligible("runtime_unlock");
+                                }
+                            }
+                        },
+                        CancellationToken.None);
+                    return;
+                }
+
                 Interlocked.Exchange(ref pendingRuntimeUnlockAccelerationNegotiation, 1);
+                MarkRuntimeUnlockRecoveryContractQueuedBehindActiveNegotiation(reason);
                 LocalOperationalLog.Info(
                     "NKN.Tuna",
                     $"event=tuna_acceleration_runtime_unlock_queued_behind_active_negotiation; reason={SanitizeLogToken(reason)}");
@@ -3675,6 +3831,7 @@ public sealed partial class NknSignalingTransport
             {
                 try
                 {
+                    MarkRuntimeUnlockRecoveryContractRetryDispatched(reason);
                     await TrySendAccelerationOfferAsync(reason, payerDecisionId, CancellationToken.None).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
@@ -4018,6 +4175,10 @@ public sealed partial class NknSignalingTransport
         if (offerSend.Succeeded)
         {
             MarkRuntimeUnlockOfferObservedSendIfCurrent(nonce, payerDecisionId, offerGeneration, offerSend.ObservedLane);
+            if (isRuntimeUnlockActivation)
+            {
+                MarkRuntimeUnlockRecoveryContractRetryObserved(sessionId, offerGeneration, offerSend.ObservedLane);
+            }
         }
 
         LocalOperationalLog.Info(
@@ -4177,6 +4338,109 @@ public sealed partial class NknSignalingTransport
         }
     }
 
+    private bool TrySupersedeStaleActiveNegotiationForRuntimeUnlockRecoveryContract(string reason)
+    {
+        if (!IsRuntimeUnlockActivationReason(reason))
+        {
+            return false;
+        }
+
+        RuntimeUnlockRecoveryRetryState? stateSnapshot = null;
+        lock (accelerationGate)
+        {
+            var state = runtimeUnlockRecoveryRetryState;
+            if (state is null ||
+                state.RetryObserved ||
+                state.ContractState is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed ||
+                !state.RetryQueued ||
+                !state.QueuedBehindActiveNegotiation)
+            {
+                return false;
+            }
+
+            var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var staleWindow = RuntimeUnlockRecoveryContractStaleNegotiationWindowOverrideForTests ??
+                RuntimeUnlockRecoveryContractStaleNegotiationWindow;
+            if (nowMs - state.CreatedUtcMs < (long)staleWindow.TotalMilliseconds)
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(outboundAccelerationOfferNonce) ||
+                !string.IsNullOrWhiteSpace(pendingAccelerationAnswerAckNonce))
+            {
+                return false;
+            }
+
+            if (runtimeUnlockOfferProofState is { Retired: false, ObservedSend: true })
+            {
+                return false;
+            }
+
+            state.ContractState = SessionRecoveryContractState.RetryDispatching;
+            state.RetryDispatching = true;
+            stateSnapshot = state;
+        }
+
+        Interlocked.Exchange(ref pendingRuntimeUnlockAccelerationNegotiation, 0);
+        Interlocked.Exchange(ref accelerationNegotiationScheduled, 0);
+        LogRuntimeUnlockRecoveryContract(
+            "session_recovery_contract_stale_negotiation_superseded",
+            stateSnapshot!.SessionId);
+        return true;
+    }
+
+    private void MarkRuntimeUnlockRecoveryContractQueuedBehindActiveNegotiation(string reason)
+    {
+        RuntimeUnlockRecoveryRetryState? stateSnapshot = null;
+        lock (accelerationGate)
+        {
+            var state = runtimeUnlockRecoveryRetryState;
+            if (state is null ||
+                state.RetryObserved ||
+                state.ContractState is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed ||
+                !IsRuntimeUnlockActivationRetryReason(state.RetryReason))
+            {
+                return;
+            }
+
+            state.QueuedBehindActiveNegotiation = true;
+            state.RetryQueued = true;
+            state.ContractState = SessionRecoveryContractState.RetryQueued;
+            stateSnapshot = state;
+        }
+
+        LogRuntimeUnlockRecoveryContract("session_recovery_contract_retry_queued", stateSnapshot!.SessionId);
+    }
+
+    private void MarkRuntimeUnlockRecoveryContractRetryDispatched(string reason)
+    {
+        if (!IsRuntimeUnlockActivationReason(reason))
+        {
+            return;
+        }
+
+        RuntimeUnlockRecoveryRetryState? stateSnapshot = null;
+        lock (accelerationGate)
+        {
+            var state = runtimeUnlockRecoveryRetryState;
+            if (state is null ||
+                state.RetryObserved ||
+                state.ContractState is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed)
+            {
+                return;
+            }
+
+            state.RetryQueued = true;
+            state.RetryDispatching = true;
+            state.RetryDispatched = true;
+            state.ContractState = SessionRecoveryContractState.RetryDispatched;
+            stateSnapshot = state;
+        }
+
+        LogRuntimeUnlockRecoveryContract("session_recovery_contract_retry_dispatched", stateSnapshot!.SessionId);
+    }
+
     private bool HasPendingOutboundAccelerationOffer()
     {
         lock (accelerationGate)
@@ -4243,6 +4507,79 @@ public sealed partial class NknSignalingTransport
             state.ObservedSend = true;
             state.ObservedSendLane = SanitizeLogToken(observedLane);
         }
+    }
+
+    private void MarkRuntimeUnlockRecoveryContractRetryObserved(
+        string sessionId,
+        long offerGeneration,
+        string? observedLane)
+    {
+        RuntimeUnlockRecoveryRetryState? stateSnapshot = null;
+        lock (accelerationGate)
+        {
+            var state = runtimeUnlockRecoveryRetryState;
+            if (state is null ||
+                state.RetryObserved ||
+                state.ContractState is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed ||
+                !string.Equals(state.SessionId, sessionId.Trim(), StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            state.RetryObserved = true;
+            state.RetryDispatched = true;
+            state.RetryDispatching = false;
+            state.ContractState = SessionRecoveryContractState.RetryObserved;
+            stateSnapshot = state;
+        }
+
+        LogRuntimeUnlockRecoveryContract("session_recovery_contract_retry_observed", stateSnapshot!.SessionId);
+    }
+
+    private void CompleteRuntimeUnlockRecoveryContractIfActive(string sessionId, string reason)
+    {
+        RuntimeUnlockRecoveryRetryState? stateSnapshot = null;
+        lock (accelerationGate)
+        {
+            var state = runtimeUnlockRecoveryRetryState;
+            if (state is null ||
+                state.ContractState is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed ||
+                !string.Equals(state.SessionId, sessionId.Trim(), StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            state.RetryObserved = true;
+            state.RetryDispatching = false;
+            state.RetryDispatched = true;
+            state.ContractState = SessionRecoveryContractState.Completed;
+            stateSnapshot = state;
+        }
+
+        LogRuntimeUnlockRecoveryContract("session_recovery_contract_completed", stateSnapshot!.SessionId);
+    }
+
+    private void FailRuntimeUnlockRecoveryContractIfActive(string? sessionId, string reason)
+    {
+        RuntimeUnlockRecoveryRetryState? stateSnapshot = null;
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? string.Empty : sessionId.Trim();
+        lock (accelerationGate)
+        {
+            var state = runtimeUnlockRecoveryRetryState;
+            if (state is null ||
+                state.ContractState is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed ||
+                (!string.IsNullOrWhiteSpace(normalizedSessionId) &&
+                 !string.Equals(state.SessionId, normalizedSessionId, StringComparison.Ordinal)))
+            {
+                return;
+            }
+
+            state.RetryDispatching = false;
+            state.ContractState = SessionRecoveryContractState.Failed;
+            stateSnapshot = state;
+        }
+
+        LogRuntimeUnlockRecoveryContract("session_recovery_contract_failed", stateSnapshot!.SessionId);
     }
 
     private void MarkRuntimeUnlockOfferAnswerTimeoutScheduledIfCurrent(
@@ -4475,21 +4812,30 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
+        var transferId = TryGetFirstActiveFileTransferIdForSession(normalizedSessionId);
         lock (accelerationGate)
         {
+            var now = DateTimeOffset.UtcNow;
+            var nowMs = now.ToUnixTimeMilliseconds();
+            var contractGeneration = ++runtimeUnlockRecoveryContractNextGeneration;
             runtimeUnlockRecoveryRetryState = new RuntimeUnlockRecoveryRetryState
             {
+                ContractGeneration = contractGeneration,
                 RetiredOfferGeneration = retiredOfferGeneration,
                 SessionId = normalizedSessionId,
+                TransferId = transferId,
                 RetryReason = SanitizeLogToken(retryReason),
                 RecoveryReason = SanitizeLogToken(recoveryReason),
-                CreatedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                CreatedUtcMs = nowMs,
+                RetryDeadlineUtcMs = now.Add(RuntimeUnlockRecoveryContractRetryDeadline).ToUnixTimeMilliseconds(),
+                LivenessDeferralDeadlineUtcMs = now.Add(RuntimeUnlockRecoveryContractLivenessDeferral).ToUnixTimeMilliseconds(),
             };
         }
 
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=tuna_acceleration_runtime_unlock_retry_after_recovery_armed; session_id={SanitizeLogToken(normalizedSessionId)}; retired_generation={retiredOfferGeneration}; retry_reason={SanitizeLogToken(retryReason)}; recovery_reason={SanitizeLogToken(recoveryReason)}");
+        LogRuntimeUnlockRecoveryContract("session_recovery_contract_started", normalizedSessionId);
         if (ShouldDeferRuntimeUnlockRetryForActivePostTunaFallbackRepair(normalizedSessionId))
         {
             ScheduleRuntimeUnlockRetryAfterFallbackRepairSoftSettle(
@@ -4775,11 +5121,13 @@ public sealed partial class NknSignalingTransport
                 }
 
                 state.Settled = true;
+                state.ContractState = SessionRecoveryContractState.RecoverySettled;
             }
 
             LocalOperationalLog.Info(
                 "NKN.Tuna",
                 $"event=tuna_acceleration_runtime_unlock_retry_after_recovery_deferred_for_fallback_repair; session_id={SanitizeLogToken(stateSnapshot.SessionId)}; retired_generation={stateSnapshot.RetiredOfferGeneration}; retry_reason={SanitizeLogToken(stateSnapshot.RetryReason)}; recovery_reason={SanitizeLogToken(stateSnapshot.RecoveryReason)}; trigger={SanitizeLogToken(trigger)}");
+            LogRuntimeUnlockRecoveryContract("session_recovery_contract_recovery_settled", stateSnapshot.SessionId);
             ScheduleRuntimeUnlockRetryAfterFallbackRepairSoftSettle(
                 stateSnapshot.RetiredOfferGeneration,
                 stateSnapshot.SessionId);
@@ -4802,6 +5150,8 @@ public sealed partial class NknSignalingTransport
             state.Settled = true;
             state.RetryQueued = true;
             queuedBehindActiveNegotiation = Volatile.Read(ref accelerationNegotiationScheduled) != 0;
+            state.QueuedBehindActiveNegotiation = queuedBehindActiveNegotiation;
+            state.ContractState = SessionRecoveryContractState.RetryQueued;
             stateToSchedule = state;
         }
 
@@ -4813,6 +5163,8 @@ public sealed partial class NknSignalingTransport
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled; session_id={SanitizeLogToken(stateToSchedule.SessionId)}; retired_generation={stateToSchedule.RetiredOfferGeneration}; retry_reason={SanitizeLogToken(stateToSchedule.RetryReason)}; recovery_reason={SanitizeLogToken(stateToSchedule.RecoveryReason)}; trigger={SanitizeLogToken(trigger)}; queued_behind_active_negotiation={(queuedBehindActiveNegotiation ? 1 : 0)}");
+        LogRuntimeUnlockRecoveryContract("session_recovery_contract_recovery_settled", stateToSchedule.SessionId);
+        LogRuntimeUnlockRecoveryContract("session_recovery_contract_retry_queued", stateToSchedule.SessionId);
         ScheduleAccelerationNegotiationRetry(stateToSchedule.RetryReason);
     }
 
@@ -6100,6 +6452,7 @@ public sealed partial class NknSignalingTransport
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=tuna_acceleration_negotiated; session_id={answer.SessionId}; lanes={string.Join(",", answer.SupportedLanes)}; payer_decision_id={answer.PayerDecisionId}");
+        CompleteRuntimeUnlockRecoveryContractIfActive(answer.SessionId, "transport_acceleration_answer");
         RequestFileTransferTunaActivationHandoff(answer.SessionId, validation.AcceptedLanes, "tuna_activation_negotiated");
         NotifyTransportAccelerationStateChanged(GetActiveAccelerationStatusReason());
     }
@@ -6214,6 +6567,7 @@ public sealed partial class NknSignalingTransport
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=tuna_acceleration_negotiated; session_id={ack.SessionId}; lanes={string.Join(",", ack.SupportedLanes)}; payer_decision_id={ack.PayerDecisionId}; handshake=answer_ack");
+        CompleteRuntimeUnlockRecoveryContractIfActive(ack.SessionId, "transport_acceleration_answer_ack");
         RequestFileTransferTunaActivationHandoff(ack.SessionId, validation.AcceptedLanes & pendingLanes, "tuna_activation_answer_ack");
         NotifyTransportAccelerationStateChanged(GetActiveAccelerationStatusReason());
     }
@@ -6333,6 +6687,13 @@ public sealed partial class NknSignalingTransport
             LocalOperationalLog.Warn(
                 "NKN.Tuna",
                 $"event=tuna_acceleration_retry_exhausted; reason={normalizedReason}; attempts={attempt - 1}");
+            if (isRuntimeUnlockActivationRetry)
+            {
+                FailRuntimeUnlockRecoveryContractIfActive(
+                    currentSessionSecurityState.SessionId?.Value,
+                    $"retry_exhausted_{normalizedReason}");
+            }
+
             if (TryGetActiveFileTransferTunaActivationPauseForCurrentSession(out var pausedSessionId))
             {
                     LocalOperationalLog.Warn(

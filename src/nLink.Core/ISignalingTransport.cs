@@ -83,6 +83,48 @@ public interface ITransportAccelerationControl
     Task StopAccelerationAsync(string reason, CancellationToken ct);
 }
 
+public enum SessionRecoveryContractKind
+{
+    RuntimeUnlockActivation = 0,
+}
+
+public enum SessionRecoveryContractState
+{
+    RecoveryPending = 0,
+    RecoverySettled = 1,
+    RetryQueued = 2,
+    RetryDispatching = 3,
+    RetryDispatched = 4,
+    RetryObserved = 5,
+    Completed = 6,
+    Failed = 7,
+}
+
+public sealed record SessionRecoveryContractSnapshot(
+    string SessionId,
+    string? TransferId,
+    long ContractGeneration,
+    long OfferGeneration,
+    SessionRecoveryContractKind Kind,
+    SessionRecoveryContractState State,
+    string RetryReason,
+    string RecoveryReason,
+    DateTimeOffset CreatedUtc,
+    DateTimeOffset RetryDeadlineUtc,
+    DateTimeOffset LivenessDeferralDeadlineUtc,
+    bool RecoveryPending,
+    bool RecoverySettled,
+    bool RetryRequired,
+    bool RetryDispatching,
+    bool RetryDispatched,
+    bool RetryObserved,
+    bool QueuedBehindActiveNegotiation);
+
+public interface ISessionRecoveryStateContract
+{
+    bool TryGetActiveSessionRecoveryContract(string sessionId, out SessionRecoveryContractSnapshot snapshot);
+}
+
 public interface ISessionLivenessSignalingTransport
 {
     event EventHandler<SessionLivenessProofEventArgs>? SessionLivenessProofReceived;
