@@ -1232,6 +1232,8 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         var blockOldRegularSend = 0;
         var blockedOldRegularSendCount = 0;
         var abandonedForLiveRouteChangeObserved = false;
+        var routeChangeObserved = false;
+        var fileTunaRouteObserved = false;
         var oldRegularSendBlocked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseOldRegularSend = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var senderTransport = new LoopbackFileTransferTransport(sessionId)
@@ -1299,12 +1301,21 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             await WaitUntilAsync(
                 () =>
                 {
+                    var logTail = ReadOperationalLogTail(logStart);
                     abandonedForLiveRouteChangeObserved =
                         abandonedForLiveRouteChangeObserved ||
-                        ReadOperationalLogTail(logStart).Contains(
+                        logTail.Contains(
                             "event=filetransfer_v4_transport_send_abandoned_for_live_route_change;",
                             StringComparison.Ordinal);
-                    return abandonedForLiveRouteChangeObserved;
+                    routeChangeObserved =
+                        routeChangeObserved ||
+                        logTail.Contains("previous_route=regular_nkn_v4_fast; new_route=file_tuna_v4", StringComparison.Ordinal);
+                    fileTunaRouteObserved =
+                        fileTunaRouteObserved ||
+                        logTail.Contains("route=file_tuna_v4; protocol_version=4", StringComparison.Ordinal);
+                    return abandonedForLiveRouteChangeObserved &&
+                           routeChangeObserved &&
+                           fileTunaRouteObserved;
                 },
                 timeoutMs: 10000);
             releaseOldRegularSend.TrySetResult();
@@ -1327,8 +1338,8 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Equal(payload, destination.ToArray()[..payload.Length]);
         var logTail = ReadOperationalLogTail(logStart);
         Assert.True(abandonedForLiveRouteChangeObserved, logTail);
-        Assert.Contains("previous_route=regular_nkn_v4_fast; new_route=file_tuna_v4", logTail, StringComparison.Ordinal);
-        Assert.Contains("route=file_tuna_v4; protocol_version=4", logTail, StringComparison.Ordinal);
+        Assert.True(routeChangeObserved, logTail);
+        Assert.True(fileTunaRouteObserved, logTail);
         Assert.DoesNotContain("file_tuna_v6", logTail, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_v4_sender_failed;", logTail, StringComparison.Ordinal);
     }

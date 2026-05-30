@@ -118,7 +118,14 @@ public sealed record SessionRecoveryContractSnapshot(
     bool RetryDispatching,
     bool RetryDispatched,
     bool RetryObserved,
-    bool QueuedBehindActiveNegotiation);
+    bool QueuedBehindActiveNegotiation,
+    bool RetryAuthorityPending,
+    bool RetryAuthorityGranted,
+    bool ObservedSendPending,
+    DateTimeOffset ObservedSendDeadlineUtc,
+    string? AuthorizedObservedLane,
+    string? AuthorityFailureReason,
+    int AuthorityAttempt);
 
 public interface ISessionRecoveryStateContract
 {

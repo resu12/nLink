@@ -295,6 +295,14 @@ function Test-FileTransferLegHistoryRouteEvent {
     return $Event.EventName -eq 'filetransfer_leg_frozen'
 }
 
+function Test-FileTransferLiveRouteEpochRouteEvent {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    return $Event.EventName -eq 'filetransfer_live_route_epoch_started' -or
+        $Event.EventName -eq 'filetransfer_live_route_epoch_recovered' -or
+        $Event.EventName -eq 'filetransfer_live_route_epoch_terminal'
+}
+
 function Test-FileTransferRouteEventCanPrecedeSelection {
     param([Parameter(Mandatory = $true)]$Event)
 
@@ -539,6 +547,11 @@ function Get-FileTransferRouteConsistency {
 
         if (Test-FileTransferLegHistoryRouteEvent -Event $event) {
             Add-FileTransferRouteSelfConsistencyFindings -Findings $findings -EvidenceEvents $evidenceEvents -Event $event -Context 'transfer leg history'
+            continue
+        }
+
+        if (Test-FileTransferLiveRouteEpochRouteEvent -Event $event) {
+            Add-FileTransferRouteSelfConsistencyFindings -Findings $findings -EvidenceEvents $evidenceEvents -Event $event -Context 'live route epoch'
             continue
         }
 

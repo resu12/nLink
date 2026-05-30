@@ -3254,6 +3254,9 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_retry_scheduled_count={0}" -f $recoveryClassification.RuntimeUnlockRetryScheduledCount),
         ("runtime_unlock_retry_queued_behind_active_negotiation_count={0}" -f $recoveryClassification.RuntimeUnlockRetryQueuedBehindActiveNegotiationCount),
         ("runtime_unlock_retry_dispatched_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchedCount),
+        ("runtime_unlock_retry_authority_granted_count={0}" -f $recoveryClassification.RuntimeUnlockRetryAuthorityGrantedCount),
+        ("runtime_unlock_retry_authority_observed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryAuthorityObservedCount),
+        ("runtime_unlock_retry_authority_failed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryAuthorityFailedCount),
         ("runtime_unlock_offer_observation_blocked_count={0}" -f $recoveryClassification.RuntimeUnlockOfferObservationBlockedCount),
         ("session_liveness_timeout_after_runtime_unlock_count={0}" -f $recoveryClassification.SessionLivenessTimeoutAfterRuntimeUnlockCount),
         ("hard_failure_count={0}" -f $GateResult.HardFailures.Count),
@@ -3659,6 +3662,15 @@ function Get-FileTransferRecoveryFailureClassification {
     $sessionRecoveryContractRetryDispatchedEvents = @($events | Where-Object {
         $_.EventName -eq 'session_recovery_contract_retry_dispatched'
     })
+    $sessionRecoveryContractRetryAuthorityGrantedEvents = @($events | Where-Object {
+        $_.EventName -eq 'session_recovery_contract_retry_authority_granted'
+    })
+    $sessionRecoveryContractRetryAuthorityObservedEvents = @($events | Where-Object {
+        $_.EventName -eq 'session_recovery_contract_retry_authority_observed'
+    })
+    $sessionRecoveryContractRetryAuthorityFailedEvents = @($events | Where-Object {
+        $_.EventName -eq 'session_recovery_contract_retry_authority_failed'
+    })
     $runtimeUnlockOfferRejectedWithoutObservationEvents = @($events | Where-Object {
         $_.EventName -eq 'tuna_acceleration_offer_rejected' -and
         (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'runtime_unlock' -and
@@ -3705,6 +3717,7 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     elseif ($runtimeUnlockOfferNotObservedEvents.Count -gt 0 -and
         $sessionRecoveryContractRetryDispatchedEvents.Count -gt 0 -and
+        $sessionRecoveryContractRetryAuthorityObservedEvents.Count -gt 0 -and
         $sessionLivenessTimeoutEvents.Count -eq 0 -and
         $peerDisconnectedTerminalEvents.Count -eq 0) {
         $class = '(none)'
@@ -3743,6 +3756,9 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockRetryScheduledCount = $runtimeUnlockRetryScheduledEvents.Count
         RuntimeUnlockRetryQueuedBehindActiveNegotiationCount = $runtimeUnlockRetryQueuedBehindActiveNegotiationEvents.Count
         RuntimeUnlockRetryDispatchedCount = $sessionRecoveryContractRetryDispatchedEvents.Count
+        RuntimeUnlockRetryAuthorityGrantedCount = $sessionRecoveryContractRetryAuthorityGrantedEvents.Count
+        RuntimeUnlockRetryAuthorityObservedCount = $sessionRecoveryContractRetryAuthorityObservedEvents.Count
+        RuntimeUnlockRetryAuthorityFailedCount = $sessionRecoveryContractRetryAuthorityFailedEvents.Count
         RuntimeUnlockOfferObservationBlockedCount = $runtimeUnlockOfferRejectedWithoutObservationEvents.Count + $runtimeUnlockReceiveRecoveryBlockedOfferEvents.Count
         SessionLivenessTimeoutAfterRuntimeUnlockCount = if ($runtimeUnlockOfferNotObservedEvents.Count -gt 0) { $sessionLivenessTimeoutEvents.Count } else { 0 }
     }
@@ -3810,6 +3826,9 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_retry_scheduled_count={0}" -f $recoveryClassification.RuntimeUnlockRetryScheduledCount),
         ("runtime_unlock_retry_queued_behind_active_negotiation_count={0}" -f $recoveryClassification.RuntimeUnlockRetryQueuedBehindActiveNegotiationCount),
         ("runtime_unlock_retry_dispatched_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchedCount),
+        ("runtime_unlock_retry_authority_granted_count={0}" -f $recoveryClassification.RuntimeUnlockRetryAuthorityGrantedCount),
+        ("runtime_unlock_retry_authority_observed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryAuthorityObservedCount),
+        ("runtime_unlock_retry_authority_failed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryAuthorityFailedCount),
         ("runtime_unlock_offer_observation_blocked_count={0}" -f $recoveryClassification.RuntimeUnlockOfferObservationBlockedCount),
         ("session_liveness_timeout_after_runtime_unlock_count={0}" -f $recoveryClassification.SessionLivenessTimeoutAfterRuntimeUnlockCount),
         ("observed_start_utc={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.FirstTimestamp)) { '(unknown)' } else { $Summary.FirstTimestamp }))),

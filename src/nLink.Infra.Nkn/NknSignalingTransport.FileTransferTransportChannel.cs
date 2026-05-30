@@ -466,6 +466,12 @@ public sealed partial class NknSignalingTransport
         CancellationToken ct)
     {
         var normalizedTransferId = NormalizeRequiredFileTransferId(transferId);
+        FileTransferCompleteV1? completedMessage = null;
+        if (messageType == MsgType.FileTransferComplete &&
+            FileTransferPayloadCodec.TryDeserializeComplete(plaintextPayload, out var parsedComplete))
+        {
+            completedMessage = parsedComplete;
+        }
 
         if (!TryGetCurrentEnvelopeCode(out var envelopeCode))
         {
@@ -533,6 +539,11 @@ public sealed partial class NknSignalingTransport
             LocalOperationalLog.Warn(
                 "SessionSecurity",
                 $"event=filetransfer_message_state_race; message_type={MapSecureFileTransferMessageType(messageType)}; transfer_id={normalizedTransferId}; source={LocalPeerAddress}");
+        }
+
+        if (completedMessage is not null)
+        {
+            RememberFileTransferCompletedTombstoneMessage(normalizedTransferId, completedMessage);
         }
 
         LogFileTransferEnvelopeEvent("sent", messageType, normalizedTransferId, source: LocalPeerAddress);
@@ -2723,6 +2734,11 @@ public sealed partial class NknSignalingTransport
                 ScheduleFileTransferCancelEcho(frame, source, channel, failureReason);
             }
 
+            if (ShouldEchoCompleteForLateFileTransferDataFrame(frame, failureReason))
+            {
+                ScheduleFileTransferCompleteEcho(frame, source, channel, failureReason);
+            }
+
             if (IsBenignLateFileTransferDataFrameRejection(frame, failureReason))
             {
                 LocalOperationalLog.Info(
@@ -4490,6 +4506,7 @@ public sealed partial class NknSignalingTransport
             ClearActiveFileTransferRuntimeTrackingLocked("control_session_key_reset");
             fileTransferStates.Clear();
             fileTransferTerminalTombstones.Clear();
+            fileTransferCompleteEchoLastSent.Clear();
         }
 
         ClearFileTransferDataSessionRemoteOpenSuppressed();
@@ -4525,6 +4542,7 @@ public sealed partial class NknSignalingTransport
             ClearActiveFileTransferRuntimeTrackingLocked("control_secure_state_reset");
             fileTransferStates.Clear();
             fileTransferTerminalTombstones.Clear();
+            fileTransferCompleteEchoLastSent.Clear();
         }
 
         ClearFileTransferDataSessionRemoteOpenSuppressed();
@@ -5002,6 +5020,31 @@ public sealed partial class NknSignalingTransport
                terminalPhase == FileTransferTransportPhase.Canceled;
     }
 
+    private bool ShouldEchoCompleteForLateFileTransferDataFrame(FileTransferDataFrame frame, string failureReason)
+    {
+        if (frame is FileTransferCompleteFrameV4)
+        {
+            return false;
+        }
+
+        if (failureReason is not ("post_completion_late_sender_frame" or "transfer_already_terminal" or "unknown_transfer_id"))
+        {
+            return false;
+        }
+
+        if (!IsSenderDataFrame(frame) &&
+            !IsV6RecoveryControlDataFrame(frame) &&
+            !IsReceiverFeedbackDataFrame(frame))
+        {
+            return false;
+        }
+
+        lock (controlSecureStateGate)
+        {
+            return TryGetCompletedFileTransferTombstoneMessageLocked(frame.TransferId, frame.SessionId, out _);
+        }
+    }
+
     private void ScheduleFileTransferCancelEcho(
         FileTransferDataFrame frame,
         string? source,
@@ -5054,6 +5097,110 @@ public sealed partial class NknSignalingTransport
                 }
             },
             CancellationToken.None);
+    }
+
+    private void ScheduleFileTransferCompleteEcho(
+        FileTransferDataFrame frame,
+        string? source,
+        NknBridgeChannel channel,
+        string triggerReason)
+    {
+        var normalizedTransferId = NormalizeRequiredFileTransferId(frame.TransferId);
+        var normalizedSessionId = string.IsNullOrWhiteSpace(frame.SessionId) ? CurrentSessionSecurityState.SessionId?.Value : frame.SessionId.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedSessionId))
+        {
+            return;
+        }
+
+        FileTransferCompleteV1 complete;
+        var now = DateTimeOffset.UtcNow;
+        lock (controlSecureStateGate)
+        {
+            if (!TryGetCompletedFileTransferTombstoneMessageLocked(normalizedTransferId, normalizedSessionId, out complete))
+            {
+                return;
+            }
+
+            if (fileTransferCompleteEchoLastSent.TryGetValue(normalizedTransferId, out var lastSent) &&
+                now - lastSent < FileTransferCompleteEchoMinInterval)
+            {
+                return;
+            }
+
+            fileTransferCompleteEchoLastSent[normalizedTransferId] = now;
+        }
+
+        _ = Task.Run(
+            async () =>
+            {
+                try
+                {
+                    using var timeout = new CancellationTokenSource(AckWaitTimeout);
+                    await SendCompletedFileTransferTombstoneEchoAsync(complete, timeout.Token).ConfigureAwait(false);
+                    LocalOperationalLog.Info(
+                        "SessionSecurity",
+                        $"event=filetransfer_complete_echo_sent; transport=nkn; transfer_id={normalizedTransferId}; session_id={normalizedSessionId}; trigger_reason={triggerReason}; late_frame_type={frame.Type}; source={source ?? "(none)"}; lane={MapBridgeChannel(channel)}");
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    LocalOperationalLog.Warn(
+                        "SessionSecurity",
+                        $"event=filetransfer_complete_echo_failed; transport=nkn; transfer_id={normalizedTransferId}; session_id={normalizedSessionId}; trigger_reason={triggerReason}; late_frame_type={frame.Type}; error={ex.GetType().Name}");
+                }
+            },
+            CancellationToken.None);
+    }
+
+    private async Task SendCompletedFileTransferTombstoneEchoAsync(FileTransferCompleteV1 complete, CancellationToken ct)
+    {
+        if (!TryGetCurrentEnvelopeCode(out var envelopeCode))
+        {
+            throw new InvalidOperationException("Session context is not set.");
+        }
+
+        if (string.IsNullOrWhiteSpace(remoteEndpoint))
+        {
+            throw new InvalidOperationException("Remote endpoint is not known yet.");
+        }
+
+        var normalizedTransferId = NormalizeRequiredFileTransferId(complete.TransferId);
+        var plaintextPayload = FileTransferPayloadCodec.Serialize(complete);
+        var controlPayload = CreateSecureFileTransferPayload(MsgType.FileTransferComplete, normalizedTransferId, plaintextPayload);
+        var controlEnvelope = CreateEnvelope(envelopeCode, MsgType.FileTransferComplete, controlPayload, replyTo: null);
+        var controlTask = SendFileTransferLifecycleCopyAsync(
+            MsgType.FileTransferComplete,
+            remoteEndpoint,
+            controlEnvelope,
+            useBulkLane: false,
+            lane: "control_echo",
+            ct);
+
+        Task<LifecycleCopySendResult>? bulkTask = null;
+        if (!string.IsNullOrWhiteSpace(remoteBulkEndpoint))
+        {
+            var bulkPayload = CreateSecureFileTransferPayload(
+                MsgType.FileTransferComplete,
+                normalizedTransferId,
+                plaintextPayload,
+                useBulkIdentity: true);
+            var bulkEnvelope = CreateEnvelope(envelopeCode, MsgType.FileTransferComplete, bulkPayload, replyTo: null);
+            bulkTask = SendFileTransferLifecycleCopyAsync(
+                MsgType.FileTransferComplete,
+                remoteBulkEndpoint,
+                bulkEnvelope,
+                useBulkLane: true,
+                lane: "bulk_echo",
+                ct);
+        }
+
+        var controlResult = await controlTask.ConfigureAwait(false);
+        var bulkResult = bulkTask is null
+            ? new LifecycleCopySendResult("bulk_echo", false, null)
+            : await bulkTask.ConfigureAwait(false);
+        if (!controlResult.Succeeded && !bulkResult.Succeeded)
+        {
+            throw controlResult.Error ?? bulkResult.Error ?? new InvalidOperationException("File-transfer completion echo failed on all lanes.");
+        }
     }
 
     private static bool IsSenderDataFrame(FileTransferDataFrame frame)
@@ -5143,7 +5290,8 @@ public sealed partial class NknSignalingTransport
             PruneExpiredFileTransferTerminalTombstonesLocked();
             fileTransferTerminalTombstones[transferId] = new FileTransferTerminalTombstone(
                 nextState.Phase,
-                DateTimeOffset.UtcNow.UtcTicks);
+                DateTimeOffset.UtcNow.UtcTicks,
+                null);
             fileTransferStates.Remove(transferId);
             UnregisterActiveFileTransferRuntime(transferId);
             return;
@@ -5169,6 +5317,46 @@ public sealed partial class NknSignalingTransport
 
         terminalPhase = default;
         return false;
+    }
+
+    private void RememberFileTransferCompletedTombstoneMessage(string transferId, FileTransferCompleteV1 complete)
+    {
+        lock (controlSecureStateGate)
+        {
+            PruneExpiredFileTransferTerminalTombstonesLocked();
+            if (!fileTransferTerminalTombstones.TryGetValue(transferId, out var tombstone) ||
+                tombstone.Phase != FileTransferTransportPhase.Completed)
+            {
+                return;
+            }
+
+            fileTransferTerminalTombstones[transferId] = tombstone with { CompleteMessage = complete };
+        }
+    }
+
+    private bool TryGetCompletedFileTransferTombstoneMessageLocked(
+        string transferId,
+        string? sessionId,
+        out FileTransferCompleteV1 complete)
+    {
+        var normalizedTransferId = NormalizeRequiredFileTransferId(transferId);
+        PruneExpiredFileTransferTerminalTombstonesLocked();
+        complete = default!;
+        if (!fileTransferTerminalTombstones.TryGetValue(normalizedTransferId, out var tombstone) ||
+            tombstone.Phase != FileTransferTransportPhase.Completed ||
+            tombstone.CompleteMessage is null)
+        {
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(sessionId) &&
+            !string.Equals(tombstone.CompleteMessage.SessionId, sessionId.Trim(), StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        complete = tombstone.CompleteMessage;
+        return true;
     }
 
     private void PruneExpiredFileTransferTerminalTombstonesLocked()
@@ -5199,6 +5387,7 @@ public sealed partial class NknSignalingTransport
         foreach (var expiredTransferId in expiredTransferIds)
         {
             fileTransferTerminalTombstones.Remove(expiredTransferId);
+            fileTransferCompleteEchoLastSent.Remove(expiredTransferId);
         }
     }
 
@@ -5630,7 +5819,8 @@ public sealed partial class NknSignalingTransport
 
     private readonly record struct FileTransferTerminalTombstone(
         FileTransferTransportPhase Phase,
-        long CompletedUtcTicks);
+        long CompletedUtcTicks,
+        FileTransferCompleteV1? CompleteMessage);
 
     private readonly record struct InboundFileTransferDispatchWork(
         long Generation,

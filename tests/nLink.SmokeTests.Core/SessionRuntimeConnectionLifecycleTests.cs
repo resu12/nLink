@@ -82,7 +82,14 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
             RetryDispatching: false,
             RetryDispatched: false,
             RetryObserved: false,
-            QueuedBehindActiveNegotiation: true));
+            QueuedBehindActiveNegotiation: true,
+            RetryAuthorityPending: true,
+            RetryAuthorityGranted: true,
+            ObservedSendPending: false,
+            ObservedSendDeadlineUtc: now.AddSeconds(20),
+            AuthorizedObservedLane: null,
+            AuthorityFailureReason: null,
+            AuthorityAttempt: 1));
         var disconnected = 0;
         runtime.Disconnected += (_, _) => disconnected++;
         InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
@@ -113,7 +120,115 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
             RetryDispatching: false,
             RetryDispatched: false,
             RetryObserved: false,
-            QueuedBehindActiveNegotiation: true));
+            QueuedBehindActiveNegotiation: true,
+            RetryAuthorityPending: false,
+            RetryAuthorityGranted: true,
+            ObservedSendPending: false,
+            ObservedSendDeadlineUtc: now.AddSeconds(-1),
+            AuthorizedObservedLane: null,
+            AuthorityFailureReason: "runtime_unlock_retry_authority_expired",
+            AuthorityAttempt: 1));
+
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+        now = now.AddSeconds(6);
+        delay.CompleteLatest();
+        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Failed, TimeSpan.FromSeconds(1));
+
+        Assert.Equal("Connection lost.", runtime.StatusText);
+        Assert.Equal(1, disconnected);
+    }
+
+    [Fact]
+    public async Task RecoveryStateContract_LivenessDefersForRuntimeUnlockAuthorityObservedSendWindow()
+    {
+        var delay = new ControlledDelayScheduler();
+        var now = DateTimeOffset.UtcNow;
+        var heartbeatCount = 0;
+        var scripted = new ScriptedSignalingTransport(
+            onSendSessionHeartbeatAsync: (_, _) =>
+            {
+                Interlocked.Increment(ref heartbeatCount);
+                return Task.CompletedTask;
+            });
+        var options = SessionRuntimeWatchdogOptions.Default with
+        {
+            SessionLivenessHeartbeatInterval = TimeSpan.FromSeconds(1),
+            SessionLivenessSuspectTimeout = TimeSpan.FromSeconds(2),
+            SessionLivenessTimeout = TimeSpan.FromSeconds(5),
+        };
+        using var runtime = new SessionRuntime(() => scripted, options, delay.DelayAsync, nowProvider: () => now);
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        var securityState = CreateApprovedSecurityState(
+            new PeerAddress(scripted.LocalPeerAddress),
+            new PeerAddress("scripted.helpee.recovery-contract-authority"));
+        var sessionId = securityState.SessionId!.Value.Value;
+        scripted.SetSessionSecurityStateForTests(securityState);
+        scripted.SetSessionRecoveryContractForTests(new SessionRecoveryContractSnapshot(
+            sessionId,
+            "ft_recovery_contract_liveness_authority",
+            ContractGeneration: 21,
+            OfferGeneration: 12,
+            Kind: SessionRecoveryContractKind.RuntimeUnlockActivation,
+            State: SessionRecoveryContractState.RetryDispatched,
+            RetryReason: "runtime_unlock_offer_send_not_observed",
+            RecoveryReason: "runtime_unlock_retry_authority_offer_blocked",
+            CreatedUtc: now,
+            RetryDeadlineUtc: now.AddSeconds(20),
+            LivenessDeferralDeadlineUtc: now.AddSeconds(20),
+            RecoveryPending: false,
+            RecoverySettled: true,
+            RetryRequired: false,
+            RetryDispatching: false,
+            RetryDispatched: true,
+            RetryObserved: false,
+            QueuedBehindActiveNegotiation: false,
+            RetryAuthorityPending: false,
+            RetryAuthorityGranted: true,
+            ObservedSendPending: true,
+            ObservedSendDeadlineUtc: now.AddSeconds(20),
+            AuthorizedObservedLane: null,
+            AuthorityFailureReason: null,
+            AuthorityAttempt: 1));
+        var disconnected = 0;
+        runtime.Disconnected += (_, _) => disconnected++;
+        InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+
+        now = now.AddSeconds(6);
+        delay.CompleteLatest();
+        await Task.Delay(50);
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.Equal(0, disconnected);
+        Assert.True(Volatile.Read(ref heartbeatCount) > 0);
+
+        scripted.SetSessionRecoveryContractForTests(new SessionRecoveryContractSnapshot(
+            sessionId,
+            "ft_recovery_contract_liveness_authority",
+            ContractGeneration: 21,
+            OfferGeneration: 12,
+            Kind: SessionRecoveryContractKind.RuntimeUnlockActivation,
+            State: SessionRecoveryContractState.Failed,
+            RetryReason: "runtime_unlock_offer_send_not_observed",
+            RecoveryReason: "runtime_unlock_retry_authority_offer_blocked",
+            CreatedUtc: now.AddSeconds(-10),
+            RetryDeadlineUtc: now.AddSeconds(-1),
+            LivenessDeferralDeadlineUtc: now.AddSeconds(-1),
+            RecoveryPending: false,
+            RecoverySettled: true,
+            RetryRequired: false,
+            RetryDispatching: false,
+            RetryDispatched: true,
+            RetryObserved: false,
+            QueuedBehindActiveNegotiation: false,
+            RetryAuthorityPending: false,
+            RetryAuthorityGranted: true,
+            ObservedSendPending: false,
+            ObservedSendDeadlineUtc: now.AddSeconds(-1),
+            AuthorizedObservedLane: null,
+            AuthorityFailureReason: "runtime_unlock_retry_authority_expired",
+            AuthorityAttempt: 1));
 
         await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
         now = now.AddSeconds(6);

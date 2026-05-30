@@ -3075,6 +3075,145 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
         }
     }
 
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_CompletedReceiverEchoesCompleteWhenLateV6RecoveryFrameArrives()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            int logStartIndex = CoreSmokeTestsBase.GetOperationalLogLength();
+            using CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(8.0));
+            NknTransportOptions options = NknTransportOptions.Load();
+            FakeNknClient hostClient = new FakeNknClient("host.filetransfer.complete-echo.address");
+            FakeNknClient helperClient = new FakeNknClient("helper.filetransfer.complete-echo.address");
+            NknIdentity hostIdentity = new NknIdentity("host-complete-echo-id", hostClient.Address);
+            NknIdentity helperIdentity = new NknIdentity("helper-complete-echo-id", helperClient.Address);
+            using NknSignalingTransport host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using NknSignalingTransport helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            string sessionId = await CoreSmokeTestsBase.ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_nkn_complete_echo";
+            bool dropInitialComplete = true;
+            hostClient.ShouldDeliverSendAsync = (destination, payload, _) =>
+            {
+                if (dropInitialComplete &&
+                    EnvelopeCodec.TryDeserialize(payload, out Envelope envelope) &&
+                    envelope.Type == MsgType.FileTransferComplete)
+                {
+                    return Task.FromResult(false);
+                }
+
+                return Task.FromResult(true);
+            };
+
+            TaskCompletionSource<FileTransferOfferV2> offerReceived = new TaskCompletionSource<FileTransferOfferV2>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<FileTransferAcceptV1> acceptReceived = new TaskCompletionSource<FileTransferAcceptV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<FileTransferSessionOpenV2> sessionOpenReceived = new TaskCompletionSource<FileTransferSessionOpenV2>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<FileTransferCompleteV1> completeReceived = new TaskCompletionSource<FileTransferCompleteV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.FileTransferOfferReceived += delegate (object? _, FileTransferOfferReceivedEventArgs e)
+            {
+                if (string.Equals(e.Message.TransferId, transferId, StringComparison.Ordinal))
+                {
+                    offerReceived.TrySetResult(e.Message);
+                }
+            };
+            helper.FileTransferAcceptReceived += delegate (object? _, FileTransferAcceptReceivedEventArgs e)
+            {
+                if (string.Equals(e.Message.TransferId, transferId, StringComparison.Ordinal))
+                {
+                    acceptReceived.TrySetResult(e.Message);
+                }
+            };
+            host.FileTransferSessionOpenReceived += delegate (object? _, FileTransferSessionOpenReceivedEventArgs e)
+            {
+                if (string.Equals(e.Message.TransferId, transferId, StringComparison.Ordinal))
+                {
+                    sessionOpenReceived.TrySetResult(e.Message);
+                }
+            };
+            helper.FileTransferCompleteReceived += delegate (object? _, FileTransferCompleteReceivedEventArgs e)
+            {
+                if (string.Equals(e.Message.TransferId, transferId, StringComparison.Ordinal))
+                {
+                    completeReceived.TrySetResult(e.Message);
+                }
+            };
+
+            await helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV2
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "complete-echo.bin",
+                    FileSizeBytes = 1024L,
+                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                },
+                cts.Token);
+            await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+            await host.SendFileTransferAcceptAsync(
+                new FileTransferAcceptV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                },
+                cts.Token);
+            await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+            await helper.SendFileTransferSessionOpenAsync(
+                new FileTransferSessionOpenV2
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    ProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                    SessionRole = FileTransferProtocol.SessionRoleSender,
+                    ChunkSizeBytes = 21 * 1024,
+                    InitialPipelineDepth = 8,
+                },
+                cts.Token);
+            await sessionOpenReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+
+            await host.SendFileTransferCompleteAsync(
+                new FileTransferCompleteV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileSizeBytes = 1024L,
+                    Sha256Base64 = Convert.ToBase64String(new byte[32]),
+                },
+                cts.Token);
+            await Task.Delay(150, cts.Token);
+            Assert.False(completeReceived.Task.IsCompleted);
+
+            dropInitialComplete = false;
+            IFileTransferDataSession staleSenderRecoverySession = await helper.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            await staleSenderRecoverySession.SendAsync(
+                new FileTransferFrontierRequestFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    TransportEpoch = 11,
+                    RepairRequestId = "terminal-complete-echo",
+                    MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = 5850, ChunkCount = 1 }],
+                    Priority = "frontier",
+                    RecoveryMode = "post_tuna_fallback_terminal_probe",
+                },
+                cts.Token);
+
+            FileTransferCompleteV1 echoedComplete = await completeReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+            Assert.Equal(transferId, echoedComplete.TransferId);
+            Assert.Equal(1024L, echoedComplete.FileSizeBytes);
+
+            string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
+            Assert.Contains("event=filetransfer_complete_echo_sent; transport=nkn", logTail, StringComparison.Ordinal);
+            Assert.Contains("late_frame_type=filetransfer.frontier_request.v6", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_envelope_received; transport=nkn; effective_transport=nkn; accelerated=0; message_type=file_transfer_complete", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
     [Trait("Category", "LegacySmoke")]
     [Theory]
     [InlineData("declined", "post_terminal_late_sender_frame_declined")]

@@ -103,6 +103,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private static readonly TimeSpan FileTransferFallbackUnprovenProbeDelay = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan FileTransferPostTunaFallbackRepairProofFreshness = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan FileTransferCancelEchoMinInterval = TimeSpan.FromMilliseconds(750);
+    private static readonly TimeSpan FileTransferCompleteEchoMinInterval = TimeSpan.FromMilliseconds(750);
     private static readonly TimeSpan FileTransferControlReceiveStallRecoveryBroadcastCooldown = TimeSpan.FromSeconds(30);
 
     private readonly NknTransportOptions options;
@@ -144,6 +145,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private readonly Dictionary<string, ExpectedControlReplayDuplicateSuppressionState> expectedControlReplayDuplicateSuppressions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FileTransferTerminalTombstone> fileTransferTerminalTombstones = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTimeOffset> fileTransferCancelEchoLastSent = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DateTimeOffset> fileTransferCompleteEchoLastSent = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TransportFileTransferDataSession> fileTransferDataSessions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FileTransferRouteHint> fileTransferRouteHints = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FileTransferPostTunaFallbackRepairProofHint> fileTransferPostTunaFallbackRepairProofHints = new(StringComparer.Ordinal);
@@ -2721,7 +2723,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
 
     private static bool IsRuntimeUnlockActivationRecoveryFailure(string reason)
         => !string.IsNullOrWhiteSpace(reason) &&
-           reason.Contains("tuna_activation_offer_send_timeout", StringComparison.OrdinalIgnoreCase);
+           (reason.Contains("tuna_activation_offer_send_timeout", StringComparison.OrdinalIgnoreCase) ||
+            reason.Contains("runtime_unlock_retry_authority_offer_blocked", StringComparison.OrdinalIgnoreCase));
 
     private static bool IsPostTunaFallbackReceiveStallRecoveryReason(string? reason)
         => !string.IsNullOrWhiteSpace(reason) &&

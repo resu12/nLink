@@ -854,10 +854,17 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
            reason.Trim().StartsWith("post_tuna_fallback", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsRegularV4RuntimeUnlockReceiveStallRecoveryReason(string? reason)
-        => string.Equals(
-            reason?.Trim(),
-            "tuna_activation_offer_send_timeout",
-            StringComparison.OrdinalIgnoreCase);
+    {
+        var normalized = reason?.Trim();
+        return string.Equals(
+                   normalized,
+                   "tuna_activation_offer_send_timeout",
+                   StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(
+                   normalized,
+                   "runtime_unlock_retry_authority_offer_blocked",
+                   StringComparison.OrdinalIgnoreCase);
+    }
 
     private void ArmPostTunaFallbackUnprovenRecoveryEscalation(string requestedReason, long nowTick)
     {

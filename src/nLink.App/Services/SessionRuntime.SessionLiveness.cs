@@ -689,13 +689,16 @@ public sealed partial class SessionRuntime
         }
 
         var now = nowProvider();
-        if (!snapshot.RetryRequired ||
+        var recoveryActionPending = snapshot.RetryRequired ||
+            snapshot.RetryAuthorityPending ||
+            snapshot.ObservedSendPending;
+        if (!recoveryActionPending ||
             snapshot.State is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed ||
             now > snapshot.LivenessDeferralDeadlineUtc)
         {
             LocalOperationalLog.Warn(
                 "Session",
-                $"event=session_liveness_timeout_session_recovery_contract_not_deferred; session_id={sessionIdSnapshot}; contract_generation={snapshot.ContractGeneration}; state={snapshot.State.ToString().ToLowerInvariant()}; retry_required={(snapshot.RetryRequired ? 1 : 0)}; retry_dispatched={(snapshot.RetryDispatched ? 1 : 0)}; retry_observed={(snapshot.RetryObserved ? 1 : 0)}; liveness_deferral_deadline_utc_ms={snapshot.LivenessDeferralDeadlineUtc.ToUnixTimeMilliseconds()}; silence_ms={(long)silence.TotalMilliseconds}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+                $"event=session_liveness_timeout_session_recovery_contract_not_deferred; session_id={sessionIdSnapshot}; contract_generation={snapshot.ContractGeneration}; state={snapshot.State.ToString().ToLowerInvariant()}; retry_required={(snapshot.RetryRequired ? 1 : 0)}; retry_authority_pending={(snapshot.RetryAuthorityPending ? 1 : 0)}; observed_send_pending={(snapshot.ObservedSendPending ? 1 : 0)}; retry_dispatched={(snapshot.RetryDispatched ? 1 : 0)}; retry_observed={(snapshot.RetryObserved ? 1 : 0)}; authority_failure_reason={SanitizeSessionLivenessReason(snapshot.AuthorityFailureReason ?? "(none)")}; observed_send_deadline_utc_ms={snapshot.ObservedSendDeadlineUtc.ToUnixTimeMilliseconds()}; liveness_deferral_deadline_utc_ms={snapshot.LivenessDeferralDeadlineUtc.ToUnixTimeMilliseconds()}; silence_ms={(long)silence.TotalMilliseconds}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
             return false;
         }
 
@@ -716,7 +719,7 @@ public sealed partial class SessionRuntime
 
         LocalOperationalLog.Warn(
             "Session",
-            $"event=session_liveness_timeout_deferred_for_session_recovery_contract; session_id={sessionIdSnapshot}; transfer_id={snapshot.TransferId ?? "(none)"}; contract_generation={snapshot.ContractGeneration}; offer_generation={snapshot.OfferGeneration}; kind=runtime_unlock_activation; state={snapshot.State.ToString().ToLowerInvariant()}; retry_reason={SanitizeSessionLivenessReason(snapshot.RetryReason)}; recovery_reason={SanitizeSessionLivenessReason(snapshot.RecoveryReason)}; recovery_pending={(snapshot.RecoveryPending ? 1 : 0)}; recovery_settled={(snapshot.RecoverySettled ? 1 : 0)}; retry_dispatching={(snapshot.RetryDispatching ? 1 : 0)}; retry_dispatched={(snapshot.RetryDispatched ? 1 : 0)}; retry_observed={(snapshot.RetryObserved ? 1 : 0)}; queued_behind_active_negotiation={(snapshot.QueuedBehindActiveNegotiation ? 1 : 0)}; silence_ms={(long)silence.TotalMilliseconds}; liveness_deferral_deadline_utc_ms={snapshot.LivenessDeferralDeadlineUtc.ToUnixTimeMilliseconds()}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+            $"event=session_liveness_timeout_deferred_for_session_recovery_contract; session_id={sessionIdSnapshot}; transfer_id={snapshot.TransferId ?? "(none)"}; contract_generation={snapshot.ContractGeneration}; offer_generation={snapshot.OfferGeneration}; kind=runtime_unlock_activation; state={snapshot.State.ToString().ToLowerInvariant()}; retry_reason={SanitizeSessionLivenessReason(snapshot.RetryReason)}; recovery_reason={SanitizeSessionLivenessReason(snapshot.RecoveryReason)}; recovery_pending={(snapshot.RecoveryPending ? 1 : 0)}; recovery_settled={(snapshot.RecoverySettled ? 1 : 0)}; retry_dispatching={(snapshot.RetryDispatching ? 1 : 0)}; retry_dispatched={(snapshot.RetryDispatched ? 1 : 0)}; retry_observed={(snapshot.RetryObserved ? 1 : 0)}; queued_behind_active_negotiation={(snapshot.QueuedBehindActiveNegotiation ? 1 : 0)}; retry_authority_pending={(snapshot.RetryAuthorityPending ? 1 : 0)}; retry_authority_granted={(snapshot.RetryAuthorityGranted ? 1 : 0)}; observed_send_pending={(snapshot.ObservedSendPending ? 1 : 0)}; authority_attempt={snapshot.AuthorityAttempt}; authorized_observed_lane={SanitizeSessionLivenessReason(snapshot.AuthorizedObservedLane ?? "(none)")}; authority_failure_reason={SanitizeSessionLivenessReason(snapshot.AuthorityFailureReason ?? "(none)")}; observed_send_deadline_utc_ms={snapshot.ObservedSendDeadlineUtc.ToUnixTimeMilliseconds()}; silence_ms={(long)silence.TotalMilliseconds}; liveness_deferral_deadline_utc_ms={snapshot.LivenessDeferralDeadlineUtc.ToUnixTimeMilliseconds()}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
         return true;
     }
 

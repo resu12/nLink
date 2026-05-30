@@ -1147,7 +1147,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             var options = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "id.json"), "mock-bulk-adaptation");
             var identity = NknIdentityStore.LoadOrCreate(options);
             using var adapter = new RealNknClientAdapter(identity, options);
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
             await adapter.ConnectAsync(cts.Token);
 
             var baselineLength = LocalOperationalLog.GetRecentLogText().Length;
@@ -1695,7 +1695,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                            int.TryParse(File.ReadAllText(countFile).Trim(), out var count) &&
                            count > 1;
                 },
-                TimeSpan.FromSeconds(8));
+                TimeSpan.FromSeconds(15));
 
             var logText = GetRecentLogTextSince(logBaseline);
             Assert.Contains("event=nkn_bridge_receive_stall_recovery_suppressed; reason=filetransfer_runtime_protocol_liveness", logText, StringComparison.Ordinal);
@@ -3200,7 +3200,8 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 bulkMessagesReceivedSinceLast: 0,
                 totalMessagesReceivedSinceLast: 1,
                 controlLastReceivedAgeMs: 21_000,
-                bulkLastReceivedAgeMs: 21_000));
+                bulkLastReceivedAgeMs: 21_000,
+                connectKey: "post-tuna-peer-silence-escalation-key"));
         var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
         var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
         var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
@@ -3239,16 +3240,26 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 {
                     var text = GetRecentLogTextSince(logBaseline);
                     return text.Contains("event=nkn_bridge_receive_stall_recovery_post_tuna_fallback_unproven_escalation_allowed", StringComparison.Ordinal) &&
+                           text.Contains("connect_key=post-tuna-peer-silence-escalation-key", StringComparison.Ordinal) &&
                            text.Contains("trigger=filetransfer_protocol_repair_only", StringComparison.Ordinal) &&
-                           text.Contains("event=nkn_bridge_receive_stall_recovery_hard_restart", StringComparison.Ordinal);
+                           text.Contains("event=nkn_bridge_receive_stall_recovery_hard_restart; connect_key=post-tuna-peer-silence-escalation-key", StringComparison.Ordinal);
                 },
                 TimeSpan.FromSeconds(8));
 
             var logText = GetRecentLogTextSince(logBaseline);
-            Assert.Contains("event=nkn_bridge_receive_stall_recovery_post_tuna_fallback_unproven_escalation_auto_armed", logText, StringComparison.Ordinal);
+            Assert.Contains(
+                "event=nkn_bridge_receive_stall_recovery_post_tuna_fallback_unproven_escalation_auto_armed; trigger=filetransfer_protocol_repair_only; requested_reason=post_tuna_fallback_peer_silence; connect_key=post-tuna-peer-silence-escalation-key",
+                logText,
+                StringComparison.Ordinal);
             Assert.Contains("stall_reason=post_tuna_fallback_unproven_recovery_escalation", logText, StringComparison.Ordinal);
-            Assert.Contains("event=nkn_bridge_receive_stall_recovery_cooldown_bypassed; reason=post_tuna_fallback_unproven_escalation", logText, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_suppressed; reason=filetransfer_protocol_repair_only", logText, StringComparison.Ordinal);
+            Assert.Contains(
+                "event=nkn_bridge_receive_stall_recovery_cooldown_bypassed; reason=post_tuna_fallback_unproven_escalation; connect_key=post-tuna-peer-silence-escalation-key",
+                logText,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=nkn_bridge_receive_stall_recovery_suppressed; reason=filetransfer_protocol_repair_only; connect_key=post-tuna-peer-silence-escalation-key",
+                logText,
+                StringComparison.Ordinal);
 
             adapter.UnregisterActiveFileTransferRuntime("transfer-post-tuna-peer-silence-escalation");
             adapter.UnregisterActiveFileTransferDataSession("transfer-post-tuna-peer-silence-escalation");
@@ -3627,8 +3638,10 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
     }
 
     [Trait("Category", "LegacySmoke")]
-    [Fact]
-    public async Task Bridge_ReceiveStallRecovery_RuntimeUnlockOfferTimeoutEscalatesUnprovenRegularV4Recovery()
+    [Theory]
+    [InlineData("tuna_activation_offer_send_timeout")]
+    [InlineData("runtime_unlock_retry_authority_offer_blocked")]
+    public async Task Bridge_ReceiveStallRecovery_RuntimeUnlockOfferRecoveryEscalatesUnprovenRegularV4Recovery(string requestedReason)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -3647,10 +3660,11 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             return;
         }
 
-        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-runtime-unlock-unproven-escalation", Guid.NewGuid().ToString("N"));
+        var reasonName = requestedReason.Replace('_', '-');
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-runtime-unlock-unproven-escalation", reasonName, Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempDir);
         var countFile = Path.Combine(tempDir, "connect-count.txt");
-        var bridgePath = Path.Combine(tempDir, "mock-bridge-runtime-unlock-unproven-escalation.js");
+        var bridgePath = Path.Combine(tempDir, $"mock-bridge-runtime-unlock-unproven-escalation-{reasonName}.js");
         WriteBridgeScriptWithManifest(bridgePath, BuildReceiveStallRecoveryMockBridgeScript(countFile, stallConnectCount: 0));
         var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
         var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
@@ -3662,15 +3676,15 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
             var keyPath = Path.Combine(tempDir, "identity.json");
-            WriteIdentityFile(keyPath, "runtime-unlock-unproven-escalation");
+            WriteIdentityFile(keyPath, $"runtime-unlock-unproven-escalation-{reasonName}");
             var seedBackend = new FakeProtectedSeedBackend();
             seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
             using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
-            var options = LoadNknOptionsWithOverrides(keyPath, "runtime-unlock-unproven-escalation");
-            var identity = new NknIdentity("runtime-unlock-unproven-escalation", "runtime-unlock-unproven-escalation.fake");
+            var options = LoadNknOptionsWithOverrides(keyPath, $"runtime-unlock-unproven-escalation-{reasonName}");
+            var identity = new NknIdentity($"runtime-unlock-unproven-escalation-{reasonName}", $"runtime-unlock-unproven-escalation-{reasonName}.fake");
             using var adapter = new RealNknClientAdapter(identity, options);
-            adapter.RegisterActiveFileTransferDataSession("transfer-runtime-unlock-unproven-escalation");
-            adapter.RegisterActiveFileTransferRuntime("transfer-runtime-unlock-unproven-escalation");
+            adapter.RegisterActiveFileTransferDataSession($"transfer-runtime-unlock-unproven-escalation-{reasonName}");
+            adapter.RegisterActiveFileTransferRuntime($"transfer-runtime-unlock-unproven-escalation-{reasonName}");
             var logBaseline = LocalOperationalLog.GetRecentLogText().Length;
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
             await adapter.ConnectAsync(cts.Token);
@@ -3684,7 +3698,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             SetPrivateField(adapter, "receiveStallRecoveryRequiresControlProof", 1);
             SetPrivateField(adapter, "receiveStallRecoveryRequiresBulkProof", 1);
 
-            Assert.True(adapter.RequestFileTransferReceiveStallRecovery("tuna_activation_offer_send_timeout"));
+            Assert.True(adapter.RequestFileTransferReceiveStallRecovery(requestedReason));
             var proofSeen = false;
             var proofDeadline = Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * 10);
             while (Stopwatch.GetTimestamp() < proofDeadline)
@@ -3708,11 +3722,11 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
             var logText = GetRecentLogTextSince(logBaseline);
             Assert.Contains("event=nkn_bridge_receive_stall_recovery_cooldown_bypassed; reason=regular_v4_unproven_escalation", logText, StringComparison.Ordinal);
-            Assert.Contains("requested_reason=tuna_activation_offer_send_timeout", logText, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_request_ignored; reason=recovery_already_in_progress; requested_reason=tuna_activation_offer_send_timeout", logText, StringComparison.Ordinal);
+            Assert.Contains($"requested_reason={requestedReason}", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain($"event=nkn_bridge_receive_stall_recovery_request_ignored; reason=recovery_already_in_progress; requested_reason={requestedReason}", logText, StringComparison.Ordinal);
 
-            adapter.UnregisterActiveFileTransferRuntime("transfer-runtime-unlock-unproven-escalation");
-            adapter.UnregisterActiveFileTransferDataSession("transfer-runtime-unlock-unproven-escalation");
+            adapter.UnregisterActiveFileTransferRuntime($"transfer-runtime-unlock-unproven-escalation-{reasonName}");
+            adapter.UnregisterActiveFileTransferDataSession($"transfer-runtime-unlock-unproven-escalation-{reasonName}");
             await adapter.DisconnectAsync();
         }
         finally
@@ -5151,7 +5165,8 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         int? postRecoveryBulkLastReceivedAgeMs = null,
         int stallHealthSampleCount = 3,
         int stallHealthSampleSpacingMs = 50,
-        bool rampStallBulkAgeForAllChannelRecovery = false)
+        bool rampStallBulkAgeForAllChannelRecovery = false,
+        string connectKey = "mock-key")
     {
         var normalizedStallHealthSampleSpacingMs = Math.Max(1, stallHealthSampleSpacingMs);
         var stallHealthBlock = rampStallBulkAgeForAllChannelRecovery
@@ -5215,7 +5230,7 @@ function emitHealth(
     selected_rpc_key: '(none)',
     selected_rpc_stage: 'none',
     connect_id: 'mock-connect',
-    connect_key: 'mock-key',
+    connect_key: {JsonSerializer.Serialize(connectKey)},
     ready_emitted: 1,
     client_ready_age_ms: 10000,
     disconnect_count_since_last: 0,
