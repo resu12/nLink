@@ -221,6 +221,15 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private bool fileTransferFallbackProofProbeScheduled;
     private bool fileTransferFallbackBulkProofObserved;
     private bool fileTransferFallbackControlProofObserved;
+    private string? fileTransferFallbackProofTransferId;
+    private string? fileTransferFallbackProofRouteToken;
+    private int fileTransferFallbackProofProtocolVersion;
+    private int fileTransferFallbackProofLiveRouteEpoch;
+    private int fileTransferFallbackProofLegGeneration;
+    private int fileTransferFallbackProofBridgeRecoveryGeneration;
+    private long fileTransferFallbackProofTransportEpoch;
+    private string? fileTransferFallbackProofCheckpointRequestId;
+    private string? fileTransferFallbackProofAuthorityReason;
     private int bridgeReceiveStallRecoveryActive;
     private SessionId? activeApprovedSessionId;
     private PeerAddress? activeApprovedHelperAddress;

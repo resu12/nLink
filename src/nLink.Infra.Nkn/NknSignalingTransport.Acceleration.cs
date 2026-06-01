@@ -97,6 +97,7 @@ public sealed partial class NknSignalingTransport
     private int fileTransferTunaActivationBridgeRecoveryActive;
     private long runtimeUnlockRecoveryContractNextGeneration;
     private RuntimeUnlockRecoveryRetryState? runtimeUnlockRecoveryRetryState;
+    private FileTransferFallbackLegAuthorityState? fileTransferFallbackLegAuthorityState;
     private string? pendingAccelerationAnswerAckSessionId;
     private string? pendingAccelerationAnswerAckNonce;
     private NknAccelerationLaneKind pendingAccelerationAnswerAckLanes;
@@ -247,6 +248,37 @@ public sealed partial class NknSignalingTransport
         public string? AuthorityFailureReason { get; set; }
 
         public int AuthorityAttempt { get; set; }
+    }
+
+    private sealed class FileTransferFallbackLegAuthorityState
+    {
+        public required string SessionId { get; init; }
+
+        public required string TransferId { get; init; }
+
+        public required int LegGeneration { get; init; }
+
+        public required string RouteToken { get; init; }
+
+        public required int ProtocolVersion { get; init; }
+
+        public required int LiveRouteEpoch { get; init; }
+
+        public required long TransportEpoch { get; init; }
+
+        public required int BridgeRecoveryGeneration { get; init; }
+
+        public string? CheckpointRequestId { get; init; }
+
+        public required string AuthorityReason { get; init; }
+
+        public required long CreatedUtcMs { get; init; }
+
+        public bool BridgeRecoveryRequested { get; set; }
+
+        public bool BridgeRecoveryEscalated { get; set; }
+
+        public bool Completed { get; set; }
     }
 
     private readonly record struct AccelerationControlSendResult(
@@ -409,19 +441,43 @@ public sealed partial class NknSignalingTransport
             ? "core_filetransfer_receive_recovery"
             : SanitizeLogToken(request.Reason);
         var direction = request.Direction.ToString().ToLowerInvariant();
+        var authorityFields = FormatFileTransferFallbackLegAuthorityFields(request);
+        var hasFallbackLegAuthority = HasFileTransferFallbackLegAuthority(request);
+        FileTransferFallbackLegAuthorityState? fallbackAuthority = null;
 
         if (client is not RealNknClientAdapter realClient)
         {
             LocalOperationalLog.Info(
                 "NKN.Tuna",
-                $"event=filetransfer_v6_bridge_receive_recovery_request_unsupported; session_id={SanitizeLogToken(sessionId ?? "none")}; transfer_id={SanitizeLogToken(transferId)}; direction={direction}; reason={reason}");
+                $"event=filetransfer_v6_bridge_receive_recovery_request_unsupported; session_id={SanitizeLogToken(sessionId ?? "none")}; transfer_id={SanitizeLogToken(transferId)}; direction={direction}; reason={reason}{authorityFields}");
             return;
         }
 
+        if (hasFallbackLegAuthority)
+        {
+            fallbackAuthority = MarkFileTransferFallbackLegAuthorityStarted(request, sessionId, transferId, reason);
+            realClient.MarkActiveFileTransferPostTunaFallbackLegAuthority(
+                transferId,
+                sessionId ?? "none",
+                request.TransferLegGeneration,
+                request.RouteToken ?? "post_tuna_fallback_v6",
+                request.ProtocolVersion,
+                request.LiveRouteEpoch,
+                request.TransportEpoch,
+                request.BridgeRecoveryGeneration,
+                request.CheckpointRequestId,
+                request.AuthorityReason ?? reason);
+        }
+
         var accepted = realClient.RequestFileTransferReceiveStallRecovery(reason);
+        if (accepted && fallbackAuthority is not null)
+        {
+            MarkFileTransferFallbackLegAuthorityBridgeRecoveryRequested(fallbackAuthority, reason);
+        }
+
         LocalOperationalLog.Warn(
             "NKN.Tuna",
-            $"event=filetransfer_v6_bridge_receive_recovery_requested; session_id={SanitizeLogToken(sessionId ?? "none")}; transfer_id={SanitizeLogToken(transferId)}; direction={direction}; reason={reason}; accepted={(accepted ? 1 : 0)}");
+            $"event=filetransfer_v6_bridge_receive_recovery_requested; session_id={SanitizeLogToken(sessionId ?? "none")}; transfer_id={SanitizeLogToken(transferId)}; direction={direction}; reason={reason}; accepted={(accepted ? 1 : 0)}{authorityFields}");
         if (!accepted)
         {
             return;
@@ -440,7 +496,8 @@ public sealed partial class NknSignalingTransport
             MarkFileTransferFallbackNknProofPending(
                 reason,
                 sessionId,
-                NknAccelerationLaneKind.File);
+                NknAccelerationLaneKind.File,
+                request);
             SetFileTransferDataSessionsAvailability(
                 isAvailable: false,
                 reason: reason,
@@ -460,6 +517,168 @@ public sealed partial class NknSignalingTransport
             requiresResumeRequest: false,
             handoffKind: FileTransferTransportHandoffKind.None,
             targetTransport: FileTransferTransportKind.RegularNkn);
+    }
+
+    private static bool HasFileTransferFallbackLegAuthority(FileTransferReceiveRecoveryRequest request)
+        => request.TransferLegGeneration > 0 &&
+           request.ProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
+           string.Equals(request.RouteToken, "post_tuna_fallback_v6", StringComparison.Ordinal);
+
+    private static string FormatFileTransferFallbackLegAuthorityFields(FileTransferReceiveRecoveryRequest request)
+    {
+        if (!HasFileTransferFallbackLegAuthority(request))
+        {
+            return string.Empty;
+        }
+
+        return
+            $"; route={SanitizeLogToken(request.RouteToken ?? "post_tuna_fallback_v6")}" +
+            $"; protocol_version={request.ProtocolVersion}" +
+            $"; live_route_epoch={request.LiveRouteEpoch}" +
+            $"; leg_generation={request.TransferLegGeneration}" +
+            $"; bridge_recovery_generation={request.BridgeRecoveryGeneration}" +
+            $"; transport_epoch={request.TransportEpoch}" +
+            $"; checkpoint_request_id={SanitizeLogToken(request.CheckpointRequestId ?? "none")}" +
+            $"; authority_reason={SanitizeLogToken(request.AuthorityReason ?? "none")}";
+    }
+
+    private FileTransferFallbackLegAuthorityState MarkFileTransferFallbackLegAuthorityStarted(
+        FileTransferReceiveRecoveryRequest request,
+        string? sessionId,
+        string transferId,
+        string reason)
+    {
+        var normalizedSessionId = SanitizeLogToken(sessionId ?? "none");
+        var normalizedTransferId = SanitizeLogToken(transferId);
+        var normalizedRoute = SanitizeLogToken(request.RouteToken ?? "post_tuna_fallback_v6");
+        var normalizedAuthorityReason = SanitizeLogToken(request.AuthorityReason ?? reason);
+        FileTransferFallbackLegAuthorityState state;
+        bool started = false;
+        lock (fileTransferFallbackProofGate)
+        {
+            var existing = fileTransferFallbackLegAuthorityState;
+            if (existing is not null &&
+                !existing.Completed &&
+                string.Equals(existing.SessionId, normalizedSessionId, StringComparison.Ordinal) &&
+                string.Equals(existing.TransferId, normalizedTransferId, StringComparison.Ordinal) &&
+                existing.LegGeneration == request.TransferLegGeneration)
+            {
+                state = existing;
+            }
+            else
+            {
+                state = new FileTransferFallbackLegAuthorityState
+                {
+                    SessionId = normalizedSessionId,
+                    TransferId = normalizedTransferId,
+                    LegGeneration = request.TransferLegGeneration,
+                    RouteToken = normalizedRoute,
+                    ProtocolVersion = request.ProtocolVersion,
+                    LiveRouteEpoch = request.LiveRouteEpoch,
+                    TransportEpoch = request.TransportEpoch,
+                    BridgeRecoveryGeneration = request.BridgeRecoveryGeneration,
+                    CheckpointRequestId = SanitizeLogToken(request.CheckpointRequestId ?? "none"),
+                    AuthorityReason = normalizedAuthorityReason,
+                    CreatedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                };
+                fileTransferFallbackLegAuthorityState = state;
+                started = true;
+            }
+        }
+
+        if (started)
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=filetransfer_fallback_leg_authority_started; session_id={state.SessionId}; transfer_id={state.TransferId}; leg_generation={state.LegGeneration}; route={state.RouteToken}; protocol_version={state.ProtocolVersion}; live_route_epoch={state.LiveRouteEpoch}; transport_epoch={state.TransportEpoch}; bridge_recovery_generation={state.BridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(state.CheckpointRequestId ?? "none")}; authority_reason={state.AuthorityReason}; reason={reason}");
+        }
+
+        return state;
+    }
+
+    private void MarkFileTransferFallbackLegAuthorityBridgeRecoveryRequested(
+        FileTransferFallbackLegAuthorityState state,
+        string reason)
+    {
+        var shouldLog = false;
+        lock (fileTransferFallbackProofGate)
+        {
+            if (ReferenceEquals(fileTransferFallbackLegAuthorityState, state) &&
+                !state.BridgeRecoveryRequested)
+            {
+                state.BridgeRecoveryRequested = true;
+                shouldLog = true;
+            }
+        }
+
+        if (!shouldLog)
+        {
+            return;
+        }
+
+        LocalOperationalLog.Warn(
+            "NKN.Tuna",
+            $"event=filetransfer_fallback_leg_authority_bridge_recovery_requested; session_id={state.SessionId}; transfer_id={state.TransferId}; leg_generation={state.LegGeneration}; route={state.RouteToken}; protocol_version={state.ProtocolVersion}; live_route_epoch={state.LiveRouteEpoch}; transport_epoch={state.TransportEpoch}; bridge_recovery_generation={state.BridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(state.CheckpointRequestId ?? "none")}; authority_reason={state.AuthorityReason}; reason={SanitizeLogToken(reason)}");
+    }
+
+    private void MarkFileTransferFallbackLegAuthorityCompleted(
+        string? sessionId,
+        string? transferId,
+        string? routeToken,
+        int protocolVersion,
+        int liveRouteEpoch,
+        int legGeneration,
+        int bridgeRecoveryGeneration,
+        long transportEpoch,
+        string? checkpointRequestId,
+        string? authorityReason,
+        string proofKind)
+    {
+        var normalizedSessionId = SanitizeLogToken(sessionId ?? "none");
+        var normalizedTransferId = SanitizeLogToken(transferId ?? "none");
+        var normalizedRoute = SanitizeLogToken(routeToken ?? "post_tuna_fallback_v6");
+        var normalizedAuthorityReason = SanitizeLogToken(authorityReason ?? "none");
+        var shouldLog = true;
+        lock (fileTransferFallbackProofGate)
+        {
+            if (fileTransferFallbackLegAuthorityState is { } state &&
+                !state.Completed &&
+                string.Equals(state.SessionId, normalizedSessionId, StringComparison.Ordinal) &&
+                string.Equals(state.TransferId, normalizedTransferId, StringComparison.Ordinal) &&
+                state.LegGeneration == legGeneration)
+            {
+                state.Completed = true;
+            }
+            else if (fileTransferFallbackLegAuthorityState is { Completed: true } completedState &&
+                     string.Equals(completedState.SessionId, normalizedSessionId, StringComparison.Ordinal) &&
+                     string.Equals(completedState.TransferId, normalizedTransferId, StringComparison.Ordinal) &&
+                     completedState.LegGeneration == legGeneration)
+            {
+                shouldLog = false;
+            }
+        }
+
+        if (!shouldLog)
+        {
+            return;
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=filetransfer_fallback_leg_authority_completed; session_id={normalizedSessionId}; transfer_id={normalizedTransferId}; leg_generation={legGeneration}; route={normalizedRoute}; protocol_version={protocolVersion}; live_route_epoch={liveRouteEpoch}; transport_epoch={transportEpoch}; bridge_recovery_generation={bridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(checkpointRequestId ?? "none")}; authority_reason={normalizedAuthorityReason}; proof={SanitizeLogToken(proofKind)}");
+    }
+
+    private void ClearFileTransferFallbackProofAuthorityUnsafe()
+    {
+        fileTransferFallbackProofTransferId = null;
+        fileTransferFallbackProofRouteToken = null;
+        fileTransferFallbackProofProtocolVersion = 0;
+        fileTransferFallbackProofLiveRouteEpoch = 0;
+        fileTransferFallbackProofLegGeneration = 0;
+        fileTransferFallbackProofBridgeRecoveryGeneration = 0;
+        fileTransferFallbackProofTransportEpoch = 0;
+        fileTransferFallbackProofCheckpointRequestId = null;
+        fileTransferFallbackProofAuthorityReason = null;
     }
 
     private static bool IsSessionLivenessReceiveRecoveryReason(string? reason)
@@ -2752,7 +2971,8 @@ public sealed partial class NknSignalingTransport
     private void MarkFileTransferFallbackNknProofPending(
         string reason,
         string? sessionId,
-        NknAccelerationLaneKind lanes)
+        NknAccelerationLaneKind lanes,
+        FileTransferReceiveRecoveryRequest? authorityRequest = null)
     {
         if ((lanes & NknAccelerationLaneKind.File) != NknAccelerationLaneKind.File)
         {
@@ -2773,11 +2993,23 @@ public sealed partial class NknSignalingTransport
             fileTransferFallbackProofProbeScheduled = false;
             fileTransferFallbackBulkProofObserved = false;
             fileTransferFallbackControlProofObserved = false;
+            fileTransferFallbackProofTransferId = authorityRequest?.TransferId;
+            fileTransferFallbackProofRouteToken = authorityRequest?.RouteToken;
+            fileTransferFallbackProofProtocolVersion = authorityRequest?.ProtocolVersion ?? 0;
+            fileTransferFallbackProofLiveRouteEpoch = authorityRequest?.LiveRouteEpoch ?? 0;
+            fileTransferFallbackProofLegGeneration = authorityRequest?.TransferLegGeneration ?? 0;
+            fileTransferFallbackProofBridgeRecoveryGeneration = authorityRequest?.BridgeRecoveryGeneration ?? 0;
+            fileTransferFallbackProofTransportEpoch = authorityRequest?.TransportEpoch ?? 0;
+            fileTransferFallbackProofCheckpointRequestId = authorityRequest?.CheckpointRequestId;
+            fileTransferFallbackProofAuthorityReason = authorityRequest?.AuthorityReason;
         }
 
+        var authorityFields = authorityRequest is null
+            ? string.Empty
+            : FormatFileTransferFallbackLegAuthorityFields(authorityRequest);
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=filetransfer_fallback_nkn_proof_pending; session_id={SanitizeLogToken(normalizedSessionId ?? "none")}; reason={normalizedReason}; lanes={FormatAccelerationLanesForLog(lanes)}");
+            $"event=filetransfer_fallback_nkn_proof_pending; session_id={SanitizeLogToken(normalizedSessionId ?? "none")}; reason={normalizedReason}; lanes={FormatAccelerationLanesForLog(lanes)}{authorityFields}");
     }
 
     private bool ShouldUseFileTransferV6EpochForRegularNknRecovery(string? sessionId)
@@ -2830,6 +3062,15 @@ public sealed partial class NknSignalingTransport
         bool shouldLogUnconfirmed = false;
         bool requiresV6EpochRecovery = false;
         bool completed = false;
+        string? authorityTransferId = null;
+        string? authorityRouteToken = null;
+        int authorityProtocolVersion = 0;
+        int authorityLiveRouteEpoch = 0;
+        int authorityLegGeneration = 0;
+        int authorityBridgeRecoveryGeneration = 0;
+        long authorityTransportEpoch = 0;
+        string? authorityCheckpointRequestId = null;
+        string? authorityReason = null;
         var normalizedProofKind = SanitizeLogToken(proofKind);
         var authoritativeProof = IsAuthoritativeFileTransferFallbackNknProof(normalizedProofKind);
         lock (fileTransferFallbackProofGate)
@@ -2874,6 +3115,15 @@ public sealed partial class NknSignalingTransport
                 }
                 else
                 {
+                    authorityTransferId = fileTransferFallbackProofTransferId;
+                    authorityRouteToken = fileTransferFallbackProofRouteToken;
+                    authorityProtocolVersion = fileTransferFallbackProofProtocolVersion;
+                    authorityLiveRouteEpoch = fileTransferFallbackProofLiveRouteEpoch;
+                    authorityLegGeneration = fileTransferFallbackProofLegGeneration;
+                    authorityBridgeRecoveryGeneration = fileTransferFallbackProofBridgeRecoveryGeneration;
+                    authorityTransportEpoch = fileTransferFallbackProofTransportEpoch;
+                    authorityCheckpointRequestId = fileTransferFallbackProofCheckpointRequestId;
+                    authorityReason = fileTransferFallbackProofAuthorityReason;
                     fileTransferFallbackProofPending = false;
                     fileTransferFallbackProofReason = "none";
                     fileTransferFallbackProofSessionId = null;
@@ -2882,6 +3132,7 @@ public sealed partial class NknSignalingTransport
                     fileTransferFallbackProofProbeScheduled = false;
                     fileTransferFallbackBulkProofObserved = false;
                     fileTransferFallbackControlProofObserved = false;
+                    ClearFileTransferFallbackProofAuthorityUnsafe();
                     completed = true;
                 }
             }
@@ -2908,6 +3159,22 @@ public sealed partial class NknSignalingTransport
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=filetransfer_fallback_nkn_proof_observed; session_id={SanitizeLogToken(pendingSessionId ?? "none")}; reason={reason}; proof={normalizedProofKind}; lanes={FormatAccelerationLanesForLog(lanes)}; bulk_seen={(bulkProofObserved ? 1 : 0)}; control_seen={(controlProofObserved ? 1 : 0)}");
+        if (authorityLegGeneration > 0)
+        {
+            MarkFileTransferFallbackLegAuthorityCompleted(
+                pendingSessionId,
+                authorityTransferId,
+                authorityRouteToken,
+                authorityProtocolVersion,
+                authorityLiveRouteEpoch,
+                authorityLegGeneration,
+                authorityBridgeRecoveryGeneration,
+                authorityTransportEpoch,
+                authorityCheckpointRequestId,
+                authorityReason,
+                normalizedProofKind);
+        }
+
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=tuna_disable_handoff_nkn_ready; session_id={SanitizeLogToken(pendingSessionId ?? "none")}; reason={reason}; proof={normalizedProofKind}; lanes={FormatAccelerationLanesForLog(lanes)}");
@@ -2979,6 +3246,7 @@ public sealed partial class NknSignalingTransport
                 fileTransferFallbackProofProbeScheduled = false;
                 fileTransferFallbackBulkProofObserved = false;
                 fileTransferFallbackControlProofObserved = false;
+                ClearFileTransferFallbackProofAuthorityUnsafe();
             }
         }
 

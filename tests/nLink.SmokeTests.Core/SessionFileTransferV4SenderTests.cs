@@ -5619,6 +5619,62 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
+    public async Task PostTunaFallbackV6StateRefreshRecoveryRequest_CarriesCurrentLegAuthority()
+    {
+        using var service = new SessionFileTransferService();
+        using var senderTransport = new LoopbackFileTransferTransport("session_post_tuna_fallback_v6_authority_request");
+        service.AttachTransport(senderTransport);
+        var serviceType = typeof(SessionFileTransferService);
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            "transfer_post_tuna_fallback_v6_authority_request");
+        serviceType
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        serviceType
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, "test_authority_start"]);
+
+        var request = new FileTransferFrontierRequestFrameV6
+        {
+            SessionId = "session_transfer_post_tuna_fallback_v6_authority_request",
+            TransferId = "transfer_post_tuna_fallback_v6_authority_request",
+            TransportEpoch = 11,
+            RepairRequestId = "v6-regular-nkn-state-refresh:authority",
+            MissingRanges =
+            [
+                new FileTransferRangeV4
+                {
+                    StartChunkIndex = 100,
+                    ChunkCount = 1,
+                },
+            ],
+            Priority = "state_refresh",
+            RecoveryMode = "regular_nkn_state_refresh",
+        };
+
+        serviceType
+            .GetMethod("QueueOutboundV4SparseRuntimeStateRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, new ThrowingDataSession(request.SessionId, request.TransferId), request]);
+
+        await WaitUntilAsync(
+            () => senderTransport.ReceiveRecoveryRequests.Any(recoveryRequest =>
+                string.Equals(recoveryRequest.Reason, "post_tuna_fallback_state_refresh_failed", StringComparison.Ordinal)),
+            timeoutMs: 5000);
+
+        var recovery = Assert.Single(
+            senderTransport.ReceiveRecoveryRequests,
+            recoveryRequest => string.Equals(recoveryRequest.Reason, "post_tuna_fallback_state_refresh_failed", StringComparison.Ordinal));
+        Assert.Equal("post_tuna_fallback_v6", recovery.RouteToken);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV6, recovery.ProtocolVersion);
+        Assert.True(recovery.LiveRouteEpoch >= 0);
+        Assert.True(recovery.TransferLegGeneration > 0);
+        Assert.Equal(3, recovery.BridgeRecoveryGeneration);
+        Assert.Equal(11, recovery.TransportEpoch);
+        Assert.Equal("v6-regular-nkn-state-refresh:authority", recovery.CheckpointRequestId);
+        Assert.Equal("post_tuna_fallback_state_refresh_failed", recovery.AuthorityReason);
+    }
+
+    [Fact]
     public void PostTunaFallbackV6StaleCreditRepair_ClampsCreditAndForcesStateRefresh()
     {
         var serviceType = typeof(SessionFileTransferService);
@@ -6294,6 +6350,44 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Equal("post_tuna_fallback_bridge_restart", GetPrivateProperty<string>(context, "PullTransportPauseReason"));
         var log = ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_post_tuna_fallback_data_session_cancellation_deferred; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_v4_sender_failed;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("error_code=peer_disconnected", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PostTunaFallbackV6BridgeRestartSendFailure_DefersInsteadOfTerminalPeerDisconnect()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            "transfer_post_tuna_fallback_v6_bridge_restart_send_failure");
+        serviceType
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        serviceType
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, "test_bridge_restart_send_failure"]);
+
+        var logStart = GetOperationalLogLength();
+        var deferred = (bool)serviceType
+            .GetMethod("TryDeferOutboundPostTunaFallbackTransportSendFailure", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    context,
+                    "sender_pump",
+                    new InvalidOperationException(
+                        "File-transfer V4 sender transport send failed.",
+                        new ObjectDisposedException("LoopbackDataSession", "Bridge disconnected during recovery.")),
+                ])!;
+
+        Assert.True(deferred);
+        Assert.Equal(FileTransferTransferState.Sending, GetPrivateProperty<FileTransferTransferState>(context, "State"));
+        Assert.True(GetPrivateProperty<bool>(context, "PullTransportPaused"));
+        Assert.Equal("post_tuna_fallback_bridge_restart", GetPrivateProperty<string>(context, "PullTransportPauseReason"));
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_post_tuna_fallback_transport_send_failure_deferred; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("reason=post_tuna_fallback_bridge_restart_send_failure", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_v4_sender_failed;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("error_code=peer_disconnected", log, StringComparison.Ordinal);
     }

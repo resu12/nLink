@@ -31,7 +31,24 @@ public sealed record FileTransferReceiveRecoveryRequest(
     string SessionId,
     string TransferId,
     FileTransferDirection Direction,
-    string Reason);
+    string Reason)
+{
+    public string? RouteToken { get; init; }
+
+    public int ProtocolVersion { get; init; }
+
+    public int LiveRouteEpoch { get; init; }
+
+    public int TransferLegGeneration { get; init; }
+
+    public int BridgeRecoveryGeneration { get; init; }
+
+    public long TransportEpoch { get; init; }
+
+    public string? CheckpointRequestId { get; init; }
+
+    public string? AuthorityReason { get; init; }
+}
 
 public interface IFileTransferReceiveRecoveryController
 {

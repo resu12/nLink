@@ -2477,6 +2477,14 @@ public sealed partial class SessionFileTransferService
                     context.PullSenderSendWaitCountRecent++;
                     logRequestWait = context.PullSenderFeedCreditWaitStartedUtc is null ||
                         !string.Equals(context.V6SenderPumpLastWakeReason, "post_tuna_fallback_checkpoint_pending", StringComparison.Ordinal);
+                    if (logRequestWait)
+                    {
+                        LogFileTransferFallbackLegAuthoritySendBlocked(
+                            context,
+                            context.CurrentTransferLeg!,
+                            "post_tuna_fallback_checkpoint_pending");
+                    }
+
                     context.PullSenderFeedCreditWaitStartedUtc ??= DateTimeOffset.UtcNow;
                     context.V4SenderCreditExhaustedSinceUtc ??= DateTimeOffset.UtcNow;
                     priorityRequestCount = context.V6PriorityRequestedChunks.Count;
@@ -2723,10 +2731,13 @@ public sealed partial class SessionFileTransferService
             "FileTransferService",
             $"event=filetransfer_v6_sender_feedback_stale_normal_pipeline_paused; transfer_id={context.TransferId}; session_id={context.SessionId}; feedback_silence_ms={(long)feedbackSilence.TotalMilliseconds}; recovery_delay_ms={(long)CurrentV6SenderRequestFeedbackStallRecoveryDelay.TotalMilliseconds}; transport_epoch={transportEpoch}; epoch_state={FormatProtocolLogValue(epochState)}; remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; highest_accepted_chunk_index={Math.Max(-1, context.ChunksAcceptedForTransport - 1)}; normal_request_count={normalRequestCount}; priority_request_count={priorityRequestCount}; in_flight_send_count={inFlightSendCount}; transport_backlog_chunks={transportBacklogChunks}; cleared_normal_request_count={clearedNormalRequestCount}");
 
-        recoveryRequest = new FileTransferReceiveRecoveryRequest(
-            context.SessionId,
-            context.TransferId,
-            FileTransferDirection.Outbound,
+        recoveryRequest = AttachFallbackLegAuthority(
+            context,
+            new FileTransferReceiveRecoveryRequest(
+                context.SessionId,
+                context.TransferId,
+                FileTransferDirection.Outbound,
+                "sender_request_feedback_stalled"),
             "sender_request_feedback_stalled");
         outboundToProbe = context;
         return true;
@@ -2889,10 +2900,13 @@ public sealed partial class SessionFileTransferService
                 remoteFrontier = context.RemoteNextExpectedChunkIndex;
                 highestAcceptedChunk = Math.Max(-1, context.ChunksAcceptedForTransport - 1);
                 outboundToProbe = context;
-                recoveryRequest = new FileTransferReceiveRecoveryRequest(
-                    context.SessionId,
-                    context.TransferId,
-                    FileTransferDirection.Outbound,
+                recoveryRequest = AttachFallbackLegAuthority(
+                    context,
+                    new FileTransferReceiveRecoveryRequest(
+                        context.SessionId,
+                        context.TransferId,
+                        FileTransferDirection.Outbound,
+                        "sender_request_feedback_stalled"),
                     "sender_request_feedback_stalled");
             }
 
@@ -5571,10 +5585,13 @@ public sealed partial class SessionFileTransferService
             "FileTransferService",
             $"event=filetransfer_v6_sender_feedback_stale_regular_nkn_receive_recovery_requested; transfer_id={context.TransferId}; session_id={context.SessionId}; feedback_silence_ms={(long)feedbackSilence.TotalMilliseconds}; recovery_delay_ms={(long)CurrentV6SenderRequestFeedbackStallRecoveryDelay.TotalMilliseconds}; transport_epoch={transportEpoch}; epoch_state={FormatProtocolLogValue(epochState)}; remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; highest_accepted_chunk_index={Math.Max(-1, context.ChunksAcceptedForTransport - 1)}; transport_backlog_chunks={transportBacklogChunks}; in_flight_send_count={inFlightSendCount}; recent_chunk_send_count={recentChunkSendCount}; normal_request_count={normalRequestCount}; priority_request_count={priorityRequestCount}; epoch_started=0");
 
-        recoveryRequest = new FileTransferReceiveRecoveryRequest(
-            context.SessionId,
-            context.TransferId,
-            FileTransferDirection.Outbound,
+        recoveryRequest = AttachFallbackLegAuthority(
+            context,
+            new FileTransferReceiveRecoveryRequest(
+                context.SessionId,
+                context.TransferId,
+                FileTransferDirection.Outbound,
+                "sender_request_feedback_stalled"),
             "sender_request_feedback_stalled");
         return true;
     }
@@ -5634,10 +5651,13 @@ public sealed partial class SessionFileTransferService
             "FileTransferService",
             $"event=filetransfer_v6_sender_feedback_stale_regular_nkn_normal_pipeline_cleared; transfer_id={context.TransferId}; session_id={context.SessionId}; feedback_silence_ms={(long)feedbackSilence.TotalMilliseconds}; recovery_delay_ms={(long)CurrentV6SenderRequestFeedbackStallRecoveryDelay.TotalMilliseconds}; transport_epoch={transportEpoch}; epoch_state={FormatProtocolLogValue(epochState)}; remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; highest_accepted_chunk_index={Math.Max(-1, context.ChunksAcceptedForTransport - 1)}; transport_backlog_chunks={transportBacklogChunks}; normal_request_count={normalRequestCount}; priority_request_count={priorityRequestCount}; in_flight_send_count={inFlightSendCount}; recent_chunk_send_count={recentChunkSendCount}; cleared_normal_request_count={clearedNormalRequestCount}; cleared_in_flight_chunk_count={clearedInFlightCount}; sender_pipeline_generation={pipelineGeneration}; epoch_started=0");
 
-        recoveryRequest = new FileTransferReceiveRecoveryRequest(
-            context.SessionId,
-            context.TransferId,
-            FileTransferDirection.Outbound,
+        recoveryRequest = AttachFallbackLegAuthority(
+            context,
+            new FileTransferReceiveRecoveryRequest(
+                context.SessionId,
+                context.TransferId,
+                FileTransferDirection.Outbound,
+                "sender_request_feedback_stalled"),
             "sender_request_feedback_stalled");
         return true;
     }

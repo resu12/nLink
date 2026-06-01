@@ -273,6 +273,15 @@ public sealed partial class SessionFileTransferService
                         pendingReceiveTask = null;
                         continue;
                     }
+                    catch (Exception ex) when (TryDeferOutboundPostTunaFallbackTransportSendFailure(
+                               context,
+                               "sender_pump",
+                               ex))
+                    {
+                        senderPumpTask = RunOutboundV4SenderPumpAsync(context, stream, dataSession);
+                        pendingReceiveTask = null;
+                        continue;
+                    }
 
                     if (isPrimaryRegularNknBulkV6)
                     {
@@ -354,6 +363,15 @@ public sealed partial class SessionFileTransferService
                     received = await pendingReceiveTask.ConfigureAwait(false);
                 }
                 catch (OperationCanceledException ex) when (TryDeferOutboundPostTunaFallbackDataSessionCancellation(
+                           context,
+                           "receive_loop",
+                           ex))
+                {
+                    pendingReceiveTask = null;
+                    await Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token).ConfigureAwait(false);
+                    continue;
+                }
+                catch (Exception ex) when (TryDeferOutboundPostTunaFallbackTransportSendFailure(
                            context,
                            "receive_loop",
                            ex))
@@ -521,6 +539,11 @@ public sealed partial class SessionFileTransferService
                 LogPrimaryRegularNknBulkV6State(context, PrimaryRegularNknBulkV6State.Failed, "exception");
             }
 
+            if (TryDeferOutboundPostTunaFallbackTransportSendFailure(context, "outbound_loop", ex))
+            {
+                return;
+            }
+
             var errorCode = ClassifyOutboundFailureErrorCode(ex, StreamReadFailedErrorCode);
             await FailOutboundV4Async(
                 context,
@@ -570,6 +593,71 @@ public sealed partial class SessionFileTransferService
         RaiseTransferChanged(snapshot);
         SignalOutboundSparseSenderPump(context);
         return true;
+    }
+
+    private bool TryDeferOutboundPostTunaFallbackTransportSendFailure(
+        OutboundTransferContext context,
+        string source,
+        Exception ex)
+    {
+        if (!IsRecoverablePostTunaFallbackTransportSendException(ex))
+        {
+            return false;
+        }
+
+        SessionFileTransferSnapshot? snapshot;
+        var now = DateTimeOffset.UtcNow;
+        lock (gate)
+        {
+            if (!ReferenceEquals(outboundTransfer, context) ||
+                context.IsTerminal ||
+                context.LifetimeCts.IsCancellationRequested ||
+                !IsOutboundPostTunaFallbackV6LiveSparseRecoveryActiveLocked(context))
+            {
+                return false;
+            }
+
+            if (!context.PullTransportPaused)
+            {
+                context.PullTransportPaused = true;
+                context.PullTransportPausedSinceUtc = now;
+                context.PullTransportPauseReason = "post_tuna_fallback_bridge_restart";
+                context.PullTransportLastPauseReason = context.PullTransportPauseReason;
+                context.PullTransportResumeRequestPending = true;
+            }
+
+            context.PullTransportGraceDeadlineUtc = now.AddSeconds(5);
+            context.StatusMessage = "Waiting for network recovery.";
+            context.SparseSenderPumpLastWakeReason = "post_tuna_fallback_bridge_restart_send_failure";
+            context.V6SenderPumpLastWakeReason = "post_tuna_fallback_bridge_restart_send_failure";
+            snapshot = CreateSnapshotLocked();
+        }
+
+        TryRequestFileTransferReceiveRecovery(AttachFallbackLegAuthority(
+            context,
+            new FileTransferReceiveRecoveryRequest(
+                context.SessionId,
+                context.TransferId,
+                FileTransferDirection.Outbound,
+                "post_tuna_fallback_bridge_restart_send_failure"),
+            "post_tuna_fallback_bridge_restart_send_failure"));
+
+        LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_post_tuna_fallback_transport_send_failure_deferred; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; source={FormatProtocolLogValue(source)}; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}; reason=post_tuna_fallback_bridge_restart_send_failure; recovery_active={(context.PullPostTunaRecoveryActive ? 1 : 0)}; rebind_generation={context.PullTransportRebindGeneration}; transport_paused={(context.PullTransportPaused ? 1 : 0)}; error={FormatProtocolLogValue(ex.GetType().Name)}; message={FormatProtocolLogValue(ex.Message)}");
+        RaiseTransferChanged(snapshot);
+        SignalOutboundSparseSenderPump(context);
+        return true;
+    }
+
+    private static bool IsRecoverablePostTunaFallbackTransportSendException(Exception ex)
+    {
+        if (ex is OperationCanceledException)
+        {
+            return true;
+        }
+
+        return IsTransportDisconnected(ex);
     }
 
     private bool TryGetOutboundV4PeerSilenceFailure(
@@ -1180,11 +1268,16 @@ public sealed partial class SessionFileTransferService
                     "FileTransferService",
                     $"event=filetransfer_primary_regular_nkn_bulk_v6_checkpoint_receive_recovery_requested; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; request_id={FormatProtocolLogValue(request.RepairRequestId)}; failure_count={context.V6RegularNknCheckpointSyncFailureCount}; feedback_silence_ms={(long)Math.Max(0, feedbackSilence.TotalMilliseconds)}; remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; highest_accepted_chunk_index={Math.Max(-1, context.ChunksAcceptedForTransport - 1)}; transport_backlog_chunks={transportBacklogChunks}; available_credit_chunks={availableCreditChunks}; credit_ceiling_chunk_index={creditCeiling}; rebind_generation={context.PullTransportRebindGeneration}; bridge_recovery_policy={FormatFileTransferBridgeRecoveryPolicy(context.BridgeRecoveryPolicy)}");
 
-                recoveryRequest = new FileTransferReceiveRecoveryRequest(
-                    context.SessionId,
-                    context.TransferId,
-                    FileTransferDirection.Outbound,
-                    "primary_regular_nkn_bulk_v6_checkpoint_sync_failed");
+                recoveryRequest = AttachFallbackLegAuthority(
+                    context,
+                    new FileTransferReceiveRecoveryRequest(
+                        context.SessionId,
+                        context.TransferId,
+                        FileTransferDirection.Outbound,
+                        "primary_regular_nkn_bulk_v6_checkpoint_sync_failed"),
+                    "primary_regular_nkn_bulk_v6_checkpoint_sync_failed",
+                    request.RepairRequestId,
+                    request.TransportEpoch);
             }
         }
 
@@ -1226,11 +1319,16 @@ public sealed partial class SessionFileTransferService
                         request,
                         DateTimeOffset.UtcNow))
                 {
-                    recoveryRequest = new FileTransferReceiveRecoveryRequest(
-                        context.SessionId,
-                        context.TransferId,
-                        FileTransferDirection.Outbound,
-                        "post_tuna_fallback_stale_state_refresh_send_retired");
+                    recoveryRequest = AttachFallbackLegAuthority(
+                        context,
+                        new FileTransferReceiveRecoveryRequest(
+                            context.SessionId,
+                            context.TransferId,
+                            FileTransferDirection.Outbound,
+                            "post_tuna_fallback_stale_state_refresh_send_retired"),
+                        "post_tuna_fallback_stale_state_refresh_send_retired",
+                        request.RepairRequestId,
+                        request.TransportEpoch);
                     DeferOutboundPostTunaFallbackStateRefreshAfterRecoveryLocked(
                         context,
                         request,
@@ -1779,11 +1877,16 @@ public sealed partial class SessionFileTransferService
                     "FileTransferService",
                     $"event=filetransfer_post_tuna_fallback_state_refresh_receive_recovery_requested; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; request_id={FormatProtocolLogValue(request.RepairRequestId)}; stale_inflight_recovery={(staleInflightEscalation ? 1 : 0)}; stale_credit_recovery={(staleCreditEscalation ? 1 : 0)}; state_refresh_send_timeout={(stateRefreshSendTimeout ? 1 : 0)}; recovery_reason={FormatProtocolLogValue(recoveryReason)}; failure_count={context.V6RegularNknStateRefreshFailureCount}; feedback_silence_ms={(long)Math.Max(0, feedbackSilence.TotalMilliseconds)}; remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; highest_accepted_chunk_index={Math.Max(-1, context.ChunksAcceptedForTransport - 1)}; transport_backlog_chunks={transportBacklogChunks}; available_credit_chunks={availableCreditChunks}; credit_ceiling_chunk_index={creditCeiling}; rebind_generation={context.PullTransportRebindGeneration}; bridge_recovery_policy={FormatFileTransferBridgeRecoveryPolicy(context.BridgeRecoveryPolicy)}");
 
-                recoveryRequest = new FileTransferReceiveRecoveryRequest(
-                    context.SessionId,
-                    context.TransferId,
-                    FileTransferDirection.Outbound,
-                    recoveryReason);
+                recoveryRequest = AttachFallbackLegAuthority(
+                    context,
+                    new FileTransferReceiveRecoveryRequest(
+                        context.SessionId,
+                        context.TransferId,
+                        FileTransferDirection.Outbound,
+                        recoveryReason),
+                    recoveryReason,
+                    request.RepairRequestId,
+                    request.TransportEpoch);
             }
         }
 

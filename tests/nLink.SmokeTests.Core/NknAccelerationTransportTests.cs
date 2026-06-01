@@ -2739,6 +2739,11 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             await WaitUntilAsync(
                 () => Volatile.Read(ref recoveryRequestCount) > 0,
                 TimeSpan.FromSeconds(2));
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=tuna_activation_control_send_recovery_requested;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(2));
 
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=tuna_activation_control_send_waiting_for_bridge_recovery;", logTail, StringComparison.Ordinal);

@@ -4329,6 +4329,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
 
         $lastActivationPayloadBookmark = $null
         $lastObservedLiveRouteEpoch = 0
+        $prearmedActivationBookmark = $null
         for ($stepIndex = 0; $stepIndex -lt $sequence.Count; $stepIndex++) {
             $action = [string]$sequence[$stepIndex]
             $stepNumber = $stepIndex + 1
@@ -4371,6 +4372,14 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 ) -TimeoutMs 90000 -Description 'live multi-toggle post-Tuna fallback V6 route selection')
                 $observedEvidenceLines.Add($fallbackRouteLine) | Out-Null
 
+                $nextAction = if ($stepIndex + 1 -lt $sequence.Count) { [string]$sequence[$stepIndex + 1] } else { '' }
+                if (($RouteMode -eq 'live-regular-activation-cycle' -or $RouteMode -eq 'live-multi-toggle') -and
+                    [string]::Equals($nextAction, 'on', [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $prearmedActivationBookmark = Get-AppLogBookmark
+                    $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step_prearmed; step={1}; next_step={2}; action=on; route_mode={3}; reason=prearm_after_fallback_route_started" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber, ($stepNumber + 1), $RouteMode)) | Out-Null
+                    Unlock-TunaPayers -Context $Context -PayerMode $PayerMode -Password $WalletPassword
+                }
+
                 $fallbackResolutionLine = Wait-TunaGuiLiveRouteEpochRecovered -Bookmark $stepBookmark -Route 'post_tuna_fallback_v6' -ProtocolVersion 6 -HandoffKind 'tuna_to_normal_fallback' -TargetTransport 'regular_nkn' -Description 'live multi-toggle Tuna-to-normal fallback route epoch recovered' -LiveRouteEpoch $fallbackStartedEpoch -AfterLiveRouteEpoch $lastObservedLiveRouteEpoch
                 $observedEvidenceLines.Add($fallbackResolutionLine) | Out-Null
                 Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'off_recovered' -Line $fallbackResolutionLine
@@ -4381,10 +4390,21 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
             }
             else {
                 Write-Host ("[GUI Smoke][filetransfer_tuna] Live toggle step {0}/{1}: re-enabling Tuna for the same transfer." -f $stepNumber, $sequence.Count) -ForegroundColor DarkGray
-                $stepBookmark = Get-AppLogBookmark
+                $prearmedActivation = $false
+                if ($null -ne $prearmedActivationBookmark) {
+                    $stepBookmark = $prearmedActivationBookmark
+                    $prearmedActivationBookmark = $null
+                    $prearmedActivation = $true
+                }
+                else {
+                    $stepBookmark = Get-AppLogBookmark
+                }
                 $lastActivationPayloadBookmark = $stepBookmark
-                $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step; step={1}; action=on" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber)) | Out-Null
-                Unlock-TunaPayers -Context $Context -PayerMode $PayerMode -Password $WalletPassword
+                $prearmedFlag = if ($prearmedActivation) { 1 } else { 0 }
+                $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step; step={1}; action=on; prearmed={2}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber, $prearmedFlag)) | Out-Null
+                if (-not $prearmedActivation) {
+                    Unlock-TunaPayers -Context $Context -PayerMode $PayerMode -Password $WalletPassword
+                }
 
                 $activationProofTimeoutMs = if ($RouteMode -eq 'live-regular-activation-cycle') { 240000 } else { 90000 }
                 $activationStartedLine = Wait-TunaGuiLiveRouteEpochStarted -Bookmark $stepBookmark -Route 'file_tuna_v4' -ProtocolVersion 4 -HandoffKind 'normal_to_tuna_activation' -TargetTransport 'tuna' -Description 'live multi-toggle normal-to-Tuna route epoch started' -AfterLiveRouteEpoch $lastObservedLiveRouteEpoch -TimeoutMs $activationProofTimeoutMs

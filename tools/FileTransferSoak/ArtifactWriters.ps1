@@ -1683,6 +1683,94 @@ function Get-FileTransferGateFallbackDiagnostics {
     return $property.Value
 }
 
+function Get-FileTransferFallbackLegAuthorityProof {
+    param(
+        [object[]]$TransferEvents
+    )
+
+    [object[]]$authorityEvents = @(
+        $TransferEvents |
+            Where-Object { ([string]$_.EventName).StartsWith('filetransfer_fallback_leg_authority_', [System.StringComparison]::OrdinalIgnoreCase) } |
+            Sort-Object Sequence
+    )
+    [object[]]$startedEvents = @($authorityEvents | Where-Object { $_.EventName -eq 'filetransfer_fallback_leg_authority_started' })
+    [object[]]$checkpointAcceptedEvents = @($authorityEvents | Where-Object { $_.EventName -eq 'filetransfer_fallback_leg_authority_checkpoint_accepted' })
+    [object[]]$bridgeRequestedEvents = @($authorityEvents | Where-Object { $_.EventName -eq 'filetransfer_fallback_leg_authority_bridge_recovery_requested' })
+    [object[]]$bridgeEscalatedEvents = @($authorityEvents | Where-Object { $_.EventName -eq 'filetransfer_fallback_leg_authority_bridge_recovery_escalated' })
+    [object[]]$completedEvents = @($authorityEvents | Where-Object { $_.EventName -eq 'filetransfer_fallback_leg_authority_completed' })
+    [object[]]$sendBlockedEvents = @($authorityEvents | Where-Object { $_.EventName -eq 'filetransfer_fallback_leg_authority_send_blocked' })
+    [object[]]$staleProofIgnoredEvents = @(
+        $TransferEvents |
+            Where-Object { $_.EventName -eq 'filetransfer_fallback_stale_proof_ignored' } |
+            Sort-Object Sequence
+    )
+
+    $metadataMissing = New-Object System.Collections.Generic.List[object]
+    foreach ($event in @($authorityEvents)) {
+        $route = Get-FileTransferEventField -Event $event -Name 'route' -Default ''
+        $protocol = Get-FileTransferEventInt64Field -Event $event -Name 'protocol_version' -Default 0
+        $legGeneration = Get-FileTransferEventInt64Field -Event $event -Name 'leg_generation' -Default 0
+        $liveRouteEpoch = Get-FileTransferEventInt64Field -Event $event -Name 'live_route_epoch' -Default 0
+        $transportEpoch = Get-FileTransferEventInt64Field -Event $event -Name 'transport_epoch' -Default 0
+        $checkpointId = Get-FileTransferEventField -Event $event -Name 'checkpoint_request_id' -Default ''
+        if ($route -ne 'post_tuna_fallback_v6' -or
+            $protocol -ne 6 -or
+            $legGeneration -le 0 -or
+            $liveRouteEpoch -le 0 -or
+            $transportEpoch -lt 0 -or
+            [string]::IsNullOrWhiteSpace($checkpointId)) {
+            $metadataMissing.Add($event) | Out-Null
+        }
+    }
+
+    $sequence = @(
+        $startedEvents |
+            ForEach-Object { Get-FileTransferEventField -Event $_ -Name 'leg_generation' -Default '' } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+
+    $findings = New-Object System.Collections.Generic.List[string]
+    $evidence = New-Object System.Collections.Generic.List[object]
+    foreach ($event in @($metadataMissing.ToArray())) {
+        $findings.Add(("fallback leg authority metadata missing: {0}" -f (Format-FileTransferEvidenceLine -Event $event))) | Out-Null
+        $evidence.Add($event) | Out-Null
+    }
+
+    $postTunaRouteSelected = @(
+        $TransferEvents |
+            Where-Object {
+                $_.EventName -eq 'filetransfer_route_selected' -and
+                (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6'
+            }
+    )
+    if ($postTunaRouteSelected.Count -gt 0 -and $authorityEvents.Count -eq 0) {
+        $findings.Add('fallback leg authority missing for post_tuna_fallback_v6 route') | Out-Null
+        foreach ($event in @($postTunaRouteSelected | Select-Object -First 3)) {
+            $evidence.Add($event) | Out-Null
+        }
+    }
+
+    $verdict = if ($findings.Count -eq 0) { 'pass' } else { 'fail' }
+    if ($postTunaRouteSelected.Count -eq 0 -and $authorityEvents.Count -eq 0) {
+        $verdict = 'none'
+    }
+
+    return [pscustomobject]@{
+        Verdict = $verdict
+        Sequence = @($sequence)
+        StartedCount = $startedEvents.Count
+        CheckpointAcceptedCount = $checkpointAcceptedEvents.Count
+        BridgeRecoveryRequestedCount = $bridgeRequestedEvents.Count
+        BridgeRecoveryEscalatedCount = $bridgeEscalatedEvents.Count
+        CompletedCount = $completedEvents.Count
+        SendBlockedCount = $sendBlockedEvents.Count
+        StaleProofIgnoredCount = $staleProofIgnoredEvents.Count
+        MetadataMissingCount = $metadataMissing.Count
+        Findings = $findings
+        EvidenceEvents = @(@($evidence.ToArray()) + @($authorityEvents) | Select-Object -First 20)
+    }
+}
+
 function New-FileTransferRouteConsistencySummaryLines {
     param(
         [Parameter(Mandatory = $true)]$Summary,
@@ -1724,6 +1812,8 @@ function New-FileTransferRouteConsistencySummaryLines {
     $liveRouteProof = Get-FileTransferLiveRouteEpochProof -TransferEvents $Summary.TransferEvents -Mode $LiveRouteProofMode
     [object[]]$liveRouteEpochSequence = @($liveRouteProof.Sequence)
     [object[]]$liveRouteEpochRouteChanges = @($liveRouteProof.RouteChanges)
+    $fallbackAuthorityProof = Get-FileTransferFallbackLegAuthorityProof -TransferEvents $Summary.TransferEvents
+    [object[]]$fallbackAuthoritySequence = @($fallbackAuthorityProof.Sequence)
 
     $lines = New-Object System.Collections.Generic.List[string]
     $lines.Add(("transfer_id={0}" -f $Summary.TransferId)) | Out-Null
@@ -1742,6 +1832,16 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("live_route_epoch_transport_only_count={0}" -f $liveRouteProof.TransportOnlyCount)) | Out-Null
     $lines.Add(("live_route_epoch_sequence={0}" -f ($(if ($liveRouteEpochSequence.Length -gt 0) { $liveRouteEpochSequence -join ',' } else { '(none)' })))) | Out-Null
     $lines.Add(("live_route_epoch_route_changes={0}" -f ($(if ($liveRouteEpochRouteChanges.Length -gt 0) { $liveRouteEpochRouteChanges -join ',' } else { '(none)' })))) | Out-Null
+    $lines.Add(("fallback_leg_authority_proof_verdict={0}" -f $fallbackAuthorityProof.Verdict)) | Out-Null
+    $lines.Add(("fallback_leg_authority_generation_sequence={0}" -f ($(if ($fallbackAuthoritySequence.Length -gt 0) { $fallbackAuthoritySequence -join ',' } else { '(none)' })))) | Out-Null
+    $lines.Add(("fallback_leg_authority_started_count={0}" -f $fallbackAuthorityProof.StartedCount)) | Out-Null
+    $lines.Add(("fallback_leg_authority_checkpoint_accepted_count={0}" -f $fallbackAuthorityProof.CheckpointAcceptedCount)) | Out-Null
+    $lines.Add(("fallback_leg_authority_bridge_recovery_requested_count={0}" -f $fallbackAuthorityProof.BridgeRecoveryRequestedCount)) | Out-Null
+    $lines.Add(("fallback_leg_authority_bridge_recovery_escalated_count={0}" -f $fallbackAuthorityProof.BridgeRecoveryEscalatedCount)) | Out-Null
+    $lines.Add(("fallback_leg_authority_completed_count={0}" -f $fallbackAuthorityProof.CompletedCount)) | Out-Null
+    $lines.Add(("fallback_leg_authority_send_blocked_count={0}" -f $fallbackAuthorityProof.SendBlockedCount)) | Out-Null
+    $lines.Add(("fallback_leg_authority_stale_proof_ignored_count={0}" -f $fallbackAuthorityProof.StaleProofIgnoredCount)) | Out-Null
+    $lines.Add(("fallback_leg_authority_metadata_missing_count={0}" -f $fallbackAuthorityProof.MetadataMissingCount)) | Out-Null
 
     $index = 0
     foreach ($event in @($routeSelectedEvents | Sort-Object Sequence)) {
@@ -1775,6 +1875,19 @@ function New-FileTransferRouteConsistencySummaryLines {
         foreach ($finding in @($liveRouteProof.Findings)) {
             $proofIndex++
             $lines.Add(("proof.{0}={1}" -f $proofIndex, $finding)) | Out-Null
+        }
+    }
+    else {
+        $lines.Add('(none)') | Out-Null
+    }
+
+    $lines.Add('') | Out-Null
+    $lines.Add('fallback_leg_authority_findings:') | Out-Null
+    if ($fallbackAuthorityProof.Findings.Count -gt 0) {
+        $authorityIndex = 0
+        foreach ($finding in @($fallbackAuthorityProof.Findings)) {
+            $authorityIndex++
+            $lines.Add(("authority.{0}={1}" -f $authorityIndex, $finding)) | Out-Null
         }
     }
     else {
@@ -3244,6 +3357,7 @@ function New-FileTransferStabilityGateSummaryLines {
     $warningCap = Get-FileTransferGateWarningCap -GateResult $GateResult
     $fallbackDiagnostics = Get-FileTransferGateFallbackDiagnostics -GateResult $GateResult
     $recoveryClassification = Get-FileTransferRecoveryFailureClassification -Summary $Summary
+    $fallbackAuthorityProof = Get-FileTransferFallbackLegAuthorityProof -TransferEvents $Summary.TransferEvents
 
     return @(
         ("verdict={0}" -f $GateResult.Verdict),
@@ -3282,6 +3396,14 @@ function New-FileTransferStabilityGateSummaryLines {
         ("fallback_v6_receiver_state_coalesced_count={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.ReceiverStateCoalescedCount } else { 0 }))),
         ("fallback_v6_sender_repair_active_evidence_count={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.SenderRepairActiveEvidenceCount } else { 0 }))),
         ("fallback_v6_sender_still_repairing={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.SenderStillRepairing } else { 0 }))),
+        ("fallback_leg_authority_proof_verdict={0}" -f $fallbackAuthorityProof.Verdict),
+        ("fallback_leg_authority_started_count={0}" -f $fallbackAuthorityProof.StartedCount),
+        ("fallback_leg_authority_checkpoint_accepted_count={0}" -f $fallbackAuthorityProof.CheckpointAcceptedCount),
+        ("fallback_leg_authority_bridge_recovery_requested_count={0}" -f $fallbackAuthorityProof.BridgeRecoveryRequestedCount),
+        ("fallback_leg_authority_bridge_recovery_escalated_count={0}" -f $fallbackAuthorityProof.BridgeRecoveryEscalatedCount),
+        ("fallback_leg_authority_completed_count={0}" -f $fallbackAuthorityProof.CompletedCount),
+        ("fallback_leg_authority_stale_proof_ignored_count={0}" -f $fallbackAuthorityProof.StaleProofIgnoredCount),
+        ("fallback_leg_authority_metadata_missing_count={0}" -f $fallbackAuthorityProof.MetadataMissingCount),
         ("next_artifact={0}" -f $GateResult.NextArtifact),
         ("gui_progress_timeout_count={0}" -f $Summary.LiveProgressTimeoutCount),
         ("terminal_missing_after_progress_timeout={0}" -f $Summary.TerminalMissingAfterProgressTimeout),
@@ -3815,6 +3937,7 @@ function Write-FileTransferDiagnosticsArtifacts {
     $fallbackDiagnostics = Get-FileTransferGateFallbackDiagnostics -GateResult $GateResult
     $liveRouteProof = Get-FileTransferLiveRouteEpochProof -TransferEvents $Summary.TransferEvents -Mode $LiveRouteProofMode
     $recoveryClassification = Get-FileTransferRecoveryFailureClassification -Summary $Summary
+    $fallbackAuthorityProof = Get-FileTransferFallbackLegAuthorityProof -TransferEvents $Summary.TransferEvents
 
     $verdictLines = @(
         ("verdict={0}" -f $GateResult.Verdict),
@@ -3858,6 +3981,14 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("fallback_v6_receiver_state_coalesced_count={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.ReceiverStateCoalescedCount } else { 0 }))),
         ("fallback_v6_sender_repair_active_evidence_count={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.SenderRepairActiveEvidenceCount } else { 0 }))),
         ("fallback_v6_sender_still_repairing={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.SenderStillRepairing } else { 0 }))),
+        ("fallback_leg_authority_proof_verdict={0}" -f $fallbackAuthorityProof.Verdict),
+        ("fallback_leg_authority_started_count={0}" -f $fallbackAuthorityProof.StartedCount),
+        ("fallback_leg_authority_checkpoint_accepted_count={0}" -f $fallbackAuthorityProof.CheckpointAcceptedCount),
+        ("fallback_leg_authority_bridge_recovery_requested_count={0}" -f $fallbackAuthorityProof.BridgeRecoveryRequestedCount),
+        ("fallback_leg_authority_bridge_recovery_escalated_count={0}" -f $fallbackAuthorityProof.BridgeRecoveryEscalatedCount),
+        ("fallback_leg_authority_completed_count={0}" -f $fallbackAuthorityProof.CompletedCount),
+        ("fallback_leg_authority_stale_proof_ignored_count={0}" -f $fallbackAuthorityProof.StaleProofIgnoredCount),
+        ("fallback_leg_authority_metadata_missing_count={0}" -f $fallbackAuthorityProof.MetadataMissingCount),
         ("live_route_epoch_proof_mode={0}" -f $LiveRouteProofMode),
         ("live_route_epoch_proof_verdict={0}" -f $liveRouteProof.Verdict),
         ("live_route_epoch_metadata_missing_count={0}" -f $liveRouteProof.MetadataMissingCount),

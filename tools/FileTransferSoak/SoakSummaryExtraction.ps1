@@ -354,6 +354,47 @@ function Get-FileTransferSelectedRouteForEvent {
     return $null
 }
 
+function Convert-FileTransferRouteTransitionToSelection {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    $newRoute = Get-FileTransferEventField -Event $Event -Name 'new_route' -Default ''
+    if ([string]::IsNullOrWhiteSpace($newRoute)) {
+        return $null
+    }
+
+    $fields = @{}
+    if ($null -ne $Event.Fields) {
+        foreach ($key in @($Event.Fields.Keys)) {
+            $fields[$key] = $Event.Fields[$key]
+        }
+    }
+
+    $fields['route'] = $newRoute
+    $fields['protocol_version'] = Get-FileTransferEventField -Event $Event -Name 'new_protocol_version' -Default (Get-FileTransferEventField -Event $Event -Name 'protocol_version' -Default '')
+    $fields['runtime_profile'] = Get-FileTransferEventField -Event $Event -Name 'new_runtime_profile' -Default (Get-FileTransferEventField -Event $Event -Name 'runtime_profile' -Default '')
+    $fields['frame_family'] = Get-FileTransferEventField -Event $Event -Name 'new_frame_family' -Default (Get-FileTransferEventField -Event $Event -Name 'frame_family' -Default '')
+    $fields['file_tuna_active'] = if ($newRoute -eq 'file_tuna_v4') { '1' } else { '0' }
+    $fields['post_tuna_fallback_active'] = if ($newRoute -eq 'post_tuna_fallback_v6') { '1' } else { '0' }
+    $fields['diagnostic_regular_nkn_v6'] = if ($newRoute -eq 'diagnostic_regular_nkn_v6') { '1' } else { '0' }
+    $fields['transition_backed_route_selection'] = '1'
+
+    return [pscustomobject]@{
+        TimestampUtc = $Event.TimestampUtc
+        TimestampText = $Event.TimestampText
+        Level = $Event.Level
+        Source = $Event.Source
+        EventName = 'filetransfer_route_selected'
+        Fields = $fields
+        TransferId = $Event.TransferId
+        FilePath = $Event.FilePath
+        FileName = $Event.FileName
+        LineNumber = $Event.LineNumber
+        Sequence = $Event.Sequence
+        Message = $Event.Message
+        RawLine = $Event.RawLine
+    }
+}
+
 function Test-FileTransferRouteTerminalBetween {
     param(
         [Parameter(Mandatory = $true)]
@@ -474,13 +515,21 @@ function Get-FileTransferRouteConsistency {
     param([object[]]$TransferEvents)
 
     $routeSelectedEvents = @(Get-FileTransferEventsByName -Events $TransferEvents -Names @('filetransfer_route_selected') | Sort-Object Sequence)
+    $routeTransitionSelections = @(
+        $TransferEvents |
+            Where-Object { $_.EventName -eq 'filetransfer_route_transitioned' } |
+            ForEach-Object { Convert-FileTransferRouteTransitionToSelection -Event $_ } |
+            Where-Object { $null -ne $_ } |
+            Sort-Object Sequence
+    )
+    $routeStateEvents = @($routeSelectedEvents + $routeTransitionSelections | Sort-Object Sequence)
     $routeAwareEvents = @($TransferEvents | Where-Object { Test-FileTransferRouteAwareEvent -Event $_ } | Sort-Object Sequence)
     $terminalEvents = @(Get-FileTransferTerminalEvents -Events $TransferEvents | Sort-Object Sequence)
     $findings = New-Object System.Collections.ArrayList
     $evidenceEvents = New-Object System.Collections.ArrayList
     $lastSelectedByDirectionKey = @{}
 
-    foreach ($selected in @($routeSelectedEvents)) {
+    foreach ($selected in @($routeStateEvents)) {
         $route = Get-FileTransferEventField -Event $selected -Name 'route' -Default ''
         $directionKey = Get-FileTransferRouteEventKey -Event $selected -IncludeDirection
         if ($lastSelectedByDirectionKey.ContainsKey($directionKey)) {
@@ -524,7 +573,7 @@ function Get-FileTransferRouteConsistency {
         }
     }
 
-    if ($routeAwareEvents.Count -gt 0 -and $routeSelectedEvents.Count -eq 0) {
+    if ($routeAwareEvents.Count -gt 0 -and $routeStateEvents.Count -eq 0) {
         Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding 'route-aware transfer events were present but no filetransfer_route_selected event was found' -Event $routeAwareEvents[0]
     }
 
@@ -560,7 +609,7 @@ function Get-FileTransferRouteConsistency {
             continue
         }
 
-        $selected = Get-FileTransferSelectedRouteForEvent -Event $event -RouteSelectedEvents $routeSelectedEvents
+        $selected = Get-FileTransferSelectedRouteForEvent -Event $event -RouteSelectedEvents $routeStateEvents
         if ($null -eq $selected) {
             Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding ("route-aware event has no selected route: {0}" -f (Format-FileTransferEvidenceLine -Event $event)) -Event $event
             continue

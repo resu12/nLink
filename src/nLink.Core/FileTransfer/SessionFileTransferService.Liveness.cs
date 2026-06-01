@@ -36,25 +36,28 @@ public sealed partial class SessionFileTransferService
 
         if (controller is null)
         {
+            var authorityFields = FormatReceiveRecoveryAuthorityFields(request);
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_v6_transport_receive_recovery_request_unsupported; direction={request.Direction.ToString().ToLowerInvariant()}; transfer_id={request.TransferId}; session_id={request.SessionId}; reason={FormatProtocolLogValue(request.Reason)}; bridge_recovery_policy={FormatFileTransferBridgeRecoveryPolicy(bridgeRecoveryPolicy)}");
+                $"event=filetransfer_v6_transport_receive_recovery_request_unsupported; direction={request.Direction.ToString().ToLowerInvariant()}; transfer_id={request.TransferId}; session_id={request.SessionId}; reason={FormatProtocolLogValue(request.Reason)}; bridge_recovery_policy={FormatFileTransferBridgeRecoveryPolicy(bridgeRecoveryPolicy)}{authorityFields}");
             return false;
         }
 
         try
         {
             controller.RequestFileTransferReceiveRecovery(request);
+            var authorityFields = FormatReceiveRecoveryAuthorityFields(request);
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_v6_transport_receive_recovery_request_dispatched; direction={request.Direction.ToString().ToLowerInvariant()}; transfer_id={request.TransferId}; session_id={request.SessionId}; reason={FormatProtocolLogValue(request.Reason)}; bridge_recovery_policy={FormatFileTransferBridgeRecoveryPolicy(bridgeRecoveryPolicy)}");
+                $"event=filetransfer_v6_transport_receive_recovery_request_dispatched; direction={request.Direction.ToString().ToLowerInvariant()}; transfer_id={request.TransferId}; session_id={request.SessionId}; reason={FormatProtocolLogValue(request.Reason)}; bridge_recovery_policy={FormatFileTransferBridgeRecoveryPolicy(bridgeRecoveryPolicy)}{authorityFields}");
             return true;
         }
         catch (Exception ex)
         {
+            var authorityFields = FormatReceiveRecoveryAuthorityFields(request);
             LocalOperationalLog.Warn(
                 "FileTransferService",
-                $"event=filetransfer_v6_transport_receive_recovery_request_failed; direction={request.Direction.ToString().ToLowerInvariant()}; transfer_id={request.TransferId}; session_id={request.SessionId}; reason={FormatProtocolLogValue(request.Reason)}; error={FormatProtocolLogValue(ex.GetType().Name)}; bridge_recovery_policy={FormatFileTransferBridgeRecoveryPolicy(bridgeRecoveryPolicy)}");
+                $"event=filetransfer_v6_transport_receive_recovery_request_failed; direction={request.Direction.ToString().ToLowerInvariant()}; transfer_id={request.TransferId}; session_id={request.SessionId}; reason={FormatProtocolLogValue(request.Reason)}; error={FormatProtocolLogValue(ex.GetType().Name)}; bridge_recovery_policy={FormatFileTransferBridgeRecoveryPolicy(bridgeRecoveryPolicy)}{authorityFields}");
             return false;
         }
     }
@@ -413,10 +416,13 @@ public sealed partial class SessionFileTransferService
                 peerLivenessTimeout,
                 out var outboundToProbe))
         {
-            TryRequestFileTransferReceiveRecovery(new FileTransferReceiveRecoveryRequest(
-                context.SessionId,
-                context.TransferId,
-                FileTransferDirection.Outbound,
+            TryRequestFileTransferReceiveRecovery(AttachFallbackLegAuthority(
+                context,
+                new FileTransferReceiveRecoveryRequest(
+                    context.SessionId,
+                    context.TransferId,
+                    FileTransferDirection.Outbound,
+                    "peer_liveness_stale_receive_recovery"),
                 "peer_liveness_stale_receive_recovery"));
 
             if (outboundToProbe is not null)
@@ -451,10 +457,13 @@ public sealed partial class SessionFileTransferService
             }
             else
             {
-                TryRequestFileTransferReceiveRecovery(new FileTransferReceiveRecoveryRequest(
-                    context.SessionId,
-                    context.TransferId,
-                    FileTransferDirection.Outbound,
+                TryRequestFileTransferReceiveRecovery(AttachFallbackLegAuthority(
+                    context,
+                    new FileTransferReceiveRecoveryRequest(
+                        context.SessionId,
+                        context.TransferId,
+                        FileTransferDirection.Outbound,
+                        "v6_sparse_runtime_peer_liveness_recovery"),
                     "v6_sparse_runtime_peer_liveness_recovery"));
             }
 

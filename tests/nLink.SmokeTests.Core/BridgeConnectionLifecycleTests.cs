@@ -1676,14 +1676,14 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             using var adapter = new RealNknClientAdapter(identity, options);
             adapter.RegisterActiveFileTransferDataSession("transfer-v6-runtime-protocol-liveness");
             adapter.RegisterActiveFileTransferRuntime("transfer-v6-runtime-protocol-liveness");
-            var logBaseline = LocalOperationalLog.GetRecentLogText().Length;
+            var logBaseline = GetOperationalLogLength();
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             await adapter.ConnectAsync(cts.Token);
 
             await WaitUntilAsync(
                 () =>
                 {
-                    var text = GetRecentLogTextSince(logBaseline);
+                    var text = ReadOperationalLogTail(logBaseline) + Environment.NewLine + LocalOperationalLog.GetRecentLogText();
                     if (!text.Contains("event=nkn_bridge_receive_stall_recovery_suppressed; reason=filetransfer_runtime_protocol_liveness", StringComparison.Ordinal) ||
                         !text.Contains("event=nkn_bridge_receive_stall_recovery_protocol_repair_exhausted", StringComparison.Ordinal) ||
                         !text.Contains("event=nkn_bridge_receive_stall_recovery_started", StringComparison.Ordinal))
@@ -1697,7 +1697,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 },
                 TimeSpan.FromSeconds(15));
 
-            var logText = GetRecentLogTextSince(logBaseline);
+            var logText = ReadOperationalLogTail(logBaseline) + Environment.NewLine + LocalOperationalLog.GetRecentLogText();
             Assert.Contains("event=nkn_bridge_receive_stall_recovery_suppressed; reason=filetransfer_runtime_protocol_liveness", logText, StringComparison.Ordinal);
             Assert.Contains("event=nkn_bridge_receive_stall_recovery_protocol_repair_exhausted", logText, StringComparison.Ordinal);
             Assert.Contains("event=nkn_bridge_receive_stall_recovery_started", logText, StringComparison.Ordinal);

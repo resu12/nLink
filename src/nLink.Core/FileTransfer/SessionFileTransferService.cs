@@ -4535,6 +4535,99 @@ public sealed partial class SessionFileTransferService : IDisposable
             ProtocolVersion: FileTransferProtocol.ProtocolVersionV6,
         };
 
+    private static FileTransferReceiveRecoveryRequest AttachFallbackLegAuthority(
+        OutboundTransferContext context,
+        FileTransferReceiveRecoveryRequest request,
+        string authorityReason,
+        string? checkpointRequestId = null,
+        long? transportEpoch = null)
+    {
+        var leg = context.CurrentTransferLeg;
+        if (!IsCurrentPostTunaFallbackLeg(leg))
+        {
+            return request;
+        }
+
+        return request with
+        {
+            RouteToken = leg!.RouteSelection.TelemetryToken,
+            ProtocolVersion = leg.ProtocolVersion,
+            LiveRouteEpoch = leg.LiveRouteEpochId,
+            TransferLegGeneration = leg.Generation,
+            BridgeRecoveryGeneration = leg.BridgeRecoveryGeneration,
+            TransportEpoch = transportEpoch ?? leg.TransportEpochId,
+            CheckpointRequestId = checkpointRequestId ?? leg.CheckpointRequestId,
+            AuthorityReason = authorityReason,
+        };
+    }
+
+    private static FileTransferReceiveRecoveryRequest AttachFallbackLegAuthority(
+        InboundTransferContext context,
+        FileTransferReceiveRecoveryRequest request,
+        string authorityReason,
+        string? checkpointRequestId = null,
+        long? transportEpoch = null)
+    {
+        var leg = context.CurrentTransferLeg;
+        if (!IsCurrentPostTunaFallbackLeg(leg))
+        {
+            return request;
+        }
+
+        return request with
+        {
+            RouteToken = leg!.RouteSelection.TelemetryToken,
+            ProtocolVersion = leg.ProtocolVersion,
+            LiveRouteEpoch = leg.LiveRouteEpochId,
+            TransferLegGeneration = leg.Generation,
+            BridgeRecoveryGeneration = leg.BridgeRecoveryGeneration,
+            TransportEpoch = transportEpoch ?? leg.TransportEpochId,
+            CheckpointRequestId = checkpointRequestId ?? leg.CheckpointRequestId,
+            AuthorityReason = authorityReason,
+        };
+    }
+
+    private static string FormatReceiveRecoveryAuthorityFields(FileTransferReceiveRecoveryRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.RouteToken) &&
+            request.ProtocolVersion <= 0 &&
+            request.TransferLegGeneration <= 0 &&
+            request.TransportEpoch <= 0 &&
+            string.IsNullOrWhiteSpace(request.CheckpointRequestId))
+        {
+            return string.Empty;
+        }
+
+        return
+            $"; route={FormatProtocolLogValue(request.RouteToken ?? "(none)")}" +
+            $"; protocol_version={request.ProtocolVersion}" +
+            $"; live_route_epoch={request.LiveRouteEpoch}" +
+            $"; leg_generation={request.TransferLegGeneration}" +
+            $"; bridge_recovery_generation={request.BridgeRecoveryGeneration}" +
+            $"; transport_epoch={request.TransportEpoch}" +
+            $"; checkpoint_request_id={FormatProtocolLogValue(request.CheckpointRequestId ?? "(none)")}" +
+            $"; authority_reason={FormatProtocolLogValue(request.AuthorityReason ?? "(none)")}";
+    }
+
+    private static void LogFileTransferFallbackLegAuthoritySendBlocked(
+        OutboundTransferContext context,
+        FileTransferLeg leg,
+        string reason)
+        => LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_fallback_leg_authority_send_blocked; direction=outbound; transfer_id={context.TransferId}; session_id={FormatProtocolLogValue(context.SessionId)}; reason={FormatProtocolLogValue(reason)}; leg_id={FormatProtocolLogValue(leg.LegId)}; leg_generation={leg.Generation}; route={leg.RouteSelection.TelemetryToken}; protocol_version={leg.ProtocolVersion}; live_route_epoch={leg.LiveRouteEpochId}; transport_epoch={leg.TransportEpochId}; bridge_recovery_generation={leg.BridgeRecoveryGeneration}; checkpoint_request_id={FormatProtocolLogValue(leg.CheckpointRequestId ?? "(none)")}; proven_committed_chunk={leg.ProvenCommittedChunkIndex}; state={FormatFileTransferLegState(leg.State)}; can_send_data={(leg.CanSendData ? 1 : 0)}");
+
+    private static void LogFileTransferFallbackLegAuthorityCheckpointAccepted(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        FileTransferLeg leg,
+        string? requestId,
+        string reason)
+        => LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_fallback_leg_authority_checkpoint_accepted; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; leg_id={FormatProtocolLogValue(leg.LegId)}; leg_generation={leg.Generation}; route={leg.RouteSelection.TelemetryToken}; protocol_version={leg.ProtocolVersion}; live_route_epoch={leg.LiveRouteEpochId}; transport_epoch={leg.TransportEpochId}; bridge_recovery_generation={leg.BridgeRecoveryGeneration}; checkpoint_request_id={FormatProtocolLogValue(requestId ?? "(none)")}; proven_committed_chunk={leg.ProvenCommittedChunkIndex}; proven_highest_observed_chunk={leg.ProvenHighestObservedChunkIndex}; reason={FormatProtocolLogValue(reason)}");
+
     private static void MarkOutboundFallbackCheckpointRequestedLocked(
         OutboundTransferContext context,
         FileTransferFrontierRequestFrameV6 request,
@@ -4846,6 +4939,13 @@ public sealed partial class SessionFileTransferService : IDisposable
             leg,
             state.RepairRequestId,
             reason);
+        LogFileTransferFallbackLegAuthorityCheckpointAccepted(
+            FileTransferDirection.Outbound,
+            context.TransferId,
+            context.SessionId,
+            leg,
+            state.RepairRequestId,
+            reason);
         return true;
     }
 
@@ -4905,6 +5005,13 @@ public sealed partial class SessionFileTransferService : IDisposable
         leg.CheckpointRequestId = null;
         ClearStaleInboundFallbackTransportEpochAfterCheckpointLocked(context, leg, transportEpoch, reason);
         LogFileTransferFallbackCheckpointAccepted(
+            FileTransferDirection.Inbound,
+            context.TransferId,
+            context.SessionId,
+            leg,
+            requestId,
+            reason);
+        LogFileTransferFallbackLegAuthorityCheckpointAccepted(
             FileTransferDirection.Inbound,
             context.TransferId,
             context.SessionId,
