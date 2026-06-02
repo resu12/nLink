@@ -1295,6 +1295,71 @@ public sealed class FileTransferOpsScriptsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_BridgeLivenessDefersThenFallbackProofPasses()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "[redacted]";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6_repair; selection_reason=post_tuna_file_fallback_active; file_tuna_active=0; post_tuna_fallback_active=1; diagnostic_regular_nkn_v6=0; transport_profile=nkn; live_route_epoch=1"),
+            LogLine($"event=filetransfer_fallback_leg_authority_started; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; leg_generation=2; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=1; transport_epoch=7; bridge_recovery_generation=1; checkpoint_request_id=v6-regular-nkn-state-refresh:1; authority_reason=post_tuna_fallback_state_refresh_failed"),
+            LogLine($"event=filetransfer_fallback_leg_authority_bridge_recovery_requested; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; leg_generation=2; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=1; transport_epoch=7; bridge_recovery_generation=1; checkpoint_request_id=v6-regular-nkn-state-refresh:1; authority_reason=post_tuna_fallback_state_refresh_failed"),
+            LogLine($"event=session_liveness_timeout_deferred_for_current_filetransfer_recovery; session_id=sess_redacted; transfer_id={transferId}; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=1; leg_generation=2; bridge_recovery_generation=1; transport_epoch=7; checkpoint_request_id=v6-regular-nkn-state-refresh:1; authority_reason=post_tuna_fallback_state_refresh_failed; state=bridge_recovery_completed_awaiting_proof; bridge_recovery_requested=1; bridge_recovery_started=1; bridge_recovery_completed=1; silence_ms=18000; liveness_deferral_deadline_utc_ms=999999"),
+            LogLine($"event=bridge_receive_stall_recovery_receive_resumed; session_id=sess_redacted; exit_reason=post_tuna_fallback_state_refresh_failed"),
+            LogLine($"event=filetransfer_fallback_leg_authority_checkpoint_accepted; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; leg_generation=2; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=1; transport_epoch=7; bridge_recovery_generation=1; checkpoint_request_id=v6-regular-nkn-state-refresh:1; proven_committed_chunk=128; proven_highest_observed_chunk=160; reason=receiver_state"),
+            LogLine($"event=filetransfer_fallback_leg_authority_completed; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; leg_generation=2; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=1; transport_epoch=7; bridge_recovery_generation=1; checkpoint_request_id=v6-regular-nkn-state-refresh:1; authority_reason=post_tuna_fallback_state_refresh_failed; proof=post_tuna_receiver_state"),
+            LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_redacted; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=(none); integrity_ok=1"),
+            LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_redacted; transfer_id={transferId}; state=Completed; error_code=(none); integrity_ok=1")
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("pass", route["bridge_liveness_integration_verdict"]);
+        Assert.Equal("1", route["session_liveness_deferred_for_current_recovery_count"]);
+        Assert.Equal("0", route["session_liveness_timeout_during_valid_recovery_count"]);
+        Assert.Equal("1", route["bridge_recovery_receive_resumed_count"]);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("pass", verdict["bridge_liveness_integration_verdict"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_LivenessTimeoutDuringValidFallbackRecoveryFails()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "[redacted]";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6_repair; selection_reason=post_tuna_file_fallback_active; file_tuna_active=0; post_tuna_fallback_active=1; diagnostic_regular_nkn_v6=0; transport_profile=nkn; live_route_epoch=1"),
+            LogLine($"event=filetransfer_fallback_leg_authority_started; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; leg_generation=2; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=1; transport_epoch=7; bridge_recovery_generation=1; checkpoint_request_id=v6-regular-nkn-state-refresh:1; authority_reason=post_tuna_fallback_state_refresh_failed"),
+            LogLine($"event=filetransfer_fallback_leg_authority_bridge_recovery_requested; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; leg_generation=2; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=1; transport_epoch=7; bridge_recovery_generation=1; checkpoint_request_id=v6-regular-nkn-state-refresh:1; authority_reason=post_tuna_fallback_state_refresh_failed"),
+            LogLine($"event=session_liveness_timeout; session_id=sess_redacted; generation=1; silence_ms=20000; terminal_timeout_ms=18000; role=Helper"),
+            LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_redacted; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=(none); integrity_ok=1"),
+            LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_redacted; transfer_id={transferId}; state=Completed; error_code=(none); integrity_ok=1")
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("fail", verdict["bridge_liveness_integration_verdict"]);
+        Assert.Equal("1", verdict["session_liveness_timeout_during_valid_recovery_count"]);
+        var routeText = File.ReadAllText(Path.Combine(result.ArtifactDir, "filetransfer-route-consistency-summary.txt"));
+        Assert.Contains("session liveness timeout during valid fallback recovery authority", routeText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_LiveTunaLegStartBeforeRouteSelected_ReturnsRouteConsistencyPass()
     {
         if (!OperatingSystem.IsWindows())

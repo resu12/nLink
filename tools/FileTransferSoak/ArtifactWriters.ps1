@@ -1813,6 +1813,7 @@ function New-FileTransferRouteConsistencySummaryLines {
     [object[]]$liveRouteEpochSequence = @($liveRouteProof.Sequence)
     [object[]]$liveRouteEpochRouteChanges = @($liveRouteProof.RouteChanges)
     $fallbackAuthorityProof = Get-FileTransferFallbackLegAuthorityProof -TransferEvents $Summary.TransferEvents
+    $bridgeLivenessProof = Get-FileTransferBridgeLivenessIntegrationProof -Summary $Summary
     [object[]]$fallbackAuthoritySequence = @($fallbackAuthorityProof.Sequence)
 
     $lines = New-Object System.Collections.Generic.List[string]
@@ -1842,6 +1843,14 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("fallback_leg_authority_send_blocked_count={0}" -f $fallbackAuthorityProof.SendBlockedCount)) | Out-Null
     $lines.Add(("fallback_leg_authority_stale_proof_ignored_count={0}" -f $fallbackAuthorityProof.StaleProofIgnoredCount)) | Out-Null
     $lines.Add(("fallback_leg_authority_metadata_missing_count={0}" -f $fallbackAuthorityProof.MetadataMissingCount)) | Out-Null
+    $lines.Add(("bridge_liveness_integration_verdict={0}" -f $bridgeLivenessProof.Verdict)) | Out-Null
+    $lines.Add(("session_liveness_deferred_for_current_recovery_count={0}" -f $bridgeLivenessProof.CurrentRecoveryDeferralCount)) | Out-Null
+    $lines.Add(("session_liveness_deferred_for_bridge_recovery_count={0}" -f $bridgeLivenessProof.BridgeRecoveryDeferralCount)) | Out-Null
+    $lines.Add(("session_liveness_timeout_during_valid_recovery_count={0}" -f $bridgeLivenessProof.TimeoutDuringValidRecoveryCount)) | Out-Null
+    $lines.Add(("bridge_recovery_receive_resumed_count={0}" -f $bridgeLivenessProof.ReceiveResumedCount)) | Out-Null
+    $lines.Add(("bridge_recovery_exhausted_without_proof_count={0}" -f $bridgeLivenessProof.RecoveryExhaustedWithoutProofCount)) | Out-Null
+    $lines.Add(("fallback_leg_authority_liveness_deferral_count={0}" -f $bridgeLivenessProof.FallbackLegAuthorityLivenessDeferralCount)) | Out-Null
+    $lines.Add(("bridge_liveness_stale_deferral_count={0}" -f $bridgeLivenessProof.StaleDeferralCount)) | Out-Null
 
     $index = 0
     foreach ($event in @($routeSelectedEvents | Sort-Object Sequence)) {
@@ -1888,6 +1897,19 @@ function New-FileTransferRouteConsistencySummaryLines {
         foreach ($finding in @($fallbackAuthorityProof.Findings)) {
             $authorityIndex++
             $lines.Add(("authority.{0}={1}" -f $authorityIndex, $finding)) | Out-Null
+        }
+    }
+    else {
+        $lines.Add('(none)') | Out-Null
+    }
+
+    $lines.Add('') | Out-Null
+    $lines.Add('bridge_liveness_integration_findings:') | Out-Null
+    if ($bridgeLivenessProof.Findings.Count -gt 0) {
+        $bridgeLivenessIndex = 0
+        foreach ($finding in @($bridgeLivenessProof.Findings)) {
+            $bridgeLivenessIndex++
+            $lines.Add(("bridge_liveness.{0}={1}" -f $bridgeLivenessIndex, $finding)) | Out-Null
         }
     }
     else {
@@ -3358,6 +3380,7 @@ function New-FileTransferStabilityGateSummaryLines {
     $fallbackDiagnostics = Get-FileTransferGateFallbackDiagnostics -GateResult $GateResult
     $recoveryClassification = Get-FileTransferRecoveryFailureClassification -Summary $Summary
     $fallbackAuthorityProof = Get-FileTransferFallbackLegAuthorityProof -TransferEvents $Summary.TransferEvents
+    $bridgeLivenessProof = Get-FileTransferBridgeLivenessIntegrationProof -Summary $Summary
 
     return @(
         ("verdict={0}" -f $GateResult.Verdict),
@@ -3404,6 +3427,14 @@ function New-FileTransferStabilityGateSummaryLines {
         ("fallback_leg_authority_completed_count={0}" -f $fallbackAuthorityProof.CompletedCount),
         ("fallback_leg_authority_stale_proof_ignored_count={0}" -f $fallbackAuthorityProof.StaleProofIgnoredCount),
         ("fallback_leg_authority_metadata_missing_count={0}" -f $fallbackAuthorityProof.MetadataMissingCount),
+        ("bridge_liveness_integration_verdict={0}" -f $bridgeLivenessProof.Verdict),
+        ("session_liveness_deferred_for_current_recovery_count={0}" -f $bridgeLivenessProof.CurrentRecoveryDeferralCount),
+        ("session_liveness_deferred_for_bridge_recovery_count={0}" -f $bridgeLivenessProof.BridgeRecoveryDeferralCount),
+        ("session_liveness_timeout_during_valid_recovery_count={0}" -f $bridgeLivenessProof.TimeoutDuringValidRecoveryCount),
+        ("bridge_recovery_receive_resumed_count={0}" -f $bridgeLivenessProof.ReceiveResumedCount),
+        ("bridge_recovery_exhausted_without_proof_count={0}" -f $bridgeLivenessProof.RecoveryExhaustedWithoutProofCount),
+        ("fallback_leg_authority_liveness_deferral_count={0}" -f $bridgeLivenessProof.FallbackLegAuthorityLivenessDeferralCount),
+        ("bridge_liveness_stale_deferral_count={0}" -f $bridgeLivenessProof.StaleDeferralCount),
         ("next_artifact={0}" -f $GateResult.NextArtifact),
         ("gui_progress_timeout_count={0}" -f $Summary.LiveProgressTimeoutCount),
         ("terminal_missing_after_progress_timeout={0}" -f $Summary.TerminalMissingAfterProgressTimeout),
@@ -3938,6 +3969,7 @@ function Write-FileTransferDiagnosticsArtifacts {
     $liveRouteProof = Get-FileTransferLiveRouteEpochProof -TransferEvents $Summary.TransferEvents -Mode $LiveRouteProofMode
     $recoveryClassification = Get-FileTransferRecoveryFailureClassification -Summary $Summary
     $fallbackAuthorityProof = Get-FileTransferFallbackLegAuthorityProof -TransferEvents $Summary.TransferEvents
+    $bridgeLivenessProof = Get-FileTransferBridgeLivenessIntegrationProof -Summary $Summary
 
     $verdictLines = @(
         ("verdict={0}" -f $GateResult.Verdict),
@@ -3989,6 +4021,14 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("fallback_leg_authority_completed_count={0}" -f $fallbackAuthorityProof.CompletedCount),
         ("fallback_leg_authority_stale_proof_ignored_count={0}" -f $fallbackAuthorityProof.StaleProofIgnoredCount),
         ("fallback_leg_authority_metadata_missing_count={0}" -f $fallbackAuthorityProof.MetadataMissingCount),
+        ("bridge_liveness_integration_verdict={0}" -f $bridgeLivenessProof.Verdict),
+        ("session_liveness_deferred_for_current_recovery_count={0}" -f $bridgeLivenessProof.CurrentRecoveryDeferralCount),
+        ("session_liveness_deferred_for_bridge_recovery_count={0}" -f $bridgeLivenessProof.BridgeRecoveryDeferralCount),
+        ("session_liveness_timeout_during_valid_recovery_count={0}" -f $bridgeLivenessProof.TimeoutDuringValidRecoveryCount),
+        ("bridge_recovery_receive_resumed_count={0}" -f $bridgeLivenessProof.ReceiveResumedCount),
+        ("bridge_recovery_exhausted_without_proof_count={0}" -f $bridgeLivenessProof.RecoveryExhaustedWithoutProofCount),
+        ("fallback_leg_authority_liveness_deferral_count={0}" -f $bridgeLivenessProof.FallbackLegAuthorityLivenessDeferralCount),
+        ("bridge_liveness_stale_deferral_count={0}" -f $bridgeLivenessProof.StaleDeferralCount),
         ("live_route_epoch_proof_mode={0}" -f $LiveRouteProofMode),
         ("live_route_epoch_proof_verdict={0}" -f $liveRouteProof.Verdict),
         ("live_route_epoch_metadata_missing_count={0}" -f $liveRouteProof.MetadataMissingCount),

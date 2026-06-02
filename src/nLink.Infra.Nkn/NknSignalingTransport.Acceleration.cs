@@ -36,6 +36,7 @@ public sealed partial class NknSignalingTransport
     private static readonly TimeSpan RuntimeUnlockRecoveryContractLivenessDeferral = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan RuntimeUnlockRecoveryContractStaleNegotiationWindow = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan RuntimeUnlockRetryAuthorityDeadline = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan FileTransferFallbackRecoveryLivenessDeferral = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan RuntimeUnlockQueueAcceptedObservedEscapeTtl = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan RemotePayerIntentFreshness = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan TunaFallbackProofLogWindow = TimeSpan.FromMinutes(1);
@@ -275,6 +276,14 @@ public sealed partial class NknSignalingTransport
         public required long CreatedUtcMs { get; init; }
 
         public bool BridgeRecoveryRequested { get; set; }
+
+        public bool BridgeRecoveryStarted { get; set; }
+
+        public bool BridgeRecoveryCompleted { get; set; }
+
+        public bool ReceiveProofObserved { get; set; }
+
+        public bool RecoveryExhausted { get; set; }
 
         public bool BridgeRecoveryEscalated { get; set; }
 
@@ -621,6 +630,127 @@ public sealed partial class NknSignalingTransport
             $"event=filetransfer_fallback_leg_authority_bridge_recovery_requested; session_id={state.SessionId}; transfer_id={state.TransferId}; leg_generation={state.LegGeneration}; route={state.RouteToken}; protocol_version={state.ProtocolVersion}; live_route_epoch={state.LiveRouteEpoch}; transport_epoch={state.TransportEpoch}; bridge_recovery_generation={state.BridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(state.CheckpointRequestId ?? "none")}; authority_reason={state.AuthorityReason}; reason={SanitizeLogToken(reason)}");
     }
 
+    private void MarkFileTransferFallbackLegAuthorityBridgeRecoveryLifecycle(
+        string lifecycle,
+        string? reason)
+    {
+        FileTransferFallbackLegAuthorityState? state;
+        bool shouldLog = false;
+        lock (fileTransferFallbackProofGate)
+        {
+            state = fileTransferFallbackLegAuthorityState;
+            if (state is null ||
+                state.Completed)
+            {
+                return;
+            }
+
+            switch (lifecycle)
+            {
+                case "started":
+                    if (!state.BridgeRecoveryStarted)
+                    {
+                        state.BridgeRecoveryStarted = true;
+                        shouldLog = true;
+                    }
+
+                    break;
+                case "completed":
+                    if (!state.BridgeRecoveryCompleted)
+                    {
+                        state.BridgeRecoveryCompleted = true;
+                        shouldLog = true;
+                    }
+
+                    break;
+                case "receive_resumed":
+                    if (!state.ReceiveProofObserved)
+                    {
+                        state.ReceiveProofObserved = true;
+                        shouldLog = true;
+                    }
+
+                    break;
+                case "exhausted":
+                    if (!state.RecoveryExhausted)
+                    {
+                        state.RecoveryExhausted = true;
+                        shouldLog = true;
+                    }
+
+                    break;
+            }
+        }
+
+        if (!shouldLog || state is null)
+        {
+            return;
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=filetransfer_fallback_leg_authority_bridge_lifecycle; lifecycle={SanitizeLogToken(lifecycle)}; session_id={state.SessionId}; transfer_id={state.TransferId}; leg_generation={state.LegGeneration}; route={state.RouteToken}; protocol_version={state.ProtocolVersion}; live_route_epoch={state.LiveRouteEpoch}; transport_epoch={state.TransportEpoch}; bridge_recovery_generation={state.BridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(state.CheckpointRequestId ?? "none")}; authority_reason={state.AuthorityReason}; reason={SanitizeLogToken(reason ?? "none")}");
+    }
+
+    public bool TryGetActiveFileTransferRecoveryLivenessSnapshot(
+        string sessionId,
+        out FileTransferRecoveryLivenessSnapshot snapshot)
+    {
+        snapshot = default!;
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return false;
+        }
+
+        FileTransferFallbackLegAuthorityState? state;
+        lock (fileTransferFallbackProofGate)
+        {
+            state = fileTransferFallbackLegAuthorityState;
+            if (state is null ||
+                !string.Equals(state.SessionId, sessionId.Trim(), StringComparison.Ordinal) ||
+                state.Completed)
+            {
+                return false;
+            }
+        }
+
+        var createdUtc = DateTimeOffset.FromUnixTimeMilliseconds(Math.Max(0, state.CreatedUtcMs));
+        var recoveryState =
+            state.RecoveryExhausted ? FileTransferRecoveryLivenessState.Exhausted :
+            state.ReceiveProofObserved ? FileTransferRecoveryLivenessState.ReceiveProofObserved :
+            state.BridgeRecoveryCompleted ? FileTransferRecoveryLivenessState.BridgeRecoveryCompletedAwaitingProof :
+            state.BridgeRecoveryStarted ? FileTransferRecoveryLivenessState.BridgeRecoveryStarted :
+            state.BridgeRecoveryRequested ? FileTransferRecoveryLivenessState.BridgeRecoveryRequested :
+            FileTransferRecoveryLivenessState.AuthorityActive;
+        var terminalRecommended =
+            recoveryState is FileTransferRecoveryLivenessState.Exhausted or
+                FileTransferRecoveryLivenessState.ReceiveProofObserved or
+                FileTransferRecoveryLivenessState.Completed;
+
+        snapshot = new FileTransferRecoveryLivenessSnapshot(
+            state.SessionId,
+            state.TransferId,
+            state.RouteToken,
+            state.ProtocolVersion,
+            state.LiveRouteEpoch,
+            state.LegGeneration,
+            state.BridgeRecoveryGeneration,
+            state.TransportEpoch,
+            state.CheckpointRequestId,
+            state.AuthorityReason,
+            recoveryState,
+            createdUtc,
+            createdUtc.Add(FileTransferFallbackRecoveryLivenessDeferral),
+            state.BridgeRecoveryRequested,
+            state.BridgeRecoveryStarted,
+            state.BridgeRecoveryCompleted,
+            state.ReceiveProofObserved,
+            state.RecoveryExhausted,
+            state.Completed,
+            terminalRecommended);
+        return true;
+    }
+
     private void MarkFileTransferFallbackLegAuthorityCompleted(
         string? sessionId,
         string? transferId,
@@ -647,6 +777,7 @@ public sealed partial class NknSignalingTransport
                 string.Equals(state.TransferId, normalizedTransferId, StringComparison.Ordinal) &&
                 state.LegGeneration == legGeneration)
             {
+                state.ReceiveProofObserved = true;
                 state.Completed = true;
             }
             else if (fileTransferFallbackLegAuthorityState is { Completed: true } completedState &&

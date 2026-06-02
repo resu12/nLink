@@ -240,6 +240,173 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
     }
 
     [Fact]
+    public async Task FileTransferRecoveryLiveness_LivenessDefersForCurrentFallbackBridgeRecovery()
+    {
+        var delay = new ControlledDelayScheduler();
+        var now = DateTimeOffset.UtcNow;
+        var heartbeatCount = 0;
+        var scripted = new ScriptedSignalingTransport(
+            onSendSessionHeartbeatAsync: (_, _) =>
+            {
+                Interlocked.Increment(ref heartbeatCount);
+                return Task.CompletedTask;
+            });
+        var options = SessionRuntimeWatchdogOptions.Default with
+        {
+            SessionLivenessHeartbeatInterval = TimeSpan.FromSeconds(1),
+            SessionLivenessSuspectTimeout = TimeSpan.FromSeconds(3),
+            SessionLivenessTimeout = TimeSpan.FromSeconds(9),
+        };
+        using var runtime = new SessionRuntime(() => scripted, options, delay.DelayAsync, nowProvider: () => now);
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        var securityState = CreateApprovedSecurityState(
+            new PeerAddress(scripted.LocalPeerAddress),
+            new PeerAddress("scripted.helpee.fallback-liveness"));
+        var sessionId = securityState.SessionId!.Value.Value;
+        scripted.SetSessionSecurityStateForTests(securityState);
+        scripted.SetFileTransferRecoveryLivenessSnapshotForTests(new FileTransferRecoveryLivenessSnapshot(
+            sessionId,
+            "ft_fallback_liveness",
+            "post_tuna_fallback_v6",
+            FileTransferProtocol.ProtocolVersionV6,
+            LiveRouteEpoch: 2,
+            TransferLegGeneration: 4,
+            BridgeRecoveryGeneration: 1,
+            TransportEpoch: 9,
+            CheckpointRequestId: "v6-regular-nkn-state-refresh:1",
+            AuthorityReason: "post_tuna_fallback_state_refresh_failed",
+            State: FileTransferRecoveryLivenessState.BridgeRecoveryCompletedAwaitingProof,
+            CreatedUtc: now,
+            LivenessDeferralDeadlineUtc: now.AddSeconds(120),
+            BridgeRecoveryRequested: true,
+            BridgeRecoveryStarted: true,
+            BridgeRecoveryCompleted: true,
+            ReceiveProofObserved: false,
+            RecoveryExhausted: false,
+            AuthorityCompleted: false,
+            TerminalRecommended: false));
+        var disconnected = 0;
+        runtime.Disconnected += (_, _) => disconnected++;
+        InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+
+        now = now.AddSeconds(10);
+        delay.CompleteLatest();
+        await Task.Delay(50);
+
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.Equal(0, disconnected);
+        Assert.True(Volatile.Read(ref heartbeatCount) > 0);
+
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+        now = now.AddSeconds(95);
+        delay.CompleteLatest();
+        await Task.Delay(50);
+
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.Equal(0, disconnected);
+
+        scripted.SetFileTransferRecoveryLivenessSnapshotForTests(new FileTransferRecoveryLivenessSnapshot(
+            sessionId,
+            "ft_fallback_liveness",
+            "post_tuna_fallback_v6",
+            FileTransferProtocol.ProtocolVersionV6,
+            LiveRouteEpoch: 2,
+            TransferLegGeneration: 4,
+            BridgeRecoveryGeneration: 1,
+            TransportEpoch: 9,
+            CheckpointRequestId: "v6-regular-nkn-state-refresh:1",
+            AuthorityReason: "post_tuna_fallback_state_refresh_failed",
+            State: FileTransferRecoveryLivenessState.Exhausted,
+            CreatedUtc: now.AddSeconds(-50),
+            LivenessDeferralDeadlineUtc: now.AddSeconds(-1),
+            BridgeRecoveryRequested: true,
+            BridgeRecoveryStarted: true,
+            BridgeRecoveryCompleted: true,
+            ReceiveProofObserved: false,
+            RecoveryExhausted: true,
+            AuthorityCompleted: false,
+            TerminalRecommended: true));
+
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+        now = now.AddSeconds(41);
+        delay.CompleteLatest();
+        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Failed, TimeSpan.FromSeconds(1));
+
+        Assert.Equal("Connection lost.", runtime.StatusText);
+        Assert.Equal(1, disconnected);
+    }
+
+    [Fact]
+    public async Task FileTransferRecoveryLiveness_ReceiveProofClearsCurrentFallbackDeferral()
+    {
+        var delay = new ControlledDelayScheduler();
+        var now = DateTimeOffset.UtcNow;
+        var scripted = new ScriptedSignalingTransport(onSendSessionHeartbeatAsync: static (_, _) => Task.CompletedTask);
+        var options = SessionRuntimeWatchdogOptions.Default with
+        {
+            SessionLivenessHeartbeatInterval = TimeSpan.FromSeconds(1),
+            SessionLivenessSuspectTimeout = TimeSpan.FromSeconds(3),
+            SessionLivenessTimeout = TimeSpan.FromSeconds(9),
+        };
+        using var runtime = new SessionRuntime(() => scripted, options, delay.DelayAsync, nowProvider: () => now);
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        var securityState = CreateApprovedSecurityState(
+            new PeerAddress(scripted.LocalPeerAddress),
+            new PeerAddress("scripted.helpee.fallback-liveness-proof"));
+        var sessionId = securityState.SessionId!.Value.Value;
+        scripted.SetSessionSecurityStateForTests(securityState);
+        scripted.SetFileTransferRecoveryLivenessSnapshotForTests(new FileTransferRecoveryLivenessSnapshot(
+            sessionId,
+            "ft_fallback_liveness_proof",
+            "post_tuna_fallback_v6",
+            FileTransferProtocol.ProtocolVersionV6,
+            LiveRouteEpoch: 2,
+            TransferLegGeneration: 4,
+            BridgeRecoveryGeneration: 1,
+            TransportEpoch: 9,
+            CheckpointRequestId: "v6-regular-nkn-state-refresh:1",
+            AuthorityReason: "post_tuna_fallback_state_refresh_failed",
+            State: FileTransferRecoveryLivenessState.BridgeRecoveryCompletedAwaitingProof,
+            CreatedUtc: now,
+            LivenessDeferralDeadlineUtc: now.AddSeconds(40),
+            BridgeRecoveryRequested: true,
+            BridgeRecoveryStarted: true,
+            BridgeRecoveryCompleted: true,
+            ReceiveProofObserved: false,
+            RecoveryExhausted: false,
+            AuthorityCompleted: false,
+            TerminalRecommended: false));
+        var disconnected = 0;
+        runtime.Disconnected += (_, _) => disconnected++;
+        InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+
+        now = now.AddSeconds(10);
+        delay.CompleteLatest();
+        await Task.Delay(50);
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+
+        scripted.InjectSessionLivenessProof(
+            sessionId,
+            proofKind: "bridge_receive_stall_recovery_receive_resumed",
+            lane: "bridge_bulk");
+        scripted.SetFileTransferRecoveryLivenessSnapshotForTests(null);
+
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+        now = now.AddSeconds(4);
+        delay.CompleteLatest();
+        await Task.Delay(50);
+
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.Equal(0, disconnected);
+    }
+
+    [Fact]
     public void SessionRuntime_FileTransferPeerDisconnected_DoesNotEndConnectedSession()
     {
         var helperAddress = new PeerAddress("helper.file.peer.disconnect");

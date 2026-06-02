@@ -33,6 +33,7 @@ public sealed partial class SessionRuntime
     private int sessionLivenessFileTransferBridgeRecoveryDeferralCount;
     private int sessionLivenessRuntimeUnlockStartupDeferralCount;
     private long sessionLivenessRecoveryContractDeferralGeneration;
+    private string? sessionLivenessFileTransferRecoveryDeferralKey;
     private bool sessionLivenessSuspectLogged;
 
     private void StartSessionLivenessWatchdog(string reason)
@@ -70,6 +71,7 @@ public sealed partial class SessionRuntime
             sessionLivenessFileTransferBridgeRecoveryDeferralCount = 0;
             sessionLivenessRuntimeUnlockStartupDeferralCount = 0;
             sessionLivenessRecoveryContractDeferralGeneration = 0;
+            sessionLivenessFileTransferRecoveryDeferralKey = null;
             sessionLivenessFileTransferRecoveryDeferralUntilUtc = DateTimeOffset.MinValue;
             sessionLivenessHeartbeatInFlight = 0;
         }
@@ -144,6 +146,7 @@ public sealed partial class SessionRuntime
     {
         DateTimeOffset lastProof;
         DateTimeOffset fileTransferRecoveryDeferralUntil;
+        string? fileTransferRecoveryDeferralKey;
         bool suspectAlreadyLogged;
         lock (sessionLivenessGate)
         {
@@ -159,6 +162,7 @@ public sealed partial class SessionRuntime
 
             lastProof = sessionLivenessLastPeerProofUtc;
             fileTransferRecoveryDeferralUntil = sessionLivenessFileTransferRecoveryDeferralUntilUtc;
+            fileTransferRecoveryDeferralKey = sessionLivenessFileTransferRecoveryDeferralKey;
             suspectAlreadyLogged = sessionLivenessSuspectLogged;
         }
 
@@ -166,6 +170,29 @@ public sealed partial class SessionRuntime
         var silence = now - lastProof;
         if (silence >= watchdogOptions.SessionLivenessTimeout)
         {
+            if (fileTransferRecoveryDeferralUntil > now &&
+                TryGetValidFileTransferRecoveryLivenessSnapshot(
+                    sessionIdSnapshot,
+                    now,
+                    out var currentRecoverySnapshot) &&
+                string.Equals(
+                    fileTransferRecoveryDeferralKey,
+                    CreateFileTransferRecoveryLivenessDeferralKey(currentRecoverySnapshot),
+                    StringComparison.Ordinal))
+            {
+                LocalOperationalLog.Info(
+                    "Session",
+                    $"event=session_liveness_timeout_deferred_waiting_for_current_filetransfer_recovery; session_id={sessionIdSnapshot}; transfer_id={currentRecoverySnapshot.TransferId}; route={currentRecoverySnapshot.RouteToken}; protocol_version={currentRecoverySnapshot.ProtocolVersion}; live_route_epoch={currentRecoverySnapshot.LiveRouteEpoch}; leg_generation={currentRecoverySnapshot.TransferLegGeneration}; bridge_recovery_generation={currentRecoverySnapshot.BridgeRecoveryGeneration}; transport_epoch={currentRecoverySnapshot.TransportEpoch}; generation={generation}; silence_ms={(long)silence.TotalMilliseconds}; remaining_ms={(long)(fileTransferRecoveryDeferralUntil - now).TotalMilliseconds}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+                await TrySendSessionLivenessHeartbeatAsync(
+                        livenessTransport,
+                        sessionIdSnapshot,
+                        generation,
+                        "timeout_waiting_current_filetransfer_recovery",
+                        ct)
+                    .ConfigureAwait(false);
+                return false;
+            }
+
             var fileTransferDeferralCapReached = IsSessionLivenessFileTransferDeferralCapReached(
                 sessionIdSnapshot,
                 generation,
@@ -190,6 +217,18 @@ public sealed partial class SessionRuntime
             else if (fileTransferRecoveryDeferralUntil > now)
             {
                 ClearExpiredSessionLivenessFileTransferDeferral(generation, sessionIdSnapshot, "deferral_cap_reached");
+            }
+
+            if (TryDeferSessionLivenessTimeoutForFileTransferRecoveryLivenessState(sessionIdSnapshot, generation, silence))
+            {
+                await TrySendSessionLivenessHeartbeatAsync(
+                        livenessTransport,
+                        sessionIdSnapshot,
+                        generation,
+                        "timeout_current_filetransfer_recovery",
+                        ct)
+                    .ConfigureAwait(false);
+                return false;
             }
 
             if (TryDeferSessionLivenessTimeoutForRuntimeUnlockStartup(sessionIdSnapshot, generation, silence))
@@ -332,6 +371,90 @@ public sealed partial class SessionRuntime
             $"event=session_liveness_timeout_deferred_for_filetransfer_recovery; session_id={sessionIdSnapshot}; transfer_id={recoveryRequest.TransferId}; direction={recoveryRequest.Direction.ToString().ToLowerInvariant()}; generation={generation}; silence_ms={(long)silence.TotalMilliseconds}; deferral_count={nextDeferralCount}; deferral_limit={SessionLivenessActiveFileTransferRecoveryDeferralLimit}; deferral_ms={(long)SessionLivenessActiveFileTransferRecoveryDeferral.TotalMilliseconds}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
         return true;
     }
+
+    private bool TryDeferSessionLivenessTimeoutForFileTransferRecoveryLivenessState(
+        string sessionIdSnapshot,
+        long generation,
+        TimeSpan silence)
+    {
+        if (transport is not IFileTransferRecoveryLivenessState recoveryState ||
+            !recoveryState.TryGetActiveFileTransferRecoveryLivenessSnapshot(sessionIdSnapshot, out var snapshot))
+        {
+            return false;
+        }
+
+        var now = nowProvider();
+        var metadataValid = IsValidFileTransferRecoveryLivenessSnapshot(sessionIdSnapshot, snapshot);
+        if (!metadataValid ||
+            !IsActiveFileTransferRecoveryLivenessSnapshot(snapshot, now))
+        {
+            LocalOperationalLog.Warn(
+                "Session",
+                $"event=session_liveness_timeout_filetransfer_recovery_state_not_deferred; session_id={sessionIdSnapshot}; transfer_id={snapshot.TransferId}; route={snapshot.RouteToken}; protocol_version={snapshot.ProtocolVersion}; live_route_epoch={snapshot.LiveRouteEpoch}; leg_generation={snapshot.TransferLegGeneration}; bridge_recovery_generation={snapshot.BridgeRecoveryGeneration}; transport_epoch={snapshot.TransportEpoch}; state={snapshot.State.ToString().ToLowerInvariant()}; metadata_valid={(metadataValid ? 1 : 0)}; terminal_recommended={(snapshot.TerminalRecommended ? 1 : 0)}; authority_completed={(snapshot.AuthorityCompleted ? 1 : 0)}; receive_proof_observed={(snapshot.ReceiveProofObserved ? 1 : 0)}; recovery_exhausted={(snapshot.RecoveryExhausted ? 1 : 0)}; liveness_deferral_deadline_utc_ms={snapshot.LivenessDeferralDeadlineUtc.ToUnixTimeMilliseconds()}; silence_ms={(long)silence.TotalMilliseconds}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+            return false;
+        }
+
+        var deferralKey = CreateFileTransferRecoveryLivenessDeferralKey(snapshot);
+        lock (sessionLivenessGate)
+        {
+            if (generation != sessionLivenessGeneration ||
+                sessionLivenessCts is null ||
+                state != SessionRuntimeState.Connected ||
+                transportState != TransportState.Connected ||
+                !string.Equals(GetApprovedSessionIdForLiveness(), sessionIdSnapshot, StringComparison.Ordinal) ||
+                string.Equals(sessionLivenessFileTransferRecoveryDeferralKey, deferralKey, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            sessionLivenessFileTransferRecoveryDeferralKey = deferralKey;
+            sessionLivenessFileTransferRecoveryDeferralUntilUtc = snapshot.LivenessDeferralDeadlineUtc;
+        }
+
+        LocalOperationalLog.Warn(
+            "Session",
+            $"event=session_liveness_timeout_deferred_for_current_filetransfer_recovery; session_id={sessionIdSnapshot}; transfer_id={snapshot.TransferId}; route={snapshot.RouteToken}; protocol_version={snapshot.ProtocolVersion}; live_route_epoch={snapshot.LiveRouteEpoch}; leg_generation={snapshot.TransferLegGeneration}; bridge_recovery_generation={snapshot.BridgeRecoveryGeneration}; transport_epoch={snapshot.TransportEpoch}; checkpoint_request_id={SanitizeSessionLivenessReason(snapshot.CheckpointRequestId ?? "(none)")}; authority_reason={SanitizeSessionLivenessReason(snapshot.AuthorityReason)}; state={snapshot.State.ToString().ToLowerInvariant()}; bridge_recovery_requested={(snapshot.BridgeRecoveryRequested ? 1 : 0)}; bridge_recovery_started={(snapshot.BridgeRecoveryStarted ? 1 : 0)}; bridge_recovery_completed={(snapshot.BridgeRecoveryCompleted ? 1 : 0)}; silence_ms={(long)silence.TotalMilliseconds}; liveness_deferral_deadline_utc_ms={snapshot.LivenessDeferralDeadlineUtc.ToUnixTimeMilliseconds()}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+        return true;
+    }
+
+    private bool TryGetValidFileTransferRecoveryLivenessSnapshot(
+        string sessionIdSnapshot,
+        DateTimeOffset now,
+        out FileTransferRecoveryLivenessSnapshot snapshot)
+    {
+        snapshot = default!;
+        if (transport is not IFileTransferRecoveryLivenessState recoveryState ||
+            !recoveryState.TryGetActiveFileTransferRecoveryLivenessSnapshot(sessionIdSnapshot, out var candidate) ||
+            !IsValidFileTransferRecoveryLivenessSnapshot(sessionIdSnapshot, candidate) ||
+            !IsActiveFileTransferRecoveryLivenessSnapshot(candidate, now))
+        {
+            return false;
+        }
+
+        snapshot = candidate;
+        return true;
+    }
+
+    private static bool IsValidFileTransferRecoveryLivenessSnapshot(
+        string sessionIdSnapshot,
+        FileTransferRecoveryLivenessSnapshot snapshot)
+        => string.Equals(snapshot.SessionId, sessionIdSnapshot, StringComparison.Ordinal) &&
+           string.Equals(snapshot.RouteToken, "post_tuna_fallback_v6", StringComparison.Ordinal) &&
+           snapshot.ProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
+           snapshot.TransferLegGeneration > 0 &&
+           snapshot.LiveRouteEpoch > 0;
+
+    private static bool IsActiveFileTransferRecoveryLivenessSnapshot(
+        FileTransferRecoveryLivenessSnapshot snapshot,
+        DateTimeOffset now)
+        => !snapshot.TerminalRecommended &&
+           !snapshot.AuthorityCompleted &&
+           !snapshot.ReceiveProofObserved &&
+           !snapshot.RecoveryExhausted &&
+           now <= snapshot.LivenessDeferralDeadlineUtc;
+
+    private static string CreateFileTransferRecoveryLivenessDeferralKey(FileTransferRecoveryLivenessSnapshot snapshot)
+        => $"{snapshot.SessionId}:{snapshot.TransferId}:{snapshot.TransferLegGeneration}:{snapshot.BridgeRecoveryGeneration}:{snapshot.TransportEpoch}";
 
     private bool TryDeferSessionLivenessTimeoutForRuntimeUnlockStartup(
         string sessionIdSnapshot,
@@ -495,6 +618,7 @@ public sealed partial class SessionRuntime
             }
 
             sessionLivenessFileTransferRecoveryDeferralUntilUtc = DateTimeOffset.MinValue;
+            sessionLivenessFileTransferRecoveryDeferralKey = null;
         }
 
         LocalOperationalLog.Warn(
@@ -837,6 +961,7 @@ public sealed partial class SessionRuntime
             sessionLivenessRuntimeUnlockStartupDeferralCount = 0;
             sessionLivenessRecoveryContractDeferralGeneration = 0;
             sessionLivenessFileTransferRecoveryDeferralUntilUtc = DateTimeOffset.MinValue;
+            sessionLivenessFileTransferRecoveryDeferralKey = null;
         }
 
         if (toCancel is null)
@@ -887,6 +1012,7 @@ public sealed partial class SessionRuntime
             sessionLivenessRuntimeUnlockStartupDeferralCount = 0;
             sessionLivenessRecoveryContractDeferralGeneration = 0;
             sessionLivenessFileTransferRecoveryDeferralUntilUtc = DateTimeOffset.MinValue;
+            sessionLivenessFileTransferRecoveryDeferralKey = null;
             sessionLivenessSuspectLogged = false;
         }
 

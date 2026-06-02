@@ -55,6 +55,46 @@ public interface IFileTransferReceiveRecoveryController
     void RequestFileTransferReceiveRecovery(FileTransferReceiveRecoveryRequest request);
 }
 
+public enum FileTransferRecoveryLivenessState
+{
+    AuthorityActive = 0,
+    BridgeRecoveryRequested = 1,
+    BridgeRecoveryStarted = 2,
+    BridgeRecoveryCompletedAwaitingProof = 3,
+    ReceiveProofObserved = 4,
+    Exhausted = 5,
+    Completed = 6,
+}
+
+public sealed record FileTransferRecoveryLivenessSnapshot(
+    string SessionId,
+    string TransferId,
+    string RouteToken,
+    int ProtocolVersion,
+    int LiveRouteEpoch,
+    int TransferLegGeneration,
+    int BridgeRecoveryGeneration,
+    long TransportEpoch,
+    string? CheckpointRequestId,
+    string AuthorityReason,
+    FileTransferRecoveryLivenessState State,
+    DateTimeOffset CreatedUtc,
+    DateTimeOffset LivenessDeferralDeadlineUtc,
+    bool BridgeRecoveryRequested,
+    bool BridgeRecoveryStarted,
+    bool BridgeRecoveryCompleted,
+    bool ReceiveProofObserved,
+    bool RecoveryExhausted,
+    bool AuthorityCompleted,
+    bool TerminalRecommended);
+
+public interface IFileTransferRecoveryLivenessState
+{
+    bool TryGetActiveFileTransferRecoveryLivenessSnapshot(
+        string sessionId,
+        out FileTransferRecoveryLivenessSnapshot snapshot);
+}
+
 public sealed record FileTransferRegularV4ControlFeedbackPressure(
     string SessionId,
     string TransferId,

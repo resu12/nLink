@@ -87,7 +87,7 @@ internal sealed class CountingRemoteInputInjector : IRemoteInputInjector
     }
 }
 
-internal sealed class ScriptedSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, ILocalPeerAddressSignalingTransport, ISessionSecuritySignalingTransport, ISessionLivenessSignalingTransport, ISessionRecoveryStateContract, ITransportAccelerationStatus, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IHelpRequestSignalingTransport, IFileTransferReceiveRecoveryController
+internal sealed class ScriptedSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, ILocalPeerAddressSignalingTransport, ISessionSecuritySignalingTransport, ISessionLivenessSignalingTransport, ISessionRecoveryStateContract, ITransportAccelerationStatus, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IHelpRequestSignalingTransport, IFileTransferReceiveRecoveryController, IFileTransferRecoveryLivenessState
 {
     private readonly Func<string, CancellationToken, Task> onJoinByAddressAsync;
     private readonly Func<string, ValidatedInviteV1, CancellationToken, Task> onJoinByInviteAsync;
@@ -108,6 +108,7 @@ internal sealed class ScriptedSignalingTransport : ISignalingTransport, IAddress
     private readonly Action<FileTransferReceiveRecoveryRequest> onRequestFileTransferReceiveRecovery;
     private SessionSecurityState currentSessionSecurityState = SessionSecurityState.Empty;
     private SessionRecoveryContractSnapshot? sessionRecoveryContractSnapshot;
+    private FileTransferRecoveryLivenessSnapshot? fileTransferRecoveryLivenessSnapshot;
 
     public ScriptedSignalingTransport(
         Func<string, CancellationToken, Task>? onJoinByAddressAsync = null,
@@ -222,6 +223,22 @@ internal sealed class ScriptedSignalingTransport : ISignalingTransport, IAddress
         return true;
     }
 
+    public bool TryGetActiveFileTransferRecoveryLivenessSnapshot(
+        string sessionId,
+        out FileTransferRecoveryLivenessSnapshot snapshot)
+    {
+        snapshot = default!;
+        var current = fileTransferRecoveryLivenessSnapshot;
+        if (current is null ||
+            !string.Equals(current.SessionId, sessionId?.Trim(), StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        snapshot = current;
+        return true;
+    }
+
     public void RaiseDisconnected()
     {
         Disconnected?.Invoke(this, EventArgs.Empty);
@@ -274,6 +291,11 @@ internal sealed class ScriptedSignalingTransport : ISignalingTransport, IAddress
     public void SetSessionRecoveryContractForTests(SessionRecoveryContractSnapshot? snapshot)
     {
         sessionRecoveryContractSnapshot = snapshot;
+    }
+
+    public void SetFileTransferRecoveryLivenessSnapshotForTests(FileTransferRecoveryLivenessSnapshot? snapshot)
+    {
+        fileTransferRecoveryLivenessSnapshot = snapshot;
     }
 
     public void InjectIncomingControlRequest(ControlRequestMessageV1 message, string? peerId)

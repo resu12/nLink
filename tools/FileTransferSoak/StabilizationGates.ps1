@@ -30,6 +30,125 @@ function Test-FileTransferTerminalCompleted {
     return $TerminalEvents.Count -gt 0
 }
 
+function Get-FileTransferBridgeLivenessIntegrationProof {
+    param(
+        [Parameter(Mandatory = $true)]$Summary
+    )
+
+    [object[]]$events = @()
+    if ($null -ne $Summary.PSObject.Properties['AllEvents']) {
+        $events = @($Summary.AllEvents)
+    }
+
+    if ($events.Count -eq 0) {
+        $events = @($Summary.GlobalEvents + $Summary.TransferEvents)
+    }
+
+    [object[]]$authorityEvents = @(
+        $events |
+            Where-Object { ([string]$_.EventName).StartsWith('filetransfer_fallback_leg_authority_', [System.StringComparison]::OrdinalIgnoreCase) } |
+            Sort-Object Sequence
+    )
+    [object[]]$currentDeferralEvents = @($events | Where-Object { $_.EventName -eq 'session_liveness_timeout_deferred_for_current_filetransfer_recovery' })
+    [object[]]$bridgeDeferralEvents = @($events | Where-Object { $_.EventName -eq 'session_liveness_timeout_deferred_for_bridge_filetransfer_recovery' })
+    [object[]]$timeoutEvents = @($events | Where-Object { $_.EventName -eq 'session_liveness_timeout' })
+    [object[]]$checkpointAcceptedEvents = @($authorityEvents | Where-Object { $_.EventName -eq 'filetransfer_fallback_leg_authority_checkpoint_accepted' })
+    [object[]]$receiveResumedEvents = @($events | Where-Object {
+        $_.EventName -eq 'bridge_receive_stall_recovery_receive_resumed' -or
+        $_.EventName -eq 'nkn_bridge_receive_stall_recovery_receive_resumed' -or
+        $_.EventName -eq 'filetransfer_fallback_leg_authority_checkpoint_accepted' -or
+        $_.EventName -eq 'session_liveness_peer_proof_observed' -and
+            (Get-FileTransferEventField -Event $_ -Name 'proof_kind' -Default '') -eq 'bridge_receive_stall_recovery_receive_resumed'
+    })
+    [object[]]$exhaustedEvents = @($events | Where-Object {
+        $_.EventName -eq 'bridge_receive_stall_recovery_exhausted' -or
+        $_.EventName -eq 'nkn_bridge_receive_stall_recovery_exhausted_for_filetransfer'
+    })
+
+    $findings = New-Object System.Collections.Generic.List[string]
+    $evidence = New-Object System.Collections.Generic.List[object]
+    $activeAuthorities = @{}
+    $timeoutDuringValidRecovery = 0
+    $staleDeferralCount = 0
+    $exhaustedWithoutProofCount = 0
+
+    foreach ($event in @($events | Sort-Object Sequence)) {
+        $eventName = [string]$event.EventName
+        if ($eventName.StartsWith('filetransfer_fallback_leg_authority_', [System.StringComparison]::OrdinalIgnoreCase)) {
+            $sessionId = Get-FileTransferEventField -Event $event -Name 'session_id' -Default ''
+            $transferId = Get-FileTransferEventField -Event $event -Name 'transfer_id' -Default ''
+            $legGeneration = Get-FileTransferEventField -Event $event -Name 'leg_generation' -Default ''
+            $key = "$sessionId|$transferId|$legGeneration"
+            if ($eventName -eq 'filetransfer_fallback_leg_authority_started' -or
+                $eventName -eq 'filetransfer_fallback_leg_authority_bridge_recovery_requested' -or
+                $eventName -eq 'filetransfer_fallback_leg_authority_bridge_recovery_escalated') {
+                if (-not [string]::IsNullOrWhiteSpace($sessionId) -and
+                    -not [string]::IsNullOrWhiteSpace($transferId) -and
+                    -not [string]::IsNullOrWhiteSpace($legGeneration)) {
+                    $activeAuthorities[$key] = $event
+                }
+            }
+            elseif ($eventName -eq 'filetransfer_fallback_leg_authority_checkpoint_accepted' -or
+                    $eventName -eq 'filetransfer_fallback_leg_authority_completed') {
+                if ($activeAuthorities.ContainsKey($key)) {
+                    $activeAuthorities.Remove($key)
+                }
+            }
+        }
+
+        if ($eventName -eq 'session_liveness_timeout_deferred_for_current_filetransfer_recovery') {
+            $sessionId = Get-FileTransferEventField -Event $event -Name 'session_id' -Default ''
+            $transferId = Get-FileTransferEventField -Event $event -Name 'transfer_id' -Default ''
+            $legGeneration = Get-FileTransferEventField -Event $event -Name 'leg_generation' -Default ''
+            $key = "$sessionId|$transferId|$legGeneration"
+            if (-not $activeAuthorities.ContainsKey($key)) {
+                $staleDeferralCount++
+                $findings.Add(("stale fallback recovery liveness deferral: {0}" -f (Format-FileTransferEvidenceLine -Event $event))) | Out-Null
+                $evidence.Add($event) | Out-Null
+            }
+        }
+
+        if ($eventName -eq 'session_liveness_timeout' -and $activeAuthorities.Count -gt 0) {
+            $timeoutDuringValidRecovery++
+            $findings.Add(("session liveness timeout during valid fallback recovery authority: {0}" -f (Format-FileTransferEvidenceLine -Event $event))) | Out-Null
+            $evidence.Add($event) | Out-Null
+            foreach ($authority in @($activeAuthorities.Values | Select-Object -First 3)) {
+                $evidence.Add($authority) | Out-Null
+            }
+        }
+
+        if (($eventName -eq 'bridge_receive_stall_recovery_exhausted' -or
+             $eventName -eq 'nkn_bridge_receive_stall_recovery_exhausted_for_filetransfer') -and
+            $activeAuthorities.Count -gt 0) {
+            $exhaustedWithoutProofCount++
+            foreach ($key in @($activeAuthorities.Keys)) {
+                $activeAuthorities.Remove($key)
+            }
+        }
+    }
+
+    $verdict = if ($findings.Count -eq 0) { 'pass' } else { 'fail' }
+    if ($authorityEvents.Count -eq 0 -and
+        $currentDeferralEvents.Count -eq 0 -and
+        $bridgeDeferralEvents.Count -eq 0 -and
+        $timeoutEvents.Count -eq 0) {
+        $verdict = 'none'
+    }
+
+    return [pscustomobject]@{
+        Verdict = $verdict
+        CurrentRecoveryDeferralCount = $currentDeferralEvents.Count
+        BridgeRecoveryDeferralCount = $bridgeDeferralEvents.Count
+        TimeoutDuringValidRecoveryCount = $timeoutDuringValidRecovery
+        ReceiveResumedCount = $receiveResumedEvents.Count + $checkpointAcceptedEvents.Count
+        RecoveryExhaustedWithoutProofCount = $exhaustedWithoutProofCount
+        FallbackLegAuthorityLivenessDeferralCount = $currentDeferralEvents.Count
+        StaleDeferralCount = $staleDeferralCount
+        Findings = $findings
+        EvidenceEvents = @($evidence.ToArray() | Select-Object -First 20)
+    }
+}
+
 function Test-FileTransferSummaryHasV6Evidence {
     param([Parameter(Mandatory = $true)]$Summary)
 
@@ -1589,12 +1708,18 @@ function Get-FileTransferStabilizationGateResult {
         Add-FileTransferGateFinding -List $hardFailures -Finding ("live route epoch proof: {0}" -f $operatorFinding)
     }
 
+    $bridgeLivenessProof = Get-FileTransferBridgeLivenessIntegrationProof -Summary $Summary
+    foreach ($finding in @($bridgeLivenessProof.Findings)) {
+        $operatorFinding = ([string]$finding).Replace('=', ':')
+        Add-FileTransferGateFinding -List $hardFailures -Finding ("bridge liveness integration: {0}" -f $operatorFinding)
+    }
+
     if ($hardFailures.Count -gt 0) {
         [object[]]$routeEvidenceEvents = @()
         if ($null -ne $Summary.RouteConsistency) {
             $routeEvidenceEvents = @($Summary.RouteConsistency.EvidenceEvents)
         }
-        $nextArtifact = if ($routeConsistencyFindings.Count -gt 0 -or $liveRouteProof.Findings.Count -gt 0) {
+        $nextArtifact = if ($routeConsistencyFindings.Count -gt 0 -or $liveRouteProof.Findings.Count -gt 0 -or $bridgeLivenessProof.Findings.Count -gt 0) {
             'filetransfer-route-consistency-summary.txt'
         }
         else {
@@ -1607,8 +1732,9 @@ function Get-FileTransferStabilizationGateResult {
             HardFailures = @($hardFailures)
             Warnings = @()
             NextArtifact = $nextArtifact
-            EvidenceEvents = @($Summary.TerminalEvents + $hardFailureEvents + $legacyProtocolStartedEvents + $unexpectedLegacyFramesDuringV4 + $bridgeBulkFailures + $routeEvidenceEvents + $liveRouteProof.EvidenceEvents | Select-Object -First 20)
+            EvidenceEvents = @($Summary.TerminalEvents + $hardFailureEvents + $legacyProtocolStartedEvents + $unexpectedLegacyFramesDuringV4 + $bridgeBulkFailures + $routeEvidenceEvents + $liveRouteProof.EvidenceEvents + $bridgeLivenessProof.EvidenceEvents | Select-Object -First 20)
             LiveRouteProof = $liveRouteProof
+            BridgeLivenessProof = $bridgeLivenessProof
             FallbackDiagnostics = $fallbackDiagnostics
         }
     }
@@ -1738,6 +1864,7 @@ function Get-FileTransferStabilizationGateResult {
             EvidenceEvents = @($warningCap.ExceededEvents + $Summary.TerminalEvents | Select-Object -First 30)
             WarningCap = $warningCap
             LiveRouteProof = $liveRouteProof
+            BridgeLivenessProof = $bridgeLivenessProof
             FallbackDiagnostics = $fallbackDiagnostics
         }
     }
@@ -1784,6 +1911,7 @@ function Get-FileTransferStabilizationGateResult {
         EvidenceEvents = @($evidence)
         WarningCap = $warningCap
         LiveRouteProof = $liveRouteProof
+        BridgeLivenessProof = $bridgeLivenessProof
         FallbackDiagnostics = $fallbackDiagnostics
     }
 }
