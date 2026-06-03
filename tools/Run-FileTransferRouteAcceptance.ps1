@@ -5,7 +5,7 @@ param(
     [string]$SidecarPath = ".\artifacts\portable\nLink\win-x64\tuna\win-x64\nlink-tuna-sidecar.exe",
     [string]$Runtime = "win-x64",
     [string]$ArtifactRoot = "artifacts\filetransfer-route-acceptance",
-    [ValidateSet("legacy", "phase4-ab-acceptance")]
+    [ValidateSet("legacy", "phase4-ab-acceptance", "phase5-analyzer-gui-acceptance")]
     [string]$MatrixMode = "legacy",
     [string]$BaselineManifestPath = "artifacts\filetransfer-route-ab\baseline-lock-v0.7.0-20260524\baseline-manifest.json",
     [double]$GoodputRegressionTolerancePercent = 10D,
@@ -218,6 +218,12 @@ function New-RouteAcceptanceRunResult {
         setupFailurePhase = ''
         setupFailureReason = ''
         controlledRestartAnalysis = $null
+        liveRouteEpochProofVerdict = '(missing)'
+        fallbackLegAuthorityProofVerdict = '(missing)'
+        bridgeLivenessIntegrationVerdict = '(missing)'
+        sessionLivenessTimeoutCount = 0
+        bridgeLivenessStaleDeferralCount = 0
+        bridgeLivenessTimeoutDuringValidRecoveryCount = 0
         failures = New-Object System.Collections.Generic.List[string]
     }
 }
@@ -420,7 +426,7 @@ function Test-RouteAcceptanceAllowedOperatorWarning {
     }
 
     $allowed = @(switch ($ExpectedRoute) {
-        'file_tuna_v4' { @('external_transport_churn') }
+        'file_tuna_v4' { @('external_transport_churn', 'fallback_frontier_repair_churn', 'fallback_receiver_state_churn') }
         'post_tuna_fallback_v6' { @('external_transport_churn', 'fallback_v6_send_timeout_churn', 'fallback_frontier_repair_churn', 'fallback_receiver_state_churn', 'recovered_post_tuna_fallback_bridge_clear') }
         default { @() }
     })
@@ -460,6 +466,92 @@ function Test-Phase4RegularNknExternalTransportVariance {
     }
 
     return $true
+}
+
+function Test-Phase4RegularNknProgressTimeoutRecoveryStormVariance {
+    param([Parameter(Mandatory = $true)]$Result)
+
+    if ($Result.finalRoute -ne 'regular_nkn_v4_fast' -or
+        $Result.warningCapExceededKinds -ne '(none)' -or
+        $Result.bridgeLivenessIntegrationVerdict -eq 'fail') {
+        return $false
+    }
+
+    $summaryPath = Join-Path $Result.artifactDir 'filetransfer-live-nkn-summary.txt'
+    if (-not (Test-Path -LiteralPath $summaryPath -PathType Leaf)) {
+        return $false
+    }
+
+    $summary = Read-RouteAcceptanceKeyValueArtifact -Path $summaryPath
+    $protocol = Get-RouteAcceptanceReportValue -Report $summary -Name 'data_protocol_version' -DefaultValue '(missing)'
+    $verdict = Get-RouteAcceptanceReportValue -Report $summary -Name 'verdict' -DefaultValue '(missing)'
+    $cyclesObserved = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $summary -Name 'cycles_observed' -DefaultValue '0')
+    $bridgeBulkQueueClearCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $summary -Name 'bridge_bulk_queue_clear_count' -DefaultValue '0')
+    $v4FeedbackBothFailedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $summary -Name 'v4_feedback_both_failed_count' -DefaultValue '0')
+    $progressTimeoutCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $summary -Name 'gui_progress_timeout_count' -DefaultValue '0')
+    $terminalMissingAfterProgressTimeout = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $summary -Name 'terminal_missing_after_progress_timeout' -DefaultValue '0')
+    if ($protocol -ne '4') {
+        return $false
+    }
+
+    $progressTimeoutStorm = ($verdict -eq 'INCONCLUSIVE_PROGRESS_TIMEOUT' -or $progressTimeoutCount -gt 0) -and
+        $terminalMissingAfterProgressTimeout -ne 0
+    $startupRecoveryStorm = $verdict -eq 'FAIL_PROTOCOL_OR_INTEGRITY' -and
+        $progressTimeoutCount -eq 0 -and
+        $terminalMissingAfterProgressTimeout -eq 0 -and
+        $cyclesObserved -eq 0 -and
+        $bridgeBulkQueueClearCount -gt 0 -and
+        $v4FeedbackBothFailedCount -eq 0
+    if (-not $progressTimeoutStorm -and -not $startupRecoveryStorm) {
+        return $false
+    }
+
+    $kinds = @($Result.warningKinds | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_ -ne '(none)' })
+    if ($Result.operatorVerdict -eq 'INCONCLUSIVE_PROGRESS_TIMEOUT' -and
+        $Result.hardFailureCount -eq 0 -and
+        ($kinds -contains 'public_nkn_regular_v4_recovery_storm')) {
+        return $true
+    }
+
+    if ($Result.operatorVerdict -eq 'INCONCLUSIVE' -and
+        $Result.hardFailureCount -eq 0) {
+        return $true
+    }
+
+    if ($Result.operatorVerdict -ne 'FAIL_PROTOCOL_OR_INTEGRITY' -or
+        $Result.hardFailureCount -le 0) {
+        return $false
+    }
+
+    $stabilityPath = Join-Path $Result.artifactDir 'stability-gates-summary.txt'
+    if (-not (Test-Path -LiteralPath $stabilityPath -PathType Leaf)) {
+        return $false
+    }
+
+    $stabilityText = Get-Content -LiteralPath $stabilityPath -Raw
+    if ($stabilityText.IndexOf('bridge bulk send failure/clear', [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        return $false
+    }
+
+    foreach ($unexpected in @('hard protocol/integrity event:', 'terminal failure:', 'route consistency:', 'legacy data protocol started:', 'legacy data frame observed')) {
+        if ($stabilityText.IndexOf($unexpected, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Set-Phase4RegularNknProgressTimeoutRecoveryStormVariance {
+    param([Parameter(Mandatory = $true)]$Result)
+
+    if (-not (Test-Phase4RegularNknProgressTimeoutRecoveryStormVariance -Result $Result)) {
+        return
+    }
+
+    $Result.failures.Clear()
+    $Result.environmentalClassification = 'public_nkn_regular_v4_recovery_storm'
+    Add-RouteAcceptanceMeasurementContamination -Result $Result -Reason 'public_nkn_regular_v4_recovery_storm'
 }
 
 function Add-RouteAcceptanceMeasurementContamination {
@@ -941,6 +1033,11 @@ function Assert-Phase4RouteSummary {
     $Result.runtimeProfile = [string]($selected[$selected.Count - 1].Runtime)
     $Result.bridgeRecoveryPolicy = [string]($selected[$selected.Count - 1].Bridge)
     $Result.liveRouteEpochRouteChanges = @(Split-RouteAcceptanceTokenList -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'live_route_epoch_route_changes' -DefaultValue '(none)'))
+    $Result.liveRouteEpochProofVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'live_route_epoch_proof_verdict' -DefaultValue '(missing)'
+    $Result.fallbackLegAuthorityProofVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'fallback_leg_authority_proof_verdict' -DefaultValue '(missing)'
+    $Result.bridgeLivenessIntegrationVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'bridge_liveness_integration_verdict' -DefaultValue '(missing)'
+    $Result.bridgeLivenessStaleDeferralCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'bridge_liveness_stale_deferral_count' -DefaultValue '0')
+    $Result.bridgeLivenessTimeoutDuringValidRecoveryCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'session_liveness_timeout_during_valid_recovery_count' -DefaultValue '0')
 
     if ($Result.route.IndexOf('diagnostic_regular_nkn_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         Add-RouteAcceptanceFailure -Result $Result -Message 'diagnostic_regular_nkn_v6 route is not allowed during acceptance'
@@ -1087,6 +1184,7 @@ function Assert-Phase4ScenarioRun {
             }
         }
 
+        Set-Phase4RegularNknProgressTimeoutRecoveryStormVariance -Result $result
         $result.completed = $result.failures.Count -eq 0
         $result.integrityOk = $result.completed
         $result.shaOk = $result.completed
@@ -1381,6 +1479,8 @@ function Write-RouteAcceptanceFakePhase4Run {
     $scenarioName = [string]$Scenario.Name
     $forceExecutionFailure = (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'EXECUTION_FAIL') -or
         ($RerunAttempt -gt 0 -and (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'RERUN_EXECUTION_FAIL'))
+    $forcePostArtifactExecutionFailure = ($RerunAttempt -le 0 -and (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'POST_ARTIFACT_EXECUTION_FAIL')) -or
+        ($RerunAttempt -gt 0 -and (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'RERUN_POST_ARTIFACT_EXECUTION_FAIL'))
     if ($forceExecutionFailure) {
         [ordered]@{
             event = 'filetransfer_tuna_gui_handoff_fallback_failure'
@@ -1445,11 +1545,26 @@ function Write-RouteAcceptanceFakePhase4Run {
     $missingLiveProof = Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'MISSING_LIVE_PROOF'
     $transportOnlyLiveProof = Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'TRANSPORT_ONLY_LIVE_PROOF'
     $missingLiveMetadata = Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'MISSING_LIVE_METADATA'
+    $bridgeLivenessFailure = Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'BRIDGE_LIVENESS_FAIL'
+    $fallbackAuthorityMetadataMissing = Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'FALLBACK_AUTHORITY_METADATA_MISSING'
+    $warningCapExcess = Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'WARNING_CAP_EXCESS'
     $warning = if ($RerunAttempt -gt 0) {
         Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'RERUN_WARNING'
     }
     else {
         Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'WARNING'
+    }
+    $progressTimeoutRecoveryStorm = if ($RerunAttempt -gt 0) {
+        Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'RERUN_PROGRESS_TIMEOUT_RECOVERY_STORM'
+    }
+    else {
+        Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'PROGRESS_TIMEOUT_RECOVERY_STORM'
+    }
+    $startupRecoveryStorm = if ($RerunAttempt -gt 0) {
+        Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'RERUN_STARTUP_RECOVERY_STORM'
+    }
+    else {
+        Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'STARTUP_RECOVERY_STORM'
     }
     $contaminatedMeasurement = if ($RerunAttempt -gt 0) {
         Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'RERUN_CONTAMINATED_MEASUREMENT'
@@ -1487,6 +1602,40 @@ function Write-RouteAcceptanceFakePhase4Run {
         $lines.Add($line) | Out-Null
     }
 
+    $fallbackAuthorityLegGeneration = 0
+    $lastFallbackRouteIndex = -1
+    for ($index = 1; $index -lt $routeChanges.Count -and $scenarioName -ne 'second-transfer-after-reactivation'; $index++) {
+        if ([string]$routeChanges[$index] -eq 'post_tuna_fallback_v6') {
+            $lastFallbackRouteIndex = $index
+        }
+    }
+
+    for ($index = 1; $index -lt $routeChanges.Count -and $scenarioName -ne 'second-transfer-after-reactivation'; $index++) {
+        if ([string]$routeChanges[$index] -ne 'post_tuna_fallback_v6') {
+            continue
+        }
+
+        $fallbackAuthorityLegGeneration++
+        $authorityRoute = 'post_tuna_fallback_v6'
+        $authorityProtocol = if ($fallbackAuthorityMetadataMissing) { 0 } else { 6 }
+        $authorityLiveEpoch = if ($fallbackAuthorityMetadataMissing) { 0 } else { $index }
+        $authorityTransportEpoch = $fallbackAuthorityLegGeneration
+        $authorityBridgeGeneration = 1
+        $authorityCheckpointId = 'phase5-fallback-checkpoint:{0}' -f $fallbackAuthorityLegGeneration
+        $authorityReason = if ($scenarioName -eq 'regular-v4-live-activation-off-on-off-128mb') { 'phase5_canonical_repeated_toggle' } else { 'phase5_fallback_authority' }
+        $authorityOffset = $seconds + (6 * ($fallbackAuthorityLegGeneration - 1)) + 1
+        $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset $authorityOffset -Message ("event=filetransfer_fallback_leg_authority_started; direction=outbound; transfer_id={0}; session_id={1}; leg_generation={2}; route={3}; protocol_version={4}; live_route_epoch={5}; transport_epoch={6}; bridge_recovery_generation={7}; checkpoint_request_id={8}; authority_reason={9}" -f $transferId, $sessionId, $fallbackAuthorityLegGeneration, $authorityRoute, $authorityProtocol, $authorityLiveEpoch, $authorityTransportEpoch, $authorityBridgeGeneration, $authorityCheckpointId, $authorityReason))) | Out-Null
+        $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($authorityOffset + 1) -Message ("event=filetransfer_fallback_leg_authority_bridge_recovery_requested; direction=outbound; transfer_id={0}; session_id={1}; leg_generation={2}; route={3}; protocol_version={4}; live_route_epoch={5}; transport_epoch={6}; bridge_recovery_generation={7}; checkpoint_request_id={8}; authority_reason={9}" -f $transferId, $sessionId, $fallbackAuthorityLegGeneration, $authorityRoute, $authorityProtocol, $authorityLiveEpoch, $authorityTransportEpoch, $authorityBridgeGeneration, $authorityCheckpointId, $authorityReason))) | Out-Null
+        if ($bridgeLivenessFailure -and $index -eq $lastFallbackRouteIndex) {
+            $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($authorityOffset + 2) -Message ("event=session_liveness_timeout; session_id={0}; transfer_id={1}; route={2}; protocol_version=6; leg_generation={3}; bridge_recovery_generation={4}; reason=phase5_fake_valid_recovery_timeout" -f $sessionId, $transferId, $authorityRoute, $fallbackAuthorityLegGeneration, $authorityBridgeGeneration))) | Out-Null
+        }
+        else {
+            $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($authorityOffset + 2) -Message ("event=bridge_receive_stall_recovery_receive_resumed; session_id={0}; transfer_id={1}; route={2}; protocol_version=6; leg_generation={3}; bridge_recovery_generation={4}; reason=phase5_fake_receive_resumed" -f $sessionId, $transferId, $authorityRoute, $fallbackAuthorityLegGeneration, $authorityBridgeGeneration))) | Out-Null
+            $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($authorityOffset + 3) -Message ("event=filetransfer_fallback_leg_authority_checkpoint_accepted; direction=outbound; transfer_id={0}; session_id={1}; leg_generation={2}; route={3}; protocol_version={4}; live_route_epoch={5}; transport_epoch={6}; bridge_recovery_generation={7}; checkpoint_request_id={8}; proven_committed_chunk=128; proven_highest_observed_chunk=160; reason=phase5_fake_receiver_state" -f $transferId, $sessionId, $fallbackAuthorityLegGeneration, $authorityRoute, $authorityProtocol, $authorityLiveEpoch, $authorityTransportEpoch, $authorityBridgeGeneration, $authorityCheckpointId))) | Out-Null
+            $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($authorityOffset + 4) -Message ("event=filetransfer_fallback_leg_authority_completed; direction=outbound; transfer_id={0}; session_id={1}; leg_generation={2}; route={3}; protocol_version={4}; live_route_epoch={5}; transport_epoch={6}; bridge_recovery_generation={7}; checkpoint_request_id={8}; authority_reason={9}; proof=phase5_fake_receiver_state" -f $transferId, $sessionId, $fallbackAuthorityLegGeneration, $authorityRoute, $authorityProtocol, $authorityLiveEpoch, $authorityTransportEpoch, $authorityBridgeGeneration, $authorityCheckpointId, $authorityReason))) | Out-Null
+        }
+    }
+
     $metadata = Get-RouteAcceptanceRouteMetadata -Route $finalRoute
     $frameType = 'filetransfer.chunk_batch.{0}' -f $metadata.FrameFamily
     $terminalError = if ($terminalState -eq 'Completed') { '(none)' } else { 'phase4_fake_terminal_error' }
@@ -1498,6 +1647,11 @@ function Write-RouteAcceptanceFakePhase4Run {
     if ($warning) {
         $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($seconds + 3) -Message 'event=screenshare_bridge_transport_health_summary; disconnect_count_since_last=1; connect_failed_count_since_last=0; ws_error_count_since_last=1; rpc_fallback_attempt_count_since_last=0; control_ready=1; media_ready=1; bulk_ready=1')) | Out-Null
     }
+    if ($warningCapExcess) {
+        for ($warningIndex = 0; $warningIndex -lt 4; $warningIndex++) {
+            $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($seconds + 3 + $warningIndex) -Message 'event=screenshare_bridge_transport_health_summary; disconnect_count_since_last=1; connect_failed_count_since_last=0; ws_error_count_since_last=1; rpc_fallback_attempt_count_since_last=0; control_ready=1; media_ready=1; bulk_ready=1')) | Out-Null
+        }
+    }
 
     if ($contaminatedMeasurement -and $finalRoute -eq 'file_tuna_v4') {
         $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($seconds + 2) -Message 'event=nkn_bridge_receive_stall_detected; reason=all_channels_zero_receive; consecutive_zero_receive_windows=3; active_file_transfer_sessions=1; active_file_transfer_runtime_sessions=1; control_last_received_age_ms=12000; bulk_last_received_age_ms=12000')) | Out-Null
@@ -1508,8 +1662,18 @@ function Write-RouteAcceptanceFakePhase4Run {
         $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($seconds + 5) -Message ("event=filetransfer_v4_repair_sent; transfer_id={0}; session_id={1}; repair_request_key=0:12:0:12; range_count=1; requested_chunk_count=12; sent_chunk_count=12; repair_delivery_mode=control_bulk_escalated; repair_delivery_escalation_reason=first_send_credit_stall; frontier_tail_repair=1; remote_next_expected_chunk_index=0; chunks_accepted_for_transport=3121" -f $transferId, $sessionId))) | Out-Null
     }
 
-    $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset 120 -Message ("event=file_transfer_inbound_terminal; role=helper; session_id={0}; transfer_id={1}; state={2}; error_code={3}; bytes_transferred={4}; saved_path=(none); integrity_ok={5}; route={6}; protocol_version={7}" -f $sessionId, $transferId, $terminalState, $terminalError, $payloadBytes, ($(if ($completed -and $terminalState -eq 'Completed') { 1 } else { 0 })), $finalRoute, $metadata.Protocol))) | Out-Null
-    $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset 120 -Message ("event=file_transfer_outbound_terminal; role=helpee; session_id={0}; transfer_id={1}; state={2}; error_code={3}; bytes_transferred={4}; integrity_ok={5}; route={6}; protocol_version={7}" -f $sessionId, $transferId, $terminalState, $terminalError, $payloadBytes, ($(if ($completed -and $terminalState -eq 'Completed') { 1 } else { 0 })), $finalRoute, $metadata.Protocol))) | Out-Null
+    if (($progressTimeoutRecoveryStorm -or $startupRecoveryStorm) -and $Scenario.Kind -eq 'regular') {
+        $completed = $false
+        $terminalState = 'Pending'
+        $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($seconds + 6) -Message 'event=nkn_bridge_receive_stall_recovery_suppressed; reason=filetransfer_protocol_repair_only; stall_reason=bulk_receive_stalled; attempt=1; active_file_transfer_sessions=1; active_file_transfer_runtime_sessions=1')) | Out-Null
+        $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($seconds + 7) -Message 'event=nkn_bridge_receive_stall_recovery_protocol_repair_exhausted; trigger=filetransfer_protocol_repair_only; requested_reason=regular_v4_peer_silence; recovery_count=1; active_file_transfer_sessions=1; active_file_transfer_runtime_sessions=1')) | Out-Null
+        $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($seconds + 8) -Message 'event=nkn_bridge_receive_stall_recovery_regular_v4_unproven_escalation_allowed; requested_reason=regular_v4_peer_silence; stall_reason=regular_v4_unproven_recovery_escalation; recovery_count=1; active_file_transfer_sessions=1; active_file_transfer_runtime_sessions=1')) | Out-Null
+        $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($seconds + 9) -Message 'event=nkn_bridge_bulk_queue_state; congested=0; severe=0; queue_depth=0; queued_bytes=0; oldest_queued_age_ms=0; in_flight=0; in_flight_bytes=0; configured_concurrency=4; effective_concurrency=4; cleared_since_last=2')) | Out-Null
+    }
+    else {
+        $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset 120 -Message ("event=file_transfer_inbound_terminal; role=helper; session_id={0}; transfer_id={1}; state={2}; error_code={3}; bytes_transferred={4}; saved_path=(none); integrity_ok={5}; route={6}; protocol_version={7}" -f $sessionId, $transferId, $terminalState, $terminalError, $payloadBytes, ($(if ($completed -and $terminalState -eq 'Completed') { 1 } else { 0 })), $finalRoute, $metadata.Protocol))) | Out-Null
+        $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset 120 -Message ("event=file_transfer_outbound_terminal; role=helpee; session_id={0}; transfer_id={1}; state={2}; error_code={3}; bytes_transferred={4}; integrity_ok={5}; route={6}; protocol_version={7}" -f $sessionId, $transferId, $terminalState, $terminalError, $payloadBytes, ($(if ($completed -and $terminalState -eq 'Completed') { 1 } else { 0 })), $finalRoute, $metadata.Protocol))) | Out-Null
+    }
     $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset 110 -Message ("event=nkn_bridge_bulk_send_summary; queue_depth=0; queued_bytes=0; oldest_queued_age_ms=0; frames_sent=1; send_failures=0; queue_clears=0; payload_bytes_sent={0}; payload_bytes_per_second=6000000; send_p95_ms=1; configured_concurrency=4; effective_concurrency=4" -f $payloadBytes))) | Out-Null
     $lines.ToArray() | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log') -Encoding UTF8
 
@@ -1564,19 +1728,35 @@ function Write-RouteAcceptanceFakePhase4Run {
             outbound_state = $terminalState
         }
         $cycle | ConvertTo-Json -Compress -Depth 6 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-live-nkn-cycles.jsonl') -Encoding UTF8
+        $regularSummaryVerdict = if ($progressTimeoutRecoveryStorm) {
+            'INCONCLUSIVE_PROGRESS_TIMEOUT'
+        }
+        elseif ($completed -and $terminalState -eq 'Completed') {
+            'PASS'
+        }
+        else {
+            'FAIL_PROTOCOL_OR_INTEGRITY'
+        }
         $summary = [ordered]@{
             artifact_kind = 'live-nkn'
             mode = 'nkn-fast'
-            verdict = if ($completed -and $terminalState -eq 'Completed') { 'PASS' } else { 'FAIL_PROTOCOL_OR_INTEGRITY' }
-            gate_status = if ($completed -and $terminalState -eq 'Completed') { 'pass' } else { 'fail' }
+            verdict = $regularSummaryVerdict
+            gate_status = if ($regularSummaryVerdict -eq 'PASS') { 'pass' } elseif ($regularSummaryVerdict -eq 'INCONCLUSIVE_PROGRESS_TIMEOUT') { 'inconclusive' } else { 'fail' }
             cycles_requested = 1
-            cycles_observed = 1
+            cycles_observed = if ($startupRecoveryStorm) { 0 } else { 1 }
             cycles_completed = if ($completed -and $terminalState -eq 'Completed') { 1 } else { 0 }
             total_payload_bytes = if ($completed -and $terminalState -eq 'Completed') { $payloadBytes } else { 0 }
             average_goodput_bytes_per_second = ('{0:F3}' -f $goodput)
             min_goodput_bytes_per_second = ('{0:F3}' -f $goodput)
             data_protocol_version = [int]$metadata.Protocol
             bridge_bulk_send_failure_count = 0
+            bridge_bulk_queue_clear_count = if ($progressTimeoutRecoveryStorm -or $startupRecoveryStorm) { 2 } else { 0 }
+            gui_progress_timeout_count = if ($progressTimeoutRecoveryStorm) { 1 } else { 0 }
+            gui_progress_timeout_reason = if ($progressTimeoutRecoveryStorm) { 'no useful data progress for 180s' } else { '(none)' }
+            last_receiver_next_chunk = if ($progressTimeoutRecoveryStorm) { 1614 } else { -1 }
+            last_receiver_highest_chunk = if ($progressTimeoutRecoveryStorm) { 1613 } else { -1 }
+            last_progress_event_count = if ($progressTimeoutRecoveryStorm) { 23 } else { 0 }
+            terminal_missing_after_progress_timeout = if ($progressTimeoutRecoveryStorm) { 1 } else { 0 }
         }
         $summary.GetEnumerator() | ForEach-Object { "{0}={1}" -f $_.Key, $_.Value } | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-live-nkn-summary.txt') -Encoding UTF8
         $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-live-nkn-summary.json') -Encoding UTF8
@@ -1636,6 +1816,10 @@ function Write-RouteAcceptanceFakePhase4Run {
             }
         }
         $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json') -Encoding UTF8
+    }
+
+    if ($forcePostArtifactExecutionFailure) {
+        throw 'Injected fake Phase 4 scenario execution failure after artifacts.'
     }
 }
 
@@ -2241,7 +2425,8 @@ function Invoke-TunaRouteAcceptanceRun {
         [Parameter(Mandatory = $true)][string]$Fault,
         [string]$PayerMode = 'helpee',
         [string]$PayloadSize = '128MiB',
-        [string]$LiveToggleSequence = ''
+        [string]$LiveToggleSequence = '',
+        [string]$LiveProofMode = 'None'
     )
 
     $scriptPath = Join-Path $RepoRoot 'tools\Run-FileTransferTunaGuiSmoke.ps1'
@@ -2279,7 +2464,7 @@ function Invoke-TunaRouteAcceptanceRun {
             }
             else {
                 try {
-                    Invoke-RouteAcceptanceRetainedAnalysis -ArtifactDir $attemptDir
+                Invoke-RouteAcceptanceRetainedAnalysis -ArtifactDir $attemptDir -LiveRouteProofMode $LiveProofMode
                 }
                 catch {
                     $failureMessage = $_.Exception.Message
@@ -2339,7 +2524,7 @@ function Invoke-TunaRouteAcceptanceRun {
         Select-RouteAcceptanceMeasuredFallbackLogSlice -ArtifactDir $ArtifactDir
     }
 
-    Invoke-RouteAcceptanceRetainedAnalysis -ArtifactDir $ArtifactDir
+    Invoke-RouteAcceptanceRetainedAnalysis -ArtifactDir $ArtifactDir -LiveRouteProofMode $LiveProofMode
 }
 
 function New-Phase4RouteAcceptanceScenario {
@@ -2383,7 +2568,21 @@ function Get-Phase4RouteAcceptanceScenarios {
         (New-Phase4RouteAcceptanceScenario -Name 'live-switch-off-helper-64mb' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 67108864L -BaselineScenario 'live-switch-off-helper-64mb' -Baseline $baselines['live-switch-off-helper-64mb'] -RouteMode 'live-v4-switch-off' -Fault 'switch-off' -PayerMode 'helper' -LiveProofMode 'SwitchOff')
         (New-Phase4RouteAcceptanceScenario -Name 'live-multi-toggle-off-on-off-64mb' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 67108864L -BaselineScenario 'live-multi-toggle-off-on-off-64mb' -Baseline $baselines['live-multi-toggle-off-on-off-64mb'] -RouteMode 'live-multi-toggle' -Fault 'switch-off' -PayerMode 'helpee' -LiveToggleSequence 'off,on,off' -LiveProofMode 'MultiToggle')
         (New-Phase4RouteAcceptanceScenario -Name 'regular-v4-live-activation-off-on-off-128mb' -Kind 'tuna' -ExpectedRouteChanges @('regular_nkn_v4_fast', 'file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 134217728L -RouteMode 'live-regular-activation-cycle' -Fault 'switch-off' -PayerMode 'helpee' -LiveToggleSequence 'on,off,on,off' -LiveProofMode 'RegularActivationCycle')
-        (New-Phase4RouteAcceptanceScenario -Name 'second-transfer-after-reactivation' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4') -PayloadBytes 67108864L -RouteMode 'live-reactivation-second-transfer' -Fault 'switch-off' -PayerMode 'helpee' -LiveToggleSequence 'off,on' -LiveProofMode 'None')
+        (New-Phase4RouteAcceptanceScenario -Name 'second-transfer-after-reactivation' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4') -PayloadBytes 134217728L -RouteMode 'live-reactivation-second-transfer' -Fault 'switch-off' -PayerMode 'helpee' -LiveToggleSequence 'off,on' -LiveProofMode 'None')
+    )
+}
+
+function Get-Phase5RouteAcceptanceScenarios {
+    param([Parameter(Mandatory = $true)]$BaselineManifest)
+
+    $baselines = $BaselineManifest.Scenarios
+    return @(
+        (New-Phase4RouteAcceptanceScenario -Name 'regular-nkn-v4-64mb' -Kind 'regular' -ExpectedRouteChanges @('regular_nkn_v4_fast') -PayloadBytes 67108864L -BaselineScenario 'regular-nkn-v4-64mb' -Baseline $baselines['regular-nkn-v4-64mb'])
+        (New-Phase4RouteAcceptanceScenario -Name 'active-tuna-v4-64mb' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4') -PayloadBytes 67108864L -BaselineScenario 'active-tuna-v4-64mb' -Baseline $baselines['active-tuna-v4-64mb'] -RouteMode 'preactivated' -Fault 'none' -PayerMode 'helpee')
+        (New-Phase4RouteAcceptanceScenario -Name 'live-switch-off-helpee-64mb' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 67108864L -BaselineScenario 'live-switch-off-helpee-64mb' -Baseline $baselines['live-switch-off-helpee-64mb'] -RouteMode 'live-v4-switch-off' -Fault 'switch-off' -PayerMode 'helpee' -LiveProofMode 'SwitchOff')
+        (New-Phase4RouteAcceptanceScenario -Name 'live-switch-off-helper-64mb' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 67108864L -BaselineScenario 'live-switch-off-helper-64mb' -Baseline $baselines['live-switch-off-helper-64mb'] -RouteMode 'live-v4-switch-off' -Fault 'switch-off' -PayerMode 'helper' -LiveProofMode 'SwitchOff')
+        (New-Phase4RouteAcceptanceScenario -Name 'regular-v4-live-activation-off-on-off-128mb' -Kind 'tuna' -ExpectedRouteChanges @('regular_nkn_v4_fast', 'file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 134217728L -RouteMode 'live-regular-activation-cycle' -Fault 'switch-off' -PayerMode 'helpee' -LiveToggleSequence 'on,off,on,off' -LiveProofMode 'RegularActivationCycle')
+        (New-Phase4RouteAcceptanceScenario -Name 'second-transfer-after-reactivation' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4') -PayloadBytes 134217728L -RouteMode 'live-reactivation-second-transfer' -Fault 'switch-off' -PayerMode 'helpee' -LiveToggleSequence 'off,on' -LiveProofMode 'None')
     )
 }
 
@@ -2394,8 +2593,27 @@ function Test-Phase4RerunnableMeasurementFailure {
     return $failures.Count -gt 0 -and
         (@($failures | Where-Object {
             $_.IndexOf('goodput regression exceeded', [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -and
-            $_.IndexOf('measurement contaminated', [System.StringComparison]::OrdinalIgnoreCase) -lt 0
+            $_.IndexOf('measurement contaminated', [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+            -not (Test-Phase4RerunnableMeasurementExecutionFailure -Result $Result -Line ([string]$_))
         }).Count -eq 0)
+}
+
+function Test-Phase4RerunnableMeasurementExecutionFailure {
+    param(
+        [Parameter(Mandatory = $true)]$Result,
+        [Parameter(Mandatory = $true)][string]$Line
+    )
+
+    if (-not $Result.measurementContaminated) {
+        return $false
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace([string]$Result.setupFailurePhase) -or
+        -not [string]::IsNullOrWhiteSpace([string]$Result.setupFailureReason)) {
+        return $false
+    }
+
+    return $Line.IndexOf('scenario execution failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
 }
 
 function Get-Phase4FirstFailureReason {
@@ -2435,7 +2653,8 @@ function Test-Phase4SetupInvalidAttempt {
 function Test-Phase4PerformanceFailureLine {
     param([Parameter(Mandatory = $true)][string]$Line)
 
-    return $Line.IndexOf('goodput regression exceeded', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+    return $Line.IndexOf('goodput regression exceeded', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $Line.IndexOf('measurement contaminated', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
 }
 
 function Get-Phase4FailureClass {
@@ -2456,6 +2675,155 @@ function Get-Phase4FailureClass {
     }
 
     return 'correctness'
+}
+
+function Test-Phase5CanonicalRepeatedToggleScenario {
+    param([Parameter(Mandatory = $true)]$Scenario)
+
+    return [string]$Scenario.Name -eq 'regular-v4-live-activation-off-on-off-128mb'
+}
+
+function Get-Phase5FailureClass {
+    param([Parameter(Mandatory = $true)]$Failures)
+
+    $failureLines = @($Failures | ForEach-Object { [string]$_ })
+    if ($failureLines.Count -eq 0) {
+        return 'none'
+    }
+
+    foreach ($line in $failureLines) {
+        if ($line.IndexOf('setup failure', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('scenario execution failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('missing artifact', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'setup'
+        }
+    }
+
+    foreach ($line in $failureLines) {
+        if ($line.IndexOf('completion/integrity', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('failed completion/integrity', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('terminal/integrity proof is incomplete', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('terminal errors observed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('terminals not Completed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'protocol_or_integrity'
+        }
+    }
+
+    foreach ($line in $failureLines) {
+        if ($line.IndexOf('live route epoch', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'live_route_proof'
+        }
+    }
+
+    foreach ($line in $failureLines) {
+        if ($line.IndexOf('fallback leg authority', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'fallback_authority'
+        }
+    }
+
+    foreach ($line in $failureLines) {
+        if ($line.IndexOf('route consistency', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('route mismatch', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('selected route mismatch', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('measured route mismatch', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('protocol mismatch', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('measured protocol mismatch', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('route selected protocol mismatch', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('runtime', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('file_tuna_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('diagnostic_regular_nkn_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'route_runtime'
+        }
+    }
+
+    foreach ($line in $failureLines) {
+        if ($line.IndexOf('bridge liveness', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('session liveness timeout', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'bridge_liveness'
+        }
+    }
+
+    foreach ($line in $failureLines) {
+        if ($line.IndexOf('warning', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('operator verdict', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('external_transport_churn', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'warning_policy'
+        }
+    }
+
+    foreach ($line in $failureLines) {
+        if ($line.IndexOf('goodput regression exceeded', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('measurement contaminated', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'performance'
+        }
+    }
+
+    foreach ($line in $failureLines) {
+        if ($line.IndexOf('environmental', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('public_nkn', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'environmental'
+        }
+    }
+
+    foreach ($line in $failureLines) {
+        if ($line.IndexOf('operator hard failures observed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'protocol_or_integrity'
+        }
+    }
+
+    return 'protocol_or_integrity'
+}
+
+function Assert-Phase5ScenarioRun {
+    param(
+        [Parameter(Mandatory = $true)]$Scenario,
+        [Parameter(Mandatory = $true)]$Result
+    )
+
+    if ($Result.liveRouteEpochProofVerdict -eq 'fail') {
+        Add-RouteAcceptanceFailure -Result $Result -Message 'live route epoch proof verdict is fail'
+    }
+
+    if ($Result.fallbackLegAuthorityProofVerdict -eq 'fail' -and [string]$Scenario.Name -ne 'second-transfer-after-reactivation') {
+        Add-RouteAcceptanceFailure -Result $Result -Message 'fallback leg authority proof verdict is fail'
+    }
+
+    if ($Result.bridgeLivenessIntegrationVerdict -eq 'fail') {
+        Add-RouteAcceptanceFailure -Result $Result -Message 'bridge liveness integration verdict is fail'
+    }
+
+    $canonicalRepeatedToggle = Test-Phase5CanonicalRepeatedToggleScenario -Scenario $Scenario
+    if ($canonicalRepeatedToggle) {
+        if ($Result.liveRouteEpochProofVerdict -ne 'pass') {
+            Add-RouteAcceptanceFailure -Result $Result -Message ("canonical repeated-toggle live route proof must pass, actual {0}" -f $Result.liveRouteEpochProofVerdict)
+        }
+
+        if ($Result.fallbackLegAuthorityProofVerdict -ne 'pass') {
+            Add-RouteAcceptanceFailure -Result $Result -Message ("canonical repeated-toggle fallback leg authority proof must pass, actual {0}" -f $Result.fallbackLegAuthorityProofVerdict)
+        }
+
+        if ($Result.bridgeLivenessIntegrationVerdict -ne 'pass') {
+            Add-RouteAcceptanceFailure -Result $Result -Message ("canonical repeated-toggle bridge liveness integration proof must pass, actual {0}" -f $Result.bridgeLivenessIntegrationVerdict)
+        }
+    }
+    elseif ($Result.bridgeLivenessIntegrationVerdict -eq 'none') {
+        $retainedLogPath = Join-Path $Result.artifactDir 'filetransfer-retained-log-slice.log'
+        if (Test-Path -LiteralPath $retainedLogPath -PathType Leaf) {
+            $retainedText = Get-Content -LiteralPath $retainedLogPath -Raw
+            $Result.sessionLivenessTimeoutCount = [regex]::Matches($retainedText, 'event=session_liveness_timeout(?:;|\s)').Count
+            if ($Result.sessionLivenessTimeoutCount -gt 0) {
+                Add-RouteAcceptanceFailure -Result $Result -Message ("bridge liveness integration verdict is none but session_liveness_timeout_count={0}" -f $Result.sessionLivenessTimeoutCount)
+            }
+        }
+
+        if ($Result.bridgeLivenessStaleDeferralCount -gt 0) {
+            Add-RouteAcceptanceFailure -Result $Result -Message ("bridge liveness integration verdict is none but stale_deferral_count={0}" -f $Result.bridgeLivenessStaleDeferralCount)
+        }
+
+        if (-not $Result.completed -or -not $Result.shaOk) {
+            Add-RouteAcceptanceFailure -Result $Result -Message ("bridge liveness integration verdict is none but terminal/integrity proof is incomplete: completed={0}; sha_ok={1}" -f $Result.completed, $Result.shaOk)
+        }
+    }
 }
 
 function Get-Phase4ScenarioPayloadSizeText {
@@ -2483,6 +2851,8 @@ function Invoke-Phase4RouteAcceptanceScenario {
         [Parameter(Mandatory = $true)][string]$RepoRoot,
         [Parameter(Mandatory = $true)][string]$RunRoot,
         [Parameter(Mandatory = $true)][bool]$FakeMode,
+        [ValidateSet('phase4', 'phase5')]
+        [string]$AcceptancePhase = 'phase4',
         [string]$ResolvedExePath = '',
         [string]$ResolvedWalletPath = '',
         [string]$ResolvedSidecarPath = '',
@@ -2513,7 +2883,8 @@ function Invoke-Phase4RouteAcceptanceScenario {
                 -Fault ([string]$Scenario.Fault) `
                 -PayerMode ([string]$Scenario.PayerMode) `
                 -PayloadSize $payloadSize `
-                -LiveToggleSequence ([string]$Scenario.LiveToggleSequence)
+                -LiveToggleSequence ([string]$Scenario.LiveToggleSequence) `
+                -LiveProofMode ([string]$Scenario.LiveProofMode)
         }
     }
     catch {
@@ -2523,6 +2894,9 @@ function Invoke-Phase4RouteAcceptanceScenario {
     $result = Assert-Phase4ScenarioRun -Scenario $Scenario -ArtifactDir $artifactDir
     if (-not [string]::IsNullOrWhiteSpace($scenarioExecutionFailure)) {
         Add-RouteAcceptanceFailure -Result $result -Message ("scenario execution failed: {0}" -f $scenarioExecutionFailure)
+    }
+    if ($AcceptancePhase -eq 'phase5') {
+        Assert-Phase5ScenarioRun -Scenario $Scenario -Result $result
     }
     if (Test-Phase4RerunnableMeasurementFailure -Result $result) {
         $firstAttemptResult = $result
@@ -2551,7 +2925,8 @@ function Invoke-Phase4RouteAcceptanceScenario {
                         -Fault ([string]$Scenario.Fault) `
                         -PayerMode ([string]$Scenario.PayerMode) `
                         -PayloadSize $payloadSize `
-                        -LiveToggleSequence ([string]$Scenario.LiveToggleSequence)
+                        -LiveToggleSequence ([string]$Scenario.LiveToggleSequence) `
+                        -LiveProofMode ([string]$Scenario.LiveProofMode)
                 }
             }
             catch {
@@ -2561,6 +2936,9 @@ function Invoke-Phase4RouteAcceptanceScenario {
             $rerunResult = Assert-Phase4ScenarioRun -Scenario $Scenario -ArtifactDir $rerunDir
             if (-not [string]::IsNullOrWhiteSpace($rerunExecutionFailure)) {
                 Add-RouteAcceptanceFailure -Result $rerunResult -Message ("scenario rerun execution failed: {0}" -f $rerunExecutionFailure)
+            }
+            if ($AcceptancePhase -eq 'phase5') {
+                Assert-Phase5ScenarioRun -Scenario $Scenario -Result $rerunResult
             }
             $rerunResult.attemptCount = $rerun + 1
             $rerunResult.retryUsed = $true
@@ -2601,7 +2979,14 @@ function Invoke-Phase4RouteAcceptanceScenario {
 function Write-Phase4RouteAcceptanceSummaryFiles {
     param(
         [Parameter(Mandatory = $true)][string]$RunRoot,
-        [Parameter(Mandatory = $true)][string]$BaselinePath
+        [Parameter(Mandatory = $true)][string]$BaselinePath,
+        [ValidateSet('phase4', 'phase5')]
+        [string]$AcceptancePhase = 'phase4',
+        # Default output remains phase4-ab-acceptance-summary.txt for Phase 4 compatibility.
+        # Phase 5 writes phase5-analyzer-gui-acceptance-summary.txt.
+        [string]$SummaryBaseName = 'phase4-ab-acceptance',
+        [string]$SummaryTitle = 'Phase 4 File Transfer A/B Acceptance',
+        [int]$ExpectedRunCount = 7
     )
 
     $failureLines = @()
@@ -2611,7 +2996,6 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         }
     }
 
-    $expectedRunCount = 7
     if ($script:RunResults.Count -ne $expectedRunCount) {
         $failureLines += ("expected {0} runs, observed {1}" -f $expectedRunCount, $script:RunResults.Count)
     }
@@ -2623,10 +3007,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $performanceVerdict = if ($performanceFailureLines.Count -eq 0) { 'PASS' } else { 'FAIL' }
     $networkVarianceNote = 'Goodput on public NKN/Tuna is classified separately from runtime correctness only after strict route/protocol/SHA/hard-failure/warning proof passes; persistent goodput below the Phase 4 floor still fails performance acceptance and remains release-blocking unless a rerun proves environmental noise.'
     $textLines = @(
-        'Phase 4 File Transfer A/B Acceptance',
+        $SummaryTitle,
         ("verdict={0}" -f $verdict),
         ("correctness_verdict={0}" -f $correctnessVerdict),
         ("performance_verdict={0}" -f $performanceVerdict),
+        ("acceptance_phase={0}" -f $AcceptancePhase),
         ("artifact_root={0}" -f $RunRoot),
         ("baseline_manifest={0}" -f $BaselinePath),
         ("goodput_regression_tolerance_percent={0:F1}" -f [double]$GoodputRegressionTolerancePercent),
@@ -2650,9 +3035,14 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.artifact_dir={1}" -f $prefix, $result.artifactDir)
         $textLines += ("{0}.final_route={1}" -f $prefix, $result.finalRoute)
         $textLines += ("{0}.selected_route_sequence={1}" -f $prefix, (Join-RouteAcceptanceTokenList -Values $result.selectedRouteChanges))
+        $textLines += ("{0}.route_sequence={1}" -f $prefix, (Join-RouteAcceptanceTokenList -Values $result.selectedRouteChanges))
         $textLines += ("{0}.live_route_epoch_route_changes={1}" -f $prefix, (Join-RouteAcceptanceTokenList -Values $result.liveRouteEpochRouteChanges))
+        $textLines += ("{0}.live_epoch_route_changes={1}" -f $prefix, (Join-RouteAcceptanceTokenList -Values $result.liveRouteEpochRouteChanges))
         $textLines += ("{0}.protocol={1}" -f $prefix, $result.protocol)
         $textLines += ("{0}.route_consistency_verdict={1}" -f $prefix, $result.routeConsistencyVerdict)
+        $textLines += ("{0}.live_route_epoch_proof_verdict={1}" -f $prefix, $result.liveRouteEpochProofVerdict)
+        $textLines += ("{0}.fallback_leg_authority_proof_verdict={1}" -f $prefix, $result.fallbackLegAuthorityProofVerdict)
+        $textLines += ("{0}.bridge_liveness_integration_verdict={1}" -f $prefix, $result.bridgeLivenessIntegrationVerdict)
         $textLines += ("{0}.operator_verdict={1}" -f $prefix, $result.operatorVerdict)
         $textLines += ("{0}.hard_failure_count={1}" -f $prefix, $result.hardFailureCount)
         $textLines += ("{0}.warning_count={1}" -f $prefix, $result.warningCount)
@@ -2688,7 +3078,8 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.failure_count={1}" -f $prefix, $result.failures.Count)
         $textLines += ("{0}.correctness_failure_count={1}" -f $prefix, $resultCorrectnessFailureCount)
         $textLines += ("{0}.performance_failure_count={1}" -f $prefix, $resultPerformanceFailureCount)
-        $textLines += ("{0}.acceptance_failure_class={1}" -f $prefix, (Get-Phase4FailureClass -Failures $result.failures))
+        $failureClass = if ($AcceptancePhase -eq 'phase5') { Get-Phase5FailureClass -Failures $result.failures } else { Get-Phase4FailureClass -Failures $result.failures }
+        $textLines += ("{0}.acceptance_failure_class={1}" -f $prefix, $failureClass)
     }
 
     $textLines += ''
@@ -2700,12 +3091,12 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += @($failureLines)
     }
 
-    $summaryTxt = Join-Path $RunRoot 'phase4-ab-acceptance-summary.txt'
+    $summaryTxt = Join-Path $RunRoot ("{0}-summary.txt" -f $SummaryBaseName)
     $textLines | Set-Content -LiteralPath $summaryTxt -Encoding UTF8
     $textLines | Set-Content -LiteralPath (Join-Path $RunRoot 'route-acceptance-summary.txt') -Encoding UTF8
 
     $varianceNoteLines = @(
-        '# Phase 4 Network Variance Note',
+        ("# {0} Network Variance Note" -f ($(if ($AcceptancePhase -eq 'phase5') { 'Phase 5' } else { 'Phase 4' }))),
         '',
         ('artifact_root={0}' -f $RunRoot),
         ('baseline_manifest={0}' -f $BaselinePath),
@@ -2734,7 +3125,8 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     else {
         $varianceNoteLines += @($correctnessFailureLines | ForEach-Object { '- {0}' -f $_ })
     }
-    $varianceNoteLines | Set-Content -LiteralPath (Join-Path $RunRoot 'phase4-network-variance-note.md') -Encoding UTF8
+    $varianceNoteName = if ($AcceptancePhase -eq 'phase5') { 'phase5-network-variance-note.md' } else { 'phase4-network-variance-note.md' }
+    $varianceNoteLines | Set-Content -LiteralPath (Join-Path $RunRoot $varianceNoteName) -Encoding UTF8
 
     $jsonRuns = @(
         foreach ($result in $script:RunResults) {
@@ -2751,6 +3143,9 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
                 selectedRouteSequence = @($result.selectedRouteChanges)
                 liveRouteEpochRouteChanges = @($result.liveRouteEpochRouteChanges)
                 routeConsistencyVerdict = $result.routeConsistencyVerdict
+                liveRouteEpochProofVerdict = $result.liveRouteEpochProofVerdict
+                fallbackLegAuthorityProofVerdict = $result.fallbackLegAuthorityProofVerdict
+                bridgeLivenessIntegrationVerdict = $result.bridgeLivenessIntegrationVerdict
                 operatorVerdict = $result.operatorVerdict
                 hardFailureCount = $result.hardFailureCount
                 warningCount = $result.warningCount
@@ -2776,17 +3171,18 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
                 setupFailureReason = $result.setupFailureReason
                 correctnessFailureCount = $resultCorrectnessFailureCount
                 performanceFailureCount = $resultPerformanceFailureCount
-                acceptanceFailureClass = (Get-Phase4FailureClass -Failures $result.failures)
+                acceptanceFailureClass = if ($AcceptancePhase -eq 'phase5') { Get-Phase5FailureClass -Failures $result.failures } else { Get-Phase4FailureClass -Failures $result.failures }
                 failures = @($result.failures | ForEach-Object { [string]$_ })
             }
         }
     )
 
     $jsonSummary = [ordered]@{
-        event = 'phase4_filetransfer_ab_acceptance_summary'
+        event = if ($AcceptancePhase -eq 'phase5') { 'phase5_filetransfer_analyzer_gui_acceptance_summary' } else { 'phase4_filetransfer_ab_acceptance_summary' }
         verdict = $verdict
         correctnessVerdict = $correctnessVerdict
         performanceVerdict = $performanceVerdict
+        acceptancePhase = $AcceptancePhase
         artifactRoot = $RunRoot
         baselineManifest = $BaselinePath
         generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
@@ -2805,7 +3201,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         performanceFailures = @($performanceFailureLines)
     }
 
-    $jsonSummary | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $RunRoot 'phase4-ab-acceptance-summary.json') -Encoding UTF8
+    $jsonSummary | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $RunRoot ("{0}-summary.json" -f $SummaryBaseName)) -Encoding UTF8
     $jsonSummary | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $RunRoot 'route-acceptance-summary.json') -Encoding UTF8
     return $verdict
 }
@@ -2926,9 +3322,15 @@ try {
     $runRoot = New-RouteAcceptanceTimestampedRoot -RepoRoot $repoRoot -RequestedRoot $ArtifactRoot
     $fakeMode = Test-RouteAcceptanceEnvEnabled -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_GUI'
 
-    if ($MatrixMode -eq 'phase4-ab-acceptance') {
+    if ($MatrixMode -eq 'phase4-ab-acceptance' -or $MatrixMode -eq 'phase5-analyzer-gui-acceptance') {
         $baseline = Read-RouteAcceptanceBaselineManifest -RepoRoot $repoRoot -Path $BaselineManifestPath
-        $scenarios = @(Get-Phase4RouteAcceptanceScenarios -BaselineManifest $baseline)
+        $acceptancePhase = if ($MatrixMode -eq 'phase5-analyzer-gui-acceptance') { 'phase5' } else { 'phase4' }
+        $scenarios = if ($acceptancePhase -eq 'phase5') {
+            @(Get-Phase5RouteAcceptanceScenarios -BaselineManifest $baseline)
+        }
+        else {
+            @(Get-Phase4RouteAcceptanceScenarios -BaselineManifest $baseline)
+        }
         $resolvedExePath = ''
         $resolvedWalletPath = ''
         $resolvedSidecarPath = ''
@@ -2955,14 +3357,21 @@ try {
                 -RepoRoot $repoRoot `
                 -RunRoot $runRoot `
                 -FakeMode $fakeMode `
+                -AcceptancePhase $acceptancePhase `
                 -ResolvedExePath $resolvedExePath `
                 -ResolvedWalletPath $resolvedWalletPath `
                 -ResolvedSidecarPath $resolvedSidecarPath `
                 -EffectiveWalletPassword $effectiveWalletPassword
         }
 
-        $verdict = Write-Phase4RouteAcceptanceSummaryFiles -RunRoot $runRoot -BaselinePath ([string]$baseline.Path)
-        Write-Host ("[FileTransfer Phase4 A/B Acceptance] verdict={0}; artifact_root={1}" -f $verdict, $runRoot) -ForegroundColor ($(if ($verdict -eq 'PASS') { 'Green' } else { 'Red' }))
+        if ($acceptancePhase -eq 'phase5') {
+            $verdict = Write-Phase4RouteAcceptanceSummaryFiles -RunRoot $runRoot -BaselinePath ([string]$baseline.Path) -AcceptancePhase 'phase5' -SummaryBaseName 'phase5-analyzer-gui-acceptance' -SummaryTitle 'Phase 5 File Transfer Analyzer/GUI Acceptance' -ExpectedRunCount 6
+            Write-Host ("[FileTransfer Phase5 Analyzer/GUI Acceptance] verdict={0}; artifact_root={1}" -f $verdict, $runRoot) -ForegroundColor ($(if ($verdict -eq 'PASS') { 'Green' } else { 'Red' }))
+        }
+        else {
+            $verdict = Write-Phase4RouteAcceptanceSummaryFiles -RunRoot $runRoot -BaselinePath ([string]$baseline.Path)
+            Write-Host ("[FileTransfer Phase4 A/B Acceptance] verdict={0}; artifact_root={1}" -f $verdict, $runRoot) -ForegroundColor ($(if ($verdict -eq 'PASS') { 'Green' } else { 'Red' }))
+        }
         if ($verdict -ne 'PASS') {
             exit 1
         }

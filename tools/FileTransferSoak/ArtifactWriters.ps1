@@ -1771,6 +1771,146 @@ function Get-FileTransferFallbackLegAuthorityProof {
     }
 }
 
+function Get-FileTransferFallbackTailReconciliationProof {
+    param(
+        [Parameter(Mandatory = $true)]$Summary
+    )
+
+    [object[]]$events = @($Summary.TransferEvents)
+    [object[]]$postTunaRouteSelected = @(
+        $events |
+            Where-Object {
+                $_.EventName -eq 'filetransfer_route_selected' -and
+                (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6'
+            }
+    )
+    [object[]]$zeroCreditBreakerEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_tail_zero_credit_breaker' })
+    [object[]]$staleFrontierRetiredEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_tail_stale_frontier_retired' })
+    [object[]]$requestedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_tail_reconciliation_requested' })
+    [object[]]$acceptedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_tail_reconciliation_accepted' })
+    [object[]]$sendSlotRetiredEvents = @(
+        $events |
+            Where-Object {
+                $_.EventName -eq 'filetransfer_post_tuna_fallback_state_refresh_send_inflight_retired' -and
+                (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'tail_reconciliation_forced'
+            }
+    )
+    [object[]]$receiveRecoveryRequestedEvents = @(
+        $events |
+            Where-Object {
+                $_.EventName -eq 'filetransfer_post_tuna_fallback_state_refresh_receive_recovery_requested' -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'tail_reconciliation' -Default 0) -gt 0
+            }
+    )
+    [object[]]$normalZeroCreditTailStateRefreshEvents = @(
+        $events |
+            Where-Object {
+                $_.EventName -eq 'filetransfer_v6_regular_nkn_state_refresh_requested' -and
+                (Get-FileTransferEventField -Event $_ -Name 'priority' -Default '') -eq 'state_refresh' -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'available_credit_chunks' -Default 1) -le 0 -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'highest_accepted_chunk_index' -Default -1) -ge
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'remote_frontier_chunk_index' -Default 0)
+            }
+    )
+    [object[]]$failureEvents = @(
+        $events |
+            Where-Object {
+                if ($_.EventName -eq 'session_liveness_timeout' -or
+                    $_.EventName -eq 'filetransfer_gui_progress_timeout') {
+                    return $true
+                }
+
+                if ($_.EventName -eq 'file_transfer_inbound_terminal' -or
+                    $_.EventName -eq 'file_transfer_outbound_terminal') {
+                    return (
+                        (Get-FileTransferEventField -Event $_ -Name 'state' -Default '') -ne 'Completed' -or
+                        (Get-FileTransferEventField -Event $_ -Name 'error_code' -Default '(none)') -ne '(none)'
+                    )
+                }
+
+                if ($_.EventName -eq 'transfer_terminal') {
+                    return (Get-FileTransferEventField -Event $_ -Name 'error_code' -Default '(none)') -ne '(none)'
+                }
+
+                return $false
+            }
+    )
+
+    $metadataMissing = New-Object System.Collections.Generic.List[object]
+    foreach ($event in @($requestedEvents + $acceptedEvents + $staleFrontierRetiredEvents)) {
+        $route = Get-FileTransferEventField -Event $event -Name 'route' -Default ''
+        $protocol = Get-FileTransferEventInt64Field -Event $event -Name 'protocol_version' -Default 0
+        $legGeneration = Get-FileTransferEventInt64Field -Event $event -Name 'leg_generation' -Default 0
+        $liveRouteEpoch = Get-FileTransferEventInt64Field -Event $event -Name 'live_route_epoch' -Default 0
+        $transportEpoch = Get-FileTransferEventInt64Field -Event $event -Name 'transport_epoch' -Default -1
+        if ($route -ne 'post_tuna_fallback_v6' -or
+            $protocol -ne 6 -or
+            $legGeneration -le 0 -or
+            $liveRouteEpoch -le 0 -or
+            $transportEpoch -lt 0) {
+            $metadataMissing.Add($event) | Out-Null
+        }
+    }
+
+    $findings = New-Object System.Collections.Generic.List[string]
+    $evidence = New-Object System.Collections.Generic.List[object]
+    foreach ($event in @($metadataMissing.ToArray())) {
+        $findings.Add(("fallback tail reconciliation metadata missing: {0}" -f (Format-FileTransferEvidenceLine -Event $event))) | Out-Null
+        $evidence.Add($event) | Out-Null
+    }
+
+    $tailReconciliationStarted = $zeroCreditBreakerEvents.Count -gt 0 -or
+        $staleFrontierRetiredEvents.Count -gt 0 -or
+        $requestedEvents.Count -gt 0 -or
+        $sendSlotRetiredEvents.Count -gt 0 -or
+        $receiveRecoveryRequestedEvents.Count -gt 0
+    $tailFailureCandidate = $postTunaRouteSelected.Count -gt 0 -and
+        $failureEvents.Count -gt 0 -and
+        $normalZeroCreditTailStateRefreshEvents.Count -gt 0 -and
+        $requestedEvents.Count -eq 0 -and
+        $acceptedEvents.Count -eq 0
+
+    if ($tailReconciliationStarted -and $requestedEvents.Count -eq 0) {
+        $findings.Add('fallback tail reconciliation started without request proof') | Out-Null
+        foreach ($event in @($zeroCreditBreakerEvents + $staleFrontierRetiredEvents + $sendSlotRetiredEvents | Select-Object -First 5)) {
+            $evidence.Add($event) | Out-Null
+        }
+    }
+
+    if ($requestedEvents.Count -gt 0 -and $acceptedEvents.Count -eq 0 -and $failureEvents.Count -gt 0) {
+        $findings.Add('fallback tail reconciliation request was not accepted before terminal failure') | Out-Null
+        foreach ($event in @($requestedEvents + $failureEvents | Select-Object -First 5)) {
+            $evidence.Add($event) | Out-Null
+        }
+    }
+
+    if ($tailFailureCandidate) {
+        $findings.Add('post-Tuna fallback zero-credit tail stall ended without tail reconciliation proof') | Out-Null
+        foreach ($event in @($normalZeroCreditTailStateRefreshEvents + $failureEvents | Select-Object -First 8)) {
+            $evidence.Add($event) | Out-Null
+        }
+    }
+
+    $verdict = if ($findings.Count -eq 0) { 'pass' } else { 'fail' }
+    if (-not $tailReconciliationStarted -and -not $tailFailureCandidate) {
+        $verdict = 'none'
+    }
+
+    return [pscustomobject]@{
+        Verdict = $verdict
+        RequestedCount = $requestedEvents.Count
+        AcceptedCount = $acceptedEvents.Count
+        ZeroCreditBreakerCount = $zeroCreditBreakerEvents.Count
+        StaleFrontierRetiredCount = $staleFrontierRetiredEvents.Count
+        SendSlotRetiredCount = $sendSlotRetiredEvents.Count
+        ReceiveRecoveryRequestedCount = $receiveRecoveryRequestedEvents.Count
+        NormalZeroCreditTailStateRefreshCount = $normalZeroCreditTailStateRefreshEvents.Count
+        MetadataMissingCount = $metadataMissing.Count
+        Findings = $findings
+        EvidenceEvents = @(@($evidence.ToArray()) + @($zeroCreditBreakerEvents + $requestedEvents + $acceptedEvents + $normalZeroCreditTailStateRefreshEvents) | Select-Object -First 20)
+    }
+}
+
 function New-FileTransferRouteConsistencySummaryLines {
     param(
         [Parameter(Mandatory = $true)]$Summary,
@@ -1813,6 +1953,7 @@ function New-FileTransferRouteConsistencySummaryLines {
     [object[]]$liveRouteEpochSequence = @($liveRouteProof.Sequence)
     [object[]]$liveRouteEpochRouteChanges = @($liveRouteProof.RouteChanges)
     $fallbackAuthorityProof = Get-FileTransferFallbackLegAuthorityProof -TransferEvents $Summary.TransferEvents
+    $fallbackTailProof = Get-FileTransferFallbackTailReconciliationProof -Summary $Summary
     $bridgeLivenessProof = Get-FileTransferBridgeLivenessIntegrationProof -Summary $Summary
     [object[]]$fallbackAuthoritySequence = @($fallbackAuthorityProof.Sequence)
 
@@ -1843,6 +1984,15 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("fallback_leg_authority_send_blocked_count={0}" -f $fallbackAuthorityProof.SendBlockedCount)) | Out-Null
     $lines.Add(("fallback_leg_authority_stale_proof_ignored_count={0}" -f $fallbackAuthorityProof.StaleProofIgnoredCount)) | Out-Null
     $lines.Add(("fallback_leg_authority_metadata_missing_count={0}" -f $fallbackAuthorityProof.MetadataMissingCount)) | Out-Null
+    $lines.Add(("fallback_tail_reconciliation_verdict={0}" -f $fallbackTailProof.Verdict)) | Out-Null
+    $lines.Add(("fallback_tail_reconciliation_requested_count={0}" -f $fallbackTailProof.RequestedCount)) | Out-Null
+    $lines.Add(("fallback_tail_reconciliation_accepted_count={0}" -f $fallbackTailProof.AcceptedCount)) | Out-Null
+    $lines.Add(("fallback_tail_zero_credit_breaker_count={0}" -f $fallbackTailProof.ZeroCreditBreakerCount)) | Out-Null
+    $lines.Add(("fallback_tail_stale_frontier_retired_count={0}" -f $fallbackTailProof.StaleFrontierRetiredCount)) | Out-Null
+    $lines.Add(("fallback_tail_state_refresh_send_slot_retired_count={0}" -f $fallbackTailProof.SendSlotRetiredCount)) | Out-Null
+    $lines.Add(("fallback_tail_receive_recovery_requested_count={0}" -f $fallbackTailProof.ReceiveRecoveryRequestedCount)) | Out-Null
+    $lines.Add(("fallback_tail_normal_zero_credit_state_refresh_count={0}" -f $fallbackTailProof.NormalZeroCreditTailStateRefreshCount)) | Out-Null
+    $lines.Add(("fallback_tail_reconciliation_metadata_missing_count={0}" -f $fallbackTailProof.MetadataMissingCount)) | Out-Null
     $lines.Add(("bridge_liveness_integration_verdict={0}" -f $bridgeLivenessProof.Verdict)) | Out-Null
     $lines.Add(("session_liveness_deferred_for_current_recovery_count={0}" -f $bridgeLivenessProof.CurrentRecoveryDeferralCount)) | Out-Null
     $lines.Add(("session_liveness_deferred_for_bridge_recovery_count={0}" -f $bridgeLivenessProof.BridgeRecoveryDeferralCount)) | Out-Null
@@ -1897,6 +2047,19 @@ function New-FileTransferRouteConsistencySummaryLines {
         foreach ($finding in @($fallbackAuthorityProof.Findings)) {
             $authorityIndex++
             $lines.Add(("authority.{0}={1}" -f $authorityIndex, $finding)) | Out-Null
+        }
+    }
+    else {
+        $lines.Add('(none)') | Out-Null
+    }
+
+    $lines.Add('') | Out-Null
+    $lines.Add('fallback_tail_reconciliation_findings:') | Out-Null
+    if ($fallbackTailProof.Findings.Count -gt 0) {
+        $tailIndex = 0
+        foreach ($finding in @($fallbackTailProof.Findings)) {
+            $tailIndex++
+            $lines.Add(("tail.{0}={1}" -f $tailIndex, $finding)) | Out-Null
         }
     }
     else {
@@ -3380,6 +3543,7 @@ function New-FileTransferStabilityGateSummaryLines {
     $fallbackDiagnostics = Get-FileTransferGateFallbackDiagnostics -GateResult $GateResult
     $recoveryClassification = Get-FileTransferRecoveryFailureClassification -Summary $Summary
     $fallbackAuthorityProof = Get-FileTransferFallbackLegAuthorityProof -TransferEvents $Summary.TransferEvents
+    $fallbackTailProof = Get-FileTransferFallbackTailReconciliationProof -Summary $Summary
     $bridgeLivenessProof = Get-FileTransferBridgeLivenessIntegrationProof -Summary $Summary
 
     return @(
@@ -3396,6 +3560,9 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_retry_authority_failed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryAuthorityFailedCount),
         ("runtime_unlock_offer_observation_blocked_count={0}" -f $recoveryClassification.RuntimeUnlockOfferObservationBlockedCount),
         ("session_liveness_timeout_after_runtime_unlock_count={0}" -f $recoveryClassification.SessionLivenessTimeoutAfterRuntimeUnlockCount),
+        ("classification_fallback_tail_reconciliation_requested_count={0}" -f $recoveryClassification.FallbackTailReconciliationRequestedCount),
+        ("classification_fallback_tail_reconciliation_accepted_count={0}" -f $recoveryClassification.FallbackTailReconciliationAcceptedCount),
+        ("classification_fallback_tail_normal_zero_credit_state_refresh_count={0}" -f $recoveryClassification.FallbackTailNormalZeroCreditStateRefreshCount),
         ("hard_failure_count={0}" -f $GateResult.HardFailures.Count),
         ("warning_count={0}" -f $GateResult.Warnings.Count),
         ("warning_cap_policy={0}" -f ($(if ($null -ne $warningCap) { $warningCap.Policy } else { 'strict_small' }))),
@@ -3427,6 +3594,15 @@ function New-FileTransferStabilityGateSummaryLines {
         ("fallback_leg_authority_completed_count={0}" -f $fallbackAuthorityProof.CompletedCount),
         ("fallback_leg_authority_stale_proof_ignored_count={0}" -f $fallbackAuthorityProof.StaleProofIgnoredCount),
         ("fallback_leg_authority_metadata_missing_count={0}" -f $fallbackAuthorityProof.MetadataMissingCount),
+        ("fallback_tail_reconciliation_verdict={0}" -f $fallbackTailProof.Verdict),
+        ("fallback_tail_reconciliation_requested_count={0}" -f $fallbackTailProof.RequestedCount),
+        ("fallback_tail_reconciliation_accepted_count={0}" -f $fallbackTailProof.AcceptedCount),
+        ("fallback_tail_zero_credit_breaker_count={0}" -f $fallbackTailProof.ZeroCreditBreakerCount),
+        ("fallback_tail_stale_frontier_retired_count={0}" -f $fallbackTailProof.StaleFrontierRetiredCount),
+        ("fallback_tail_state_refresh_send_slot_retired_count={0}" -f $fallbackTailProof.SendSlotRetiredCount),
+        ("fallback_tail_receive_recovery_requested_count={0}" -f $fallbackTailProof.ReceiveRecoveryRequestedCount),
+        ("fallback_tail_normal_zero_credit_state_refresh_count={0}" -f $fallbackTailProof.NormalZeroCreditTailStateRefreshCount),
+        ("fallback_tail_reconciliation_metadata_missing_count={0}" -f $fallbackTailProof.MetadataMissingCount),
         ("bridge_liveness_integration_verdict={0}" -f $bridgeLivenessProof.Verdict),
         ("session_liveness_deferred_for_current_recovery_count={0}" -f $bridgeLivenessProof.CurrentRecoveryDeferralCount),
         ("session_liveness_deferred_for_bridge_recovery_count={0}" -f $bridgeLivenessProof.BridgeRecoveryDeferralCount),
@@ -3847,6 +4023,7 @@ function Get-FileTransferRecoveryFailureClassification {
     $fileTunaV6Events = @($events | Where-Object {
         (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'file_tuna_v6'
     })
+    $fallbackTailProof = Get-FileTransferFallbackTailReconciliationProof -Summary $Summary
 
     $routeChanges = New-Object System.Collections.Generic.List[string]
     $lastRoute = ''
@@ -3867,6 +4044,9 @@ function Get-FileTransferRecoveryFailureClassification {
     $class = '(none)'
     if ($fileTunaV6Events.Count -gt 0) {
         $class = 'active_file_tuna_v6_evidence'
+    }
+    elseif ($fallbackTailProof.Verdict -eq 'fail') {
+        $class = 'fallback_tail_reconciliation'
     }
     elseif ($runtimeUnlockOfferNotObservedEvents.Count -gt 0 -and
         $sessionRecoveryContractRetryDispatchedEvents.Count -gt 0 -and
@@ -3914,6 +4094,9 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockRetryAuthorityFailedCount = $sessionRecoveryContractRetryAuthorityFailedEvents.Count
         RuntimeUnlockOfferObservationBlockedCount = $runtimeUnlockOfferRejectedWithoutObservationEvents.Count + $runtimeUnlockReceiveRecoveryBlockedOfferEvents.Count
         SessionLivenessTimeoutAfterRuntimeUnlockCount = if ($runtimeUnlockOfferNotObservedEvents.Count -gt 0) { $sessionLivenessTimeoutEvents.Count } else { 0 }
+        FallbackTailReconciliationRequestedCount = $fallbackTailProof.RequestedCount
+        FallbackTailReconciliationAcceptedCount = $fallbackTailProof.AcceptedCount
+        FallbackTailNormalZeroCreditStateRefreshCount = $fallbackTailProof.NormalZeroCreditTailStateRefreshCount
     }
 }
 
@@ -3940,6 +4123,9 @@ function Write-FileTransferDiagnosticsArtifacts {
             elseif ($text -eq 'recovered runtime-unlock bridge queue clear overlapped the completed transfer' -or
                 $text -eq 'recovered runtime unlock bridge queue clear overlapped the completed transfer') {
                 'recovered_runtime_unlock_bridge_clear'
+            }
+            elseif ($text -eq 'recovered regular NKN V4 bridge queue clear overlapped the completed transfer') {
+                'recovered_regular_v4_bridge_clear'
             }
             elseif ($text -eq 'post-Tuna fallback V6 send timeout churn recovered before terminal completion') {
                 'fallback_v6_send_timeout_churn'
@@ -3969,6 +4155,7 @@ function Write-FileTransferDiagnosticsArtifacts {
     $liveRouteProof = Get-FileTransferLiveRouteEpochProof -TransferEvents $Summary.TransferEvents -Mode $LiveRouteProofMode
     $recoveryClassification = Get-FileTransferRecoveryFailureClassification -Summary $Summary
     $fallbackAuthorityProof = Get-FileTransferFallbackLegAuthorityProof -TransferEvents $Summary.TransferEvents
+    $fallbackTailProof = Get-FileTransferFallbackTailReconciliationProof -Summary $Summary
     $bridgeLivenessProof = Get-FileTransferBridgeLivenessIntegrationProof -Summary $Summary
 
     $verdictLines = @(
@@ -3986,6 +4173,9 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_retry_authority_failed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryAuthorityFailedCount),
         ("runtime_unlock_offer_observation_blocked_count={0}" -f $recoveryClassification.RuntimeUnlockOfferObservationBlockedCount),
         ("session_liveness_timeout_after_runtime_unlock_count={0}" -f $recoveryClassification.SessionLivenessTimeoutAfterRuntimeUnlockCount),
+        ("classification_fallback_tail_reconciliation_requested_count={0}" -f $recoveryClassification.FallbackTailReconciliationRequestedCount),
+        ("classification_fallback_tail_reconciliation_accepted_count={0}" -f $recoveryClassification.FallbackTailReconciliationAcceptedCount),
+        ("classification_fallback_tail_normal_zero_credit_state_refresh_count={0}" -f $recoveryClassification.FallbackTailNormalZeroCreditStateRefreshCount),
         ("observed_start_utc={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.FirstTimestamp)) { '(unknown)' } else { $Summary.FirstTimestamp }))),
         ("observed_end_utc={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.LastTimestamp)) { '(unknown)' } else { $Summary.LastTimestamp }))),
         ("analyzed_files={0}" -f $analyzedFiles),
@@ -4021,6 +4211,15 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("fallback_leg_authority_completed_count={0}" -f $fallbackAuthorityProof.CompletedCount),
         ("fallback_leg_authority_stale_proof_ignored_count={0}" -f $fallbackAuthorityProof.StaleProofIgnoredCount),
         ("fallback_leg_authority_metadata_missing_count={0}" -f $fallbackAuthorityProof.MetadataMissingCount),
+        ("fallback_tail_reconciliation_verdict={0}" -f $fallbackTailProof.Verdict),
+        ("fallback_tail_reconciliation_requested_count={0}" -f $fallbackTailProof.RequestedCount),
+        ("fallback_tail_reconciliation_accepted_count={0}" -f $fallbackTailProof.AcceptedCount),
+        ("fallback_tail_zero_credit_breaker_count={0}" -f $fallbackTailProof.ZeroCreditBreakerCount),
+        ("fallback_tail_stale_frontier_retired_count={0}" -f $fallbackTailProof.StaleFrontierRetiredCount),
+        ("fallback_tail_state_refresh_send_slot_retired_count={0}" -f $fallbackTailProof.SendSlotRetiredCount),
+        ("fallback_tail_receive_recovery_requested_count={0}" -f $fallbackTailProof.ReceiveRecoveryRequestedCount),
+        ("fallback_tail_normal_zero_credit_state_refresh_count={0}" -f $fallbackTailProof.NormalZeroCreditTailStateRefreshCount),
+        ("fallback_tail_reconciliation_metadata_missing_count={0}" -f $fallbackTailProof.MetadataMissingCount),
         ("bridge_liveness_integration_verdict={0}" -f $bridgeLivenessProof.Verdict),
         ("session_liveness_deferred_for_current_recovery_count={0}" -f $bridgeLivenessProof.CurrentRecoveryDeferralCount),
         ("session_liveness_deferred_for_bridge_recovery_count={0}" -f $bridgeLivenessProof.BridgeRecoveryDeferralCount),
