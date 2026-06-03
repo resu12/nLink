@@ -175,7 +175,9 @@ public sealed record FileTransferTransferSnapshot(
     bool IsPaused = false,
     string? PauseReason = null,
     bool IsPeerPaused = false,
-    string? PeerPauseReason = null)
+    string? PeerPauseReason = null,
+    string? RouteToken = null,
+    int? ProtocolVersion = null)
 {
     public bool IsTerminal
         => State is FileTransferTransferState.Completed or

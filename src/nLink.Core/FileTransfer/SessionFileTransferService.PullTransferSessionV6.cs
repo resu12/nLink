@@ -4858,9 +4858,15 @@ public sealed partial class SessionFileTransferService
             }
 
             var now = DateTimeOffset.UtcNow;
+            var postTunaFallbackCheckpoint =
+                context.RouteRuntime.UsesPostTunaFallbackV6Runtime &&
+                string.Equals(reason, V6RegularNknStateRefreshRecoveryMode, StringComparison.Ordinal) &&
+                IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg) &&
+                !string.IsNullOrWhiteSpace(context.CurrentTransferLeg!.CheckpointRequestId);
             var receiverStateRetryInterval = TimeSpan.FromMilliseconds(V6ReceiverStateRetryIntervalMs);
             if (forceSend &&
                 !terminalReady &&
+                !postTunaFallbackCheckpoint &&
                 ShouldCoalesceForcedInboundV6PostTunaFallbackControlLocked(
                     context,
                     now,
@@ -4890,6 +4896,20 @@ public sealed partial class SessionFileTransferService
                         ? "regular_nkn_frontier_stall_control_bulk"
                         : "regular_nkn_frontier_stall"
                     : null;
+            var receiverTransportEpoch = postTunaFallbackCheckpoint
+                ? context.CurrentTransferLeg!.TransportEpochId
+                : context.V6ReceiverTransportEpoch;
+            var receiverRepairRequestId = postTunaFallbackCheckpoint
+                ? context.CurrentTransferLeg!.CheckpointRequestId
+                : null;
+            var receiverPriority = postTunaFallbackCheckpoint
+                ? context.CurrentTransferLeg!.CheckpointPriority ?? V6RegularNknStateRefreshPriority
+                : ranges.Count > 0 && ranges[0].StartChunkIndex == context.NextChunkIndex
+                    ? "frontier"
+                    : null;
+            var receiverRecoveryMode = postTunaFallbackCheckpoint
+                ? V6RegularNknStateRefreshRecoveryMode
+                : recoveryMode;
             context.V6ReceiverStateEpoch++;
             var requestedEndExclusive = ranges.Count == 0
                 ? context.NextChunkIndex
@@ -4916,11 +4936,10 @@ public sealed partial class SessionFileTransferService
                 TerminalReady = terminalReady,
                 TransferPaused = context.UserPaused,
                 TransferPauseReason = context.UserPauseReason,
-                TransportEpoch = context.V6ReceiverTransportEpoch,
-                Priority = ranges.Count > 0 && ranges[0].StartChunkIndex == context.NextChunkIndex
-                    ? "frontier"
-                    : null,
-                RecoveryMode = recoveryMode,
+                TransportEpoch = receiverTransportEpoch,
+                RepairRequestId = receiverRepairRequestId,
+                Priority = receiverPriority,
+                RecoveryMode = receiverRecoveryMode,
             };
             context.V6LastReceiverStateSentUtc = now;
             context.V6LastReceiverStateCommittedChunkIndex = context.NextChunkIndex;
@@ -4938,7 +4957,7 @@ public sealed partial class SessionFileTransferService
 
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_v6_receiver_state_sent; transfer_id={state.TransferId}; session_id={state.SessionId}; reason={reason}; epoch={state.Epoch}; contiguous_committed_chunk_index={state.ContiguousCommittedChunkIndex}; durable_received_highest_chunk_index={state.DurableReceivedHighestChunkIndex}; requested_until_chunk_index_exclusive={state.CreditUntilChunkIndexExclusive}; missing_range_count={state.MissingRanges.Count}; bytes_committed={state.BytesCommitted}; destination_mode={FormatV6DestinationMode(context.V6DestinationMode)}; transfer_paused={(state.TransferPaused ? 1 : 0)}");
+                $"event=filetransfer_v6_receiver_state_sent; transfer_id={state.TransferId}; session_id={state.SessionId}; reason={reason}; epoch={state.Epoch}; contiguous_committed_chunk_index={state.ContiguousCommittedChunkIndex}; durable_received_highest_chunk_index={state.DurableReceivedHighestChunkIndex}; requested_until_chunk_index_exclusive={state.CreditUntilChunkIndexExclusive}; missing_range_count={state.MissingRanges.Count}; bytes_committed={state.BytesCommitted}; destination_mode={FormatV6DestinationMode(context.V6DestinationMode)}; transfer_paused={(state.TransferPaused ? 1 : 0)}; transport_epoch={state.TransportEpoch}; repair_request_id={FormatProtocolLogValue(state.RepairRequestId ?? "(none)")}; priority={FormatProtocolLogValue(state.Priority ?? "(none)")}; recovery_mode={FormatProtocolLogValue(state.RecoveryMode ?? "(none)")}");
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=filetransfer_v6_receiver_request_window_sent; transfer_id={state.TransferId}; session_id={state.SessionId}; reason={reason}; epoch={state.Epoch}; requested_chunk_count={requestedChunkCount}; requested_until_chunk_index_exclusive={state.CreditUntilChunkIndexExclusive}; missing_range_count={state.MissingRanges.Count}; request_window_chunks={requestWindowChunks}; frontier_stalled={(frontierStalled ? 1 : 0)}; transport_epoch={state.TransportEpoch}; recovery_mode={FormatProtocolLogValue(state.RecoveryMode)}");
@@ -5216,6 +5235,7 @@ public sealed partial class SessionFileTransferService
     {
         if (string.Equals(reason, "regular_nkn_legacy_v4_chunk_probe", StringComparison.Ordinal) ||
             string.Equals(reason, "regular_nkn_legacy_v4_state_proof", StringComparison.Ordinal) ||
+            string.Equals(reason, V6RegularNknStateRefreshRecoveryMode, StringComparison.Ordinal) ||
             string.Equals(reason, "post_tuna_fallback_proof_replay", StringComparison.Ordinal))
         {
             return false;

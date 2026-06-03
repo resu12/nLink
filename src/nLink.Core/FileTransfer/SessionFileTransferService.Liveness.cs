@@ -24,14 +24,20 @@ public sealed partial class SessionFileTransferService
     private static TimeSpan CurrentV6SenderRequestFeedbackStallRecoveryCooldown
         => TimeSpan.FromMilliseconds(V6SenderRequestFeedbackStallRecoveryCooldownMs);
 
+    public bool RequestFileTransferReceiveRecovery(FileTransferReceiveRecoveryRequest request)
+        => TryRequestFileTransferReceiveRecovery(request);
+
     private bool TryRequestFileTransferReceiveRecovery(FileTransferReceiveRecoveryRequest request)
     {
         IFileTransferReceiveRecoveryController? controller;
         FileTransferBridgeRecoveryPolicy bridgeRecoveryPolicy;
+        var regularV4ReplayArmed = false;
         lock (gate)
         {
+            request = AttachActiveRouteRuntimeForReceiveRecoveryLocked(request);
             controller = transport as IFileTransferReceiveRecoveryController;
             bridgeRecoveryPolicy = ResolveReceiveRecoveryPolicyForRequestLocked(request);
+            regularV4ReplayArmed = TryQueueOutboundRegularNknV4ReceiveRecoveryReplayLocked(request);
         }
 
         if (controller is null)
@@ -49,7 +55,7 @@ public sealed partial class SessionFileTransferService
             var authorityFields = FormatReceiveRecoveryAuthorityFields(request);
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_v6_transport_receive_recovery_request_dispatched; direction={request.Direction.ToString().ToLowerInvariant()}; transfer_id={request.TransferId}; session_id={request.SessionId}; reason={FormatProtocolLogValue(request.Reason)}; bridge_recovery_policy={FormatFileTransferBridgeRecoveryPolicy(bridgeRecoveryPolicy)}{authorityFields}");
+                $"event=filetransfer_v6_transport_receive_recovery_request_dispatched; direction={request.Direction.ToString().ToLowerInvariant()}; transfer_id={request.TransferId}; session_id={request.SessionId}; reason={FormatProtocolLogValue(request.Reason)}; bridge_recovery_policy={FormatFileTransferBridgeRecoveryPolicy(bridgeRecoveryPolicy)}; regular_v4_peer_silence_replay_armed={(regularV4ReplayArmed ? 1 : 0)}{authorityFields}");
             return true;
         }
         catch (Exception ex)
@@ -61,6 +67,84 @@ public sealed partial class SessionFileTransferService
             return false;
         }
     }
+
+    private bool TryQueueOutboundRegularNknV4ReceiveRecoveryReplayLocked(FileTransferReceiveRecoveryRequest request)
+    {
+        if (request.Direction != FileTransferDirection.Outbound ||
+            outboundTransfer is not { } context ||
+            !string.Equals(context.TransferId, request.TransferId, StringComparison.Ordinal) ||
+            !string.Equals(context.SessionId, request.SessionId, StringComparison.Ordinal) ||
+            !context.RouteRuntime.UsesRegularNknV4FastRuntime ||
+            context.NegotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+            context.RouteRuntime.FrameFamily != FileTransferFrameFamily.V4)
+        {
+            return false;
+        }
+
+        var queuedBefore = context.PullV4SenderPumpRepairQueue.Count;
+        var replayCountBefore = context.PullRegularNknV4PeerSilenceSafetyReplayCount;
+        MaybeQueueOutboundRegularNknV4PeerSilenceSafetyReplayLocked(
+            context,
+            string.IsNullOrWhiteSpace(request.Reason)
+                ? "receive_recovery"
+                : request.Reason);
+
+        var replayArmed = context.PullRegularNknV4PeerSilenceSafetyReplayCount > replayCountBefore ||
+            context.PullV4SenderPumpRepairQueue.Count > queuedBefore;
+        if (replayArmed)
+        {
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_regular_v4_receive_recovery_peer_silence_replay_armed; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(request.Reason)}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.NegotiatedDataProtocolVersion}; queued_before={queuedBefore}; queued_after={context.PullV4SenderPumpRepairQueue.Count}; replay_count_before={replayCountBefore}; replay_count_after={context.PullRegularNknV4PeerSilenceSafetyReplayCount}");
+        }
+
+        return replayArmed;
+    }
+
+    private FileTransferReceiveRecoveryRequest AttachActiveRouteRuntimeForReceiveRecoveryLocked(
+        FileTransferReceiveRecoveryRequest request)
+    {
+        if (request.Direction == FileTransferDirection.Outbound &&
+            outboundTransfer is { } outbound &&
+            string.Equals(outbound.TransferId, request.TransferId, StringComparison.Ordinal) &&
+            string.Equals(outbound.SessionId, request.SessionId, StringComparison.Ordinal))
+        {
+            return AttachActiveRouteRuntimeForReceiveRecovery(
+                request,
+                outbound.RouteSelection,
+                outbound.CurrentLiveRouteEpoch?.EpochId ?? 0);
+        }
+
+        if (request.Direction == FileTransferDirection.Inbound &&
+            inboundTransfer is { } inbound &&
+            string.Equals(inbound.TransferId, request.TransferId, StringComparison.Ordinal) &&
+            string.Equals(inbound.SessionId, request.SessionId, StringComparison.Ordinal))
+        {
+            return AttachActiveRouteRuntimeForReceiveRecovery(
+                request,
+                inbound.RouteSelection,
+                inbound.CurrentLiveRouteEpoch?.EpochId ?? 0);
+        }
+
+        return request;
+    }
+
+    private static FileTransferReceiveRecoveryRequest AttachActiveRouteRuntimeForReceiveRecovery(
+        FileTransferReceiveRecoveryRequest request,
+        FileTransferRouteSelection routeSelection,
+        int liveRouteEpoch)
+        => request with
+        {
+            RouteToken = string.IsNullOrWhiteSpace(request.RouteToken)
+                ? routeSelection.TelemetryToken
+                : request.RouteToken,
+            ProtocolVersion = request.ProtocolVersion <= 0
+                ? routeSelection.ProtocolVersion
+                : request.ProtocolVersion,
+            LiveRouteEpoch = request.LiveRouteEpoch <= 0
+                ? liveRouteEpoch
+                : request.LiveRouteEpoch,
+        };
 
     private static TimeSpan ResolveV6PeerLivenessTimeout(V6TransportEpoch? epoch)
     {

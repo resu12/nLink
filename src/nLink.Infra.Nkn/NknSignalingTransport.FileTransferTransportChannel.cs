@@ -2757,6 +2757,12 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
+        MarkFileTransferRegularV4RecoveryLivenessReceiveProofReceived(
+            frame.SessionId,
+            frame.TransferId,
+            "file_transfer_data_frame",
+            MapBridgeChannel(channel));
+
         if (frame is FileTransferCancelFrameV4 cancelFrame)
         {
             work = CreateInboundFileTransferDispatchWork(
