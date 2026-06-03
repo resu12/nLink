@@ -2454,6 +2454,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             var recoveryReason = string.IsNullOrWhiteSpace(e.ExitReasonText) ? "receive_stall_recovery" : e.ExitReasonText;
             var sessionId = currentSessionSecurityState.SessionId?.Value;
             MarkFileTransferFallbackLegAuthorityBridgeRecoveryLifecycle("started", recoveryReason);
+            MarkFileTransferRegularV4RecoveryLivenessBridgeRecoveryLifecycle("started", recoveryReason);
             MarkFileTransferTunaActivationBridgeRecoveryStarted(recoveryReason);
             InterruptRuntimeUnlockOfferForBridgeRecovery(
                 "offer_interrupted_by_bridge_recovery",
@@ -2561,6 +2562,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryCompleted)
         {
             MarkFileTransferFallbackLegAuthorityBridgeRecoveryLifecycle("completed", e.ExitReasonText);
+            MarkFileTransferRegularV4RecoveryLivenessBridgeRecoveryLifecycle("completed", e.ExitReasonText);
             MarkFileTransferTunaActivationBridgeRecoverySettled("receive_stall_recovery_completed");
             Volatile.Write(ref bridgeReceiveStallRecoveryActive, 0);
             HandleFileTransferBridgeRecovered(
@@ -2574,6 +2576,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryReceiveResumed)
         {
             MarkFileTransferFallbackLegAuthorityBridgeRecoveryLifecycle("receive_resumed", e.ExitReasonText);
+            MarkFileTransferRegularV4RecoveryLivenessBridgeRecoveryLifecycle("receive_resumed", e.ExitReasonText);
             RaiseBridgeReceiveStallSessionLivenessProof(e);
             MarkFileTransferTunaActivationBridgeRecoverySettled("receive_resumed");
             Volatile.Write(ref bridgeReceiveStallRecoveryActive, 0);
@@ -2589,6 +2592,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         {
             Volatile.Write(ref bridgeReceiveStallRecoveryActive, 0);
             MarkFileTransferFallbackLegAuthorityBridgeRecoveryLifecycle("exhausted", e.ExitReasonText);
+            MarkFileTransferRegularV4RecoveryLivenessBridgeRecoveryLifecycle("exhausted", e.ExitReasonText);
             MarkFileTransferTunaActivationBridgeRecoverySettled("receive_stall_recovery_exhausted");
             var sessionId = SanitizeLogToken(currentSessionSecurityState.SessionId?.Value ?? "none");
             var reason = string.IsNullOrWhiteSpace(e.ExitReasonText)

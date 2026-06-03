@@ -1877,16 +1877,16 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             using var adapter = new RealNknClientAdapter(identity, options);
             adapter.RegisterActiveFileTransferDataSession("transfer-v6-bulk-proof-after-reconnect");
             adapter.RegisterActiveFileTransferRuntime("transfer-v6-bulk-proof-after-reconnect");
-            var logBaseline = LocalOperationalLog.GetRecentLogText().Length;
+            var logBaseline = GetOperationalLogLength();
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             await adapter.ConnectAsync(cts.Token);
 
             await WaitUntilAsync(
-                () => GetRecentLogTextSince(logBaseline).Contains("event=nkn_bridge_receive_stall_recovery_suppressed; reason=filetransfer_bulk_probe_window", StringComparison.Ordinal),
+                () => (ReadOperationalLogTail(logBaseline) + Environment.NewLine + LocalOperationalLog.GetRecentLogText()).Contains("event=nkn_bridge_receive_stall_recovery_suppressed; reason=filetransfer_bulk_probe_window", StringComparison.Ordinal),
                 TimeSpan.FromSeconds(5));
             await Task.Delay(500, cts.Token);
 
-            var logText = GetRecentLogTextSince(logBaseline);
+            var logText = ReadOperationalLogTail(logBaseline) + Environment.NewLine + LocalOperationalLog.GetRecentLogText();
             Assert.Contains("event=nkn_bridge_receive_stall_recovery_suppressed; reason=filetransfer_bulk_probe_window", logText, StringComparison.Ordinal);
             Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_filetransfer_bulk_proof_accepted", logText, StringComparison.Ordinal);
             Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_receive_resumed", logText, StringComparison.Ordinal);
@@ -3017,6 +3017,115 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public async Task Bridge_ReceiveStallRecovery_RegularV4FeedbackPressureBypassesProtocolRepairOnly()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-regular-v4-feedback-pressure", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-regular-v4-feedback-pressure.js");
+        WriteBridgeScriptWithManifest(
+            bridgePath,
+            BuildReceiveStallRecoveryMockBridgeScript(
+                countFile,
+                controlMessagesReceivedSinceLast: 0,
+                bulkMessagesReceivedSinceLast: 0,
+                totalMessagesReceivedSinceLast: 0,
+                controlLastReceivedAgeMs: 9_000,
+                bulkLastReceivedAgeMs: 9_000,
+                stallHealthSampleCount: 4,
+                connectKey: "regular-v4-feedback-pressure-key"));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var prevFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
+        var prevControlOnlyRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", "0");
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "regular-v4-feedback-pressure");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "regular-v4-feedback-pressure");
+            var identity = new NknIdentity("regular-v4-feedback-pressure", "regular-v4-feedback-pressure.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            adapter.RegisterActiveFileTransferDataSession("transfer-regular-v4-feedback-pressure");
+            adapter.RegisterActiveFileTransferRuntime("transfer-regular-v4-feedback-pressure");
+            var logBaseline = LocalOperationalLog.GetRecentLogText().Length;
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                "transfer-regular-v4-feedback-pressure",
+                "regular_v4_receiver_frontier_repair_due",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 128,
+                pendingRepairCount: 8);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            await adapter.ConnectAsync(cts.Token);
+
+            await WaitUntilAsync(
+                () =>
+                {
+                    var text = GetRecentLogTextSince(logBaseline);
+                    return text.Contains("event=nkn_bridge_receive_stall_recovery_protocol_repair_bypassed; reason=regular_v4_control_feedback_pressure", StringComparison.Ordinal) &&
+                           text.Contains("stall_reason=regular_v4_control_feedback_pressure", StringComparison.Ordinal) &&
+                           text.Contains("event=nkn_bridge_receive_stall_recovery_hard_restart; connect_key=regular-v4-feedback-pressure-key", StringComparison.Ordinal);
+                },
+                TimeSpan.FromSeconds(8));
+
+            var logText = GetRecentLogTextSince(logBaseline);
+            Assert.Contains("event=nkn_bridge_receive_stall_recovery_protocol_repair_bypassed; reason=regular_v4_control_feedback_pressure", logText, StringComparison.Ordinal);
+            Assert.Contains("stall_reason=regular_v4_control_feedback_pressure", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_receive_stall_recovery_hard_restart; connect_key=regular-v4-feedback-pressure-key", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_suppressed; reason=filetransfer_protocol_repair_only; connect_key=regular-v4-feedback-pressure-key", logText, StringComparison.Ordinal);
+            Assert.True(File.Exists(countFile));
+            Assert.True(int.TryParse(File.ReadAllText(countFile).Trim(), out var count));
+            Assert.True(count >= 1);
+
+            adapter.UnregisterActiveFileTransferRuntime("transfer-regular-v4-feedback-pressure");
+            adapter.UnregisterActiveFileTransferDataSession("transfer-regular-v4-feedback-pressure");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevFastRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", prevControlOnlyRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public async Task Bridge_ReceiveStallRecovery_RetriesBeforeCooldownWhenReconnectDoesNotResumeReceive()
     {
         if (!OperatingSystem.IsWindows())
@@ -3233,12 +3342,12 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             SetPrivateField(adapter, "receiveStallRecoveryAwaitingReceiveProof", 1);
             SetPrivateField(adapter, "receiveStallRecoveryRequiresControlProof", 1);
             SetPrivateField(adapter, "receiveStallRecoveryRequiresBulkProof", 1);
-            var logBaseline = LocalOperationalLog.GetRecentLogText().Length;
+            var logBaseline = GetOperationalLogLength();
 
             await WaitUntilAsync(
                 () =>
                 {
-                    var text = GetRecentLogTextSince(logBaseline);
+                    var text = ReadOperationalLogTail(logBaseline) + Environment.NewLine + LocalOperationalLog.GetRecentLogText();
                     return text.Contains("event=nkn_bridge_receive_stall_recovery_post_tuna_fallback_unproven_escalation_allowed", StringComparison.Ordinal) &&
                            text.Contains("connect_key=post-tuna-peer-silence-escalation-key", StringComparison.Ordinal) &&
                            text.Contains("trigger=filetransfer_protocol_repair_only", StringComparison.Ordinal) &&
@@ -3246,7 +3355,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 },
                 TimeSpan.FromSeconds(8));
 
-            var logText = GetRecentLogTextSince(logBaseline);
+            var logText = ReadOperationalLogTail(logBaseline) + Environment.NewLine + LocalOperationalLog.GetRecentLogText();
             Assert.Contains(
                 "event=nkn_bridge_receive_stall_recovery_post_tuna_fallback_unproven_escalation_auto_armed; trigger=filetransfer_protocol_repair_only; requested_reason=post_tuna_fallback_peer_silence; connect_key=post-tuna-peer-silence-escalation-key",
                 logText,
@@ -3639,9 +3748,12 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Theory]
-    [InlineData("tuna_activation_offer_send_timeout")]
-    [InlineData("runtime_unlock_retry_authority_offer_blocked")]
-    public async Task Bridge_ReceiveStallRecovery_RuntimeUnlockOfferRecoveryEscalatesUnprovenRegularV4Recovery(string requestedReason)
+    [InlineData("tuna_activation_offer_send_timeout", false)]
+    [InlineData("runtime_unlock_retry_authority_offer_blocked", false)]
+    [InlineData("session_liveness_timeout_pending", true)]
+    public async Task Bridge_ReceiveStallRecovery_RuntimeUnlockOfferRecoveryEscalatesUnprovenRegularV4Recovery(
+        string requestedReason,
+        bool staleInProgress)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -3690,15 +3802,24 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             await adapter.ConnectAsync(cts.Token);
 
             var nowTick = Stopwatch.GetTimestamp();
+            var startedTick = staleInProgress
+                ? nowTick - Stopwatch.Frequency * 25
+                : nowTick;
+            var completedTick = staleInProgress ? 0 : nowTick;
             SetPrivateField(adapter, "receiveStallRecoveryInProgress", 1);
             SetPrivateField(adapter, "receiveStallRecoveryCount", 1);
-            SetPrivateField(adapter, "receiveStallLastRecoveryStartedTick", nowTick);
-            SetPrivateField(adapter, "receiveStallLastRecoveryCompletedTick", nowTick);
-            SetPrivateField(adapter, "receiveStallRecoveryAwaitingReceiveProof", 1);
+            SetPrivateField(adapter, "receiveStallLastRecoveryStartedTick", startedTick);
+            SetPrivateField(adapter, "receiveStallLastRecoveryCompletedTick", completedTick);
+            SetPrivateField(adapter, "receiveStallRecoveryAwaitingReceiveProof", staleInProgress ? 0 : 1);
             SetPrivateField(adapter, "receiveStallRecoveryRequiresControlProof", 1);
             SetPrivateField(adapter, "receiveStallRecoveryRequiresBulkProof", 1);
 
-            Assert.True(adapter.RequestFileTransferReceiveStallRecovery(requestedReason));
+            Assert.True(
+                adapter.RequestFileTransferReceiveStallRecovery(requestedReason),
+                GetRecentLogTextSince(logBaseline));
+            var expectedStaleGateReason = staleInProgress
+                ? "reason=regular_v4_stale_in_progress_recovery"
+                : "reason=regular_v4_unproven_recovery";
             var proofSeen = false;
             var proofDeadline = Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * 10);
             while (Stopwatch.GetTimestamp() < proofDeadline)
@@ -3706,7 +3827,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 var text = GetRecentLogTextSince(logBaseline);
                 proofSeen =
                     text.Contains("event=nkn_bridge_receive_stall_recovery_stale_gate_cleared", StringComparison.Ordinal) &&
-                    text.Contains("reason=regular_v4_unproven_recovery", StringComparison.Ordinal) &&
+                    text.Contains(expectedStaleGateReason, StringComparison.Ordinal) &&
                     text.Contains("event=nkn_bridge_receive_stall_recovery_regular_v4_unproven_escalation_allowed", StringComparison.Ordinal) &&
                     text.Contains("event=nkn_bridge_receive_stall_recovery_hard_restart", StringComparison.Ordinal) &&
                     text.Contains("stall_reason=regular_v4_unproven_recovery_escalation", StringComparison.Ordinal);
@@ -3721,7 +3842,15 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Assert.True(proofSeen, GetRecentLogTextSince(logBaseline));
 
             var logText = GetRecentLogTextSince(logBaseline);
-            Assert.Contains("event=nkn_bridge_receive_stall_recovery_cooldown_bypassed; reason=regular_v4_unproven_escalation", logText, StringComparison.Ordinal);
+            if (staleInProgress)
+            {
+                Assert.Contains("reason=regular_v4_stale_in_progress_recovery", logText, StringComparison.Ordinal);
+            }
+            else
+            {
+                Assert.Contains("event=nkn_bridge_receive_stall_recovery_cooldown_bypassed; reason=regular_v4_unproven_escalation", logText, StringComparison.Ordinal);
+            }
+
             Assert.Contains($"requested_reason={requestedReason}", logText, StringComparison.Ordinal);
             Assert.DoesNotContain($"event=nkn_bridge_receive_stall_recovery_request_ignored; reason=recovery_already_in_progress; requested_reason={requestedReason}", logText, StringComparison.Ordinal);
 

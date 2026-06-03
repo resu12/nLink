@@ -8181,6 +8181,7 @@ public sealed partial class SessionRuntime
     private void OnFileTransferChanged(object? sender, SessionFileTransferSnapshotChangedEventArgs e)
     {
         latestFileTransferSnapshot = e.Snapshot;
+        ObserveFileTransferPeerVisibleProgressForSessionLiveness(e.Snapshot);
         var screenShareActive = IsSessionScreenShareActive();
         fileTransferHost.LogSnapshot(e.Snapshot);
         _ = TryHandlePeerSessionEndFromFileTransferCancel(e.Snapshot);
