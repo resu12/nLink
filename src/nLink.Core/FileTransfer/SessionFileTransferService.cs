@@ -3817,7 +3817,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 "FileTransferService",
                 $"event=filetransfer_lifecycle_priority_sent; kind=complete; transfer_id={transferId}; session_id={sessionId}; path=control; file_size_bytes={context.FileSizeBytes}");
 
-            if (isV4)
+            if (sparseMode)
             {
                 using var dataFrameTimeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(LifecyclePrioritySendTimeoutMs));
                 await SendInboundV4CompleteAsync(
