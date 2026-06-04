@@ -46,6 +46,7 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         Assert.Contains(senderTransport.SentDataFrames, static frame => frame is FileTransferManifestFrameV6);
         Assert.Contains(senderTransport.SentDataFrames, static frame => frame is FileTransferChunkBatchFrameV6);
         Assert.Contains(receiverTransport.SentDataFrames, static frame => frame is FileTransferReceiverStateFrameV6);
+        Assert.Contains(receiverTransport.SentDataFrames, static frame => frame is FileTransferCompleteFrameV6);
         Assert.Contains(receiverTransport.SentCompletes, complete =>
             complete.TransferId == transferId &&
             complete.FileSizeBytes == payload.Length);

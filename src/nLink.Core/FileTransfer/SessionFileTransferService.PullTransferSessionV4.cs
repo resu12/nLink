@@ -501,9 +501,14 @@ public sealed partial class SessionFileTransferService
                         SignalOutboundSparseSenderPump(context);
                         break;
                     case FileTransferCompleteFrameV4 complete:
+                        if (await TryHandleOutboundLifecycleCompleteDataFrameAsync(context, complete).ConfigureAwait(false))
+                        {
+                            return;
+                        }
+
                         LocalOperationalLog.Info(
                             "FileTransferService",
-                            $"event=filetransfer_lifecycle_data_frame_ignored; kind=complete; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason=phase2_control_required; file_size_bytes={complete.FileSizeBytes}");
+                            $"event=filetransfer_lifecycle_data_frame_ignored; kind=complete; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason=metadata_mismatch; file_size_bytes={complete.FileSizeBytes}");
                         break;
                     case FileTransferCancelFrameV4 cancel:
                     {
@@ -9346,7 +9351,14 @@ public sealed partial class SessionFileTransferService
             now - previousFrontierRepair.LastRequestedUtc.Value >= TimeSpan.FromMilliseconds(repairRepeatIntervalMs);
     }
 
-    private async Task<bool> SendInboundV4CompleteAsync(InboundTransferContext context, string sessionId, string transferId, long fileSizeBytes, string sha256Base64, CancellationToken ct)
+    private async Task<bool> SendInboundV4CompleteAsync(
+        InboundTransferContext context,
+        string sessionId,
+        string transferId,
+        long fileSizeBytes,
+        string sha256Base64,
+        CancellationToken ct,
+        bool failOnSendFailure = true)
     {
         IFileTransferDataSession? dataSession;
         lock (gate)
@@ -9390,8 +9402,16 @@ public sealed partial class SessionFileTransferService
                 $"event=filetransfer_v4_complete_sent; transfer_id={transferId}; session_id={sessionId}; file_size_bytes={fileSizeBytes}");
             return true;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !failOnSendFailure)
         {
+            if (!failOnSendFailure)
+            {
+                LocalOperationalLog.Warn(
+                    "FileTransferService",
+                    $"event=filetransfer_v4_complete_data_frame_echo_failed; transfer_id={transferId}; session_id={sessionId}; file_size_bytes={fileSizeBytes}; error={ex.GetType().Name}");
+                return false;
+            }
+
             await TransitionInboundToTerminalAsync(
                 context,
                 FileTransferTransferState.Failed,

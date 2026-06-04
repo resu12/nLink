@@ -630,6 +630,51 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
+    public async Task PostTunaFallbackV6Outbound_AcceptsRedundantCompleteDataFrameAsTerminalProof()
+    {
+        const string transferId = "transfer_post_tuna_fallback_complete_data_frame";
+        const string sha256Base64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 255,
+            chunksAcceptedForTransport: 255,
+            remoteGrantedUntilExclusive: 256,
+            chunkCount: 256);
+        SetPrivateProperty(context, "Sha256Base64", sha256Base64);
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var complete = new FileTransferCompleteFrameV6
+        {
+            SessionId = $"session_{transferId}",
+            TransferId = transferId,
+            FileSizeBytes = 256L * 21 * 1024,
+            Sha256Base64 = sha256Base64,
+            TransportEpoch = 3,
+            RecoveryMode = "post_tuna_fallback",
+        };
+        var task = Assert.IsAssignableFrom<Task<bool>>(InvokePrivateMethod(
+            service,
+            "TryHandleOutboundLifecycleCompleteDataFrameAsync",
+            context,
+            complete));
+
+        Assert.True(await task);
+        Assert.Equal(FileTransferTransferState.Completed, GetPrivateProperty<FileTransferTransferState>(context, "State"));
+        Assert.Equal(complete.FileSizeBytes, GetPrivateProperty<long>(context, "BytesTransferred"));
+        Assert.Equal(complete.FileSizeBytes, GetPrivateProperty<long>(context, "BytesAcknowledgedByReceiver"));
+
+        var logTail = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_lifecycle_priority_received; kind=complete", logTail, StringComparison.Ordinal);
+        Assert.Contains("path=redundant_data_frame", logTail, StringComparison.Ordinal);
+        Assert.Contains("protocol_version=6", logTail, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=session_liveness_timeout;", logTail, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void RegularNknV4Fast_LiveTunaActivationRewindsAcceptedFrontierBeforeFileTunaV4()
     {
         const string transferId = "transfer_regular_v4_live_tuna_activation_rewind";

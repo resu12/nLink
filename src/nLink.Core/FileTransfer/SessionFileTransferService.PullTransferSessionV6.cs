@@ -217,9 +217,14 @@ public sealed partial class SessionFileTransferService
                         LogPullDataFrameIgnored(context.TransferId, context.SessionId, pauseControl, "lifecycle_data_frame_ignored_phase2");
                         break;
                     case FileTransferCompleteFrameV4 complete:
+                        if (await TryHandleOutboundLifecycleCompleteDataFrameAsync(context, complete).ConfigureAwait(false))
+                        {
+                            return;
+                        }
+
                         LocalOperationalLog.Info(
                             "FileTransferService",
-                            $"event=filetransfer_lifecycle_data_frame_ignored; kind=complete; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason=phase2_control_required; file_size_bytes={complete.FileSizeBytes}");
+                            $"event=filetransfer_lifecycle_data_frame_ignored; kind=complete; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason=metadata_mismatch; file_size_bytes={complete.FileSizeBytes}");
                         break;
                     case FileTransferCancelFrameV4 cancel:
                     {

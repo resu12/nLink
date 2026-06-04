@@ -3466,6 +3466,63 @@ public sealed partial class SessionFileTransferService : IDisposable
             ct: CancellationToken.None);
     }
 
+    private async Task<bool> TryHandleOutboundLifecycleCompleteDataFrameAsync(
+        OutboundTransferContext context,
+        FileTransferCompleteFrameV4 complete)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(complete);
+
+        bool completionEligible;
+        lock (gate)
+        {
+            completionEligible = ReferenceEquals(outboundTransfer, context) &&
+                !context.IsTerminal &&
+                string.Equals(context.TransferId, complete.TransferId, StringComparison.Ordinal) &&
+                string.Equals(context.SessionId, complete.SessionId, StringComparison.Ordinal) &&
+                (
+                    context.State == FileTransferTransferState.AwaitingCompletion ||
+                    context.PullSessionActive
+                ) &&
+                context.FileSizeBytes == complete.FileSizeBytes &&
+                string.Equals(context.Sha256Base64, complete.Sha256Base64, StringComparison.Ordinal);
+
+            if (!completionEligible)
+            {
+                return false;
+            }
+
+            context.BytesTransferred = context.FileSizeBytes;
+            context.ChunksTransferred = context.ChunkCount;
+            context.BytesAcceptedForTransport = context.FileSizeBytes;
+            context.ChunksAcceptedForTransport = context.ChunkCount;
+            context.BytesAcknowledgedByReceiver = context.FileSizeBytes;
+            context.State = FileTransferTransferState.AwaitingCompletion;
+            context.StatusMessage = "Waiting for receiver verification.";
+        }
+
+        LogTransferInfo(
+            "complete_received",
+            FileTransferDirection.Outbound,
+            complete.TransferId,
+            sessionId: complete.SessionId,
+            fileSizeBytes: complete.FileSizeBytes);
+        TouchOutboundV6PeerLiveness(context, "complete_data_frame");
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_lifecycle_priority_received; kind=complete; transfer_id={complete.TransferId}; session_id={complete.SessionId}; direction=outbound; file_size_bytes={complete.FileSizeBytes}; path=redundant_data_frame; protocol_version={(complete is FileTransferCompleteFrameV6 ? FileTransferProtocol.ProtocolVersionV6 : FileTransferProtocol.ProtocolVersionV4)}");
+        await TransitionOutboundToTerminalAsync(
+                context,
+                FileTransferTransferState.Completed,
+                errorCode: null,
+                statusMessage: "Transfer complete.",
+                notifyPeer: false,
+                cancelReason: null,
+                ct: CancellationToken.None)
+            .ConfigureAwait(false);
+        return true;
+    }
+
     private Task HandleIncomingPauseControlAsync(FileTransferPauseControlV6 message)
     {
         ArgumentNullException.ThrowIfNull(message);
@@ -3759,6 +3816,20 @@ public sealed partial class SessionFileTransferService : IDisposable
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=filetransfer_lifecycle_priority_sent; kind=complete; transfer_id={transferId}; session_id={sessionId}; path=control; file_size_bytes={context.FileSizeBytes}");
+
+            if (isV4)
+            {
+                using var dataFrameTimeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(LifecyclePrioritySendTimeoutMs));
+                await SendInboundV4CompleteAsync(
+                        context,
+                        sessionId,
+                        transferId,
+                        context.FileSizeBytes,
+                        computedHash,
+                        dataFrameTimeout.Token,
+                        failOnSendFailure: false)
+                    .ConfigureAwait(false);
+            }
 
             await TransitionInboundToTerminalAsync(
                 context,

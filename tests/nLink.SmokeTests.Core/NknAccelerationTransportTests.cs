@@ -4496,6 +4496,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                     return tail.Contains("event=tuna_acceleration_runtime_unlock_retry_after_fallback_repair_soft_settle;", StringComparison.Ordinal) &&
                            tail.Contains("settle_reason=active_regular_v4_recovery_soft_settle", StringComparison.Ordinal) &&
                            tail.Contains("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", StringComparison.Ordinal) &&
+                           tail.Contains("event=session_recovery_contract_retry_authority_granted;", StringComparison.Ordinal) &&
                            tail.Contains("event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_offer_send_not_observed", StringComparison.Ordinal);
                 },
                 TimeSpan.FromSeconds(3));
