@@ -54,6 +54,7 @@ public sealed class SessionFileTransferRouteRuntimeRegressionTests : SessionFile
         Assert.All(regularBatches, static batch => Assert.True(batch.ForceRegularNknBulk));
         Assert.DoesNotContain(result.SenderTransport.SentDataFrames, static frame => FileTransferProtocol.IsV6DataFrame(frame));
         Assert.DoesNotContain(result.ReceiverTransport.SentDataFrames, static frame => FileTransferProtocol.IsV6DataFrame(frame));
+        Assert.DoesNotContain(result.ReceiverTransport.SentDataFrames, static frame => frame is FileTransferCompleteFrameV4);
         Assert.DoesNotContain("event=filetransfer_v6_sender_started; transfer_id=" + transferId, result.LogTail, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_v6_receiver_started; transfer_id=" + transferId, result.LogTail, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_primary_regular_nkn_bulk_v6_selected; direction=outbound; transfer_id=" + transferId, result.LogTail, StringComparison.Ordinal);
@@ -80,6 +81,7 @@ public sealed class SessionFileTransferRouteRuntimeRegressionTests : SessionFile
         Assert.All(tunaBatches, static batch => Assert.False(batch.ForceRegularNknBulk));
         Assert.DoesNotContain(result.SenderTransport.SentDataFrames, static frame => FileTransferProtocol.IsV6DataFrame(frame));
         Assert.DoesNotContain(result.ReceiverTransport.SentDataFrames, static frame => FileTransferProtocol.IsV6DataFrame(frame));
+        Assert.DoesNotContain(result.ReceiverTransport.SentDataFrames, static frame => frame is FileTransferCompleteFrameV4);
         Assert.DoesNotContain("event=filetransfer_v6_sender_started; transfer_id=" + transferId, result.LogTail, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_v6_receiver_started; transfer_id=" + transferId, result.LogTail, StringComparison.Ordinal);
         AssertRouteAwareLogConsistency(

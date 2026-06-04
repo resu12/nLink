@@ -1548,6 +1548,16 @@ public sealed partial class NknSignalingTransport
                 realClient.ClearActiveFileTransferPostTunaFallbackRuntime(normalizedTransferId, source);
             }
         }
+
+        if (route != FileTransferRoute.RegularNknV4Fast ||
+            normalizedProtocolVersion != FileTransferProtocol.ProtocolVersionV4)
+        {
+            MarkFileTransferRegularV4RecoveryLivenessSupersededByRouteHint(
+                normalizedTransferId,
+                selection.TelemetryToken,
+                normalizedProtocolVersion,
+                source);
+        }
     }
 
     private void TrackFileTransferRouteHintForHandoff(

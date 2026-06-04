@@ -1212,6 +1212,39 @@ public sealed partial class NknSignalingTransport
             $"event=filetransfer_regular_v4_recovery_liveness_completed; session_id={state.SessionId}; transfer_id={state.TransferId}; generation={state.Generation}; route={state.RouteToken}; protocol_version={state.ProtocolVersion}; live_route_epoch={state.LiveRouteEpoch}; authority_reason={state.AuthorityReason}; reason={SanitizeLogToken(reason)}");
     }
 
+    private void MarkFileTransferRegularV4RecoveryLivenessSupersededByRouteHint(
+        string? transferId,
+        string routeToken,
+        int protocolVersion,
+        string source)
+    {
+        var normalizedTransferId = SanitizeLogToken(transferId ?? "none");
+        var normalizedRoute = SanitizeLogToken(routeToken);
+        FileTransferRegularV4RecoveryLivenessState? state;
+        var shouldLog = false;
+        lock (fileTransferFallbackProofGate)
+        {
+            state = fileTransferRegularV4RecoveryLivenessState;
+            if (state is not null &&
+                !state.Completed &&
+                string.Equals(state.TransferId, normalizedTransferId, StringComparison.Ordinal) &&
+                !string.Equals(normalizedRoute, FileTransferRouteResolver.RegularNknV4FastToken, StringComparison.Ordinal))
+            {
+                state.Completed = true;
+                shouldLog = true;
+            }
+        }
+
+        if (!shouldLog || state is null)
+        {
+            return;
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=filetransfer_regular_v4_recovery_liveness_completed; session_id={state.SessionId}; transfer_id={state.TransferId}; generation={state.Generation}; route={state.RouteToken}; protocol_version={state.ProtocolVersion}; live_route_epoch={state.LiveRouteEpoch}; authority_reason={state.AuthorityReason}; reason=regular_v4_recovery_superseded_by_route_hint; superseded_by_route={normalizedRoute}; superseded_by_protocol_version={protocolVersion}; source={SanitizeLogToken(source)}");
+    }
+
     internal bool IsAccelerationUserStoppedForCurrentSessionForTests => IsAccelerationUserStoppedForCurrentSession();
 
     internal void SetAccelerationAcceptedForTests(NknAccelerationLaneKind lanes, string? sessionId = null)

@@ -1777,6 +1777,7 @@ public sealed partial class SessionFileTransferService
 
             var staleGeneration =
                 context.V6RegularNknStateRefreshRetiredSendGeneration >= sendGeneration ||
+                sendGeneration < context.V6RegularNknStateRefreshSendGeneration ||
                 context.V6RegularNknStateRefreshActiveSendGeneration > 0 &&
                 sendGeneration < context.V6RegularNknStateRefreshActiveSendGeneration;
             if (!staleGeneration)

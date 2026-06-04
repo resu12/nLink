@@ -6531,6 +6531,86 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
+    public void PostTunaFallbackV6SupersededStateRefreshTimeout_DoesNotInterruptNewCheckpoint()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            "transfer_post_tuna_fallback_v6_superseded_state_refresh_timeout",
+            remoteNextExpectedChunkIndex: 1859,
+            chunksAcceptedForTransport: 1859,
+            remoteGrantedUntilExclusive: 1859,
+            chunkCount: 3121);
+        SetPrivateProperty(context, "V6RegularNknStateRefreshSendGeneration", 5L);
+        serviceType
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        serviceType
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, "unit_test_superseded_state_refresh"]);
+
+        var currentRequest = new FileTransferFrontierRequestFrameV6
+        {
+            SessionId = "session_transfer_post_tuna_fallback_v6_superseded_state_refresh_timeout",
+            TransferId = "transfer_post_tuna_fallback_v6_superseded_state_refresh_timeout",
+            TransportEpoch = 2,
+            RepairRequestId = "v6-regular-nkn-state-refresh:7",
+            MissingRanges =
+            [
+                new FileTransferRangeV4
+                {
+                    StartChunkIndex = 1859,
+                    ChunkCount = 1,
+                },
+            ],
+            Priority = "state_refresh",
+            RecoveryMode = "regular_nkn_state_refresh",
+        };
+        serviceType
+            .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, currentRequest, "unit_test_current_checkpoint"]);
+
+        var oldRequest = new FileTransferFrontierRequestFrameV6
+        {
+            SessionId = currentRequest.SessionId,
+            TransferId = currentRequest.TransferId,
+            TransportEpoch = 0,
+            RepairRequestId = "v6-regular-nkn-state-refresh:5",
+            MissingRanges =
+            [
+                new FileTransferRangeV4
+                {
+                    StartChunkIndex = 1859,
+                    ChunkCount = 1,
+                },
+            ],
+            Priority = "state_refresh",
+            RecoveryMode = "regular_nkn_state_refresh",
+        };
+
+        var logStart = GetOperationalLogLength();
+        var observed = (bool)serviceType
+            .GetMethod("TryObserveRetiredOutboundV4SparseRuntimeStateRefreshSend", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, oldRequest, 4L, "timeout"])!;
+
+        Assert.True(observed);
+        var currentLeg = context.GetType()
+            .GetProperty("CurrentTransferLeg", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!
+            .GetValue(context);
+        Assert.NotNull(currentLeg);
+        var checkpointRequestId = currentLeg!.GetType()
+            .GetProperty("CheckpointRequestId", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!
+            .GetValue(currentLeg) as string;
+        Assert.Equal("v6-regular-nkn-state-refresh:7", checkpointRequestId);
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_v6_regular_nkn_state_refresh_retired_send_observed;", log, StringComparison.Ordinal);
+        Assert.Contains("request_id=v6-regular-nkn-state-refresh:5", log, StringComparison.Ordinal);
+        Assert.Contains("active_request_id=(none)", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_fallback_checkpoint_retired;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_post_tuna_fallback_state_refresh_receive_recovery_requested;", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task PostTunaFallbackV6StaleInflightStateRefresh_RetiresWedgedSendSlotAndReplaysFreshProbeAfterResume()
     {
         using var service = new SessionFileTransferService();
