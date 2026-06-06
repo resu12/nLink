@@ -36,6 +36,7 @@ public sealed partial class NknSignalingTransport
     private static readonly TimeSpan RuntimeUnlockRecoveryContractLivenessDeferral = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan RuntimeUnlockRecoveryContractStaleNegotiationWindow = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan RuntimeUnlockRetryAuthorityDeadline = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan RuntimeUnlockRetryAuthorityInFlightSendGrace = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan FileTransferFallbackRecoveryLivenessDeferral = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan FileTransferRegularV4RecoveryLivenessDeferral = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan FileTransferRegularV4RecoveryLivenessMaxDeferral = TimeSpan.FromSeconds(210);
@@ -5305,6 +5306,12 @@ public sealed partial class NknSignalingTransport
             if (requiresContractLocalListenerRetry)
             {
                 MarkRuntimeUnlockRecoveryContractAuthorityBlocked(listenerRetryReason);
+                if (TryDeferRuntimeUnlockListenerRearmRetryForActiveRegularV4Recovery(
+                        sessionId,
+                        listenerRetryReason))
+                {
+                    return;
+                }
             }
 
             ScheduleAccelerationNegotiationRetry(listenerRetryReason);
@@ -5807,6 +5814,12 @@ public sealed partial class NknSignalingTransport
             !state.RetryAuthorityPending ||
             state.ObservedSendDeadlineUtcMs <= 0 ||
             nowMs <= state.ObservedSendDeadlineUtcMs)
+        {
+            return false;
+        }
+
+        if (state.ObservedSendPending &&
+            nowMs <= state.ObservedSendDeadlineUtcMs + (long)RuntimeUnlockRetryAuthorityInFlightSendGrace.TotalMilliseconds)
         {
             return false;
         }
@@ -6669,6 +6682,102 @@ public sealed partial class NknSignalingTransport
         }
 
         return deadlineRemainingMs > (long)RuntimeUnlockRegularV4FinalObservedSendProbeWindow.TotalMilliseconds;
+    }
+
+    private bool TryDeferRuntimeUnlockListenerRearmRetryForActiveRegularV4Recovery(
+        string sessionId,
+        string listenerRetryReason)
+    {
+        if (!ShouldDeferRuntimeUnlockListenerRearmRetryForActiveRegularV4Recovery(
+                sessionId,
+                out var deferReason,
+                out var deadlineRemainingMs))
+        {
+            return false;
+        }
+
+        RuntimeUnlockRecoveryRetryState? stateSnapshot = null;
+        lock (accelerationGate)
+        {
+            var state = runtimeUnlockRecoveryRetryState;
+            if (state is null ||
+                state.ContractState is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed ||
+                !state.RequiresLocalListenerRetry ||
+                !IsRuntimeUnlockActivationRetryReason(state.RetryReason) ||
+                !string.Equals(state.SessionId, sessionId.Trim(), StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            state.Settled = true;
+            state.RetryQueued = false;
+            state.RetryDispatching = false;
+            state.RetryDispatched = false;
+            state.RetryAuthorityPending = false;
+            state.RetryAuthorityGranted = false;
+            state.ObservedSendPending = false;
+            state.AuthorizedObservedLane = null;
+            state.AuthorityFailureReason = SanitizeLogToken(listenerRetryReason);
+            state.ObservedSendDeadlineUtcMs = 0;
+            state.RetryDeadlineUtcMs = Math.Max(
+                state.RetryDeadlineUtcMs,
+                nowMs + (long)RuntimeUnlockRecoveryContractRetryDeadline.TotalMilliseconds);
+            state.LivenessDeferralDeadlineUtcMs = Math.Max(
+                state.LivenessDeferralDeadlineUtcMs,
+                nowMs + (long)RuntimeUnlockRecoveryContractLivenessDeferral.TotalMilliseconds);
+            state.ContractState = SessionRecoveryContractState.RecoverySettled;
+            stateSnapshot = state;
+        }
+
+        LocalOperationalLog.Warn(
+            "NKN.Tuna",
+            $"event=session_recovery_contract_listener_rearm_deferred_for_regular_v4_recovery; session_id={SanitizeLogToken(sessionId)}; retired_generation={stateSnapshot!.RetiredOfferGeneration}; listener_retry_reason={SanitizeLogToken(listenerRetryReason)}; liveness_state={SanitizeLogToken(deferReason)}; liveness_deadline_remaining_ms={deadlineRemainingMs}; reason=awaiting_regular_v4_receive_recovery_before_listener_rearm");
+        LogRuntimeUnlockRecoveryContract("session_recovery_contract_recovery_settled", stateSnapshot.SessionId);
+        ScheduleRuntimeUnlockRetryAfterFallbackRepairSoftSettle(
+            stateSnapshot.RetiredOfferGeneration,
+            stateSnapshot.SessionId);
+        return true;
+    }
+
+    private bool ShouldDeferRuntimeUnlockListenerRearmRetryForActiveRegularV4Recovery(
+        string sessionId,
+        out string deferReason,
+        out long deadlineRemainingMs)
+    {
+        deferReason = "none";
+        deadlineRemainingMs = 0;
+        if (string.IsNullOrWhiteSpace(sessionId) ||
+            !HasActiveRegularV4FileTransferRouteHint(sessionId))
+        {
+            return false;
+        }
+
+        if (TryGetActiveRegularV4RecoveryLivenessStatus(
+                sessionId,
+                out var receiveProofObserved,
+                out var terminal,
+                out var deadlineExpired,
+                out var stateReason,
+                out deadlineRemainingMs))
+        {
+            deferReason = stateReason;
+            return !receiveProofObserved && !terminal && !deadlineExpired;
+        }
+
+        if (client is RealNknClientAdapter realClient &&
+            realClient.TryGetFileTransferRegularV4ActivationSendBlocker(
+                out var blockerReason,
+                out var blockerRemainingMs,
+                includeRegularV4Pressure: false) &&
+            IsReceiveStallActivationSendBlocker(blockerReason))
+        {
+            deferReason = blockerReason;
+            deadlineRemainingMs = blockerRemainingMs;
+            return true;
+        }
+
+        return false;
     }
 
     private bool HasSettledRuntimeUnlockRegularV4AuthorityProbeCandidate(string sessionId)
