@@ -795,6 +795,15 @@ public sealed class TunaWalletDiagnosticsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public void TunaRuntimeListenerSupervisor_RetainsUnlockAcrossListenerAcceptWindow()
+    {
+        Assert.True(
+            TunaRuntimePilotService.ListenerRestartUnlockRetentionForTests >= TimeSpan.FromSeconds(150),
+            "Listener restart retention must cover the sidecar accept timeout plus startup/recovery margin.");
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task TunaRuntimeUnlockCoordinator_EmptyPasswordDoesNotValidateOrStartCooldown()
     {
         var root = CreateTempRoot();

@@ -817,6 +817,47 @@ public sealed class NknIdentityStoreAndStartupCleanupTests : SessionRuntimeConne
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public async Task NknIdentityStore_OnWindows_ReadSeedBase64ForConnect_RetriesTransientSeedFileAccessDenied()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-protected-seed-transient-read", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            var options = LoadNknOptionsWithOverrides(keyPath, "protected-seed-transient-read-test");
+            var identity = NknIdentityStore.LoadOrCreate(options);
+            var secretPath = NknSecretStore.GetSecretPath(keyPath);
+            Assert.True(File.Exists(secretPath));
+
+            using var exclusive = File.Open(secretPath, FileMode.Open, FileAccess.Read, FileShare.None);
+            var readTask = Task.Run(() => NknIdentityStore.ReadSeedBase64ForConnect(keyPath));
+            await Task.Delay(750);
+
+            exclusive.Dispose();
+            var seedBase64 = await readTask;
+
+            Assert.False(string.IsNullOrWhiteSpace(seedBase64));
+            Assert.False(string.IsNullOrWhiteSpace(identity.Address));
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public void NknIdentityStore_WithInjectedProtectedBackend_MigratesLegacySeedBase64_AndClearsJsonSeed()
     {
         var tempDir = Path.Combine(Path.GetTempPath(), "nlink-protected-seed-migrate-injected", Guid.NewGuid().ToString("N"));

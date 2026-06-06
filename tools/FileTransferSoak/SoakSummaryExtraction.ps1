@@ -317,6 +317,29 @@ function Test-FileTransferRouteEventCanPrecedeSelection {
         $reason -eq 'live_route_tuna_reactivated'
 }
 
+function Test-FileTransferRouteEventSupersededBySelectedRoute {
+    param(
+        [Parameter(Mandatory = $true)]$Event,
+        [Parameter(Mandatory = $true)][string]$SelectedRoute,
+        [AllowEmptyString()][string]$ExpectedProtocol = ''
+    )
+
+    $supersededByRoute = Get-FileTransferEventField -Event $Event -Name 'superseded_by_route' -Default ''
+    if ([string]::IsNullOrWhiteSpace($supersededByRoute) -or
+        -not [string]::Equals($supersededByRoute, $SelectedRoute, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+
+    $supersededByProtocol = Get-FileTransferEventField -Event $Event -Name 'superseded_by_protocol_version' -Default ''
+    if (-not [string]::IsNullOrWhiteSpace($supersededByProtocol) -and
+        -not [string]::IsNullOrWhiteSpace($ExpectedProtocol) -and
+        $supersededByProtocol -ne $ExpectedProtocol) {
+        return $false
+    }
+
+    return $true
+}
+
 function Get-FileTransferSelectedRouteForEvent {
     param(
         [Parameter(Mandatory = $true)]$Event,
@@ -621,8 +644,16 @@ function Get-FileTransferRouteConsistency {
         $expectedBridgePolicy = Get-FileTransferRouteExpectedBridgePolicy -Route $selectedRoute
 
         $eventRoute = Get-FileTransferEventField -Event $event -Name 'route' -Default ''
+        $eventSupersededBySelectedRoute = Test-FileTransferRouteEventSupersededBySelectedRoute -Event $event -SelectedRoute $selectedRoute -ExpectedProtocol $expectedProtocol
         if (-not [string]::IsNullOrWhiteSpace($eventRoute) -and $eventRoute -ne $selectedRoute) {
-            Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding ("route token mismatch: selected_route={0}; event_route={1}; event={2}" -f $selectedRoute, $eventRoute, (Format-FileTransferEvidenceLine -Event $event)) -Event $event
+            if (-not $eventSupersededBySelectedRoute) {
+                Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding ("route token mismatch: selected_route={0}; event_route={1}; event={2}" -f $selectedRoute, $eventRoute, (Format-FileTransferEvidenceLine -Event $event)) -Event $event
+            }
+        }
+
+        if ($eventSupersededBySelectedRoute) {
+            Add-FileTransferRouteSelfConsistencyFindings -Findings $findings -EvidenceEvents $evidenceEvents -Event $event -Context 'superseded route event'
+            continue
         }
 
         $eventProtocol = Get-FileTransferEventField -Event $event -Name 'protocol_version' -Default ''

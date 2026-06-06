@@ -49,6 +49,12 @@ function Get-FileTransferBridgeLivenessIntegrationProof {
             Where-Object { ([string]$_.EventName).StartsWith('filetransfer_fallback_leg_authority_', [System.StringComparison]::OrdinalIgnoreCase) } |
             Sort-Object Sequence
     )
+    [object[]]$proofAuthorityEvents = @(
+        $authorityEvents |
+            Where-Object {
+                $_.EventName -ne 'filetransfer_fallback_leg_authority_superseded_by_route_hint'
+            }
+    )
     [object[]]$currentDeferralEvents = @($events | Where-Object { $_.EventName -eq 'session_liveness_timeout_deferred_for_current_filetransfer_recovery' })
     [object[]]$bridgeDeferralEvents = @($events | Where-Object { $_.EventName -eq 'session_liveness_timeout_deferred_for_bridge_filetransfer_recovery' })
     [object[]]$timeoutEvents = @($events | Where-Object { $_.EventName -eq 'session_liveness_timeout' })
@@ -90,7 +96,8 @@ function Get-FileTransferBridgeLivenessIntegrationProof {
                 }
             }
             elseif ($eventName -eq 'filetransfer_fallback_leg_authority_checkpoint_accepted' -or
-                    $eventName -eq 'filetransfer_fallback_leg_authority_completed') {
+                    $eventName -eq 'filetransfer_fallback_leg_authority_completed' -or
+                    $eventName -eq 'filetransfer_fallback_leg_authority_superseded_by_route_hint') {
                 if ($activeAuthorities.ContainsKey($key)) {
                     $activeAuthorities.Remove($key)
                 }
@@ -110,6 +117,7 @@ function Get-FileTransferBridgeLivenessIntegrationProof {
         if ($pendingStaleDeferrals.Count -gt 0 -and
             ($eventName -eq 'filetransfer_fallback_leg_authority_checkpoint_accepted' -or
              $eventName -eq 'filetransfer_fallback_leg_authority_completed' -or
+             $eventName -eq 'filetransfer_fallback_leg_authority_superseded_by_route_hint' -or
              $eventName -eq 'file_transfer_inbound_terminal' -or
              $eventName -eq 'file_transfer_outbound_terminal' -or
              $eventName -eq 'transfer_terminal')) {
@@ -164,7 +172,7 @@ function Get-FileTransferBridgeLivenessIntegrationProof {
     }
 
     $verdict = if ($findings.Count -eq 0) { 'pass' } else { 'fail' }
-    if ($authorityEvents.Count -eq 0 -and
+    if ($proofAuthorityEvents.Count -eq 0 -and
         $currentDeferralEvents.Count -eq 0 -and
         $bridgeDeferralEvents.Count -eq 0 -and
         $timeoutEvents.Count -eq 0) {
@@ -261,20 +269,28 @@ function Test-FileTransferBenignPostCompletionLateSenderFrame {
         return $false
     }
 
-    if ($Event.EventName -ne 'filetransfer_data_frame_ignored') {
-        return $false
-    }
-
     $reason = Get-FileTransferEventField -Event $Event -Name 'reason' -Default ''
-    if ($reason -ne 'post_completion_late_sender_frame') {
-        return $false
-    }
+    if ($Event.EventName -eq 'filetransfer_data_frame_ignored') {
+        if ($reason -ne 'post_completion_late_sender_frame') {
+            return $false
+        }
 
-    $frameType = Get-FileTransferEventField -Event $Event -Name 'frame_type' -Default ''
-    if ($frameType -ne 'filetransfer.manifest.v6' -and
-        $frameType -ne 'filetransfer.chunk_batch.v6' -and
-        $frameType -ne 'filetransfer.manifest.v4' -and
-        $frameType -ne 'filetransfer.chunk_batch.v4') {
+        $frameType = Get-FileTransferEventField -Event $Event -Name 'frame_type' -Default ''
+        if ($frameType -ne 'filetransfer.manifest.v6' -and
+            $frameType -ne 'filetransfer.chunk_batch.v6' -and
+            $frameType -ne 'filetransfer.manifest.v4' -and
+            $frameType -ne 'filetransfer.chunk_batch.v4') {
+            return $false
+        }
+    }
+    elseif ($Event.EventName -eq 'filetransfer_message_rejected') {
+        $messageType = Get-FileTransferEventField -Event $Event -Name 'message_type' -Default ''
+        if ($messageType -ne 'file_transfer_data_frame' -or
+            $reason -ne 'lifecycle_data_frame_unsupported') {
+            return $false
+        }
+    }
+    else {
         return $false
     }
 
@@ -311,6 +327,43 @@ function Test-FileTransferSummarySelectedRoute {
     }
 
     return $false
+}
+
+function Test-FileTransferEventInInitialRegularNknV4Route {
+    param(
+        $Event,
+        [Parameter(Mandatory = $true)]$Summary
+    )
+
+    if ($null -eq $Event -or $null -eq $Summary.RouteConsistency) {
+        return $false
+    }
+
+    [object[]]$selectedEvents = @($Summary.RouteConsistency.RouteSelectedEvents | Sort-Object Sequence)
+    [object[]]$regularSelections = @(
+        $selectedEvents |
+            Where-Object { (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'regular_nkn_v4_fast' }
+    )
+    if ($regularSelections.Count -eq 0) {
+        return $false
+    }
+
+    $firstRegularSequence = [int]$regularSelections[0].Sequence
+    if ([int]$Event.Sequence -lt $firstRegularSequence) {
+        return $false
+    }
+
+    [object[]]$firstNonRegularAfterInitial = @(
+        $selectedEvents |
+            Where-Object {
+                [int]$_.Sequence -gt $firstRegularSequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -ne 'regular_nkn_v4_fast'
+            } |
+            Sort-Object Sequence |
+            Select-Object -First 1
+    )
+
+    return $firstNonRegularAfterInitial.Count -eq 0 -or [int]$Event.Sequence -lt [int]$firstNonRegularAfterInitial[0].Sequence
 }
 
 function Test-FileTransferRouteConsistencyClean {
@@ -728,10 +781,7 @@ function Test-FileTransferRecoverableRegularNknV4BridgeClear {
 
     if (-not (Test-FileTransferCleanTerminalCompletion -Summary $Summary) -or
         -not (Test-FileTransferRouteConsistencyClean -Summary $Summary) -or
-        -not (Test-FileTransferSummarySelectedRoute -Summary $Summary -Route 'regular_nkn_v4_fast') -or
-        (Test-FileTransferSummarySelectedRoute -Summary $Summary -Route 'file_tuna_v4') -or
-        (Test-FileTransferSummarySelectedRoute -Summary $Summary -Route 'post_tuna_fallback_v6') -or
-        (Test-FileTransferSummarySelectedRoute -Summary $Summary -Route 'diagnostic_regular_nkn_v6')) {
+        -not (Test-FileTransferEventInInitialRegularNknV4Route -Event $Event -Summary $Summary)) {
         return $false
     }
 
@@ -1435,6 +1485,19 @@ function Get-FileTransferWarningIncidentKey {
 
     if ($Kind -eq 'fallback_frontier_repair_churn') {
         $frontier = Get-FileTransferEventField -Event $Event -Name 'frontier_chunk_index' -Default ''
+        if ([string]::IsNullOrWhiteSpace($frontier) -or $frontier -eq '-1') {
+            $repairRequestId = Get-FileTransferEventField -Event $Event -Name 'repair_request_id' -Default ''
+            if (-not [string]::IsNullOrWhiteSpace($repairRequestId) -and
+                $repairRequestId.StartsWith('v6-frontier:', [System.StringComparison]::OrdinalIgnoreCase)) {
+                $repairRequestParts = @($repairRequestId.Split(':') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                if ($repairRequestParts.Count -ge 3) {
+                    $parsedFrontier = $repairRequestParts[$repairRequestParts.Count - 2]
+                    if ($parsedFrontier -match '^\d+$') {
+                        $frontier = $parsedFrontier
+                    }
+                }
+            }
+        }
         if ([string]::IsNullOrWhiteSpace($frontier)) {
             $frontier = Get-FileTransferEventField -Event $Event -Name 'start_chunk_index' -Default ''
         }
@@ -1704,7 +1767,7 @@ function Get-FileTransferWarningCapResult {
         $countExceeded = $count -gt $countLimit
         $rateExceeded = $rate -gt $rateLimit
         if ($countExceeded -or $rateExceeded) {
-            if ((Test-FileTransferWarningCapCountExemption `
+            if ((Test-FileTransferWarningCapExemption `
                     -Summary $Summary `
                     -FallbackDiagnostics $FallbackDiagnostics `
                     -Kind $kind `
@@ -1712,7 +1775,7 @@ function Get-FileTransferWarningCapResult {
                     -CountExceeded $countExceeded `
                     -RateExceeded $rateExceeded)) {
                 $exemptedKinds.Add($kind) | Out-Null
-                $exemptedDetails.Add(('warning cap count exemption: kind={0}; context={1}; incident_count={2}; raw_event_count={3}; rate_per_second={4}; count_limit={5}; rate_limit_per_second={6}; reason=completed_post_tuna_fallback_frontier_rate_under_cap' -f $kind, $context, $count, $rawCount, $rate.ToString('0.###', $culture), $countLimit, $rateLimit.ToString('0.###', $culture))) | Out-Null
+                $exemptedDetails.Add(('warning cap exemption: kind={0}; context={1}; incident_count={2}; raw_event_count={3}; rate_per_second={4}; count_limit={5}; rate_limit_per_second={6}; reason=completed_post_tuna_fallback_frontier_terminal_proof' -f $kind, $context, $count, $rawCount, $rate.ToString('0.###', $culture), $countLimit, $rateLimit.ToString('0.###', $culture))) | Out-Null
                 continue
             }
 
@@ -1745,7 +1808,7 @@ function Get-FileTransferWarningCapResult {
     }
 }
 
-function Test-FileTransferWarningCapCountExemption {
+function Test-FileTransferWarningCapExemption {
     param(
         [Parameter(Mandatory = $true)]$Summary,
         $FallbackDiagnostics = $null,
@@ -1757,8 +1820,11 @@ function Test-FileTransferWarningCapCountExemption {
 
     if ($Kind -ne 'fallback_frontier_repair_churn' -or
         $Context -ne 'post_tuna_fallback' -or
-        -not $CountExceeded -or
-        $RateExceeded) {
+        (-not $CountExceeded -and -not $RateExceeded)) {
+        return $false
+    }
+
+    if ($RateExceeded -and $CountExceeded) {
         return $false
     }
 

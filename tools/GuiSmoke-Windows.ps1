@@ -2189,7 +2189,7 @@ function Copy-FileTransferLiveLogSlice {
 
 function Test-TunaGuiLogLinesContain {
     param(
-        [Parameter(Mandatory = $true)][object[]]$Lines,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Lines,
         [Parameter(Mandatory = $true)][string[]]$Needles
     )
 
@@ -3330,6 +3330,7 @@ function Wait-TunaGuiLiveRouteEpochStarted {
         [Parameter(Mandatory = $true)][string]$HandoffKind,
         [Parameter(Mandatory = $true)][string]$TargetTransport,
         [Parameter(Mandatory = $true)][string]$Description,
+        [int]$FallbackBookmark = -1,
         [int]$AfterLiveRouteEpoch = 0,
         [int]$TimeoutMs = 90000
     )
@@ -3342,6 +3343,7 @@ function Wait-TunaGuiLiveRouteEpochStarted {
         -TargetTransport $TargetTransport `
         -EventName 'filetransfer_live_route_epoch_started' `
         -Description $Description `
+        -FallbackBookmark $FallbackBookmark `
         -AfterLiveRouteEpoch $AfterLiveRouteEpoch `
         -TimeoutMs $TimeoutMs)
 }
@@ -3354,6 +3356,7 @@ function Wait-TunaGuiLiveRouteEpochRecovered {
         [Parameter(Mandatory = $true)][string]$HandoffKind,
         [Parameter(Mandatory = $true)][string]$TargetTransport,
         [Parameter(Mandatory = $true)][string]$Description,
+        [int]$FallbackBookmark = -1,
         [int]$LiveRouteEpoch = 0,
         [int]$AfterLiveRouteEpoch = 0,
         [int]$TimeoutMs = 150000
@@ -3367,6 +3370,7 @@ function Wait-TunaGuiLiveRouteEpochRecovered {
         -TargetTransport $TargetTransport `
         -EventName 'filetransfer_live_route_epoch_recovered' `
         -Description $Description `
+        -FallbackBookmark $FallbackBookmark `
         -LiveRouteEpoch $LiveRouteEpoch `
         -AfterLiveRouteEpoch $AfterLiveRouteEpoch `
         -TimeoutMs $TimeoutMs)
@@ -3381,6 +3385,7 @@ function Wait-TunaGuiLiveRouteEpochEvidence {
         [Parameter(Mandatory = $true)][string]$TargetTransport,
         [Parameter(Mandatory = $true)][string]$EventName,
         [Parameter(Mandatory = $true)][string]$Description,
+        [int]$FallbackBookmark = -1,
         [int]$LiveRouteEpoch = 0,
         [int]$AfterLiveRouteEpoch = 0,
         [int]$TimeoutMs = 90000
@@ -3395,8 +3400,10 @@ function Wait-TunaGuiLiveRouteEpochEvidence {
         'live_route_epoch='
     )
     $label = if ([string]::IsNullOrWhiteSpace($Description)) { $EventName } else { $Description }
-    return Wait-Until -TimeoutMs $TimeoutMs -PollMs 500 -OnTimeoutMessage "Timed out waiting for app log evidence: $label" -Condition {
-        foreach ($line in @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)) {
+    $findMatchingLine = {
+        param([int]$CandidateBookmark)
+
+        foreach ($line in @(Get-AppLogLinesAfterBookmark -Bookmark $CandidateBookmark)) {
             $matched = $true
             foreach ($needle in $needles) {
                 if ($line.IndexOf([string]$needle, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
@@ -3420,6 +3427,22 @@ function Wait-TunaGuiLiveRouteEpochEvidence {
             }
 
             return $line
+        }
+
+        return $null
+    }
+
+    return Wait-Until -TimeoutMs $TimeoutMs -PollMs 500 -OnTimeoutMessage "Timed out waiting for app log evidence: $label" -Condition {
+        $line = & $findMatchingLine $Bookmark
+        if ($line) {
+            return $line
+        }
+
+        if ($FallbackBookmark -ge 0 -and $FallbackBookmark -ne $Bookmark -and $FallbackBookmark -lt $Bookmark) {
+            $line = & $findMatchingLine $FallbackBookmark
+            if ($line) {
+                return $line
+            }
         }
 
         return $null
@@ -4360,7 +4383,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step; step={1}; action=off" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber)) | Out-Null
                 Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode
 
-                $fallbackStartedLine = Wait-TunaGuiLiveRouteEpochStarted -Bookmark $stepBookmark -Route 'post_tuna_fallback_v6' -ProtocolVersion 6 -HandoffKind 'tuna_to_normal_fallback' -TargetTransport 'regular_nkn' -Description 'live multi-toggle Tuna-to-normal fallback route epoch started' -AfterLiveRouteEpoch $lastObservedLiveRouteEpoch
+                $fallbackStartedLine = Wait-TunaGuiLiveRouteEpochStarted -Bookmark $stepBookmark -FallbackBookmark $bookmark -Route 'post_tuna_fallback_v6' -ProtocolVersion 6 -HandoffKind 'tuna_to_normal_fallback' -TargetTransport 'regular_nkn' -Description 'live multi-toggle Tuna-to-normal fallback route epoch started' -AfterLiveRouteEpoch $lastObservedLiveRouteEpoch
                 $observedEvidenceLines.Add($fallbackStartedLine) | Out-Null
                 Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'off_started' -Line $fallbackStartedLine
                 $fallbackEpochStartedObserved = $true
@@ -4380,7 +4403,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                     Unlock-TunaPayers -Context $Context -PayerMode $PayerMode -Password $WalletPassword
                 }
 
-                $fallbackResolutionLine = Wait-TunaGuiLiveRouteEpochRecovered -Bookmark $stepBookmark -Route 'post_tuna_fallback_v6' -ProtocolVersion 6 -HandoffKind 'tuna_to_normal_fallback' -TargetTransport 'regular_nkn' -Description 'live multi-toggle Tuna-to-normal fallback route epoch recovered' -LiveRouteEpoch $fallbackStartedEpoch -AfterLiveRouteEpoch $lastObservedLiveRouteEpoch
+                $fallbackResolutionLine = Wait-TunaGuiLiveRouteEpochRecovered -Bookmark $stepBookmark -FallbackBookmark $bookmark -Route 'post_tuna_fallback_v6' -ProtocolVersion 6 -HandoffKind 'tuna_to_normal_fallback' -TargetTransport 'regular_nkn' -Description 'live multi-toggle Tuna-to-normal fallback route epoch recovered' -LiveRouteEpoch $fallbackStartedEpoch -AfterLiveRouteEpoch $lastObservedLiveRouteEpoch
                 $observedEvidenceLines.Add($fallbackResolutionLine) | Out-Null
                 Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'off_recovered' -Line $fallbackResolutionLine
                 $fallbackEpochRecoveredObserved = $true
@@ -4407,7 +4430,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 }
 
                 $activationProofTimeoutMs = if ($RouteMode -eq 'live-regular-activation-cycle') { 240000 } else { 90000 }
-                $activationStartedLine = Wait-TunaGuiLiveRouteEpochStarted -Bookmark $stepBookmark -Route 'file_tuna_v4' -ProtocolVersion 4 -HandoffKind 'normal_to_tuna_activation' -TargetTransport 'tuna' -Description 'live multi-toggle normal-to-Tuna route epoch started' -AfterLiveRouteEpoch $lastObservedLiveRouteEpoch -TimeoutMs $activationProofTimeoutMs
+                $activationStartedLine = Wait-TunaGuiLiveRouteEpochStarted -Bookmark $stepBookmark -FallbackBookmark $bookmark -Route 'file_tuna_v4' -ProtocolVersion 4 -HandoffKind 'normal_to_tuna_activation' -TargetTransport 'tuna' -Description 'live multi-toggle normal-to-Tuna route epoch started' -AfterLiveRouteEpoch $lastObservedLiveRouteEpoch -TimeoutMs $activationProofTimeoutMs
                 $observedEvidenceLines.Add($activationStartedLine) | Out-Null
                 Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'on_started' -Line $activationStartedLine
                 $activationEpochStartedObserved = $true
@@ -4419,7 +4442,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 ) -TimeoutMs $activationProofTimeoutMs -Description 'live multi-toggle file Tuna V4 route selection')
                 $observedEvidenceLines.Add($activationRouteLine) | Out-Null
 
-                $activationRecoveredLine = Wait-TunaGuiLiveRouteEpochRecovered -Bookmark $stepBookmark -Route 'file_tuna_v4' -ProtocolVersion 4 -HandoffKind 'normal_to_tuna_activation' -TargetTransport 'tuna' -Description 'live multi-toggle normal-to-Tuna route epoch recovered' -LiveRouteEpoch $activationStartedEpoch -AfterLiveRouteEpoch $lastObservedLiveRouteEpoch -TimeoutMs $activationProofTimeoutMs
+                $activationRecoveredLine = Wait-TunaGuiLiveRouteEpochRecovered -Bookmark $stepBookmark -FallbackBookmark $bookmark -Route 'file_tuna_v4' -ProtocolVersion 4 -HandoffKind 'normal_to_tuna_activation' -TargetTransport 'tuna' -Description 'live multi-toggle normal-to-Tuna route epoch recovered' -LiveRouteEpoch $activationStartedEpoch -AfterLiveRouteEpoch $lastObservedLiveRouteEpoch -TimeoutMs $activationProofTimeoutMs
                 $observedEvidenceLines.Add($activationRecoveredLine) | Out-Null
                 Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'on_recovered' -Line $activationRecoveredLine
                 $activationEpochRecoveredObserved = $true
@@ -5262,7 +5285,7 @@ function Start-AppInstance {
     )
     Write-Host "[GUI Smoke] Starting $RoleName instance..." -ForegroundColor Cyan
 
-    $launchEnvironment = Get-AppLaunchEnvironmentOverrides
+    $launchEnvironment = Get-AppLaunchEnvironmentOverrides -RoleName $RoleName
     $workingDirectory = Split-Path -Parent $ExePath
 
     if ($launchEnvironment.Count -gt 0) {
@@ -5304,6 +5327,8 @@ function Test-LegacyHigherClarityTupleActive {
 }
 
 function Get-AppLaunchEnvironmentOverrides {
+    param([string]$RoleName = '')
+
     $overrides = @{}
     if (Test-LegacyHigherClarityTupleActive) {
         $overrides['NLINK_FEATURE_SCREENCAP_MAX_FPS'] = '15'
@@ -5311,7 +5336,33 @@ function Get-AppLaunchEnvironmentOverrides {
         $overrides['NLINK_FEATURE_SCREENCAP_SCALE'] = '1.0'
     }
 
+    $identityPath = Get-GuiSmokeNknIdentityPathForRole -RoleName $RoleName
+    if (-not [string]::IsNullOrWhiteSpace($identityPath)) {
+        $overrides['NLINK_NKN_KEY_PATH'] = $identityPath
+    }
+
     return $overrides
+}
+
+function Get-GuiSmokeNknIdentityPathForRole {
+    param([string]$RoleName = '')
+
+    $artifactDir = [string]$env:NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR
+    if ([string]::IsNullOrWhiteSpace($artifactDir)) {
+        return ''
+    }
+
+    $resolvedArtifactDir = [System.IO.Path]::GetFullPath($artifactDir)
+    $identityRoot = Join-Path $resolvedArtifactDir 'nkn-identities'
+    $safeRole = if ([string]::IsNullOrWhiteSpace($RoleName)) { 'app' } else { $RoleName.Trim().ToLowerInvariant() }
+    $safeRole = [regex]::Replace($safeRole, '[^a-z0-9_-]+', '-')
+    if ([string]::IsNullOrWhiteSpace($safeRole)) {
+        $safeRole = 'app'
+    }
+
+    $roleDir = Join-Path $identityRoot $safeRole
+    New-Item -ItemType Directory -Force -Path $roleDir | Out-Null
+    return (Join-Path $roleDir 'identity.json')
 }
 
 function Wait-Window {

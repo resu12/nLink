@@ -119,6 +119,11 @@ public interface IFileTransferRouteCompletionObserver
     void ObserveFileTransferRouteCompleted(FileTransferRouteCompletedNotification notification);
 }
 
+public interface IFileTransferSessionContextProvider
+{
+    string? CurrentFileTransferSessionId { get; }
+}
+
 public interface IFileTransferSignalingTransport
 {
     event EventHandler<FileTransferOfferReceivedEventArgs>? FileTransferOfferReceived;

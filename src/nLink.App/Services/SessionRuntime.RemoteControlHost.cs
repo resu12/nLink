@@ -8133,6 +8133,11 @@ public sealed partial class SessionRuntime
             .Replace('\r', '_')
             .Replace('\n', '_')
             .Trim();
+        if (TryDeferBridgeReceiveStallRecoveryExhaustedForActiveRecovery(e, bridgeReason))
+        {
+            return;
+        }
+
         LocalOperationalLog.Warn(
             "Session",
             $"event=peer_liveness_visible_disconnect; reason=receive_stall_recovery_exhausted; bridge_reason={bridgeReason}; role={role}; state={state}; transport_state={transportState}; run_id={GetRunIdForLog()}; session_id={GetSessionIdForLog()}; scenario={GetScenarioForLog()}");

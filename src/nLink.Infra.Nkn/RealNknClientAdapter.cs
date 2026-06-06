@@ -144,6 +144,9 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private long lastBridgeTransportHealthControlLastReceivedAgeMs;
     private long lastBridgeTransportHealthBulkLastReceivedAgeMs;
     private long lastBridgeTransportHealthDisconnectSignalCount;
+    private long lastBridgeTransportHealthReadyEmitted;
+    private long lastBridgeTransportHealthControlReady;
+    private long lastBridgeTransportHealthBulkReady;
     private long lastBridgeSendFrameTick;
     private long lastBridgeSendFramePayloadBytes;
     private long lastBridgeSendFrameSerializedBytes;
@@ -525,14 +528,26 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     internal void ClearActiveFileTransferPostTunaFallbackRuntime(string transferId, string reason)
     {
         var normalizedTransferId = string.IsNullOrWhiteSpace(transferId) ? "(unknown)" : transferId.Trim();
-        if (!activePostTunaFallbackRuntimeTransfers.TryRemove(normalizedTransferId, out _))
+        var removedRuntime = activePostTunaFallbackRuntimeTransfers.TryRemove(normalizedTransferId, out _);
+        var clearedAuthority = false;
+        lock (gate)
+        {
+            if (postTunaFallbackLegAuthority is { } authority &&
+                string.Equals(authority.TransferId, normalizedTransferId, StringComparison.Ordinal))
+            {
+                postTunaFallbackLegAuthority = null;
+                clearedAuthority = true;
+            }
+        }
+
+        if (!removedRuntime && !clearedAuthority)
         {
             return;
         }
 
         Log(
             "event=filetransfer_active_runtime_post_tuna_fallback_cleared; " +
-            $"transfer_id={SanitizeLogToken(normalizedTransferId)}; reason={SanitizeLogToken(reason)}; active_post_tuna_fallback_runtime_sessions={activePostTunaFallbackRuntimeTransfers.Count}; active_file_transfer_runtime_sessions={activeFileTransferRuntimeTransfers.Count}; active_file_transfer_data_sessions={Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions))}");
+            $"transfer_id={SanitizeLogToken(normalizedTransferId)}; reason={SanitizeLogToken(reason)}; removed_runtime={(removedRuntime ? 1 : 0)}; cleared_authority={(clearedAuthority ? 1 : 0)}; active_post_tuna_fallback_runtime_sessions={activePostTunaFallbackRuntimeTransfers.Count}; active_file_transfer_runtime_sessions={activeFileTransferRuntimeTransfers.Count}; active_file_transfer_data_sessions={Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions))}");
     }
 
     internal void ReportRegularV4ControlFeedbackPressure(
@@ -997,6 +1012,10 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         return string.Equals(
                    normalized,
                    "tuna_activation_offer_send_timeout",
+                   StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(
+                   normalized,
+                   "tuna_activation_offer_replay_send_timeout",
                    StringComparison.OrdinalIgnoreCase) ||
                string.Equals(
                    normalized,
@@ -1584,6 +1603,44 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
              bulkLastReceivedAgeMs >= ReceiveStallBulkAgeThresholdMs))
         {
             reason = "recent_zero_receive_health";
+            return true;
+        }
+
+        return false;
+    }
+
+    internal bool TryGetRuntimeUnlockBulkQueueObservedProofBlocker(out string reason)
+    {
+        reason = string.Empty;
+
+        var nowTick = Stopwatch.GetTimestamp();
+        var lastHealthTick = Volatile.Read(ref lastBridgeTransportHealthSummaryTick);
+        if (lastHealthTick <= 0)
+        {
+            reason = "bridge_health_missing";
+            return true;
+        }
+
+        var healthAge = Stopwatch.GetElapsedTime(lastHealthTick, nowTick);
+        if (healthAge > ScreenShareBridgeLogInterval + ScreenShareBridgeLogInterval)
+        {
+            reason = "bridge_health_stale";
+            return true;
+        }
+
+        var disconnectSignals = Volatile.Read(ref lastBridgeTransportHealthDisconnectSignalCount);
+        if (disconnectSignals > 0)
+        {
+            reason = "bridge_disconnect_signal";
+            return true;
+        }
+
+        var readyEmitted = Volatile.Read(ref lastBridgeTransportHealthReadyEmitted);
+        var controlReady = Volatile.Read(ref lastBridgeTransportHealthControlReady);
+        var bulkReady = Volatile.Read(ref lastBridgeTransportHealthBulkReady);
+        if (readyEmitted <= 0 || controlReady <= 0 || bulkReady <= 0)
+        {
+            reason = "bridge_not_ready";
             return true;
         }
 
@@ -2666,6 +2723,9 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         Volatile.Write(ref lastBridgeTransportHealthMessagesReceivedSinceLast, totalMessagesReceivedSinceLast);
         Volatile.Write(ref lastBridgeTransportHealthControlLastReceivedAgeMs, controlLastReceivedAgeMs);
         Volatile.Write(ref lastBridgeTransportHealthBulkLastReceivedAgeMs, bulkLastReceivedAgeMs);
+        Volatile.Write(ref lastBridgeTransportHealthReadyEmitted, readyEmitted);
+        Volatile.Write(ref lastBridgeTransportHealthControlReady, controlReady);
+        Volatile.Write(ref lastBridgeTransportHealthBulkReady, bulkReady);
         Volatile.Write(
             ref lastBridgeTransportHealthDisconnectSignalCount,
             disconnectCountSinceLast + connectFailedCountSinceLast + wsErrorCountSinceLast);
@@ -2782,6 +2842,9 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             (consecutiveWindows >= ReceiveStallRequiredConsecutiveWindows ||
              bulkConsecutiveWindows >= ReceiveStallFastRequiredConsecutiveWindows ||
              controlConsecutiveWindows >= ReceiveStallFastRequiredConsecutiveWindows);
+        var regularV4BulkReceiveRecentForProtocolRepair =
+            bulkLastReceivedAgeMs >= 0 &&
+            bulkLastReceivedAgeMs < ReceiveStallFileTransferProtocolRepairGraceMaxAgeMs;
         PostTunaFallbackLegAuthorityState? postTunaFallbackAuthority = null;
         lock (gate)
         {
@@ -2843,6 +2906,19 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 }
                 else if (!runtimeProtocolRepairGraceExhausted && regularV4ControlFeedbackPressureRecoveryNeeded)
                 {
+                    if (regularV4BulkReceiveRecentForProtocolRepair)
+                    {
+                        Log(
+                            "event=nkn_bridge_receive_stall_recovery_suppressed; reason=regular_v4_bulk_recent; " +
+                            $"connect_key={connectKey}; consecutive_zero_receive_windows={consecutiveWindows}; bulk_zero_receive_consecutive_windows={bulkConsecutiveWindows}; control_zero_receive_consecutive_windows={controlConsecutiveWindows}; active_file_transfer_sessions={fileTransferActiveSessionCount}; active_file_transfer_runtime_sessions={fileTransferActiveRuntimeCount}; recovery_count={Volatile.Read(ref receiveStallRecoveryCount)}; " +
+                            $"frames_sent_since_last={framesSentSinceLast}; control_messages_received_since_last={controlMessagesReceivedSinceLast}; bulk_messages_received_since_last={bulkMessagesReceivedSinceLast}; total_messages_received_since_last={totalMessagesReceivedSinceLast}; control_last_received_age_ms={controlLastReceivedAgeMs}; bulk_last_received_age_ms={bulkLastReceivedAgeMs}; pressure_remaining_ms={regularV4ControlFeedbackPressureRemainingMs}; protocol_repair_grace_max_age_ms={ReceiveStallFileTransferProtocolRepairGraceMaxAgeMs}");
+                        EmitReceiveStallRecoveryDeferredLifecycle(
+                            "regular_v4_bulk_recent",
+                            RegularV4ControlFeedbackPressureStallReason,
+                            connectKey);
+                        return;
+                    }
+
                     Log(
                         "event=nkn_bridge_receive_stall_recovery_protocol_repair_bypassed; reason=regular_v4_control_feedback_pressure; " +
                         $"connect_key={connectKey}; consecutive_zero_receive_windows={consecutiveWindows}; bulk_zero_receive_consecutive_windows={bulkConsecutiveWindows}; control_zero_receive_consecutive_windows={controlConsecutiveWindows}; active_file_transfer_sessions={fileTransferActiveSessionCount}; active_file_transfer_runtime_sessions={fileTransferActiveRuntimeCount}; recovery_count={Volatile.Read(ref receiveStallRecoveryCount)}; " +
@@ -2994,6 +3070,19 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
             if (regularV4ControlFeedbackPressureRecoveryNeeded)
             {
+                if (regularV4BulkReceiveRecentForProtocolRepair)
+                {
+                    Log(
+                        "event=nkn_bridge_receive_stall_recovery_suppressed; reason=regular_v4_bulk_recent; " +
+                        $"connect_key={connectKey}; stall_reason={RegularV4ControlFeedbackPressureStallReason}; consecutive_zero_receive_windows={qualifiedConsecutiveWindows}; all_zero_receive_consecutive_windows={consecutiveWindows}; bulk_zero_receive_consecutive_windows={bulkConsecutiveWindows}; control_zero_receive_consecutive_windows={controlConsecutiveWindows}; active_file_transfer_sessions={fileTransferActiveSessionCount}; active_file_transfer_runtime_sessions={fileTransferActiveRuntimeCount}; recovery_count={Volatile.Read(ref receiveStallRecoveryCount)}; " +
+                        $"control_messages_received_since_last={controlMessagesReceivedSinceLast}; bulk_messages_received_since_last={bulkMessagesReceivedSinceLast}; control_last_received_age_ms={controlLastReceivedAgeMs}; bulk_last_received_age_ms={bulkLastReceivedAgeMs}; pressure_remaining_ms={regularV4ControlFeedbackPressureRemainingMs}; protocol_repair_grace_max_age_ms={ReceiveStallFileTransferProtocolRepairGraceMaxAgeMs}");
+                    EmitReceiveStallRecoveryDeferredLifecycle(
+                        "regular_v4_bulk_recent",
+                        RegularV4ControlFeedbackPressureStallReason,
+                        connectKey);
+                    return;
+                }
+
                 regularV4ControlFeedbackPressureRecovery = true;
                 stallReason = RegularV4ControlFeedbackPressureStallReason;
                 requiresControlProof = true;

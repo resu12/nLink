@@ -44,6 +44,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int RepairResendIntervalMs = 150;
     private const int RepairAckTimeoutMs = 750;
     private const int LifecyclePrioritySendTimeoutMs = 1000;
+    private const int OfferSendTimeoutMs = 5000;
     private static readonly int[] OfferRetryDelaysMs = [1000, 3000, 7000, 15000, 30000];
     private const int OfferRetrySteadyStateDelayMs = 30000;
     private const int V6HeartbeatIntervalMs = 5000;
@@ -321,6 +322,9 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int V6RegularNknCheckpointSyncFailuresBeforeBridgeRecovery = 2;
     private const int V6PostTunaFallbackStaleInflightRecoveryMinStateRefreshFailures = 3;
     private const int V6PostTunaFallbackStaleCreditRecoveryMinStateRefreshFailures = 3;
+    private const int V6PostTunaFallbackTailReconciliationMinStateRefreshAttempts = 3;
+    private const int V6PostTunaFallbackLiveCheckpointTailStallThreshold = 3;
+    private const int V6PostTunaFallbackLiveCheckpointTailGapChunks = 128;
     private const string V6RegularNknStateRefreshRecoveryMode = "regular_nkn_state_refresh";
     private const string V6RegularNknStateRefreshPriority = "state_refresh";
     private const string V6RegularNknStateRefreshStaleInflightPriority = "state_refresh_stale_inflight";
@@ -403,6 +407,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     internal static TimeSpan? V6RegularNknFrontierRequestProgressGraceOverrideForTests { get; set; }
     internal static TimeSpan? V6RegularNknInferredFrontierRepairStallOverrideForTests { get; set; }
     internal static TimeSpan? V6RegularNknInferredFrontierRepairCooldownOverrideForTests { get; set; }
+    internal static TimeSpan? OfferSendTimeoutOverrideForTests { get; set; }
     public SessionFileTransferService(Func<string>? transferIdFactory = null)
     {
         this.transferIdFactory = transferIdFactory ?? (() => Guid.NewGuid().ToString("N"));
@@ -1042,6 +1047,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             var routeSelection = ResolveFileTransferRouteForNewTransfer(routeInput);
             context = new OutboundTransferContext(normalizedDescriptor, openReadStreamAsync)
             {
+                SessionId = ResolveCurrentFileTransferSessionId(currentTransport),
                 RouteSelection = routeSelection,
                 OfferedDataProtocolVersion = routeSelection.ProtocolVersion,
                 NegotiatedDataProtocolVersion = routeSelection.ProtocolVersion,
@@ -1092,7 +1098,7 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         var offerMessage = new FileTransferOfferV2
         {
-            SessionId = string.Empty,
+            SessionId = context.SessionId,
             TransferId = context.TransferId,
             FileName = context.FileName,
             FileSizeBytes = context.FileSizeBytes,
@@ -1100,18 +1106,29 @@ public sealed partial class SessionFileTransferService : IDisposable
             FileTransferRoute = context.RouteSelection.TelemetryToken,
         };
 
+        StartOutboundOfferRetryLoop(context, offerMessage);
+
         try
         {
             var offerTransport = GetTransportOrThrow();
-            await offerTransport.SendFileTransferOfferAsync(offerMessage, linkedCts.Token).ConfigureAwait(false);
-            LogTransferInfo(
-                "offer_sent",
-                FileTransferDirection.Outbound,
-                context.TransferId,
-                sessionId: context.SessionId,
-                fileName: context.FileName,
-                fileSizeBytes: context.FileSizeBytes);
-            StartOutboundOfferRetryLoop(context, offerMessage);
+            if (await TrySendOutboundOfferWithTimeoutAsync(
+                    context,
+                    offerTransport,
+                    offerMessage,
+                    attempt: 1,
+                    source: "initial",
+                    linkedCts.Token)
+                .ConfigureAwait(false))
+            {
+                LogTransferInfo(
+                    "offer_sent",
+                    FileTransferDirection.Outbound,
+                    context.TransferId,
+                    sessionId: context.SessionId,
+                    fileName: context.FileName,
+                    fileSizeBytes: context.FileSizeBytes);
+            }
+
             return CaptureCurrentOutboundSnapshot();
         }
         catch (OperationCanceledException) when (context.LifetimeCts.IsCancellationRequested || ct.IsCancellationRequested)
@@ -1138,6 +1155,53 @@ public sealed partial class SessionFileTransferService : IDisposable
                 cancelReason: null,
                 ct: CancellationToken.None).ConfigureAwait(false);
             return CaptureCurrentOutboundSnapshot();
+        }
+    }
+
+    private static string ResolveCurrentFileTransferSessionId(IFileTransferSignalingTransport? currentTransport)
+    {
+        if (currentTransport is not IFileTransferSessionContextProvider sessionContextProvider)
+        {
+            return string.Empty;
+        }
+
+        return string.IsNullOrWhiteSpace(sessionContextProvider.CurrentFileTransferSessionId)
+            ? string.Empty
+            : sessionContextProvider.CurrentFileTransferSessionId.Trim();
+    }
+
+    private static TimeSpan GetOfferSendTimeout()
+    {
+        var timeout = OfferSendTimeoutOverrideForTests ?? TimeSpan.FromMilliseconds(OfferSendTimeoutMs);
+        return timeout <= TimeSpan.Zero ? TimeSpan.FromMilliseconds(OfferSendTimeoutMs) : timeout;
+    }
+
+    private async Task<bool> TrySendOutboundOfferWithTimeoutAsync(
+        OutboundTransferContext context,
+        IFileTransferSignalingTransport currentTransport,
+        FileTransferOfferV2 offerMessage,
+        int attempt,
+        string source,
+        CancellationToken ct)
+    {
+        var timeout = GetOfferSendTimeout();
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_offer_send_started; transfer_id={context.TransferId}; session_id={context.SessionId}; attempt={attempt}; source={FormatProtocolLogValue(source)}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.RouteSelection.ProtocolVersion}; timeout_ms={(long)timeout.TotalMilliseconds}");
+
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeoutCts.CancelAfter(timeout);
+        try
+        {
+            await currentTransport.SendFileTransferOfferAsync(offerMessage, timeoutCts.Token).ConfigureAwait(false);
+            return true;
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested && timeoutCts.IsCancellationRequested)
+        {
+            LocalOperationalLog.Warn(
+                "FileTransferService",
+                $"event=filetransfer_offer_send_timed_out; transfer_id={context.TransferId}; session_id={context.SessionId}; attempt={attempt}; source={FormatProtocolLogValue(source)}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.RouteSelection.ProtocolVersion}; timeout_ms={(long)timeout.TotalMilliseconds}");
+            return false;
         }
     }
 
@@ -1191,10 +1255,19 @@ public sealed partial class SessionFileTransferService : IDisposable
             try
             {
                 attempt++;
-                await currentTransport.SendFileTransferOfferAsync(offerMessage, context.LifetimeCts.Token).ConfigureAwait(false);
-                LocalOperationalLog.Info(
-                    "FileTransferService",
-                    $"event=filetransfer_offer_retry_sent; transfer_id={context.TransferId}; session_id={context.SessionId}; attempt={attempt}; delay_ms={delayMs}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.RouteSelection.ProtocolVersion}");
+                if (await TrySendOutboundOfferWithTimeoutAsync(
+                        context,
+                        currentTransport,
+                        offerMessage,
+                        attempt,
+                        source: "retry",
+                        context.LifetimeCts.Token)
+                    .ConfigureAwait(false))
+                {
+                    LocalOperationalLog.Info(
+                        "FileTransferService",
+                        $"event=filetransfer_offer_retry_sent; transfer_id={context.TransferId}; session_id={context.SessionId}; attempt={attempt}; delay_ms={delayMs}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.RouteSelection.ProtocolVersion}");
+                }
             }
             catch (OperationCanceledException) when (context.LifetimeCts.IsCancellationRequested)
             {
@@ -4029,7 +4102,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             }
 
             if (current is InvalidOperationException invalidOperationException &&
-                invalidOperationException.Message.Contains("Bridge disconnected", StringComparison.OrdinalIgnoreCase))
+                (invalidOperationException.Message.Contains("Bridge disconnected", StringComparison.OrdinalIgnoreCase) ||
+                 invalidOperationException.Message.Contains("NKN bridge is not running", StringComparison.OrdinalIgnoreCase)))
             {
                 return true;
             }
@@ -4567,6 +4641,24 @@ public sealed partial class SessionFileTransferService : IDisposable
             "FileTransferService",
             $"event=filetransfer_fallback_stale_proof_ignored; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; leg_id={FormatProtocolLogValue(leg?.LegId ?? "(none)")}; leg_generation={leg?.Generation ?? 0}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? "(none)")}; protocol_version={leg?.ProtocolVersion ?? 0}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; transport_epoch={transportEpoch}; checkpoint_request_id={FormatProtocolLogValue(requestId ?? "(none)")}; expected_checkpoint_request_id={FormatProtocolLogValue(leg?.CheckpointRequestId ?? "(none)")}; reason={FormatProtocolLogValue(reason)}");
 
+    private static void LogFileTransferFallbackLegAuthoritySupersededByRouteHint(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        FileTransferLeg? supersededLeg,
+        FileTransferRouteSelection supersedingRoute,
+        string source)
+    {
+        if (!IsCurrentPostTunaFallbackLeg(supersededLeg))
+        {
+            return;
+        }
+
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_fallback_leg_authority_superseded_by_route_hint; direction={direction.ToString().ToLowerInvariant()}; session_id={FormatProtocolLogValue(sessionId)}; transfer_id={transferId}; leg_id={FormatProtocolLogValue(supersededLeg!.LegId)}; leg_generation={supersededLeg.Generation}; route={supersededLeg.RouteSelection.TelemetryToken}; protocol_version={supersededLeg.ProtocolVersion}; live_route_epoch={supersededLeg.LiveRouteEpochId}; transport_epoch={supersededLeg.TransportEpochId}; bridge_recovery_generation={supersededLeg.BridgeRecoveryGeneration}; checkpoint_request_id={FormatProtocolLogValue(supersededLeg.CheckpointRequestId ?? "(none)")}; authority_reason=live_route_tuna_reactivated; superseded_by_route={supersedingRoute.TelemetryToken}; superseded_by_protocol_version={supersedingRoute.ProtocolVersion}; source={FormatProtocolLogValue(source)}");
+    }
+
     private static void LogFileTransferFallbackStaleTransportEpochCleared(
         FileTransferDirection direction,
         string transferId,
@@ -5058,7 +5150,53 @@ public sealed partial class SessionFileTransferService : IDisposable
                 reason);
         }
 
+        TrackOutboundPostTunaFallbackLiveCheckpointLocked(context, leg, state);
         return true;
+    }
+
+    private static void TrackOutboundPostTunaFallbackLiveCheckpointLocked(
+        OutboundTransferContext context,
+        FileTransferLeg leg,
+        FileTransferReceiverStateFrameV6 state)
+    {
+        if (!context.RouteRuntime.UsesPostTunaFallbackV6Runtime ||
+            context.NegotiatedDataProtocolVersion < FileTransferProtocol.ProtocolVersionV6 ||
+            !context.PullPostTunaRecoveryActive ||
+            !IsCurrentPostTunaFallbackLeg(leg) ||
+            leg.State != FileTransferLegState.RecoveryActive ||
+            !leg.CanSendData ||
+            !IsV6TransportHandoffBlockingTail(context.V6TransportHandoff))
+        {
+            context.PostTunaFallbackLiveCheckpointStallCommittedChunkIndex = -1;
+            context.PostTunaFallbackLiveCheckpointStallHighestObservedChunkIndex = -1;
+            context.PostTunaFallbackLiveCheckpointStallCount = 0;
+            return;
+        }
+
+        var committed = Math.Clamp(state.ContiguousCommittedChunkIndex, 0, Math.Max(0, context.ChunkCount));
+        var highestObserved = Math.Max(-1, state.DurableReceivedHighestChunkIndex);
+        if (highestObserved - committed < V6PostTunaFallbackLiveCheckpointTailGapChunks)
+        {
+            context.PostTunaFallbackLiveCheckpointStallCommittedChunkIndex = committed;
+            context.PostTunaFallbackLiveCheckpointStallHighestObservedChunkIndex = highestObserved;
+            context.PostTunaFallbackLiveCheckpointStallCount = 0;
+            return;
+        }
+
+        if (context.PostTunaFallbackLiveCheckpointStallCommittedChunkIndex == committed &&
+            highestObserved >= context.PostTunaFallbackLiveCheckpointStallHighestObservedChunkIndex)
+        {
+            context.PostTunaFallbackLiveCheckpointStallCount++;
+        }
+        else
+        {
+            context.PostTunaFallbackLiveCheckpointStallCommittedChunkIndex = committed;
+            context.PostTunaFallbackLiveCheckpointStallCount = 1;
+        }
+
+        context.PostTunaFallbackLiveCheckpointStallHighestObservedChunkIndex = Math.Max(
+            context.PostTunaFallbackLiveCheckpointStallHighestObservedChunkIndex,
+            highestObserved);
     }
 
     private static void MarkInboundFallbackCheckpointAcceptedLocked(
@@ -6139,6 +6277,12 @@ public sealed partial class SessionFileTransferService : IDisposable
         public int V6RegularNknStateRefreshRetiredSendCount { get; set; }
 
         public int V6RegularNknStateRefreshFailureCount { get; set; }
+
+        public int PostTunaFallbackLiveCheckpointStallCommittedChunkIndex { get; set; } = -1;
+
+        public int PostTunaFallbackLiveCheckpointStallHighestObservedChunkIndex { get; set; } = -1;
+
+        public int PostTunaFallbackLiveCheckpointStallCount { get; set; }
 
         public FileTransferFrontierRequestFrameV6? V6RegularNknDeferredStateRefreshRequest { get; set; }
 

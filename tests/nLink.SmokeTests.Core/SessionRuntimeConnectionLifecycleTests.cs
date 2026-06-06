@@ -240,6 +240,376 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
     }
 
     [Fact]
+    public async Task RecoveryStateContract_ObservedSendAnswerWaitDefersAfterPriorContractDeferral()
+    {
+        var delay = new ControlledDelayScheduler();
+        var now = DateTimeOffset.UtcNow;
+        var heartbeatCount = 0;
+        var scripted = new ScriptedSignalingTransport(
+            onSendSessionHeartbeatAsync: (_, _) =>
+            {
+                Interlocked.Increment(ref heartbeatCount);
+                return Task.CompletedTask;
+            });
+        var options = SessionRuntimeWatchdogOptions.Default with
+        {
+            SessionLivenessHeartbeatInterval = TimeSpan.FromSeconds(1),
+            SessionLivenessSuspectTimeout = TimeSpan.FromSeconds(2),
+            SessionLivenessTimeout = TimeSpan.FromSeconds(5),
+        };
+        using var runtime = new SessionRuntime(() => scripted, options, delay.DelayAsync, nowProvider: () => now);
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        var securityState = CreateApprovedSecurityState(
+            new PeerAddress(scripted.LocalPeerAddress),
+            new PeerAddress("scripted.helpee.recovery-contract-answer-wait"));
+        var sessionId = securityState.SessionId!.Value.Value;
+        scripted.SetSessionSecurityStateForTests(securityState);
+        scripted.SetSessionRecoveryContractForTests(new SessionRecoveryContractSnapshot(
+            sessionId,
+            "ft_recovery_contract_answer_wait",
+            ContractGeneration: 31,
+            OfferGeneration: 18,
+            Kind: SessionRecoveryContractKind.RuntimeUnlockActivation,
+            State: SessionRecoveryContractState.RetryQueued,
+            RetryReason: "runtime_unlock_offer_send_not_observed",
+            RecoveryReason: "regular_v4_unproven_recovery_escalation",
+            CreatedUtc: now,
+            RetryDeadlineUtc: now.AddSeconds(40),
+            LivenessDeferralDeadlineUtc: now.AddSeconds(40),
+            RecoveryPending: false,
+            RecoverySettled: true,
+            RetryRequired: true,
+            RetryDispatching: false,
+            RetryDispatched: false,
+            RetryObserved: false,
+            QueuedBehindActiveNegotiation: false,
+            RetryAuthorityPending: true,
+            RetryAuthorityGranted: true,
+            ObservedSendPending: false,
+            ObservedSendDeadlineUtc: now.AddSeconds(40),
+            AuthorizedObservedLane: null,
+            AuthorityFailureReason: null,
+            AuthorityAttempt: 1));
+        var disconnected = 0;
+        runtime.Disconnected += (_, _) => disconnected++;
+        InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+
+        now = now.AddSeconds(6);
+        delay.CompleteLatest();
+        await Task.Delay(50);
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.Equal(0, disconnected);
+
+        scripted.SetSessionRecoveryContractForTests(new SessionRecoveryContractSnapshot(
+            sessionId,
+            "ft_recovery_contract_answer_wait",
+            ContractGeneration: 31,
+            OfferGeneration: 18,
+            Kind: SessionRecoveryContractKind.RuntimeUnlockActivation,
+            State: SessionRecoveryContractState.RetryDispatched,
+            RetryReason: "runtime_unlock_offer_send_not_observed",
+            RecoveryReason: "regular_v4_unproven_recovery_escalation",
+            CreatedUtc: now.AddSeconds(-10),
+            RetryDeadlineUtc: now.AddSeconds(40),
+            LivenessDeferralDeadlineUtc: now.AddSeconds(40),
+            RecoveryPending: false,
+            RecoverySettled: true,
+            RetryRequired: false,
+            RetryDispatching: false,
+            RetryDispatched: true,
+            RetryObserved: false,
+            QueuedBehindActiveNegotiation: false,
+            RetryAuthorityPending: false,
+            RetryAuthorityGranted: true,
+            ObservedSendPending: true,
+            ObservedSendDeadlineUtc: now.AddSeconds(40),
+            AuthorizedObservedLane: "control_to_bulk_endpoint",
+            AuthorityFailureReason: null,
+            AuthorityAttempt: 1));
+
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+        now = now.AddSeconds(6);
+        delay.CompleteLatest();
+        await Task.Delay(50);
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.Equal(0, disconnected);
+        Assert.True(Volatile.Read(ref heartbeatCount) > 0);
+
+        scripted.SetSessionRecoveryContractForTests(new SessionRecoveryContractSnapshot(
+            sessionId,
+            "ft_recovery_contract_answer_wait",
+            ContractGeneration: 31,
+            OfferGeneration: 18,
+            Kind: SessionRecoveryContractKind.RuntimeUnlockActivation,
+            State: SessionRecoveryContractState.Failed,
+            RetryReason: "runtime_unlock_offer_send_not_observed",
+            RecoveryReason: "regular_v4_unproven_recovery_escalation",
+            CreatedUtc: now.AddSeconds(-60),
+            RetryDeadlineUtc: now.AddSeconds(-1),
+            LivenessDeferralDeadlineUtc: now.AddSeconds(-1),
+            RecoveryPending: false,
+            RecoverySettled: true,
+            RetryRequired: false,
+            RetryDispatching: false,
+            RetryDispatched: true,
+            RetryObserved: false,
+            QueuedBehindActiveNegotiation: false,
+            RetryAuthorityPending: false,
+            RetryAuthorityGranted: true,
+            ObservedSendPending: false,
+            ObservedSendDeadlineUtc: now.AddSeconds(-1),
+            AuthorizedObservedLane: "control_to_bulk_endpoint",
+            AuthorityFailureReason: "runtime_unlock_offer_answer_timeout",
+            AuthorityAttempt: 1));
+
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+        now = now.AddSeconds(60);
+        delay.CompleteLatest();
+        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Failed, TimeSpan.FromSeconds(1));
+
+        Assert.Equal("Connection lost.", runtime.StatusText);
+        Assert.Equal(1, disconnected);
+    }
+
+    [Fact]
+    public async Task RecoveryStateContract_ObservedSendAnswerWaitSurvivesFileTransferDeferralCapUntilDeadline()
+    {
+        var delay = new ControlledDelayScheduler();
+        var now = DateTimeOffset.UtcNow;
+        var heartbeatCount = 0;
+        var scripted = new ScriptedSignalingTransport(
+            onSendSessionHeartbeatAsync: (_, _) =>
+            {
+                Interlocked.Increment(ref heartbeatCount);
+                return Task.CompletedTask;
+            });
+        var options = SessionRuntimeWatchdogOptions.Default with
+        {
+            SessionLivenessHeartbeatInterval = TimeSpan.FromSeconds(1),
+            SessionLivenessSuspectTimeout = TimeSpan.FromSeconds(2),
+            SessionLivenessTimeout = TimeSpan.FromSeconds(5),
+        };
+        using var runtime = new SessionRuntime(() => scripted, options, delay.DelayAsync, nowProvider: () => now);
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        var securityState = CreateApprovedSecurityState(
+            new PeerAddress(scripted.LocalPeerAddress),
+            new PeerAddress("scripted.helpee.recovery-contract-answer-wait-cap"));
+        var sessionId = securityState.SessionId!.Value.Value;
+        scripted.SetSessionSecurityStateForTests(securityState);
+        scripted.SetSessionRecoveryContractForTests(new SessionRecoveryContractSnapshot(
+            sessionId,
+            "ft_recovery_contract_answer_wait_cap",
+            ContractGeneration: 41,
+            OfferGeneration: 22,
+            Kind: SessionRecoveryContractKind.RuntimeUnlockActivation,
+            State: SessionRecoveryContractState.RetryDispatched,
+            RetryReason: "runtime_unlock_offer_send_not_observed",
+            RecoveryReason: "regular_v4_unproven_recovery_escalation",
+            CreatedUtc: now,
+            RetryDeadlineUtc: now.AddSeconds(240),
+            LivenessDeferralDeadlineUtc: now.AddSeconds(240),
+            RecoveryPending: false,
+            RecoverySettled: true,
+            RetryRequired: false,
+            RetryDispatching: false,
+            RetryDispatched: true,
+            RetryObserved: false,
+            QueuedBehindActiveNegotiation: false,
+            RetryAuthorityPending: false,
+            RetryAuthorityGranted: true,
+            ObservedSendPending: true,
+            ObservedSendDeadlineUtc: now.AddSeconds(240),
+            AuthorizedObservedLane: "control_to_bulk_endpoint",
+            AuthorityFailureReason: null,
+            AuthorityAttempt: 1));
+        var disconnected = 0;
+        runtime.Disconnected += (_, _) => disconnected++;
+        InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+
+        now = now.AddSeconds(211);
+        delay.CompleteLatest();
+        await Task.Delay(50);
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.Equal(0, disconnected);
+
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+        now = now.AddSeconds(4);
+        delay.CompleteLatest();
+        await Task.Delay(50);
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.Equal(0, disconnected);
+
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+        now = now.AddSeconds(4);
+        delay.CompleteLatest();
+        await Task.Delay(50);
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.Equal(0, disconnected);
+        Assert.True(Volatile.Read(ref heartbeatCount) > 0);
+
+        scripted.SetSessionRecoveryContractForTests(new SessionRecoveryContractSnapshot(
+            sessionId,
+            "ft_recovery_contract_answer_wait_cap",
+            ContractGeneration: 41,
+            OfferGeneration: 22,
+            Kind: SessionRecoveryContractKind.RuntimeUnlockActivation,
+            State: SessionRecoveryContractState.Failed,
+            RetryReason: "runtime_unlock_offer_send_not_observed",
+            RecoveryReason: "regular_v4_unproven_recovery_escalation",
+            CreatedUtc: now.AddSeconds(-240),
+            RetryDeadlineUtc: now.AddSeconds(-1),
+            LivenessDeferralDeadlineUtc: now.AddSeconds(-1),
+            RecoveryPending: false,
+            RecoverySettled: true,
+            RetryRequired: false,
+            RetryDispatching: false,
+            RetryDispatched: true,
+            RetryObserved: false,
+            QueuedBehindActiveNegotiation: false,
+            RetryAuthorityPending: false,
+            RetryAuthorityGranted: true,
+            ObservedSendPending: false,
+            ObservedSendDeadlineUtc: now.AddSeconds(-1),
+            AuthorizedObservedLane: "control_to_bulk_endpoint",
+            AuthorityFailureReason: "runtime_unlock_offer_answer_timeout",
+            AuthorityAttempt: 1));
+
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+        now = now.AddSeconds(40);
+        delay.CompleteLatest();
+        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Failed, TimeSpan.FromSeconds(1));
+
+        Assert.Equal("Connection lost.", runtime.StatusText);
+        Assert.Equal(1, disconnected);
+    }
+
+    [Fact]
+    public async Task RecoveryStateContract_ObservedSendAnswerWaitIsScopedPerContractGeneration()
+    {
+        var delay = new ControlledDelayScheduler();
+        var now = DateTimeOffset.UtcNow;
+        var heartbeatCount = 0;
+        var scripted = new ScriptedSignalingTransport(
+            onSendSessionHeartbeatAsync: (_, _) =>
+            {
+                Interlocked.Increment(ref heartbeatCount);
+                return Task.CompletedTask;
+            });
+        var options = SessionRuntimeWatchdogOptions.Default with
+        {
+            SessionLivenessHeartbeatInterval = TimeSpan.FromSeconds(1),
+            SessionLivenessSuspectTimeout = TimeSpan.FromSeconds(2),
+            SessionLivenessTimeout = TimeSpan.FromSeconds(5),
+        };
+        using var runtime = new SessionRuntime(() => scripted, options, delay.DelayAsync, nowProvider: () => now);
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        var securityState = CreateApprovedSecurityState(
+            new PeerAddress(scripted.LocalPeerAddress),
+            new PeerAddress("scripted.helpee.recovery-contract-answer-wait-two-generations"));
+        var sessionId = securityState.SessionId!.Value.Value;
+        scripted.SetSessionSecurityStateForTests(securityState);
+
+        SessionRecoveryContractSnapshot ObservedAnswerWaitContract(long contractGeneration, long offerGeneration) =>
+            new(
+                sessionId,
+                "ft_recovery_contract_answer_wait_two_generations",
+                ContractGeneration: contractGeneration,
+                OfferGeneration: offerGeneration,
+                Kind: SessionRecoveryContractKind.RuntimeUnlockActivation,
+                State: SessionRecoveryContractState.RetryDispatched,
+                RetryReason: "runtime_unlock_offer_answer_timeout",
+                RecoveryReason: "tuna_activation_offer_answer_timeout",
+                CreatedUtc: now.AddSeconds(-1),
+                RetryDeadlineUtc: now.AddSeconds(40),
+                LivenessDeferralDeadlineUtc: now.AddSeconds(40),
+                RecoveryPending: false,
+                RecoverySettled: true,
+                RetryRequired: false,
+                RetryDispatching: false,
+                RetryDispatched: true,
+                RetryObserved: false,
+                QueuedBehindActiveNegotiation: false,
+                RetryAuthorityPending: false,
+                RetryAuthorityGranted: true,
+                ObservedSendPending: true,
+                ObservedSendDeadlineUtc: now.AddSeconds(40),
+                AuthorizedObservedLane: "control_to_bulk_endpoint",
+                AuthorityFailureReason: null,
+                AuthorityAttempt: 1);
+
+        scripted.SetSessionRecoveryContractForTests(ObservedAnswerWaitContract(51, 31));
+        var disconnected = 0;
+        runtime.Disconnected += (_, _) => disconnected++;
+        InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+
+        now = now.AddSeconds(6);
+        delay.CompleteLatest();
+        await Task.Delay(50);
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.Equal(0, disconnected);
+
+        scripted.SetSessionRecoveryContractForTests(ObservedAnswerWaitContract(52, 32));
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+        now = now.AddSeconds(6);
+        delay.CompleteLatest();
+        await Task.Delay(50);
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.Equal(0, disconnected);
+
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+        now = now.AddSeconds(6);
+        delay.CompleteLatest();
+        await Task.Delay(50);
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.Equal(0, disconnected);
+        Assert.True(Volatile.Read(ref heartbeatCount) > 0);
+
+        scripted.SetSessionRecoveryContractForTests(new SessionRecoveryContractSnapshot(
+            sessionId,
+            "ft_recovery_contract_answer_wait_two_generations",
+            ContractGeneration: 52,
+            OfferGeneration: 32,
+            Kind: SessionRecoveryContractKind.RuntimeUnlockActivation,
+            State: SessionRecoveryContractState.Failed,
+            RetryReason: "runtime_unlock_offer_answer_timeout",
+            RecoveryReason: "tuna_activation_offer_answer_timeout",
+            CreatedUtc: now.AddSeconds(-60),
+            RetryDeadlineUtc: now.AddSeconds(-1),
+            LivenessDeferralDeadlineUtc: now.AddSeconds(-1),
+            RecoveryPending: false,
+            RecoverySettled: true,
+            RetryRequired: false,
+            RetryDispatching: false,
+            RetryDispatched: true,
+            RetryObserved: false,
+            QueuedBehindActiveNegotiation: false,
+            RetryAuthorityPending: false,
+            RetryAuthorityGranted: true,
+            ObservedSendPending: false,
+            ObservedSendDeadlineUtc: now.AddSeconds(-1),
+            AuthorizedObservedLane: "control_to_bulk_endpoint",
+            AuthorityFailureReason: "runtime_unlock_offer_answer_timeout",
+            AuthorityAttempt: 1));
+
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+        now = now.AddSeconds(40);
+        delay.CompleteLatest();
+        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Failed, TimeSpan.FromSeconds(1));
+
+        Assert.Equal("Connection lost.", runtime.StatusText);
+        Assert.Equal(1, disconnected);
+    }
+
+    [Fact]
     public async Task FileTransferRecoveryLiveness_LivenessDefersForCurrentFallbackBridgeRecovery()
     {
         var delay = new ControlledDelayScheduler();
@@ -2697,6 +3067,68 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
         Assert.Equal("Connection lost.", runtime.StatusText);
         Assert.False(runtime.LastDisconnectWasRemoteEnd);
         Assert.Equal(1, disconnectedCount);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void SessionRuntime_BridgeReceiveStallRecoveryExhausted_DefersForActiveRegularV4Progress()
+    {
+        var scripted = new ScriptedSignalingTransport();
+        using var runtime = new SessionRuntime(() => scripted);
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        var securityState = CreateApprovedSecurityState(
+            new PeerAddress(scripted.LocalPeerAddress),
+            new PeerAddress("scripted.helpee.bridge-exhausted-regular-v4"));
+        var sessionId = securityState.SessionId!.Value.Value;
+        scripted.SetSessionSecurityStateForTests(securityState);
+        InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
+
+        var transfer = new FileTransferTransferSnapshot(
+            sessionId,
+            "ft_bridge_exhausted_regular_v4",
+            FileTransferDirection.Inbound,
+            FileTransferTransferState.Receiving,
+            "regular-v4-progress.bin",
+            128L * 1024L * 1024L,
+            Sha256Base64: null,
+            BytesTransferred: 6_709_248,
+            ChunksTransferred: 312,
+            ChunkCount: 6242,
+            ChunkSizeBytes: 21_504,
+            ErrorCode: null,
+            StatusMessage: "Receiving...",
+            RouteToken: "regular_nkn_v4_fast",
+            ProtocolVersion: FileTransferProtocol.ProtocolVersionV4);
+        var snapshot = new SessionFileTransferSnapshot(Outbound: null, Inbound: transfer);
+        InvokePrivateMethod(
+            runtime,
+            "OnFileTransferChanged",
+            runtime,
+            new SessionFileTransferSnapshotChangedEventArgs(snapshot));
+        var disconnectedCount = 0;
+        runtime.Disconnected += (_, _) => disconnectedCount++;
+
+        InvokePrivateMethod(
+            runtime,
+            "OnBridgeLifecycle",
+            null,
+            new BridgeLifecycleEvent(
+                BridgeLifecycleEventKind.ReceiveStallRecoveryExhausted,
+                StartMode: null,
+                Pid: null,
+                ReadyTimeMs: null,
+                PingRttMs: null,
+                UptimeMs: null,
+                ExitCode: null,
+                ExitReasonKind: null,
+                ExitReasonText: "regular_v4_unproven_recovery_escalation"));
+
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.Equal("Connected", runtime.StatusText);
+        Assert.False(runtime.LastDisconnectWasRemoteEnd);
+        Assert.Equal(0, disconnectedCount);
     }
 
     [Trait("Category", "LegacySmoke")]

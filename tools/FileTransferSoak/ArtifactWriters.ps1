@@ -1699,6 +1699,15 @@ function Get-FileTransferFallbackLegAuthorityProof {
     [object[]]$bridgeEscalatedEvents = @($authorityEvents | Where-Object { $_.EventName -eq 'filetransfer_fallback_leg_authority_bridge_recovery_escalated' })
     [object[]]$completedEvents = @($authorityEvents | Where-Object { $_.EventName -eq 'filetransfer_fallback_leg_authority_completed' })
     [object[]]$sendBlockedEvents = @($authorityEvents | Where-Object { $_.EventName -eq 'filetransfer_fallback_leg_authority_send_blocked' })
+    [object[]]$supersededEvents = @($authorityEvents | Where-Object { $_.EventName -eq 'filetransfer_fallback_leg_authority_superseded_by_route_hint' })
+    [object[]]$proofAuthorityEvents = @(
+        @($startedEvents) +
+        @($checkpointAcceptedEvents) +
+        @($bridgeRequestedEvents) +
+        @($bridgeEscalatedEvents) +
+        @($completedEvents) +
+        @($sendBlockedEvents)
+    )
     [object[]]$staleProofIgnoredEvents = @(
         $TransferEvents |
             Where-Object { $_.EventName -eq 'filetransfer_fallback_stale_proof_ignored' } |
@@ -1743,15 +1752,21 @@ function Get-FileTransferFallbackLegAuthorityProof {
                 (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6'
             }
     )
-    if ($postTunaRouteSelected.Count -gt 0 -and $authorityEvents.Count -eq 0) {
+    [object[]]$postTunaOutboundRouteSelected = @(
+        $postTunaRouteSelected |
+            Where-Object {
+                (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound'
+            }
+    )
+    if ($postTunaOutboundRouteSelected.Count -gt 0 -and $authorityEvents.Count -eq 0) {
         $findings.Add('fallback leg authority missing for post_tuna_fallback_v6 route') | Out-Null
-        foreach ($event in @($postTunaRouteSelected | Select-Object -First 3)) {
+        foreach ($event in @($postTunaOutboundRouteSelected | Select-Object -First 3)) {
             $evidence.Add($event) | Out-Null
         }
     }
 
     $verdict = if ($findings.Count -eq 0) { 'pass' } else { 'fail' }
-    if ($postTunaRouteSelected.Count -eq 0 -and $authorityEvents.Count -eq 0) {
+    if ($postTunaOutboundRouteSelected.Count -eq 0 -and $proofAuthorityEvents.Count -eq 0) {
         $verdict = 'none'
     }
 

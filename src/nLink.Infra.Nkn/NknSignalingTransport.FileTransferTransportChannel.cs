@@ -1549,6 +1549,16 @@ public sealed partial class NknSignalingTransport
             }
         }
 
+        if (route != FileTransferRoute.PostTunaFallbackV6 ||
+            normalizedProtocolVersion != FileTransferProtocol.ProtocolVersionV6)
+        {
+            MarkFileTransferFallbackLegAuthoritySupersededByRouteHint(
+                normalizedTransferId,
+                selection.TelemetryToken,
+                normalizedProtocolVersion,
+                source);
+        }
+
         if (route != FileTransferRoute.RegularNknV4Fast ||
             normalizedProtocolVersion != FileTransferProtocol.ProtocolVersionV4)
         {

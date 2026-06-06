@@ -109,10 +109,16 @@ public sealed partial class SessionFileTransferService
             string.Equals(outbound.TransferId, request.TransferId, StringComparison.Ordinal) &&
             string.Equals(outbound.SessionId, request.SessionId, StringComparison.Ordinal))
         {
-            return AttachActiveRouteRuntimeForReceiveRecovery(
+            var enrichedRequest = AttachActiveRouteRuntimeForReceiveRecovery(
                 request,
                 outbound.RouteSelection,
                 outbound.CurrentLiveRouteEpoch?.EpochId ?? 0);
+            return AttachFallbackLegAuthority(
+                outbound,
+                enrichedRequest,
+                ResolvePostTunaFallbackReceiveRecoveryAuthorityReason(enrichedRequest),
+                enrichedRequest.CheckpointRequestId,
+                enrichedRequest.TransportEpoch > 0 ? enrichedRequest.TransportEpoch : null);
         }
 
         if (request.Direction == FileTransferDirection.Inbound &&
@@ -120,10 +126,16 @@ public sealed partial class SessionFileTransferService
             string.Equals(inbound.TransferId, request.TransferId, StringComparison.Ordinal) &&
             string.Equals(inbound.SessionId, request.SessionId, StringComparison.Ordinal))
         {
-            return AttachActiveRouteRuntimeForReceiveRecovery(
+            var enrichedRequest = AttachActiveRouteRuntimeForReceiveRecovery(
                 request,
                 inbound.RouteSelection,
                 inbound.CurrentLiveRouteEpoch?.EpochId ?? 0);
+            return AttachFallbackLegAuthority(
+                inbound,
+                enrichedRequest,
+                ResolvePostTunaFallbackReceiveRecoveryAuthorityReason(enrichedRequest),
+                enrichedRequest.CheckpointRequestId,
+                enrichedRequest.TransportEpoch > 0 ? enrichedRequest.TransportEpoch : null);
         }
 
         return request;
@@ -135,16 +147,36 @@ public sealed partial class SessionFileTransferService
         int liveRouteEpoch)
         => request with
         {
-            RouteToken = string.IsNullOrWhiteSpace(request.RouteToken)
-                ? routeSelection.TelemetryToken
-                : request.RouteToken,
-            ProtocolVersion = request.ProtocolVersion <= 0
-                ? routeSelection.ProtocolVersion
-                : request.ProtocolVersion,
-            LiveRouteEpoch = request.LiveRouteEpoch <= 0
-                ? liveRouteEpoch
-                : request.LiveRouteEpoch,
+            RouteToken = routeSelection.TelemetryToken,
+            ProtocolVersion = routeSelection.ProtocolVersion,
+            LiveRouteEpoch = liveRouteEpoch,
         };
+
+    private static string ResolvePostTunaFallbackReceiveRecoveryAuthorityReason(
+        FileTransferReceiveRecoveryRequest request)
+    {
+        if (!string.IsNullOrWhiteSpace(request.AuthorityReason) &&
+            request.AuthorityReason.Trim().StartsWith("post_tuna_fallback", StringComparison.OrdinalIgnoreCase))
+        {
+            return request.AuthorityReason.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.Reason) &&
+            request.Reason.Trim().StartsWith("post_tuna_fallback", StringComparison.OrdinalIgnoreCase))
+        {
+            return request.Reason.Trim();
+        }
+
+        if (string.Equals(
+                request.Reason,
+                "session_liveness_timeout_pending",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return "post_tuna_fallback_session_liveness_timeout_pending";
+        }
+
+        return "post_tuna_fallback_receive_recovery";
+    }
 
     private static TimeSpan ResolveV6PeerLivenessTimeout(V6TransportEpoch? epoch)
     {

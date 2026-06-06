@@ -877,7 +877,8 @@ public sealed partial class SessionFileTransferService
         }
 
         if (!CanUseV6TransportEpochsLocked(context) &&
-            TryPromoteInboundFileTunaV4FallbackToPostTunaV6Locked(context, reason, kind, target))
+            (TryPromoteInboundFileTunaV4FallbackToPostTunaV6Locked(context, reason, kind, target) ||
+             TryPromoteInboundRegularNknV4FallbackToPostTunaV6Locked(context, reason, kind, target)))
         {
             LocalOperationalLog.Info(
                 "FileTransferService",
@@ -1294,6 +1295,23 @@ public sealed partial class SessionFileTransferService
     private static int ResolveOutboundRepairAcceptedUntilExclusiveLocked(OutboundTransferContext context)
     {
         var acceptedUntil = Math.Clamp(context.ChunksAcceptedForTransport, 0, context.ChunkCount);
+        if (context.RouteRuntime.UsesPostTunaFallbackV6Runtime &&
+            context.CurrentTransferLeg is { CanSendData: true } leg &&
+            IsCurrentPostTunaFallbackLeg(leg) &&
+            leg.State == FileTransferLegState.RecoveryActive &&
+            leg.ProvenHighestObservedChunkIndex >= acceptedUntil)
+        {
+            var senderAvailableUntil = context.PullSourceCanSeek
+                ? context.ChunkCount
+                : ResolveOutboundSenderLocalAvailabilityUntilExclusiveLocked(context);
+            var provenObservedUntil = Math.Clamp(leg.ProvenHighestObservedChunkIndex + 1, 0, context.ChunkCount);
+            var fallbackAuthorityUntil = Math.Min(senderAvailableUntil, provenObservedUntil);
+            if (fallbackAuthorityUntil > acceptedUntil)
+            {
+                return Math.Clamp(fallbackAuthorityUntil, 0, context.ChunkCount);
+            }
+        }
+
         if (!context.RouteRuntime.UsesDiagnosticRegularNknV6Runtime)
         {
             return acceptedUntil;

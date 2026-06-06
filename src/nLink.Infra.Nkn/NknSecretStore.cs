@@ -12,7 +12,7 @@ internal static class NknSecretStore
 {
     private const string SecretFileSuffix = ".seed";
     private const string SecretPurpose = "nLink.NknIdentitySeed.v2";
-    private const int TransientSecretReadRetryCount = 5;
+    private const int TransientSecretReadRetryCount = 20;
     private const int TransientSecretReadRetryDelayMs = 50;
     private static Func<IProtectedSeedBackend>? backendOverrideForTests;
 

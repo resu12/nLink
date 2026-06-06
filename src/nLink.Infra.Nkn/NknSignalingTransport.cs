@@ -16,7 +16,7 @@ using NLink.Core.SessionSecurity;
 namespace NLink.Infra.Nkn;
 
 #pragma warning disable CS0067
-public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, ISessionLivenessSignalingTransport, ISessionRecoveryStateContract, ITransportAccelerationStatus, ITransportAccelerationControl, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IScreenShareTransportBackpressureProbe, IScreenShareTransportPolicyController, IFileTransferSignalingTransport, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferRecoveryLivenessState, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRouteCompletionObserver, IAuthoritativeConnectedAddressSource
+public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, ISessionLivenessSignalingTransport, ISessionRecoveryStateContract, ITransportAccelerationStatus, ITransportAccelerationControl, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IScreenShareTransportBackpressureProbe, IScreenShareTransportPolicyController, IFileTransferSignalingTransport, IFileTransferSessionContextProvider, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferRecoveryLivenessState, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRouteCompletionObserver, IAuthoritativeConnectedAddressSource
 {
     private readonly record struct FileTransferV6TransportEpochKey(
         string SessionId,
@@ -105,6 +105,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private static readonly TimeSpan FileTransferCancelEchoMinInterval = TimeSpan.FromMilliseconds(750);
     private static readonly TimeSpan FileTransferCompleteEchoMinInterval = TimeSpan.FromMilliseconds(750);
     private static readonly TimeSpan FileTransferControlReceiveStallRecoveryBroadcastCooldown = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan RuntimeUnlockRetryAuthorityPeerProofFreshness = TimeSpan.FromSeconds(12);
 
     private readonly NknTransportOptions options;
     private readonly NknIdentity identity;
@@ -117,7 +118,10 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private readonly ConcurrentDictionary<string, PendingAckWait> pendingAcks = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim outboundSendGate = new(1, 1);
     private readonly SemaphoreSlim screenShareMediaSendGate = new(1, 1);
+    private readonly object sessionLivenessProofGate = new();
     private string? outboundSendGateOwnerForDiagnostics;
+    private string? latestSessionLivenessProofSessionId;
+    private long latestSessionLivenessProofUtcMs;
     private readonly object controlOutboundQueueGate = new();
     private readonly object screenShareOutboundQueueGate = new();
     private readonly object screenShareControlFallbackGate = new();
@@ -436,6 +440,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         client is IAuthoritativeConnectedAddressSource authoritativeConnectedAddressSource &&
         authoritativeConnectedAddressSource.HasAuthoritativeConnectedAddress;
     public SessionSecurityState CurrentSessionSecurityState => currentSessionSecurityState;
+    public string? CurrentFileTransferSessionId => currentSessionSecurityState.SessionId?.Value;
     public bool IsTransportAccelerationActive => IsAccelerationNegotiatedAndHealthy();
     public bool ShouldUseFileTransferV6ForAcceleration => ShouldUseFileTransferV6ForAccelerationCore();
     public bool IsFileTunaActiveForRouteSelection => IsFileTransferAccelerationNegotiatedAndHealthy();
@@ -475,6 +480,12 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         var normalizedProofKind = string.IsNullOrWhiteSpace(proofKind) ? "unknown" : proofKind.Trim();
         var normalizedLane = string.IsNullOrWhiteSpace(lane) ? "unknown" : lane.Trim();
         var observedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        lock (sessionLivenessProofGate)
+        {
+            latestSessionLivenessProofSessionId = normalizedSessionId;
+            latestSessionLivenessProofUtcMs = observedUtcMs;
+        }
+
         LocalOperationalLog.Info(
             "SessionSecurity",
             $"event=session_liveness_proof_received; transport=nkn; session_id={SanitizeLogToken(normalizedSessionId)}; generation={generation}; sequence={sequence}; proof_kind={normalizedProofKind}; lane={normalizedLane}; observed_utc_ms={observedUtcMs}");
@@ -487,6 +498,40 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
                 observedUtcMs,
                 normalizedProofKind,
                 normalizedLane));
+    }
+
+    internal void SeedSessionLivenessProofForTests(string sessionId, long observedUtcMs)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return;
+        }
+
+        lock (sessionLivenessProofGate)
+        {
+            latestSessionLivenessProofSessionId = sessionId.Trim();
+            latestSessionLivenessProofUtcMs = observedUtcMs;
+        }
+    }
+
+    private bool HasRecentSessionLivenessProofForRuntimeUnlockAuthority(string? sessionId)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return false;
+        }
+
+        var normalizedSessionId = sessionId.Trim();
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var freshness = RuntimeUnlockRetryAuthorityPeerProofFreshnessOverrideForTests ??
+                        RuntimeUnlockRetryAuthorityPeerProofFreshness;
+        lock (sessionLivenessProofGate)
+        {
+            return latestSessionLivenessProofUtcMs > 0 &&
+                   string.Equals(latestSessionLivenessProofSessionId, normalizedSessionId, StringComparison.Ordinal) &&
+                   nowMs - latestSessionLivenessProofUtcMs <=
+                   (long)freshness.TotalMilliseconds;
+        }
     }
 
     private static bool IsDiagnosticRegularNknV6RouteEnabledCore()
@@ -2455,11 +2500,14 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             var sessionId = currentSessionSecurityState.SessionId?.Value;
             MarkFileTransferFallbackLegAuthorityBridgeRecoveryLifecycle("started", recoveryReason);
             MarkFileTransferRegularV4RecoveryLivenessBridgeRecoveryLifecycle("started", recoveryReason);
-            MarkFileTransferTunaActivationBridgeRecoveryStarted(recoveryReason);
-            InterruptRuntimeUnlockOfferForBridgeRecovery(
+            var interruptedRuntimeUnlockOffer = InterruptRuntimeUnlockOfferForBridgeRecovery(
                 "offer_interrupted_by_bridge_recovery",
                 recoveryReason,
                 "receive_stall_recovery_started");
+            if (interruptedRuntimeUnlockOffer || IsFileTransferTunaActivationBridgeRecoveryActive())
+            {
+                MarkFileTransferTunaActivationBridgeRecoveryStarted(recoveryReason);
+            }
             var sessionLivenessReceiveRecovery = IsSessionLivenessReceiveRecoveryReason(recoveryReason);
             var protectedActivePostTunaFallbackRepair =
                 ShouldProtectPostTunaFallbackAvailabilityDuringRuntimeUnlockRecovery(

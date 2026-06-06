@@ -718,8 +718,9 @@ internal sealed class JsonTunaUsageAccountingStore : ITunaUsageAccountingStore
 
 internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
 {
-    private static readonly TimeSpan ListenerRestartUnlockRetention = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan ListenerRestartUnlockRetention = TimeSpan.FromSeconds(180);
     private static readonly TimeSpan DefaultStopCompletionTimeout = TimeSpan.FromSeconds(10);
+    internal static TimeSpan ListenerRestartUnlockRetentionForTests => ListenerRestartUnlockRetention;
     private readonly object gate = new();
     private readonly ITunaRuntimePreferenceStore preferenceStore;
     private readonly ITunaUsageAccountingStore usageStore;
@@ -1783,7 +1784,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                     NotifyStateChanged();
                     LocalOperationalLog.Info(
                         "NKN.Tuna",
-                        "event=tuna_runtime_listener_restart_unlock_expired; retention_sec=60");
+                        $"event=tuna_runtime_listener_restart_unlock_expired; retention_sec={(int)Math.Ceiling(ListenerRestartUnlockRetention.TotalSeconds)}");
                 }
                 catch (OperationCanceledException)
                 {
