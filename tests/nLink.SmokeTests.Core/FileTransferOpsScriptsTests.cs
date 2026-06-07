@@ -319,7 +319,7 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Contains("route_sequence", scriptText, StringComparison.Ordinal);
         Assert.Contains("live_epoch_route_changes", scriptText, StringComparison.Ordinal);
         Assert.Contains("file_tuna_v6 route is not allowed", scriptText, StringComparison.Ordinal);
-        Assert.Contains("network_variance_policy=public_nkn_paired_rerun", scriptText, StringComparison.Ordinal);
+        Assert.Contains("network_variance_policy=live_transport_paired_rerun", scriptText, StringComparison.Ordinal);
         Assert.Contains("capped_external_transport_churn_requires_clean_rerun", scriptText, StringComparison.Ordinal);
         Assert.Contains("regular_nkn_external_transport_churn", scriptText, StringComparison.Ordinal);
         Assert.Contains("route-acceptance-summary.txt", scriptText, StringComparison.Ordinal);
@@ -516,12 +516,30 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Contains("secondTransfer", guiText, StringComparison.Ordinal);
         Assert.Contains("filetransfer-second-transfer-retained-log-slice.log", guiText, StringComparison.Ordinal);
         Assert.Contains("Wait-TunaGuiSecondTransferReadinessOrThrow", guiText, StringComparison.Ordinal);
+        Assert.Contains("$lastTunaInactiveIndex", guiText, StringComparison.Ordinal);
+        Assert.Contains("$requiredStableReadyPolls = 4", guiText, StringComparison.Ordinal);
+        Assert.Contains("last_tuna_inactive_index=", guiText, StringComparison.Ordinal);
+        Assert.Contains("required_stable_ready_polls=", guiText, StringComparison.Ordinal);
         Assert.Contains("-FileName 'filetransfer-second-transfer-retained-log-slice.log'", guiText, StringComparison.Ordinal);
         Assert.Contains("setupFailurePhase", guiText, StringComparison.Ordinal);
         Assert.Contains("second-transfer-analysis", wrapperText, StringComparison.Ordinal);
         Assert.Contains("Invoke-TunaGuiLiveRetainedAnalysisBestEffort", wrapperText, StringComparison.Ordinal);
         Assert.Contains("post_tuna_fallback_v6,file_tuna_v4", guiText, StringComparison.Ordinal);
         Assert.Contains("Second transfer after live reactivation failed route/integrity check", guiText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RunFileTransferTunaGuiSmoke_MergesMilestoneEvidenceChronologically()
+    {
+        var repoRoot = FindRepoRoot();
+        var scriptPath = Path.Combine(repoRoot, "tools", "Run-FileTransferTunaGuiSmoke.ps1");
+        var scriptText = File.ReadAllText(scriptPath);
+
+        Assert.Contains("Sort-TunaGuiRetainedLogLinesChronologically", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Get-TunaGuiRetainedLogLineSortKey", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Sort-Object -Property SortTicks, Ordinal", scriptText, StringComparison.Ordinal);
+        Assert.DoesNotContain("$combined = @($missingLines.ToArray())", scriptText, StringComparison.Ordinal);
+        Assert.DoesNotContain("$combined += $existingText", scriptText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2362,6 +2380,44 @@ public sealed class FileTransferOpsScriptsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_PostTunaFallbackReceiverStateRateOnlyOverCap_WithTerminalProofReturnsWarning()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = StretchTransferWindowForWarningRate(BuildRouteAwareMeasuredFallbackFixture(), terminalOffsetSeconds: 30);
+        var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
+        Assert.True(firstTerminalIndex > 0);
+        var churnLines = new List<string>();
+        for (var i = 0; i < 300; i++)
+        {
+            var chunk = i % 2 == 0 ? 512 : 768;
+            var secondsOffset = i % 2 == 0 ? 0 : 2;
+            var eventName = i % 2 == 0
+                ? "filetransfer_v6_receiver_state_deferred"
+                : "filetransfer_v6_receiver_state_coalesced";
+            churnLines.Add(LogLine($"event={eventName}; direction=inbound; transfer_id=[redacted]; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; reason=frontier_stalled; next_chunk_index={chunk}; highest_received_chunk_index={chunk + 32}", secondsOffset: secondsOffset));
+        }
+
+        lines.InsertRange(firstTerminalIndex, churnLines);
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("WARN_EXTERNAL_TRANSPORT", verdict["verdict"]);
+        Assert.Equal("0", verdict["hard_failure_count"]);
+        Assert.Equal("fallback_receiver_state_churn", verdict["warning_kinds"]);
+        Assert.Equal("(none)", verdict["warning_cap_exceeded_kinds"]);
+        Assert.Equal("fallback_receiver_state_churn", verdict["warning_cap_exempted_kinds"]);
+        Assert.Equal("fallback_receiver_state_churn:2", verdict["warning_kind_counts"]);
+        Assert.Equal("fallback_receiver_state_churn:10", verdict["warning_kind_raw_event_counts"]);
+        Assert.Equal("fallback_receiver_state_churn:post_tuna_fallback", verdict["warning_cap_contexts"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_PostTunaFallbackRepeatedBridgeClearSameBurst_CountsAsSingleIncident()
     {
         if (!OperatingSystem.IsWindows())
@@ -2647,10 +2703,10 @@ public sealed class FileTransferOpsScriptsTests
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("INCONCLUSIVE_PROGRESS_TIMEOUT", verdict["verdict"]);
         Assert.Equal("0", verdict["hard_failure_count"]);
-        Assert.Contains("public_nkn_regular_v4_recovery_storm", verdict["warning_kinds"], StringComparison.Ordinal);
+        Assert.Contains("regular_v4_transport_recovery_storm", verdict["warning_kinds"], StringComparison.Ordinal);
 
         var stabilityText = File.ReadAllText(Path.Combine(result.ArtifactDir, "stability-gates-summary.txt"));
-        Assert.Contains("public_nkn_regular_v4_recovery_storm", stabilityText, StringComparison.Ordinal);
+        Assert.Contains("regular_v4_transport_recovery_storm", stabilityText, StringComparison.Ordinal);
         Assert.DoesNotContain("bridge bulk send failure/clear", stabilityText, StringComparison.Ordinal);
     }
 
@@ -5954,7 +6010,7 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("PASS", summary["verdict"]);
             Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-128mb.retry_used"]);
             Assert.Equal("2", summary["regular-v4-live-activation-off-on-off-128mb.selected_attempt"]);
-            Assert.Contains("public_nkn_receive_recovery_exhausted_before_runtime_unlock", summary["regular-v4-live-activation-off-on-off-128mb.first_failure_reason"], StringComparison.Ordinal);
+            Assert.Contains("live_transport_receive_recovery_exhausted_before_runtime_unlock", summary["regular-v4-live-activation-off-on-off-128mb.first_failure_reason"], StringComparison.Ordinal);
             Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-128mb.acceptance_failure_class"]);
             Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-128mb.live_route_epoch_proof_verdict"]);
             Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-128mb.fallback_leg_authority_proof_verdict"]);
@@ -6004,9 +6060,9 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-128mb.retry_used"]);
             Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-128mb.selected_attempt"]);
             Assert.Equal("environmental", summary["regular-v4-live-activation-off-on-off-128mb.acceptance_failure_class"]);
-            Assert.Equal("public_nkn_receive_recovery_exhausted_before_runtime_unlock", summary["regular-v4-live-activation-off-on-off-128mb.environmental_classification"]);
+            Assert.Equal("live_transport_receive_recovery_exhausted_before_runtime_unlock", summary["regular-v4-live-activation-off-on-off-128mb.environmental_classification"]);
             Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-128mb.measurement_contaminated"]);
-            Assert.Contains("public_nkn_receive_recovery_exhausted_before_runtime_unlock", summaryText, StringComparison.Ordinal);
+            Assert.Contains("live_transport_receive_recovery_exhausted_before_runtime_unlock", summaryText, StringComparison.Ordinal);
         }
         finally
         {
@@ -6306,6 +6362,55 @@ if (-not $result.RegressionFailed) {
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task RunFileTransferRouteAcceptance_Phase5PerformanceFirstAttemptKeepsEvidenceWhenRerunHasWarningPolicyFailure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "phase5-performance-first-rerun-warning-fail");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-performance-first-rerun-warning-fail");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_LIVE_SWITCH_OFF_HELPER_64MB_GOODPUT_BPS"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_LIVE_SWITCH_OFF_HELPER_64MB_RERUN_WARNING_CAP_EXCESS"] = "1";
+
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"Expected Phase 5 to preserve performance-only first-attempt evidence when the goodput rerun introduces warning-policy noise.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+            var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal("PASS", summary["verdict"]);
+            Assert.Equal("PASS", summary["correctness_verdict"]);
+            Assert.Equal("FAIL", summary["performance_verdict"]);
+            Assert.Equal("1", summary["live-switch-off-helper-64mb.retry_used"]);
+            Assert.Equal("1", summary["live-switch-off-helper-64mb.selected_attempt"]);
+            Assert.Equal("performance", summary["live-switch-off-helper-64mb.acceptance_failure_class"]);
+            Assert.Contains("goodput regression exceeded", summary["live-switch-off-helper-64mb.first_failure_reason"], StringComparison.Ordinal);
+            Assert.Contains("rerun introduced warning_policy failure", summary["live-switch-off-helper-64mb.rerun_failure_reason"], StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task RunFileTransferRouteAcceptance_Phase5SecondTransferUsesSplitProofWhenCombinedSliceIsNoisy()
     {
         if (!OperatingSystem.IsWindows())
@@ -6449,9 +6554,59 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("1", summary["regular-nkn-v4-64mb.completed"]);
             Assert.Equal("1", summary["regular-nkn-v4-64mb.sha_ok"]);
             Assert.Equal("external_transport_churn", summary["regular-nkn-v4-64mb.warning_cap_exceeded_kinds"]);
-            Assert.Equal("public_nkn_external_transport_churn_completed_clean", summary["regular-nkn-v4-64mb.environmental_classification"]);
+            Assert.Equal("live_transport_external_churn_completed_clean", summary["regular-nkn-v4-64mb.environmental_classification"]);
             Assert.Equal("0", summary["regular-nkn-v4-64mb.measurement_contaminated"]);
             Assert.Equal("none", summary["regular-nkn-v4-64mb.acceptance_failure_class"]);
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RunFileTransferRouteAcceptance_Phase5CompletedLiveFallbackWarningCapExcessIsEnvironmental()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "phase5-live-fallback-completed-warning-churn");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-live-fallback-completed-warning-churn");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_LIVE_SWITCH_OFF_HELPER_64MB_WARNING_CAP_EXCESS"] = "1";
+
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"Expected completed live-fallback Phase 5 warning cap noise to be classified as environmental, not correctness failure.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+            var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal("PASS", summary["verdict"]);
+            Assert.Equal("PASS", summary["correctness_verdict"]);
+            Assert.Equal("1", summary["live-switch-off-helper-64mb.completed"]);
+            Assert.Equal("1", summary["live-switch-off-helper-64mb.sha_ok"]);
+            Assert.Equal("external_transport_churn", summary["live-switch-off-helper-64mb.warning_cap_exceeded_kinds"]);
+            Assert.Equal("live_transport_recovered_fallback_churn_completed_clean", summary["live-switch-off-helper-64mb.environmental_classification"]);
+            Assert.Equal("none", summary["live-switch-off-helper-64mb.acceptance_failure_class"]);
+            Assert.Equal("pass", summary["live-switch-off-helper-64mb.live_route_epoch_proof_verdict"]);
+            Assert.Equal("pass", summary["live-switch-off-helper-64mb.fallback_leg_authority_proof_verdict"]);
+            Assert.Equal("pass", summary["live-switch-off-helper-64mb.bridge_liveness_integration_verdict"]);
         }
         finally
         {
@@ -6804,7 +6959,7 @@ if (-not $result.RegressionFailed) {
                 $"Expected capped regular-NKN external churn to require and pass a clean rerun.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
             var summary = ReadArtifactReport(runRoot, "phase4-ab-acceptance-summary.txt");
             Assert.Equal("PASS", summary["verdict"]);
-            Assert.Equal("public_nkn_paired_rerun", summary["network_variance_policy"]);
+            Assert.Equal("live_transport_paired_rerun", summary["network_variance_policy"]);
             Assert.Equal("capped_external_transport_churn_requires_clean_rerun", summary["regular_nkn_external_transport_warning_policy"]);
             Assert.Equal("1", summary["regular-nkn-v4-64mb.retry_used"]);
             Assert.Equal("2", summary["regular-nkn-v4-64mb.selected_attempt"]);
@@ -6854,7 +7009,7 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("PASS", summary["verdict"]);
             Assert.Equal("1", summary["regular-nkn-v4-64mb.retry_used"]);
             Assert.Equal("2", summary["regular-nkn-v4-64mb.selected_attempt"]);
-            Assert.Contains("public_nkn_regular_v4_recovery_storm", summary["regular-nkn-v4-64mb.first_failure_reason"], StringComparison.Ordinal);
+            Assert.Contains("regular_v4_transport_recovery_storm", summary["regular-nkn-v4-64mb.first_failure_reason"], StringComparison.Ordinal);
             Assert.Equal("(none)", summary["regular-nkn-v4-64mb.environmental_classification"]);
             Assert.True(Directory.Exists(Path.Combine(runRoot, "regular-nkn-v4-64mb-rerun-1")));
         }
@@ -6901,8 +7056,8 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("1", summary["regular-nkn-v4-64mb.retry_used"]);
             Assert.Equal("0", summary["regular-nkn-v4-64mb.selected_attempt"]);
             Assert.Equal("1", summary["regular-nkn-v4-64mb.measurement_contaminated"]);
-            Assert.Equal("public_nkn_regular_v4_recovery_storm", summary["regular-nkn-v4-64mb.environmental_classification"]);
-            Assert.Contains("public_nkn_regular_v4_recovery_storm", summaryText, StringComparison.Ordinal);
+            Assert.Equal("regular_v4_transport_recovery_storm", summary["regular-nkn-v4-64mb.environmental_classification"]);
+            Assert.Contains("regular_v4_transport_recovery_storm", summaryText, StringComparison.Ordinal);
         }
         finally
         {
@@ -6946,7 +7101,7 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("PASS", summary["verdict"]);
             Assert.Equal("1", summary["regular-nkn-v4-64mb.retry_used"]);
             Assert.Equal("2", summary["regular-nkn-v4-64mb.selected_attempt"]);
-            Assert.Contains("public_nkn_regular_v4_recovery_storm", summary["regular-nkn-v4-64mb.first_failure_reason"], StringComparison.Ordinal);
+            Assert.Contains("regular_v4_transport_recovery_storm", summary["regular-nkn-v4-64mb.first_failure_reason"], StringComparison.Ordinal);
             Assert.Equal("(none)", summary["regular-nkn-v4-64mb.environmental_classification"]);
             Assert.True(Directory.Exists(Path.Combine(runRoot, "regular-nkn-v4-64mb-rerun-1")));
         }
@@ -6994,7 +7149,7 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("PASS", summary["verdict"]);
             Assert.Equal("1", summary["regular-nkn-v4-64mb.retry_used"]);
             Assert.Equal("2", summary["regular-nkn-v4-64mb.selected_attempt"]);
-            Assert.Contains("public_nkn_regular_v4_recovery_storm", summary["regular-nkn-v4-64mb.first_failure_reason"], StringComparison.Ordinal);
+            Assert.Contains("regular_v4_transport_recovery_storm", summary["regular-nkn-v4-64mb.first_failure_reason"], StringComparison.Ordinal);
             Assert.DoesNotContain("regular-nkn-v4-64mb: scenario execution failed", summaryText, StringComparison.Ordinal);
             Assert.True(Directory.Exists(Path.Combine(runRoot, "regular-nkn-v4-64mb-rerun-1")));
         }
@@ -7041,8 +7196,8 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("1", summary["regular-nkn-v4-64mb.retry_used"]);
             Assert.Equal("0", summary["regular-nkn-v4-64mb.selected_attempt"]);
             Assert.Equal("1", summary["regular-nkn-v4-64mb.measurement_contaminated"]);
-            Assert.Equal("public_nkn_regular_v4_recovery_storm", summary["regular-nkn-v4-64mb.environmental_classification"]);
-            Assert.Contains("public_nkn_regular_v4_recovery_storm", summaryText, StringComparison.Ordinal);
+            Assert.Equal("regular_v4_transport_recovery_storm", summary["regular-nkn-v4-64mb.environmental_classification"]);
+            Assert.Contains("regular_v4_transport_recovery_storm", summaryText, StringComparison.Ordinal);
         }
         finally
         {
@@ -7087,7 +7242,7 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("1", summary["regular-nkn-v4-64mb.retry_used"]);
             Assert.Equal("0", summary["regular-nkn-v4-64mb.selected_attempt"]);
             Assert.Equal("1", summary["regular-nkn-v4-64mb.measurement_contaminated"]);
-            Assert.Equal("public_nkn_external_transport_churn", summary["regular-nkn-v4-64mb.environmental_classification"]);
+            Assert.Equal("regular_v4_external_transport_churn", summary["regular-nkn-v4-64mb.environmental_classification"]);
             Assert.Contains("regular_nkn_external_transport_churn", summaryText, StringComparison.Ordinal);
         }
         finally

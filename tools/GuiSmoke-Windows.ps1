@@ -874,6 +874,78 @@ function Write-ProcessStartupArtifacts {
     (Get-TopLevelWindowInventoryText -Process $Process) | Set-Content -Path $uiaPath -Encoding UTF8
 }
 
+$script:GuiSmokeProcessOutputRoot = $null
+$script:GuiSmokeProcessOutputFiles = New-Object System.Collections.Generic.List[string]
+
+function Get-GuiSmokeProcessOutputRoot {
+    $artifactDir = [string]$env:NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR
+    if (-not [string]::IsNullOrWhiteSpace($artifactDir)) {
+        $root = Join-Path ([System.IO.Path]::GetFullPath($artifactDir)) 'process-output'
+        New-Item -ItemType Directory -Force -Path $root | Out-Null
+        return $root
+    }
+
+    if ([string]::IsNullOrWhiteSpace($script:GuiSmokeProcessOutputRoot)) {
+        $timestamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
+        $root = Join-Path (Resolve-Path '.').Path ("artifacts\\gui-smoke\\process-output\\$timestamp")
+        New-Item -ItemType Directory -Force -Path $root | Out-Null
+        $script:GuiSmokeProcessOutputRoot = $root
+    }
+
+    return $script:GuiSmokeProcessOutputRoot
+}
+
+function New-GuiSmokeProcessOutputCapture {
+    param(
+        [Parameter(Mandatory = $true)][string]$RoleName,
+        [Parameter(Mandatory = $true)][int]$ProcessId
+    )
+
+    $root = Get-GuiSmokeProcessOutputRoot
+    $safeRole = if ([string]::IsNullOrWhiteSpace($RoleName)) { 'app' } else { $RoleName.Trim().ToLowerInvariant() }
+    $safeRole = [regex]::Replace($safeRole, '[^a-z0-9_-]+', '-')
+    if ([string]::IsNullOrWhiteSpace($safeRole)) {
+        $safeRole = 'app'
+    }
+
+    $prefix = '{0}-{1}' -f $safeRole, $ProcessId
+    $stdoutPath = Join-Path $root ("$prefix.stdout.log")
+    $stderrPath = Join-Path $root ("$prefix.stderr.log")
+    '' | Set-Content -LiteralPath $stdoutPath -Encoding UTF8
+    '' | Set-Content -LiteralPath $stderrPath -Encoding UTF8
+    $script:GuiSmokeProcessOutputFiles.Add($stdoutPath) | Out-Null
+    $script:GuiSmokeProcessOutputFiles.Add($stderrPath) | Out-Null
+
+    return [pscustomobject]@{
+        StdoutPath = $stdoutPath
+        StderrPath = $stderrPath
+    }
+}
+
+function Copy-GuiSmokeProcessOutputIfPresent {
+    param([Parameter(Mandatory = $true)][string]$ArtifactDir)
+
+    if ($script:GuiSmokeProcessOutputFiles.Count -le 0) {
+        return
+    }
+
+    $dest = Join-Path $ArtifactDir 'process-output'
+    New-Item -ItemType Directory -Force -Path $dest | Out-Null
+
+    foreach ($path in @($script:GuiSmokeProcessOutputFiles)) {
+        if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            continue
+        }
+
+        try {
+            Copy-Item -LiteralPath $path -Destination (Join-Path $dest ([System.IO.Path]::GetFileName($path))) -Force
+        }
+        catch {
+            # Best-effort failure artifacts.
+        }
+    }
+}
+
 function Copy-AppLogsIfPresent {
     param([Parameter(Mandatory = $true)][string]$ArtifactDir)
     $logsDir = Join-Path $env:LOCALAPPDATA 'nLink\logs'
@@ -2187,6 +2259,83 @@ function Copy-FileTransferLiveLogSlice {
     }
 }
 
+function Test-TunaGuiSecondTransferPostTerminalNoiseLine {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Line)
+
+    if ([string]::IsNullOrEmpty($Line)) {
+        return $false
+    }
+
+    $needles = @(
+        'proof_kind=file_transfer_data_frame',
+        'envelope_type=file_transfer_complete',
+        'message_type=file_transfer_complete',
+        'event=filetransfer_message_ignored; message_type=file_transfer_complete',
+        'event=filetransfer_terminal_redundant',
+        'event=filetransfer_v4_data_frame_received',
+        'event=filetransfer_v6_data_frame_received'
+    )
+
+    foreach ($needle in $needles) {
+        if ($Line.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Wait-TunaGuiSecondTransferPostTerminalQuietWindowOrThrow {
+    param(
+        [Parameter(Mandatory = $true)][int]$Bookmark,
+        [int]$TimeoutMs = 45000,
+        [int]$QuietMs = 3000
+    )
+
+    $deadline = [DateTimeOffset]::UtcNow.AddMilliseconds([Math]::Max(1000, $TimeoutMs))
+    $quietStart = [DateTimeOffset]::UtcNow
+    $scanBookmark = $Bookmark
+    $lastNoiseLine = '(none)'
+    $lastNoiseUtc = $null
+    $noiseCount = 0
+
+    while ([DateTimeOffset]::UtcNow -lt $deadline) {
+        $lines = @(Get-AppLogLinesAfterBookmark -Bookmark $scanBookmark)
+        if ($lines.Count -gt 0) {
+            foreach ($line in $lines) {
+                $text = [string]$line
+                if (Test-TunaGuiSecondTransferPostTerminalNoiseLine -Line $text) {
+                    $lastNoiseLine = $text
+                    $lastNoiseUtc = [DateTimeOffset]::UtcNow
+                    $quietStart = [DateTimeOffset]::UtcNow
+                    $noiseCount++
+                }
+            }
+
+            $scanBookmark = Get-AppLogBookmark
+        }
+
+        $quietForMs = ([DateTimeOffset]::UtcNow - $quietStart).TotalMilliseconds
+        if ($quietForMs -ge $QuietMs) {
+            return [pscustomobject]@{
+                QuietMs = [Math]::Round($quietForMs, 3)
+                NoiseCount = $noiseCount
+                LastNoiseUtc = if ($null -eq $lastNoiseUtc) { '(none)' } else { $lastNoiseUtc.ToString('o') }
+                LastNoiseLine = $lastNoiseLine
+            }
+        }
+
+        Start-Sleep -Milliseconds 250
+    }
+
+    throw ("Timed out waiting for second-transfer post-terminal quiet window: quiet_ms={0}; timeout_ms={1}; noise_count={2}; last_noise_utc={3}; last_noise_line={4}" -f `
+        $QuietMs,
+        $TimeoutMs,
+        $noiseCount,
+        ($(if ($null -eq $lastNoiseUtc) { '(none)' } else { $lastNoiseUtc.ToString('o') })),
+        $lastNoiseLine)
+}
+
 function Test-TunaGuiLogLinesContain {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Lines,
@@ -2350,18 +2499,24 @@ function Get-TunaGuiReadinessStateAfterBookmark {
     $lines = @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)
     $lastListenerReadyIndex = -1
     $lastTunaActiveIndex = -1
+    $lastTunaInactiveIndex = -1
     $lastListenerUnavailableIndex = -1
     for ($i = 0; $i -lt $lines.Count; $i++) {
         $line = [string]$lines[$i]
         if ($line.IndexOf('listener_unavailable', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-            $line.IndexOf('listener_sidecar_unavailable', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $line.IndexOf('listener_sidecar_unavailable', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            ($line.IndexOf('event=tuna_listener_startup_stage', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                $line.IndexOf('stage=sidecar_error', [System.StringComparison]::OrdinalIgnoreCase) -ge 0)) {
             $lastListenerUnavailableIndex = $i
         }
 
-        if (($line.IndexOf('event=tuna_acceleration_timeline', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
-                $line.IndexOf('active=1', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -or
+        $isTunaTimeline = $line.IndexOf('event=tuna_acceleration_timeline', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+        if (($isTunaTimeline -and $line.IndexOf('active=1', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -or
             $line.IndexOf('filetransfer_tuna_gui_active_bridge_quiet_window', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             $lastTunaActiveIndex = $i
+        }
+        elseif ($isTunaTimeline -and $line.IndexOf('active=0', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $lastTunaInactiveIndex = $i
         }
 
         if (($line.IndexOf('event=tuna_acceleration_timeline', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
@@ -2372,13 +2527,86 @@ function Get-TunaGuiReadinessStateAfterBookmark {
         }
     }
 
+    $lastNotActiveIndex = [Math]::Max($lastListenerUnavailableIndex, $lastTunaInactiveIndex)
+
     return [pscustomobject]@{
-        TunaActive = $lastTunaActiveIndex -ge 0 -and $lastTunaActiveIndex -ge $lastListenerUnavailableIndex
+        TunaActive = $lastTunaActiveIndex -ge 0 -and $lastTunaActiveIndex -gt $lastNotActiveIndex
         ListenerReady = $lastListenerReadyIndex -ge 0 -and $lastListenerReadyIndex -ge $lastListenerUnavailableIndex
         ListenerUnavailable = $lastListenerUnavailableIndex -gt $lastListenerReadyIndex -or $lastListenerUnavailableIndex -gt $lastTunaActiveIndex
         LastTunaActiveIndex = $lastTunaActiveIndex
+        LastTunaInactiveIndex = $lastTunaInactiveIndex
         LastListenerReadyIndex = $lastListenerReadyIndex
         LastListenerUnavailableIndex = $lastListenerUnavailableIndex
+    }
+}
+
+function Get-TunaGuiSendFileReadinessStateAfterBookmark {
+    param(
+        [Parameter(Mandatory = $true)][int]$Bookmark,
+        [string]$SenderRole = ''
+    )
+
+    $normalizedRole = if ([string]::IsNullOrWhiteSpace($SenderRole)) {
+        ''
+    }
+    else {
+        $SenderRole.Trim().ToLowerInvariant()
+    }
+
+    $expectedEvent = if ($normalizedRole -eq 'helper') {
+        'helper_chat_panel_state'
+    }
+    elseif ($normalizedRole -eq 'helpee') {
+        'helpee_chat_panel_state'
+    }
+    else {
+        ''
+    }
+
+    $lastFields = $null
+    $lastLine = ''
+    foreach ($line in @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)) {
+        $text = [string]$line
+        if ($text.IndexOf('_chat_panel_state', [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            continue
+        }
+
+        $fields = ConvertFrom-GuiSmokeSemicolonFields -Message $text
+        $eventName = Get-GuiSmokeFieldValue -Fields $fields -Name 'event' -Default ''
+        if (-not [string]::IsNullOrWhiteSpace($expectedEvent) -and
+            -not [string]::Equals($eventName, $expectedEvent, [System.StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+
+        $lastFields = $fields
+        $lastLine = $text
+    }
+
+    $runtimeState = Get-GuiSmokeFieldValue -Fields $lastFields -Name 'runtime_state' -Default '(none)'
+    $phase = Get-GuiSmokeFieldValue -Fields $lastFields -Name 'phase' -Default '(none)'
+    $connectionState = Get-GuiSmokeFieldValue -Fields $lastFields -Name 'connection_state' -Default '(none)'
+    $canSendFiles = Get-GuiSmokeFieldValue -Fields $lastFields -Name 'can_send_files' -Default 'False'
+    $outboundState = Get-GuiSmokeFieldValue -Fields $lastFields -Name 'outbound_state' -Default '(none)'
+    $outboundTerminal = Get-GuiSmokeFieldValue -Fields $lastFields -Name 'outbound_terminal' -Default '(none)'
+
+    $connected = [string]::Equals($runtimeState, 'Connected', [System.StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals($phase, 'Connected', [System.StringComparison]::OrdinalIgnoreCase)
+    $canSend = [string]::Equals($canSendFiles, 'True', [System.StringComparison]::OrdinalIgnoreCase) -or $canSendFiles -eq '1'
+    $outboundNotActive = [string]::Equals($outboundState, '(none)', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($outboundTerminal, 'True', [System.StringComparison]::OrdinalIgnoreCase) -or
+        $outboundTerminal -eq '1'
+
+    return [pscustomobject]@{
+        Ready = ($connected -and $canSend -and $outboundNotActive)
+        Connected = $connected
+        CanSendFiles = $canSend
+        OutboundNotActive = $outboundNotActive
+        RuntimeState = $runtimeState
+        Phase = $phase
+        ConnectionState = $connectionState
+        OutboundState = $outboundState
+        OutboundTerminal = $outboundTerminal
+        LastLine = $lastLine
     }
 }
 
@@ -2387,26 +2615,61 @@ function Wait-TunaGuiSecondTransferReadinessOrThrow {
         [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
         [Parameter(Mandatory = $true)][int]$Bookmark,
         [Parameter(Mandatory = $true)][int]$TimeoutMs,
-        [Parameter(Mandatory = $true)][string]$RouteMode
+        [Parameter(Mandatory = $true)][string]$RouteMode,
+        [string]$SenderRole = ''
     )
 
     $deadline = [DateTimeOffset]::UtcNow.AddMilliseconds([Math]::Max(1000, $TimeoutMs))
     $lastState = $null
+    $lastSendState = $null
     $lastSendError = ''
+    $lastUiState = '(not_checked)'
+    $stableReadyPolls = 0
+    $requiredStableReadyPolls = 4
     while ([DateTimeOffset]::UtcNow -lt $deadline) {
         $lastState = Get-TunaGuiReadinessStateAfterBookmark -Bookmark $Bookmark
+        $lastSendState = Get-TunaGuiSendFileReadinessStateAfterBookmark -Bookmark $Bookmark -SenderRole $SenderRole
         $sendButton = $null
+        $pollWindow = $Window
         try {
-            $sendButton = Wait-ControlEnabledStateByAutomationId -Window $Window -AutomationId 'Chat.SendFile' -IsEnabled $true -TimeoutMs 1000
+            $processId = $Window.Current.ProcessId
+            $freshWindow = Get-WindowElementByProcessId -ProcessId $processId
+            if ($freshWindow) {
+                $pollWindow = $freshWindow
+            }
+        }
+        catch {}
+
+        try {
+            $candidate = Find-VisibleByAutomationId -Root $pollWindow -AutomationId 'Chat.SendFile'
+            if ($candidate) {
+                $lastUiState = "visible=$(-not $candidate.Current.IsOffscreen); enabled=$($candidate.Current.IsEnabled); name=$($candidate.Current.Name)"
+                if ($candidate.Current.IsEnabled) {
+                    $sendButton = $candidate
+                }
+            }
+            else {
+                $lastUiState = 'missing'
+            }
         }
         catch {
             $lastSendError = $_.Exception.Message
+            $lastUiState = "error=$lastSendError"
         }
 
-        if ($null -ne $sendButton -and
+        $isReadyNow = $null -ne $sendButton -and
             [bool]$lastState.TunaActive -and
             [bool]$lastState.ListenerReady -and
-            -not [bool]$lastState.ListenerUnavailable) {
+            -not [bool]$lastState.ListenerUnavailable -and
+            [bool]$lastSendState.Ready
+        if ($isReadyNow) {
+            $stableReadyPolls++
+        }
+        else {
+            $stableReadyPolls = 0
+        }
+
+        if ($stableReadyPolls -ge $requiredStableReadyPolls) {
             return $sendButton
         }
 
@@ -2416,12 +2679,33 @@ function Wait-TunaGuiSecondTransferReadinessOrThrow {
     $active = if ($null -ne $lastState -and [bool]$lastState.TunaActive) { 1 } else { 0 }
     $ready = if ($null -ne $lastState -and [bool]$lastState.ListenerReady) { 1 } else { 0 }
     $unavailable = if ($null -ne $lastState -and [bool]$lastState.ListenerUnavailable) { 1 } else { 0 }
-    throw ("Tuna GUI second-transfer readiness did not stabilize: phase=preactivation_readiness; reason=second_transfer_tuna_readiness_unstable; route_mode={0}; tuna_active={1}; listener_ready={2}; listener_unavailable={3}; send_enabled_error={4}" -f `
+    $sendLogReady = if ($null -ne $lastSendState -and [bool]$lastSendState.Ready) { 1 } else { 0 }
+    $sendLogCanSend = if ($null -ne $lastSendState -and [bool]$lastSendState.CanSendFiles) { 1 } else { 0 }
+    $sendLogConnected = if ($null -ne $lastSendState -and [bool]$lastSendState.Connected) { 1 } else { 0 }
+    $sendLogOutboundClear = if ($null -ne $lastSendState -and [bool]$lastSendState.OutboundNotActive) { 1 } else { 0 }
+    $lastTunaActiveIndex = if ($null -ne $lastState) { [int]$lastState.LastTunaActiveIndex } else { -1 }
+    $lastTunaInactiveIndex = if ($null -ne $lastState) { [int]$lastState.LastTunaInactiveIndex } else { -1 }
+    $lastSendLine = if ($null -ne $lastSendState) { [string]$lastSendState.LastLine } else { '' }
+    if ([string]::IsNullOrWhiteSpace($lastSendLine)) {
+        $lastSendLine = '(none)'
+    }
+
+    throw ("Tuna GUI second-transfer readiness did not stabilize: phase=preactivation_readiness; reason=second_transfer_tuna_readiness_unstable; route_mode={0}; tuna_active={1}; listener_ready={2}; listener_unavailable={3}; send_log_ready={4}; send_log_connected={5}; send_log_can_send_files={6}; send_log_outbound_clear={7}; send_ui_state={8}; send_enabled_error={9}; last_tuna_active_index={10}; last_tuna_inactive_index={11}; stable_ready_polls={12}; required_stable_ready_polls={13}; last_sender_panel_state={14}" -f `
         $RouteMode,
         $active,
         $ready,
         $unavailable,
-        $lastSendError)
+        $sendLogReady,
+        $sendLogConnected,
+        $sendLogCanSend,
+        $sendLogOutboundClear,
+        $lastUiState,
+        $lastSendError,
+        $lastTunaActiveIndex,
+        $lastTunaInactiveIndex,
+        $stableReadyPolls,
+        $requiredStableReadyPolls,
+        $lastSendLine)
 }
 
 function Invoke-FileTransferLiveCycle {
@@ -3622,6 +3906,90 @@ function Wait-TunaGuiLiveSwitchOffTransferProgressBeforeFault {
     throw "Timed out waiting for receiver-committed Tuna file progress before fallback fault; min_committed_bytes=$MinimumCommittedBytes; committed_bytes=$maxCommittedBytes; accelerated_payload_bytes=$acceleratedPayloadBytes; min_elapsed_ms=$MinimumElapsedMs; elapsed_ms=$($sw.ElapsedMilliseconds); min_frame_payload_bytes=$MinimumFramePayloadBytes; last_frame_payload_bytes=$lastFramePayloadBytes; timeout_s=$($TimeoutMs / 1000)."
 }
 
+function Wait-TunaGuiLiveSwitchOffTransferProgressOrEarlyFallbackBeforeFault {
+    param(
+        [Parameter(Mandatory = $true)][int]$Bookmark,
+        [int]$TimeoutMs = 60000,
+        [long]$MinimumCommittedBytes = 16777216,
+        [int]$MinimumElapsedMs = 3000,
+        [long]$MinimumFramePayloadBytes = 16384,
+        [int]$PollIntervalMs = 100
+    )
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $processedLineCount = 0
+    $acceleratedPayloadBytes = 0L
+    $lastFramePayloadBytes = -1L
+    $maxCommittedBytes = 0L
+    $bestProgressLine = ''
+    while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+        $lines = @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)
+        if ($lines.Count -lt $processedLineCount) {
+            $processedLineCount = 0
+        }
+
+        for ($lineIndex = $processedLineCount; $lineIndex -lt $lines.Count; $lineIndex++) {
+            $line = [string]$lines[$lineIndex]
+            if ($line.IndexOf('event=filetransfer_live_route_epoch_started', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                $line.IndexOf('route=post_tuna_fallback_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                $line.IndexOf('protocol_version=6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                $line.IndexOf('handoff_kind=tuna_to_normal_fallback', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                $line.IndexOf('target_transport=regular_nkn', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                return [pscustomobject]@{
+                    Kind = 'early_fallback'
+                    Line = $line
+                    CommittedBytes = $maxCommittedBytes
+                    AcceleratedPayloadBytes = $acceleratedPayloadBytes
+                    LastFramePayloadBytes = $lastFramePayloadBytes
+                    ElapsedMs = $sw.ElapsedMilliseconds
+                }
+            }
+
+            if ($line.IndexOf('event=tuna_accelerated_file_frame_sent', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                $line.IndexOf('channel=bulk', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $fields = ConvertFrom-GuiSmokeSemicolonFields -Message $line
+                $payloadText = Get-GuiSmokeFieldValue -Fields $fields -Name 'payload_bytes' -Default '-1'
+                $payloadBytes = -1L
+                if ([long]::TryParse($payloadText, [ref]$payloadBytes)) {
+                    $lastFramePayloadBytes = [Math]::Max($lastFramePayloadBytes, $payloadBytes)
+                    if ($payloadBytes -ge $MinimumFramePayloadBytes) {
+                        $acceleratedPayloadBytes += $payloadBytes
+                    }
+                }
+            }
+
+            if ($line.IndexOf('event=filetransfer_v4_state_sent', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                $line.IndexOf('bytes_committed=', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $fields = ConvertFrom-GuiSmokeSemicolonFields -Message $line
+                $committedText = Get-GuiSmokeFieldValue -Fields $fields -Name 'bytes_committed' -Default '-1'
+                $committedBytes = -1L
+                if ([long]::TryParse($committedText, [ref]$committedBytes) -and $committedBytes -gt $maxCommittedBytes) {
+                    $maxCommittedBytes = $committedBytes
+                    $bestProgressLine = $line
+                }
+            }
+        }
+        $processedLineCount = $lines.Count
+
+        if ($acceleratedPayloadBytes -gt 0L -and
+            $maxCommittedBytes -ge $MinimumCommittedBytes -and
+            $sw.ElapsedMilliseconds -ge $MinimumElapsedMs) {
+            return [pscustomobject]@{
+                Kind = 'progress'
+                Line = $bestProgressLine
+                CommittedBytes = $maxCommittedBytes
+                AcceleratedPayloadBytes = $acceleratedPayloadBytes
+                LastFramePayloadBytes = $lastFramePayloadBytes
+                ElapsedMs = $sw.ElapsedMilliseconds
+            }
+        }
+
+        Start-Sleep -Milliseconds ([Math]::Max(10, $PollIntervalMs))
+    }
+
+    throw "Timed out waiting for receiver-committed Tuna file progress or early fallback before fallback fault; min_committed_bytes=$MinimumCommittedBytes; committed_bytes=$maxCommittedBytes; accelerated_payload_bytes=$acceleratedPayloadBytes; min_elapsed_ms=$MinimumElapsedMs; elapsed_ms=$($sw.ElapsedMilliseconds); min_frame_payload_bytes=$MinimumFramePayloadBytes; last_frame_payload_bytes=$lastFramePayloadBytes; timeout_s=$($TimeoutMs / 1000)."
+}
+
 function Invoke-TunaGuiPauseResumeProbe {
     param(
         [Parameter(Mandatory = $true)]$SenderWindow,
@@ -4358,8 +4726,21 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
             $stepNumber = $stepIndex + 1
             if ($action -eq 'off') {
                 Write-Host ("[GUI Smoke][filetransfer_tuna] Live toggle step {0}/{1}: switching Tuna off after transfer progress." -f $stepNumber, $sequence.Count) -ForegroundColor DarkGray
+                $earlyFallbackStartedLine = $null
+                $earlyFallbackAccepted = $false
                 if ($stepIndex -eq 0) {
-                    $progressLine = [string](Wait-TunaGuiLiveSwitchOffTransferProgressBeforeFault -Bookmark $bookmark -MinimumCommittedBytes $liveSwitchOffMinimumCommittedBytes -MinimumElapsedMs $liveSwitchOffMinimumElapsedMs -MinimumFramePayloadBytes 16384L -TimeoutMs 90000 -PollIntervalMs 25)
+                    if ($RouteMode -eq 'live-reactivation-second-transfer') {
+                        $progressResult = Wait-TunaGuiLiveSwitchOffTransferProgressOrEarlyFallbackBeforeFault -Bookmark $bookmark -MinimumCommittedBytes $liveSwitchOffMinimumCommittedBytes -MinimumElapsedMs $liveSwitchOffMinimumElapsedMs -MinimumFramePayloadBytes 16384L -TimeoutMs 90000 -PollIntervalMs 25
+                        $progressLine = [string]$progressResult.Line
+                        if ([string]::Equals([string]$progressResult.Kind, 'early_fallback', [System.StringComparison]::OrdinalIgnoreCase)) {
+                            $earlyFallbackAccepted = $true
+                            $earlyFallbackStartedLine = $progressLine
+                            $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_reactivation_second_transfer_early_fallback; route_mode={1}; step={2}; committed_bytes={3}; accelerated_payload_bytes={4}; elapsed_ms={5}; reason=pre_fault_tuna_runtime_drop" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $RouteMode, $stepNumber, $progressResult.CommittedBytes, $progressResult.AcceleratedPayloadBytes, $progressResult.ElapsedMs)) | Out-Null
+                        }
+                    }
+                    else {
+                        $progressLine = [string](Wait-TunaGuiLiveSwitchOffTransferProgressBeforeFault -Bookmark $bookmark -MinimumCommittedBytes $liveSwitchOffMinimumCommittedBytes -MinimumElapsedMs $liveSwitchOffMinimumElapsedMs -MinimumFramePayloadBytes 16384L -TimeoutMs 90000 -PollIntervalMs 25)
+                    }
                 }
                 elseif ($RouteMode -eq 'live-regular-activation-cycle' -and
                     $stepIndex -gt 0 -and
@@ -4379,11 +4760,18 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
 
                 $observedEvidenceLines.Add($progressLine) | Out-Null
                 $lastActivationPayloadBookmark = $null
-                $stepBookmark = Get-AppLogBookmark
-                $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step; step={1}; action=off" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber)) | Out-Null
-                Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode
+                $stepBookmark = if ($earlyFallbackAccepted) { $bookmark } else { Get-AppLogBookmark }
+                $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step; step={1}; action=off; early_fallback={2}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber, ($(if ($earlyFallbackAccepted) { 1 } else { 0 })))) | Out-Null
+                if (-not $earlyFallbackAccepted) {
+                    Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode
+                }
 
-                $fallbackStartedLine = Wait-TunaGuiLiveRouteEpochStarted -Bookmark $stepBookmark -FallbackBookmark $bookmark -Route 'post_tuna_fallback_v6' -ProtocolVersion 6 -HandoffKind 'tuna_to_normal_fallback' -TargetTransport 'regular_nkn' -Description 'live multi-toggle Tuna-to-normal fallback route epoch started' -AfterLiveRouteEpoch $lastObservedLiveRouteEpoch
+                $fallbackStartedLine = if ($earlyFallbackAccepted) {
+                    $earlyFallbackStartedLine
+                }
+                else {
+                    Wait-TunaGuiLiveRouteEpochStarted -Bookmark $stepBookmark -FallbackBookmark $bookmark -Route 'post_tuna_fallback_v6' -ProtocolVersion 6 -HandoffKind 'tuna_to_normal_fallback' -TargetTransport 'regular_nkn' -Description 'live multi-toggle Tuna-to-normal fallback route epoch started' -AfterLiveRouteEpoch $lastObservedLiveRouteEpoch
+                }
                 $observedEvidenceLines.Add($fallbackStartedLine) | Out-Null
                 Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'off_started' -Line $fallbackStartedLine
                 $fallbackEpochStartedObserved = $true
@@ -4697,6 +5085,19 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
 
     if ($RouteMode -eq 'live-reactivation-second-transfer') {
         $secondPayloadBytes = 16777216L
+        $postTerminalQuietBookmark = Get-AppLogBookmark
+        $postTerminalQuiet = Wait-TunaGuiSecondTransferPostTerminalQuietWindowOrThrow `
+            -Bookmark $postTerminalQuietBookmark `
+            -TimeoutMs ([Math]::Min(45000, [Math]::Max(10000, $StartupTimeoutMs))) `
+            -QuietMs 3000
+        $summary['secondTransferPreflight'] = [ordered]@{
+            postTerminalQuietMs = $postTerminalQuiet.QuietMs
+            postTerminalNoiseCount = $postTerminalQuiet.NoiseCount
+            postTerminalLastNoiseUtc = $postTerminalQuiet.LastNoiseUtc
+        }
+        $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json') -Encoding UTF8
+        Write-Host ("[GUI Smoke][filetransfer_tuna] First-transfer terminal echoes quiet for {0} ms before second transfer; noise_count={1}." -f $postTerminalQuiet.QuietMs, $postTerminalQuiet.NoiseCount) -ForegroundColor DarkGray
+
         Write-DeterministicFileTransferPayload -Path $AutopickPath -SizeBytes $secondPayloadBytes -Seed $Seed -CycleIndex 1
         $secondExpectedHash = Get-FileSha256Hex -Path $AutopickPath
         $secondBookmark = Get-AppLogBookmark
@@ -4706,7 +5107,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         Write-Host "[GUI Smoke][filetransfer_tuna] Starting second transfer after live reactivation; expecting file_tuna_v4 protocol 4." -ForegroundColor DarkGray
 
         try {
-            $secondSendButton = Wait-TunaGuiSecondTransferReadinessOrThrow -Window $senderWindow -Bookmark $bookmark -TimeoutMs ([Math]::Min(60000, $StartupTimeoutMs)) -RouteMode $RouteMode
+            $secondSendButton = Wait-TunaGuiSecondTransferReadinessOrThrow -Window $senderWindow -Bookmark $bookmark -TimeoutMs ([Math]::Min(60000, $StartupTimeoutMs)) -RouteMode $RouteMode -SenderRole $expectedOutboundRole
             Click-Element $secondSendButton
 
             $secondAcceptButton = Wait-TunaGuiFileTransferAcceptOrThrow -Window $receiverWindow -Bookmark $secondBookmark -TimeoutMs $StartupTimeoutMs -RouteMode $RouteMode
@@ -5296,6 +5697,8 @@ function Start-AppInstance {
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new($ExePath)
     $startInfo.WorkingDirectory = $workingDirectory
     $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
 
     foreach ($entry in $launchEnvironment.GetEnumerator()) {
         $startInfo.Environment[$entry.Key] = [string]$entry.Value
@@ -5305,6 +5708,20 @@ function Start-AppInstance {
     if (-not $process) {
         throw "Failed to start app instance for role '$RoleName'."
     }
+
+    $capture = New-GuiSmokeProcessOutputCapture -RoleName $RoleName -ProcessId $process.Id
+    Register-ObjectEvent -InputObject $process -EventName OutputDataReceived -MessageData $capture.StdoutPath -Action {
+        if ($null -ne $EventArgs.Data) {
+            [System.IO.File]::AppendAllText([string]$Event.MessageData, $EventArgs.Data + [Environment]::NewLine, [System.Text.Encoding]::UTF8)
+        }
+    } | Out-Null
+    Register-ObjectEvent -InputObject $process -EventName ErrorDataReceived -MessageData $capture.StderrPath -Action {
+        if ($null -ne $EventArgs.Data) {
+            [System.IO.File]::AppendAllText([string]$Event.MessageData, $EventArgs.Data + [Environment]::NewLine, [System.Text.Encoding]::UTF8)
+        }
+    } | Out-Null
+    $process.BeginOutputReadLine()
+    $process.BeginErrorReadLine()
 
     return $process
 }
@@ -6056,6 +6473,27 @@ function Enter-HelpeeHelperIdentityAndRequestHelp {
     return $request
 }
 
+function Test-HelpeeHelperIdentityRequestRetryReady {
+    param([Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$HelpeeWindow)
+
+    if (Test-ConnectionFailedSurface -Window $HelpeeWindow) {
+        return $false
+    }
+
+    $input = Find-VisibleByAutomationId -Root $HelpeeWindow -AutomationId 'Helpee.HelperIdentityInput'
+    $request = Find-VisibleByAutomationId -Root $HelpeeWindow -AutomationId 'Helpee.RequestHelp'
+    if ($input -and
+        $input.Current.IsEnabled -and
+        -not $input.Current.IsOffscreen -and
+        $request -and
+        $request.Current.IsEnabled -and
+        -not $request.Current.IsOffscreen) {
+        return $true
+    }
+
+    return $false
+}
+
 function Wait-HelperAcceptRequestOrExit {
     param(
         [Parameter(Mandatory = $true)]$Context,
@@ -6087,6 +6525,44 @@ function Wait-HelperAcceptRequestOrExit {
     }
 
     throw "Timed out waiting for helper incoming request acceptance UI. $(Get-ConnectionWaitDiagnosticContext -Context $Context)"
+}
+
+function Connect-HelperIdentityRequestFlow {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][string]$HelperIdentity
+    )
+
+    $maxAttempts = 3
+    $lastError = $null
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        if ($attempt -gt 1) {
+            Write-Host "[GUI Smoke] Retrying helper identity help request after setup ack miss. attempt=$attempt/$maxAttempts" -ForegroundColor DarkGray
+        }
+
+        [void](Enter-HelpeeHelperIdentityAndRequestHelp -HelpeeWindow $Context.HelpeeWindow -HelperIdentity $HelperIdentity)
+
+        try {
+            return Wait-HelperAcceptRequestOrExit -Context $Context -TimeoutMs 90000
+        }
+        catch {
+            $lastError = $_
+            $message = $_.Exception.Message
+            if ($message -notlike 'Timed out waiting for helper incoming request acceptance UI*') {
+                throw
+            }
+
+            if ($attempt -ge $maxAttempts -or -not (Test-HelpeeHelperIdentityRequestRetryReady -HelpeeWindow $Context.HelpeeWindow)) {
+                throw
+            }
+        }
+    }
+
+    if ($lastError) {
+        throw $lastError
+    }
+
+    throw 'Helper identity request flow failed before an accept button was available.'
 }
 
 function Wait-HelpeeAllowOrExit {
@@ -6453,9 +6929,8 @@ function Connect-HelperAndHelpee {
         Write-Host '[GUI Smoke] Helpee connection mode: helper identity request flow.' -ForegroundColor DarkGray
         $helperIdentity = Copy-HelperIdentityWithRecovery -Context $Context
         Write-Host "[GUI Smoke] Helper identity copied: $helperIdentity" -ForegroundColor Green
-        [void](Enter-HelpeeHelperIdentityAndRequestHelp -HelpeeWindow $Context.HelpeeWindow -HelperIdentity $helperIdentity)
 
-        $accept = Wait-HelperAcceptRequestOrExit -Context $Context -TimeoutMs 90000
+        $accept = Connect-HelperIdentityRequestFlow -Context $Context -HelperIdentity $helperIdentity
         Click-Element $accept
 
         $allow = Wait-HelpeeAllowOrExit -Context $Context -TimeoutMs 90000
@@ -7630,6 +8105,7 @@ catch {
     try { if ($ctx.HelperWindow) { Dump-UiTree -Root $ctx.HelperWindow -OutPath (Join-Path $failureArtifactsDir 'helper-ui-tree.txt') } } catch {}
     try { 'Screenshot capture not implemented in this script (UI tree + logs captured).' | Set-Content -Path (Join-Path $failureArtifactsDir 'screenshot.txt') -Encoding UTF8 } catch {}
     try { Copy-AppLogsIfPresent -ArtifactDir $failureArtifactsDir } catch {}
+    try { Copy-GuiSmokeProcessOutputIfPresent -ArtifactDir $failureArtifactsDir } catch {}
 
     $exitCode = 1
 }

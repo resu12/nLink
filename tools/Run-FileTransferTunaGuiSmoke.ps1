@@ -187,6 +187,50 @@ function Invoke-TunaGuiRetainedAnalysisBestEffort {
     }
 }
 
+function Get-TunaGuiRetainedLogLineSortKey {
+    param(
+        [Parameter(Mandatory = $true)][string]$Line,
+        [Parameter(Mandatory = $true)][long]$FallbackTicks
+    )
+
+    $match = [regex]::Match($Line, '^\[(?<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}Z)\]')
+    if ($match.Success) {
+        try {
+            return [DateTimeOffset]::ParseExact(
+                $match.Groups['timestamp'].Value,
+                'yyyy-MM-dd HH:mm:ss\Z',
+                [System.Globalization.CultureInfo]::InvariantCulture,
+                [System.Globalization.DateTimeStyles]::AssumeUniversal).UtcTicks
+        }
+        catch {
+        }
+    }
+
+    return $FallbackTicks
+}
+
+function Sort-TunaGuiRetainedLogLinesChronologically {
+    param([AllowEmptyCollection()][object[]]$Lines)
+
+    $records = New-Object System.Collections.Generic.List[object]
+    $ordinal = 0L
+    foreach ($line in @($Lines)) {
+        $text = [string]$line
+        if ([string]::IsNullOrWhiteSpace($text)) {
+            continue
+        }
+
+        $records.Add([pscustomobject]@{
+            Line = $text
+            SortTicks = Get-TunaGuiRetainedLogLineSortKey -Line $text -FallbackTicks ([long]::MaxValue)
+            Ordinal = $ordinal
+        }) | Out-Null
+        $ordinal++
+    }
+
+    return @($records | Sort-Object -Property SortTicks, Ordinal | ForEach-Object { [string]$_.Line })
+}
+
 function Merge-TunaGuiMilestoneEvidenceIntoRetainedLogSlice {
     param(
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
@@ -213,8 +257,12 @@ function Merge-TunaGuiMilestoneEvidenceIntoRetainedLogSlice {
     }
 
     $existingText = ''
+    $existingLines = @()
     if (Test-Path -LiteralPath $retainedPath -PathType Leaf) {
         $existingText = Get-Content -LiteralPath $retainedPath -Raw -ErrorAction SilentlyContinue
+        if (-not [string]::IsNullOrEmpty($existingText)) {
+            $existingLines = @($existingText -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+        }
     }
 
     $missingLines = New-Object System.Collections.Generic.List[string]
@@ -233,10 +281,7 @@ function Merge-TunaGuiMilestoneEvidenceIntoRetainedLogSlice {
         return
     }
 
-    $combined = @($missingLines.ToArray())
-    if (-not [string]::IsNullOrEmpty($existingText)) {
-        $combined += $existingText
-    }
+    $combined = Sort-TunaGuiRetainedLogLinesChronologically -Lines (@($missingLines.ToArray()) + @($existingLines))
 
     [System.IO.File]::WriteAllText($retainedPath, ($combined -join [Environment]::NewLine), [System.Text.Encoding]::UTF8)
 }

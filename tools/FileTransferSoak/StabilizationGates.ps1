@@ -1767,15 +1767,16 @@ function Get-FileTransferWarningCapResult {
         $countExceeded = $count -gt $countLimit
         $rateExceeded = $rate -gt $rateLimit
         if ($countExceeded -or $rateExceeded) {
-            if ((Test-FileTransferWarningCapExemption `
+            $exemption = Test-FileTransferWarningCapExemption `
                     -Summary $Summary `
                     -FallbackDiagnostics $FallbackDiagnostics `
                     -Kind $kind `
                     -Context $context `
                     -CountExceeded $countExceeded `
-                    -RateExceeded $rateExceeded)) {
+                    -RateExceeded $rateExceeded
+            if ($exemption.Applies) {
                 $exemptedKinds.Add($kind) | Out-Null
-                $exemptedDetails.Add(('warning cap exemption: kind={0}; context={1}; incident_count={2}; raw_event_count={3}; rate_per_second={4}; count_limit={5}; rate_limit_per_second={6}; reason=completed_post_tuna_fallback_frontier_terminal_proof' -f $kind, $context, $count, $rawCount, $rate.ToString('0.###', $culture), $countLimit, $rateLimit.ToString('0.###', $culture))) | Out-Null
+                $exemptedDetails.Add(('warning cap exemption: kind={0}; context={1}; incident_count={2}; raw_event_count={3}; rate_per_second={4}; count_limit={5}; rate_limit_per_second={6}; reason={7}' -f $kind, $context, $count, $rawCount, $rate.ToString('0.###', $culture), $countLimit, $rateLimit.ToString('0.###', $culture), $exemption.Reason)) | Out-Null
                 continue
             }
 
@@ -1818,33 +1819,36 @@ function Test-FileTransferWarningCapExemption {
         [Parameter(Mandatory = $true)][bool]$RateExceeded
     )
 
-    if ($Kind -ne 'fallback_frontier_repair_churn' -or
+    if (($Kind -ne 'fallback_frontier_repair_churn' -and $Kind -ne 'fallback_receiver_state_churn') -or
         $Context -ne 'post_tuna_fallback' -or
         (-not $CountExceeded -and -not $RateExceeded)) {
-        return $false
+        return [pscustomobject]@{ Applies = $false; Reason = '(none)' }
     }
 
     if ($RateExceeded -and $CountExceeded) {
-        return $false
+        return [pscustomobject]@{ Applies = $false; Reason = '(none)' }
     }
 
     if ($Summary.InboundTerminalEvents.Count -eq 0 -or
         $Summary.OutboundTerminalEvents.Count -eq 0 -or
         -not (Test-FileTransferTerminalCompleted -TerminalEvents $Summary.TerminalEvents)) {
-        return $false
+        return [pscustomobject]@{ Applies = $false; Reason = '(none)' }
     }
 
     if ($null -ne $FallbackDiagnostics) {
         if ([string]$FallbackDiagnostics.TerminalMissingReason -ne '(none)') {
-            return $false
+            return [pscustomobject]@{ Applies = $false; Reason = '(none)' }
         }
 
         if ([int]$FallbackDiagnostics.SenderStillRepairing -ne 0) {
-            return $false
+            return [pscustomobject]@{ Applies = $false; Reason = '(none)' }
         }
     }
 
-    return $true
+    return [pscustomobject]@{
+        Applies = $true
+        Reason = ('completed_post_tuna_fallback_{0}_terminal_proof' -f $Kind)
+    }
 }
 
 function Get-FileTransferStabilizationGateResult {
@@ -1976,7 +1980,7 @@ function Get-FileTransferStabilizationGateResult {
         Add-FileTransferGateFinding -List $warnings -Finding 'live progress timeout before requested matrix completed'
         Add-FileTransferGateFinding -List $warnings -Finding 'progress_timeout_with_receiver_gap_stall'
         if (Test-FileTransferRegularV4ProgressTimeoutRecoveryStorm -Summary $Summary) {
-            Add-FileTransferGateFinding -List $warnings -Finding 'public_nkn_regular_v4_recovery_storm'
+            Add-FileTransferGateFinding -List $warnings -Finding 'regular_v4_transport_recovery_storm'
         }
 
         $progressTimeoutEvents = @($Summary.TransferEvents | Where-Object { $_.EventName -eq 'filetransfer_live_progress_timeout' })

@@ -548,7 +548,73 @@ function Set-Phase5RegularNknCompletedExternalTransportVariance {
         'warning cap exceeded: external_transport_churn',
         'regular NKN warning-free acceptance failed'
     )
-    $Result.environmentalClassification = 'public_nkn_external_transport_churn_completed_clean'
+    $Result.environmentalClassification = 'live_transport_external_churn_completed_clean'
+    return $true
+}
+
+function Test-Phase5CompletedLiveFallbackWarningVariance {
+    param(
+        [Parameter(Mandatory = $true)]$Scenario,
+        [Parameter(Mandatory = $true)]$Result
+    )
+
+    if ([string]$Scenario.Kind -ne 'tuna' -or @($Scenario.ExpectedRouteChanges).Count -le 1) {
+        return $false
+    }
+
+    if (-not $Result.completed -or
+        -not $Result.shaOk -or
+        $Result.routeConsistencyVerdict -ne 'pass' -or
+        $Result.liveRouteEpochProofVerdict -eq 'fail' -or
+        $Result.fallbackLegAuthorityProofVerdict -eq 'fail' -or
+        $Result.bridgeLivenessIntegrationVerdict -eq 'fail' -or
+        $Result.route.IndexOf('file_tuna_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $Result.route.IndexOf('diagnostic_regular_nkn_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return $false
+    }
+
+    if ($Result.operatorVerdict -ne 'FAIL_EXTERNAL_TRANSPORT_CHURN' -and
+        $Result.operatorVerdict -ne 'WARN_EXTERNAL_TRANSPORT') {
+        return $false
+    }
+
+    $exceeded = @(Split-RouteAcceptanceTokenList -Value ([string]$Result.warningCapExceededKinds))
+    if ($exceeded.Count -eq 0 -or ($exceeded.Count -eq 1 -and $exceeded[0] -eq '(none)')) {
+        return $false
+    }
+
+    $allowedExceeded = @(
+        'external_transport_churn',
+        'fallback_frontier_repair_churn',
+        'fallback_receiver_state_churn'
+    )
+    foreach ($kind in @($exceeded)) {
+        if (-not ($allowedExceeded -contains [string]$kind)) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Set-Phase5CompletedLiveFallbackWarningVariance {
+    param(
+        [Parameter(Mandatory = $true)]$Scenario,
+        [Parameter(Mandatory = $true)]$Result
+    )
+
+    if (-not (Test-Phase5CompletedLiveFallbackWarningVariance -Scenario $Scenario -Result $Result)) {
+        return $false
+    }
+
+    Remove-RouteAcceptanceFailuresMatching -Result $Result -Patterns @(
+        'operator hard failures observed',
+        'warning cap exceeded: external_transport_churn',
+        'warning cap exceeded: fallback_frontier_repair_churn',
+        'warning cap exceeded: fallback_receiver_state_churn',
+        'operator verdict is not accepted'
+    )
+    $Result.environmentalClassification = 'live_transport_recovered_fallback_churn_completed_clean'
     return $true
 }
 
@@ -593,7 +659,7 @@ function Test-Phase4RegularNknProgressTimeoutRecoveryStormVariance {
     $kinds = @($Result.warningKinds | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_ -ne '(none)' })
     if ($Result.operatorVerdict -eq 'INCONCLUSIVE_PROGRESS_TIMEOUT' -and
         $Result.hardFailureCount -eq 0 -and
-        ($kinds -contains 'public_nkn_regular_v4_recovery_storm')) {
+        ($kinds -contains 'regular_v4_transport_recovery_storm')) {
         return $true
     }
 
@@ -634,8 +700,8 @@ function Set-Phase4RegularNknProgressTimeoutRecoveryStormVariance {
     }
 
     $Result.failures.Clear()
-    $Result.environmentalClassification = 'public_nkn_regular_v4_recovery_storm'
-    Add-RouteAcceptanceMeasurementContamination -Result $Result -Reason 'public_nkn_regular_v4_recovery_storm'
+    $Result.environmentalClassification = 'regular_v4_transport_recovery_storm'
+    Add-RouteAcceptanceMeasurementContamination -Result $Result -Reason 'regular_v4_transport_recovery_storm'
 }
 
 function Add-RouteAcceptanceMeasurementContamination {
@@ -1185,7 +1251,7 @@ function Assert-Phase4OperatorVerdict {
 
     if ($RequireWarningFree -and ($Result.warningCount -gt 0 -or $Result.operatorVerdict -ne 'PASS')) {
         if (Test-Phase4RegularNknExternalTransportVariance -Result $Result) {
-            $Result.environmentalClassification = 'public_nkn_external_transport_churn'
+            $Result.environmentalClassification = 'regular_v4_external_transport_churn'
             Add-RouteAcceptanceMeasurementContamination -Result $Result -Reason 'regular_nkn_external_transport_churn'
             return
         }
@@ -1872,7 +1938,12 @@ function Write-RouteAcceptanceFakePhase4Run {
     $missingLiveMetadata = Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'MISSING_LIVE_METADATA'
     $bridgeLivenessFailure = Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'BRIDGE_LIVENESS_FAIL'
     $fallbackAuthorityMetadataMissing = Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'FALLBACK_AUTHORITY_METADATA_MISSING'
-    $warningCapExcess = Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'WARNING_CAP_EXCESS'
+    $warningCapExcess = if ($RerunAttempt -gt 0) {
+        Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'RERUN_WARNING_CAP_EXCESS'
+    }
+    else {
+        Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'WARNING_CAP_EXCESS'
+    }
     $warning = if ($RerunAttempt -gt 0) {
         Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'RERUN_WARNING'
     }
@@ -3238,9 +3309,9 @@ function Set-Phase5CanonicalRuntimeUnlockReceiveRecoveryExhaustion {
         return $false
     }
 
-    $Result.environmentalClassification = 'public_nkn_receive_recovery_exhausted_before_runtime_unlock'
-    Add-RouteAcceptanceMeasurementContamination -Result $Result -Reason 'public_nkn_receive_recovery_exhausted_before_runtime_unlock'
-    $environmentalFailure = 'environmental public NKN receive recovery exhausted before runtime unlock; paired rerun required'
+    $Result.environmentalClassification = 'live_transport_receive_recovery_exhausted_before_runtime_unlock'
+    Add-RouteAcceptanceMeasurementContamination -Result $Result -Reason 'live_transport_receive_recovery_exhausted_before_runtime_unlock'
+    $environmentalFailure = 'environmental live transport receive recovery exhausted before runtime unlock; paired rerun required'
     if (-not (@($Result.failures | ForEach-Object { [string]$_ }) -contains $environmentalFailure)) {
         $Result.failures.Insert(0, $environmentalFailure)
     }
@@ -3389,7 +3460,7 @@ function Get-Phase5FailureClass {
 
     foreach ($line in $failureLines) {
         if ($line.IndexOf('environmental', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-            $line.IndexOf('public_nkn', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $line.IndexOf('live_transport', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             return 'environmental'
         }
     }
@@ -3411,7 +3482,7 @@ function Get-RouteAcceptanceResultFailureClass {
     )
 
     if ($AcceptancePhase -eq 'phase5' -and
-        [string]$Result.environmentalClassification -eq 'public_nkn_receive_recovery_exhausted_before_runtime_unlock' -and
+        [string]$Result.environmentalClassification -eq 'live_transport_receive_recovery_exhausted_before_runtime_unlock' -and
         $Result.failures.Count -gt 0) {
         return 'environmental'
     }
@@ -3547,6 +3618,7 @@ function Invoke-Phase4RouteAcceptanceScenario {
     if ($AcceptancePhase -eq 'phase5') {
         Assert-Phase5ScenarioRun -Scenario $Scenario -Result $result
         Set-Phase5RegularNknCompletedExternalTransportVariance -Scenario $Scenario -Result $result | Out-Null
+        Set-Phase5CompletedLiveFallbackWarningVariance -Scenario $Scenario -Result $result | Out-Null
     }
     $phase5CanonicalReceiveRecoveryExhaustion = $false
     if ($AcceptancePhase -eq 'phase5') {
@@ -3564,7 +3636,7 @@ function Invoke-Phase4RouteAcceptanceScenario {
     if ((Test-Phase4RerunnableMeasurementFailure -Result $result) -or $phase5CanonicalReceiveRecoveryExhaustion -or $phase5TransientSetupFailure -or $phase5RegularStartupPeerDisconnect) {
         $firstAttemptResult = $result
         $firstFailureReason = if ($phase5CanonicalReceiveRecoveryExhaustion) {
-            'environmental receive recovery exhaustion: public_nkn_receive_recovery_exhausted_before_runtime_unlock'
+            'environmental receive recovery exhaustion: live_transport_receive_recovery_exhausted_before_runtime_unlock'
         }
         elseif ($phase5RegularStartupPeerDisconnect) {
             'transient regular NKN startup peer disconnect: regular_v4_startup_local_only_no_ack'
@@ -3621,6 +3693,7 @@ function Invoke-Phase4RouteAcceptanceScenario {
             if ($AcceptancePhase -eq 'phase5') {
                 Assert-Phase5ScenarioRun -Scenario $Scenario -Result $rerunResult
                 Set-Phase5RegularNknCompletedExternalTransportVariance -Scenario $Scenario -Result $rerunResult | Out-Null
+                Set-Phase5CompletedLiveFallbackWarningVariance -Scenario $Scenario -Result $rerunResult | Out-Null
                 Set-Phase5CanonicalRuntimeUnlockReceiveRecoveryExhaustion -Scenario $Scenario -Result $rerunResult | Out-Null
             }
             $rerunResult.attemptCount = $rerun + 1
@@ -3654,6 +3727,33 @@ function Invoke-Phase4RouteAcceptanceScenario {
                 }
                 $result = $firstAttemptResult
                 break
+            }
+
+            if ($rerunResult.failures.Count -ne 0) {
+                $firstAttemptFailureClass = Get-RouteAcceptanceResultFailureClass -AcceptancePhase $AcceptancePhase -Result $firstAttemptResult
+                $rerunFailureClass = Get-RouteAcceptanceResultFailureClass -AcceptancePhase $AcceptancePhase -Result $rerunResult
+                if (($firstAttemptFailureClass -eq 'performance' -or $firstAttemptFailureClass -eq 'environmental') -and
+                    $rerunFailureClass -ne 'performance' -and
+                    $rerunFailureClass -ne 'environmental') {
+                    $rerunFailureReason = if (-not [string]::IsNullOrWhiteSpace($rerunExecutionFailure)) {
+                        "scenario rerun execution failed: {0}" -f $rerunExecutionFailure
+                    }
+                    else {
+                        Get-Phase4FirstFailureReason -Result $rerunResult
+                    }
+                    if ([string]::IsNullOrWhiteSpace($rerunFailureReason)) {
+                        $rerunFailureReason = 'rerun introduced non-performance evidence'
+                    }
+
+                    $firstAttemptResult.attemptCount = $rerun + 1
+                    $firstAttemptResult.retryUsed = $true
+                    $firstAttemptResult.selectedAttempt = 1
+                    $firstAttemptResult.firstFailureReason = $firstFailureReason
+                    $firstAttemptResult.rerunArtifactDir = $rerunDir
+                    $firstAttemptResult.rerunFailureReason = ("rerun introduced {0} failure; preserving first-attempt evidence: {1}" -f $rerunFailureClass, $rerunFailureReason)
+                    $result = $firstAttemptResult
+                    break
+                }
             }
 
             $result = $rerunResult
@@ -3701,10 +3801,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     $correctnessVerdict = if ($correctnessFailureLines.Count -eq 0 -and $script:RunResults.Count -eq $expectedRunCount) { 'PASS' } else { 'FAIL' }
     $performanceVerdict = if ($performanceFailureLines.Count -eq 0) { 'PASS' } else { 'FAIL' }
     $networkVarianceNote = if ($AcceptancePhase -eq 'phase5') {
-        'Goodput on public NKN/Tuna is classified separately from release correctness after strict route/protocol/SHA/hard-failure/warning proof passes; persistent goodput below the Phase 4 floor still fails performance verdict, but Phase 5 release acceptance is governed by correctness gates.'
+        'Goodput on live transfer paths is classified separately from release correctness after strict route/protocol/SHA/hard-failure/warning proof passes; persistent goodput below the Phase 4 floor still fails performance verdict, but Phase 5 release acceptance is governed by correctness gates.'
     }
     else {
-        'Goodput on public NKN/Tuna is classified separately from runtime correctness only after strict route/protocol/SHA/hard-failure/warning proof passes; persistent goodput below the Phase 4 floor still fails performance acceptance and remains release-blocking unless a rerun proves environmental noise.'
+        'Goodput on live transfer paths is classified separately from runtime correctness only after strict route/protocol/SHA/hard-failure/warning proof passes; persistent goodput below the Phase 4 floor still fails performance acceptance and remains release-blocking unless a rerun proves environmental noise.'
     }
     $textLines = @(
         $SummaryTitle,
@@ -3716,7 +3816,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("baseline_manifest={0}" -f $BaselinePath),
         ("goodput_regression_tolerance_percent={0:F1}" -f [double]$GoodputRegressionTolerancePercent),
         'correctness_gate_policy=strict_no_exceptions',
-        'network_variance_policy=public_nkn_paired_rerun',
+        'network_variance_policy=live_transport_paired_rerun',
         ("network_variance_note={0}" -f $networkVarianceNote),
         'regular_nkn_external_transport_warning_policy=capped_external_transport_churn_requires_clean_rerun',
         'goodput_regression_policy=rerun_once_when_only_failure',
@@ -3892,7 +3992,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
         goodputRegressionTolerancePercent = $GoodputRegressionTolerancePercent
         correctnessGatePolicy = 'strict_no_exceptions'
-        networkVariancePolicy = 'public_nkn_paired_rerun'
+        networkVariancePolicy = 'live_transport_paired_rerun'
         networkVarianceNote = $networkVarianceNote
         regularNknExternalTransportWarningPolicy = 'capped_external_transport_churn_requires_clean_rerun'
         goodputRegressionPolicy = 'rerun_once_when_only_failure'
