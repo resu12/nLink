@@ -3184,6 +3184,9 @@ public sealed partial class SessionFileTransferService
             "sender_request_feedback_stalled" or
             "peer_liveness_stale_receive_recovery" or
             "core_filetransfer_request" ||
+            normalized?.StartsWith("header_switch_off_", StringComparison.OrdinalIgnoreCase) == true ||
+            normalized?.StartsWith("remote_header_switch_off_", StringComparison.OrdinalIgnoreCase) == true ||
+            normalized?.StartsWith("helper_switch_off_", StringComparison.OrdinalIgnoreCase) == true ||
             normalized?.Contains("tuna", StringComparison.OrdinalIgnoreCase) == true ||
             normalized?.Contains("sidecar", StringComparison.OrdinalIgnoreCase) == true;
     }

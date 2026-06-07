@@ -4947,9 +4947,37 @@ public sealed partial class NknSignalingTransport
             return true;
         }
 
-        if (frame is FileTransferPauseControlFrameV4
-            or FileTransferCompleteFrameV4
-            or FileTransferErrorFrameV4)
+        if (frame is FileTransferCompleteFrameV4)
+        {
+            if (currentState.Phase is not FileTransferTransportPhase.Started and not FileTransferTransportPhase.Transferring)
+            {
+                failureReason = "complete_frame_requires_transfer";
+                return false;
+            }
+
+            if (currentState.InitiatedLocally != inbound)
+            {
+                failureReason = inbound ? "unexpected_inbound_complete_frame_for_remote_sender" : "unexpected_outbound_complete_frame_for_local_sender";
+                return false;
+            }
+
+            nextState = currentState with { Phase = FileTransferTransportPhase.Completed };
+            return true;
+        }
+
+        if (frame is FileTransferErrorFrameV4)
+        {
+            if (!CanTransitionToTerminalFileTransferState(currentState.Phase))
+            {
+                failureReason = "error_frame_not_allowed_in_current_state";
+                return false;
+            }
+
+            nextState = currentState with { Phase = FileTransferTransportPhase.Failed };
+            return true;
+        }
+
+        if (frame is FileTransferPauseControlFrameV4)
         {
             failureReason = "lifecycle_data_frame_unsupported";
             return false;

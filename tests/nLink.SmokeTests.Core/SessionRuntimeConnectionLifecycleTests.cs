@@ -1564,7 +1564,7 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
     }
 
     [Fact]
-    public async Task SessionRuntime_SessionLivenessHeartbeat_YieldsToActiveFileTransferProgressUntilSuspect()
+    public async Task SessionRuntime_SessionLivenessHeartbeat_YieldsToOutboundFileTransferProgressUntilSuspect()
     {
         var delay = new ControlledDelayScheduler();
         var now = DateTimeOffset.UtcNow;
@@ -1591,27 +1591,28 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
         InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
         await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
 
-        void PublishInboundProgress(long bytesTransferred)
+        void PublishOutboundProgress(long bytesAcknowledgedByReceiver)
         {
             var transfer = new FileTransferTransferSnapshot(
                 sessionId,
                 "ft_liveness_progress_yield",
-                FileTransferDirection.Inbound,
-                FileTransferTransferState.Receiving,
+                FileTransferDirection.Outbound,
+                FileTransferTransferState.Sending,
                 "progress-yield.bin",
                 64 * 1024,
                 Sha256Base64: null,
-                BytesTransferred: bytesTransferred,
-                ChunksTransferred: (int)(bytesTransferred / 1024),
+                BytesTransferred: bytesAcknowledgedByReceiver,
+                ChunksTransferred: (int)(bytesAcknowledgedByReceiver / 1024),
                 ChunkCount: 64,
                 ChunkSizeBytes: 1024,
                 ErrorCode: null,
-                StatusMessage: null);
-            var snapshot = new SessionFileTransferSnapshot(Outbound: null, Inbound: transfer);
+                StatusMessage: null,
+                BytesAcknowledgedByReceiver: bytesAcknowledgedByReceiver);
+            var snapshot = new SessionFileTransferSnapshot(Outbound: transfer, Inbound: null);
             InvokePrivateMethod(runtime, "OnFileTransferChanged", runtime, new SessionFileTransferSnapshotChangedEventArgs(snapshot));
         }
 
-        PublishInboundProgress(1024);
+        PublishOutboundProgress(1024);
         now = now.AddSeconds(1);
         delay.CompleteLatest();
         await Task.Delay(50);
@@ -1629,6 +1630,421 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
         await WaitUntilAsync(() => Volatile.Read(ref heartbeatCount) > 0, TimeSpan.FromSeconds(1));
 
         Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+    }
+
+    [Fact]
+    public async Task SessionRuntime_SessionLivenessHeartbeat_SendsDuringInboundFileTransferProgress()
+    {
+        var delay = new ControlledDelayScheduler();
+        var now = DateTimeOffset.UtcNow;
+        var heartbeatCount = 0;
+        var scripted = new ScriptedSignalingTransport(
+            onSendSessionHeartbeatAsync: (_, _) =>
+            {
+                Interlocked.Increment(ref heartbeatCount);
+                return Task.CompletedTask;
+            });
+        var options = SessionRuntimeWatchdogOptions.Default with
+        {
+            SessionLivenessHeartbeatInterval = TimeSpan.FromSeconds(1),
+            SessionLivenessSuspectTimeout = TimeSpan.FromSeconds(3),
+            SessionLivenessTimeout = TimeSpan.FromSeconds(9),
+        };
+        using var runtime = new SessionRuntime(() => scripted, options, delay.DelayAsync, nowProvider: () => now);
+        runtime.SetRoleForTests(SessionRuntimeRole.Helpee);
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        var securityState = CreateApprovedSecurityState(new PeerAddress(scripted.LocalPeerAddress), new PeerAddress("scripted.helper.liveness-inbound-progress-heartbeat"));
+        var sessionId = securityState.SessionId!.Value.Value;
+        scripted.SetSessionSecurityStateForTests(securityState);
+        InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+
+        var transfer = new FileTransferTransferSnapshot(
+            sessionId,
+            "ft_liveness_inbound_progress_heartbeat",
+            FileTransferDirection.Inbound,
+            FileTransferTransferState.Receiving,
+            "inbound-progress-heartbeat.bin",
+            64 * 1024,
+            Sha256Base64: null,
+            BytesTransferred: 1024,
+            ChunksTransferred: 1,
+            ChunkCount: 64,
+            ChunkSizeBytes: 1024,
+            ErrorCode: null,
+            StatusMessage: null);
+        InvokePrivateMethod(
+            runtime,
+            "OnFileTransferChanged",
+            runtime,
+            new SessionFileTransferSnapshotChangedEventArgs(new SessionFileTransferSnapshot(Outbound: null, Inbound: transfer)));
+
+        now = now.AddSeconds(1);
+        delay.CompleteLatest();
+        await WaitUntilAsync(() => Volatile.Read(ref heartbeatCount) > 0, TimeSpan.FromSeconds(1));
+
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+    }
+
+    [Fact]
+    public async Task SessionRuntime_SessionLivenessHeartbeat_ResumesImmediatelyAfterOutboundTransferTerminal()
+    {
+        var delay = new ControlledDelayScheduler();
+        var now = DateTimeOffset.UtcNow;
+        var heartbeatCount = 0;
+        var scripted = new ScriptedSignalingTransport(
+            onSendSessionHeartbeatAsync: (_, _) =>
+            {
+                Interlocked.Increment(ref heartbeatCount);
+                return Task.CompletedTask;
+            });
+        var options = SessionRuntimeWatchdogOptions.Default with
+        {
+            SessionLivenessHeartbeatInterval = TimeSpan.FromSeconds(1),
+            SessionLivenessSuspectTimeout = TimeSpan.FromSeconds(3),
+            SessionLivenessTimeout = TimeSpan.FromSeconds(9),
+        };
+        using var runtime = new SessionRuntime(() => scripted, options, delay.DelayAsync, nowProvider: () => now);
+        runtime.SetRoleForTests(SessionRuntimeRole.Helpee);
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        var securityState = CreateApprovedSecurityState(new PeerAddress(scripted.LocalPeerAddress), new PeerAddress("scripted.helper.liveness-terminal-heartbeat"));
+        var sessionId = securityState.SessionId!.Value.Value;
+        scripted.SetSessionSecurityStateForTests(securityState);
+        InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+
+        var transfer = new FileTransferTransferSnapshot(
+            sessionId,
+            "ft_liveness_terminal_heartbeat",
+            FileTransferDirection.Outbound,
+            FileTransferTransferState.Sending,
+            "terminal-heartbeat.bin",
+            64 * 1024,
+            Sha256Base64: null,
+            BytesTransferred: 32 * 1024,
+            ChunksTransferred: 32,
+            ChunkCount: 64,
+            ChunkSizeBytes: 1024,
+            ErrorCode: null,
+            StatusMessage: null,
+            BytesAcceptedForTransport: 32 * 1024,
+            BytesAcknowledgedByReceiver: 32 * 1024);
+        InvokePrivateMethod(
+            runtime,
+            "OnFileTransferChanged",
+            runtime,
+            new SessionFileTransferSnapshotChangedEventArgs(new SessionFileTransferSnapshot(Outbound: transfer, Inbound: null)));
+
+        now = now.AddSeconds(1);
+        delay.CompleteLatest();
+        await Task.Delay(50);
+        Assert.Equal(0, Volatile.Read(ref heartbeatCount));
+
+        var terminal = transfer with
+        {
+            State = FileTransferTransferState.Completed,
+            BytesTransferred = 64 * 1024,
+            ChunksTransferred = 64,
+            BytesAcceptedForTransport = 64 * 1024,
+            BytesAcknowledgedByReceiver = 64 * 1024,
+        };
+        InvokePrivateMethod(
+            runtime,
+            "OnFileTransferChanged",
+            runtime,
+            new SessionFileTransferSnapshotChangedEventArgs(new SessionFileTransferSnapshot(Outbound: terminal, Inbound: null)));
+
+        await WaitUntilAsync(() => Volatile.Read(ref heartbeatCount) > 0, TimeSpan.FromSeconds(1));
+
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+    }
+
+    [Fact]
+    public async Task SessionRuntime_SessionLivenessTimeout_DefersOnceAfterFileTransferTerminalProof()
+    {
+        var delay = new ControlledDelayScheduler();
+        var now = DateTimeOffset.UtcNow;
+        var heartbeatCount = 0;
+        var scripted = new ScriptedSignalingTransport(
+            onSendSessionHeartbeatAsync: (_, _) =>
+            {
+                Interlocked.Increment(ref heartbeatCount);
+                return Task.CompletedTask;
+            });
+        var options = SessionRuntimeWatchdogOptions.Default with
+        {
+            SessionLivenessHeartbeatInterval = TimeSpan.FromSeconds(1),
+            SessionLivenessSuspectTimeout = TimeSpan.FromSeconds(3),
+            SessionLivenessTimeout = TimeSpan.FromSeconds(9),
+        };
+        using var runtime = new SessionRuntime(() => scripted, options, delay.DelayAsync, nowProvider: () => now);
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        var securityState = CreateApprovedSecurityState(
+            new PeerAddress(scripted.LocalPeerAddress),
+            new PeerAddress("scripted.helpee.liveness-terminal-proof"));
+        var sessionId = securityState.SessionId!.Value.Value;
+        scripted.SetSessionSecurityStateForTests(securityState);
+        var disconnected = 0;
+        runtime.Disconnected += (_, _) => disconnected++;
+        InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+
+        var terminal = new FileTransferTransferSnapshot(
+            sessionId,
+            "ft_liveness_terminal_proof",
+            FileTransferDirection.Inbound,
+            FileTransferTransferState.Completed,
+            "terminal-proof.bin",
+            64 * 1024,
+            Sha256Base64: null,
+            BytesTransferred: 64 * 1024,
+            ChunksTransferred: 64,
+            ChunkCount: 64,
+            ChunkSizeBytes: 1024,
+            ErrorCode: null,
+            StatusMessage: null);
+        InvokePrivateMethod(
+            runtime,
+            "OnFileTransferChanged",
+            runtime,
+            new SessionFileTransferSnapshotChangedEventArgs(new SessionFileTransferSnapshot(Outbound: null, Inbound: terminal)));
+
+        now = now.AddSeconds(10);
+        delay.CompleteLatest();
+        await Task.Delay(50);
+
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.Equal(0, disconnected);
+        Assert.True(Volatile.Read(ref heartbeatCount) > 0);
+
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+        now = now.AddSeconds(20);
+        delay.CompleteLatest();
+        await Task.Delay(50);
+
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.Equal(0, disconnected);
+
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+        now = now.AddSeconds(40);
+        delay.CompleteLatest();
+        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Failed, TimeSpan.FromSeconds(1));
+
+        Assert.Equal("Connection lost.", runtime.StatusText);
+        Assert.Equal(1, disconnected);
+    }
+
+    [Fact]
+    public async Task SessionRuntime_SessionLivenessTimeout_DefersSecondTerminalProofWindowWhenHeartbeatsFail()
+    {
+        var delay = new ControlledDelayScheduler();
+        var now = DateTimeOffset.UtcNow;
+        var heartbeatCount = 0;
+        var scripted = new ScriptedSignalingTransport(
+            onSendSessionHeartbeatAsync: (_, _) =>
+            {
+                Interlocked.Increment(ref heartbeatCount);
+                throw new OperationCanceledException("simulated heartbeat lane cancellation");
+            });
+        var options = SessionRuntimeWatchdogOptions.Default with
+        {
+            SessionLivenessHeartbeatInterval = TimeSpan.FromSeconds(1),
+            SessionLivenessSuspectTimeout = TimeSpan.FromSeconds(3),
+            SessionLivenessTimeout = TimeSpan.FromSeconds(9),
+        };
+        using var runtime = new SessionRuntime(() => scripted, options, delay.DelayAsync, nowProvider: () => now);
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        var securityState = CreateApprovedSecurityState(
+            new PeerAddress(scripted.LocalPeerAddress),
+            new PeerAddress("scripted.helpee.liveness-terminal-proof-failing-heartbeat"));
+        var sessionId = securityState.SessionId!.Value.Value;
+        scripted.SetSessionSecurityStateForTests(securityState);
+        var disconnected = 0;
+        runtime.Disconnected += (_, _) => disconnected++;
+        InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+
+        var terminal = new FileTransferTransferSnapshot(
+            sessionId,
+            "ft_liveness_terminal_proof_failing_heartbeat",
+            FileTransferDirection.Inbound,
+            FileTransferTransferState.Completed,
+            "terminal-proof-failing-heartbeat.bin",
+            64 * 1024,
+            Sha256Base64: null,
+            BytesTransferred: 64 * 1024,
+            ChunksTransferred: 64,
+            ChunkCount: 64,
+            ChunkSizeBytes: 1024,
+            ErrorCode: null,
+            StatusMessage: null);
+        InvokePrivateMethod(
+            runtime,
+            "OnFileTransferChanged",
+            runtime,
+            new SessionFileTransferSnapshotChangedEventArgs(new SessionFileTransferSnapshot(Outbound: null, Inbound: terminal)));
+
+        now = now.AddSeconds(10);
+        delay.CompleteLatest();
+        await Task.Delay(50);
+
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.Equal(0, disconnected);
+        Assert.True(Volatile.Read(ref heartbeatCount) > 0);
+
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+        now = now.AddSeconds(40);
+        delay.CompleteLatest();
+        await Task.Delay(50);
+
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.Equal(0, disconnected);
+
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+        now = now.AddSeconds(40);
+        delay.CompleteLatest();
+        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Failed, TimeSpan.FromSeconds(1));
+
+        Assert.Equal("Connection lost.", runtime.StatusText);
+        Assert.Equal(1, disconnected);
+    }
+
+    [Fact]
+    public async Task SessionRuntime_SessionLivenessTimeout_ClearsStaleHeartbeatInFlightAfterTerminalProof()
+    {
+        var delay = new ControlledDelayScheduler();
+        var now = DateTimeOffset.UtcNow;
+        var heartbeatCount = 0;
+        var scripted = new ScriptedSignalingTransport(
+            onSendSessionHeartbeatAsync: (_, _) =>
+            {
+                Interlocked.Increment(ref heartbeatCount);
+                return Task.CompletedTask;
+            });
+        var options = SessionRuntimeWatchdogOptions.Default with
+        {
+            SessionLivenessHeartbeatInterval = TimeSpan.FromSeconds(1),
+            SessionLivenessSuspectTimeout = TimeSpan.FromSeconds(3),
+            SessionLivenessTimeout = TimeSpan.FromSeconds(9),
+        };
+        using var runtime = new SessionRuntime(() => scripted, options, delay.DelayAsync, nowProvider: () => now);
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        var securityState = CreateApprovedSecurityState(
+            new PeerAddress(scripted.LocalPeerAddress),
+            new PeerAddress("scripted.helpee.liveness-terminal-stale-heartbeat"));
+        var sessionId = securityState.SessionId!.Value.Value;
+        scripted.SetSessionSecurityStateForTests(securityState);
+        InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+
+        var terminal = new FileTransferTransferSnapshot(
+            sessionId,
+            "ft_liveness_terminal_stale_heartbeat",
+            FileTransferDirection.Inbound,
+            FileTransferTransferState.Completed,
+            "terminal-stale-heartbeat.bin",
+            64 * 1024,
+            Sha256Base64: null,
+            BytesTransferred: 64 * 1024,
+            ChunksTransferred: 64,
+            ChunkCount: 64,
+            ChunkSizeBytes: 1024,
+            ErrorCode: null,
+            StatusMessage: null);
+        InvokePrivateMethod(
+            runtime,
+            "OnFileTransferChanged",
+            runtime,
+            new SessionFileTransferSnapshotChangedEventArgs(new SessionFileTransferSnapshot(Outbound: null, Inbound: terminal)));
+
+        SetPrivateField(runtime, "sessionLivenessHeartbeatInFlight", 1);
+        SetPrivateField(runtime, "sessionLivenessHeartbeatInFlightSinceUtc", now.AddSeconds(-10));
+
+        now = now.AddSeconds(10);
+        delay.CompleteLatest();
+        await WaitUntilAsync(() => Volatile.Read(ref heartbeatCount) > 0, TimeSpan.FromSeconds(1));
+
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+    }
+
+    [Fact]
+    public async Task SessionRuntime_SessionLivenessTimeout_PreservesTerminalProofAcrossLateFileTransferDataProof()
+    {
+        var delay = new ControlledDelayScheduler();
+        var now = DateTimeOffset.UtcNow;
+        var heartbeatCount = 0;
+        var scripted = new ScriptedSignalingTransport(
+            onSendSessionHeartbeatAsync: (_, _) =>
+            {
+                Interlocked.Increment(ref heartbeatCount);
+                return Task.CompletedTask;
+            });
+        var options = SessionRuntimeWatchdogOptions.Default with
+        {
+            SessionLivenessHeartbeatInterval = TimeSpan.FromSeconds(1),
+            SessionLivenessSuspectTimeout = TimeSpan.FromSeconds(3),
+            SessionLivenessTimeout = TimeSpan.FromSeconds(9),
+        };
+        using var runtime = new SessionRuntime(() => scripted, options, delay.DelayAsync, nowProvider: () => now);
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        var securityState = CreateApprovedSecurityState(
+            new PeerAddress(scripted.LocalPeerAddress),
+            new PeerAddress("scripted.helpee.liveness-terminal-late-data"));
+        var sessionId = securityState.SessionId!.Value.Value;
+        scripted.SetSessionSecurityStateForTests(securityState);
+        var disconnected = 0;
+        runtime.Disconnected += (_, _) => disconnected++;
+        InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+
+        var terminal = new FileTransferTransferSnapshot(
+            sessionId,
+            "ft_liveness_terminal_late_data",
+            FileTransferDirection.Inbound,
+            FileTransferTransferState.Completed,
+            "terminal-late-data.bin",
+            64 * 1024,
+            Sha256Base64: null,
+            BytesTransferred: 64 * 1024,
+            ChunksTransferred: 64,
+            ChunkCount: 64,
+            ChunkSizeBytes: 1024,
+            ErrorCode: null,
+            StatusMessage: null);
+        InvokePrivateMethod(
+            runtime,
+            "OnFileTransferChanged",
+            runtime,
+            new SessionFileTransferSnapshotChangedEventArgs(new SessionFileTransferSnapshot(Outbound: null, Inbound: terminal)));
+
+        await WaitUntilAsync(() => Volatile.Read(ref heartbeatCount) > 0, TimeSpan.FromSeconds(1));
+
+        now = now.AddSeconds(1);
+        scripted.InjectSessionLivenessProof(
+            sessionId,
+            generation: 0,
+            sequence: 100,
+            proofKind: "file_transfer_data_frame",
+            lane: "bulk");
+
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+        now = now.AddSeconds(10);
+        delay.CompleteLatest();
+        await Task.Delay(50);
+
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.Equal(0, disconnected);
+        Assert.True(Volatile.Read(ref heartbeatCount) > 1);
     }
 
     [Fact]

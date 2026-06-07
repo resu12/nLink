@@ -43,6 +43,87 @@ public sealed partial class SessionFileTransferService
                TargetTransport: FileTransferTransportKind.Tuna,
            };
 
+    private static bool IsPeerPostTunaFallbackV6RuntimeProofFrame(FileTransferDataFrame frame)
+        => frame switch
+        {
+            FileTransferReceiverStateFrameV6 state => IsPeerPostTunaFallbackV6RuntimeProofMetadata(
+                state.TransportEpoch,
+                state.RepairRequestId,
+                state.Priority,
+                state.RecoveryMode),
+            FileTransferFrontierRequestFrameV6 request => IsPeerPostTunaFallbackV6RuntimeProofMetadata(
+                request.TransportEpoch,
+                request.RepairRequestId,
+                request.Priority,
+                request.RecoveryMode),
+            FileTransferChunkBatchFrameV6 batch => IsPeerPostTunaFallbackV6RuntimeProofMetadata(
+                batch.TransportEpoch,
+                batch.RepairRequestId,
+                batch.Priority,
+                batch.RecoveryMode),
+            _ => false,
+        };
+
+    private static bool IsPeerPostTunaFallbackV6RuntimeProofMetadata(
+        long transportEpoch,
+        string? repairRequestId,
+        string? priority,
+        string? recoveryMode)
+    {
+        if (transportEpoch <= 0)
+        {
+            return false;
+        }
+
+        return ContainsPostTunaFallbackV6RuntimeProofToken(repairRequestId) ||
+               ContainsPostTunaFallbackV6RuntimeProofToken(priority) ||
+               ContainsPostTunaFallbackV6RuntimeProofToken(recoveryMode);
+    }
+
+    private static bool ContainsPostTunaFallbackV6RuntimeProofToken(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        return value.Contains("post_tuna", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("fallback", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("regular_nkn", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("frontier", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("state_refresh", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("checkpoint", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsRecoveredFileTunaV4LiveActivationEpoch(LiveRouteEpoch? epoch)
+        => epoch is
+        {
+            RouteSelection.Route: FileTransferRoute.FileTunaV4,
+            RouteSelection.ProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
+            HandoffKind: FileTransferTransportHandoffKind.NormalToTunaActivation,
+            TargetTransport: FileTransferTransportKind.Tuna,
+            State: "recovered",
+        };
+
+    private static long ResolveV6RuntimeProofTransportEpoch(FileTransferDataFrame frame)
+        => frame switch
+        {
+            FileTransferReceiverStateFrameV6 state => state.TransportEpoch,
+            FileTransferFrontierRequestFrameV6 request => request.TransportEpoch,
+            FileTransferChunkBatchFrameV6 batch => batch.TransportEpoch,
+            _ => 0,
+        };
+
+    private static void LogPeerPostTunaFallbackV6ProofIgnoredAfterLiveActivation(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        FileTransferDataFrame frame,
+        LiveRouteEpoch? currentEpoch)
+        => LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_peer_post_tuna_fallback_v6_proof_ignored; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; frame_type={FormatProtocolLogValue(frame.Type)}; frame_transport_epoch={ResolveV6RuntimeProofTransportEpoch(frame)}; current_live_route_epoch={currentEpoch?.EpochId ?? 0}; current_handoff_kind={FormatFileTransferTransportHandoffKind(currentEpoch?.HandoffKind ?? FileTransferTransportHandoffKind.None)}; current_target_transport={FormatFileTransferTransportKind(currentEpoch?.TargetTransport ?? FileTransferTransportKind.Unknown)}; reason=stale_after_live_tuna_activation");
+
     private static bool ShouldAcceptLiveRouteV6ProbeFrame(InboundTransferContext context, FileTransferDataFrame frame)
         => frame is FileTransferTransportProbeFrameV6 &&
            context.CurrentLiveRouteEpoch is
@@ -50,6 +131,104 @@ public sealed partial class SessionFileTransferService
                HandoffKind: FileTransferTransportHandoffKind.NormalToTunaActivation,
                TargetTransport: FileTransferTransportKind.Tuna,
            };
+
+    private bool TryPromoteOutboundFileTunaV4FallbackFromPeerV6Proof(
+        OutboundTransferContext context,
+        FileTransferDataFrame frame,
+        out SessionFileTransferSnapshot? snapshot)
+    {
+        snapshot = null;
+        if (!IsPeerPostTunaFallbackV6RuntimeProofFrame(frame))
+        {
+            return false;
+        }
+
+        lock (gate)
+        {
+            if (!ReferenceEquals(outboundTransfer, context) ||
+                context.IsTerminal ||
+                !context.RouteRuntime.UsesFileTunaV4Runtime ||
+                context.NegotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV4)
+            {
+                return false;
+            }
+
+            if (IsRecoveredFileTunaV4LiveActivationEpoch(context.CurrentLiveRouteEpoch))
+            {
+                LogPeerPostTunaFallbackV6ProofIgnoredAfterLiveActivation(
+                    FileTransferDirection.Outbound,
+                    context.TransferId,
+                    context.SessionId,
+                    frame,
+                    context.CurrentLiveRouteEpoch);
+                return false;
+            }
+
+            if (!TryPromoteOutboundFileTunaV4FallbackToPostTunaV6Locked(
+                    context,
+                    "peer_post_tuna_fallback_v6_proof",
+                    FileTransferTransportHandoffKind.TunaToNormalFallback,
+                    FileTransferTransportKind.RegularNkn))
+            {
+                return false;
+            }
+
+            snapshot = CreateSnapshotLocked();
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_peer_post_tuna_fallback_v6_proof_promoted_route; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; frame_type={FormatProtocolLogValue(frame.Type)}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? 0}");
+            return true;
+        }
+    }
+
+    private bool TryPromoteInboundFileTunaV4FallbackFromPeerV6Proof(
+        InboundTransferContext context,
+        FileTransferDataFrame frame,
+        out SessionFileTransferSnapshot? snapshot)
+    {
+        snapshot = null;
+        if (!IsPeerPostTunaFallbackV6RuntimeProofFrame(frame))
+        {
+            return false;
+        }
+
+        lock (gate)
+        {
+            if (!ReferenceEquals(inboundTransfer, context) ||
+                context.IsTerminal ||
+                !context.RouteRuntime.UsesFileTunaV4Runtime ||
+                context.NegotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV4)
+            {
+                return false;
+            }
+
+            if (IsRecoveredFileTunaV4LiveActivationEpoch(context.CurrentLiveRouteEpoch))
+            {
+                LogPeerPostTunaFallbackV6ProofIgnoredAfterLiveActivation(
+                    FileTransferDirection.Inbound,
+                    context.TransferId,
+                    context.SessionId,
+                    frame,
+                    context.CurrentLiveRouteEpoch);
+                return false;
+            }
+
+            if (!TryPromoteInboundFileTunaV4FallbackToPostTunaV6Locked(
+                    context,
+                    "peer_post_tuna_fallback_v6_proof",
+                    FileTransferTransportHandoffKind.TunaToNormalFallback,
+                    FileTransferTransportKind.RegularNkn))
+            {
+                return false;
+            }
+
+            snapshot = CreateSnapshotLocked();
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_peer_post_tuna_fallback_v6_proof_promoted_route; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; frame_type={FormatProtocolLogValue(frame.Type)}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? 0}");
+            return true;
+        }
+    }
 
     private bool ShouldBoundOutboundV4TransportSendForV6RegularNknSparseRuntime(OutboundTransferContext context)
     {
@@ -419,6 +598,15 @@ public sealed partial class SessionFileTransferService
                 {
                     LogPullDataFrameIgnored(context.TransferId, context.SessionId, frame, "session_or_transfer_mismatch_v4");
                     continue;
+                }
+
+                if (!ShouldAcceptSparseCreditRuntimeDataFrame(context, frame))
+                {
+                    if (TryPromoteOutboundFileTunaV4FallbackFromPeerV6Proof(context, frame, out var promotedSnapshot) &&
+                        promotedSnapshot is not null)
+                    {
+                        RaiseTransferChanged(promotedSnapshot);
+                    }
                 }
 
                 if (!ShouldAcceptSparseCreditRuntimeDataFrame(context, frame))
@@ -3913,7 +4101,7 @@ public sealed partial class SessionFileTransferService
         TransportHandoffEpoch handoff)
     {
         var remoteFrontier = Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, context.ChunkCount);
-        var acceptedUntil = Math.Clamp(context.ChunksAcceptedForTransport, 0, context.ChunkCount);
+        var acceptedUntil = ResolveOutboundRepairAcceptedUntilExclusiveLocked(context);
         if (remoteFrontier < acceptedUntil ||
             state.DurableReceivedHighestChunkIndex >= acceptedUntil)
         {
@@ -5068,7 +5256,7 @@ public sealed partial class SessionFileTransferService
         var skippedFuture = 0;
         var skippedOutOfBounds = 0;
         var remoteFrontier = Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, context.ChunkCount);
-        var acceptedUntil = Math.Clamp(context.ChunksAcceptedForTransport, 0, context.ChunkCount);
+        var acceptedUntil = ResolveOutboundRepairAcceptedUntilExclusiveLocked(context);
         foreach (var chunkIndex in queuedRepair.ChunkIndices)
         {
             if (chunkIndex < 0 || chunkIndex >= context.ChunkCount)
@@ -7835,6 +8023,15 @@ public sealed partial class SessionFileTransferService
                 {
                     LogInboundV4FrameIgnored(context, frame, "session_or_transfer_mismatch");
                     continue;
+                }
+
+                if (!ShouldAcceptSparseCreditRuntimeDataFrame(context, frame))
+                {
+                    if (TryPromoteInboundFileTunaV4FallbackFromPeerV6Proof(context, frame, out var promotedSnapshot) &&
+                        promotedSnapshot is not null)
+                    {
+                        RaiseTransferChanged(promotedSnapshot);
+                    }
                 }
 
                 if (!ShouldAcceptSparseCreditRuntimeDataFrame(context, frame))

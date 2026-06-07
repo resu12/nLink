@@ -1103,6 +1103,73 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         }
     }
 
+    [Fact]
+    public void RealNknClientAdapter_RuntimeUnlockBulkQueueProofBlocker_RejectsBackloggedQueue()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-runtime-unlock-bulk-proof", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var options = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "id.json"), "runtime-unlock-bulk-proof");
+            var identity = NknIdentityStore.LoadOrCreate(options);
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var nowTick = Stopwatch.GetTimestamp();
+
+            SetPrivateField(adapter, "lastBridgeTransportHealthSummaryTick", nowTick);
+            SetPrivateField(adapter, "lastBridgeTransportHealthReadyEmitted", 1);
+            SetPrivateField(adapter, "lastBridgeTransportHealthControlReady", 1);
+            SetPrivateField(adapter, "lastBridgeTransportHealthBulkReady", 1);
+            SetPrivateField(adapter, "lastBridgeTransportHealthDisconnectSignalCount", 0L);
+            SetPrivateField(
+                adapter,
+                "bulkQueueState",
+                new BridgeBulkQueueState(
+                    QueueDepth: 8,
+                    QueuedBytes: 512 * 1024,
+                    OldestQueuedAgeMs: 2_000,
+                    InFlight: true,
+                    InFlightCount: 4,
+                    InFlightBytes: 128 * 1024,
+                    ConfiguredConcurrency: 4,
+                    EffectiveConcurrency: 4,
+                    ClearedSinceLast: 0,
+                    IsCongested: true,
+                    IsSevere: false));
+
+            Assert.True(adapter.TryGetRuntimeUnlockBulkQueueObservedProofBlocker(out var blockedReason));
+            Assert.Equal("bulk_queue_congested", blockedReason);
+
+            SetPrivateField(
+                adapter,
+                "bulkQueueState",
+                new BridgeBulkQueueState(
+                    QueueDepth: 0,
+                    QueuedBytes: 0,
+                    OldestQueuedAgeMs: 0,
+                    InFlight: false,
+                    InFlightCount: 0,
+                    InFlightBytes: 0,
+                    ConfiguredConcurrency: 4,
+                    EffectiveConcurrency: 4,
+                    ClearedSinceLast: 0,
+                    IsCongested: false,
+                    IsSevere: false));
+
+            Assert.False(adapter.TryGetRuntimeUnlockBulkQueueObservedProofBlocker(out var clearReason));
+            Assert.Equal(string.Empty, clearReason);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
     [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task RealNknClientAdapter_FileTransferBulkAdaptation_PromotesSinglePathWhenBridgeDemandExceedsSentCapacity()

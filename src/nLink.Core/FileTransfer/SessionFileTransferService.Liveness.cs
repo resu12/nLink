@@ -304,7 +304,7 @@ public sealed partial class SessionFileTransferService
         {
             if (ReferenceEquals(outboundTransfer, context) &&
                 !context.IsTerminal &&
-                IsNegotiableDataProtocolVersion(context.NegotiatedDataProtocolVersion) &&
+                ShouldUseCurrentV6HeartbeatRuntimeLocked(context) &&
                 !string.IsNullOrWhiteSpace(context.SessionId) &&
                 !context.V6HeartbeatLoopStarted)
             {
@@ -332,7 +332,7 @@ public sealed partial class SessionFileTransferService
         {
             if (ReferenceEquals(inboundTransfer, context) &&
                 !context.IsTerminal &&
-                IsNegotiableDataProtocolVersion(context.NegotiatedDataProtocolVersion) &&
+                ShouldUseCurrentV6HeartbeatRuntimeLocked(context) &&
                 !string.IsNullOrWhiteSpace(context.SessionId) &&
                 !context.V6HeartbeatLoopStarted)
             {
@@ -371,6 +371,12 @@ public sealed partial class SessionFileTransferService
                 {
                     if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
                     {
+                        return;
+                    }
+
+                    if (!ShouldUseCurrentV6HeartbeatRuntimeLocked(context))
+                    {
+                        StopOutboundV6HeartbeatLoopLocked(context, "route_runtime_changed");
                         return;
                     }
 
@@ -438,6 +444,12 @@ public sealed partial class SessionFileTransferService
                         return;
                     }
 
+                    if (!ShouldUseCurrentV6HeartbeatRuntimeLocked(context))
+                    {
+                        StopInboundV6HeartbeatLoopLocked(context, "route_runtime_changed");
+                        return;
+                    }
+
                     peerLivenessTimeout = ResolveInboundV6PeerLivenessTimeout(context);
                     lastPeerLivenessUtc = context.V6LastPeerLivenessUtc;
                     livenessDeadlineBaseUtc = ResolveV6PeerLivenessDeadlineBaseUtc(
@@ -479,6 +491,30 @@ public sealed partial class SessionFileTransferService
         catch (OperationCanceledException) when (context.LifetimeCts.IsCancellationRequested)
         {
         }
+    }
+
+    private static bool ShouldUseCurrentV6HeartbeatRuntimeLocked(OutboundTransferContext context)
+        => context.NegotiatedDataProtocolVersion >= FileTransferProtocol.ProtocolVersionV6 &&
+           context.RouteRuntime.UsesV6FeedbackEnvelope;
+
+    private static bool ShouldUseCurrentV6HeartbeatRuntimeLocked(InboundTransferContext context)
+        => context.NegotiatedDataProtocolVersion >= FileTransferProtocol.ProtocolVersionV6 &&
+           context.RouteRuntime.UsesV6FeedbackEnvelope;
+
+    private static void StopOutboundV6HeartbeatLoopLocked(OutboundTransferContext context, string reason)
+    {
+        context.V6HeartbeatLoopStarted = false;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_v6_heartbeat_stopped; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}");
+    }
+
+    private static void StopInboundV6HeartbeatLoopLocked(InboundTransferContext context, string reason)
+    {
+        context.V6HeartbeatLoopStarted = false;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_v6_heartbeat_stopped; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}");
     }
 
     private async Task<bool> TerminalizeOutboundForPeerLivenessTimeoutAsync(OutboundTransferContext context, DateTimeOffset? lastPeerLivenessUtc, TimeSpan peerLivenessTimeout)

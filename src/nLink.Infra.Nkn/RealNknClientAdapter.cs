@@ -1644,6 +1644,32 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             return true;
         }
 
+        BridgeBulkQueueState queueState;
+        lock (bulkQueueStateGate)
+        {
+            queueState = bulkQueueState;
+        }
+
+        if (queueState.IsSevere)
+        {
+            reason = "bulk_queue_severe";
+            return true;
+        }
+
+        if (queueState.IsCongested)
+        {
+            reason = "bulk_queue_congested";
+            return true;
+        }
+
+        if (queueState.QueueDepth >= 4 ||
+            queueState.QueuedBytes >= 256 * 1024 ||
+            (queueState.QueueDepth > 0 && queueState.OldestQueuedAgeMs >= 1_000))
+        {
+            reason = "bulk_queue_backlogged";
+            return true;
+        }
+
         return false;
     }
 

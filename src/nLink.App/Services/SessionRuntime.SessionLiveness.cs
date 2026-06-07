@@ -16,7 +16,9 @@ public sealed partial class SessionRuntime
     private static readonly TimeSpan SessionLivenessActiveFileTransferBridgeRecoveryDeferral = TimeSpan.FromSeconds(12);
     private static readonly TimeSpan SessionLivenessActiveFileTransferLongBridgeRecoveryDeferral = TimeSpan.FromSeconds(35);
     private static readonly TimeSpan SessionLivenessActiveFileTransferFinalRecoveryDeferral = TimeSpan.FromSeconds(35);
+    private static readonly TimeSpan SessionLivenessFileTransferTerminalProofDeferral = TimeSpan.FromSeconds(35);
     private static readonly TimeSpan SessionLivenessBridgeExhaustedActiveRecoveryDeferral = TimeSpan.FromSeconds(35);
+    private const int SessionLivenessFileTransferTerminalProofDeferralLimit = 2;
     private const int SessionLivenessActiveFileTransferBridgeRecoveryDeferralLimit = 4;
     private static readonly TimeSpan SessionLivenessActiveFileTransferMaxDeferrableSilence = TimeSpan.FromSeconds(210);
     private static readonly TimeSpan SessionLivenessRuntimeUnlockStartupDeferral = TimeSpan.FromSeconds(60);
@@ -31,6 +33,7 @@ public sealed partial class SessionRuntime
     private DateTimeOffset sessionLivenessLastAckUtc;
     private DateTimeOffset sessionLivenessFileTransferRecoveryDeferralUntilUtc;
     private int sessionLivenessHeartbeatInFlight;
+    private DateTimeOffset sessionLivenessHeartbeatInFlightSinceUtc = DateTimeOffset.MinValue;
     private int sessionLivenessConsecutiveSendFailures;
     private int sessionLivenessFileTransferRecoveryDeferralCount;
     private int sessionLivenessFileTransferBridgeRecoveryDeferralCount;
@@ -46,6 +49,11 @@ public sealed partial class SessionRuntime
     private string? sessionLivenessLatestFileTransferProgressKey;
     private long sessionLivenessLatestFileTransferProgressBytes;
     private DateTimeOffset sessionLivenessLatestFileTransferProgressUtc = DateTimeOffset.MinValue;
+    private string? sessionLivenessLastFileTransferTerminalHeartbeatKey;
+    private string? sessionLivenessLatestFileTransferTerminalProofKey;
+    private DateTimeOffset sessionLivenessLatestFileTransferTerminalProofUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset sessionLivenessFileTransferTerminalProofDeferralUntilUtc = DateTimeOffset.MinValue;
+    private int sessionLivenessFileTransferTerminalProofDeferralCount;
     private bool sessionLivenessSuspectLogged;
 
     private void StartSessionLivenessWatchdog(string reason)
@@ -93,8 +101,14 @@ public sealed partial class SessionRuntime
             sessionLivenessLatestFileTransferProgressKey = null;
             sessionLivenessLatestFileTransferProgressBytes = 0;
             sessionLivenessLatestFileTransferProgressUtc = DateTimeOffset.MinValue;
+            sessionLivenessLastFileTransferTerminalHeartbeatKey = null;
+            sessionLivenessLatestFileTransferTerminalProofKey = null;
+            sessionLivenessLatestFileTransferTerminalProofUtc = DateTimeOffset.MinValue;
+            sessionLivenessFileTransferTerminalProofDeferralUntilUtc = DateTimeOffset.MinValue;
+            sessionLivenessFileTransferTerminalProofDeferralCount = 0;
             sessionLivenessFileTransferRecoveryDeferralUntilUtc = DateTimeOffset.MinValue;
             sessionLivenessHeartbeatInFlight = 0;
+            sessionLivenessHeartbeatInFlightSinceUtc = DateTimeOffset.MinValue;
         }
 
         LocalOperationalLog.Info(
@@ -168,8 +182,10 @@ public sealed partial class SessionRuntime
         DateTimeOffset lastProof;
         DateTimeOffset fileTransferRecoveryDeferralUntil;
         DateTimeOffset finalFileTransferRecoveryDeferralUntil;
+        DateTimeOffset terminalFileTransferProofDeferralUntil;
         string? fileTransferRecoveryDeferralKey;
         bool finalFileTransferRecoveryDeferralActive;
+        bool terminalFileTransferProofDeferralActive;
         bool suspectAlreadyLogged;
         lock (sessionLivenessGate)
         {
@@ -186,10 +202,14 @@ public sealed partial class SessionRuntime
             lastProof = sessionLivenessLastPeerProofUtc;
             fileTransferRecoveryDeferralUntil = sessionLivenessFileTransferRecoveryDeferralUntilUtc;
             finalFileTransferRecoveryDeferralUntil = sessionLivenessFileTransferFinalRecoveryDeferralUntilUtc;
+            terminalFileTransferProofDeferralUntil = sessionLivenessFileTransferTerminalProofDeferralUntilUtc;
             fileTransferRecoveryDeferralKey = sessionLivenessFileTransferRecoveryDeferralKey;
             finalFileTransferRecoveryDeferralActive =
                 sessionLivenessFileTransferFinalRecoveryDeferralCount > 0 &&
                 finalFileTransferRecoveryDeferralUntil > DateTimeOffset.MinValue;
+            terminalFileTransferProofDeferralActive =
+                sessionLivenessFileTransferTerminalProofDeferralCount > 0 &&
+                terminalFileTransferProofDeferralUntil > DateTimeOffset.MinValue;
             suspectAlreadyLogged = sessionLivenessSuspectLogged;
         }
 
@@ -285,6 +305,21 @@ public sealed partial class SessionRuntime
                 return false;
             }
 
+            if (terminalFileTransferProofDeferralActive && terminalFileTransferProofDeferralUntil > now)
+            {
+                LocalOperationalLog.Info(
+                    "Session",
+                    $"event=session_liveness_timeout_deferred_waiting_for_filetransfer_terminal_proof_settle; session_id={sessionIdSnapshot}; generation={generation}; silence_ms={(long)silence.TotalMilliseconds}; remaining_ms={(long)(terminalFileTransferProofDeferralUntil - now).TotalMilliseconds}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+                await TrySendSessionLivenessHeartbeatAsync(
+                        livenessTransport,
+                        sessionIdSnapshot,
+                        generation,
+                        "timeout_filetransfer_terminal_proof_settle",
+                        ct)
+                    .ConfigureAwait(false);
+                return false;
+            }
+
             if (fileTransferRecoveryDeferralUntil > now &&
                 !fileTransferDeferralCapReached)
             {
@@ -365,6 +400,18 @@ public sealed partial class SessionRuntime
                 return false;
             }
 
+            if (TryDeferSessionLivenessTimeoutForRecentFileTransferTerminalProof(sessionIdSnapshot, generation, silence))
+            {
+                await TrySendSessionLivenessHeartbeatAsync(
+                        livenessTransport,
+                        sessionIdSnapshot,
+                        generation,
+                        "timeout_recent_filetransfer_terminal_proof",
+                        ct)
+                    .ConfigureAwait(false);
+                return false;
+            }
+
             if (TryDeferSessionLivenessTimeoutForRecoveryContract(sessionIdSnapshot, generation, silence))
             {
                 await TrySendSessionLivenessHeartbeatAsync(
@@ -398,6 +445,7 @@ public sealed partial class SessionRuntime
                 $"event=session_liveness_suspect; session_id={sessionIdSnapshot}; generation={generation}; silence_ms={(long)silence.TotalMilliseconds}; suspect_timeout_ms={(long)watchdogOptions.SessionLivenessSuspectTimeout.TotalMilliseconds}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
         }
 
+        var heartbeatTrigger = urgentHeartbeat ? "suspect_urgent" : "periodic";
         if (!urgentHeartbeat &&
             silence < watchdogOptions.SessionLivenessSuspectTimeout &&
             TryGetActiveFileTransferPeerVisibleProgressSnapshot(
@@ -405,17 +453,25 @@ public sealed partial class SessionRuntime
                 out var activeProgressTransfer,
                 out var activeProgressBytes))
         {
+            if (activeProgressTransfer.Direction == FileTransferDirection.Outbound)
+            {
+                LocalOperationalLog.Info(
+                    "Session",
+                    $"event=session_liveness_heartbeat_skipped_for_active_filetransfer_progress; session_id={sessionIdSnapshot}; generation={generation}; transfer_id={activeProgressTransfer.TransferId}; direction={activeProgressTransfer.Direction.ToString().ToLowerInvariant()}; progress_bytes={activeProgressBytes}; silence_ms={(long)silence.TotalMilliseconds}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+                return false;
+            }
+
+            heartbeatTrigger = "active_inbound_filetransfer_progress";
             LocalOperationalLog.Info(
                 "Session",
-                $"event=session_liveness_heartbeat_skipped_for_active_filetransfer_progress; session_id={sessionIdSnapshot}; generation={generation}; transfer_id={activeProgressTransfer.TransferId}; direction={activeProgressTransfer.Direction.ToString().ToLowerInvariant()}; progress_bytes={activeProgressBytes}; silence_ms={(long)silence.TotalMilliseconds}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
-            return false;
+                $"event=session_liveness_heartbeat_required_for_active_inbound_filetransfer_progress; session_id={sessionIdSnapshot}; generation={generation}; transfer_id={activeProgressTransfer.TransferId}; direction={activeProgressTransfer.Direction.ToString().ToLowerInvariant()}; progress_bytes={activeProgressBytes}; silence_ms={(long)silence.TotalMilliseconds}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
         }
 
         await TrySendSessionLivenessHeartbeatAsync(
                 livenessTransport,
                 sessionIdSnapshot,
                 generation,
-                urgentHeartbeat ? "suspect_urgent" : "periodic",
+                heartbeatTrigger,
                 ct)
             .ConfigureAwait(false);
         return false;
@@ -804,8 +860,124 @@ public sealed partial class SessionRuntime
         }
     }
 
+    private void ObserveFileTransferTerminalProofForSessionLiveness(SessionFileTransferSnapshot snapshot)
+    {
+        var sessionIdSnapshot = GetApprovedSessionIdForLiveness();
+        if (string.IsNullOrWhiteSpace(sessionIdSnapshot) ||
+            !TryGetTerminalFileTransferForSessionLivenessHeartbeat(snapshot.Outbound, sessionIdSnapshot, out var transfer) &&
+            !TryGetTerminalFileTransferForSessionLivenessHeartbeat(snapshot.Inbound, sessionIdSnapshot, out transfer) ||
+            transfer.State != FileTransferTransferState.Completed)
+        {
+            return;
+        }
+
+        var terminalKey = CreateSessionLivenessFileTransferTerminalKey(transfer);
+        var observedUtc = nowProvider();
+        lock (sessionLivenessGate)
+        {
+            if (sessionLivenessCts is null ||
+                state != SessionRuntimeState.Connected ||
+                transportState != TransportState.Connected ||
+                !string.Equals(GetApprovedSessionIdForLiveness(), sessionIdSnapshot, StringComparison.Ordinal) ||
+                string.Equals(sessionLivenessLatestFileTransferTerminalProofKey, terminalKey, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            sessionLivenessLatestFileTransferTerminalProofKey = terminalKey;
+            sessionLivenessLatestFileTransferTerminalProofUtc = observedUtc;
+            sessionLivenessLastPeerProofUtc = observedUtc;
+            sessionLivenessConsecutiveSendFailures = 0;
+            sessionLivenessFileTransferRecoveryDeferralCount = 0;
+            sessionLivenessFileTransferBridgeRecoveryDeferralCount = 0;
+            sessionLivenessFileTransferFinalRecoveryDeferralCount = 0;
+            sessionLivenessBridgeExhaustedActiveRecoveryDeferralCount = 0;
+            sessionLivenessRuntimeUnlockStartupDeferralCount = 0;
+            sessionLivenessRuntimeUnlockAnswerWaitDeferralContractGeneration = 0;
+            sessionLivenessRecoveryContractDeferralGeneration = 0;
+            sessionLivenessFileTransferRecoveryDeferralUntilUtc = DateTimeOffset.MinValue;
+            sessionLivenessFileTransferRecoveryDeferralKey = null;
+            sessionLivenessFileTransferTerminalProofDeferralUntilUtc = DateTimeOffset.MinValue;
+            sessionLivenessFileTransferTerminalProofDeferralCount = 0;
+            sessionLivenessSuspectLogged = false;
+        }
+
+        LocalOperationalLog.Info(
+            "Session",
+            $"event=session_liveness_peer_proof_observed; session_id={sessionIdSnapshot}; generation={Volatile.Read(ref sessionLivenessGeneration)}; sequence=0; proof_kind=filetransfer_terminal; lane={transfer.Direction.ToString().ToLowerInvariant()}; transfer_id={transfer.TransferId}; terminal_state={transfer.State}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+    }
+
+    private void RequestSessionLivenessHeartbeatAfterFileTransferTerminal(SessionFileTransferSnapshot snapshot)
+    {
+        var sessionIdSnapshot = GetApprovedSessionIdForLiveness();
+        if (string.IsNullOrWhiteSpace(sessionIdSnapshot) ||
+            transport is not ISessionLivenessSignalingTransport livenessTransport ||
+            !TryGetTerminalFileTransferForSessionLivenessHeartbeat(snapshot.Outbound, sessionIdSnapshot, out var transfer) &&
+            !TryGetTerminalFileTransferForSessionLivenessHeartbeat(snapshot.Inbound, sessionIdSnapshot, out transfer))
+        {
+            return;
+        }
+
+        var terminalKey = CreateSessionLivenessFileTransferTerminalKey(transfer);
+        long generation;
+        CancellationToken ct;
+        lock (sessionLivenessGate)
+        {
+            if (sessionLivenessCts is null ||
+                state != SessionRuntimeState.Connected ||
+                transportState != TransportState.Connected ||
+                !string.Equals(GetApprovedSessionIdForLiveness(), sessionIdSnapshot, StringComparison.Ordinal) ||
+                string.Equals(sessionLivenessLastFileTransferTerminalHeartbeatKey, terminalKey, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            sessionLivenessLastFileTransferTerminalHeartbeatKey = terminalKey;
+            generation = sessionLivenessGeneration;
+            ct = sessionLivenessCts.Token;
+        }
+
+        LocalOperationalLog.Info(
+            "Session",
+            $"event=session_liveness_heartbeat_requested_after_filetransfer_terminal; session_id={sessionIdSnapshot}; generation={generation}; transfer_id={transfer.TransferId}; direction={transfer.Direction.ToString().ToLowerInvariant()}; terminal_state={transfer.State}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+
+        RunCountedBackgroundTask(
+            async () =>
+            {
+                await TrySendSessionLivenessHeartbeatAsync(
+                        livenessTransport,
+                        sessionIdSnapshot,
+                        generation,
+                        "filetransfer_terminal",
+                        ct)
+                    .ConfigureAwait(false);
+            },
+            countAsTransportTask: false);
+    }
+
+    private static bool TryGetTerminalFileTransferForSessionLivenessHeartbeat(
+        FileTransferTransferSnapshot? candidate,
+        string sessionIdSnapshot,
+        out FileTransferTransferSnapshot transfer)
+    {
+        transfer = null!;
+        if (candidate is null ||
+            !candidate.IsTerminal ||
+            string.IsNullOrWhiteSpace(candidate.TransferId) ||
+            !string.Equals(candidate.SessionId, sessionIdSnapshot, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        transfer = candidate;
+        return true;
+    }
+
     private static string CreateSessionLivenessFileTransferProgressKey(FileTransferTransferSnapshot transfer)
         => $"{transfer.SessionId}:{transfer.TransferId}:{transfer.Direction}";
+
+    private static string CreateSessionLivenessFileTransferTerminalKey(FileTransferTransferSnapshot transfer)
+        => $"{transfer.SessionId}:{transfer.TransferId}:{transfer.Direction}:{transfer.State}:{transfer.ErrorCode ?? "(none)"}";
 
     private static long GetSessionLivenessPeerVisibleFileTransferProgressBytes(FileTransferTransferSnapshot transfer)
     {
@@ -867,12 +1039,55 @@ public sealed partial class SessionRuntime
             sessionLivenessRecoveryContractDeferralGeneration = 0;
             sessionLivenessFileTransferRecoveryDeferralUntilUtc = DateTimeOffset.MinValue;
             sessionLivenessFileTransferRecoveryDeferralKey = null;
+            sessionLivenessFileTransferTerminalProofDeferralUntilUtc = DateTimeOffset.MinValue;
+            sessionLivenessFileTransferTerminalProofDeferralCount = 0;
             sessionLivenessSuspectLogged = false;
             progressProofUtc = sessionLivenessLatestFileTransferProgressUtc;
         }
 
         transfer = candidate;
         progressBytes = candidateProgressBytes;
+        return true;
+    }
+
+    private bool TryDeferSessionLivenessTimeoutForRecentFileTransferTerminalProof(
+        string sessionIdSnapshot,
+        long generation,
+        TimeSpan silence)
+    {
+        var now = nowProvider();
+        string? terminalKey;
+        DateTimeOffset terminalProofUtc;
+        int nextDeferralCount;
+        int consecutiveSendFailures;
+        lock (sessionLivenessGate)
+        {
+            terminalKey = sessionLivenessLatestFileTransferTerminalProofKey;
+            terminalProofUtc = sessionLivenessLatestFileTransferTerminalProofUtc;
+            var currentDeferralCount = sessionLivenessFileTransferTerminalProofDeferralCount;
+            consecutiveSendFailures = sessionLivenessConsecutiveSendFailures;
+            if (generation != sessionLivenessGeneration ||
+                sessionLivenessCts is null ||
+                state != SessionRuntimeState.Connected ||
+                transportState != TransportState.Connected ||
+                !string.Equals(GetApprovedSessionIdForLiveness(), sessionIdSnapshot, StringComparison.Ordinal) ||
+                string.IsNullOrWhiteSpace(terminalKey) ||
+                terminalProofUtc <= DateTimeOffset.MinValue ||
+                currentDeferralCount >= SessionLivenessFileTransferTerminalProofDeferralLimit ||
+                (currentDeferralCount > 0 && consecutiveSendFailures <= 0) ||
+                now - terminalProofUtc > SessionLivenessActiveFileTransferMaxDeferrableSilence)
+            {
+                return false;
+            }
+
+            nextDeferralCount = currentDeferralCount + 1;
+            sessionLivenessFileTransferTerminalProofDeferralCount = nextDeferralCount;
+            sessionLivenessFileTransferTerminalProofDeferralUntilUtc = now.Add(SessionLivenessFileTransferTerminalProofDeferral);
+        }
+
+        LocalOperationalLog.Warn(
+            "Session",
+            $"event=session_liveness_timeout_deferred_for_filetransfer_terminal_proof_settle; session_id={sessionIdSnapshot}; generation={generation}; terminal_proof_key={SanitizeSessionLivenessReason(terminalKey)}; terminal_proof_age_ms={(long)Math.Max(0, (now - terminalProofUtc).TotalMilliseconds)}; silence_ms={(long)silence.TotalMilliseconds}; deferral_ms={(long)SessionLivenessFileTransferTerminalProofDeferral.TotalMilliseconds}; deferral_count={nextDeferralCount}; deferral_limit={SessionLivenessFileTransferTerminalProofDeferralLimit}; consecutive_send_failures={consecutiveSendFailures}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
         return true;
     }
 
@@ -1514,12 +1729,32 @@ public sealed partial class SessionRuntime
         string trigger,
         CancellationToken ct)
     {
-        if (Interlocked.Exchange(ref sessionLivenessHeartbeatInFlight, 1) != 0)
+        var now = nowProvider();
+        var staleHeartbeatAge = TimeSpan.FromTicks(Math.Max(
+            watchdogOptions.SessionLivenessHeartbeatInterval.Ticks * 3,
+            TimeSpan.FromSeconds(5).Ticks));
+        lock (sessionLivenessGate)
         {
-            LocalOperationalLog.Info(
-                "Session",
-                $"event=session_liveness_heartbeat_skipped; reason=heartbeat_in_flight; session_id={sessionIdSnapshot}; generation={generation}; trigger={trigger}");
-            return;
+            if (sessionLivenessHeartbeatInFlight != 0)
+            {
+                var inFlightAge = sessionLivenessHeartbeatInFlightSinceUtc <= DateTimeOffset.MinValue
+                    ? TimeSpan.Zero
+                    : now - sessionLivenessHeartbeatInFlightSinceUtc;
+                if (inFlightAge <= staleHeartbeatAge)
+                {
+                    LocalOperationalLog.Info(
+                        "Session",
+                        $"event=session_liveness_heartbeat_skipped; reason=heartbeat_in_flight; session_id={sessionIdSnapshot}; generation={generation}; trigger={trigger}; in_flight_age_ms={(long)Math.Max(0, inFlightAge.TotalMilliseconds)}; stale_after_ms={(long)staleHeartbeatAge.TotalMilliseconds}");
+                    return;
+                }
+
+                LocalOperationalLog.Warn(
+                    "Session",
+                    $"event=session_liveness_heartbeat_inflight_stale_cleared; session_id={sessionIdSnapshot}; generation={generation}; trigger={trigger}; in_flight_age_ms={(long)Math.Max(0, inFlightAge.TotalMilliseconds)}; stale_after_ms={(long)staleHeartbeatAge.TotalMilliseconds}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+            }
+
+            sessionLivenessHeartbeatInFlight = 1;
+            sessionLivenessHeartbeatInFlightSinceUtc = now;
         }
 
         try
@@ -1556,7 +1791,11 @@ public sealed partial class SessionRuntime
         }
         finally
         {
-            Interlocked.Exchange(ref sessionLivenessHeartbeatInFlight, 0);
+            lock (sessionLivenessGate)
+            {
+                sessionLivenessHeartbeatInFlight = 0;
+                sessionLivenessHeartbeatInFlightSinceUtc = DateTimeOffset.MinValue;
+            }
         }
     }
 
@@ -1788,6 +2027,11 @@ public sealed partial class SessionRuntime
             sessionLivenessLatestFileTransferProgressKey = null;
             sessionLivenessLatestFileTransferProgressBytes = 0;
             sessionLivenessLatestFileTransferProgressUtc = DateTimeOffset.MinValue;
+            sessionLivenessLatestFileTransferTerminalProofKey = null;
+            sessionLivenessLatestFileTransferTerminalProofUtc = DateTimeOffset.MinValue;
+            sessionLivenessFileTransferTerminalProofDeferralUntilUtc = DateTimeOffset.MinValue;
+            sessionLivenessFileTransferTerminalProofDeferralCount = 0;
+            sessionLivenessHeartbeatInFlightSinceUtc = DateTimeOffset.MinValue;
         }
 
         if (toCancel is null)
@@ -1848,12 +2092,29 @@ public sealed partial class SessionRuntime
             sessionLivenessLatestFileTransferProgressKey = null;
             sessionLivenessLatestFileTransferProgressBytes = 0;
             sessionLivenessLatestFileTransferProgressUtc = DateTimeOffset.MinValue;
+            if (!ShouldPreserveFileTransferTerminalProofAcrossSessionLivenessProof(e.ProofKind))
+            {
+                sessionLivenessLatestFileTransferTerminalProofKey = null;
+                sessionLivenessLatestFileTransferTerminalProofUtc = DateTimeOffset.MinValue;
+                sessionLivenessFileTransferTerminalProofDeferralUntilUtc = DateTimeOffset.MinValue;
+                sessionLivenessFileTransferTerminalProofDeferralCount = 0;
+            }
             sessionLivenessSuspectLogged = false;
         }
 
         LocalOperationalLog.Info(
             "Session",
             $"event=session_liveness_peer_proof_observed; session_id={e.SessionId}; generation={e.Generation}; sequence={e.Sequence}; proof_kind={e.ProofKind}; lane={e.Lane}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+    }
+
+    private bool ShouldPreserveFileTransferTerminalProofAcrossSessionLivenessProof(string proofKind)
+    {
+        if (string.IsNullOrWhiteSpace(sessionLivenessLatestFileTransferTerminalProofKey))
+        {
+            return false;
+        }
+
+        return string.Equals(proofKind, "file_transfer_data_frame", StringComparison.OrdinalIgnoreCase);
     }
 
     private string? GetApprovedSessionIdForLiveness()
