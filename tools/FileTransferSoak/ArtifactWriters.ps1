@@ -876,6 +876,11 @@ function New-FileTransferTerminalSummaryLines {
 
     $states = @($Summary.TerminalEvents | ForEach-Object { Get-FileTransferEventField -Event $_ -Name 'state' -Default '(unknown)' })
     $errors = @($Summary.TerminalEvents | ForEach-Object { Get-FileTransferEventField -Event $_ -Name 'error_code' -Default '(none)' })
+    $terminalStaleUpdateRejectedCount = 0
+    if ($Summary.PSObject.Properties.Name -contains 'TerminalStaleUpdateRejectedCount') {
+        $terminalStaleUpdateRejectedCount = $Summary.TerminalStaleUpdateRejectedCount
+    }
+
     return @(
         ("transfer_id={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.TransferId)) { '(none)' } else { $Summary.TransferId }))),
         ("verdict={0}" -f $GateResult.Verdict),
@@ -883,6 +888,7 @@ function New-FileTransferTerminalSummaryLines {
         ("outbound_terminal_count={0}" -f $Summary.OutboundTerminalEvents.Count),
         ("terminal_states={0}" -f (Join-FileTransferValues -Values $states)),
         ("terminal_error_codes={0}" -f (Join-FileTransferValues -Values $errors)),
+        ("terminal_stale_update_rejected_count={0}" -f $terminalStaleUpdateRejectedCount),
         ("observed_start_utc={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.FirstTimestamp)) { '(unknown)' } else { $Summary.FirstTimestamp }))),
         ("observed_end_utc={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.LastTimestamp)) { '(unknown)' } else { $Summary.LastTimestamp }))),
         ("analyzed_file_count={0}" -f $Summary.LogFiles.Count),

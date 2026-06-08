@@ -941,13 +941,45 @@ public sealed partial class SessionFileTransferService : IDisposable
         var normalizedReason = NormalizeReason(reason) ?? "peer_teardown";
         OutboundTransferContext? outbound;
         InboundTransferContext? inbound;
+        OutboundTransferContext? terminalOutbound;
+        InboundTransferContext? terminalInbound;
         lock (gate)
         {
             outbound = outboundTransfer is { IsTerminal: false } ? outboundTransfer : null;
             inbound = inboundTransfer is { IsTerminal: false } ? inboundTransfer : null;
+            terminalOutbound = outboundTransfer is { IsTerminal: true } ? outboundTransfer : null;
+            terminalInbound = inboundTransfer is { IsTerminal: true } ? inboundTransfer : null;
         }
 
         var terminalizedCount = 0;
+        if (terminalOutbound is not null)
+        {
+            LogTerminalTeardownSkippedTerminalWins(
+                FileTransferDirection.Outbound,
+                terminalOutbound.TransferId,
+                terminalOutbound.SessionId,
+                terminalOutbound.State,
+                terminalOutbound.ErrorCode,
+                terminalState,
+                errorCode,
+                eventName,
+                normalizedReason);
+        }
+
+        if (terminalInbound is not null)
+        {
+            LogTerminalTeardownSkippedTerminalWins(
+                FileTransferDirection.Inbound,
+                terminalInbound.TransferId,
+                terminalInbound.SessionId,
+                terminalInbound.State,
+                terminalInbound.ErrorCode,
+                terminalState,
+                errorCode,
+                eventName,
+                normalizedReason);
+        }
+
         if (outbound is null && inbound is null)
         {
             return terminalizedCount;
@@ -1014,6 +1046,38 @@ public sealed partial class SessionFileTransferService : IDisposable
             "FileTransferService",
             $"event={eventName}_completed; reason={FormatProtocolLogValue(normalizedReason)}; transfer_count={terminalizedCount}");
         return terminalizedCount;
+    }
+
+    private static void LogTerminalTeardownSkippedTerminalWins(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        FileTransferTransferState currentState,
+        string? currentErrorCode,
+        FileTransferTransferState attemptedState,
+        string? attemptedErrorCode,
+        string source,
+        string reason)
+    {
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_terminal_teardown_skipped_terminal_wins; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; current_state={currentState.ToString().ToLowerInvariant()}; current_error_code={FormatProtocolLogValue(currentErrorCode ?? "(none)")}; attempted_state={attemptedState.ToString().ToLowerInvariant()}; attempted_error_code={FormatProtocolLogValue(NormalizeErrorCode(attemptedErrorCode) ?? "(none)")}; source={FormatProtocolLogValue(source)}; reason={FormatProtocolLogValue(reason)}");
+    }
+
+    private static void LogTerminalStaleUpdateRejected(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        FileTransferTransferState currentState,
+        string? currentErrorCode,
+        FileTransferTransferState attemptedState,
+        string? attemptedErrorCode,
+        string source,
+        string reason)
+    {
+        LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_terminal_stale_update_rejected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; current_state={currentState.ToString().ToLowerInvariant()}; current_error_code={FormatProtocolLogValue(currentErrorCode ?? "(none)")}; attempted_state={attemptedState.ToString().ToLowerInvariant()}; attempted_error_code={FormatProtocolLogValue(NormalizeErrorCode(attemptedErrorCode) ?? "(none)")}; source={FormatProtocolLogValue(source)}; reason={FormatProtocolLogValue(reason)}");
     }
 
     public async Task<FileTransferTransferSnapshot?> TryStartSendAsync(
@@ -1429,6 +1493,40 @@ public sealed partial class SessionFileTransferService : IDisposable
         InboundTransferContext? inboundContext;
         lock (gate)
         {
+            if (outboundTransfer is not null &&
+                outboundTransfer.IsTerminal &&
+                string.Equals(outboundTransfer.TransferId, normalizedTransferId, StringComparison.Ordinal))
+            {
+                LogTerminalStaleUpdateRejected(
+                    FileTransferDirection.Outbound,
+                    outboundTransfer.TransferId,
+                    outboundTransfer.SessionId,
+                    outboundTransfer.State,
+                    outboundTransfer.ErrorCode,
+                    FileTransferTransferState.Canceled,
+                    FileTransferResultCodes.CanceledLocal,
+                    "user_cancel",
+                    NormalizeReason(reason) ?? "user_requested");
+                return null;
+            }
+
+            if (inboundTransfer is not null &&
+                inboundTransfer.IsTerminal &&
+                string.Equals(inboundTransfer.TransferId, normalizedTransferId, StringComparison.Ordinal))
+            {
+                LogTerminalStaleUpdateRejected(
+                    FileTransferDirection.Inbound,
+                    inboundTransfer.TransferId,
+                    inboundTransfer.SessionId,
+                    inboundTransfer.State,
+                    inboundTransfer.ErrorCode,
+                    FileTransferTransferState.Canceled,
+                    FileTransferResultCodes.CanceledLocal,
+                    "user_cancel",
+                    NormalizeReason(reason) ?? "user_requested");
+                return null;
+            }
+
             outboundContext = outboundTransfer is not null &&
                               !outboundTransfer.IsTerminal &&
                               string.Equals(outboundTransfer.TransferId, normalizedTransferId, StringComparison.Ordinal)
@@ -1491,6 +1589,40 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         lock (gate)
         {
+            if (outboundTransfer is not null &&
+                outboundTransfer.IsTerminal &&
+                string.Equals(outboundTransfer.TransferId, normalizedTransferId, StringComparison.Ordinal))
+            {
+                LogTerminalStaleUpdateRejected(
+                    FileTransferDirection.Outbound,
+                    outboundTransfer.TransferId,
+                    outboundTransfer.SessionId,
+                    outboundTransfer.State,
+                    outboundTransfer.ErrorCode,
+                    outboundTransfer.State,
+                    outboundTransfer.ErrorCode,
+                    "user_pause",
+                    normalizedReason);
+                return null;
+            }
+
+            if (inboundTransfer is not null &&
+                inboundTransfer.IsTerminal &&
+                string.Equals(inboundTransfer.TransferId, normalizedTransferId, StringComparison.Ordinal))
+            {
+                LogTerminalStaleUpdateRejected(
+                    FileTransferDirection.Inbound,
+                    inboundTransfer.TransferId,
+                    inboundTransfer.SessionId,
+                    inboundTransfer.State,
+                    inboundTransfer.ErrorCode,
+                    inboundTransfer.State,
+                    inboundTransfer.ErrorCode,
+                    "user_pause",
+                    normalizedReason);
+                return null;
+            }
+
             if (outboundTransfer is not null &&
                 !outboundTransfer.IsTerminal &&
                 string.Equals(outboundTransfer.TransferId, normalizedTransferId, StringComparison.Ordinal))
@@ -1594,6 +1726,40 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         lock (gate)
         {
+            if (outboundTransfer is not null &&
+                outboundTransfer.IsTerminal &&
+                string.Equals(outboundTransfer.TransferId, normalizedTransferId, StringComparison.Ordinal))
+            {
+                LogTerminalStaleUpdateRejected(
+                    FileTransferDirection.Outbound,
+                    outboundTransfer.TransferId,
+                    outboundTransfer.SessionId,
+                    outboundTransfer.State,
+                    outboundTransfer.ErrorCode,
+                    outboundTransfer.State,
+                    outboundTransfer.ErrorCode,
+                    "user_resume",
+                    normalizedReason ?? "user_requested");
+                return null;
+            }
+
+            if (inboundTransfer is not null &&
+                inboundTransfer.IsTerminal &&
+                string.Equals(inboundTransfer.TransferId, normalizedTransferId, StringComparison.Ordinal))
+            {
+                LogTerminalStaleUpdateRejected(
+                    FileTransferDirection.Inbound,
+                    inboundTransfer.TransferId,
+                    inboundTransfer.SessionId,
+                    inboundTransfer.State,
+                    inboundTransfer.ErrorCode,
+                    inboundTransfer.State,
+                    inboundTransfer.ErrorCode,
+                    "user_resume",
+                    normalizedReason ?? "user_requested");
+                return null;
+            }
+
             if (outboundTransfer is not null &&
                 !outboundTransfer.IsTerminal &&
                 string.Equals(outboundTransfer.TransferId, normalizedTransferId, StringComparison.Ordinal))

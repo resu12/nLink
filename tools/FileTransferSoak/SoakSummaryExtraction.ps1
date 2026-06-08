@@ -1470,6 +1470,7 @@ function New-FileTransferRetainedSummary {
         LastReceiverHighestChunk = if ($lastLiveProgressTimeout.Count -gt 0) { Get-FileTransferEventInt64Field -Event $lastLiveProgressTimeout[0] -Name 'receiver_highest_chunk' -Default 0 } else { 0 }
         LastProgressEventCount = if ($lastLiveProgressTimeout.Count -gt 0) { Get-FileTransferEventInt64Field -Event $lastLiveProgressTimeout[0] -Name 'progress_events' -Default 0 } else { 0 }
         TerminalMissingAfterProgressTimeout = $terminalMissingAfterProgressTimeout
+        TerminalStaleUpdateRejectedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_terminal_stale_update_rejected'
         ArtifactSliceStartReason = if ($lastArtifactSliceSummary.Count -gt 0) { Get-FileTransferEventField -Event $lastArtifactSliceSummary[0] -Name 'artifact_slice_start_reason' -Default '' } else { '' }
         ArtifactSliceEndReason = if ($lastArtifactSliceSummary.Count -gt 0) { Get-FileTransferEventField -Event $lastArtifactSliceSummary[0] -Name 'artifact_slice_end_reason' -Default '' } else { '' }
         MaxReceiverPendingBytes = Get-FileTransferMaxField -Events $transferEvents -FieldName 'pending_bytes'

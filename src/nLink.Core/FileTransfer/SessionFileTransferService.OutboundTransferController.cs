@@ -56,8 +56,23 @@ public sealed partial class SessionFileTransferService
 
         lock (gate)
         {
-            if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
+            if (!ReferenceEquals(outboundTransfer, context))
             {
+                return;
+            }
+
+            if (context.IsTerminal)
+            {
+                LogTerminalStaleUpdateRejected(
+                    FileTransferDirection.Outbound,
+                    context.TransferId,
+                    context.SessionId,
+                    context.State,
+                    context.ErrorCode,
+                    terminalState,
+                    NormalizeErrorCode(errorCode),
+                    "transition_outbound_terminal",
+                    "already_terminal");
                 return;
             }
 
@@ -233,8 +248,23 @@ public sealed partial class SessionFileTransferService
 
         lock (gate)
         {
-            if (!ReferenceEquals(inboundTransfer, context) || context.IsTerminal)
+            if (!ReferenceEquals(inboundTransfer, context))
             {
+                return;
+            }
+
+            if (context.IsTerminal)
+            {
+                LogTerminalStaleUpdateRejected(
+                    FileTransferDirection.Inbound,
+                    context.TransferId,
+                    context.SessionId,
+                    context.State,
+                    context.ErrorCode,
+                    terminalState,
+                    NormalizeErrorCode(errorCode),
+                    "transition_inbound_terminal",
+                    "already_terminal");
                 return;
             }
 

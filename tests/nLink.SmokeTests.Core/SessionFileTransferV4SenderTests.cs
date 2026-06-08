@@ -5454,6 +5454,157 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Contains("path=redundant_data_frame", logTail, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task CompletedOutboundTransfer_PeerDisconnectTerminalizationKeepsTerminalComplete()
+    {
+        const string transferId = "transfer_terminal_wins_completed_outbound";
+        var logStart = GetOperationalLogLength();
+        using var senderTransport = new LoopbackFileTransferTransport("session_terminal_wins_completed_outbound");
+        using var receiverTransport = new LoopbackFileTransferTransport("session_terminal_wins_completed_outbound");
+        senderTransport.Connect(receiverTransport);
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+
+        await RunCompletedLoopbackTransferAsync(
+            sender,
+            receiver,
+            transferId,
+            "terminal-wins-completed-outbound.bin");
+
+        var terminalized = await sender.TerminalizeActiveTransfersForPeerDisconnectedAsync(
+            "session_liveness_timeout",
+            CancellationToken.None);
+
+        Assert.Equal(0, terminalized);
+        Assert.Equal(FileTransferTransferState.Completed, sender.Snapshot.Outbound?.State);
+        Assert.Null(sender.Snapshot.Outbound?.ErrorCode);
+        Assert.Equal(sender.Snapshot.Outbound?.FileSizeBytes, sender.Snapshot.Outbound?.BytesTransferred);
+        var logTail = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_terminal_teardown_skipped_terminal_wins; direction=outbound", logTail, StringComparison.Ordinal);
+        Assert.Contains("attempted_error_code=peer_disconnected", logTail, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_terminalized_by_peer_disconnect; direction=outbound", logTail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CompletedInboundTransfer_PeerDisconnectTerminalizationKeepsTerminalComplete()
+    {
+        const string transferId = "transfer_terminal_wins_completed_inbound";
+        var logStart = GetOperationalLogLength();
+        using var senderTransport = new LoopbackFileTransferTransport("session_terminal_wins_completed_inbound");
+        using var receiverTransport = new LoopbackFileTransferTransport("session_terminal_wins_completed_inbound");
+        senderTransport.Connect(receiverTransport);
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+
+        await RunCompletedLoopbackTransferAsync(
+            sender,
+            receiver,
+            transferId,
+            "terminal-wins-completed-inbound.bin");
+
+        var terminalized = await receiver.TerminalizeActiveTransfersForPeerDisconnectedAsync(
+            "session_liveness_timeout",
+            CancellationToken.None);
+
+        Assert.Equal(0, terminalized);
+        Assert.Equal(FileTransferTransferState.Completed, receiver.Snapshot.Inbound?.State);
+        Assert.Null(receiver.Snapshot.Inbound?.ErrorCode);
+        Assert.Equal(receiver.Snapshot.Inbound?.FileSizeBytes, receiver.Snapshot.Inbound?.BytesTransferred);
+        var logTail = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_terminal_teardown_skipped_terminal_wins; direction=inbound", logTail, StringComparison.Ordinal);
+        Assert.Contains("attempted_error_code=peer_disconnected", logTail, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_terminalized_by_peer_disconnect; direction=inbound", logTail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SessionEndCancelTerminalWinsOverLaterPeerDisconnect()
+    {
+        const string transferId = "transfer_terminal_wins_session_end_cancel";
+        var logStart = GetOperationalLogLength();
+        var payload = Enumerable.Range(0, 128_000).Select(static index => (byte)(index % 251)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport("session_terminal_wins_session_end_cancel");
+        using var receiverTransport = new LoopbackFileTransferTransport("session_terminal_wins_session_end_cancel");
+        senderTransport.Connect(receiverTransport);
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("terminal-wins-session-end-cancel.bin", payload.Length, transferId),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+        await WaitUntilAsync(
+            () => receiver.Snapshot.Inbound is { } inbound &&
+                  inbound.TransferId == transferId &&
+                  inbound.State == FileTransferTransferState.PendingDecision,
+            timeoutMs: 5000);
+
+        var canceledCount = await receiver.CancelActiveTransfersForSessionEndAsync(
+            "session_end",
+            CancellationToken.None);
+
+        Assert.Equal(1, canceledCount);
+        await WaitUntilAsync(
+            () => sender.Snapshot.Outbound is { } outbound &&
+                  outbound.TransferId == transferId &&
+                  outbound.State == FileTransferTransferState.Canceled &&
+                  outbound.ErrorCode == FileTransferResultCodes.CanceledRemote,
+            timeoutMs: 6000);
+
+        var terminalized = await sender.TerminalizeActiveTransfersForPeerDisconnectedAsync(
+            "session_liveness_timeout",
+            CancellationToken.None);
+
+        Assert.Equal(0, terminalized);
+        Assert.Equal(FileTransferTransferState.Canceled, sender.Snapshot.Outbound?.State);
+        Assert.Equal(FileTransferResultCodes.CanceledRemote, sender.Snapshot.Outbound?.ErrorCode);
+        Assert.Equal("session_end", sender.Snapshot.Outbound?.StatusMessage);
+        var logTail = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_terminal_teardown_skipped_terminal_wins; direction=outbound", logTail, StringComparison.Ordinal);
+        Assert.Contains("current_error_code=canceled_remote", logTail, StringComparison.Ordinal);
+        Assert.Contains("attempted_error_code=peer_disconnected", logTail, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_terminalized_by_peer_disconnect; direction=outbound", logTail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CompletedTransfer_StaleUserPauseResumeCancelAreRejected()
+    {
+        const string transferId = "transfer_terminal_wins_stale_user_actions";
+        using var senderTransport = new LoopbackFileTransferTransport("session_terminal_wins_stale_user_actions");
+        using var receiverTransport = new LoopbackFileTransferTransport("session_terminal_wins_stale_user_actions");
+        senderTransport.Connect(receiverTransport);
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+
+        await RunCompletedLoopbackTransferAsync(
+            sender,
+            receiver,
+            transferId,
+            "terminal-wins-stale-user-actions.bin");
+
+        var logStart = GetOperationalLogLength();
+        Assert.Null(await sender.PauseTransferAsync(transferId, "late_pause", CancellationToken.None));
+        Assert.Null(await sender.ResumeTransferAsync(transferId, "late_resume", CancellationToken.None));
+        Assert.Null(await sender.CancelTransferAsync(transferId, "late_cancel", CancellationToken.None));
+
+        Assert.Equal(FileTransferTransferState.Completed, sender.Snapshot.Outbound?.State);
+        Assert.Null(sender.Snapshot.Outbound?.ErrorCode);
+        Assert.Equal(sender.Snapshot.Outbound?.FileSizeBytes, sender.Snapshot.Outbound?.BytesTransferred);
+        var logTail = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_terminal_stale_update_rejected; direction=outbound", logTail, StringComparison.Ordinal);
+        Assert.Contains("source=user_pause", logTail, StringComparison.Ordinal);
+        Assert.Contains("source=user_resume", logTail, StringComparison.Ordinal);
+        Assert.Contains("source=user_cancel", logTail, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_user_paused", logTail, StringComparison.Ordinal);
+    }
+
     [Fact(Skip = RetiredV4CreditRepairRuntimeSkip)]
     public async Task V4Sender_PeerSilence_TerminalsInsteadOfSendingForever()
     {

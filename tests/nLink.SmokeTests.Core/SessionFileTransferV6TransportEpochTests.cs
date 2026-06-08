@@ -374,7 +374,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                 HandoffKind = "tuna_to_normal_fallback",
                 SourceTransport = "tuna",
                 TargetTransport = "regular_nkn",
-                Reason = "peer_header_switch_off",
+                Reason = "tuna_to_normal_fallback",
             },
             CancellationToken.None);
         await WaitUntilAsync(
@@ -476,7 +476,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                 HandoffKind = "tuna_to_normal_fallback",
                 SourceTransport = "tuna",
                 TargetTransport = "regular_nkn",
-                Reason = "peer_header_switch_off",
+                Reason = "tuna_to_normal_fallback",
             },
             CancellationToken.None);
         await WaitUntilAsync(
