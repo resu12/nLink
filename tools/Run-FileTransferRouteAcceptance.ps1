@@ -3729,6 +3729,23 @@ function Invoke-Phase4RouteAcceptanceScenario {
                 break
             }
 
+            $firstAttemptFailureClassForWarningPolicy = Get-RouteAcceptanceResultFailureClass -AcceptancePhase $AcceptancePhase -Result $firstAttemptResult
+            $rerunWarningCapExceededKinds = [string]$rerunResult.warningCapExceededKinds
+            $rerunIntroducedWarningPolicyEvidence = $AcceptancePhase -eq 'phase5' -and
+                ($firstAttemptFailureClassForWarningPolicy -eq 'performance' -or $firstAttemptFailureClassForWarningPolicy -eq 'environmental') -and
+                -not [string]::IsNullOrWhiteSpace($rerunWarningCapExceededKinds) -and
+                $rerunWarningCapExceededKinds -ne '(none)'
+            if ($rerunIntroducedWarningPolicyEvidence) {
+                $firstAttemptResult.attemptCount = $rerun + 1
+                $firstAttemptResult.retryUsed = $true
+                $firstAttemptResult.selectedAttempt = 1
+                $firstAttemptResult.firstFailureReason = $firstFailureReason
+                $firstAttemptResult.rerunArtifactDir = $rerunDir
+                $firstAttemptResult.rerunFailureReason = ("rerun introduced warning_policy failure; preserving first-attempt evidence: warning cap exceeded: {0}" -f $rerunWarningCapExceededKinds)
+                $result = $firstAttemptResult
+                break
+            }
+
             if ($rerunResult.failures.Count -ne 0) {
                 $firstAttemptFailureClass = Get-RouteAcceptanceResultFailureClass -AcceptancePhase $AcceptancePhase -Result $firstAttemptResult
                 $rerunFailureClass = Get-RouteAcceptanceResultFailureClass -AcceptancePhase $AcceptancePhase -Result $rerunResult
