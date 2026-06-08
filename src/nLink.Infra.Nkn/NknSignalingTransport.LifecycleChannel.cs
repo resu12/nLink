@@ -295,12 +295,6 @@ public sealed partial class NknSignalingTransport
     {
         ThrowIfDisposed();
 
-        if (ct.IsCancellationRequested)
-        {
-            await Task.FromCanceled(ct);
-            return;
-        }
-
         if (!TryGetCurrentEnvelopeCode(out var envelopeCode) ||
             string.IsNullOrWhiteSpace(remoteEndpoint) ||
             currentSessionSecurityState.SessionId is not SessionId sessionId)
@@ -320,66 +314,32 @@ public sealed partial class NknSignalingTransport
 
         var envelope = CreateEnvelope(envelopeCode, MsgType.SessionEnd, payload, replyTo: null);
         SessionTimeline.Record("SessionEndSent");
-        var bulkCopyTask = string.IsNullOrWhiteSpace(remoteBulkEndpoint)
-            ? null
-            : SendSessionEndCopyAsync(remoteBulkEndpoint, envelope, useBulkLane: true, lane: "bulk", ct);
-        Exception? ackError = null;
-        try
-        {
-            await SendEnvelopeWithAckRetryAsync(remoteEndpoint, envelope, ct).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            ackError = ex;
-        }
+        var result = await SendLifecycleEnvelopeAsync(
+                new LifecycleDeliveryOptions(
+                    MessageType: MsgType.SessionEnd,
+                    RequestId: null,
+                    ControlDestination: remoteEndpoint,
+                    BulkDestination: remoteBulkEndpoint,
+                    LogCategory: "SessionSecurity",
+                    LogEvent: "session_end_lifecycle_delivery",
+                    AllowBulkDuplicate: true,
+                    IgnoreCallerCancellation: true,
+                    AcceptancePolicy: LifecycleDeliveryAcceptancePolicy.PeerVisibleRequired,
+                    UseControlAckRetry: true,
+                    PeerCopyAttempts: 2,
+                    ThrowOnFailure: true),
+                envelope,
+                ct)
+            .ConfigureAwait(false);
 
-        var bulkCopyResult = bulkCopyTask is null
-            ? new SessionEndCopySendResult("bulk", false, null)
-            : await bulkCopyTask.ConfigureAwait(false);
-        var controlCopyResult = new SessionEndCopySendResult("control_copy", false, null);
-        if (ackError is not null && !ct.IsCancellationRequested)
-        {
-            controlCopyResult = await SendSessionEndCopyAsync(
-                    remoteEndpoint,
-                    envelope,
-                    useBulkLane: false,
-                    lane: "control_copy",
-                    ct)
-                .ConfigureAwait(false);
-        }
-
-        var bulkRetryResult = new SessionEndCopySendResult("bulk_retry", false, null);
-        if (!bulkCopyResult.Succeeded &&
-            !string.IsNullOrWhiteSpace(remoteBulkEndpoint) &&
-            !ct.IsCancellationRequested)
-        {
-            bulkRetryResult = await SendSessionEndCopyAsync(
-                    remoteBulkEndpoint,
-                    envelope,
-                    useBulkLane: true,
-                    lane: "bulk_retry",
-                    ct)
-                .ConfigureAwait(false);
-        }
-
-        var deliveredAny = ackError is null ||
-                           bulkCopyResult.Succeeded ||
-                           controlCopyResult.Succeeded ||
-                           bulkRetryResult.Succeeded;
-
-        if (!deliveredAny)
-        {
-            throw ackError ??
-                  bulkCopyResult.Error ??
-                  controlCopyResult.Error ??
-                  bulkRetryResult.Error ??
-                  new InvalidOperationException("Session end send failed on all lanes.");
-        }
+        var bulkSent = result.BulkCopy && string.Equals(result.BulkCopyLane, "bulk_copy", StringComparison.Ordinal);
+        var bulkRetry = result.BulkCopy && !string.Equals(result.BulkCopyLane, "bulk_copy", StringComparison.Ordinal);
+        var controlCopy = result.ControlCopy && string.Equals(result.ControlCopyLane, "control_copy", StringComparison.Ordinal);
 
         LocalOperationalLog.Info(
             "SessionSecurity",
-            $"event=session_end_redundant_sent; transport=nkn; session_id={SanitizeLogToken(sessionId.Value)}; reason={SanitizeLogToken(normalizedReason)}; control_ack={(ackError is null ? 1 : 0)}; control_copy={(controlCopyResult.Succeeded ? 1 : 0)}; bulk_copy={(bulkCopyResult.Succeeded || bulkRetryResult.Succeeded ? 1 : 0)}; bulk_sent={(bulkCopyResult.Succeeded ? 1 : 0)}; bulk_retry={(bulkRetryResult.Succeeded ? 1 : 0)}; delivered_any={(deliveredAny ? 1 : 0)}; control_error={ackError?.GetType().Name ?? "(none)"}; control_copy_error={controlCopyResult.Error?.GetType().Name ?? "(none)"}; bulk_error={bulkCopyResult.Error?.GetType().Name ?? "(none)"}; bulk_retry_error={bulkRetryResult.Error?.GetType().Name ?? "(none)"}");
-        Log($"SendSessionEndAsync sent SessionEnd with Ack or redundant copy (msg_id={envelope.MessageId}, control_ack={(ackError is null ? 1 : 0)}, control_copy={(controlCopyResult.Succeeded ? 1 : 0)}, bulk_copy={(bulkCopyResult.Succeeded || bulkRetryResult.Succeeded ? 1 : 0)})");
+            $"event=session_end_redundant_sent; transport=nkn; session_id={SanitizeLogToken(sessionId.Value)}; reason={SanitizeLogToken(normalizedReason)}; control_ack={(result.ControlAck ? 1 : 0)}; control_copy={(controlCopy ? 1 : 0)}; bulk_copy={(result.BulkCopy ? 1 : 0)}; bulk_sent={(bulkSent ? 1 : 0)}; bulk_retry={(bulkRetry ? 1 : 0)}; delivered_any={(result.PeerVisibleAny ? 1 : 0)}; control_error={result.ControlAckErrorName}; control_copy_error={result.ControlCopyErrorName}; bulk_error={result.BulkCopyErrorName}; bulk_retry_error={(bulkRetry ? "(none)" : result.BulkCopyErrorName)}");
+        Log($"SendSessionEndAsync sent SessionEnd with Ack or redundant copy (msg_id={envelope.MessageId}, control_ack={(result.ControlAck ? 1 : 0)}, control_copy={(result.ControlCopy ? 1 : 0)}, bulk_copy={(result.BulkCopy ? 1 : 0)})");
     }
 
     public async Task SendSessionHeartbeatAsync(SessionHeartbeatMessage message, CancellationToken ct)

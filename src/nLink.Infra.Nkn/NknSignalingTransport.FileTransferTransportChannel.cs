@@ -141,7 +141,8 @@ public sealed partial class NknSignalingTransport
         ThrowIfDisposed();
         message = EnsureFileTransferSessionId(message);
 
-        if (ct.IsCancellationRequested)
+        var isSessionEndCancel = string.Equals(message.Reason, "session_end", StringComparison.OrdinalIgnoreCase);
+        if (ct.IsCancellationRequested && !isSessionEndCancel)
         {
             await Task.FromCanceled(ct);
             return;
@@ -613,14 +614,7 @@ public sealed partial class NknSignalingTransport
 
         var controlPayload = CreateSecureFileTransferPayload(MsgType.FileTransferCancel, normalizedTransferId, plaintextPayload);
         var controlEnvelope = CreateEnvelope(envelopeCode, MsgType.FileTransferCancel, controlPayload, replyTo: null);
-        var controlTask = SendFileTransferCancelCopyAsync(
-            remoteEndpoint,
-            controlEnvelope,
-            useBulkLane: false,
-            lane: "control",
-            ct);
-
-        Task<CancelCopySendResult>? bulkTask = null;
+        Envelope? bulkEnvelope = null;
         if (!string.IsNullOrWhiteSpace(remoteBulkEndpoint))
         {
             var bulkPayload = CreateSecureFileTransferPayload(
@@ -628,69 +622,39 @@ public sealed partial class NknSignalingTransport
                 normalizedTransferId,
                 plaintextPayload,
                 useBulkIdentity: true);
-            var bulkEnvelope = CreateEnvelope(envelopeCode, MsgType.FileTransferCancel, bulkPayload, replyTo: null);
-            bulkTask = SendFileTransferCancelCopyAsync(
-                remoteBulkEndpoint,
-                bulkEnvelope,
-                useBulkLane: true,
-                lane: "bulk",
-                ct);
+            bulkEnvelope = CreateEnvelope(envelopeCode, MsgType.FileTransferCancel, bulkPayload, replyTo: null);
         }
 
-        var controlResult = await controlTask.ConfigureAwait(false);
-        var bulkResult = bulkTask is null
-            ? new CancelCopySendResult("bulk", false, null)
-            : await bulkTask.ConfigureAwait(false);
         var isSessionEndCancel = string.Equals(reason, "session_end", StringComparison.OrdinalIgnoreCase);
-        var controlRetryResult = new CancelCopySendResult("control_retry", false, null);
-        if (isSessionEndCancel &&
-            !controlResult.Succeeded &&
-            !ct.IsCancellationRequested)
-        {
-            controlRetryResult = await SendFileTransferCancelCopyAsync(
-                    remoteEndpoint,
-                    controlEnvelope,
-                    useBulkLane: false,
-                    lane: "control_retry",
-                    ct)
-                .ConfigureAwait(false);
-        }
+        var result = await SendLifecycleEnvelopeAsync(
+                new LifecycleDeliveryOptions(
+                    MessageType: MsgType.FileTransferCancel,
+                    RequestId: normalizedTransferId,
+                    ControlDestination: remoteEndpoint,
+                    BulkDestination: remoteBulkEndpoint,
+                    LogCategory: "SessionSecurity",
+                    LogEvent: "filetransfer_cancel_lifecycle_delivery",
+                    AllowBulkDuplicate: true,
+                    IgnoreCallerCancellation: isSessionEndCancel,
+                    AcceptancePolicy: LifecycleDeliveryAcceptancePolicy.PeerVisibleRequired,
+                    UseControlAckRetry: false,
+                    PeerCopyAttempts: isSessionEndCancel ? 2 : 1,
+                    ThrowOnFailure: false),
+                new LifecycleEnvelopeSet(controlEnvelope, bulkEnvelope),
+                ct)
+            .ConfigureAwait(false);
 
-        var bulkRetryResult = new CancelCopySendResult("bulk_retry", false, null);
-        if (isSessionEndCancel &&
-            !bulkResult.Succeeded &&
-            !string.IsNullOrWhiteSpace(remoteBulkEndpoint) &&
-            !ct.IsCancellationRequested)
-        {
-            var bulkPayload = CreateSecureFileTransferPayload(
-                MsgType.FileTransferCancel,
-                normalizedTransferId,
-                plaintextPayload,
-                useBulkIdentity: true);
-            var bulkEnvelope = CreateEnvelope(envelopeCode, MsgType.FileTransferCancel, bulkPayload, replyTo: null);
-            bulkRetryResult = await SendFileTransferCancelCopyAsync(
-                    remoteBulkEndpoint,
-                    bulkEnvelope,
-                    useBulkLane: true,
-                    lane: "bulk_retry",
-                    ct)
-                .ConfigureAwait(false);
-        }
+        var controlSent = result.ControlCopy && string.Equals(result.ControlCopyLane, "control_copy", StringComparison.Ordinal);
+        var controlRetry = result.ControlCopy && !string.Equals(result.ControlCopyLane, "control_copy", StringComparison.Ordinal);
+        var bulkSent = result.BulkCopy && string.Equals(result.BulkCopyLane, "bulk_copy", StringComparison.Ordinal);
+        var bulkRetry = result.BulkCopy && !string.Equals(result.BulkCopyLane, "bulk_copy", StringComparison.Ordinal);
 
-        var deliveredAny = controlResult.Succeeded ||
-                           bulkResult.Succeeded ||
-                           controlRetryResult.Succeeded ||
-                           bulkRetryResult.Succeeded;
-        if (!deliveredAny)
+        if (!result.AcceptedAny)
         {
             LocalOperationalLog.Warn(
                 "SessionSecurity",
-                $"event=filetransfer_cancel_redundant_both_failed; transport=nkn; transfer_id={normalizedTransferId}; reason={SanitizeLogToken(reason ?? "(none)")}; control_error={controlResult.Error?.GetType().Name ?? "(none)"}; control_retry_error={controlRetryResult.Error?.GetType().Name ?? "(none)"}; bulk_error={bulkResult.Error?.GetType().Name ?? "(none)"}; bulk_retry_error={bulkRetryResult.Error?.GetType().Name ?? "(none)"}");
-            throw controlResult.Error ??
-                  bulkResult.Error ??
-                  controlRetryResult.Error ??
-                  bulkRetryResult.Error ??
-                  new InvalidOperationException("File-transfer cancel send failed on all lanes.");
+                $"event=filetransfer_cancel_redundant_both_failed; transport=nkn; transfer_id={normalizedTransferId}; reason={SanitizeLogToken(reason ?? "(none)")}; control_error={result.ControlCopyErrorName}; control_retry_error={(controlRetry ? "(none)" : result.ControlCopyErrorName)}; bulk_error={result.BulkCopyErrorName}; bulk_retry_error={(bulkRetry ? "(none)" : result.BulkCopyErrorName)}");
+            throw new InvalidOperationException("File-transfer cancel send failed on all peer-visible lifecycle lanes.");
         }
 
         if (!TryValidateAndTrackFileTransferMessage(MsgType.FileTransferCancel, normalizedTransferId, inbound: false, applyStateChange: true, out _))
@@ -703,7 +667,7 @@ public sealed partial class NknSignalingTransport
         LogFileTransferEnvelopeEvent("sent", MsgType.FileTransferCancel, normalizedTransferId, source: LocalPeerAddress);
         LocalOperationalLog.Info(
             "SessionSecurity",
-            $"event=filetransfer_cancel_redundant_sent; transport=nkn; transfer_id={normalizedTransferId}; reason={SanitizeLogToken(reason ?? "(none)")}; control_sent={(controlResult.Succeeded ? 1 : 0)}; control_retry={(controlRetryResult.Succeeded ? 1 : 0)}; bulk_sent={(bulkResult.Succeeded ? 1 : 0)}; bulk_retry={(bulkRetryResult.Succeeded ? 1 : 0)}; delivered_any={(deliveredAny ? 1 : 0)}");
+            $"event=filetransfer_cancel_redundant_sent; transport=nkn; transfer_id={normalizedTransferId}; reason={SanitizeLogToken(reason ?? "(none)")}; control_sent={(controlSent ? 1 : 0)}; control_retry={(controlRetry ? 1 : 0)}; bulk_sent={(bulkSent ? 1 : 0)}; bulk_retry={(bulkRetry ? 1 : 0)}; delivered_any={(result.PeerVisibleAny ? 1 : 0)}");
     }
 
     private async Task<CancelCopySendResult> SendFileTransferCancelCopyAsync(
@@ -3023,20 +2987,22 @@ public sealed partial class NknSignalingTransport
                 request.SessionId,
                 env.MessageId,
                 request.RequestId,
-                source))
+                source,
+                allowBulkPeerSource: true))
         {
             return;
         }
 
+        var canonicalSource = CanonicalizeRemoteControlLifecycleSource(source);
         transportRemoteControlState = TransportRemoteControlCoordinator.Apply(
             transportRemoteControlState,
             new TransportRemoteControlEvent(
                 TransportRemoteControlEventKind.ControlRequestReceived,
                 request.RequestId,
-                source,
+                canonicalSource,
                 Decision: null));
         Log($"ControlRequest received (msg_id={env.MessageId}, request_id_len={request.RequestId.Length}, has_reason={request.Reason is not null})");
-        RemoteControlRequestReceived?.Invoke(this, new RemoteControlRequestReceivedEventArgs(request, source));
+        RemoteControlRequestReceived?.Invoke(this, new RemoteControlRequestReceivedEventArgs(request, canonicalSource));
     }
 
     private void HandleControlResponse(string source, Envelope env)
@@ -3064,20 +3030,22 @@ public sealed partial class NknSignalingTransport
                 response.SessionId,
                 env.MessageId,
                 response.RequestId,
-                source))
+                source,
+                allowBulkPeerSource: true))
         {
             return;
         }
 
+        var canonicalSource = CanonicalizeRemoteControlLifecycleSource(source);
         transportRemoteControlState = TransportRemoteControlCoordinator.Apply(
             transportRemoteControlState,
             new TransportRemoteControlEvent(
                 TransportRemoteControlEventKind.ControlResponseReceived,
                 response.RequestId,
-                source,
+                canonicalSource,
                 response.Decision));
         Log($"ControlResponse received (msg_id={env.MessageId}, request_id_len={response.RequestId.Length}, decision={response.Decision})");
-        RemoteControlResponseReceived?.Invoke(this, new RemoteControlResponseReceivedEventArgs(response, source));
+        RemoteControlResponseReceived?.Invoke(this, new RemoteControlResponseReceivedEventArgs(response, canonicalSource));
     }
 
     private void HandleControlStart(string source, Envelope env)
@@ -3105,20 +3073,22 @@ public sealed partial class NknSignalingTransport
                 start.SessionId,
                 env.MessageId,
                 start.RequestId,
-                source))
+                source,
+                allowBulkPeerSource: true))
         {
             return;
         }
 
+        var canonicalSource = CanonicalizeRemoteControlLifecycleSource(source);
         transportRemoteControlState = TransportRemoteControlCoordinator.Apply(
             transportRemoteControlState,
             new TransportRemoteControlEvent(
                 TransportRemoteControlEventKind.ControlStartReceived,
                 start.RequestId,
-                source,
+                canonicalSource,
                 Decision: null));
         Log($"ControlStart received (msg_id={env.MessageId}, request_id_len={start.RequestId.Length}, has_token={start.ConsentToken is not null})");
-        RemoteControlStartReceived?.Invoke(this, new RemoteControlStartReceivedEventArgs(start, source));
+        RemoteControlStartReceived?.Invoke(this, new RemoteControlStartReceivedEventArgs(start, canonicalSource));
     }
 
     private void HandleControlStop(string source, Envelope env)
@@ -3146,20 +3116,22 @@ public sealed partial class NknSignalingTransport
                 stop.SessionId,
                 env.MessageId,
                 stop.RequestId,
-                source))
+                source,
+                allowBulkPeerSource: true))
         {
             return;
         }
 
+        var canonicalSource = CanonicalizeRemoteControlLifecycleSource(source);
         transportRemoteControlState = TransportRemoteControlCoordinator.Apply(
             transportRemoteControlState,
             new TransportRemoteControlEvent(
                 TransportRemoteControlEventKind.ControlStopReceived,
                 stop.RequestId,
-                source,
+                canonicalSource,
                 Decision: null));
         Log($"ControlStop received (msg_id={env.MessageId}, request_id_len={stop.RequestId.Length}, has_reason={stop.Reason is not null})");
-        RemoteControlStopReceived?.Invoke(this, new RemoteControlStopReceivedEventArgs(stop, source));
+        RemoteControlStopReceived?.Invoke(this, new RemoteControlStopReceivedEventArgs(stop, canonicalSource));
     }
 
     private void HandleControlInput(string source, Envelope env)
@@ -3513,10 +3485,12 @@ public sealed partial class NknSignalingTransport
         string? messageSessionId,
         string messageId,
         string? requestId,
-        string? source)
+        string? source,
+        bool allowBulkPeerSource = false)
     {
         var expectedSessionId = currentSessionSecurityState.SessionId?.Value;
         var expectedSource = ResolveExpectedRemotePeerAddressForCurrentSession();
+        var expectedBulkSource = allowBulkPeerSource ? ResolveExpectedRemoteBulkPeerAddressForCurrentSession() : null;
         var normalizedMessageSessionId = string.IsNullOrWhiteSpace(messageSessionId) ? null : messageSessionId.Trim();
         var normalizedSource = string.IsNullOrWhiteSpace(source) ? null : source.Trim();
         string failureReason;
@@ -3540,6 +3514,13 @@ public sealed partial class NknSignalingTransport
         else if (!string.IsNullOrWhiteSpace(expectedSource) &&
                  !AddressMatchesForSessionPolicy(normalizedSource, expectedSource))
         {
+            if (allowBulkPeerSource &&
+                !string.IsNullOrWhiteSpace(expectedBulkSource) &&
+                AddressMatchesForSessionPolicy(normalizedSource, expectedBulkSource))
+            {
+                return true;
+            }
+
             failureReason = "source_identity_mismatch";
         }
         else
@@ -3551,9 +3532,25 @@ public sealed partial class NknSignalingTransport
         NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{messageType}_{failureReason}");
         LocalOperationalLog.Warn(
             "SessionSecurity",
-            $"event=control_message_rejected; message_type={messageType}; reason={failureReason}; session_id={normalizedMessageSessionId ?? "(none)"}; expected_session_id={expectedSessionId ?? "(none)"}; request_id={requestId ?? "(none)"}; source={normalizedSource ?? "(none)"}; expected_source={expectedSource ?? "(none)"}");
+            $"event=control_message_rejected; message_type={messageType}; reason={failureReason}; session_id={normalizedMessageSessionId ?? "(none)"}; expected_session_id={expectedSessionId ?? "(none)"}; request_id={requestId ?? "(none)"}; source={normalizedSource ?? "(none)"}; expected_source={expectedSource ?? "(none)"}; expected_bulk_source={expectedBulkSource ?? "(none)"}");
         Log($"Control message rejected (type={messageType}, msg_id={messageId}, reason={failureReason}, request_id={requestId ?? "(none)"})");
         return false;
+    }
+
+    private string CanonicalizeRemoteControlLifecycleSource(string source)
+    {
+        var normalizedSource = string.IsNullOrWhiteSpace(source) ? null : source.Trim();
+        var expectedSource = ResolveExpectedRemotePeerAddressForCurrentSession();
+        var expectedBulkSource = ResolveExpectedRemoteBulkPeerAddressForCurrentSession();
+        if (!string.IsNullOrWhiteSpace(normalizedSource) &&
+            !string.IsNullOrWhiteSpace(expectedSource) &&
+            !string.IsNullOrWhiteSpace(expectedBulkSource) &&
+            AddressMatchesForSessionPolicy(normalizedSource, expectedBulkSource))
+        {
+            return expectedSource.Trim();
+        }
+
+        return normalizedSource ?? source;
     }
 
     private bool TryValidateScreenShareMessageSession(
@@ -3567,6 +3564,9 @@ public sealed partial class NknSignalingTransport
         var expectedSource = string.Equals(messageType, "screenshare_frame", StringComparison.Ordinal)
             ? ResolveExpectedRemoteScreenShareFrameSourcesForLog()
             : ResolveExpectedRemotePeerAddressForCurrentSession();
+        var expectedBulkSource = string.Equals(messageType, "screenshare_stop", StringComparison.Ordinal)
+            ? ResolveExpectedRemoteBulkPeerAddressForCurrentSession()
+            : null;
         var normalizedMessageSessionId = string.IsNullOrWhiteSpace(messageSessionId) ? null : messageSessionId.Trim();
         var normalizedSource = string.IsNullOrWhiteSpace(source) ? null : source.Trim();
         string failureReason;
@@ -3601,6 +3601,13 @@ public sealed partial class NknSignalingTransport
         else if (!string.IsNullOrWhiteSpace(expectedSource) &&
                  !AddressMatchesForSessionPolicy(normalizedSource, expectedSource))
         {
+            if (string.Equals(messageType, "screenshare_stop", StringComparison.Ordinal) &&
+                !string.IsNullOrWhiteSpace(expectedBulkSource) &&
+                AddressMatchesForSessionPolicy(normalizedSource, expectedBulkSource))
+            {
+                return true;
+            }
+
             failureReason = "source_identity_mismatch";
         }
         else
@@ -3618,7 +3625,7 @@ public sealed partial class NknSignalingTransport
 
         LocalOperationalLog.Warn(
             "SessionSecurity",
-            $"event=screen_share_message_rejected; message_type={messageType}; reason={failureReason}; session_id={normalizedMessageSessionId ?? "(none)"}; source={normalizedSource ?? "(none)"}; expected_source={expectedSource ?? "(none)"}; request_id={requestId ?? "(none)"}; msg_id={messageId}");
+            $"event=screen_share_message_rejected; message_type={messageType}; reason={failureReason}; session_id={normalizedMessageSessionId ?? "(none)"}; source={normalizedSource ?? "(none)"}; expected_source={expectedSource ?? "(none)"}; expected_bulk_source={expectedBulkSource ?? "(none)"}; request_id={requestId ?? "(none)"}; msg_id={messageId}");
         Log($"ScreenShare message rejected (type={messageType}, msg_id={messageId}, request_id={requestId ?? "(none)"}, reason={failureReason})");
         return false;
     }

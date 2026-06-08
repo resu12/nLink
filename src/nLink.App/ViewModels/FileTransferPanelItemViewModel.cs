@@ -253,7 +253,7 @@ public sealed record FileTransferPanelItemViewModel(
 
     private static long GetVisibleProgressBytes(FileTransferTransferSnapshot snapshot)
     {
-        return snapshot.ProgressBytes;
+        return Math.Clamp(snapshot.ProgressBytes, 0L, Math.Max(0L, snapshot.FileSizeBytes));
     }
 
     private static string? BuildSavedLocationText(FileTransferTransferSnapshot snapshot)

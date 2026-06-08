@@ -87,6 +87,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         TimeSpan.FromMilliseconds(80),
         TimeSpan.FromMilliseconds(220),
     };
+    private static readonly TimeSpan ControlPlaneLifecycleCopyTimeout = TimeSpan.FromMilliseconds(750);
     private static readonly TimeSpan ScreenShareOutboundGateWaitBudget = TimeSpan.FromMilliseconds(25);
     private const int FileTransferMaxBridgePayloadBytes = 64 * 1024;
     internal const int FileTransferDataSessionMaxQueuedFrames = 512;
@@ -832,15 +833,22 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     {
         ThrowIfDisposed();
 
-        if (ct.IsCancellationRequested)
+        if (!TryParseScreenSharePayload(payload.Span, out var messageType, out var messageSessionId))
         {
-            await Task.FromCanceled(ct);
+            if (ct.IsCancellationRequested)
+            {
+                await Task.FromCanceled(ct);
+                return;
+            }
+
+            LogScreenShareRejected("send", "payload_invalid", sessionId: null);
             return;
         }
 
-        if (!TryParseScreenSharePayload(payload.Span, out var messageType, out var messageSessionId))
+        var isStopPayload = string.Equals(messageType, "stop", StringComparison.Ordinal);
+        if (ct.IsCancellationRequested && !isStopPayload)
         {
-            LogScreenShareRejected("send", "payload_invalid", sessionId: null);
+            await Task.FromCanceled(ct);
             return;
         }
 
@@ -850,7 +858,6 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             return;
         }
 
-        var isStopPayload = string.Equals(messageType, "stop", StringComparison.Ordinal);
         var destination = isStopPayload ? remoteEndpoint : remoteMediaEndpoint;
         if (string.IsNullOrWhiteSpace(destination))
         {
@@ -874,8 +881,19 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             LocalOperationalLog.Info(
                 "ScreenShareTransport",
                 $"event=screenshare_stop_send_requested; session_id={messageSessionId}; payload_len={payload.Length}");
-            await SendScreenShareStopEnvelopeAsync(destination, envelope, ct).ConfigureAwait(false);
             SendScreenShareStopEnvelopeRetriesFireAndForget(destination, envelope, messageSessionId);
+            try
+            {
+                await SendScreenShareStopEnvelopeAsync(destination, envelope, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                NknRuntimeDiagnostics.SetLastError(ex);
+                LocalOperationalLog.Warn(
+                    "ScreenShareTransport",
+                    $"event=screenshare_stop_initial_send_failed_retries_armed; session_id={messageSessionId ?? "(none)"}; msg_id={envelope.MessageId}; ex={ex.GetType().Name}");
+                Log($"SendScreenSharePayloadAsync initial stop envelope send failed; retries armed (msg_id={envelope.MessageId}, ex={ex.GetType().Name})");
+            }
         }
         else
         {
@@ -2084,8 +2102,23 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private async Task SendScreenShareStopEnvelopeAsync(string destination, Envelope envelope, CancellationToken ct)
     {
         FlushLowPriorityControlOutboundQueue("screenshare_stop");
-        var payload = EnvelopeCodec.Serialize(envelope);
-        await SendScreenShareTransportPayloadAsync(destination, payload, waitForOutboundGate: true, ct).ConfigureAwait(false);
+        await SendLifecycleEnvelopeAsync(
+                new LifecycleDeliveryOptions(
+                    MessageType: MsgType.ScreenShareStop,
+                    RequestId: null,
+                    ControlDestination: destination,
+                    BulkDestination: remoteBulkEndpoint,
+                    LogCategory: "ScreenShareTransport",
+                    LogEvent: "screenshare_stop_redundant_sent",
+                    AllowBulkDuplicate: true,
+                    IgnoreCallerCancellation: true,
+                    AcceptancePolicy: LifecycleDeliveryAcceptancePolicy.AnyAccepted,
+                    UseControlAckRetry: false,
+                    PeerCopyAttempts: 1,
+                    ThrowOnFailure: true),
+                envelope,
+                ct)
+            .ConfigureAwait(false);
     }
 
     private void SendScreenShareStopEnvelopeRetriesFireAndForget(string destination, Envelope envelope, string? sessionId)
@@ -2133,6 +2166,269 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         });
     }
 
+    private async Task<LifecycleDeliveryResult> SendLifecycleEnvelopeAsync(
+        LifecycleDeliveryOptions options,
+        Envelope envelope,
+        CancellationToken ct)
+        => await SendLifecycleEnvelopeAsync(options, new LifecycleEnvelopeSet(envelope, null), ct).ConfigureAwait(false);
+
+    private async Task<LifecycleDeliveryResult> SendLifecycleEnvelopeAsync(
+        LifecycleDeliveryOptions options,
+        LifecycleEnvelopeSet envelopes,
+        CancellationToken ct)
+    {
+        var effectiveCt = options.IgnoreCallerCancellation ? CancellationToken.None : ct;
+        var controlEnvelope = envelopes.ControlEnvelope;
+        var bulkEnvelope = envelopes.BulkEnvelope ?? envelopes.ControlEnvelope;
+        var controlQueueTask = SendLifecycleControlQueueCopyAsync(options, controlEnvelope, effectiveCt);
+        Task<LifecycleCopySendResult>? controlAckTask = null;
+        if (options.UseControlAckRetry)
+        {
+            controlAckTask = SendLifecycleControlAckCopyAsync(options, controlEnvelope, effectiveCt);
+        }
+
+        var controlCopyTask = SendLifecyclePeerCopyAttemptsAsync(
+            options.ControlDestination,
+            controlEnvelope,
+            useBulkLane: false,
+            lanePrefix: "control_copy",
+            options,
+            effectiveCt);
+
+        Task<LifecycleCopySendResult>? bulkCopyTask = null;
+        if (options.AllowBulkDuplicate && !string.IsNullOrWhiteSpace(options.BulkDestination))
+        {
+            bulkCopyTask = SendLifecyclePeerCopyAttemptsAsync(
+                options.BulkDestination,
+                bulkEnvelope,
+                useBulkLane: true,
+                lanePrefix: "bulk_copy",
+                options,
+                effectiveCt);
+        }
+
+        var controlQueueResult = await controlQueueTask.ConfigureAwait(false);
+        var controlAckResult = controlAckTask is null
+            ? new LifecycleCopySendResult("control_ack", false, null)
+            : await controlAckTask.ConfigureAwait(false);
+        var controlCopyResult = await controlCopyTask.ConfigureAwait(false);
+        var bulkCopyResult = bulkCopyTask is null
+            ? new LifecycleCopySendResult("bulk_copy", false, null)
+            : await bulkCopyTask.ConfigureAwait(false);
+
+        var peerVisibleAny = controlAckResult.Succeeded || controlCopyResult.Succeeded || bulkCopyResult.Succeeded;
+        var acceptedAny = options.AcceptancePolicy == LifecycleDeliveryAcceptancePolicy.PeerVisibleRequired
+            ? peerVisibleAny
+            : controlQueueResult.Succeeded || peerVisibleAny;
+        var result = new LifecycleDeliveryResult(
+            options.MessageType,
+            options.RequestId,
+            controlEnvelope.MessageId,
+            controlQueueResult.Succeeded,
+            controlAckResult.Succeeded,
+            controlCopyResult.Succeeded,
+            bulkCopyResult.Succeeded,
+            peerVisibleAny,
+            acceptedAny,
+            FormatLifecycleErrorName(controlQueueResult.Error),
+            FormatLifecycleErrorName(controlAckResult.Error),
+            FormatLifecycleErrorName(controlCopyResult.Error),
+            FormatLifecycleErrorName(bulkCopyResult.Error),
+            controlCopyResult.Lane,
+            bulkCopyResult.Lane);
+
+        LocalOperationalLog.Info(
+            options.LogCategory,
+            $"event={options.LogEvent}; transport=nkn; message_type={MapControlPlaneLifecycleMessageType(options.MessageType)}; request_id={SanitizeLogToken(options.RequestId ?? "(none)")}; msg_id={controlEnvelope.MessageId}; control_queue={(result.ControlQueue ? 1 : 0)}; control_ack={(result.ControlAck ? 1 : 0)}; control_copy={(result.ControlCopy ? 1 : 0)}; bulk_copy={(result.BulkCopy ? 1 : 0)}; peer_copy_any={(result.PeerVisibleAny ? 1 : 0)}; peer_visible_any={(result.PeerVisibleAny ? 1 : 0)}; accepted_any={(result.AcceptedAny ? 1 : 0)}; control_queue_error={result.ControlQueueErrorName}; control_ack_error={result.ControlAckErrorName}; control_copy_error={result.ControlCopyErrorName}; bulk_copy_error={result.BulkCopyErrorName}");
+
+        if (!result.AcceptedAny && options.ThrowOnFailure)
+        {
+            throw controlQueueResult.Error ??
+                  controlAckResult.Error ??
+                  controlCopyResult.Error ??
+                  bulkCopyResult.Error ??
+                  new InvalidOperationException($"{MapControlPlaneLifecycleMessageType(options.MessageType)} send failed on all lifecycle lanes.");
+        }
+
+        return result;
+    }
+
+    private async Task<LifecycleCopySendResult> SendLifecycleControlQueueCopyAsync(
+        LifecycleDeliveryOptions options,
+        Envelope envelope,
+        CancellationToken ct)
+    {
+        try
+        {
+            var queued = await QueueControlEnvelopeAsync(options.ControlDestination, envelope, ControlOutboundLane.High, ct).ConfigureAwait(false);
+            return new LifecycleCopySendResult("control_queue", queued, null);
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=control_plane_lifecycle_control_queue_failed; transport=nkn; message_type={MapControlPlaneLifecycleMessageType(options.MessageType)}; error={ex.GetType().Name}");
+            return new LifecycleCopySendResult("control_queue", false, ex);
+        }
+    }
+
+    private async Task<LifecycleCopySendResult> SendLifecycleControlAckCopyAsync(
+        LifecycleDeliveryOptions options,
+        Envelope envelope,
+        CancellationToken ct)
+    {
+        try
+        {
+            await SendEnvelopeWithAckRetryAsync(options.ControlDestination, envelope, ct).ConfigureAwait(false);
+            return new LifecycleCopySendResult("control_ack", true, null);
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Warn(
+                options.LogCategory,
+                $"event={options.LogEvent}_control_ack_failed; transport=nkn; message_type={MapControlPlaneLifecycleMessageType(options.MessageType)}; error={ex.GetType().Name}");
+            return new LifecycleCopySendResult("control_ack", false, ex);
+        }
+    }
+
+    private async Task<LifecycleCopySendResult> SendLifecyclePeerCopyAttemptsAsync(
+        string destination,
+        Envelope envelope,
+        bool useBulkLane,
+        string lanePrefix,
+        LifecycleDeliveryOptions options,
+        CancellationToken ct)
+    {
+        var attempts = Math.Max(1, options.PeerCopyAttempts);
+        LifecycleCopySendResult lastResult = new(lanePrefix, false, null);
+        for (var attempt = 1; attempt <= attempts; attempt++)
+        {
+            var lane = attempt == 1 ? lanePrefix : $"{lanePrefix}_retry_{attempt - 1}";
+            lastResult = await SendLifecycleCopyAsync(
+                    destination,
+                    envelope,
+                    useBulkLane,
+                    lane,
+                    options,
+                    ct)
+                .ConfigureAwait(false);
+            if (lastResult.Succeeded)
+            {
+                return lastResult;
+            }
+        }
+
+        return lastResult;
+    }
+
+    private async Task<LifecycleCopySendResult> SendLifecycleCopyAsync(
+        string destination,
+        Envelope envelope,
+        bool useBulkLane,
+        string lane,
+        LifecycleDeliveryOptions options,
+        CancellationToken ct)
+    {
+        try
+        {
+            using var copyCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            copyCts.CancelAfter(ControlPlaneLifecycleCopyTimeout);
+
+            if (useBulkLane)
+            {
+                await SendBulkEnvelopeAsync(destination, envelope, copyCts.Token).ConfigureAwait(false);
+            }
+            else
+            {
+                await SendEnvelopeAsync(destination, envelope, copyCts.Token).ConfigureAwait(false);
+            }
+
+            return new LifecycleCopySendResult(lane, true, null);
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Warn(
+                options.LogCategory,
+                $"event={options.LogEvent}_{lane}_failed; transport=nkn; message_type={MapControlPlaneLifecycleMessageType(options.MessageType)}; error={ex.GetType().Name}");
+            return new LifecycleCopySendResult(lane, false, ex);
+        }
+    }
+
+    private static string FormatLifecycleErrorName(Exception? error)
+        => error?.GetType().Name ?? "(none)";
+
+    private static string MapControlPlaneLifecycleMessageType(MsgType messageType)
+        => messageType switch
+        {
+            MsgType.ControlRequest => "control_request",
+            MsgType.ControlResponse => "control_response",
+            MsgType.ControlStart => "control_start",
+            MsgType.ControlStop => "control_stop",
+            MsgType.ScreenShareStop => "screenshare_stop",
+            MsgType.SessionEnd => "session_end",
+            MsgType.FileTransferCancel => "file_transfer_cancel",
+            _ => messageType.ToString(),
+        };
+
+    private LifecycleDeliveryOptions CreateRemoteControlLifecycleDeliveryOptions(
+        MsgType messageType,
+        string? requestId,
+        string controlDestination)
+        => new(
+            MessageType: messageType,
+            RequestId: requestId,
+            ControlDestination: controlDestination,
+            BulkDestination: remoteBulkEndpoint,
+            LogCategory: "RemoteControl",
+            LogEvent: "remote_control_lifecycle_redundant_sent",
+            AllowBulkDuplicate: true,
+            IgnoreCallerCancellation: false,
+            AcceptancePolicy: LifecycleDeliveryAcceptancePolicy.AnyAccepted,
+            UseControlAckRetry: false,
+            PeerCopyAttempts: 1,
+            ThrowOnFailure: true);
+
+    private enum LifecycleDeliveryAcceptancePolicy
+    {
+        AnyAccepted,
+        PeerVisibleRequired,
+    }
+
+    private readonly record struct LifecycleDeliveryOptions(
+        MsgType MessageType,
+        string? RequestId,
+        string ControlDestination,
+        string? BulkDestination,
+        string LogCategory,
+        string LogEvent,
+        bool AllowBulkDuplicate,
+        bool IgnoreCallerCancellation,
+        LifecycleDeliveryAcceptancePolicy AcceptancePolicy,
+        bool UseControlAckRetry,
+        int PeerCopyAttempts,
+        bool ThrowOnFailure);
+
+    private readonly record struct LifecycleEnvelopeSet(
+        Envelope ControlEnvelope,
+        Envelope? BulkEnvelope);
+
+    private readonly record struct LifecycleDeliveryResult(
+        MsgType MessageType,
+        string? RequestId,
+        string MessageId,
+        bool ControlQueue,
+        bool ControlAck,
+        bool ControlCopy,
+        bool BulkCopy,
+        bool PeerVisibleAny,
+        bool AcceptedAny,
+        string ControlQueueErrorName,
+        string ControlAckErrorName,
+        string ControlCopyErrorName,
+        string BulkCopyErrorName,
+        string ControlCopyLane,
+        string BulkCopyLane);
+
 
     public async Task SendControlRequestAsync(ControlRequestMessageV1 message, CancellationToken ct)
     {
@@ -2165,7 +2461,11 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             message.RequestId,
             RemoteControlPayloadCodec.Serialize(message));
         var envelope = CreateEnvelope(envelopeCode, MsgType.ControlRequest, payload, replyTo: null);
-        await QueueControlEnvelopeAsync(remoteEndpoint, envelope, ControlOutboundLane.High, ct).ConfigureAwait(false);
+        await SendLifecycleEnvelopeAsync(
+                CreateRemoteControlLifecycleDeliveryOptions(MsgType.ControlRequest, message.RequestId, remoteEndpoint),
+                envelope,
+                ct)
+            .ConfigureAwait(false);
         Log($"SendControlRequestAsync sent ControlRequest (msg_id={envelope.MessageId}, request_id_len={message.RequestId.Length})");
     }
 
@@ -2200,7 +2500,11 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             message.RequestId,
             RemoteControlPayloadCodec.Serialize(message));
         var envelope = CreateEnvelope(envelopeCode, MsgType.ControlResponse, payload, replyTo: null);
-        await QueueControlEnvelopeAsync(remoteEndpoint, envelope, ControlOutboundLane.High, ct).ConfigureAwait(false);
+        await SendLifecycleEnvelopeAsync(
+                CreateRemoteControlLifecycleDeliveryOptions(MsgType.ControlResponse, message.RequestId, remoteEndpoint),
+                envelope,
+                ct)
+            .ConfigureAwait(false);
         Log($"SendControlResponseAsync sent ControlResponse (msg_id={envelope.MessageId}, request_id_len={message.RequestId.Length}, decision={message.Decision})");
     }
 
@@ -2235,7 +2539,11 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             message.RequestId,
             RemoteControlPayloadCodec.Serialize(message));
         var envelope = CreateEnvelope(envelopeCode, MsgType.ControlStart, payload, replyTo: null);
-        await QueueControlEnvelopeAsync(remoteEndpoint, envelope, ControlOutboundLane.High, ct).ConfigureAwait(false);
+        await SendLifecycleEnvelopeAsync(
+                CreateRemoteControlLifecycleDeliveryOptions(MsgType.ControlStart, message.RequestId, remoteEndpoint),
+                envelope,
+                ct)
+            .ConfigureAwait(false);
         Log($"SendControlStartAsync sent ControlStart (msg_id={envelope.MessageId}, request_id_len={message.RequestId.Length})");
     }
 
@@ -2271,7 +2579,11 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             RemoteControlPayloadCodec.Serialize(message));
         var envelope = CreateEnvelope(envelopeCode, MsgType.ControlStop, payload, replyTo: null);
         FlushLowPriorityControlOutboundQueue("control_stop");
-        await QueueControlEnvelopeAsync(remoteEndpoint, envelope, ControlOutboundLane.High, ct).ConfigureAwait(false);
+        await SendLifecycleEnvelopeAsync(
+                CreateRemoteControlLifecycleDeliveryOptions(MsgType.ControlStop, message.RequestId, remoteEndpoint),
+                envelope,
+                ct)
+            .ConfigureAwait(false);
         Log($"SendControlStopAsync sent ControlStop (msg_id={envelope.MessageId}, request_id_len={message.RequestId.Length}, has_reason={message.Reason is not null})");
     }
 

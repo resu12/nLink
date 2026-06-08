@@ -297,6 +297,92 @@ public sealed class TransportScreenShareCoordinatorLifecycleTests : ScreenShareC
 
 [Fact]
     [Trait("Category", "Smoke")]
+    public async Task TransportScreenShareCoordinator_StreamConfigMissing_ResendsCachedConfigWithNextKeyframe()
+    {
+        var fakeSource = new FakeScreenCaptureSource();
+        var probe = new ScreenShareSendProbe(recentPayloadCapacity: 8);
+        var sentConfigs = new List<ScreenShareVideoStreamConfigV1>();
+
+        await using var coordinator = new TransportScreenShareCoordinator(
+            captureSourceFactory: () => fakeSource,
+            sendPayloadAsync: probe.SendReadOnlyPayloadAsync,
+            sendVideoStreamConfigAsync: (message, _) =>
+            {
+                sentConfigs.Add(message);
+                return Task.CompletedTask;
+            });
+
+        await coordinator.StartAsync("session-live", CancellationToken.None);
+
+        fakeSource.RaiseFrame(
+            new ScreenCaptureFrameEventArgs(
+                1280,
+                720,
+                new byte[] { 1 },
+                "h264",
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                isKeyFrame: true,
+                streamEpoch: 4,
+                streamConfig: new ScreenShareVideoStreamConfigV1
+                {
+                    SessionId = string.Empty,
+                    StreamEpoch = 4,
+                    Encoding = "h264",
+                    CodecProfile = "baseline",
+                    DecoderConfigData = new byte[] { 7, 8, 9 },
+                }));
+
+        fakeSource.RaiseFrame(
+            new ScreenCaptureFrameEventArgs(
+                1280,
+                720,
+                new byte[] { 2 },
+                "h264",
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                isKeyFrame: false,
+                streamEpoch: 4,
+                streamConfig: null));
+        fakeSource.RaiseFrame(
+            new ScreenCaptureFrameEventArgs(
+                1280,
+                720,
+                new byte[] { 3 },
+                "h264",
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                isKeyFrame: false,
+                streamEpoch: 4,
+                streamConfig: null));
+
+        await WaitUntilAsync(() => sentConfigs.Count >= 3, TimeSpan.FromSeconds(2));
+        Assert.Equal(3, sentConfigs.Count);
+
+        coordinator.RequestKeyFrame("stream_config_missing");
+        Assert.Equal(
+            "stream_config_missing",
+            fakeSource.KeyFrameRequestReasons[fakeSource.KeyFrameRequestReasons.Count - 1]);
+
+        fakeSource.RaiseFrame(
+            new ScreenCaptureFrameEventArgs(
+                1280,
+                720,
+                new byte[] { 4 },
+                "h264",
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                isKeyFrame: true,
+                streamEpoch: 4,
+                streamConfig: null));
+
+        await WaitUntilAsync(() => sentConfigs.Count >= 4, TimeSpan.FromSeconds(2));
+
+        Assert.Equal(4, sentConfigs.Count);
+        Assert.Equal("session-live", sentConfigs[^1].SessionId);
+        Assert.Equal(4, sentConfigs[^1].StreamEpoch);
+        Assert.Equal(new byte[] { 7, 8, 9 }, sentConfigs[^1].DecoderConfigData);
+        Assert.Equal(1L, GetPrivateFieldValue<long>(coordinator, "streamConfigMissingCachedResendCount"));
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
     public async Task TransportScreenShareCoordinator_StopSendsRemoteStop_BeforeSlowCaptureShutdownCompletes()
     {
         var fakeSource = new FakeScreenCaptureSource

@@ -277,6 +277,9 @@ internal sealed partial class TransportScreenShareCoordinator : IAsyncDisposable
     private ScreenShareVideoStreamConfigV1? bootstrapStreamConfig;
     private long bootstrapStreamConfigEpoch;
     private int bootstrapStreamConfigSendCount;
+    private bool streamConfigMissingResendPending;
+    private long streamConfigMissingRequestCount;
+    private long streamConfigMissingCachedResendCount;
     private bool disposed;
 #if DEBUG
     private Timer? snapshotTimer;

@@ -283,7 +283,7 @@ public sealed class HelpeeSessionUiTests : SessionHeaderAndBannerTestBase
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public async Task HelpeeViewModel_HelperDisconnectsAfterAccept_ReturnsToStartingSetupState()
+    public async Task HelpeeViewModel_HelperDisconnectsAfterAccept_KeepsConnectionLostVisible()
     {
         using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
         using var scriptedTransport = new ScriptedSignalingTransport(onHostByAddressAsync: _ => Task.CompletedTask, localPeerAddress: "helpee.helper.accepted.disconnect");
@@ -304,22 +304,23 @@ public sealed class HelpeeSessionUiTests : SessionHeaderAndBannerTestBase
         SetPrivateField(helpeeRuntime, "statusText", "Connection lost.");
         SetPrivateField(helpeeRuntime, "currentFlowSnapshot", helpeeRuntime.FlowSnapshot with
         {
-            Phase = SessionFlowPhase.HelpeeWaiting,
-            UiPhase = SessionUiPhase.Waiting,
+            Phase = SessionFlowPhase.Failed,
+            UiPhase = SessionUiPhase.Failed,
             Role = SessionRuntimeRole.Helpee,
             RuntimeState = SessionRuntimeState.Failed,
             TransportState = TransportState.Failed,
-            LastEndOrigin = SessionFlowEndOrigin.Remote,
-            TerminalKind = SessionTerminalKind.None,
-            TerminalStatusText = string.Empty,
-            FailureTitle = string.Empty,
-            FailureMessage = string.Empty,
-            FailureActionText = string.Empty,
+            LastEndOrigin = SessionFlowEndOrigin.Failed,
+            ApprovalActive = false,
+            TerminalKind = SessionTerminalKind.Failed,
+            TerminalStatusText = "Connection lost.",
+            FailureTitle = "Connection lost",
+            FailureMessage = "The session ended due to a connection problem.",
+            FailureActionText = "Retry",
             ShouldClearConversationUi = true,
             ShouldSuppressConnectedControls = true,
             DisplayStatusText = "Connection lost.",
-            DisplayConnectionState = "Waiting",
-            ShowRetryAction = false,
+            DisplayConnectionState = "Failed",
+            ShowRetryAction = true,
             ShowDiagnosticsAction = true,
             PostTerminalAction = SessionFlowPostTerminalAction.None,
             FailureReason = "transport_disconnected",
@@ -328,14 +329,16 @@ public sealed class HelpeeSessionUiTests : SessionHeaderAndBannerTestBase
         InvokePrivateMethod(helpee, "SyncFromRuntime");
 
         await WaitUntilAsync(
-            () => string.IsNullOrWhiteSpace(helpee.InviteHelperIdentityInput) &&
-                  !helpee.HasVerifiedInviteHelperIdentity &&
+            () => string.Equals(helpee.ConnectionState, "Failed", StringComparison.Ordinal) &&
+                  string.Equals(helpee.ConnectionStatus, "Connection lost.", StringComparison.Ordinal) &&
+                  helpee.ShowFailurePanel &&
                   !helpee.RequestHelpCommand.CanExecute(null) &&
-                  string.Equals(helpee.ConnectionState, "Waiting", StringComparison.Ordinal),
+                  !helpee.IsConnectedView,
             TimeSpan.FromSeconds(5));
 
-        Assert.Equal(string.Empty, helpee.InviteHelperIdentityInput);
-        Assert.False(helpee.HasVerifiedInviteHelperIdentity);
+        Assert.Equal("Failed", helpee.ConnectionState);
+        Assert.Equal("Connection lost.", helpee.ConnectionStatus);
+        Assert.True(helpee.ShowFailurePanel);
         Assert.False(helpee.CanRequestHelpAction);
         Assert.False(helpee.RequestHelpCommand.CanExecute(null));
     }

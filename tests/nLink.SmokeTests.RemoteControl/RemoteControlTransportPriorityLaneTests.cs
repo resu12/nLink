@@ -175,12 +175,17 @@ public sealed class RemoteControlTransportPriorityLaneTests
 
             var types = receivedTypes.ToArray();
             var stopIndex = Array.IndexOf(types, MsgType.ControlStop);
-            Assert.True(stopIndex >= 1, "Expected control stop to arrive after one in-flight move.");
-            Assert.DoesNotContain(types.Skip(stopIndex + 1), static t => t == MsgType.ControlInput);
+            Assert.True(stopIndex >= 0, "Expected control stop to arrive through the redundant lifecycle path.");
+            Assert.True(
+                types.Count(static t => t == MsgType.ControlInput) <= 1,
+                "Expected only the already in-flight move to survive the stop flush.");
 
             var inputs = receivedInputs.ToArray();
-            Assert.Single(inputs);
-            Assert.True(inputs[0].Seq >= 0 && inputs[0].Seq < totalMoves);
+            Assert.True(inputs.Length <= 1);
+            if (inputs.Length == 1)
+            {
+                Assert.True(inputs[0].Seq >= 0 && inputs[0].Seq < totalMoves);
+            }
 
             var stops = receivedStops.ToArray();
             Assert.Single(stops);
@@ -429,11 +434,13 @@ public sealed class RemoteControlTransportPriorityLaneTests
 
             var types = receivedTypes.ToArray();
             var stopIndex = Array.IndexOf(types, MsgType.ControlStop);
-            Assert.True(stopIndex >= 1, "Expected control stop to arrive after one in-flight move following reconnect.");
-            Assert.DoesNotContain(types.Skip(stopIndex + 1), static t => t == MsgType.ControlInput);
+            Assert.True(stopIndex >= 0, "Expected control stop to arrive through the redundant lifecycle path following reconnect.");
+            Assert.True(
+                types.Count(static t => t == MsgType.ControlInput) <= 1,
+                "Expected only the already in-flight move to survive the reconnect stop flush.");
 
             var inputs = receivedInputs.ToArray();
-            Assert.Single(inputs);
+            Assert.True(inputs.Length <= 1);
             Assert.All(inputs, input => Assert.Equal(newRequestId, input.RequestId));
 
             var stops = receivedStops.ToArray();
@@ -441,6 +448,165 @@ public sealed class RemoteControlTransportPriorityLaneTests
             Assert.Equal("p61_reconnect_stop", stops[0].Reason);
             Assert.True(helper.LowLaneDroppedMoves > 0);
             Assert.InRange(helper.LowLaneMaxDepthSeen, 1, 256);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task NknControlRequest_DeliversViaBulkDuplicate_WhenControlCopiesAreDropped()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.rc.bulk-request");
+            var helperClient = new FakeNknClient("helper.rc.bulk-request");
+            var hostIdentity = new NknIdentity("host-rc-bulk-request", "host.rc.bulk-request");
+            var helperIdentity = new NknIdentity("helper-rc-bulk-request", "helper.rc.bulk-request");
+
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            await ConnectAsync(host, helper, cts.Token);
+
+            var receivedRequests = new ConcurrentQueue<ControlRequestMessageV1>();
+            var receivedRequestPeerIds = new ConcurrentQueue<string?>();
+            var bulkRequestReceived = new TaskCompletionSource<NknIncomingMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.RemoteControlRequestReceived += (_, e) =>
+            {
+                receivedRequests.Enqueue(e.Message);
+                receivedRequestPeerIds.Enqueue(e.PeerId);
+            };
+            hostClient.MessageReceived += (_, e) =>
+            {
+                if (e.Channel == NknBridgeChannel.Bulk &&
+                    EnvelopeCodec.TryDeserialize(e.Payload, out var env) &&
+                    env.Type == MsgType.ControlRequest)
+                {
+                    bulkRequestReceived.TrySetResult(e);
+                }
+            };
+
+            helperClient.ShouldDeliverSendAsync = (destination, payload, _) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(payload, out var env) &&
+                    env.Type == MsgType.ControlRequest &&
+                    string.Equals(destination, hostClient.ConnectedAddress, StringComparison.Ordinal))
+                {
+                    return Task.FromResult(false);
+                }
+
+                return Task.FromResult(true);
+            };
+
+            await helper.SendControlRequestAsync(
+                new ControlRequestMessageV1
+                {
+                    RequestId = "req-bulk-duplicate",
+                    Caps = new[] { "remote_control" },
+                },
+                cts.Token);
+
+            var received = await bulkRequestReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await WaitUntilAsync(() => receivedRequests.Count == 1, TimeSpan.FromSeconds(2));
+
+            Assert.Equal(helperClient.ConnectedBulkAddress, received.Source);
+            var request = Assert.Single(receivedRequests);
+            var peerId = Assert.Single(receivedRequestPeerIds);
+            Assert.Equal("req-bulk-duplicate", request.RequestId);
+            Assert.Equal(helperClient.ConnectedAddress, peerId);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task NknControlStart_DeliveredViaBulkDuplicate_KeepsCanonicalPeerForControlInput()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.rc.bulk-start");
+            var helperClient = new FakeNknClient("helper.rc.bulk-start");
+            var hostIdentity = new NknIdentity("host-rc-bulk-start", "host.rc.bulk-start");
+            var helperIdentity = new NknIdentity("helper-rc-bulk-start", "helper.rc.bulk-start");
+
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            await ConnectAsync(host, helper, cts.Token);
+
+            var receivedStarts = new ConcurrentQueue<RemoteControlStartReceivedEventArgs>();
+            var receivedInputs = new ConcurrentQueue<RemoteControlInputReceivedEventArgs>();
+            var bulkStartReceived = new TaskCompletionSource<NknIncomingMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.RemoteControlStartReceived += (_, e) => receivedStarts.Enqueue(e);
+            host.RemoteControlInputReceived += (_, e) => receivedInputs.Enqueue(e);
+            hostClient.MessageReceived += (_, e) =>
+            {
+                if (e.Channel == NknBridgeChannel.Bulk &&
+                    EnvelopeCodec.TryDeserialize(e.Payload, out var env) &&
+                    env.Type == MsgType.ControlStart)
+                {
+                    bulkStartReceived.TrySetResult(e);
+                }
+            };
+
+            helperClient.ShouldDeliverSendAsync = (destination, payload, _) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(payload, out var env) &&
+                    env.Type == MsgType.ControlStart &&
+                    string.Equals(destination, hostClient.ConnectedAddress, StringComparison.Ordinal))
+                {
+                    return Task.FromResult(false);
+                }
+
+                return Task.FromResult(true);
+            };
+
+            await helper.SendControlStartAsync(
+                new ControlStartMessageV1
+                {
+                    RequestId = "req-bulk-start",
+                    ConsentToken = Convert.ToBase64String(new byte[] { 1, 2, 3, 4 }),
+                },
+                cts.Token);
+
+            var bulkStart = await bulkStartReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await WaitUntilAsync(() => receivedStarts.Count == 1, TimeSpan.FromSeconds(2));
+
+            Assert.Equal(helperClient.ConnectedBulkAddress, bulkStart.Source);
+            var start = Assert.Single(receivedStarts);
+            Assert.Equal("req-bulk-start", start.Message.RequestId);
+            Assert.Equal(helperClient.ConnectedAddress, start.PeerId);
+
+            await helper.SendControlInputAsync(
+                new ControlInputMessageV1
+                {
+                    RequestId = "req-bulk-start",
+                    Kind = "mouse_button",
+                    Button = "left",
+                    Action = "down",
+                    Nx = 0.5d,
+                    Ny = 0.5d,
+                    Seq = 1,
+                    TsUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                },
+                cts.Token);
+
+            await WaitUntilAsync(() => receivedInputs.Count == 1, TimeSpan.FromSeconds(2));
+            var input = Assert.Single(receivedInputs);
+            Assert.Equal("req-bulk-start", input.Message.RequestId);
+            Assert.Equal(helperClient.ConnectedAddress, input.PeerId);
         }
         finally
         {
@@ -506,12 +672,12 @@ public sealed class RemoteControlTransportPriorityLaneTests
 
             releaseFirstSend.TrySetResult();
 
-            await WaitUntilAsync(() => receivedRequests.Count >= 257, TimeSpan.FromSeconds(2));
+            await WaitUntilAsync(() => receivedRequests.Count >= totalRequests, TimeSpan.FromSeconds(2));
             await WaitUntilAsync(() => GetHighPriorityQueueCount(helper) == 0, TimeSpan.FromSeconds(2));
             await Task.Delay(100, cts.Token);
 
             Assert.Equal(256, cappedDepth);
-            Assert.Equal(257, receivedRequests.Count);
+            Assert.Equal(totalRequests, receivedRequests.Count);
             Assert.True(helper.HighPriorityControlQueueOverflowCount > 0);
             Assert.True(helper.HighPriorityControlRejectedCount > 0);
             Assert.Equal(0, helper.HighPriorityControlCoalescedCount);

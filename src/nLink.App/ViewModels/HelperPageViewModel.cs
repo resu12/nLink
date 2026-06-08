@@ -2884,6 +2884,18 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             var (errorCode, errorHint) = GetReliabilityError();
             LogReliability(SessionReliabilityStage.Disconnected, errorCode, errorHint);
             SyncFromRuntime();
+            if (sessionRuntime.LastDisconnectWasRemoteEnd)
+            {
+                ShowPeerEndedNotice("The other person ended the session.");
+                IsChatInputEnabled = false;
+                CanSendFiles = false;
+                CanEndSession = false;
+                ShowChatNotice = false;
+                LocalOperationalLog.Info(
+                    "HelperUi",
+                    $"event=helper_remote_session_end_notice_latched; source=disconnected; last_remote={(sessionRuntime.LastDisconnectWasRemoteEnd ? 1 : 0)}; header={SanitizeForLog(HeaderStatusText)}; phase={EffectivePhase}; runtime_state={sessionRuntime.State}; chat_input={(IsChatInputEnabled ? 1 : 0)}");
+            }
+
             NotifyDisconnectedUiAffordancesChanged();
         });
     }
@@ -2897,7 +2909,17 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         _ = UiThreadDispatch.RunAsync(() =>
         {
+            ClearRemoteScreenShareFrame();
+            IsConnecting = false;
             SyncFromRuntime();
+            ShowPeerEndedNotice("The other person ended the session.");
+            IsChatInputEnabled = false;
+            CanSendFiles = false;
+            CanEndSession = false;
+            ShowChatNotice = false;
+            LocalOperationalLog.Info(
+                "HelperUi",
+                $"event=helper_remote_session_end_notice_latched; source=remote_session_ended; last_remote={(sessionRuntime.LastDisconnectWasRemoteEnd ? 1 : 0)}; header={SanitizeForLog(HeaderStatusText)}; phase={EffectivePhase}; runtime_state={sessionRuntime.State}; chat_input={(IsChatInputEnabled ? 1 : 0)}");
             NotifyDisconnectedUiAffordancesChanged();
         });
     }

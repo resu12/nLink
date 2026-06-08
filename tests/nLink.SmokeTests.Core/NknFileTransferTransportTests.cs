@@ -119,6 +119,138 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
     }
 
     [Fact]
+    public async Task NknTransport_SessionEnd_IgnoresCanceledCallerTokenForPeerVisibleDelivery()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.session.end.cancelled-token.address");
+            var helperClient = new FakeNknClient("helper.session.end.cancelled-token.address");
+            using var host = new NknSignalingTransport(hostClient, options, new NknIdentity("host-session-end-cancelled", hostClient.Address));
+            using var helper = new NknSignalingTransport(helperClient, options, new NknIdentity("helper-session-end-cancelled", helperClient.Address));
+            await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat).ConfigureAwait(false);
+            var remoteEnded = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.RemoteSessionEnded += (_, _) => remoteEnded.TrySetResult();
+
+            using var canceled = new CancellationTokenSource();
+            canceled.Cancel();
+            await helper.SendSessionEndAsync("user_exit", canceled.Token).ConfigureAwait(false);
+
+            await remoteEnded.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token).ConfigureAwait(false);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    public async Task NknTransport_SessionEnd_NoPeerVisibleLane_DoesNotSatisfyTerminalDelivery()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var logStartIndex = GetOperationalLogLength();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.session.end.no-peer-copy.address");
+            var helperClient = new FakeNknClient("helper.session.end.no-peer-copy.address");
+            using var host = new NknSignalingTransport(hostClient, options, new NknIdentity("host-session-end-no-peer", hostClient.Address));
+            using var helper = new NknSignalingTransport(helperClient, options, new NknIdentity("helper-session-end-no-peer", helperClient.Address));
+            await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat).ConfigureAwait(false);
+            var remoteEnded = 0;
+            host.RemoteSessionEnded += (_, _) => Interlocked.Increment(ref remoteEnded);
+
+            helperClient.BeforeSendCoreAsync = static (_, payload, _, _) =>
+                EnvelopeCodec.TryDeserialize(payload, out var envelope) && envelope.Type == MsgType.SessionEnd
+                    ? Task.FromException(new InvalidOperationException("session_end_peer_lanes_unavailable"))
+                    : Task.CompletedTask;
+
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                    () => helper.SendSessionEndAsync("user_exit", cts.Token))
+                .ConfigureAwait(false);
+
+            Assert.Equal(0, Volatile.Read(ref remoteEnded));
+            var logTail = ReadOperationalLogTail(logStartIndex);
+            Assert.Contains("event=session_end_lifecycle_delivery", logTail, StringComparison.Ordinal);
+            Assert.Contains("peer_visible_any=0", logTail, StringComparison.Ordinal);
+            Assert.Contains("accepted_any=0", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    public async Task NknTransport_FileTransferSessionEndCancel_IgnoresCanceledCallerTokenForPeerVisibleDelivery()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8.0));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfer.session-end-cancelled.address");
+            var helperClient = new FakeNknClient("helper.filetransfer.session-end-cancelled.address");
+            using var host = new NknSignalingTransport(hostClient, options, new NknIdentity("host-session-end-cancelled-id", hostClient.Address));
+            using var helper = new NknSignalingTransport(helperClient, options, new NknIdentity("helper-session-end-cancelled-id", helperClient.Address));
+            var sessionId = await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer).ConfigureAwait(false);
+            const string transferId = "transfer_nkn_session_end_cancelled_token";
+
+            var offerReceived = new TaskCompletionSource<FileTransferOfferV2>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var cancelReceived = new TaskCompletionSource<FileTransferCancelV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.FileTransferOfferReceived += (_, e) =>
+            {
+                if (string.Equals(e.Message.TransferId, transferId, StringComparison.Ordinal))
+                {
+                    offerReceived.TrySetResult(e.Message);
+                }
+            };
+            host.FileTransferCancelReceived += (_, e) =>
+            {
+                if (string.Equals(e.Message.TransferId, transferId, StringComparison.Ordinal))
+                {
+                    cancelReceived.TrySetResult(e.Message);
+                }
+            };
+
+            await helper.SendFileTransferOfferAsync(
+                    new FileTransferOfferV2
+                    {
+                        SessionId = sessionId,
+                        TransferId = transferId,
+                        FileName = "session-end-cancelled-token.bin",
+                        FileSizeBytes = 4096L,
+                        PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                    },
+                    cts.Token)
+                .ConfigureAwait(false);
+            await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token).ConfigureAwait(false);
+
+            using var canceled = new CancellationTokenSource();
+            canceled.Cancel();
+            await helper.SendFileTransferCancelAsync(
+                    new FileTransferCancelV1
+                    {
+                        SessionId = sessionId,
+                        TransferId = transferId,
+                        Reason = "session_end",
+                    },
+                    canceled.Token)
+                .ConfigureAwait(false);
+
+            var cancel = await cancelReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token).ConfigureAwait(false);
+            Assert.Equal("session_end", cancel.Reason);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
     public async Task NknTransport_BridgeReceiveResumedPeerTrafficRaisesLivenessProof()
     {
         FakeNknClient.ResetNetwork();

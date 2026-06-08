@@ -366,6 +366,9 @@ internal sealed partial class TransportScreenShareCoordinator
             bootstrapStreamConfig = null;
             bootstrapStreamConfigEpoch = 0;
             bootstrapStreamConfigSendCount = 0;
+            streamConfigMissingResendPending = false;
+            streamConfigMissingRequestCount = 0;
+            streamConfigMissingCachedResendCount = 0;
             transitionFromTransportTuningLevel = ScreenShareTransportTuningLevel.BandwidthReduced;
             transitionToTransportTuningLevel = ScreenShareTransportTuningLevel.BandwidthReduced;
             lastAutoTuneRateGateDrops = 0;
@@ -524,6 +527,9 @@ internal sealed partial class TransportScreenShareCoordinator
             bootstrapStreamConfig = null;
             bootstrapStreamConfigEpoch = 0;
             bootstrapStreamConfigSendCount = 0;
+            streamConfigMissingResendPending = false;
+            streamConfigMissingRequestCount = 0;
+            streamConfigMissingCachedResendCount = 0;
 
             if (oldCaptureSource is not null)
             {

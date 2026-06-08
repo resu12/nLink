@@ -3031,10 +3031,12 @@ public sealed partial class SessionRuntime
                     SessionTimeline.Record("Disconnected", timelineReason);
                     await TerminalizeAndDetachFileTransferTransportForPeerSessionEndAsync(reason).ConfigureAwait(false);
                     await ResetAsync(notifyRemoteSessionEnd: false).ConfigureAwait(false);
+                    lastDisconnectWasRemoteEnd = true;
                     // A just-closed helper session can leave the old NKN bridge in a stale state
                     // for passive hosting. Force a fresh listener transport before relistening.
                     DiscardCachedBridgeTransport();
                     await StartHelperListeningAsync(CancellationToken.None).ConfigureAwait(false);
+                    lastDisconnectWasRemoteEnd = true;
                 }
                 catch
                 {
@@ -3042,6 +3044,7 @@ public sealed partial class SessionRuntime
                 }
                 finally
                 {
+                    lastDisconnectWasRemoteEnd = true;
                     remoteSessionEndHandling = false;
                 }
             });
@@ -9059,7 +9062,11 @@ public sealed partial class SessionRuntime
 
     private void BeginConnectAttempt(SessionRuntimeRole nextRole, string connectTargetKey)
     {
-        lastDisconnectWasRemoteEnd = false;
+        if (!remoteSessionEndHandling)
+        {
+            lastDisconnectWasRemoteEnd = false;
+        }
+
         allowTransportScreenShareAutoStart = true;
         if (remoteControlSessionState.ControlState != ControlState.Off)
         {
