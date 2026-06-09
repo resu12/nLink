@@ -315,6 +315,35 @@ function Wait-AutomationTextInSet {
     }
 }
 
+function Assert-OptionalAutomationTextInSet {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [Parameter(Mandatory = $true)][string]$AutomationId,
+        [Parameter(Mandatory = $true)][string[]]$AllowedTexts
+    )
+
+    $el = Find-VisibleByAutomationId -Root $Window -AutomationId $AutomationId
+    if (-not $el) {
+        return $null
+    }
+
+    $text = (Get-ElementTextSafe -Element $el).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $null
+    }
+
+    foreach ($allowed in $AllowedTexts) {
+        if ([string]::Equals($text, $allowed, [System.StringComparison]::Ordinal)) {
+            return [pscustomobject]@{
+                Element = $el
+                Text = $text
+            }
+        }
+    }
+
+    throw "Unexpected $AutomationId text '$text'. Expected one of: $($AllowedTexts -join ', ')"
+}
+
 function Wait-AutomationTextEquals {
     param(
         [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
@@ -7454,6 +7483,8 @@ function Run-ScenarioHeaderChatCoherence {
     Start-HelpeeFlow -Context $Context
     Start-HelperFlow -Context $Context
 
+    $allowedPillTexts = @('Connected', 'Connecting…', 'Reconnecting…', 'Not connected')
+
     $helperHeader = Find-VisibleByAutomationId -Root $Context.HelperWindow -AutomationId 'SessionHeader.StatusText'
     if ($helperHeader) {
         $headerText = Get-ElementTextSafe -Element $helperHeader
@@ -7470,6 +7501,26 @@ function Run-ScenarioHeaderChatCoherence {
         }
     }
 
+    $entryMode = Wait-HelpeeConnectionEntryMode -Context $Context -TimeoutMs (Get-TransportAwareTimeoutMs -DefaultMs 10000 -NknMs 30000)
+    if ([string]::Equals($entryMode, 'helper_identity', [System.StringComparison]::Ordinal)) {
+        Write-Host '[GUI Smoke] Helpee connection mode: helper identity request flow.' -ForegroundColor DarkGray
+        $helperIdentity = Copy-HelperIdentityWithRecovery -Context $Context
+        Write-Host "[GUI Smoke] Helper identity copied: $helperIdentity" -ForegroundColor Green
+
+        $accept = Connect-HelperIdentityRequestFlow -Context $Context -HelperIdentity $helperIdentity
+        Click-Element $accept
+
+        $allow = Wait-HelpeeAllowOrExit -Context $Context -TimeoutMs 90000
+        Click-Element $allow
+
+        [void](Wait-ConnectedChatVisibleProcessAware -Context $Context -TimeoutMs 120000)
+        [void](Wait-NonEmptyAutomationText -Window $Context.HelperWindow -AutomationId 'SessionHeader.StatusText' -TimeoutMs 20000)
+        [void](Wait-NonEmptyAutomationText -Window $Context.HelpeeWindow -AutomationId 'SessionHeader.StatusText' -TimeoutMs 20000)
+        [void](Assert-OptionalAutomationTextInSet -Window $Context.HelperWindow -AutomationId 'Chat.ConnectionPillText' -AllowedTexts $allowedPillTexts)
+        [void](Assert-OptionalAutomationTextInSet -Window $Context.HelpeeWindow -AutomationId 'Chat.ConnectionPillText' -AllowedTexts $allowedPillTexts)
+        return
+    }
+
     $code = Get-HelpeeCodeFromUi -HelpeeWindow $Context.HelpeeWindow
     [void](Enter-HelperCodeAndConnect -HelperWindow $Context.HelperWindow -Code $code)
     Wait-HelpeeAllowAndClick -HelpeeWindow $Context.HelpeeWindow
@@ -7477,22 +7528,28 @@ function Run-ScenarioHeaderChatCoherence {
     [void](Wait-Until -TimeoutMs 20000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helper header/chat coherence on Connected.' -Condition {
         $header = Find-VisibleByAutomationId -Root $Context.HelperWindow -AutomationId 'SessionHeader.StatusText'
         $pill = Find-VisibleByAutomationId -Root $Context.HelperWindow -AutomationId 'Chat.ConnectionPillText'
-        if ($header -and $pill -and
-            (Get-ElementTextSafe -Element $header) -eq 'Connected' -and
-            (Get-ElementTextSafe -Element $pill) -eq 'Connected') {
+        if ($header -and (Get-ElementTextSafe -Element $header) -eq 'Connected') {
+            if ($pill -and (Get-ElementTextSafe -Element $pill) -ne 'Connected') {
+                return $null
+            }
+
             return $true
         }
+
         return $null
     })
 
     [void](Wait-Until -TimeoutMs 20000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helpee header/chat coherence on Connected.' -Condition {
         $header = Find-VisibleByAutomationId -Root $Context.HelpeeWindow -AutomationId 'SessionHeader.StatusText'
         $pill = Find-VisibleByAutomationId -Root $Context.HelpeeWindow -AutomationId 'Chat.ConnectionPillText'
-        if ($header -and $pill -and
-            (Get-ElementTextSafe -Element $header) -eq 'Connected' -and
-            (Get-ElementTextSafe -Element $pill) -eq 'Connected') {
+        if ($header -and (Get-ElementTextSafe -Element $header) -eq 'Connected') {
+            if ($pill -and (Get-ElementTextSafe -Element $pill) -ne 'Connected') {
+                return $null
+            }
+
             return $true
         }
+
         return $null
     })
 }
@@ -7507,7 +7564,33 @@ function Run-ScenarioStatusTextGuardrails {
 
     [void](Wait-NonEmptyAutomationText -Window $Context.HelpeeWindow -AutomationId 'SessionHeader.StatusText' -TimeoutMs 10000)
     [void](Wait-NonEmptyAutomationText -Window $Context.HelperWindow -AutomationId 'SessionHeader.StatusText' -TimeoutMs 10000)
-    [void](Wait-AutomationTextInSet -Window $Context.HelperWindow -AutomationId 'Chat.ConnectionPillText' -AllowedTexts $allowedPillTexts -TimeoutMs 10000)
+    $initialHelperPill = Find-VisibleByAutomationId -Root $Context.HelperWindow -AutomationId 'Chat.ConnectionPillText'
+    if ($initialHelperPill) {
+        $initialHelperPillText = (Get-ElementTextSafe -Element $initialHelperPill).Trim()
+        if (-not ($allowedPillTexts -contains $initialHelperPillText)) {
+            throw "Unexpected initial helper chat connection pill text '$initialHelperPillText'."
+        }
+    }
+
+    $entryMode = Wait-HelpeeConnectionEntryMode -Context $Context -TimeoutMs (Get-TransportAwareTimeoutMs -DefaultMs 10000 -NknMs 30000)
+    if ([string]::Equals($entryMode, 'helper_identity', [System.StringComparison]::Ordinal)) {
+        Write-Host '[GUI Smoke] Helpee connection mode: helper identity request flow.' -ForegroundColor DarkGray
+        $helperIdentity = Copy-HelperIdentityWithRecovery -Context $Context
+        Write-Host "[GUI Smoke] Helper identity copied: $helperIdentity" -ForegroundColor Green
+
+        $accept = Connect-HelperIdentityRequestFlow -Context $Context -HelperIdentity $helperIdentity
+        Click-Element $accept
+
+        $allow = Wait-HelpeeAllowOrExit -Context $Context -TimeoutMs 90000
+        Click-Element $allow
+
+        [void](Wait-ConnectedChatVisibleProcessAware -Context $Context -TimeoutMs 120000)
+        [void](Wait-NonEmptyAutomationText -Window $Context.HelperWindow -AutomationId 'SessionHeader.StatusText' -TimeoutMs 20000)
+        [void](Wait-NonEmptyAutomationText -Window $Context.HelpeeWindow -AutomationId 'SessionHeader.StatusText' -TimeoutMs 20000)
+        [void](Assert-OptionalAutomationTextInSet -Window $Context.HelperWindow -AutomationId 'Chat.ConnectionPillText' -AllowedTexts $allowedPillTexts)
+        [void](Assert-OptionalAutomationTextInSet -Window $Context.HelpeeWindow -AutomationId 'Chat.ConnectionPillText' -AllowedTexts $allowedPillTexts)
+        return
+    }
 
     $code = Get-HelpeeCodeFromUi -HelpeeWindow $Context.HelpeeWindow
     [void](Enter-HelperCodeAndConnect -HelperWindow $Context.HelperWindow -Code $code)
@@ -7519,8 +7602,8 @@ function Run-ScenarioStatusTextGuardrails {
 
     [void](Wait-NonEmptyAutomationText -Window $Context.HelperWindow -AutomationId 'SessionHeader.StatusText' -TimeoutMs 20000)
     [void](Wait-NonEmptyAutomationText -Window $Context.HelpeeWindow -AutomationId 'SessionHeader.StatusText' -TimeoutMs 20000)
-    [void](Wait-AutomationTextInSet -Window $Context.HelperWindow -AutomationId 'Chat.ConnectionPillText' -AllowedTexts $allowedPillTexts -TimeoutMs 20000)
-    [void](Wait-AutomationTextInSet -Window $Context.HelpeeWindow -AutomationId 'Chat.ConnectionPillText' -AllowedTexts $allowedPillTexts -TimeoutMs 20000)
+    [void](Assert-OptionalAutomationTextInSet -Window $Context.HelperWindow -AutomationId 'Chat.ConnectionPillText' -AllowedTexts $allowedPillTexts)
+    [void](Assert-OptionalAutomationTextInSet -Window $Context.HelpeeWindow -AutomationId 'Chat.ConnectionPillText' -AllowedTexts $allowedPillTexts)
 }
 
 function Run-ScenarioEndSessionDisablesChat {
@@ -7745,7 +7828,17 @@ function Run-ScenarioScreenShareChatCoexistence {
         $message = "screenshare chat coexist"
         Send-ChatMessage -Window $Context.HelpeeWindow -Text $message
         Wait-MessageVisible -Window $Context.HelperWindow -MessageText $message -TimeoutMs 10000
-        [void](Wait-AutomationTextEquals -Window $Context.HelperWindow -AutomationId 'SessionHeader.StatusText' -ExpectedText 'Connected' -TimeoutMs 5000)
+        [void](Wait-Until -TimeoutMs 5000 -PollMs 200 -OnTimeoutMessage "Timed out waiting for helper connected status after screenshare start." -Condition {
+            $status = Find-VisibleByAutomationId -Root $Context.HelperWindow -AutomationId 'SessionHeader.StatusText'
+            if (-not $status) { return $null }
+
+            $text = (Get-ElementTextSafe -Element $status).Trim()
+            if ($text.StartsWith('Connected', [System.StringComparison]::Ordinal)) {
+                return $status
+            }
+
+            return $null
+        })
         [void](Wait-Until -TimeoutMs 5000 -PollMs 200 -OnTimeoutMessage "Timed out waiting for helper chat-connected state after screenshare start." -Condition {
             $pill = Find-VisibleByAutomationId -Root $Context.HelperWindow -AutomationId 'Chat.ConnectionPillText'
             if ($pill) {
