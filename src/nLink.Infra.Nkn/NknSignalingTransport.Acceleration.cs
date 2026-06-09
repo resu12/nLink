@@ -8231,7 +8231,7 @@ public sealed partial class NknSignalingTransport
         }
 
         Func<string?>? bulkQueueFallbackSkipReason = requireObservedSend
-            ? () => GetRuntimeUnlockBulkQueueFallbackObservedProofSkipReason(queueObservedReason)
+            ? () => GetRuntimeUnlockBulkQueueFallbackObservedProofSkipReason(activationSessionId, queueObservedReason)
             : null;
         Func<string?>? bulkQueueFallbackAfterDirectSuccessReason = requireObservedSend &&
             IsTunaActivationOfferSendPurpose(purpose)
@@ -8373,11 +8373,27 @@ public sealed partial class NknSignalingTransport
                 !HasRecentSessionLivenessProofForRuntimeUnlockAuthority(activationSessionId))
             {
                 const string missingPeerProofReason = "runtime_unlock_authority_missing_recent_peer_proof";
-                LocalOperationalLog.Warn(
-                    "NKN.Tuna",
-                    $"event=tuna_acceleration_control_send_observed_without_recent_peer_proof; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(envelope.Type)}; observed_lane={SanitizeLogToken(observedSend.ObservedLane ?? "(none)")}; session_id={SanitizeLogToken(activationSessionId ?? "none")}; reason={missingPeerProofReason}");
-                if (!priorityReplayTrusted)
+                var fallbackRepairProofTrusted =
+                    ShouldTrustRuntimeUnlockObservedSendWithPostTunaFallbackRepairProof(
+                        activationSessionId,
+                        observedSend.ObservedLane,
+                        out var fallbackProof,
+                        out var fallbackProofDirection,
+                        out var fallbackProofAgeMs);
+                if (fallbackRepairProofTrusted)
                 {
+                    LocalOperationalLog.Warn(
+                        "NKN.Tuna",
+                        $"event=tuna_acceleration_control_send_observed_without_recent_peer_proof; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(envelope.Type)}; observed_lane={SanitizeLogToken(observedSend.ObservedLane ?? "(none)")}; session_id={SanitizeLogToken(activationSessionId ?? "none")}; reason={missingPeerProofReason}; fallback_repair_proof_trusted=1; fallback_proof={SanitizeLogToken(fallbackProof)}; fallback_proof_direction={SanitizeLogToken(fallbackProofDirection)}; fallback_proof_age_ms={fallbackProofAgeMs}");
+                    LocalOperationalLog.Info(
+                        "NKN.Tuna",
+                        $"event=tuna_acceleration_control_observed_trusted_by_post_tuna_fallback_repair; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(envelope.Type)}; observed_lane={SanitizeLogToken(observedSend.ObservedLane ?? "(none)")}; session_id={SanitizeLogToken(activationSessionId ?? "none")}; proof={SanitizeLogToken(fallbackProof)}; proof_direction={SanitizeLogToken(fallbackProofDirection)}; proof_age_ms={fallbackProofAgeMs}");
+                }
+                else if (!priorityReplayTrusted)
+                {
+                    LocalOperationalLog.Warn(
+                        "NKN.Tuna",
+                        $"event=tuna_acceleration_control_send_observed_without_recent_peer_proof; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(envelope.Type)}; observed_lane={SanitizeLogToken(observedSend.ObservedLane ?? "(none)")}; session_id={SanitizeLogToken(activationSessionId ?? "none")}; reason={missingPeerProofReason}");
                     if (string.Equals(
                             observedSend.ObservedLane,
                             AccelerationObservedLaneControlPriority,
@@ -8449,7 +8465,44 @@ public sealed partial class NknSignalingTransport
         string? observedLane)
         => false;
 
-    private string? GetRuntimeUnlockBulkQueueFallbackObservedProofSkipReason(string? queueObservedReason)
+    private bool ShouldTrustRuntimeUnlockObservedSendWithPostTunaFallbackRepairProof(
+        string? sessionId,
+        string? observedLane,
+        out string proof,
+        out string proofDirection,
+        out long proofAgeMs)
+    {
+        proof = "none";
+        proofDirection = "none";
+        proofAgeMs = 0;
+        if (string.IsNullOrWhiteSpace(sessionId) ||
+            string.IsNullOrWhiteSpace(observedLane) ||
+            !IsCurrentRuntimeUnlockActivationOffer())
+        {
+            return false;
+        }
+
+        var normalizedSessionId = sessionId.Trim();
+        if (!HasActivePostTunaFallbackFileTransferRouteHint(normalizedSessionId))
+        {
+            return false;
+        }
+
+        var normalizedLane = observedLane.Trim();
+        if (!string.Equals(normalizedLane, AccelerationObservedLaneControlToBulkEndpoint, StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(normalizedLane, AccelerationObservedLaneBulkQueueFallback, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return TryGetCurrentPostTunaFallbackObservedSendProbeProof(
+            normalizedSessionId,
+            out proof,
+            out proofDirection,
+            out proofAgeMs);
+    }
+
+    private string? GetRuntimeUnlockBulkQueueFallbackObservedProofSkipReason(string? sessionId, string? queueObservedReason)
     {
         if (!IsCurrentRuntimeUnlockActivationOffer())
         {
@@ -8458,6 +8511,19 @@ public sealed partial class NknSignalingTransport
 
         if (TryGetRuntimeUnlockObservedOfferReplayWindowForCurrentOffer(out _, out _))
         {
+            return null;
+        }
+
+        if (ShouldTrustRuntimeUnlockObservedSendWithPostTunaFallbackRepairProof(
+                sessionId,
+                AccelerationObservedLaneBulkQueueFallback,
+                out var proof,
+                out var proofDirection,
+                out var proofAgeMs))
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=tuna_acceleration_control_bulk_queue_fallback_trusted_by_post_tuna_fallback_repair; purpose=offer; message_type={MapAccelerationControlMessageType(MsgType.TransportAccelerationOffer)}; lane=bulk_queue_fallback; session_id={SanitizeLogToken(sessionId ?? "none")}; proof={SanitizeLogToken(proof)}; proof_direction={SanitizeLogToken(proofDirection)}; proof_age_ms={proofAgeMs}; reason=current_post_tuna_fallback_repair_proof");
             return null;
         }
 
@@ -8526,8 +8592,17 @@ public sealed partial class NknSignalingTransport
     private string? GetRuntimeUnlockBulkQueueFallbackObservedProofFailureReason(string? sessionId)
     {
         if (!IsCurrentRuntimeUnlockActivationOffer() ||
-            !TryGetRuntimeUnlockRetryAuthorityForCurrentOffer(out _) ||
             HasRecentSessionLivenessProofForRuntimeUnlockAuthority(sessionId))
+        {
+            return null;
+        }
+
+        if (ShouldTrustRuntimeUnlockObservedSendWithPostTunaFallbackRepairProof(
+                sessionId,
+                AccelerationObservedLaneBulkQueueFallback,
+                out _,
+                out _,
+                out _))
         {
             return null;
         }

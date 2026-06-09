@@ -495,6 +495,7 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
     private void OnClientStateChanged(object? sender, AccelerationStateChangedEventArgs e)
     {
         NknTunaSidecarProcessOwner? processToStop = null;
+        var shouldForward = true;
         if (sender is NknTunaSidecarClient sidecarClient)
         {
             lock (gate)
@@ -511,7 +512,19 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
                         dialerProcessOwner = null;
                     }
                 }
+                else
+                {
+                    shouldForward = false;
+                }
             }
+        }
+
+        if (!shouldForward)
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=tuna_acceleration_stale_sidecar_state_ignored; available={FormatBool(e.IsAvailable)}; reason={SanitizeSidecarReason(e.Reason) ?? "unknown"}");
+            return;
         }
 
         processToStop?.Stop(string.IsNullOrWhiteSpace(e.Reason) ? "client_unavailable" : e.Reason);
