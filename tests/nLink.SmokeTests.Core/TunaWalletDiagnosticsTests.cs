@@ -872,6 +872,43 @@ public sealed class TunaWalletDiagnosticsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task TunaRuntimeUnlockCoordinator_ActiveRuntimeCanToggleOffWhenUnlockAttemptFlagIsStale()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var context = await CreateVerifiedRuntimeContextAsync(
+                root,
+                new FakeTunaWalletVerifier(
+                    TunaWalletValidationResult.Ok("wallet-test-nkn.json", "NKN0123456789PUBLICADDRESS", "1.2500")));
+            var control = new RecordingTransportAccelerationControl();
+            SetPrivateField(context.RuntimeService, "currentTransportControl", control);
+            SetPrivateField(context.RuntimeService, "runtimeStatus", "active");
+            SetPrivateField(context.RuntimeService, "unlockAttemptInProgress", 1);
+
+            var state = await context.RuntimeService.GetUnlockStateAsync();
+
+            Assert.True(state.IsVisible);
+            Assert.True(state.IsOn);
+            Assert.True(state.CanToggle);
+
+            var result = await context.RuntimeService.LockOrStopForSessionAsync(
+                "header_switch_off",
+                TunaRuntimeUnlockSource.Header);
+
+            Assert.True(result.Success);
+            await WaitUntilAsync(
+                () => context.RuntimeService.RuntimeStatus == "locked" && control.StopCalls == 1,
+                TimeSpan.FromSeconds(2));
+        }
+        finally
+        {
+            DeleteTempRoot(root);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task TunaRuntimeUnlockCoordinator_HangingStopDoesNotPinHeaderToggle()
     {
         var root = CreateTempRoot();

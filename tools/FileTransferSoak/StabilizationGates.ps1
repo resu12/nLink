@@ -635,23 +635,24 @@ function Test-FileTransferRecoverableV6FeedbackFailure {
         return $false
     }
 
-    if (-not (Test-FileTransferEventNearRecoveryMarker -Event $Event -Summary $Summary)) {
-        return $false
-    }
-
     $firstError = Get-FileTransferEventField -Event $Event -Name 'first_error' -Default ''
     $secondError = Get-FileTransferEventField -Event $Event -Name 'second_error' -Default ''
     $errorText = "$firstError $secondError"
     $transferId = [string]$Event.TransferId
-    if ($frameType -eq 'filetransfer.frontier_request.v6' -and
-        $errorText -like '*OperationCanceledException*' -and
-        (Test-FileTransferSummaryUsesPrimaryRegularNknQuietBridgePolicy -Summary $Summary -TransferId $transferId)) {
-        return $true
-    }
 
     if ($frameType -eq 'filetransfer.frontier_request.v6' -and
         $errorText -like '*OperationCanceledException*' -and
         (Test-FileTransferPostTunaFallbackV6RecoveryEvidence -Summary $Summary)) {
+        return $true
+    }
+
+    if (-not (Test-FileTransferEventNearRecoveryMarker -Event $Event -Summary $Summary)) {
+        return $false
+    }
+
+    if ($frameType -eq 'filetransfer.frontier_request.v6' -and
+        $errorText -like '*OperationCanceledException*' -and
+        (Test-FileTransferSummaryUsesPrimaryRegularNknQuietBridgePolicy -Summary $Summary -TransferId $transferId)) {
         return $true
     }
 

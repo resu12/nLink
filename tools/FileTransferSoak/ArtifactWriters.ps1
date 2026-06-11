@@ -3579,6 +3579,11 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_retry_authority_granted_count={0}" -f $recoveryClassification.RuntimeUnlockRetryAuthorityGrantedCount),
         ("runtime_unlock_retry_authority_observed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryAuthorityObservedCount),
         ("runtime_unlock_retry_authority_failed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryAuthorityFailedCount),
+        ("listener_ready_unavailable_contradiction_count={0}" -f $recoveryClassification.ListenerReadyUnavailableContradictionCount),
+        ("listener_rearm_required_count={0}" -f $recoveryClassification.ListenerRearmRequiredCount),
+        ("listener_rearm_completed_count={0}" -f $recoveryClassification.ListenerRearmCompletedCount),
+        ("listener_rearm_failed_count={0}" -f $recoveryClassification.ListenerRearmFailedCount),
+        ("runtime_unlock_offer_dispatched_after_listener_rearm_count={0}" -f $recoveryClassification.RuntimeUnlockOfferDispatchedAfterListenerRearmCount),
         ("runtime_unlock_offer_observation_blocked_count={0}" -f $recoveryClassification.RuntimeUnlockOfferObservationBlockedCount),
         ("session_liveness_timeout_after_runtime_unlock_count={0}" -f $recoveryClassification.SessionLivenessTimeoutAfterRuntimeUnlockCount),
         ("classification_fallback_tail_reconciliation_requested_count={0}" -f $recoveryClassification.FallbackTailReconciliationRequestedCount),
@@ -4021,6 +4026,26 @@ function Get-FileTransferRecoveryFailureClassification {
     $sessionRecoveryContractRetryAuthorityFailedEvents = @($events | Where-Object {
         $_.EventName -eq 'session_recovery_contract_retry_authority_failed'
     })
+    $listenerRearmRequiredEvents = @($events | Where-Object {
+        $_.EventName -eq 'session_recovery_contract_listener_rearm_required'
+    })
+    $listenerRearmCompletedEvents = @($events | Where-Object {
+        $_.EventName -eq 'session_recovery_contract_listener_rearm_completed'
+    })
+    $listenerRearmFailedEvents = @($events | Where-Object {
+        $_.EventName -eq 'session_recovery_contract_listener_rearm_failed' -or
+        (
+            $_.EventName -eq 'session_recovery_contract_failed' -and
+            (Get-FileTransferEventField -Event $_ -Name 'authority_failure_reason' -Default '') -eq 'runtime_unlock_listener_rearm_failed'
+        )
+    })
+    $runtimeUnlockOfferDispatchedAfterListenerRearmEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_offer_dispatched_after_listener_rearm'
+    })
+    $listenerReadyUnavailableContradictionEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_tuna_gui_handoff_fallback_failure' -and
+        (Get-FileTransferEventField -Event $_ -Name 'failureReason' -Default '') -eq 'listener_ready_unavailable_contradiction'
+    })
     $runtimeUnlockOfferRejectedWithoutObservationEvents = @($events | Where-Object {
         $_.EventName -eq 'tuna_acceleration_offer_rejected' -and
         (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'runtime_unlock' -and
@@ -4086,6 +4111,13 @@ function Get-FileTransferRecoveryFailureClassification {
         $class = 'runtime_unlock_offer_observation_blocked_by_receive_recovery'
     }
     elseif ($runtimeUnlockOfferNotObservedEvents.Count -gt 0 -and
+        $listenerRearmRequiredEvents.Count -gt 0 -and
+        $listenerRearmCompletedEvents.Count -eq 0 -and
+        ($listenerRearmFailedEvents.Count -gt 0 -or $listenerReadyUnavailableContradictionEvents.Count -gt 0) -and
+        ($sessionLivenessTimeoutEvents.Count -gt 0 -or $peerDisconnectedTerminalEvents.Count -gt 0)) {
+        $class = 'tuna_listener_rearm_coordination'
+    }
+    elseif ($runtimeUnlockOfferNotObservedEvents.Count -gt 0 -and
         $runtimeUnlockRetryScheduledEvents.Count -gt 0 -and
         $runtimeUnlockRetryQueuedBehindActiveNegotiationEvents.Count -gt 0 -and
         $sessionLivenessTimeoutEvents.Count -gt 0 -and
@@ -4113,6 +4145,11 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockRetryAuthorityGrantedCount = $sessionRecoveryContractRetryAuthorityGrantedEvents.Count
         RuntimeUnlockRetryAuthorityObservedCount = $sessionRecoveryContractRetryAuthorityObservedEvents.Count
         RuntimeUnlockRetryAuthorityFailedCount = $sessionRecoveryContractRetryAuthorityFailedEvents.Count
+        ListenerReadyUnavailableContradictionCount = $listenerReadyUnavailableContradictionEvents.Count
+        ListenerRearmRequiredCount = $listenerRearmRequiredEvents.Count
+        ListenerRearmCompletedCount = $listenerRearmCompletedEvents.Count
+        ListenerRearmFailedCount = $listenerRearmFailedEvents.Count
+        RuntimeUnlockOfferDispatchedAfterListenerRearmCount = $runtimeUnlockOfferDispatchedAfterListenerRearmEvents.Count
         RuntimeUnlockOfferObservationBlockedCount = $runtimeUnlockOfferRejectedWithoutObservationEvents.Count + $runtimeUnlockReceiveRecoveryBlockedOfferEvents.Count
         SessionLivenessTimeoutAfterRuntimeUnlockCount = if ($runtimeUnlockOfferNotObservedEvents.Count -gt 0) { $sessionLivenessTimeoutEvents.Count } else { 0 }
         FallbackTailReconciliationRequestedCount = $fallbackTailProof.RequestedCount
@@ -4192,6 +4229,11 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_retry_authority_granted_count={0}" -f $recoveryClassification.RuntimeUnlockRetryAuthorityGrantedCount),
         ("runtime_unlock_retry_authority_observed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryAuthorityObservedCount),
         ("runtime_unlock_retry_authority_failed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryAuthorityFailedCount),
+        ("listener_ready_unavailable_contradiction_count={0}" -f $recoveryClassification.ListenerReadyUnavailableContradictionCount),
+        ("listener_rearm_required_count={0}" -f $recoveryClassification.ListenerRearmRequiredCount),
+        ("listener_rearm_completed_count={0}" -f $recoveryClassification.ListenerRearmCompletedCount),
+        ("listener_rearm_failed_count={0}" -f $recoveryClassification.ListenerRearmFailedCount),
+        ("runtime_unlock_offer_dispatched_after_listener_rearm_count={0}" -f $recoveryClassification.RuntimeUnlockOfferDispatchedAfterListenerRearmCount),
         ("runtime_unlock_offer_observation_blocked_count={0}" -f $recoveryClassification.RuntimeUnlockOfferObservationBlockedCount),
         ("session_liveness_timeout_after_runtime_unlock_count={0}" -f $recoveryClassification.SessionLivenessTimeoutAfterRuntimeUnlockCount),
         ("classification_fallback_tail_reconciliation_requested_count={0}" -f $recoveryClassification.FallbackTailReconciliationRequestedCount),

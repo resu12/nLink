@@ -1245,7 +1245,8 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         var toggleOn = unlocked || engaged || unlockAttemptInProgressNow;
         var visible = walletFunded || toggleOn;
         var canUnlock = walletFunded && runtimeEnabled && sidecarAvailable && !cooldownActive && !switchingToNkn && !unlockAttemptInProgressNow;
-        var canToggle = !switchingToNkn && !unlockAttemptInProgressNow && (toggleOn || canUnlock);
+        var canStopEngagedRuntime = engaged && !switchingToNkn;
+        var canToggle = canStopEngagedRuntime || (!switchingToNkn && !unlockAttemptInProgressNow && (toggleOn || canUnlock));
         var statusText = cooldownActive
             ? $"Try again in {FormatCooldownRemaining(cooldownRemaining)}"
             : switchingToNkn

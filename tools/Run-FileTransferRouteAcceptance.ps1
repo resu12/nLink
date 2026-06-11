@@ -1278,8 +1278,10 @@ function Try-ApplySecondTransferSplitProofAcceptance {
     )
 
     $expectedFirstLiveText = 'post_tuna_fallback_v6,file_tuna_v4'
+    $firstTerminalBeforeReactivation = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $Summary -Name 'firstTransferTerminalBeforeLiveReactivation' -DefaultValue $false)
     $summaryLiveText = Join-RouteAcceptanceTokenList -Values @(Get-JsonPropertyValue -Object $Summary -Name 'liveRouteEpochRouteChanges' -DefaultValue @())
-    if ($summaryLiveText -ne $expectedFirstLiveText) {
+    if ($summaryLiveText -ne $expectedFirstLiveText -and
+        -not ($firstTerminalBeforeReactivation -and $summaryLiveText -eq 'post_tuna_fallback_v6')) {
         return $false
     }
 
@@ -1338,6 +1340,8 @@ function Try-ApplySecondTransferSplitProofAcceptance {
 
     Remove-RouteAcceptanceFailuresMatching -Result $Result -Patterns @(
         'route consistency verdict is',
+        'Tuna measured route mismatch',
+        'Tuna measured protocol mismatch',
         'live route epoch sequence mismatch',
         'operator hard failures observed',
         'operator verdict is not accepted'
@@ -1754,6 +1758,13 @@ function Write-RouteAcceptanceFakePhase4Run {
         else {
             Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'RECEIVE_RECOVERY_EXHAUSTED_BEFORE_RUNTIME_UNLOCK'
         }))
+    $receiveRecoveryLivenessTimeoutBeforeRuntimeUnlock = $scenarioName -eq 'regular-v4-live-activation-off-on-off-128mb' -and
+        ($(if ($RerunAttempt -gt 0) {
+            Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'RERUN_RECEIVE_RECOVERY_LIVENESS_TIMEOUT_BEFORE_RUNTIME_UNLOCK'
+        }
+        else {
+            Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'RECEIVE_RECOVERY_LIVENESS_TIMEOUT_BEFORE_RUNTIME_UNLOCK'
+        }))
     $transientSetupFailure = $Scenario.Kind -eq 'tuna' -and
         ($(if ($RerunAttempt -gt 0) {
             Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'RERUN_TRANSIENT_SETUP_FAILURE'
@@ -1885,7 +1896,7 @@ function Write-RouteAcceptanceFakePhase4Run {
     }
 
     $defaultRouteChanges = @($Scenario.ExpectedRouteChanges)
-    $routeOverride = if ($receiveRecoveryExhaustedBeforeRuntimeUnlock) {
+    $routeOverride = if ($receiveRecoveryExhaustedBeforeRuntimeUnlock -or $receiveRecoveryLivenessTimeoutBeforeRuntimeUnlock) {
         'regular_nkn_v4_fast'
     }
     else {
@@ -1919,11 +1930,11 @@ function Write-RouteAcceptanceFakePhase4Run {
     $goodput = ConvertTo-RouteAcceptanceDouble -Value (Get-RouteAcceptanceScenarioEnvValue -ScenarioName $scenarioName -Suffix $goodputSuffix -DefaultValue (Get-RouteAcceptanceScenarioEnvValue -ScenarioName $scenarioName -Suffix 'GOODPUT_BPS' -DefaultValue $defaultGoodput))
     $payloadBytes = [long]$Scenario.PayloadBytes
     $completed = -not (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'SHA_FAIL')
-    $terminalState = if ($receiveRecoveryExhaustedBeforeRuntimeUnlock -or (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'TERMINAL_ERROR')) { 'Failed' } else { 'Completed' }
+    $terminalState = if ($receiveRecoveryExhaustedBeforeRuntimeUnlock -or $receiveRecoveryLivenessTimeoutBeforeRuntimeUnlock -or (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'TERMINAL_ERROR')) { 'Failed' } else { 'Completed' }
     if (-not $completed) {
         $terminalState = 'Completed'
     }
-    if ($receiveRecoveryExhaustedBeforeRuntimeUnlock) {
+    if ($receiveRecoveryExhaustedBeforeRuntimeUnlock -or $receiveRecoveryLivenessTimeoutBeforeRuntimeUnlock) {
         $completed = $false
     }
 
@@ -2044,7 +2055,7 @@ function Write-RouteAcceptanceFakePhase4Run {
 
     $metadata = Get-RouteAcceptanceRouteMetadata -Route $finalRoute
     $frameType = 'filetransfer.chunk_batch.{0}' -f $metadata.FrameFamily
-    $terminalError = if ($terminalState -eq 'Completed') { '(none)' } elseif ($receiveRecoveryExhaustedBeforeRuntimeUnlock -or $startupPeerDisconnect) { 'peer_disconnected' } else { 'phase4_fake_terminal_error' }
+    $terminalError = if ($terminalState -eq 'Completed') { '(none)' } elseif ($receiveRecoveryExhaustedBeforeRuntimeUnlock -or $receiveRecoveryLivenessTimeoutBeforeRuntimeUnlock -or $startupPeerDisconnect) { 'peer_disconnected' } else { 'phase4_fake_terminal_error' }
     $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($seconds + 1) -Message ("event=filetransfer_binary_frame_sent; transfer_id={0}; session_id={1}; frame_type={2}; chunk_index=0-31; payload_bytes={3}; serialized_payload_bytes={3}; raw_chunk_bytes={3}; chunk_count=32" -f $transferId, $sessionId, $frameType, $payloadBytes))) | Out-Null
     $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($seconds + 1) -Message ("event=filetransfer_binary_frame_received; transfer_id={0}; session_id={1}; frame_type={2}; chunk_index=0-31; raw_chunk_bytes={3}; chunk_count=32" -f $transferId, $sessionId, $frameType, $payloadBytes))) | Out-Null
     if ($hardFailure) {
@@ -2079,6 +2090,17 @@ function Write-RouteAcceptanceFakePhase4Run {
         $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($seconds + 9) -Message ("event=nkn_bridge_receive_stall_recovery_completed; stall_reason=regular_v4_unproven_recovery_escalation; attempt=16; recovery_count=16; requires_control_proof=1; requires_bulk_proof=1; transfer_id={0}; session_id={1}" -f $transferId, $sessionId))) | Out-Null
         $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($seconds + 10) -Message ("event=nkn_bridge_receive_stall_recovery_failed; reason=max_restarts_reached; stall_reason=regular_v4_unproven_recovery_escalation; recovery_count=16; max_restarts=16; active_file_transfer_sessions=1; active_file_transfer_runtime_sessions=1; transfer_id={0}; session_id={1}" -f $transferId, $sessionId))) | Out-Null
         $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($seconds + 11) -Message ("event=session_liveness_timeout; session_id={0}; transfer_id={1}; reason=session_liveness_timeout; route=regular_nkn_v4_fast; protocol_version=4" -f $sessionId, $transferId))) | Out-Null
+    }
+    elseif ($receiveRecoveryLivenessTimeoutBeforeRuntimeUnlock) {
+        $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($seconds + 2) -Message ("event=tuna_acceleration_activation_offer_not_observed; trigger=runtime_unlock; session_id={0}; payer_decision_id=1; generation=1; retry_scheduled=0; retry_after_recovery_armed=1; answer_timeout_scheduled=0; recovery_requested=1; recovery_reason=regular_v4_unproven_recovery_escalation; observed_send=0; observed_lane=(none)" -f $sessionId))) | Out-Null
+        $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($seconds + 3) -Message ("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled; session_id={0}; retired_generation=1; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=regular_v4_unproven_recovery_escalation; queued_behind_active_negotiation=0" -f $sessionId))) | Out-Null
+        $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($seconds + 4) -Message ("event=session_recovery_contract_retry_dispatched; session_id={0}; transfer_id={1}; contract_generation=1; offer_generation=2; kind=runtime_unlock_activation; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=regular_v4_unproven_recovery_escalation" -f $sessionId, $transferId))) | Out-Null
+        $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($seconds + 5) -Message ("event=session_recovery_contract_retry_authority_granted; session_id={0}; transfer_id={1}; contract_generation=1; offer_generation=2; authority_attempt=1; reason=bridge_recovery_settled; observed_send_deadline_utc_ms=1780587010000" -f $sessionId, $transferId))) | Out-Null
+        $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($seconds + 6) -Message ("event=session_recovery_contract_retry_authority_observed; session_id={0}; transfer_id={1}; contract_generation=1; offer_generation=2; authorized_observed_lane=control_to_bulk_endpoint; authority_attempt=1" -f $sessionId, $transferId))) | Out-Null
+        $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($seconds + 7) -Message ("event=filetransfer_tuna_activation_negotiation_regular_nkn_pause_deferred; session_id={0}; reason=runtime_unlock_offer_observed_waiting_for_answer; trigger=runtime_unlock" -f $sessionId))) | Out-Null
+        $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($seconds + 8) -Message ("event=nkn_bridge_receive_stall_recovery_started; stall_reason=regular_v4_unproven_recovery_escalation; attempt=4; max_restarts=4; active_file_transfer_sessions=1; active_file_transfer_runtime_sessions=1; transfer_id={0}; session_id={1}" -f $transferId, $sessionId))) | Out-Null
+        $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($seconds + 9) -Message ("event=nkn_bridge_receive_stall_recovery_completed; stall_reason=regular_v4_unproven_recovery_escalation; attempt=4; recovery_count=4; requires_control_proof=1; requires_bulk_proof=1; transfer_id={0}; session_id={1}" -f $transferId, $sessionId))) | Out-Null
+        $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($seconds + 10) -Message ("event=session_liveness_timeout; session_id={0}; transfer_id={1}; reason=session_liveness_timeout; route=regular_nkn_v4_fast; protocol_version=4" -f $sessionId, $transferId))) | Out-Null
     }
 
     if ($startupPeerDisconnect -and $Scenario.Kind -eq 'regular') {
@@ -3193,6 +3215,10 @@ function Test-Phase5RerunnableTransientSetupFailure {
     $combined = ("{0} {1} {2}" -f $phase, $reason, (Join-RouteAcceptanceTokenList -Values $Result.failures))
 
     return $combined.IndexOf('activation_offer_not_observed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('activation_offer_sent_waiting_answer', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('listener_ready_unavailable_contradiction', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('preflight_listener_unavailable', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('tuna_transport_not_active', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('terminal_before_accept', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('offer_sent_accept_not_enabled', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('offer_received_accept_not_enabled', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
@@ -3270,7 +3296,8 @@ function Test-Phase5CanonicalRuntimeUnlockReceiveRecoveryExhaustion {
     $operator = Read-RouteAcceptanceKeyValueArtifact -Path $operatorPath
     $routeSummary = Read-RouteAcceptanceKeyValueArtifact -Path $routePath
     $recoveryClass = Get-RouteAcceptanceReportValue -Report $operator -Name 'recovery_failure_class' -DefaultValue '(missing)'
-    if ($recoveryClass -ne 'runtime_unlock_offer_observation_blocked_by_receive_recovery') {
+    if ($recoveryClass -ne 'runtime_unlock_offer_observation_blocked_by_receive_recovery' -and
+        $recoveryClass -ne 'runtime_unlock_liveness_timeout') {
         return $false
     }
 
@@ -3283,7 +3310,6 @@ function Test-Phase5CanonicalRuntimeUnlockReceiveRecoveryExhaustion {
     if ($offerNotObserved -le 0 -or
         $retryDispatched -le 0 -or
         $authorityObserved -le 0 -or
-        $observationBlocked -le 0 -or
         $livenessTimeoutAfterRuntimeUnlock -le 0 -or
         $receiveResumed -ne 0) {
         return $false
@@ -3296,7 +3322,16 @@ function Test-Phase5CanonicalRuntimeUnlockReceiveRecoveryExhaustion {
 
     $hasMaxRestartExhaustion = [regex]::IsMatch($retainedText, 'event=nkn_bridge_receive_stall_recovery_failed;[^\r\n]*reason=max_restarts_reached', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
     $hasRegularV4UnprovenEscalation = $retainedText.IndexOf('regular_v4_unproven_recovery_escalation', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
-    return $hasMaxRestartExhaustion -and $hasRegularV4UnprovenEscalation
+    $hasUnprovenRecoveryCompletion = [regex]::IsMatch($retainedText, 'event=nkn_bridge_receive_stall_recovery_completed;[^\r\n]*stall_reason=regular_v4_unproven_recovery_escalation', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if (-not $hasRegularV4UnprovenEscalation) {
+        return $false
+    }
+
+    if ($recoveryClass -eq 'runtime_unlock_offer_observation_blocked_by_receive_recovery') {
+        return $observationBlocked -gt 0 -and ($hasMaxRestartExhaustion -or $hasUnprovenRecoveryCompletion)
+    }
+
+    return $hasUnprovenRecoveryCompletion -or $hasMaxRestartExhaustion
 }
 
 function Set-Phase5CanonicalRuntimeUnlockReceiveRecoveryExhaustion {

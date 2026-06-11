@@ -3171,6 +3171,13 @@ public sealed partial class SessionFileTransferService
                         }
                         else
                         {
+                            if (MaybeQueueOutboundFileTunaV4PostTunaFrontierReplayLocked(
+                                    context,
+                                    "file_tuna_v4_post_tuna_sender_wait"))
+                            {
+                                continue;
+                            }
+
                             MaybeQueueOutboundRegularNknV4PeerSilenceSafetyReplayLocked(
                                 context,
                                 "regular_v4_sender_wait");
@@ -3356,6 +3363,9 @@ public sealed partial class SessionFileTransferService
                             if (!transportPaused || allowPausedRepair)
                             {
                                 MaybeQueueOutboundV4StalledRebindSafetyReplayLocked(context, "post_fallback_sender_wait");
+                                MaybeQueueOutboundFileTunaV4PostTunaFrontierReplayLocked(
+                                    context,
+                                    "file_tuna_v4_post_tuna_sender_wait");
                                 MaybeQueueOutboundRegularNknV4PeerSilenceSafetyReplayLocked(context, "regular_v4_sender_wait");
                             }
 
@@ -3532,6 +3542,118 @@ public sealed partial class SessionFileTransferService
         LocalOperationalLog.Warn(
             "FileTransferService",
             $"event=filetransfer_regular_v4_peer_silence_safety_replay_started; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.NegotiatedDataProtocolVersion}; replay_ordinal={replayOrdinal}; remote_next_expected_chunk_index={remoteFrontier}; replay_start_chunk_index={replayStartChunkIndex}; replay_end_chunk_exclusive={replayEndExclusive}; requested_chunk_count={replayChunkCount}; scheduled_chunk_count={chunkIndices.Count}; frontier_lag_chunks={frontierLagChunks}; feedback_silence_ms={(long)Math.Max(0, feedbackSilence.TotalMilliseconds)}; replay_byte_cap={PullTransportRebindSafetyReplayMaxBytes}; replay_chunk_cap={PullTransportRebindSafetyReplayMaxChunks}; wrapped_to_frontier={(wrappedToFrontier ? 1 : 0)}");
+        return true;
+    }
+
+    private bool MaybeQueueOutboundFileTunaV4PostTunaFrontierReplayLocked(
+        OutboundTransferContext context,
+        string reason)
+    {
+        if (!ReferenceEquals(outboundTransfer, context) ||
+            context.IsTerminal ||
+            context.UserPaused ||
+            context.PeerPaused ||
+            !context.RouteRuntime.UsesFileTunaV4Runtime ||
+            context.NegotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+            context.RouteRuntime.FrameFamily != FileTransferFrameFamily.V4 ||
+            context.PullFileTunaV4PostTunaReactivationGeneration <= 0 ||
+            !context.PullSourceCanSeek ||
+            context.RemoteNextExpectedChunkIndex >= context.ChunkCount)
+        {
+            return false;
+        }
+
+        var remoteFrontier = Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, context.ChunkCount);
+        var acceptedUntil = ResolveOutboundRepairAcceptedUntilExclusiveLocked(context);
+        if (acceptedUntil <= remoteFrontier)
+        {
+            return false;
+        }
+
+        if (HasOutboundV4RepairWorkInProgressLocked(context))
+        {
+            return false;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var lastPeerFrameUtc = context.PullV4LastPeerFrameReceivedUtc ?? context.PullV4LastGrantReceivedUtc;
+        var minSilence = TimeSpan.FromMilliseconds(PullControlChatterWindowMs * 2L);
+        var feedbackSilence = lastPeerFrameUtc is null ? TimeSpan.MaxValue : now - lastPeerFrameUtc.Value;
+        if (feedbackSilence < minSilence)
+        {
+            return false;
+        }
+
+        if (context.PullFileTunaV4PostTunaLastFrontierReplayUtc is { } lastReplayUtc &&
+            now - lastReplayUtc < PullTransportRebindSafetyReplayRearmCooldown)
+        {
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_v4_post_reactivation_frontier_replay_skipped; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; skip_reason=rearm_cooldown; reactivation_generation={context.PullFileTunaV4PostTunaReactivationGeneration}; remote_next_expected_chunk_index={remoteFrontier}; chunks_accepted_for_transport={acceptedUntil}; feedback_silence_ms={(long)Math.Max(0, feedbackSilence.TotalMilliseconds)}; rearm_cooldown_ms={(long)PullTransportRebindSafetyReplayRearmCooldown.TotalMilliseconds}");
+            return false;
+        }
+
+        var replayChunkCount = Math.Min(
+            V4PostFallbackEmergencyFrontierRepairChunks,
+            Math.Max(0, acceptedUntil - remoteFrontier));
+        if (replayChunkCount <= 0)
+        {
+            return false;
+        }
+
+        var replayEndExclusive = remoteFrontier + replayChunkCount;
+        var chunkIndices = new List<int>(replayChunkCount);
+        for (var chunkIndex = remoteFrontier; chunkIndex < replayEndExclusive; chunkIndex++)
+        {
+            if (context.PullV4SenderPumpRepairQueuedChunkIndices.Add(chunkIndex))
+            {
+                chunkIndices.Add(chunkIndex);
+            }
+        }
+
+        if (chunkIndices.Count == 0)
+        {
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_v4_post_reactivation_frontier_replay_skipped; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; skip_reason=chunks_already_queued; reactivation_generation={context.PullFileTunaV4PostTunaReactivationGeneration}; remote_next_expected_chunk_index={remoteFrontier}; replay_start_chunk_index={remoteFrontier}; replay_end_chunk_exclusive={replayEndExclusive}; feedback_silence_ms={(long)Math.Max(0, feedbackSilence.TotalMilliseconds)}");
+            return false;
+        }
+
+        context.PullFileTunaV4PostTunaLastFrontierReplayUtc = now;
+        context.PullFileTunaV4PostTunaLastFrontierReplayChunkIndex = remoteFrontier;
+        context.PullFileTunaV4PostTunaLastFrontierReplayEndChunkIndex = replayEndExclusive;
+        var replayOrdinal = ++context.PullFileTunaV4PostTunaFrontierReplayCount;
+        var repairKey = $"file_tuna_v4_post_tuna_frontier_replay:{context.PullFileTunaV4PostTunaReactivationGeneration}:{remoteFrontier}:{replayOrdinal}";
+        context.PullV4SenderPumpRepairQueue.Enqueue(
+            new PullV4QueuedRepairSend(
+                chunkIndices,
+                RangeCount: 1,
+                RequestedChunkCount: replayChunkCount,
+                FirstStartChunkIndex: remoteFrontier,
+                LastEndChunkExclusive: replayEndExclusive,
+                RemoteNextExpectedChunkIndex: remoteFrontier,
+                ChunksAcceptedForTransport: acceptedUntil,
+                SkippedObsoleteCount: 0,
+                SkippedFutureCount: replayChunkCount - chunkIndices.Count,
+                SkippedOutOfBoundsCount: 0,
+                RepairRequestKey: repairKey,
+                ProtocolRepairRequestId: null,
+                ProtocolPriority: null,
+                ProtocolRecoveryMode: null,
+                FrontierTailRepair: true,
+                EmergencyCreditRepair: false,
+                DeliveryMode: FileTransferV4RepairDeliveryMode.ControlBulkRedundant,
+                DeliveryEscalationReason: "file_tuna_v4_post_tuna_frontier_replay",
+                CreditExhaustedTimeMsAtDecision: context.V4SenderCreditExhaustedSinceUtc is null
+                    ? 0
+                    : (long)Math.Max(0, (now - context.V4SenderCreditExhaustedSinceUtc.Value).TotalMilliseconds)));
+
+        context.SparseSenderPumpLastWakeReason = "file_tuna_v4_post_tuna_frontier_replay";
+        context.SignalSparseSenderPump();
+
+        LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_v4_post_reactivation_frontier_replay_started; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? 0}; reactivation_generation={context.PullFileTunaV4PostTunaReactivationGeneration}; replay_ordinal={replayOrdinal}; remote_next_expected_chunk_index={remoteFrontier}; replay_start_chunk_index={remoteFrontier}; replay_end_chunk_exclusive={replayEndExclusive}; requested_chunk_count={replayChunkCount}; scheduled_chunk_count={chunkIndices.Count}; chunks_accepted_for_transport={acceptedUntil}; remote_credit_until_chunk_index_exclusive={context.RemoteGrantedUntilExclusive}; feedback_silence_ms={(long)Math.Max(0, feedbackSilence.TotalMilliseconds)}; repair_request_key={repairKey}");
         return true;
     }
 

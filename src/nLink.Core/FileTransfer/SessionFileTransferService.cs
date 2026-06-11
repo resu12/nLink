@@ -5303,6 +5303,12 @@ public sealed partial class SessionFileTransferService : IDisposable
             leg,
             acceptedCheckpointRequestId,
             reason);
+        MarkLiveRouteEpochRecoveredFromFallbackCheckpointIfCurrent(
+            FileTransferDirection.Outbound,
+            context.TransferId,
+            context.SessionId,
+            context.CurrentLiveRouteEpoch,
+            leg);
         if (tailReconciliationCheckpoint)
         {
             LogFileTransferFallbackTailReconciliationAccepted(
@@ -5435,6 +5441,12 @@ public sealed partial class SessionFileTransferService : IDisposable
             leg,
             requestId,
             reason);
+        MarkLiveRouteEpochRecoveredFromFallbackCheckpointIfCurrent(
+            FileTransferDirection.Inbound,
+            context.TransferId,
+            context.SessionId,
+            context.CurrentLiveRouteEpoch,
+            leg);
     }
 
     private static bool ShouldUseV6RegularNknSparseRuntime(OutboundTransferContext context)
@@ -5581,6 +5593,36 @@ public sealed partial class SessionFileTransferService : IDisposable
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_live_route_epoch_terminal; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; live_route_epoch={epoch.EpochId}; route={epoch.RouteSelection.TelemetryToken}; protocol_version={epoch.RouteSelection.ProtocolVersion}; runtime_profile={FormatFileTransferRouteRuntimeProfile(epoch.RouteSelection.RuntimeProfile)}; frame_family={FormatFileTransferFrameFamily(epoch.RouteSelection.FrameFamily)}; handoff_kind={FormatFileTransferTransportHandoffKind(epoch.HandoffKind)}; target_transport={FormatFileTransferTransportKind(epoch.TargetTransport)}; terminal_state={terminalState.ToString().ToLowerInvariant()}; reason={FormatProtocolLogValue(reason)}");
+    }
+
+    private static void MarkLiveRouteEpochRecoveredFromFallbackCheckpointIfCurrent(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        LiveRouteEpoch? epoch,
+        FileTransferLeg leg)
+    {
+        if (epoch is null ||
+            leg.LiveRouteEpochId <= 0 ||
+            epoch.EpochId != leg.LiveRouteEpochId ||
+            !leg.RouteSelection.RuntimeDescriptor.UsesPostTunaFallbackV6Runtime ||
+            leg.ProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+            epoch.RouteSelection.Route != leg.RouteSelection.Route ||
+            epoch.RouteSelection.ProtocolVersion != leg.ProtocolVersion ||
+            epoch.HandoffKind != FileTransferTransportHandoffKind.TunaToNormalFallback ||
+            epoch.TargetTransport != FileTransferTransportKind.RegularNkn ||
+            string.Equals(epoch.State, "recovered", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(epoch.State, "terminal", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        LogLiveRouteEpochRecovered(
+            direction,
+            transferId,
+            sessionId,
+            epoch,
+            "fallback_checkpoint_accepted");
     }
 
     private FileTransferBridgeRecoveryPolicy ResolveReceiveRecoveryPolicyForRequestLocked(FileTransferReceiveRecoveryRequest request)
@@ -6647,6 +6689,18 @@ public sealed partial class SessionFileTransferService : IDisposable
         public int PullRegularNknV4LastPeerSilenceSafetyReplayEndChunkIndex { get; set; } = -1;
 
         public int PullRegularNknV4PeerSilenceSafetyReplayCount { get; set; }
+
+        public int PullFileTunaV4PostTunaReactivationGeneration { get; set; }
+
+        public DateTimeOffset? PullFileTunaV4PostTunaReactivationStartedUtc { get; set; }
+
+        public DateTimeOffset? PullFileTunaV4PostTunaLastFrontierReplayUtc { get; set; }
+
+        public int PullFileTunaV4PostTunaLastFrontierReplayChunkIndex { get; set; } = -1;
+
+        public int PullFileTunaV4PostTunaLastFrontierReplayEndChunkIndex { get; set; } = -1;
+
+        public int PullFileTunaV4PostTunaFrontierReplayCount { get; set; }
 
         public long PullSenderRawBytesRecent { get; set; }
 

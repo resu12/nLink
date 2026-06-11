@@ -2420,8 +2420,13 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
 
     $phase = 'unknown'
     $reason = 'unknown'
+    $listenerReadyUnavailableContradiction = $listenerReady -and ($listenerUnavailable -or $listenerSidecarUnavailable)
     if ($ErrorMessage.IndexOf('Chat.FileTransfer.Accept', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-        if (-not $tunaActive -and $activationOfferNotObserved) {
+        if (-not $tunaActive -and $listenerReadyUnavailableContradiction) {
+            $phase = 'preactivation_readiness'
+            $reason = 'listener_ready_unavailable_contradiction'
+        }
+        elseif (-not $tunaActive -and $activationOfferNotObserved) {
             $phase = 'activation_offer_send'
             $reason = 'activation_offer_not_observed'
         }
@@ -2449,6 +2454,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             $phase = 'measured_accept_wait'
             $reason = 'offer_received_accept_not_enabled'
         }
+    }
+    elseif ($listenerReadyUnavailableContradiction) {
+        $phase = 'preactivation_readiness'
+        $reason = 'listener_ready_unavailable_contradiction'
     }
     elseif (-not $tunaActive -and $activationOfferNotObserved) {
         $phase = 'activation_offer_send'
@@ -2719,7 +2728,9 @@ function Wait-TunaGuiSecondTransferReadinessOrThrow {
         $lastSendLine = '(none)'
     }
 
-    throw ("Tuna GUI second-transfer readiness did not stabilize: phase=preactivation_readiness; reason=second_transfer_tuna_readiness_unstable; route_mode={0}; tuna_active={1}; listener_ready={2}; listener_unavailable={3}; send_log_ready={4}; send_log_connected={5}; send_log_can_send_files={6}; send_log_outbound_clear={7}; send_ui_state={8}; send_enabled_error={9}; last_tuna_active_index={10}; last_tuna_inactive_index={11}; stable_ready_polls={12}; required_stable_ready_polls={13}; last_sender_panel_state={14}" -f `
+    $readinessFailureReason = if ($ready -eq 1 -and $unavailable -eq 1) { 'listener_ready_unavailable_contradiction' } else { 'second_transfer_tuna_readiness_unstable' }
+    throw ("Tuna GUI second-transfer readiness did not stabilize: phase=preactivation_readiness; reason={0}; route_mode={1}; tuna_active={2}; listener_ready={3}; listener_unavailable={4}; send_log_ready={5}; send_log_connected={6}; send_log_can_send_files={7}; send_log_outbound_clear={8}; send_ui_state={9}; send_enabled_error={10}; last_tuna_active_index={11}; last_tuna_inactive_index={12}; stable_ready_polls={13}; required_stable_ready_polls={14}; last_sender_panel_state={15}" -f `
+        $readinessFailureReason,
         $RouteMode,
         $active,
         $ready,
@@ -4563,6 +4574,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     $fallbackEpochWaitingObserved = $false
     $setupPhase = $null
     $liveRouteEpochObservations = New-Object System.Collections.Generic.List[object]
+    $firstTransferTerminalBeforeLiveReactivation = $false
+    $firstTransferTerminalBeforeLiveReactivationTransferId = ''
     $liveSwitchOffMinimumFaultPayloadBytes = 0L
     $liveSwitchOffMinimumCommittedBytes = 0L
     $liveSwitchOffMinimumElapsedMs = 0
@@ -4813,7 +4826,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 $observedEvidenceLines.Add($fallbackRouteLine) | Out-Null
 
                 $nextAction = if ($stepIndex + 1 -lt $sequence.Count) { [string]$sequence[$stepIndex + 1] } else { '' }
-                if (($RouteMode -eq 'live-regular-activation-cycle' -or $RouteMode -eq 'live-multi-toggle') -and
+                if (($RouteMode -eq 'live-regular-activation-cycle' -or $RouteMode -eq 'live-multi-toggle' -or $RouteMode -eq 'live-reactivation-second-transfer') -and
                     [string]::Equals($nextAction, 'on', [System.StringComparison]::OrdinalIgnoreCase)) {
                     $prearmedActivationBookmark = Get-AppLogBookmark
                     $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step_prearmed; step={1}; next_step={2}; action=on; route_mode={3}; reason=prearm_after_fallback_route_started" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber, ($stepNumber + 1), $RouteMode)) | Out-Null
@@ -4846,8 +4859,46 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                     Unlock-TunaPayers -Context $Context -PayerMode $PayerMode -Password $WalletPassword
                 }
 
-                $activationProofTimeoutMs = if ($RouteMode -eq 'live-regular-activation-cycle') { 240000 } else { 90000 }
-                $activationStartedLine = Wait-TunaGuiLiveRouteEpochStarted -Bookmark $stepBookmark -FallbackBookmark $bookmark -Route 'file_tuna_v4' -ProtocolVersion 4 -HandoffKind 'normal_to_tuna_activation' -TargetTransport 'tuna' -Description 'live multi-toggle normal-to-Tuna route epoch started' -AfterLiveRouteEpoch $lastObservedLiveRouteEpoch -TimeoutMs $activationProofTimeoutMs
+                $activationProofTimeoutMs = if ($RouteMode -eq 'live-regular-activation-cycle' -or $RouteMode -eq 'live-reactivation-second-transfer') { 240000 } else { 90000 }
+                try {
+                    $activationStartedLine = Wait-TunaGuiLiveRouteEpochStarted -Bookmark $stepBookmark -FallbackBookmark $bookmark -Route 'file_tuna_v4' -ProtocolVersion 4 -HandoffKind 'normal_to_tuna_activation' -TargetTransport 'tuna' -Description 'live multi-toggle normal-to-Tuna route epoch started' -AfterLiveRouteEpoch $lastObservedLiveRouteEpoch -TimeoutMs $activationProofTimeoutMs
+                }
+                catch {
+                    if ($RouteMode -eq 'live-reactivation-second-transfer') {
+                        $terminalProbeInboundRole = if ($Direction -eq 'helper-to-helpee') { 'helpee' } else { 'helper' }
+                        $terminalProbeOutboundRole = if ($Direction -eq 'helper-to-helpee') { 'helper' } else { 'helpee' }
+                        try {
+                            $terminalProbe = Wait-FileTransferTerminalPairAfterBookmark `
+                                -Bookmark $bookmark `
+                                -TimeoutMs 10000 `
+                                -ProgressTimeoutMs 10000 `
+                                -ExpectedFileName ([System.IO.Path]::GetFileName($AutopickPath)) `
+                                -ExpectedSizeBytes $PayloadSizeBytes `
+                                -ExpectedInboundRole $terminalProbeInboundRole `
+                                -ExpectedOutboundRole $terminalProbeOutboundRole `
+                                -NotBeforeUtc $cycleStartedUtc `
+                                -ArtifactDir $ArtifactDir
+                            $terminalProbeInboundState = Get-GuiSmokeFieldValue -Fields $terminalProbe.Inbound -Name 'state' -Default '(unknown)'
+                            $terminalProbeOutboundState = Get-GuiSmokeFieldValue -Fields $terminalProbe.Outbound -Name 'state' -Default '(unknown)'
+                            $terminalProbeInboundError = Get-GuiSmokeFieldValue -Fields $terminalProbe.Inbound -Name 'error_code' -Default '(none)'
+                            $terminalProbeOutboundError = Get-GuiSmokeFieldValue -Fields $terminalProbe.Outbound -Name 'error_code' -Default '(none)'
+                            if ($terminalProbeInboundState -eq 'Completed' -and
+                                $terminalProbeOutboundState -eq 'Completed' -and
+                                $terminalProbeInboundError -eq '(none)' -and
+                                $terminalProbeOutboundError -eq '(none)') {
+                                $firstTransferTerminalBeforeLiveReactivation = $true
+                                $firstTransferTerminalBeforeLiveReactivationTransferId = [string]$terminalProbe.TransferId
+                                $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_reactivation_first_transfer_terminal_before_activation; route_mode={1}; transfer_id={2}; step={3}; action=on; reason=terminal_before_same_transfer_reactivation; fallback_epoch_recovered={4}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $RouteMode, $firstTransferTerminalBeforeLiveReactivationTransferId, $stepNumber, ($(if ($fallbackEpochRecoveredObserved) { 1 } else { 0 })))) | Out-Null
+                                Write-Host '[GUI Smoke][filetransfer_tuna] First transfer completed cleanly in fallback before same-transfer reactivation; continuing to second-transfer Tuna proof.' -ForegroundColor Yellow
+                                continue
+                            }
+                        }
+                        catch {
+                        }
+                    }
+
+                    throw
+                }
                 $observedEvidenceLines.Add($activationStartedLine) | Out-Null
                 Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'on_started' -Line $activationStartedLine
                 $activationEpochStartedObserved = $true
@@ -5089,6 +5140,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         liveRouteEpochs = $liveRouteEpochArray
         liveRouteEpochSequence = $liveRouteEpochSequence
         liveRouteEpochRouteChanges = @($liveRouteEpochRouteChanges.ToArray())
+        firstTransferTerminalBeforeLiveReactivation = [bool]$firstTransferTerminalBeforeLiveReactivation
+        firstTransferTerminalBeforeLiveReactivationTransferId = $firstTransferTerminalBeforeLiveReactivationTransferId
         pauseProbe = [bool]$pauseProbe
         evidence = $evidence
     }
@@ -5112,6 +5165,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
             $PayloadSizeBytes)
     }
 
+    $secondTransferProofOk = $false
     if ($RouteMode -eq 'live-reactivation-second-transfer') {
         $secondPayloadBytes = 16777216L
         $postTerminalQuietBookmark = Get-AppLogBookmark
@@ -5223,6 +5277,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                     $secondInboundState,
                     $secondOutboundState)
             }
+
+            $secondTransferProofOk = $true
         }
         catch {
             if ($secondSw.IsRunning) {
@@ -5296,16 +5352,29 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     }
     elseif ($RouteMode -eq 'live-reactivation-second-transfer') {
         $joinedRouteSequence = ($liveRouteEpochRouteChanges.ToArray() -join ',')
-        $liveRouteProof = Get-TunaGuiLiveRouteEpochProof -Observations $liveRouteEpochObservations -ExpectedRoutes @('post_tuna_fallback_v6', 'file_tuna_v4')
-        if (-not $evidence.tunaNegotiated -or
-            -not $evidence.fallbackEpochStarted -or
-            -not $evidence.activationEpochStarted -or
-            -not $evidence.activationEpochRecovered -or
-            -not $evidence.postTunaFallbackV6RouteObserved -or
-            -not $evidence.fallbackEpochRecovered -or
-            -not $liveRouteProof.Pass -or
-            $joinedRouteSequence -ne 'post_tuna_fallback_v6,file_tuna_v4') {
-            throw "Tuna GUI live reactivation did not prove same-transfer strict live-route epoch sequence before the second transfer. sequence=$joinedRouteSequence findings=$($liveRouteProof.Findings -join '|') metadata_missing=$($liveRouteProof.MetadataMissingCount) Summary: $($evidence | ConvertTo-Json -Compress)"
+        if ($firstTransferTerminalBeforeLiveReactivation) {
+            $liveRouteProof = Get-TunaGuiLiveRouteEpochProof -Observations $liveRouteEpochObservations -ExpectedRoutes @('post_tuna_fallback_v6')
+            if (-not $evidence.fallbackEpochStarted -or
+                -not $evidence.postTunaFallbackV6RouteObserved -or
+                -not $evidence.fallbackEpochRecovered -or
+                -not $liveRouteProof.Pass -or
+                $joinedRouteSequence -ne 'post_tuna_fallback_v6' -or
+                -not $secondTransferProofOk) {
+                throw "Tuna GUI live reactivation second-transfer proof did not prove clean fallback terminal followed by second-transfer Tuna V4. sequence=$joinedRouteSequence second_transfer_proof=$secondTransferProofOk findings=$($liveRouteProof.Findings -join '|') metadata_missing=$($liveRouteProof.MetadataMissingCount) Summary: $($evidence | ConvertTo-Json -Compress)"
+            }
+        }
+        else {
+            $liveRouteProof = Get-TunaGuiLiveRouteEpochProof -Observations $liveRouteEpochObservations -ExpectedRoutes @('post_tuna_fallback_v6', 'file_tuna_v4')
+            if (-not $evidence.tunaNegotiated -or
+                -not $evidence.fallbackEpochStarted -or
+                -not $evidence.activationEpochStarted -or
+                -not $evidence.activationEpochRecovered -or
+                -not $evidence.postTunaFallbackV6RouteObserved -or
+                -not $evidence.fallbackEpochRecovered -or
+                -not $liveRouteProof.Pass -or
+                $joinedRouteSequence -ne 'post_tuna_fallback_v6,file_tuna_v4') {
+                throw "Tuna GUI live reactivation did not prove same-transfer strict live-route epoch sequence before the second transfer. sequence=$joinedRouteSequence findings=$($liveRouteProof.Findings -join '|') metadata_missing=$($liveRouteProof.MetadataMissingCount) Summary: $($evidence | ConvertTo-Json -Compress)"
+            }
         }
     }
     elseif ($RouteMode -eq 'live-multi-toggle') {
