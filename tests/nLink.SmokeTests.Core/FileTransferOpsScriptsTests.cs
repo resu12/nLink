@@ -1854,6 +1854,38 @@ public sealed class FileTransferOpsScriptsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_LiveRegularActivationCycleLateDuplicateRecovered_DedupesByEpoch()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildRouteAwareLiveRegularActivationCycleFixture().ToList();
+        var firstFallbackStartedIndex = lines.FindIndex(line =>
+            line.Contains("event=filetransfer_live_route_epoch_started", StringComparison.Ordinal) &&
+            line.Contains("route=post_tuna_fallback_v6", StringComparison.Ordinal) &&
+            line.Contains("live_route_epoch=2", StringComparison.Ordinal));
+        Assert.True(firstFallbackStartedIndex >= 0);
+
+        lines.Insert(
+            firstFallbackStartedIndex + 1,
+            LogLine("event=filetransfer_live_route_epoch_recovered; direction=inbound; transfer_id=[redacted]; session_id=sess_redacted; live_route_epoch=1; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=normal_to_tuna_activation; target_transport=tuna; reason=late_peer_ack"));
+
+        var result = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "RegularActivationCycle"]);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("PASS", verdict["verdict"]);
+        Assert.Equal("pass", verdict["live_route_epoch_proof_verdict"]);
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("pass", route["route_consistency_verdict"]);
+        Assert.Equal("regular_nkn_v4_fast,file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", route["selected_route_changes"]);
+        Assert.Equal("file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", route["live_route_epoch_route_changes"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_LiveSwitchOffProofModeWithStrictLiveRouteEvents_ReturnsPass()
     {
         if (!OperatingSystem.IsWindows())
@@ -6297,8 +6329,8 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("PASS", summary["verdict"]);
             Assert.Equal("1", summary["live-switch-off-helpee-64mb.retry_used"]);
             Assert.Equal("2", summary["live-switch-off-helpee-64mb.selected_attempt"]);
-            Assert.Equal("preactivation_readiness", summary["live-switch-off-helpee-64mb.setup_failure_phase"]);
-            Assert.Equal("listener_ready_unavailable_contradiction", summary["live-switch-off-helpee-64mb.setup_failure_reason"]);
+            Assert.False(summary.ContainsKey("live-switch-off-helpee-64mb.setup_failure_phase"));
+            Assert.False(summary.ContainsKey("live-switch-off-helpee-64mb.setup_failure_reason"));
             Assert.Contains("listener_ready_unavailable_contradiction", summary["live-switch-off-helpee-64mb.first_failure_reason"], StringComparison.Ordinal);
             Assert.Equal("none", summary["live-switch-off-helpee-64mb.acceptance_failure_class"]);
             Assert.True(Directory.Exists(Path.Combine(runRoot, "live-switch-off-helpee-64mb-rerun-1")));
@@ -6393,8 +6425,8 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("PASS", summary["correctness_verdict"]);
             Assert.Equal("1", summary["regular-nkn-v4-64mb.retry_used"]);
             Assert.Equal("2", summary["regular-nkn-v4-64mb.selected_attempt"]);
-            Assert.Equal("approval_ui", summary["regular-nkn-v4-64mb.setup_failure_phase"]);
-            Assert.Equal("help_request_expired_before_transfer", summary["regular-nkn-v4-64mb.setup_failure_reason"]);
+            Assert.False(summary.ContainsKey("regular-nkn-v4-64mb.setup_failure_phase"));
+            Assert.False(summary.ContainsKey("regular-nkn-v4-64mb.setup_failure_reason"));
             Assert.Equal("none", summary["regular-nkn-v4-64mb.acceptance_failure_class"]);
             Assert.True(Directory.Exists(Path.Combine(runRoot, "regular-nkn-v4-64mb-rerun-1")));
         }

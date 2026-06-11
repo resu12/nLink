@@ -940,9 +940,57 @@ function Get-FileTransferLiveRouteEpochProof {
         }
     }
 
-    $sequence = @(
+    $completedEpochRows = New-Object System.Collections.Generic.List[object]
+    [object[]]$scopedLiveEpochGroups = @(
         $scopedCompleteEvents |
-            ForEach-Object { Get-FileTransferEventField -Event $_ -Name 'route' -Default '' } |
+            Group-Object {
+                $epoch = Get-FileTransferEventInt64Field -Event $_ -Name 'live_route_epoch' -Default 0
+                $route = Get-FileTransferEventField -Event $_ -Name 'route' -Default ''
+                $protocol = Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default ''
+                $handoff = Get-FileTransferEventField -Event $_ -Name 'handoff_kind' -Default ''
+                $target = Get-FileTransferEventField -Event $_ -Name 'target_transport' -Default ''
+                "{0}|{1}|{2}|{3}|{4}" -f $epoch, $route, $protocol, $handoff, $target
+            }
+    )
+    foreach ($group in @($scopedLiveEpochGroups)) {
+        [object[]]$events = @($group.Group | Sort-Object Sequence)
+        [object[]]$startedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_live_route_epoch_started' })
+        [object[]]$recoveredEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_live_route_epoch_recovered' })
+        if ($startedEvents.Count -eq 0 -or $recoveredEvents.Count -eq 0) {
+            continue
+        }
+
+        $started = $null
+        $recovered = $null
+        foreach ($candidateStarted in @($startedEvents)) {
+            $candidateRecovered = @(
+                $recoveredEvents |
+                    Where-Object { $_.Sequence -gt $candidateStarted.Sequence } |
+                    Select-Object -First 1
+            )
+            if ($candidateRecovered.Count -gt 0) {
+                $started = $candidateStarted
+                $recovered = $candidateRecovered[0]
+                break
+            }
+        }
+
+        if ($null -eq $started -or $null -eq $recovered) {
+            continue
+        }
+
+        $completedEpochRows.Add([pscustomobject]@{
+            Epoch = Get-FileTransferEventInt64Field -Event $started -Name 'live_route_epoch' -Default 0
+            Route = Get-FileTransferEventField -Event $started -Name 'route' -Default ''
+            StartedSequence = [int64]$started.Sequence
+            RecoveredSequence = [int64]$recovered.Sequence
+        }) | Out-Null
+    }
+
+    $sequence = @(
+        $completedEpochRows |
+            Sort-Object Epoch, StartedSequence |
+            ForEach-Object { [string]$_.Route } |
             Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
     )
     $routeChanges = New-Object System.Collections.Generic.List[string]

@@ -3735,10 +3735,6 @@ function Invoke-Phase4RouteAcceptanceScenario {
             $rerunResult.retryUsed = $true
             $rerunResult.selectedAttempt = if ($rerunResult.failures.Count -eq 0) { $rerun + 1 } else { 0 }
             $rerunResult.firstFailureReason = $firstFailureReason
-            if ($phase5TransientSetupFailure) {
-                $rerunResult.setupFailurePhase = [string]$firstAttemptResult.setupFailurePhase
-                $rerunResult.setupFailureReason = [string]$firstAttemptResult.setupFailureReason
-            }
             if ($rerunResult.failures.Count -ne 0 -and (Test-Phase4SetupInvalidAttempt -Result $rerunResult)) {
                 $rerunFailureReason = if (-not [string]::IsNullOrWhiteSpace($rerunExecutionFailure)) {
                     "scenario rerun execution failed: {0}" -f $rerunExecutionFailure
