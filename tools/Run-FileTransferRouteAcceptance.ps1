@@ -2965,10 +2965,41 @@ function Invoke-Phase5BridgeReadinessPreflight {
     $oldTransport = $env:NLINK_TRANSPORT
     $oldScenarios = $env:NLINK_GUI_SMOKE_SCENARIOS
     $oldArtifactDir = $env:NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR
+    $oldBridgePath = $env:NLINK_NKN_BRIDGE_PATH
+    $oldNodePath = $env:NLINK_NKN_NODE_PATH
     try {
         $env:NLINK_TRANSPORT = 'NKN'
         $env:NLINK_GUI_SMOKE_SCENARIOS = 'NKN_DIRECT_CONNECT'
         $env:NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR = $artifactDir
+
+        if (-not [string]::IsNullOrWhiteSpace($ResolvedExePath)) {
+            $exeDirectory = [System.IO.Path]::GetDirectoryName((Resolve-Path -LiteralPath $ResolvedExePath).Path)
+            $bundledBridge = Join-Path $exeDirectory 'bridge\win-x64\index.js'
+            $bundledNode = Join-Path $exeDirectory 'bridge\win-x64\node.exe'
+            if (-not (Test-Path -LiteralPath $bundledBridge) -or -not (Test-Path -LiteralPath $bundledNode)) {
+                $candidateBridgeDirs = @(
+                    (Join-Path $RepoRoot 'artifacts\bridge\win-x64'),
+                    (Join-Path $RepoRoot 'artifacts\portable\nLink\win-x64\bridge\win-x64')
+                )
+                $overrideApplied = $false
+                foreach ($candidateBridgeDir in $candidateBridgeDirs) {
+                    $candidateBridge = Join-Path $candidateBridgeDir 'index.js'
+                    $candidateNode = Join-Path $candidateBridgeDir 'node.exe'
+                    if ((Test-Path -LiteralPath $candidateBridge -PathType Leaf) -and (Test-Path -LiteralPath $candidateNode -PathType Leaf)) {
+                        $env:NLINK_NKN_BRIDGE_PATH = (Resolve-Path -LiteralPath $candidateBridge).Path
+                        $env:NLINK_NKN_NODE_PATH = (Resolve-Path -LiteralPath $candidateNode).Path
+                        Write-Host "[FileTransfer Phase5 Preflight] Using bridge override: $($env:NLINK_NKN_BRIDGE_PATH)" -ForegroundColor DarkGray
+                        Write-Host "[FileTransfer Phase5 Preflight] Using node override: $($env:NLINK_NKN_NODE_PATH)" -ForegroundColor DarkGray
+                        $overrideApplied = $true
+                        break
+                    }
+                }
+
+                if (-not $overrideApplied) {
+                    Write-Host '[FileTransfer Phase5 Preflight] No bridge override found; preflight will use app packaged bridge paths.' -ForegroundColor Yellow
+                }
+            }
+        }
 
         $output = & powershell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -ExePath $ResolvedExePath -TimeoutSeconds $preflightTimeoutSeconds 2>&1
         $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
@@ -2998,6 +3029,20 @@ function Invoke-Phase5BridgeReadinessPreflight {
         else {
             $env:NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR = $oldArtifactDir
         }
+
+        if ($null -eq $oldBridgePath) {
+            Remove-Item Env:NLINK_NKN_BRIDGE_PATH -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:NLINK_NKN_BRIDGE_PATH = $oldBridgePath
+        }
+
+        if ($null -eq $oldNodePath) {
+            Remove-Item Env:NLINK_NKN_NODE_PATH -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:NLINK_NKN_NODE_PATH = $oldNodePath
+        }
     }
 
     $outputLines = @($output | ForEach-Object { [string]$_ })
@@ -3011,6 +3056,11 @@ function Invoke-Phase5BridgeReadinessPreflight {
         $joined = $outputLines -join "`n"
         if ($joined.IndexOf('Timed out waiting for helpee invite to become ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             $failureReason = 'helpee_invite_readiness_timeout'
+        }
+        elseif ($joined.IndexOf('Timed out waiting for helper address in app log', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $joined.IndexOf('BridgeStartFailure', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $joined.IndexOf('Please reinstall', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $failureReason = 'nkn_bridge_start_failure'
         }
         elseif ($joined.IndexOf('RPC call failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $joined.IndexOf('Connect failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
