@@ -2395,11 +2395,21 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     )
 
     $lines = @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)
-    $listenerUnavailable = Test-TunaGuiLogLinesContain -Lines $lines -Needles @('listener_unavailable')
-    $listenerSidecarUnavailable = Test-TunaGuiLogLinesContain -Lines $lines -Needles @('listener_sidecar_unavailable')
-    $listenerReady = (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_acceleration_timeline', 'status=listener_ready')) -or
+    $rawListenerUnavailable = Test-TunaGuiLogLinesContain -Lines $lines -Needles @('listener_unavailable')
+    $rawListenerSidecarUnavailable = Test-TunaGuiLogLinesContain -Lines $lines -Needles @('listener_sidecar_unavailable')
+    $rawListenerReady = (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_acceleration_timeline', 'status=listener_ready')) -or
         (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_listener_startup_stage', 'stage=listener_ready'))
-    $tunaActive = Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_acceleration_timeline', 'active=1')
+    $readinessState = Get-TunaGuiReadinessStateAfterBookmark -Bookmark $Bookmark
+    $listenerUnavailable = [bool]$readinessState.ListenerUnavailable
+    $listenerSidecarUnavailable = [bool]($readinessState.ListenerUnavailable -and $rawListenerSidecarUnavailable)
+    $listenerReady = [bool]$readinessState.ListenerReady
+    $tunaActive = [bool]$readinessState.TunaActive
+    if (-not $listenerUnavailable -and -not $listenerReady -and -not $tunaActive) {
+        $listenerUnavailable = [bool]$rawListenerUnavailable
+        $listenerSidecarUnavailable = [bool]$rawListenerSidecarUnavailable
+        $listenerReady = [bool]$rawListenerReady
+        $tunaActive = Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_acceleration_timeline', 'active=1')
+    }
     $routeSelected = Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=filetransfer_route_selected')
     $activationOfferNotObserved = (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_acceleration_activation_offer_not_observed')) -or
         (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('reason=offer_send_not_observed')) -or
@@ -2407,6 +2417,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $activationOfferWaitingAnswer = (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_acceleration_offer_queued')) -or
         (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('status=waiting_for_answer')) -or
         (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_acceleration_offer_replay_sent'))
+    $runtimeUnlockDispatchDeferredForRegularV4ReceiveRecovery = Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_acceleration_runtime_unlock_dispatch_deferred_for_regular_v4_receive_recovery')
     $measuredOfferSent = (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('message_type=file_transfer_offer')) -or
         (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=offer_sent'))
     $measuredOfferReceived = Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=offer_received')
@@ -2425,6 +2436,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         if (-not $tunaActive -and $listenerReadyUnavailableContradiction) {
             $phase = 'preactivation_readiness'
             $reason = 'listener_ready_unavailable_contradiction'
+        }
+        elseif (-not $tunaActive -and $runtimeUnlockDispatchDeferredForRegularV4ReceiveRecovery) {
+            $phase = 'preactivation_readiness'
+            $reason = 'regular_v4_receive_recovery_unproven'
         }
         elseif (-not $tunaActive -and $activationOfferNotObserved) {
             $phase = 'activation_offer_send'
@@ -2459,6 +2474,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $phase = 'preactivation_readiness'
         $reason = 'listener_ready_unavailable_contradiction'
     }
+    elseif (-not $tunaActive -and $runtimeUnlockDispatchDeferredForRegularV4ReceiveRecovery) {
+        $phase = 'preactivation_readiness'
+        $reason = 'regular_v4_receive_recovery_unproven'
+    }
     elseif (-not $tunaActive -and $activationOfferNotObserved) {
         $phase = 'activation_offer_send'
         $reason = 'activation_offer_not_observed'
@@ -2487,6 +2506,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         RouteSelected = [bool]$routeSelected
         ActivationOfferNotObserved = [bool]$activationOfferNotObserved
         ActivationOfferWaitingAnswer = [bool]$activationOfferWaitingAnswer
+        RuntimeUnlockDispatchDeferredForRegularV4ReceiveRecovery = [bool]$runtimeUnlockDispatchDeferredForRegularV4ReceiveRecovery
         ActivationOfferSent = [bool]$activationOfferSent
         ActivationOfferReceived = [bool]$activationOfferReceived
         MeasuredOfferSent = [bool]$measuredOfferSent
@@ -2510,7 +2530,7 @@ function Wait-TunaGuiFileTransferAcceptOrThrow {
     }
     catch {
         $classification = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark $Bookmark -ErrorMessage $_.Exception.Message -RouteMode $RouteMode
-        throw ("Tuna GUI measured file-transfer accept did not become enabled: phase={0}; reason={1}; route_mode={2}; tuna_active={3}; listener_ready={4}; listener_unavailable={5}; route_selected={6}; activation_offer_not_observed={7}; activation_offer_waiting_answer={8}; activation_offer_sent={9}; activation_offer_received={10}; measured_offer_sent={11}; measured_offer_received={12}; offer_sent={13}; offer_received={14}; terminal_observed={15}; original_error={16}" -f `
+        throw ("Tuna GUI measured file-transfer accept did not become enabled: phase={0}; reason={1}; route_mode={2}; tuna_active={3}; listener_ready={4}; listener_unavailable={5}; route_selected={6}; activation_offer_not_observed={7}; activation_offer_waiting_answer={8}; runtime_unlock_dispatch_deferred_for_regular_v4_receive_recovery={9}; activation_offer_sent={10}; activation_offer_received={11}; measured_offer_sent={12}; measured_offer_received={13}; offer_sent={14}; offer_received={15}; terminal_observed={16}; original_error={17}" -f `
             $classification.Phase,
             $classification.Reason,
             $classification.RouteMode,
@@ -2520,6 +2540,7 @@ function Wait-TunaGuiFileTransferAcceptOrThrow {
             ($(if ($classification.RouteSelected) { 1 } else { 0 })),
             ($(if ($classification.ActivationOfferNotObserved) { 1 } else { 0 })),
             ($(if ($classification.ActivationOfferWaitingAnswer) { 1 } else { 0 })),
+            ($(if ($classification.RuntimeUnlockDispatchDeferredForRegularV4ReceiveRecovery) { 1 } else { 0 })),
             ($(if ($classification.ActivationOfferSent) { 1 } else { 0 })),
             ($(if ($classification.ActivationOfferReceived) { 1 } else { 0 })),
             ($(if ($classification.MeasuredOfferSent) { 1 } else { 0 })),
@@ -2566,11 +2587,12 @@ function Get-TunaGuiReadinessStateAfterBookmark {
     }
 
     $lastNotActiveIndex = [Math]::Max($lastListenerUnavailableIndex, $lastTunaInactiveIndex)
+    $lastReadyOrActiveIndex = [Math]::Max($lastListenerReadyIndex, $lastTunaActiveIndex)
 
     return [pscustomobject]@{
         TunaActive = $lastTunaActiveIndex -ge 0 -and $lastTunaActiveIndex -gt $lastNotActiveIndex
         ListenerReady = $lastListenerReadyIndex -ge 0 -and $lastListenerReadyIndex -ge $lastListenerUnavailableIndex
-        ListenerUnavailable = $lastListenerUnavailableIndex -gt $lastListenerReadyIndex -or $lastListenerUnavailableIndex -gt $lastTunaActiveIndex
+        ListenerUnavailable = $lastListenerUnavailableIndex -ge 0 -and $lastListenerUnavailableIndex -gt $lastReadyOrActiveIndex
         LastTunaActiveIndex = $lastTunaActiveIndex
         LastTunaInactiveIndex = $lastTunaInactiveIndex
         LastListenerReadyIndex = $lastListenerReadyIndex
@@ -5574,6 +5596,7 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
             routeSelected = [bool]$failureClassification.RouteSelected
             activationOfferNotObserved = [bool]$failureClassification.ActivationOfferNotObserved
             activationOfferWaitingAnswer = [bool]$failureClassification.ActivationOfferWaitingAnswer
+            runtimeUnlockDispatchDeferredForRegularV4ReceiveRecovery = [bool]$failureClassification.RuntimeUnlockDispatchDeferredForRegularV4ReceiveRecovery
             activationOfferSent = [bool]$failureClassification.ActivationOfferSent
             activationOfferReceived = [bool]$failureClassification.ActivationOfferReceived
             measuredOfferSent = [bool]$failureClassification.MeasuredOfferSent

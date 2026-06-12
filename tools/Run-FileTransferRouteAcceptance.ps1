@@ -851,12 +851,18 @@ function Assert-RouteAcceptanceRouteSummary {
         Add-RouteAcceptanceFailure -Result $Result -Message ("route consistency verdict is {0}" -f $Result.routeConsistencyVerdict)
     }
 
-    if ($Result.route.IndexOf('diagnostic_regular_nkn_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+    $routeText = [string]$Result.route
+    if ([string]::IsNullOrWhiteSpace($routeText)) {
+        $routeText = '(none)'
+        $Result.route = $routeText
+    }
+
+    if ($routeText.IndexOf('diagnostic_regular_nkn_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         Add-RouteAcceptanceFailure -Result $Result -Message 'diagnostic_regular_nkn_v6 route is not allowed during acceptance'
     }
 
-    if ($Result.route -ne $ExpectedRoute) {
-        Add-RouteAcceptanceFailure -Result $Result -Message ("selected route mismatch: expected {0}, actual {1}" -f $ExpectedRoute, $Result.route)
+    if ($routeText -ne $ExpectedRoute) {
+        Add-RouteAcceptanceFailure -Result $Result -Message ("selected route mismatch: expected {0}, actual {1}" -f $ExpectedRoute, $routeText)
     }
 
     $selectedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'route_selected_count' -DefaultValue '0')
@@ -1177,6 +1183,11 @@ function Assert-Phase4RouteSummary {
 
     $Result.selectedRouteSequence = @($selected | ForEach-Object { [string]$_.Route })
     $Result.selectedRouteChanges = @(Get-RouteAcceptanceRouteChanges -Routes $Result.selectedRouteSequence)
+    if ($Result.selectedRouteChanges.Count -le 0) {
+        Add-RouteAcceptanceFailure -Result $Result -Message 'no usable filetransfer_route_selected route token was observed'
+        return
+    }
+
     $Result.route = Join-RouteAcceptanceTokenList -Values $Result.selectedRouteChanges
     $Result.finalRoute = [string]$Result.selectedRouteChanges[$Result.selectedRouteChanges.Count - 1]
     $Result.protocol = [string]($selected[$selected.Count - 1].Protocol)
@@ -1189,11 +1200,17 @@ function Assert-Phase4RouteSummary {
     $Result.bridgeLivenessStaleDeferralCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'bridge_liveness_stale_deferral_count' -DefaultValue '0')
     $Result.bridgeLivenessTimeoutDuringValidRecoveryCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'session_liveness_timeout_during_valid_recovery_count' -DefaultValue '0')
 
-    if ($Result.route.IndexOf('diagnostic_regular_nkn_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+    $routeText = [string]$Result.route
+    if ([string]::IsNullOrWhiteSpace($routeText)) {
+        $routeText = '(none)'
+        $Result.route = $routeText
+    }
+
+    if ($routeText.IndexOf('diagnostic_regular_nkn_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         Add-RouteAcceptanceFailure -Result $Result -Message 'diagnostic_regular_nkn_v6 route is not allowed during acceptance'
     }
 
-    if ($Result.route.IndexOf('file_tuna_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+    if ($routeText.IndexOf('file_tuna_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         Add-RouteAcceptanceFailure -Result $Result -Message 'active file_tuna_v6 route is not allowed during acceptance'
     }
 
@@ -1751,14 +1768,14 @@ function Write-RouteAcceptanceFakePhase4Run {
         ($RerunAttempt -gt 0 -and (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'RERUN_EXECUTION_FAIL'))
     $forcePostArtifactExecutionFailure = ($RerunAttempt -le 0 -and (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'POST_ARTIFACT_EXECUTION_FAIL')) -or
         ($RerunAttempt -gt 0 -and (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'RERUN_POST_ARTIFACT_EXECUTION_FAIL'))
-    $receiveRecoveryExhaustedBeforeRuntimeUnlock = $scenarioName -eq 'regular-v4-live-activation-off-on-off-128mb' -and
+    $receiveRecoveryExhaustedBeforeRuntimeUnlock = $scenarioName -eq 'regular-v4-live-activation-off-on-off-512mb' -and
         ($(if ($RerunAttempt -gt 0) {
             Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'RERUN_RECEIVE_RECOVERY_EXHAUSTED_BEFORE_RUNTIME_UNLOCK'
         }
         else {
             Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'RECEIVE_RECOVERY_EXHAUSTED_BEFORE_RUNTIME_UNLOCK'
         }))
-    $receiveRecoveryLivenessTimeoutBeforeRuntimeUnlock = $scenarioName -eq 'regular-v4-live-activation-off-on-off-128mb' -and
+    $receiveRecoveryLivenessTimeoutBeforeRuntimeUnlock = $scenarioName -eq 'regular-v4-live-activation-off-on-off-512mb' -and
         ($(if ($RerunAttempt -gt 0) {
             Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'RERUN_RECEIVE_RECOVERY_LIVENESS_TIMEOUT_BEFORE_RUNTIME_UNLOCK'
         }
@@ -2039,7 +2056,7 @@ function Write-RouteAcceptanceFakePhase4Run {
         $authorityTransportEpoch = $fallbackAuthorityLegGeneration
         $authorityBridgeGeneration = 1
         $authorityCheckpointId = 'phase5-fallback-checkpoint:{0}' -f $fallbackAuthorityLegGeneration
-        $authorityReason = if ($scenarioName -eq 'regular-v4-live-activation-off-on-off-128mb') { 'phase5_canonical_repeated_toggle' } else { 'phase5_fallback_authority' }
+        $authorityReason = if ($scenarioName -eq 'regular-v4-live-activation-off-on-off-512mb') { 'phase5_canonical_repeated_toggle' } else { 'phase5_fallback_authority' }
         $authorityOffset = $seconds + (6 * ($fallbackAuthorityLegGeneration - 1)) + 1
         $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset $authorityOffset -Message ("event=filetransfer_fallback_leg_authority_started; direction=outbound; transfer_id={0}; session_id={1}; leg_generation={2}; route={3}; protocol_version={4}; live_route_epoch={5}; transport_epoch={6}; bridge_recovery_generation={7}; checkpoint_request_id={8}; authority_reason={9}" -f $transferId, $sessionId, $fallbackAuthorityLegGeneration, $authorityRoute, $authorityProtocol, $authorityLiveEpoch, $authorityTransportEpoch, $authorityBridgeGeneration, $authorityCheckpointId, $authorityReason))) | Out-Null
         $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($authorityOffset + 1) -Message ("event=filetransfer_fallback_leg_authority_bridge_recovery_requested; direction=outbound; transfer_id={0}; session_id={1}; leg_generation={2}; route={3}; protocol_version={4}; live_route_epoch={5}; transport_epoch={6}; bridge_recovery_generation={7}; checkpoint_request_id={8}; authority_reason={9}" -f $transferId, $sessionId, $fallbackAuthorityLegGeneration, $authorityRoute, $authorityProtocol, $authorityLiveEpoch, $authorityTransportEpoch, $authorityBridgeGeneration, $authorityCheckpointId, $authorityReason))) | Out-Null
@@ -2308,8 +2325,8 @@ function Write-RouteAcceptanceFakePhase4Run {
     }
 
     if ($transientSetupFailure) {
-        $defaultSetupPhase = if ($scenarioName -eq 'regular-v4-live-activation-off-on-off-128mb') { 'activation_offer_send' } else { 'measured_terminal' }
-        $defaultSetupReason = if ($scenarioName -eq 'regular-v4-live-activation-off-on-off-128mb') { 'activation_offer_not_observed' } else { 'terminal_before_accept' }
+        $defaultSetupPhase = if ($scenarioName -eq 'regular-v4-live-activation-off-on-off-512mb') { 'activation_offer_send' } else { 'measured_terminal' }
+        $defaultSetupReason = if ($scenarioName -eq 'regular-v4-live-activation-off-on-off-512mb') { 'activation_offer_not_observed' } else { 'terminal_before_accept' }
         $phaseSuffix = if ($RerunAttempt -gt 0) { 'RERUN_TRANSIENT_SETUP_PHASE' } else { 'TRANSIENT_SETUP_PHASE' }
         $reasonSuffix = if ($RerunAttempt -gt 0) { 'RERUN_TRANSIENT_SETUP_REASON' } else { 'TRANSIENT_SETUP_REASON' }
         $setupPhase = Get-RouteAcceptanceScenarioEnvValue -ScenarioName $scenarioName -Suffix $phaseSuffix -DefaultValue $defaultSetupPhase
@@ -3079,7 +3096,7 @@ function Get-Phase4RouteAcceptanceScenarios {
         (New-Phase4RouteAcceptanceScenario -Name 'live-switch-off-helpee-64mb' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 67108864L -BaselineScenario 'live-switch-off-helpee-64mb' -Baseline $baselines['live-switch-off-helpee-64mb'] -RouteMode 'live-v4-switch-off' -Fault 'switch-off' -PayerMode 'helpee' -LiveProofMode 'SwitchOff')
         (New-Phase4RouteAcceptanceScenario -Name 'live-switch-off-helper-64mb' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 67108864L -BaselineScenario 'live-switch-off-helper-64mb' -Baseline $baselines['live-switch-off-helper-64mb'] -RouteMode 'live-v4-switch-off' -Fault 'switch-off' -PayerMode 'helper' -LiveProofMode 'SwitchOff')
         (New-Phase4RouteAcceptanceScenario -Name 'live-multi-toggle-off-on-off-64mb' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 67108864L -BaselineScenario 'live-multi-toggle-off-on-off-64mb' -Baseline $baselines['live-multi-toggle-off-on-off-64mb'] -RouteMode 'live-multi-toggle' -Fault 'switch-off' -PayerMode 'helpee' -LiveToggleSequence 'off,on,off' -LiveProofMode 'MultiToggle')
-        (New-Phase4RouteAcceptanceScenario -Name 'regular-v4-live-activation-off-on-off-128mb' -Kind 'tuna' -ExpectedRouteChanges @('regular_nkn_v4_fast', 'file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 134217728L -RouteMode 'live-regular-activation-cycle' -Fault 'switch-off' -PayerMode 'helpee' -LiveToggleSequence 'on,off,on,off' -LiveProofMode 'RegularActivationCycle')
+        (New-Phase4RouteAcceptanceScenario -Name 'regular-v4-live-activation-off-on-off-512mb' -Kind 'tuna' -ExpectedRouteChanges @('regular_nkn_v4_fast', 'file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 536870912L -RouteMode 'live-regular-activation-cycle' -Fault 'switch-off' -PayerMode 'helpee' -LiveToggleSequence 'on,off,on,off' -LiveProofMode 'RegularActivationCycle')
         (New-Phase4RouteAcceptanceScenario -Name 'second-transfer-after-reactivation' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4') -PayloadBytes 134217728L -RouteMode 'live-reactivation-second-transfer' -Fault 'switch-off' -PayerMode 'helpee' -LiveToggleSequence 'off,on' -LiveProofMode 'None')
     )
 }
@@ -3093,7 +3110,7 @@ function Get-Phase5RouteAcceptanceScenarios {
         (New-Phase4RouteAcceptanceScenario -Name 'active-tuna-v4-64mb' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4') -PayloadBytes 67108864L -BaselineScenario 'active-tuna-v4-64mb' -Baseline $baselines['active-tuna-v4-64mb'] -RouteMode 'preactivated' -Fault 'none' -PayerMode 'helpee')
         (New-Phase4RouteAcceptanceScenario -Name 'live-switch-off-helpee-64mb' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 67108864L -BaselineScenario 'live-switch-off-helpee-64mb' -Baseline $baselines['live-switch-off-helpee-64mb'] -RouteMode 'live-v4-switch-off' -Fault 'switch-off' -PayerMode 'helpee' -LiveProofMode 'SwitchOff')
         (New-Phase4RouteAcceptanceScenario -Name 'live-switch-off-helper-64mb' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 67108864L -BaselineScenario 'live-switch-off-helper-64mb' -Baseline $baselines['live-switch-off-helper-64mb'] -RouteMode 'live-v4-switch-off' -Fault 'switch-off' -PayerMode 'helper' -LiveProofMode 'SwitchOff')
-        (New-Phase4RouteAcceptanceScenario -Name 'regular-v4-live-activation-off-on-off-128mb' -Kind 'tuna' -ExpectedRouteChanges @('regular_nkn_v4_fast', 'file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 134217728L -RouteMode 'live-regular-activation-cycle' -Fault 'switch-off' -PayerMode 'helpee' -LiveToggleSequence 'on,off,on,off' -LiveProofMode 'RegularActivationCycle')
+        (New-Phase4RouteAcceptanceScenario -Name 'regular-v4-live-activation-off-on-off-512mb' -Kind 'tuna' -ExpectedRouteChanges @('regular_nkn_v4_fast', 'file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6') -PayloadBytes 536870912L -RouteMode 'live-regular-activation-cycle' -Fault 'switch-off' -PayerMode 'helpee' -LiveToggleSequence 'on,off,on,off' -LiveProofMode 'RegularActivationCycle')
         (New-Phase4RouteAcceptanceScenario -Name 'second-transfer-after-reactivation' -Kind 'tuna' -ExpectedRouteChanges @('file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4') -PayloadBytes 134217728L -RouteMode 'live-reactivation-second-transfer' -Fault 'switch-off' -PayerMode 'helpee' -LiveToggleSequence 'off,on' -LiveProofMode 'None')
     )
 }
@@ -3216,6 +3233,7 @@ function Test-Phase5RerunnableTransientSetupFailure {
 
     return $combined.IndexOf('activation_offer_not_observed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('activation_offer_sent_waiting_answer', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('regular_v4_receive_recovery_unproven', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('listener_ready_unavailable_contradiction', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('preflight_listener_unavailable', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('tuna_transport_not_active', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
@@ -3256,7 +3274,7 @@ function Get-Phase4FailureClass {
 function Test-Phase5CanonicalRepeatedToggleScenario {
     param([Parameter(Mandatory = $true)]$Scenario)
 
-    return [string]$Scenario.Name -eq 'regular-v4-live-activation-off-on-off-128mb'
+    return [string]$Scenario.Name -eq 'regular-v4-live-activation-off-on-off-512mb'
 }
 
 function Test-Phase5CanonicalRuntimeUnlockReceiveRecoveryExhaustion {
@@ -3646,7 +3664,36 @@ function Invoke-Phase4RouteAcceptanceScenario {
         $scenarioExecutionFailure = (($_ | Out-String).Trim() -replace '[\r\n]+', ' ')
     }
 
-    $result = Assert-Phase4ScenarioRun -Scenario $Scenario -ArtifactDir $artifactDir
+    try {
+        $result = Assert-Phase4ScenarioRun -Scenario $Scenario -ArtifactDir $artifactDir
+    }
+    catch {
+        $assertionFailure = (($_ | Out-String).Trim() -replace '[\r\n]+', ' ')
+        $assertionStack = [string]$_.ScriptStackTrace
+        if (-not [string]::IsNullOrWhiteSpace($assertionStack)) {
+            $assertionFailure = "{0}; stack={1}" -f $assertionFailure, ($assertionStack -replace '[\r\n]+', ' ')
+        }
+        $expectedRouteChanges = @($Scenario.ExpectedRouteChanges)
+        $expectedFinalRoute = if ($expectedRouteChanges.Count -gt 0) {
+            [string]$expectedRouteChanges[$expectedRouteChanges.Count - 1]
+        }
+        else {
+            '(unknown)'
+        }
+
+        $expectedProtocol = 0
+        if (-not [string]::IsNullOrWhiteSpace($expectedFinalRoute) -and $expectedFinalRoute -ne '(unknown)') {
+            $expectedMetadata = Get-RouteAcceptanceRouteMetadata -Route $expectedFinalRoute
+            if ($null -ne $expectedMetadata) {
+                $expectedProtocol = [int]$expectedMetadata.Protocol
+            }
+        }
+
+        $result = New-RouteAcceptanceRunResult -Name ([string]$Scenario.Name) -ArtifactDir $artifactDir -ExpectedRoute $expectedFinalRoute -ExpectedProtocol $expectedProtocol
+        $result.setupFailurePhase = 'assertion'
+        $result.setupFailureReason = $assertionFailure
+        Add-RouteAcceptanceFailure -Result $result -Message ("scenario assertion failed: {0}" -f $assertionFailure)
+    }
     if (-not [string]::IsNullOrWhiteSpace($scenarioExecutionFailure)) {
         Add-RouteAcceptanceFailure -Result $result -Message ("scenario execution failed: {0}" -f $scenarioExecutionFailure)
     }

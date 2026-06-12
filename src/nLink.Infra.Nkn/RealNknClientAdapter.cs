@@ -588,9 +588,13 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
     internal void ArmPostTunaFallbackProofSendWindow(string reason, string trigger, string? sessionId)
     {
-        if (activePostTunaFallbackRuntimeTransfers.IsEmpty &&
-            Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions)) <= 0)
+        if (activePostTunaFallbackRuntimeTransfers.IsEmpty)
         {
+            Log(
+                "event=nkn_bridge_post_tuna_fallback_proof_send_window_skipped; " +
+                "reason=no_active_post_tuna_fallback_runtime; " +
+                $"requested_reason={SanitizeLogToken(reason)}; trigger={SanitizeLogToken(trigger)}; session_id={SanitizeLogToken(sessionId ?? "none")}; " +
+                $"active_file_transfer_sessions={Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions))}; active_file_transfer_runtime_sessions={activeFileTransferRuntimeTransfers.Count}");
             return;
         }
 
@@ -604,6 +608,25 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             ? "none"
             : SanitizeLogToken(sessionId);
         var nowTick = Stopwatch.GetTimestamp();
+        var awaitingReceiveProof = Volatile.Read(ref receiveStallRecoveryAwaitingReceiveProof) != 0;
+        var recoveryInProgress = Volatile.Read(ref receiveStallRecoveryInProgress) != 0;
+        if ((awaitingReceiveProof || recoveryInProgress) &&
+            IsPostTunaFallbackProofSendWindowActive(
+                nowTick,
+                out var existingRemainingMs,
+                out var existingReason,
+                out var existingTrigger,
+                out var existingSessionId))
+        {
+            Log(
+                "event=nkn_bridge_post_tuna_fallback_proof_send_window_preserved; " +
+                $"awaiting_receive_proof={(awaitingReceiveProof ? 1 : 0)}; recovery_in_progress={(recoveryInProgress ? 1 : 0)}; " +
+                $"requested_reason={normalizedReason}; requested_trigger={normalizedTrigger}; requested_session_id={normalizedSessionId}; " +
+                $"reason={SanitizeLogToken(existingReason)}; trigger={SanitizeLogToken(existingTrigger)}; session_id={SanitizeLogToken(existingSessionId)}; remaining_ms={existingRemainingMs}; " +
+                $"active_post_tuna_fallback_runtime_sessions={activePostTunaFallbackRuntimeTransfers.Count}; active_file_transfer_sessions={Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions))}; active_file_transfer_runtime_sessions={activeFileTransferRuntimeTransfers.Count}");
+            return;
+        }
+
         var expiresTick = AddStopwatchDuration(nowTick, PostTunaFallbackProofSendWindow);
         Interlocked.Exchange(ref postTunaFallbackProofSendWindowExpiresTick, expiresTick);
         lock (gate)
@@ -936,8 +959,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             return false;
         }
 
-        if (activePostTunaFallbackRuntimeTransfers.IsEmpty &&
-            Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions)) <= 0)
+        if (activePostTunaFallbackRuntimeTransfers.IsEmpty)
         {
             Interlocked.Exchange(ref postTunaFallbackProofSendWindowExpiresTick, 0);
             return false;

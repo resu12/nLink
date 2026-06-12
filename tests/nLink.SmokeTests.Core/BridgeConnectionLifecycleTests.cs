@@ -3535,7 +3535,8 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             SetPrivateField(adapter, "receiveStallRecoveryCount", 4);
             SetPrivateField(adapter, "receiveStallLastRecoveryStartedTick", nowTick);
             SetPrivateField(adapter, "receiveStallLastRecoveryCompletedTick", nowTick);
-            SetPrivateField(adapter, "receiveStallRecoveryAwaitingReceiveProof", 1);
+            SetPrivateField(adapter, "receiveStallRecoveryInProgress", 1);
+            SetPrivateField(adapter, "receiveStallRecoveryAwaitingReceiveProof", 0);
             SetPrivateField(adapter, "receiveStallRecoveryRequiresControlProof", 1);
             SetPrivateField(adapter, "receiveStallRecoveryRequiresBulkProof", 1);
             var logBaseline = GetOperationalLogLength();
@@ -4251,6 +4252,121 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
             Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void Bridge_ReceiveStallRecovery_PostTunaFallbackProofWindowRequiresFallbackRuntime()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-post-tuna-proof-window-route-scope", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "post-tuna-proof-window-route-scope");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "post-tuna-proof-window-route-scope");
+            var identity = new NknIdentity("post-tuna-proof-window-route-scope", "post-tuna-proof-window-route-scope.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+
+            adapter.RegisterActiveFileTransferDataSession("transfer-regular-v4-proof-window");
+            adapter.RegisterActiveFileTransferRuntime("transfer-regular-v4-proof-window");
+            var logBaseline = GetOperationalLogLength();
+
+            adapter.ArmPostTunaFallbackProofSendWindow(
+                "post_tuna_fallback_state_refresh_failed",
+                "unit_test_regular_v4_only",
+                "session-regular-v4-proof-window");
+
+            var logText = ReadOperationalLogTail(logBaseline);
+            Assert.Contains(
+                "event=nkn_bridge_post_tuna_fallback_proof_send_window_skipped; reason=no_active_post_tuna_fallback_runtime",
+                logText,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=nkn_bridge_post_tuna_fallback_proof_send_window_armed",
+                logText,
+                StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferRuntime("transfer-regular-v4-proof-window");
+            adapter.UnregisterActiveFileTransferDataSession("transfer-regular-v4-proof-window");
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void Bridge_ReceiveStallRecovery_PostTunaFallbackProofWindowDoesNotSlideWhileAwaitingProof()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-post-tuna-proof-window-preserved", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "post-tuna-proof-window-preserved");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "post-tuna-proof-window-preserved");
+            var identity = new NknIdentity("post-tuna-proof-window-preserved", "post-tuna-proof-window-preserved.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+
+            adapter.RegisterActiveFileTransferDataSession("transfer-post-tuna-proof-window-preserved");
+            adapter.RegisterActiveFileTransferRuntime("transfer-post-tuna-proof-window-preserved");
+            adapter.MarkActiveFileTransferPostTunaFallbackRuntime("transfer-post-tuna-proof-window-preserved", "test_route_hint");
+            SetPrivateField(adapter, "receiveStallRecoveryAwaitingReceiveProof", 1);
+            var logBaseline = GetOperationalLogLength();
+
+            adapter.ArmPostTunaFallbackProofSendWindow(
+                "post_tuna_fallback_state_refresh_failed",
+                "unit_test_first_state_refresh",
+                "session-post-tuna-proof-window-preserved");
+            var firstExpiresTick = Assert.IsType<long>(GetPrivateField(adapter, "postTunaFallbackProofSendWindowExpiresTick"));
+
+            adapter.ArmPostTunaFallbackProofSendWindow(
+                "post_tuna_fallback_state_refresh_failed",
+                "unit_test_second_state_refresh",
+                "session-post-tuna-proof-window-preserved");
+            var secondExpiresTick = Assert.IsType<long>(GetPrivateField(adapter, "postTunaFallbackProofSendWindowExpiresTick"));
+
+            Assert.Equal(firstExpiresTick, secondExpiresTick);
+            var logText = ReadOperationalLogTail(logBaseline);
+            Assert.Contains(
+                "event=nkn_bridge_post_tuna_fallback_proof_send_window_armed",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=nkn_bridge_post_tuna_fallback_proof_send_window_preserved",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains("requested_trigger=unit_test_second_state_refresh", logText, StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferRuntime("transfer-post-tuna-proof-window-preserved");
+            adapter.UnregisterActiveFileTransferDataSession("transfer-post-tuna-proof-window-preserved");
+        }
+        finally
+        {
             try
             {
                 CleanupDirectoryIfExists(tempDir);

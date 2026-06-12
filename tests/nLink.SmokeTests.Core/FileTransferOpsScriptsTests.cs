@@ -135,7 +135,7 @@ public sealed class FileTransferOpsScriptsTests
         "live-switch-off-helpee-64mb",
         "live-switch-off-helper-64mb",
         "live-multi-toggle-off-on-off-64mb",
-        "regular-v4-live-activation-off-on-off-128mb",
+        "regular-v4-live-activation-off-on-off-512mb",
         "second-transfer-after-reactivation"
     ];
 
@@ -145,7 +145,7 @@ public sealed class FileTransferOpsScriptsTests
         "active-tuna-v4-64mb",
         "live-switch-off-helpee-64mb",
         "live-switch-off-helper-64mb",
-        "regular-v4-live-activation-off-on-off-128mb",
+        "regular-v4-live-activation-off-on-off-512mb",
         "second-transfer-after-reactivation"
     ];
 
@@ -309,7 +309,14 @@ public sealed class FileTransferOpsScriptsTests
         Assert.NotEmpty(secondTransferScenarioLines);
         Assert.All(secondTransferScenarioLines, line => Assert.Contains("-PayloadBytes 134217728L", line, StringComparison.Ordinal));
         Assert.DoesNotContain(secondTransferScenarioLines, line => line.Contains("-PayloadBytes 67108864L", StringComparison.Ordinal));
-        Assert.Contains("regular-v4-live-activation-off-on-off-128mb", scriptText, StringComparison.Ordinal);
+        var canonicalRepeatedToggleScenarioLines = Regex
+            .Matches(scriptText, @"New-Phase4RouteAcceptanceScenario -Name 'regular-v4-live-activation-off-on-off-512mb'[^\r\n]+")
+            .Select(match => match.Value)
+            .ToArray();
+        Assert.NotEmpty(canonicalRepeatedToggleScenarioLines);
+        Assert.All(canonicalRepeatedToggleScenarioLines, line => Assert.Contains("-PayloadBytes 536870912L", line, StringComparison.Ordinal));
+        Assert.DoesNotContain(canonicalRepeatedToggleScenarioLines, line => line.Contains("-PayloadBytes 134217728L", StringComparison.Ordinal));
+        Assert.Contains("regular-v4-live-activation-off-on-off-512mb", scriptText, StringComparison.Ordinal);
         Assert.Contains("canonical repeated-toggle bridge liveness integration proof must pass", scriptText, StringComparison.Ordinal);
         Assert.Contains("bridge_liveness_integration_verdict", scriptText, StringComparison.Ordinal);
         Assert.Contains("fallback_leg_authority_proof_verdict", scriptText, StringComparison.Ordinal);
@@ -396,9 +403,11 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Contains("failureReason", scriptText, StringComparison.Ordinal);
         Assert.Contains("offer_sent_accept_not_enabled", scriptText, StringComparison.Ordinal);
         Assert.Contains("preflight_listener_unavailable", scriptText, StringComparison.Ordinal);
+        Assert.Contains("regular_v4_receive_recovery_unproven", scriptText, StringComparison.Ordinal);
         Assert.Contains("activation_offer_not_observed", scriptText, StringComparison.Ordinal);
         Assert.Contains("activation_offer_sent_waiting_answer", scriptText, StringComparison.Ordinal);
         Assert.Contains("event=tuna_acceleration_activation_offer_not_observed", scriptText, StringComparison.Ordinal);
+        Assert.Contains("event=tuna_acceleration_runtime_unlock_dispatch_deferred_for_regular_v4_receive_recovery", scriptText, StringComparison.Ordinal);
         Assert.Contains("event=tuna_acceleration_control_send_wait_timeout", scriptText, StringComparison.Ordinal);
         Assert.Contains("activationOfferReceived", scriptText, StringComparison.Ordinal);
         Assert.Contains("measuredOfferReceived", scriptText, StringComparison.Ordinal);
@@ -406,6 +415,9 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Contains("message_type=file_transfer_offer", scriptText, StringComparison.Ordinal);
         Assert.Contains("event=tuna_acceleration_offer_received_raw", scriptText, StringComparison.Ordinal);
         Assert.Contains("event=offer_received", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Get-TunaGuiReadinessStateAfterBookmark -Bookmark $Bookmark", scriptText, StringComparison.Ordinal);
+        Assert.Contains("rawListenerUnavailable", scriptText, StringComparison.Ordinal);
+        Assert.Contains("rawListenerReady", scriptText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2867,6 +2879,33 @@ public sealed class FileTransferOpsScriptsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockDispatchDeferredByRegularV4ReceiveRecovery_ClassifiesNextBlocker()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockDispatchDeferredByRegularV4ReceiveRecoveryFixture(),
+            ["-LiveRouteProofMode", "RegularActivationCycle"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("runtime_unlock_dispatch_deferred_by_regular_v4_receive_recovery", verdict["recovery_failure_class"]);
+        Assert.Equal("1", verdict["runtime_unlock_offer_not_observed_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatched_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_dispatch_deferred_for_regular_v4_recovery_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_offer_observation_blocked_count"]);
+        Assert.Equal("1", verdict["session_liveness_timeout_after_runtime_unlock_count"]);
+        Assert.NotEqual("runtime_unlock_offer_observation_blocked_by_receive_recovery", verdict["recovery_failure_class"]);
+
+        var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
+        Assert.Equal("runtime_unlock_dispatch_deferred_by_regular_v4_receive_recovery", stability["recovery_failure_class"]);
+        Assert.Equal("1", stability["runtime_unlock_dispatch_deferred_for_regular_v4_recovery_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_RuntimeUnlockListenerRearmFailure_ClassifiesListenerRearmCoordination()
     {
         if (!OperatingSystem.IsWindows())
@@ -2915,6 +2954,63 @@ public sealed class FileTransferOpsScriptsTests
 
         var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
         Assert.Equal("(none)", stability["recovery_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockPeerResponseMissingUnderRegularV4Recovery_ClassifiesPeerResponseBlocker()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockPeerResponseMissingUnderRegularV4RecoveryFixture(),
+            ["-LiveRouteProofMode", "RegularActivationCycle"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("runtime_unlock_peer_response_not_received_under_regular_v4_recovery", verdict["recovery_failure_class"]);
+        Assert.Equal("1", verdict["runtime_unlock_offer_not_observed_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatched_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_authority_observed_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_cutthrough_attempt_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_cutthrough_peer_received_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_cutthrough_timeout_count"]);
+        Assert.Equal("fail", verdict["runtime_unlock_cutthrough_verdict"]);
+        Assert.Equal("1", verdict["session_liveness_timeout_after_runtime_unlock_count"]);
+        Assert.Equal("fail", verdict["live_route_epoch_proof_verdict"]);
+
+        var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
+        Assert.Equal("runtime_unlock_peer_response_not_received_under_regular_v4_recovery", stability["recovery_failure_class"]);
+        Assert.Equal("fail", stability["runtime_unlock_cutthrough_verdict"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockCutThroughPeerReceivedWithRegularActivationCycle_IsAccepted()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockCutThroughPeerReceivedRegularActivationCycleFixture(),
+            ["-LiveRouteProofMode", "RegularActivationCycle"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("(none)", verdict["recovery_failure_class"]);
+        Assert.Equal("1", verdict["runtime_unlock_cutthrough_attempt_count"]);
+        Assert.Equal("2", verdict["runtime_unlock_cutthrough_peer_received_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_cutthrough_timeout_count"]);
+        Assert.Equal("pass", verdict["runtime_unlock_cutthrough_verdict"]);
+        Assert.Equal("0", verdict["session_liveness_timeout_after_runtime_unlock_count"]);
+        Assert.Equal("pass", verdict["live_route_epoch_proof_verdict"]);
+
+        var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
+        Assert.Equal("(none)", stability["recovery_failure_class"]);
+        Assert.Equal("pass", stability["runtime_unlock_cutthrough_verdict"]);
     }
 
     [Fact]
@@ -6077,8 +6173,8 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("6", summary["live-switch-off-helper-64mb.protocol"]);
             Assert.Equal("file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", summary["live-multi-toggle-off-on-off-64mb.selected_route_sequence"]);
             Assert.Equal("post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", summary["live-multi-toggle-off-on-off-64mb.live_route_epoch_route_changes"]);
-            Assert.Equal("regular_nkn_v4_fast,file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", summary["regular-v4-live-activation-off-on-off-128mb.selected_route_sequence"]);
-            Assert.Equal("file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", summary["regular-v4-live-activation-off-on-off-128mb.live_route_epoch_route_changes"]);
+            Assert.Equal("regular_nkn_v4_fast,file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", summary["regular-v4-live-activation-off-on-off-512mb.selected_route_sequence"]);
+            Assert.Equal("file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", summary["regular-v4-live-activation-off-on-off-512mb.live_route_epoch_route_changes"]);
             Assert.Equal("file_tuna_v4", summary["second-transfer-after-reactivation.final_route"]);
             Assert.Equal("file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4", summary["second-transfer-after-reactivation.selected_route_sequence"]);
             Assert.Equal("post_tuna_fallback_v6,file_tuna_v4", summary["second-transfer-after-reactivation.live_route_epoch_route_changes"]);
@@ -6113,7 +6209,7 @@ if (-not $result.RegressionFailed) {
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-canonical-receive-recovery-exhaustion-rerun-pass");
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_128MB_RECEIVE_RECOVERY_EXHAUSTED_BEFORE_RUNTIME_UNLOCK"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_RECEIVE_RECOVERY_EXHAUSTED_BEFORE_RUNTIME_UNLOCK"] = "1";
 
             var result = await RunPowerShellFileAsync(
                 repoRoot,
@@ -6131,14 +6227,14 @@ if (-not $result.RegressionFailed) {
                 $"Expected canonical receive-recovery exhaustion to require and pass a clean Phase 5 rerun.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
             var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
             Assert.Equal("PASS", summary["verdict"]);
-            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-128mb.retry_used"]);
-            Assert.Equal("2", summary["regular-v4-live-activation-off-on-off-128mb.selected_attempt"]);
-            Assert.Contains("live_transport_receive_recovery_exhausted_before_runtime_unlock", summary["regular-v4-live-activation-off-on-off-128mb.first_failure_reason"], StringComparison.Ordinal);
-            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-128mb.acceptance_failure_class"]);
-            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-128mb.live_route_epoch_proof_verdict"]);
-            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-128mb.fallback_leg_authority_proof_verdict"]);
-            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-128mb.bridge_liveness_integration_verdict"]);
-            Assert.True(Directory.Exists(Path.Combine(runRoot, "regular-v4-live-activation-off-on-off-128mb-rerun-1")));
+            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-512mb.retry_used"]);
+            Assert.Equal("2", summary["regular-v4-live-activation-off-on-off-512mb.selected_attempt"]);
+            Assert.Contains("live_transport_receive_recovery_exhausted_before_runtime_unlock", summary["regular-v4-live-activation-off-on-off-512mb.first_failure_reason"], StringComparison.Ordinal);
+            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-512mb.acceptance_failure_class"]);
+            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-512mb.live_route_epoch_proof_verdict"]);
+            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-512mb.fallback_leg_authority_proof_verdict"]);
+            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-512mb.bridge_liveness_integration_verdict"]);
+            Assert.True(Directory.Exists(Path.Combine(runRoot, "regular-v4-live-activation-off-on-off-512mb-rerun-1")));
         }
         finally
         {
@@ -6162,7 +6258,7 @@ if (-not $result.RegressionFailed) {
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-canonical-receive-recovery-liveness-timeout-rerun-pass");
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_128MB_RECEIVE_RECOVERY_LIVENESS_TIMEOUT_BEFORE_RUNTIME_UNLOCK"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_RECEIVE_RECOVERY_LIVENESS_TIMEOUT_BEFORE_RUNTIME_UNLOCK"] = "1";
 
             var result = await RunPowerShellFileAsync(
                 repoRoot,
@@ -6180,14 +6276,14 @@ if (-not $result.RegressionFailed) {
                 $"Expected canonical receive-recovery liveness timeout to require and pass a clean Phase 5 rerun.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
             var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
             Assert.Equal("PASS", summary["verdict"]);
-            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-128mb.retry_used"]);
-            Assert.Equal("2", summary["regular-v4-live-activation-off-on-off-128mb.selected_attempt"]);
-            Assert.Contains("live_transport_receive_recovery_exhausted_before_runtime_unlock", summary["regular-v4-live-activation-off-on-off-128mb.first_failure_reason"], StringComparison.Ordinal);
-            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-128mb.acceptance_failure_class"]);
-            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-128mb.live_route_epoch_proof_verdict"]);
-            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-128mb.fallback_leg_authority_proof_verdict"]);
-            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-128mb.bridge_liveness_integration_verdict"]);
-            Assert.True(Directory.Exists(Path.Combine(runRoot, "regular-v4-live-activation-off-on-off-128mb-rerun-1")));
+            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-512mb.retry_used"]);
+            Assert.Equal("2", summary["regular-v4-live-activation-off-on-off-512mb.selected_attempt"]);
+            Assert.Contains("live_transport_receive_recovery_exhausted_before_runtime_unlock", summary["regular-v4-live-activation-off-on-off-512mb.first_failure_reason"], StringComparison.Ordinal);
+            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-512mb.acceptance_failure_class"]);
+            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-512mb.live_route_epoch_proof_verdict"]);
+            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-512mb.fallback_leg_authority_proof_verdict"]);
+            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-512mb.bridge_liveness_integration_verdict"]);
+            Assert.True(Directory.Exists(Path.Combine(runRoot, "regular-v4-live-activation-off-on-off-512mb-rerun-1")));
         }
         finally
         {
@@ -6211,8 +6307,8 @@ if (-not $result.RegressionFailed) {
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-canonical-receive-recovery-exhaustion-rerun-fail");
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_128MB_RECEIVE_RECOVERY_EXHAUSTED_BEFORE_RUNTIME_UNLOCK"] = "1";
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_128MB_RERUN_RECEIVE_RECOVERY_EXHAUSTED_BEFORE_RUNTIME_UNLOCK"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_RECEIVE_RECOVERY_EXHAUSTED_BEFORE_RUNTIME_UNLOCK"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_RERUN_RECEIVE_RECOVERY_EXHAUSTED_BEFORE_RUNTIME_UNLOCK"] = "1";
 
             var result = await RunPowerShellFileAsync(
                 repoRoot,
@@ -6229,11 +6325,11 @@ if (-not $result.RegressionFailed) {
             var summaryText = File.ReadAllText(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.txt"));
             var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
             Assert.Equal("FAIL", summary["verdict"]);
-            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-128mb.retry_used"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-128mb.selected_attempt"]);
-            Assert.Equal("environmental", summary["regular-v4-live-activation-off-on-off-128mb.acceptance_failure_class"]);
-            Assert.Equal("live_transport_receive_recovery_exhausted_before_runtime_unlock", summary["regular-v4-live-activation-off-on-off-128mb.environmental_classification"]);
-            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-128mb.measurement_contaminated"]);
+            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-512mb.retry_used"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-512mb.selected_attempt"]);
+            Assert.Equal("environmental", summary["regular-v4-live-activation-off-on-off-512mb.acceptance_failure_class"]);
+            Assert.Equal("live_transport_receive_recovery_exhausted_before_runtime_unlock", summary["regular-v4-live-activation-off-on-off-512mb.environmental_classification"]);
+            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-512mb.measurement_contaminated"]);
             Assert.Contains("live_transport_receive_recovery_exhausted_before_runtime_unlock", summaryText, StringComparison.Ordinal);
         }
         finally
@@ -6334,6 +6430,56 @@ if (-not $result.RegressionFailed) {
             Assert.Contains("listener_ready_unavailable_contradiction", summary["live-switch-off-helpee-64mb.first_failure_reason"], StringComparison.Ordinal);
             Assert.Equal("none", summary["live-switch-off-helpee-64mb.acceptance_failure_class"]);
             Assert.True(Directory.Exists(Path.Combine(runRoot, "live-switch-off-helpee-64mb-rerun-1")));
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RunFileTransferRouteAcceptance_Phase5RegularV4ReceiveRecoveryUnprovenRerunsCleanAttempt()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "phase5-regular-v4-receive-recovery-unproven-rerun-pass");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-regular-v4-receive-recovery-unproven-rerun-pass");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_TRANSIENT_SETUP_FAILURE"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_TRANSIENT_SETUP_PHASE"] = "preactivation_readiness";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_TRANSIENT_SETUP_REASON"] = "regular_v4_receive_recovery_unproven";
+
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"Expected regular-V4 receive-recovery defer to require and pass a clean Phase 5 rerun.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+            var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal("PASS", summary["verdict"]);
+            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-512mb.retry_used"]);
+            Assert.Equal("2", summary["regular-v4-live-activation-off-on-off-512mb.selected_attempt"]);
+            Assert.False(summary.ContainsKey("regular-v4-live-activation-off-on-off-512mb.setup_failure_phase"));
+            Assert.False(summary.ContainsKey("regular-v4-live-activation-off-on-off-512mb.setup_failure_reason"));
+            Assert.Contains("regular_v4_receive_recovery_unproven", summary["regular-v4-live-activation-off-on-off-512mb.first_failure_reason"], StringComparison.Ordinal);
+            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-512mb.acceptance_failure_class"]);
+            Assert.True(Directory.Exists(Path.Combine(runRoot, "regular-v4-live-activation-off-on-off-512mb-rerun-1")));
         }
         finally
         {
@@ -6452,9 +6598,9 @@ if (-not $result.RegressionFailed) {
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-canonical-terminal-evidence-timeout-rerun-pass");
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_128MB_TRANSIENT_SETUP_FAILURE"] = "1";
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_128MB_TRANSIENT_SETUP_PHASE"] = "unknown";
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_128MB_TRANSIENT_SETUP_REASON"] = "Timed out waiting for live file-transfer terminal evidence.";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_TRANSIENT_SETUP_FAILURE"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_TRANSIENT_SETUP_PHASE"] = "unknown";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_TRANSIENT_SETUP_REASON"] = "Timed out waiting for live file-transfer terminal evidence.";
 
             var result = await RunPowerShellFileAsync(
                 repoRoot,
@@ -6472,11 +6618,11 @@ if (-not $result.RegressionFailed) {
                 $"Expected canonical terminal-evidence timeout to require and pass a clean Phase 5 rerun.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
             var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
             Assert.Equal("PASS", summary["verdict"]);
-            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-128mb.retry_used"]);
-            Assert.Equal("2", summary["regular-v4-live-activation-off-on-off-128mb.selected_attempt"]);
-            Assert.Contains("live file-transfer terminal evidence", summary["regular-v4-live-activation-off-on-off-128mb.first_failure_reason"], StringComparison.Ordinal);
-            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-128mb.acceptance_failure_class"]);
-            Assert.True(Directory.Exists(Path.Combine(runRoot, "regular-v4-live-activation-off-on-off-128mb-rerun-1")));
+            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-512mb.retry_used"]);
+            Assert.Equal("2", summary["regular-v4-live-activation-off-on-off-512mb.selected_attempt"]);
+            Assert.Contains("live file-transfer terminal evidence", summary["regular-v4-live-activation-off-on-off-512mb.first_failure_reason"], StringComparison.Ordinal);
+            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-512mb.acceptance_failure_class"]);
+            Assert.True(Directory.Exists(Path.Combine(runRoot, "regular-v4-live-activation-off-on-off-512mb-rerun-1")));
         }
         finally
         {
@@ -6500,10 +6646,10 @@ if (-not $result.RegressionFailed) {
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-transient-setup-rerun-fail");
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_128MB_TRANSIENT_SETUP_FAILURE"] = "1";
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_128MB_RERUN_TRANSIENT_SETUP_FAILURE"] = "1";
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_128MB_TRANSIENT_SETUP_REASON"] = "activation_offer_not_observed";
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_128MB_RERUN_TRANSIENT_SETUP_REASON"] = "activation_offer_not_observed";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_TRANSIENT_SETUP_FAILURE"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_RERUN_TRANSIENT_SETUP_FAILURE"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_TRANSIENT_SETUP_REASON"] = "activation_offer_not_observed";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_RERUN_TRANSIENT_SETUP_REASON"] = "activation_offer_not_observed";
 
             var result = await RunPowerShellFileAsync(
                 repoRoot,
@@ -6519,10 +6665,10 @@ if (-not $result.RegressionFailed) {
             Assert.NotEqual(0, result.ExitCode);
             var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
             Assert.Equal("FAIL", summary["verdict"]);
-            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-128mb.retry_used"]);
-            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-128mb.selected_attempt"]);
-            Assert.Equal("setup", summary["regular-v4-live-activation-off-on-off-128mb.acceptance_failure_class"]);
-            Assert.Contains("activation_offer_not_observed", summary["regular-v4-live-activation-off-on-off-128mb.rerun_failure_reason"], StringComparison.Ordinal);
+            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-512mb.retry_used"]);
+            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-512mb.selected_attempt"]);
+            Assert.Equal("setup", summary["regular-v4-live-activation-off-on-off-512mb.acceptance_failure_class"]);
+            Assert.Contains("activation_offer_not_observed", summary["regular-v4-live-activation-off-on-off-512mb.rerun_failure_reason"], StringComparison.Ordinal);
         }
         finally
         {
@@ -6716,12 +6862,12 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("PASS", summary["performance_verdict"]);
             Assert.Equal("6", summary["run_count"]);
             Assert.Equal("0", summary["failure_count"]);
-            Assert.Equal("regular_nkn_v4_fast,file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", summary["regular-v4-live-activation-off-on-off-128mb.route_sequence"]);
-            Assert.Equal("file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", summary["regular-v4-live-activation-off-on-off-128mb.live_epoch_route_changes"]);
-            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-128mb.live_route_epoch_proof_verdict"]);
-            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-128mb.fallback_leg_authority_proof_verdict"]);
-            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-128mb.bridge_liveness_integration_verdict"]);
-            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-128mb.acceptance_failure_class"]);
+            Assert.Equal("regular_nkn_v4_fast,file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", summary["regular-v4-live-activation-off-on-off-512mb.route_sequence"]);
+            Assert.Equal("file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", summary["regular-v4-live-activation-off-on-off-512mb.live_epoch_route_changes"]);
+            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-512mb.live_route_epoch_proof_verdict"]);
+            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-512mb.fallback_leg_authority_proof_verdict"]);
+            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-512mb.bridge_liveness_integration_verdict"]);
+            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-512mb.acceptance_failure_class"]);
             Assert.Equal("none", summary["active-tuna-v4-64mb.acceptance_failure_class"]);
             Assert.Equal("none", summary["active-tuna-v4-64mb.bridge_liveness_integration_verdict"]);
             Assert.Equal("file_tuna_v4", summary["second-transfer-after-reactivation.final_route"]);
@@ -6838,8 +6984,8 @@ if (-not $result.RegressionFailed) {
 
     [Theory]
     [Trait("Category", "Smoke")]
-    [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_128MB_BRIDGE_LIVENESS_FAIL", "1", "bridge_liveness", "bridge liveness integration verdict is fail")]
-    [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_128MB_FALLBACK_AUTHORITY_METADATA_MISSING", "1", "fallback_authority", "fallback leg authority proof verdict is fail")]
+    [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_BRIDGE_LIVENESS_FAIL", "1", "bridge_liveness", "bridge liveness integration verdict is fail")]
+    [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_FALLBACK_AUTHORITY_METADATA_MISSING", "1", "fallback_authority", "fallback leg authority proof verdict is fail")]
     [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_LIVE_SWITCH_OFF_HELPEE_64MB_TRANSPORT_ONLY_LIVE_PROOF", "1", "live_route_proof", "live route epoch sequence mismatch")]
     [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_LIVE_SWITCH_OFF_HELPEE_64MB_MISSING_LIVE_METADATA", "1", "live_route_proof", "live route epoch sequence mismatch")]
     [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_ACTIVE_TUNA_V4_64MB_ROUTE", "file_tuna_v6", "route_runtime", "active file_tuna_v6")]
@@ -6884,8 +7030,8 @@ if (-not $result.RegressionFailed) {
             var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
             Assert.Equal("FAIL", summary["verdict"]);
             Assert.Contains(expectedFailure, summaryText, StringComparison.Ordinal);
-            var scenarioName = environmentName.Contains("REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_128MB", StringComparison.Ordinal)
-                ? "regular-v4-live-activation-off-on-off-128mb"
+            var scenarioName = environmentName.Contains("REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB", StringComparison.Ordinal)
+                ? "regular-v4-live-activation-off-on-off-512mb"
                 : environmentName.Contains("LIVE_SWITCH_OFF_HELPEE_64MB", StringComparison.Ordinal)
                     ? "live-switch-off-helpee-64mb"
                     : environmentName.Contains("SECOND_TRANSFER_AFTER_REACTIVATION", StringComparison.Ordinal)
@@ -8703,6 +8849,26 @@ if (-not $result.RegressionFailed) {
         ];
     }
 
+    private static string[] BuildRuntimeUnlockDispatchDeferredByRegularV4ReceiveRecoveryFixture()
+    {
+        const string transferId = "transfer_runtime_unlock_dispatch_deferred_regular_v4";
+        const string sessionId = "sess_runtime_unlock_dispatch_deferred_regular_v4";
+        return
+        [
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id={sessionId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4; file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=conservative_nkn_startup", secondsOffset: 0),
+            LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id={sessionId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4; file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=conservative_nkn_startup", secondsOffset: 1),
+            LogLine($"event=filetransfer_v4_sender_started; direction=outbound; transfer_id={transferId}; session_id={sessionId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; bridge_recovery_policy=regular_nkn_v4_fast", secondsOffset: 5),
+            LogLine($"event=tuna_acceleration_activation_offer_not_observed; trigger=runtime_unlock; session_id={sessionId}; payer_decision_id=7; generation=3; retry_scheduled=0; retry_after_recovery_armed=1; recovery_requested=1; recovery_reason=tuna_activation_offer_send_timeout; retry_reason=runtime_unlock_offer_send_not_observed", secondsOffset: 20),
+            LogLine($"event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled; session_id={sessionId}; retired_generation=3; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=tuna_activation_offer_send_timeout; trigger=receive_resumed; queued_behind_active_negotiation=0", secondsOffset: 45),
+            LogLine($"event=session_recovery_contract_retry_dispatched; session_id={sessionId}; transfer_id={transferId}; contract_generation=1; offer_generation=3; kind=runtime_unlock_activation; state=retrydispatched; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=tuna_activation_offer_send_timeout; recovery_pending=0; recovery_settled=1; retry_required=0; retry_dispatching=1; retry_dispatched=1; retry_observed=0; queued_behind_active_negotiation=0", secondsOffset: 48),
+            LogLine($"event=session_recovery_contract_retry_queued; session_id={sessionId}; transfer_id={transferId}; contract_generation=1; offer_generation=3; retired_offer_generation=3; kind=runtime_unlock_activation; state=retryqueued; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=tuna_activation_offer_send_timeout; recovery_pending=0; recovery_settled=1; retry_required=1; retry_dispatching=0; retry_dispatched=0; retry_observed=0; queued_behind_active_negotiation=0; retry_authority_pending=0; retry_authority_granted=0; observed_send_pending=0; authority_attempt=1; authorized_observed_lane=(none); authority_failure_reason=regular_v4_receive_recovery_pending", secondsOffset: 49),
+            LogLine($"event=tuna_acceleration_runtime_unlock_dispatch_deferred_for_regular_v4_receive_recovery; session_id={sessionId}; trigger=runtime_unlock; payer_decision_id=8; blocker_reason=receive_stall_recovery_awaiting_receive_proof; blocker_remaining_ms=0; retry_scheduled=1; recovery_requested=0", secondsOffset: 50),
+            LogLine($"event=session_liveness_timeout; session_id={sessionId}; generation=1; silence_ms=90000; terminal_timeout_ms=18000; role=Helper", secondsOffset: 90),
+            LogLine($"event=file_transfer_outbound_terminal; role=Helpee; session_id={sessionId}; transfer_id={transferId}; state=Failed; error_code=peer_disconnected", secondsOffset: 91),
+            LogLine($"event=transfer_terminal; direction=outbound; transfer_id={transferId}; session_id={sessionId}; file_name_len=33; file_size_bytes=134217728; bytes_transferred=0; chunks_transferred=0; chunk_count=6242; error_code=peer_disconnected; reason=Peer disconnected.; saved_path=(none); route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4", secondsOffset: 92)
+        ];
+    }
+
     private static string[] BuildRuntimeUnlockListenerRearmFailureFixture()
     {
         const string transferId = "transfer_runtime_unlock_listener_rearm_failed";
@@ -8737,6 +8903,41 @@ if (-not $result.RegressionFailed) {
             LogLine($"event=session_recovery_contract_retry_authority_observed; session_id={sessionId}; transfer_id={transferId}; contract_generation=1; offer_generation=4; retired_offer_generation=3; kind=runtime_unlock_activation; state=retryobserved; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=tuna_activation_offer_send_timeout; recovery_pending=0; recovery_settled=1; retry_required=0; retry_dispatching=0; retry_dispatched=1; retry_observed=1; queued_behind_active_negotiation=0; retry_authority_pending=0; retry_authority_granted=1; observed_send_pending=0; authority_attempt=1; authorized_observed_lane=control_priority; authority_failure_reason=(none)", secondsOffset: 50),
             LogLine($"event=file_transfer_outbound_terminal; role=Helpee; session_id={sessionId}; transfer_id={transferId}; state=Completed; error_code=(none); sha256_match=1", secondsOffset: 90),
             LogLine($"event=transfer_terminal; direction=outbound; transfer_id={transferId}; session_id={sessionId}; file_name_len=33; file_size_bytes=134217728; bytes_transferred=134217728; chunks_transferred=6242; chunk_count=6242; error_code=(none); reason=Completed.; saved_path=(none); route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4", secondsOffset: 91)
+        ];
+    }
+
+    private static string[] BuildRuntimeUnlockPeerResponseMissingUnderRegularV4RecoveryFixture()
+    {
+        const string transferId = "transfer_runtime_unlock_peer_response_missing";
+        const string sessionId = "sess_runtime_unlock_peer_response_missing";
+        return
+        [
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id={sessionId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4; file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=conservative_nkn_startup", secondsOffset: 0),
+            LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id={sessionId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4; file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=conservative_nkn_startup", secondsOffset: 1),
+            LogLine($"event=filetransfer_v4_sender_started; direction=outbound; transfer_id={transferId}; session_id={sessionId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; bridge_recovery_policy=regular_nkn_v4_fast", secondsOffset: 5),
+            LogLine($"event=session_recovery_contract_retry_dispatched; session_id={sessionId}; transfer_id={transferId}; contract_generation=4; offer_generation=12; retired_offer_generation=11; kind=runtime_unlock_activation; state=retrydispatched; retry_reason=runtime_unlock_offer_peer_response_timeout; recovery_reason=tuna_activation_offer_peer_response_timeout; recovery_pending=0; recovery_settled=1; retry_required=0; retry_dispatching=1; retry_dispatched=1; retry_observed=0; queued_behind_active_negotiation=0; retry_authority_pending=1; retry_authority_granted=1; observed_send_pending=0; authority_attempt=2; authorized_observed_lane=(none); authority_failure_reason=(none); cutthrough_pending=1; cutthrough_active=0; cutthrough_attempt=0", secondsOffset: 44),
+            LogLine($"event=runtime_unlock_cutthrough_started; session_id={sessionId}; offer_generation=12; contract_generation=4; attempt=1; trigger=runtime_unlock; reason=peer_response_timeout_under_regular_v4_recovery", secondsOffset: 45),
+            LogLine($"event=session_recovery_contract_retry_authority_observed; session_id={sessionId}; transfer_id={transferId}; contract_generation=4; offer_generation=12; retired_offer_generation=11; kind=runtime_unlock_activation; state=retryobserved; retry_reason=runtime_unlock_offer_peer_response_timeout; recovery_reason=tuna_activation_offer_peer_response_timeout; recovery_pending=0; recovery_settled=1; retry_required=0; retry_dispatching=0; retry_dispatched=1; retry_observed=1; queued_behind_active_negotiation=0; retry_authority_pending=0; retry_authority_granted=1; observed_send_pending=1; authority_attempt=2; authorized_observed_lane=control_to_bulk_endpoint; authority_failure_reason=(none); cutthrough_pending=0; cutthrough_active=1; cutthrough_offer_sent=0; cutthrough_peer_received=0; cutthrough_completed=0; cutthrough_attempt=1", secondsOffset: 47),
+            LogLine($"event=runtime_unlock_cutthrough_offer_sent; session_id={sessionId}; offer_generation=12; contract_generation=4; attempt=1; observed_lane=control_to_bulk_endpoint", secondsOffset: 48),
+            LogLine($"event=tuna_acceleration_offer_queued; reason=runtime_unlock; session_id={sessionId}; lanes=file; payer_decision_id=9; generation=12; observed_lane=control_to_bulk_endpoint; queue_local_only=0; recovery_requested=0; recovery_reason=(none)", secondsOffset: 49),
+            LogLine($"event=tuna_acceleration_runtime_unlock_offer_peer_response_timeout; timeout_ms=2500; session_id={sessionId}; payer_decision_id=9; generation=12; observed_lane=control_to_bulk_endpoint", secondsOffset: 52),
+            LogLine($"event=runtime_unlock_cutthrough_failed; session_id={sessionId}; payer_decision_id=9; offer_generation=12; contract_generation=4; attempt=1; reason=runtime_unlock_peer_response_not_received", secondsOffset: 53),
+            LogLine($"event=tuna_acceleration_activation_offer_not_observed; trigger=runtime_unlock; session_id={sessionId}; payer_decision_id=9; generation=12; interruption_reason=runtime_unlock_offer_peer_response_timeout; retry_scheduled=0; retry_after_recovery_armed=0; replay_scheduled=0; answer_timeout_scheduled=0; recovery_requested=0; recovery_reason=runtime_unlock_peer_response_not_received", secondsOffset: 54),
+            LogLine($"event=session_liveness_timeout; session_id={sessionId}; generation=1; silence_ms=90000; terminal_timeout_ms=18000; role=Helper", secondsOffset: 90),
+            LogLine($"event=file_transfer_outbound_terminal; role=Helpee; session_id={sessionId}; transfer_id={transferId}; state=Failed; error_code=peer_disconnected", secondsOffset: 91),
+            LogLine($"event=transfer_terminal; direction=outbound; transfer_id={transferId}; session_id={sessionId}; file_name_len=33; file_size_bytes=536870912; bytes_transferred=0; chunks_transferred=0; chunk_count=24962; error_code=peer_disconnected; reason=Peer disconnected.; saved_path=(none); route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4", secondsOffset: 92)
+        ];
+    }
+
+    private static string[] BuildRuntimeUnlockCutThroughPeerReceivedRegularActivationCycleFixture()
+    {
+        return
+        [
+            LogLine("event=runtime_unlock_cutthrough_started; session_id=sess_redacted; offer_generation=12; contract_generation=4; attempt=1; trigger=runtime_unlock; reason=peer_response_timeout_under_regular_v4_recovery", secondsOffset: 20),
+            LogLine("event=runtime_unlock_cutthrough_offer_sent; session_id=sess_redacted; offer_generation=12; contract_generation=4; attempt=1; observed_lane=control_to_bulk_endpoint", secondsOffset: 21),
+            LogLine("event=runtime_unlock_cutthrough_peer_received; session_id=sess_redacted; payer_decision_id=9; offer_generation=12; contract_generation=4; attempt=1; source=transport_acceleration_answer", secondsOffset: 22),
+            LogLine("event=runtime_unlock_cutthrough_completed; session_id=sess_redacted; offer_generation=12; contract_generation=4; attempt=1; reason=answer_acknowledged", secondsOffset: 23),
+            .. BuildRouteAwareLiveRegularActivationCycleFixture()
         ];
     }
 
@@ -9071,7 +9272,7 @@ if (-not $result.RegressionFailed) {
             Assert.True(File.Exists(Path.Combine(runRoot, directoryName, "filetransfer-tuna-gui-summary.json")), $"Expected Phase 5 Tuna GUI summary in {directoryName}.");
         }
 
-        Assert.False(Directory.Exists(Path.Combine(runRoot, "live-multi-toggle-off-on-off-64mb")), "Phase 5 should use the canonical 128 MiB repeated-toggle stress instead of the old 64 MiB multi-toggle row.");
+        Assert.False(Directory.Exists(Path.Combine(runRoot, "live-multi-toggle-off-on-off-64mb")), "Phase 5 should use the canonical 512 MiB repeated-toggle stress instead of the old 64 MiB multi-toggle row.");
     }
 
     private static void ApplyProcessEnvironment(ProcessStartInfo startInfo, IReadOnlyDictionary<string, string>? environment)

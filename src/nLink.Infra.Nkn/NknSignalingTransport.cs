@@ -2940,6 +2940,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             RaiseBridgeReceiveStallSessionLivenessProof(e);
             MarkFileTransferTunaActivationBridgeRecoverySettled("receive_resumed");
             Volatile.Write(ref bridgeReceiveStallRecoveryActive, 0);
+            ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed("receive_resumed");
             HandleFileTransferBridgeRecovered(
                 runtimeUnlockTrigger: "receive_resumed",
                 recoveredReason: "receive_resumed",

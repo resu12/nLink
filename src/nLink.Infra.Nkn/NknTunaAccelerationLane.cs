@@ -134,7 +134,6 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
         var connectEndpoint = endpoint.Trim();
         var nextClient = new NknTunaSidecarClient(options.Lanes, options.QueueCapacity);
         nextClient.MessageReceived += OnClientMessageReceived;
-        nextClient.StateChanged += OnClientStateChanged;
         try
         {
             await nextClient.ConnectAsync(
@@ -150,7 +149,14 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
             return false;
         }
 
-        return ReplaceClient(nextClient, ClientRole.Listener, null);
+        nextClient.StateChanged += OnClientStateChanged;
+        if (!ReplaceClient(nextClient, ClientRole.Listener, null))
+        {
+            return false;
+        }
+
+        ForwardCurrentClientReadyIfAvailable(nextClient, "ready");
+        return true;
     }
 
     public async Task<bool> StartDialerSidecarAsync(string tunaAddress, string expectedRemotePeer, CancellationToken ct)
@@ -529,6 +535,24 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
 
         processToStop?.Stop(string.IsNullOrWhiteSpace(e.Reason) ? "client_unavailable" : e.Reason);
         StateChanged?.Invoke(this, e);
+    }
+
+    private void ForwardCurrentClientReadyIfAvailable(NknTunaSidecarClient expectedClient, string reason)
+    {
+        var shouldForward = false;
+        lock (gate)
+        {
+            if (ReferenceEquals(client, expectedClient) && expectedClient.IsAvailable)
+            {
+                lastDiagnostics = expectedClient.GetDiagnosticsSnapshot();
+                shouldForward = true;
+            }
+        }
+
+        if (shouldForward)
+        {
+            StateChanged?.Invoke(this, new AccelerationStateChangedEventArgs(true, reason));
+        }
     }
 
     private void CaptureClientDiagnostics_NoLock(NknTunaSidecarClient? sidecarClient)
