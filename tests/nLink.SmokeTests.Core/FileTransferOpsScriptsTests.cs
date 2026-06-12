@@ -135,7 +135,7 @@ public sealed class FileTransferOpsScriptsTests
         "live-switch-off-helpee-64mb",
         "live-switch-off-helper-64mb",
         "live-multi-toggle-off-on-off-64mb",
-        "regular-v4-live-activation-off-on-off-512mb",
+        "regular-v4-live-activation-off-on-off-256mb",
         "second-transfer-after-reactivation"
     ];
 
@@ -145,7 +145,7 @@ public sealed class FileTransferOpsScriptsTests
         "active-tuna-v4-64mb",
         "live-switch-off-helpee-64mb",
         "live-switch-off-helper-64mb",
-        "regular-v4-live-activation-off-on-off-512mb",
+        "regular-v4-live-activation-off-on-off-256mb",
         "second-transfer-after-reactivation"
     ];
 
@@ -310,13 +310,13 @@ public sealed class FileTransferOpsScriptsTests
         Assert.All(secondTransferScenarioLines, line => Assert.Contains("-PayloadBytes 134217728L", line, StringComparison.Ordinal));
         Assert.DoesNotContain(secondTransferScenarioLines, line => line.Contains("-PayloadBytes 67108864L", StringComparison.Ordinal));
         var canonicalRepeatedToggleScenarioLines = Regex
-            .Matches(scriptText, @"New-Phase4RouteAcceptanceScenario -Name 'regular-v4-live-activation-off-on-off-512mb'[^\r\n]+")
+            .Matches(scriptText, @"New-Phase4RouteAcceptanceScenario -Name 'regular-v4-live-activation-off-on-off-256mb'[^\r\n]+")
             .Select(match => match.Value)
             .ToArray();
         Assert.NotEmpty(canonicalRepeatedToggleScenarioLines);
-        Assert.All(canonicalRepeatedToggleScenarioLines, line => Assert.Contains("-PayloadBytes 536870912L", line, StringComparison.Ordinal));
+        Assert.All(canonicalRepeatedToggleScenarioLines, line => Assert.Contains("-PayloadBytes 268435456L", line, StringComparison.Ordinal));
         Assert.DoesNotContain(canonicalRepeatedToggleScenarioLines, line => line.Contains("-PayloadBytes 134217728L", StringComparison.Ordinal));
-        Assert.Contains("regular-v4-live-activation-off-on-off-512mb", scriptText, StringComparison.Ordinal);
+        Assert.Contains("regular-v4-live-activation-off-on-off-256mb", scriptText, StringComparison.Ordinal);
         Assert.Contains("canonical repeated-toggle bridge liveness integration proof must pass", scriptText, StringComparison.Ordinal);
         Assert.Contains("bridge_liveness_integration_verdict", scriptText, StringComparison.Ordinal);
         Assert.Contains("fallback_leg_authority_proof_verdict", scriptText, StringComparison.Ordinal);
@@ -6173,8 +6173,8 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("6", summary["live-switch-off-helper-64mb.protocol"]);
             Assert.Equal("file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", summary["live-multi-toggle-off-on-off-64mb.selected_route_sequence"]);
             Assert.Equal("post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", summary["live-multi-toggle-off-on-off-64mb.live_route_epoch_route_changes"]);
-            Assert.Equal("regular_nkn_v4_fast,file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", summary["regular-v4-live-activation-off-on-off-512mb.selected_route_sequence"]);
-            Assert.Equal("file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", summary["regular-v4-live-activation-off-on-off-512mb.live_route_epoch_route_changes"]);
+            Assert.Equal("regular_nkn_v4_fast,file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", summary["regular-v4-live-activation-off-on-off-256mb.selected_route_sequence"]);
+            Assert.Equal("file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", summary["regular-v4-live-activation-off-on-off-256mb.live_route_epoch_route_changes"]);
             Assert.Equal("file_tuna_v4", summary["second-transfer-after-reactivation.final_route"]);
             Assert.Equal("file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4", summary["second-transfer-after-reactivation.selected_route_sequence"]);
             Assert.Equal("post_tuna_fallback_v6,file_tuna_v4", summary["second-transfer-after-reactivation.live_route_epoch_route_changes"]);
@@ -6209,7 +6209,7 @@ if (-not $result.RegressionFailed) {
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-canonical-receive-recovery-exhaustion-rerun-pass");
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_RECEIVE_RECOVERY_EXHAUSTED_BEFORE_RUNTIME_UNLOCK"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_RECEIVE_RECOVERY_EXHAUSTED_BEFORE_RUNTIME_UNLOCK"] = "1";
 
             var result = await RunPowerShellFileAsync(
                 repoRoot,
@@ -6227,14 +6227,14 @@ if (-not $result.RegressionFailed) {
                 $"Expected canonical receive-recovery exhaustion to require and pass a clean Phase 5 rerun.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
             var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
             Assert.Equal("PASS", summary["verdict"]);
-            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-512mb.retry_used"]);
-            Assert.Equal("2", summary["regular-v4-live-activation-off-on-off-512mb.selected_attempt"]);
-            Assert.Contains("live_transport_receive_recovery_exhausted_before_runtime_unlock", summary["regular-v4-live-activation-off-on-off-512mb.first_failure_reason"], StringComparison.Ordinal);
-            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-512mb.acceptance_failure_class"]);
-            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-512mb.live_route_epoch_proof_verdict"]);
-            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-512mb.fallback_leg_authority_proof_verdict"]);
-            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-512mb.bridge_liveness_integration_verdict"]);
-            Assert.True(Directory.Exists(Path.Combine(runRoot, "regular-v4-live-activation-off-on-off-512mb-rerun-1")));
+            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-256mb.retry_used"]);
+            Assert.Equal("2", summary["regular-v4-live-activation-off-on-off-256mb.selected_attempt"]);
+            Assert.Contains("live_transport_receive_recovery_exhausted_before_runtime_unlock", summary["regular-v4-live-activation-off-on-off-256mb.first_failure_reason"], StringComparison.Ordinal);
+            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.acceptance_failure_class"]);
+            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-256mb.live_route_epoch_proof_verdict"]);
+            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-256mb.fallback_leg_authority_proof_verdict"]);
+            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-256mb.bridge_liveness_integration_verdict"]);
+            Assert.True(Directory.Exists(Path.Combine(runRoot, "regular-v4-live-activation-off-on-off-256mb-rerun-1")));
         }
         finally
         {
@@ -6258,7 +6258,7 @@ if (-not $result.RegressionFailed) {
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-canonical-receive-recovery-liveness-timeout-rerun-pass");
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_RECEIVE_RECOVERY_LIVENESS_TIMEOUT_BEFORE_RUNTIME_UNLOCK"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_RECEIVE_RECOVERY_LIVENESS_TIMEOUT_BEFORE_RUNTIME_UNLOCK"] = "1";
 
             var result = await RunPowerShellFileAsync(
                 repoRoot,
@@ -6276,14 +6276,14 @@ if (-not $result.RegressionFailed) {
                 $"Expected canonical receive-recovery liveness timeout to require and pass a clean Phase 5 rerun.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
             var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
             Assert.Equal("PASS", summary["verdict"]);
-            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-512mb.retry_used"]);
-            Assert.Equal("2", summary["regular-v4-live-activation-off-on-off-512mb.selected_attempt"]);
-            Assert.Contains("live_transport_receive_recovery_exhausted_before_runtime_unlock", summary["regular-v4-live-activation-off-on-off-512mb.first_failure_reason"], StringComparison.Ordinal);
-            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-512mb.acceptance_failure_class"]);
-            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-512mb.live_route_epoch_proof_verdict"]);
-            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-512mb.fallback_leg_authority_proof_verdict"]);
-            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-512mb.bridge_liveness_integration_verdict"]);
-            Assert.True(Directory.Exists(Path.Combine(runRoot, "regular-v4-live-activation-off-on-off-512mb-rerun-1")));
+            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-256mb.retry_used"]);
+            Assert.Equal("2", summary["regular-v4-live-activation-off-on-off-256mb.selected_attempt"]);
+            Assert.Contains("live_transport_receive_recovery_exhausted_before_runtime_unlock", summary["regular-v4-live-activation-off-on-off-256mb.first_failure_reason"], StringComparison.Ordinal);
+            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.acceptance_failure_class"]);
+            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-256mb.live_route_epoch_proof_verdict"]);
+            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-256mb.fallback_leg_authority_proof_verdict"]);
+            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-256mb.bridge_liveness_integration_verdict"]);
+            Assert.True(Directory.Exists(Path.Combine(runRoot, "regular-v4-live-activation-off-on-off-256mb-rerun-1")));
         }
         finally
         {
@@ -6307,8 +6307,8 @@ if (-not $result.RegressionFailed) {
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-canonical-receive-recovery-exhaustion-rerun-fail");
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_RECEIVE_RECOVERY_EXHAUSTED_BEFORE_RUNTIME_UNLOCK"] = "1";
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_RERUN_RECEIVE_RECOVERY_EXHAUSTED_BEFORE_RUNTIME_UNLOCK"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_RECEIVE_RECOVERY_EXHAUSTED_BEFORE_RUNTIME_UNLOCK"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_RERUN_RECEIVE_RECOVERY_EXHAUSTED_BEFORE_RUNTIME_UNLOCK"] = "1";
 
             var result = await RunPowerShellFileAsync(
                 repoRoot,
@@ -6325,11 +6325,11 @@ if (-not $result.RegressionFailed) {
             var summaryText = File.ReadAllText(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.txt"));
             var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
             Assert.Equal("FAIL", summary["verdict"]);
-            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-512mb.retry_used"]);
-            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-512mb.selected_attempt"]);
-            Assert.Equal("environmental", summary["regular-v4-live-activation-off-on-off-512mb.acceptance_failure_class"]);
-            Assert.Equal("live_transport_receive_recovery_exhausted_before_runtime_unlock", summary["regular-v4-live-activation-off-on-off-512mb.environmental_classification"]);
-            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-512mb.measurement_contaminated"]);
+            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-256mb.retry_used"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.selected_attempt"]);
+            Assert.Equal("environmental", summary["regular-v4-live-activation-off-on-off-256mb.acceptance_failure_class"]);
+            Assert.Equal("live_transport_receive_recovery_exhausted_before_runtime_unlock", summary["regular-v4-live-activation-off-on-off-256mb.environmental_classification"]);
+            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-256mb.measurement_contaminated"]);
             Assert.Contains("live_transport_receive_recovery_exhausted_before_runtime_unlock", summaryText, StringComparison.Ordinal);
         }
         finally
@@ -6453,9 +6453,9 @@ if (-not $result.RegressionFailed) {
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-regular-v4-receive-recovery-unproven-rerun-pass");
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_TRANSIENT_SETUP_FAILURE"] = "1";
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_TRANSIENT_SETUP_PHASE"] = "preactivation_readiness";
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_TRANSIENT_SETUP_REASON"] = "regular_v4_receive_recovery_unproven";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_TRANSIENT_SETUP_FAILURE"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_TRANSIENT_SETUP_PHASE"] = "preactivation_readiness";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_TRANSIENT_SETUP_REASON"] = "regular_v4_receive_recovery_unproven";
 
             var result = await RunPowerShellFileAsync(
                 repoRoot,
@@ -6473,13 +6473,13 @@ if (-not $result.RegressionFailed) {
                 $"Expected regular-V4 receive-recovery defer to require and pass a clean Phase 5 rerun.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
             var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
             Assert.Equal("PASS", summary["verdict"]);
-            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-512mb.retry_used"]);
-            Assert.Equal("2", summary["regular-v4-live-activation-off-on-off-512mb.selected_attempt"]);
-            Assert.False(summary.ContainsKey("regular-v4-live-activation-off-on-off-512mb.setup_failure_phase"));
-            Assert.False(summary.ContainsKey("regular-v4-live-activation-off-on-off-512mb.setup_failure_reason"));
-            Assert.Contains("regular_v4_receive_recovery_unproven", summary["regular-v4-live-activation-off-on-off-512mb.first_failure_reason"], StringComparison.Ordinal);
-            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-512mb.acceptance_failure_class"]);
-            Assert.True(Directory.Exists(Path.Combine(runRoot, "regular-v4-live-activation-off-on-off-512mb-rerun-1")));
+            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-256mb.retry_used"]);
+            Assert.Equal("2", summary["regular-v4-live-activation-off-on-off-256mb.selected_attempt"]);
+            Assert.False(summary.ContainsKey("regular-v4-live-activation-off-on-off-256mb.setup_failure_phase"));
+            Assert.False(summary.ContainsKey("regular-v4-live-activation-off-on-off-256mb.setup_failure_reason"));
+            Assert.Contains("regular_v4_receive_recovery_unproven", summary["regular-v4-live-activation-off-on-off-256mb.first_failure_reason"], StringComparison.Ordinal);
+            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.acceptance_failure_class"]);
+            Assert.True(Directory.Exists(Path.Combine(runRoot, "regular-v4-live-activation-off-on-off-256mb-rerun-1")));
         }
         finally
         {
@@ -6598,9 +6598,9 @@ if (-not $result.RegressionFailed) {
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-canonical-terminal-evidence-timeout-rerun-pass");
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_TRANSIENT_SETUP_FAILURE"] = "1";
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_TRANSIENT_SETUP_PHASE"] = "unknown";
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_TRANSIENT_SETUP_REASON"] = "Timed out waiting for live file-transfer terminal evidence.";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_TRANSIENT_SETUP_FAILURE"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_TRANSIENT_SETUP_PHASE"] = "unknown";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_TRANSIENT_SETUP_REASON"] = "Timed out waiting for live file-transfer terminal evidence.";
 
             var result = await RunPowerShellFileAsync(
                 repoRoot,
@@ -6618,11 +6618,11 @@ if (-not $result.RegressionFailed) {
                 $"Expected canonical terminal-evidence timeout to require and pass a clean Phase 5 rerun.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
             var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
             Assert.Equal("PASS", summary["verdict"]);
-            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-512mb.retry_used"]);
-            Assert.Equal("2", summary["regular-v4-live-activation-off-on-off-512mb.selected_attempt"]);
-            Assert.Contains("live file-transfer terminal evidence", summary["regular-v4-live-activation-off-on-off-512mb.first_failure_reason"], StringComparison.Ordinal);
-            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-512mb.acceptance_failure_class"]);
-            Assert.True(Directory.Exists(Path.Combine(runRoot, "regular-v4-live-activation-off-on-off-512mb-rerun-1")));
+            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-256mb.retry_used"]);
+            Assert.Equal("2", summary["regular-v4-live-activation-off-on-off-256mb.selected_attempt"]);
+            Assert.Contains("live file-transfer terminal evidence", summary["regular-v4-live-activation-off-on-off-256mb.first_failure_reason"], StringComparison.Ordinal);
+            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.acceptance_failure_class"]);
+            Assert.True(Directory.Exists(Path.Combine(runRoot, "regular-v4-live-activation-off-on-off-256mb-rerun-1")));
         }
         finally
         {
@@ -6646,10 +6646,10 @@ if (-not $result.RegressionFailed) {
         try
         {
             var environment = BuildFakeRouteAcceptanceEnvironment("phase5-transient-setup-rerun-fail");
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_TRANSIENT_SETUP_FAILURE"] = "1";
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_RERUN_TRANSIENT_SETUP_FAILURE"] = "1";
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_TRANSIENT_SETUP_REASON"] = "activation_offer_not_observed";
-            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_RERUN_TRANSIENT_SETUP_REASON"] = "activation_offer_not_observed";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_TRANSIENT_SETUP_FAILURE"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_RERUN_TRANSIENT_SETUP_FAILURE"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_TRANSIENT_SETUP_REASON"] = "activation_offer_not_observed";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_RERUN_TRANSIENT_SETUP_REASON"] = "activation_offer_not_observed";
 
             var result = await RunPowerShellFileAsync(
                 repoRoot,
@@ -6665,10 +6665,10 @@ if (-not $result.RegressionFailed) {
             Assert.NotEqual(0, result.ExitCode);
             var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
             Assert.Equal("FAIL", summary["verdict"]);
-            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-512mb.retry_used"]);
-            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-512mb.selected_attempt"]);
-            Assert.Equal("setup", summary["regular-v4-live-activation-off-on-off-512mb.acceptance_failure_class"]);
-            Assert.Contains("activation_offer_not_observed", summary["regular-v4-live-activation-off-on-off-512mb.rerun_failure_reason"], StringComparison.Ordinal);
+            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-256mb.retry_used"]);
+            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-256mb.selected_attempt"]);
+            Assert.Equal("setup", summary["regular-v4-live-activation-off-on-off-256mb.acceptance_failure_class"]);
+            Assert.Contains("activation_offer_not_observed", summary["regular-v4-live-activation-off-on-off-256mb.rerun_failure_reason"], StringComparison.Ordinal);
         }
         finally
         {
@@ -6862,12 +6862,12 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("PASS", summary["performance_verdict"]);
             Assert.Equal("6", summary["run_count"]);
             Assert.Equal("0", summary["failure_count"]);
-            Assert.Equal("regular_nkn_v4_fast,file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", summary["regular-v4-live-activation-off-on-off-512mb.route_sequence"]);
-            Assert.Equal("file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", summary["regular-v4-live-activation-off-on-off-512mb.live_epoch_route_changes"]);
-            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-512mb.live_route_epoch_proof_verdict"]);
-            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-512mb.fallback_leg_authority_proof_verdict"]);
-            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-512mb.bridge_liveness_integration_verdict"]);
-            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-512mb.acceptance_failure_class"]);
+            Assert.Equal("regular_nkn_v4_fast,file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", summary["regular-v4-live-activation-off-on-off-256mb.route_sequence"]);
+            Assert.Equal("file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", summary["regular-v4-live-activation-off-on-off-256mb.live_epoch_route_changes"]);
+            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-256mb.live_route_epoch_proof_verdict"]);
+            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-256mb.fallback_leg_authority_proof_verdict"]);
+            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-256mb.bridge_liveness_integration_verdict"]);
+            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.acceptance_failure_class"]);
             Assert.Equal("none", summary["active-tuna-v4-64mb.acceptance_failure_class"]);
             Assert.Equal("none", summary["active-tuna-v4-64mb.bridge_liveness_integration_verdict"]);
             Assert.Equal("file_tuna_v4", summary["second-transfer-after-reactivation.final_route"]);
@@ -6927,7 +6927,7 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("1", summary["failure_count"]);
             Assert.Contains("phase5-preflight-bridge-ready: nkn_bridge_bootstrap_not_ready", summaryText, StringComparison.Ordinal);
             Assert.False(Directory.Exists(Path.Combine(runRoot, "regular-nkn-v4-64mb")), "Preflight failure should not consume the Phase 5 scenario matrix.");
-            Assert.False(Directory.Exists(Path.Combine(runRoot, "regular-v4-live-activation-off-on-off-512mb")), "Preflight failure should not create canonical stress artifacts.");
+            Assert.False(Directory.Exists(Path.Combine(runRoot, "regular-v4-live-activation-off-on-off-256mb")), "Preflight failure should not create canonical stress artifacts.");
         }
         finally
         {
@@ -7036,8 +7036,8 @@ if (-not $result.RegressionFailed) {
 
     [Theory]
     [Trait("Category", "Smoke")]
-    [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_BRIDGE_LIVENESS_FAIL", "1", "bridge_liveness", "bridge liveness integration verdict is fail")]
-    [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB_FALLBACK_AUTHORITY_METADATA_MISSING", "1", "fallback_authority", "fallback leg authority proof verdict is fail")]
+    [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_BRIDGE_LIVENESS_FAIL", "1", "bridge_liveness", "bridge liveness integration verdict is fail")]
+    [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_FALLBACK_AUTHORITY_METADATA_MISSING", "1", "fallback_authority", "fallback leg authority proof verdict is fail")]
     [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_LIVE_SWITCH_OFF_HELPEE_64MB_TRANSPORT_ONLY_LIVE_PROOF", "1", "live_route_proof", "live route epoch sequence mismatch")]
     [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_LIVE_SWITCH_OFF_HELPEE_64MB_MISSING_LIVE_METADATA", "1", "live_route_proof", "live route epoch sequence mismatch")]
     [InlineData("NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_ACTIVE_TUNA_V4_64MB_ROUTE", "file_tuna_v6", "route_runtime", "active file_tuna_v6")]
@@ -7082,8 +7082,8 @@ if (-not $result.RegressionFailed) {
             var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
             Assert.Equal("FAIL", summary["verdict"]);
             Assert.Contains(expectedFailure, summaryText, StringComparison.Ordinal);
-            var scenarioName = environmentName.Contains("REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_512MB", StringComparison.Ordinal)
-                ? "regular-v4-live-activation-off-on-off-512mb"
+            var scenarioName = environmentName.Contains("REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB", StringComparison.Ordinal)
+                ? "regular-v4-live-activation-off-on-off-256mb"
                 : environmentName.Contains("LIVE_SWITCH_OFF_HELPEE_64MB", StringComparison.Ordinal)
                     ? "live-switch-off-helpee-64mb"
                     : environmentName.Contains("SECOND_TRANSFER_AFTER_REACTIVATION", StringComparison.Ordinal)
@@ -9324,7 +9324,7 @@ if (-not $result.RegressionFailed) {
             Assert.True(File.Exists(Path.Combine(runRoot, directoryName, "filetransfer-tuna-gui-summary.json")), $"Expected Phase 5 Tuna GUI summary in {directoryName}.");
         }
 
-        Assert.False(Directory.Exists(Path.Combine(runRoot, "live-multi-toggle-off-on-off-64mb")), "Phase 5 should use the canonical 512 MiB repeated-toggle stress instead of the old 64 MiB multi-toggle row.");
+        Assert.False(Directory.Exists(Path.Combine(runRoot, "live-multi-toggle-off-on-off-64mb")), "Phase 5 should use the canonical 256 MiB repeated-toggle stress instead of the old 64 MiB multi-toggle row.");
     }
 
     private static void ApplyProcessEnvironment(ProcessStartInfo startInfo, IReadOnlyDictionary<string, string>? environment)
