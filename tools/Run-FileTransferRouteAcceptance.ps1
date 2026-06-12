@@ -2918,6 +2918,221 @@ function Invoke-RouteAcceptanceChildScriptNoThrow {
     return $exitCode
 }
 
+function Invoke-Phase5BridgeReadinessPreflight {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$RunRoot,
+        [string]$ResolvedExePath = ''
+    )
+
+    $artifactDir = Join-Path $RunRoot 'preflight-bridge-ready'
+    New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+
+    if (Test-RouteAcceptanceEnvEnabled -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_BRIDGE_BOOTSTRAP_FAIL') {
+        $reason = Get-RouteAcceptanceEnvValue -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_FAILURE_REASON' -DefaultValue 'nkn_bridge_bootstrap_not_ready'
+        $lines = @(
+            'Phase 5 Bridge Readiness Preflight',
+            'verdict=FAIL',
+            'failure_class=preflight_bridge_bootstrap',
+            ("failure_reason={0}" -f $reason),
+            'scenario=NKN_DIRECT_CONNECT',
+            ("artifact_dir={0}" -f $artifactDir),
+            'exit_code=1'
+        )
+        $lines | Set-Content -LiteralPath (Join-Path $artifactDir 'phase5-bridge-readiness-preflight-summary.txt') -Encoding UTF8
+        ([ordered]@{
+            event = 'phase5_bridge_readiness_preflight'
+            verdict = 'FAIL'
+            failureClass = 'preflight_bridge_bootstrap'
+            failureReason = $reason
+            scenario = 'NKN_DIRECT_CONNECT'
+            artifactDir = $artifactDir
+            exitCode = 1
+        }) | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $artifactDir 'phase5-bridge-readiness-preflight-summary.json') -Encoding UTF8
+
+        return [pscustomobject]@{
+            Passed = $false
+            ArtifactDir = $artifactDir
+            FailureClass = 'preflight_bridge_bootstrap'
+            FailureReason = $reason
+            ExitCode = 1
+        }
+    }
+
+    $scriptPath = Join-Path $RepoRoot 'tools\GuiSmoke-Windows.ps1'
+    $preflightTimeoutSeconds = [Math]::Min([Math]::Max(30, $ProgressTimeoutSeconds), [Math]::Min([Math]::Max(30, $TimeoutSeconds), 180))
+    $stdoutPath = Join-Path $artifactDir 'gui-smoke-nkn-direct-connect-output.log'
+    $oldTransport = $env:NLINK_TRANSPORT
+    $oldScenarios = $env:NLINK_GUI_SMOKE_SCENARIOS
+    $oldArtifactDir = $env:NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR
+    try {
+        $env:NLINK_TRANSPORT = 'NKN'
+        $env:NLINK_GUI_SMOKE_SCENARIOS = 'NKN_DIRECT_CONNECT'
+        $env:NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR = $artifactDir
+
+        $output = & powershell -NoProfile -ExecutionPolicy Bypass -File $scriptPath -ExePath $ResolvedExePath -TimeoutSeconds $preflightTimeoutSeconds 2>&1
+        $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+    }
+    catch {
+        $output = @($_)
+        $exitCode = if ($null -eq $LASTEXITCODE -or $LASTEXITCODE -eq 0) { 1 } else { [int]$LASTEXITCODE }
+    }
+    finally {
+        if ($null -eq $oldTransport) {
+            Remove-Item Env:NLINK_TRANSPORT -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:NLINK_TRANSPORT = $oldTransport
+        }
+
+        if ($null -eq $oldScenarios) {
+            Remove-Item Env:NLINK_GUI_SMOKE_SCENARIOS -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:NLINK_GUI_SMOKE_SCENARIOS = $oldScenarios
+        }
+
+        if ($null -eq $oldArtifactDir) {
+            Remove-Item Env:NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR = $oldArtifactDir
+        }
+    }
+
+    $outputLines = @($output | ForEach-Object { [string]$_ })
+    $outputLines | Set-Content -LiteralPath $stdoutPath -Encoding UTF8
+    foreach ($line in $outputLines) {
+        Write-Host $line
+    }
+
+    $failureReason = ''
+    if ($exitCode -ne 0) {
+        $joined = $outputLines -join "`n"
+        if ($joined.IndexOf('Timed out waiting for helpee invite to become ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $failureReason = 'helpee_invite_readiness_timeout'
+        }
+        elseif ($joined.IndexOf('RPC call failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $joined.IndexOf('Connect failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $joined.IndexOf('ready_emitted=0', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $failureReason = 'nkn_bridge_bootstrap_not_ready'
+        }
+        else {
+            $failureReason = 'nkn_direct_connect_preflight_failed'
+        }
+    }
+
+    $verdict = if ($exitCode -eq 0) { 'PASS' } else { 'FAIL' }
+    $lines = @(
+        'Phase 5 Bridge Readiness Preflight',
+        ("verdict={0}" -f $verdict),
+        ("failure_class={0}" -f ($(if ($exitCode -eq 0) { 'none' } else { 'preflight_bridge_bootstrap' }))),
+        ("failure_reason={0}" -f ($(if ($exitCode -eq 0) { '' } else { $failureReason }))),
+        'scenario=NKN_DIRECT_CONNECT',
+        ("artifact_dir={0}" -f $artifactDir),
+        ("exit_code={0}" -f $exitCode),
+        ("timeout_seconds={0}" -f $preflightTimeoutSeconds),
+        ("output_log={0}" -f $stdoutPath)
+    )
+    $lines | Set-Content -LiteralPath (Join-Path $artifactDir 'phase5-bridge-readiness-preflight-summary.txt') -Encoding UTF8
+    ([ordered]@{
+        event = 'phase5_bridge_readiness_preflight'
+        verdict = $verdict
+        failureClass = if ($exitCode -eq 0) { 'none' } else { 'preflight_bridge_bootstrap' }
+        failureReason = $failureReason
+        scenario = 'NKN_DIRECT_CONNECT'
+        artifactDir = $artifactDir
+        exitCode = $exitCode
+        timeoutSeconds = $preflightTimeoutSeconds
+        outputLog = $stdoutPath
+    }) | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $artifactDir 'phase5-bridge-readiness-preflight-summary.json') -Encoding UTF8
+
+    return [pscustomobject]@{
+        Passed = ($exitCode -eq 0)
+        ArtifactDir = $artifactDir
+        FailureClass = if ($exitCode -eq 0) { 'none' } else { 'preflight_bridge_bootstrap' }
+        FailureReason = $failureReason
+        ExitCode = $exitCode
+    }
+}
+
+function Write-Phase5PreflightFailureSummaryFiles {
+    param(
+        [Parameter(Mandatory = $true)][string]$RunRoot,
+        [Parameter(Mandatory = $true)][string]$BaselinePath,
+        [Parameter(Mandatory = $true)]$PreflightResult
+    )
+
+    $failureLine = "phase5-preflight-bridge-ready: {0}" -f $PreflightResult.FailureReason
+    $textLines = @(
+        'Phase 5 File Transfer Analyzer/GUI Acceptance',
+        'verdict=FAIL',
+        'correctness_verdict=FAIL',
+        'performance_verdict=PASS',
+        'acceptance_phase=phase5',
+        ("artifact_root={0}" -f $RunRoot),
+        ("baseline_manifest={0}" -f $BaselinePath),
+        'correctness_gate_policy=strict_no_exceptions',
+        'preflight_verdict=FAIL',
+        ("preflight_failure_class={0}" -f $PreflightResult.FailureClass),
+        ("preflight_failure_reason={0}" -f $PreflightResult.FailureReason),
+        ("preflight_artifact_dir={0}" -f $PreflightResult.ArtifactDir),
+        ("preflight_exit_code={0}" -f $PreflightResult.ExitCode),
+        'run_count=0',
+        'failure_count=1',
+        'correctness_failure_count=1',
+        'performance_failure_count=0',
+        '',
+        'failures:',
+        $failureLine
+    )
+
+    $textLines | Set-Content -LiteralPath (Join-Path $RunRoot 'phase5-analyzer-gui-acceptance-summary.txt') -Encoding UTF8
+    $textLines | Set-Content -LiteralPath (Join-Path $RunRoot 'route-acceptance-summary.txt') -Encoding UTF8
+
+    $varianceNoteLines = @(
+        '# Phase 5 Network Variance Note',
+        '',
+        ("artifact_root={0}" -f $RunRoot),
+        ("baseline_manifest={0}" -f $BaselinePath),
+        'verdict=FAIL',
+        'correctness_verdict=FAIL',
+        'performance_verdict=PASS',
+        '',
+        'Phase 5 did not start the file-transfer matrix because the NKN direct-connect bridge readiness preflight failed. This is classified as setup/bootstrap evidence, not route/protocol, SHA, fallback, or throughput evidence.',
+        '',
+        'Correctness/evidence failures:',
+        ("- {0}" -f $failureLine)
+    )
+    $varianceNoteLines | Set-Content -LiteralPath (Join-Path $RunRoot 'phase5-network-variance-note.md') -Encoding UTF8
+
+    $jsonSummary = [ordered]@{
+        event = 'phase5_filetransfer_analyzer_gui_acceptance_summary'
+        verdict = 'FAIL'
+        correctnessVerdict = 'FAIL'
+        performanceVerdict = 'PASS'
+        acceptancePhase = 'phase5'
+        artifactRoot = $RunRoot
+        baselineManifest = $BaselinePath
+        generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
+        preflightVerdict = 'FAIL'
+        preflightFailureClass = $PreflightResult.FailureClass
+        preflightFailureReason = $PreflightResult.FailureReason
+        preflightArtifactDir = $PreflightResult.ArtifactDir
+        preflightExitCode = $PreflightResult.ExitCode
+        failureCount = 1
+        correctnessFailureCount = 1
+        performanceFailureCount = 0
+        runs = @()
+        failures = @($failureLine)
+        correctnessFailures = @($failureLine)
+        performanceFailures = @()
+    }
+
+    $jsonSummary | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $RunRoot 'phase5-analyzer-gui-acceptance-summary.json') -Encoding UTF8
+    $jsonSummary | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $RunRoot 'route-acceptance-summary.json') -Encoding UTF8
+}
+
 function Invoke-RegularNknRouteAcceptanceRun {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
@@ -4248,6 +4463,18 @@ try {
             $resolvedExePath = (Resolve-Path -LiteralPath (Resolve-RouteAcceptancePath -RepoRoot $repoRoot -Path $ExePath)).Path
             $resolvedWalletPath = (Resolve-Path -LiteralPath (Resolve-RouteAcceptancePath -RepoRoot $repoRoot -Path $WalletPath)).Path
             $resolvedSidecarPath = (Resolve-Path -LiteralPath (Resolve-RouteAcceptancePath -RepoRoot $repoRoot -Path $SidecarPath)).Path
+        }
+
+        $shouldRunPhase5Preflight = $acceptancePhase -eq 'phase5' -and
+            -not (Test-RouteAcceptanceEnvEnabled -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_SKIP_PHASE5_PREFLIGHT') -and
+            ((-not $fakeMode) -or (Test-RouteAcceptanceEnvEnabled -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_BRIDGE_BOOTSTRAP_FAIL'))
+        if ($shouldRunPhase5Preflight) {
+            $preflightResult = Invoke-Phase5BridgeReadinessPreflight -RepoRoot $repoRoot -RunRoot $runRoot -ResolvedExePath $resolvedExePath
+            if (-not $preflightResult.Passed) {
+                Write-Phase5PreflightFailureSummaryFiles -RunRoot $runRoot -BaselinePath ([string]$baseline.Path) -PreflightResult $preflightResult
+                Write-Host ("[FileTransfer Phase5 Analyzer/GUI Acceptance] verdict=FAIL; preflight_failure_class={0}; artifact_root={1}" -f $preflightResult.FailureClass, $runRoot) -ForegroundColor Red
+                exit 1
+            }
         }
 
         foreach ($scenario in $scenarios) {
