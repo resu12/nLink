@@ -1,0 +1,274 @@
+using NLink.Core.FileTransfer;
+
+namespace NLink.SmokeTests;
+
+[Trait("Area", "Core")]
+public sealed class FileTransferCoordinatorTests
+{
+    [Fact]
+    public void StartTransfer_RegularV4CreatesActiveV4Leg()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var state = EmptyState(regular);
+
+        var decision = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.StartTransfer,
+                regular,
+                state: FileTransferLegState.Active,
+                canSendData: true,
+                committedChunk: 0,
+                highestObservedChunk: -1),
+            state);
+
+        Assert.False(decision.TerminalMutationRejected);
+        Assert.Equal(FileTransferRoute.RegularNknV4Fast, decision.State.RouteSelection.Route);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV4, decision.State.RouteSelection.ProtocolVersion);
+        Assert.True(decision.State.RouteRuntime.UsesV4SparsePump);
+        Assert.NotNull(decision.StartedLeg);
+        Assert.Equal(FileTransferLegState.Active, decision.State.CurrentLeg!.State);
+        Assert.True(decision.State.CurrentLeg.CanSendData);
+        Assert.Equal(1, decision.State.LastTransferLegGeneration);
+    }
+
+    [Fact]
+    public void RegularV4ToTunaV4_CreatesRecoveredLiveEpochAndActiveTunaLeg()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var started = StartRegular(regular);
+
+        var decision = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.TunaActivated,
+                tuna,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                "runtime_unlock",
+                FileTransferLegState.Active,
+                canSendData: true,
+                committedChunk: 4,
+                highestObservedChunk: 7),
+            started.State);
+
+        Assert.True(decision.RouteChanged);
+        Assert.NotNull(decision.StartedLiveRouteEpoch);
+        Assert.NotNull(decision.RecoveredLiveRouteEpoch);
+        Assert.Equal(1, decision.StartedLiveRouteEpoch!.EpochId);
+        Assert.Equal("recovered", decision.StartedLiveRouteEpoch.State);
+        Assert.Equal(FileTransferRoute.FileTunaV4, decision.State.RouteSelection.Route);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV4, decision.State.CurrentLeg!.ProtocolVersion);
+        Assert.True(decision.State.CurrentLeg.CanSendData);
+        Assert.Equal(FileTransferLegState.Frozen, decision.FrozenLeg!.State);
+    }
+
+    [Fact]
+    public void FallbackV6Checkpoint_AcceptanceEnablesCurrentGenerationOnly()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        var activated = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.TunaActivated,
+                tuna,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                "runtime_unlock",
+                FileTransferLegState.Active,
+                canSendData: true,
+                committedChunk: 9,
+                highestObservedChunk: 11),
+            StartRegular(regular).State);
+
+        var fallbackDecision = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.TunaLost,
+                fallback,
+                FileTransferTransportHandoffKind.TunaToNormalFallback,
+                FileTransferTransportKind.RegularNkn,
+                "tuna_disabled",
+                FileTransferLegState.CheckpointPending,
+                canSendData: false,
+                committedChunk: 9,
+                highestObservedChunk: 11,
+                transportEpoch: 3,
+                bridgeRecoveryGeneration: 3),
+            activated.State);
+
+        Assert.Equal(FileTransferRoute.PostTunaFallbackV6, fallbackDecision.State.RouteSelection.Route);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV6, fallbackDecision.State.CurrentLeg!.ProtocolVersion);
+        Assert.False(fallbackDecision.State.CurrentLeg.CanSendData);
+        Assert.Equal(FileTransferLegState.CheckpointPending, fallbackDecision.State.CurrentLeg.State);
+        Assert.True(fallbackDecision.FallbackCheckpointRequired);
+
+        var requested = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.FallbackCheckpointRequested,
+                fallback,
+                reason: "checkpoint",
+                state: FileTransferLegState.CheckpointPending,
+                canSendData: false,
+                transportEpoch: 3,
+                checkpointRequestId: "checkpoint:1",
+                checkpointPriority: "state_refresh"),
+            fallbackDecision.State);
+        Assert.True(FileTransferCoordinator.IsCurrentPostTunaFallbackLegCheckpointPending(requested.State.CurrentLeg));
+
+        var accepted = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.FallbackCheckpointAccepted,
+                fallback,
+                reason: "receiver_state",
+                state: FileTransferLegState.RecoveryActive,
+                canSendData: true,
+                committedChunk: 12,
+                highestObservedChunk: 18,
+                transportEpoch: 3),
+            requested.State);
+
+        Assert.NotNull(accepted.AcceptedCheckpointLeg);
+        Assert.True(accepted.State.CurrentLeg!.CanSendData);
+        Assert.Equal(FileTransferLegState.RecoveryActive, accepted.State.CurrentLeg.State);
+        Assert.Equal(12, accepted.State.CurrentLeg.ProvenCommittedChunkIndex);
+        Assert.Equal(18, accepted.State.CurrentLeg.ProvenHighestObservedChunkIndex);
+        Assert.Null(accepted.State.CurrentLeg.CheckpointRequestId);
+    }
+
+    [Fact]
+    public void OffOnOffRouteCycle_UsesStrictlyIncreasingEpochsAndNeverFileTunaV6()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+
+        var state = StartRegular(regular).State;
+        var firstOn = ActivateTuna(state, tuna, committedChunk: 5);
+        var firstOff = FallBack(firstOn.State, fallback, committedChunk: 5, transportEpoch: 2);
+        var secondOn = ActivateTuna(firstOff.State, tuna, committedChunk: 6);
+        var secondOff = FallBack(secondOn.State, fallback, committedChunk: 6, transportEpoch: 3);
+
+        Assert.Equal(1, firstOn.StartedLiveRouteEpoch!.EpochId);
+        Assert.Equal(2, firstOff.StartedLiveRouteEpoch!.EpochId);
+        Assert.Equal(3, secondOn.StartedLiveRouteEpoch!.EpochId);
+        Assert.Equal(4, secondOff.StartedLiveRouteEpoch!.EpochId);
+        Assert.Equal(FileTransferRoute.PostTunaFallbackV6, secondOff.State.RouteSelection.Route);
+        Assert.All(
+            secondOff.State.LegHistory,
+            leg => Assert.NotEqual("file_tuna_v6", leg.RouteSelection.TelemetryToken));
+    }
+
+    [Fact]
+    public void TerminalStateRejectsLaterRouteMutation()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var terminal = FileTransferCoordinator.Apply(
+            CoordinatorEvent(FileTransferCoordinatorEventKind.Terminalized, regular, reason: "completed"),
+            StartRegular(regular).State);
+
+        var rejected = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.TunaActivated,
+                tuna,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                "late_activation",
+                FileTransferLegState.Active,
+                canSendData: true),
+            terminal.State);
+
+        Assert.True(rejected.TerminalMutationRejected);
+        Assert.True(rejected.State.IsTerminal);
+        Assert.Equal(FileTransferRoute.RegularNknV4Fast, rejected.State.RouteSelection.Route);
+        Assert.Equal(FileTransferLegState.Terminal, rejected.State.CurrentLeg!.State);
+    }
+
+    private static FileTransferCoordinatorDecision StartRegular(FileTransferRouteSelection regular)
+        => FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.StartTransfer,
+                regular,
+                state: FileTransferLegState.Active,
+                canSendData: true),
+            EmptyState(regular));
+
+    private static FileTransferCoordinatorDecision ActivateTuna(
+        FileTransferCoordinatorState state,
+        FileTransferRouteSelection tuna,
+        int committedChunk)
+        => FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.TunaActivated,
+                tuna,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                "runtime_unlock",
+                FileTransferLegState.Active,
+                canSendData: true,
+                committedChunk: committedChunk,
+                highestObservedChunk: committedChunk),
+            state);
+
+    private static FileTransferCoordinatorDecision FallBack(
+        FileTransferCoordinatorState state,
+        FileTransferRouteSelection fallback,
+        int committedChunk,
+        long transportEpoch)
+        => FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.TunaLost,
+                fallback,
+                FileTransferTransportHandoffKind.TunaToNormalFallback,
+                FileTransferTransportKind.RegularNkn,
+                "tuna_disabled",
+                FileTransferLegState.CheckpointPending,
+                canSendData: false,
+                committedChunk: committedChunk,
+                highestObservedChunk: committedChunk,
+                transportEpoch: transportEpoch,
+                bridgeRecoveryGeneration: (int)transportEpoch),
+            state);
+
+    private static FileTransferCoordinatorState EmptyState(FileTransferRouteSelection routeSelection)
+        => new(
+            SessionId: "session_coordinator",
+            TransferId: "transfer_coordinator",
+            Direction: FileTransferDirection.Outbound,
+            IsTerminal: false,
+            RouteSelection: routeSelection,
+            CurrentLiveRouteEpoch: null,
+            CurrentLeg: null,
+            LastLiveRouteEpochId: 0,
+            LastTransferLegGeneration: 0,
+            LegHistory: []);
+
+    private static FileTransferCoordinatorEvent CoordinatorEvent(
+        FileTransferCoordinatorEventKind kind,
+        FileTransferRouteSelection routeSelection,
+        FileTransferTransportHandoffKind handoffKind = FileTransferTransportHandoffKind.None,
+        FileTransferTransportKind targetTransport = FileTransferTransportKind.Unknown,
+        string reason = "test",
+        FileTransferLegState state = FileTransferLegState.Active,
+        bool canSendData = true,
+        int committedChunk = 0,
+        int highestObservedChunk = -1,
+        long transportEpoch = 0,
+        int bridgeRecoveryGeneration = 0,
+        string? checkpointRequestId = null,
+        string? checkpointPriority = null)
+        => new(
+            kind,
+            routeSelection,
+            handoffKind,
+            targetTransport,
+            reason,
+            state,
+            canSendData,
+            committedChunk,
+            highestObservedChunk,
+            transportEpoch,
+            bridgeRecoveryGeneration,
+            checkpointRequestId,
+            checkpointPriority);
+}

@@ -80,6 +80,7 @@ public sealed partial class SessionFileTransferService
             context.State = terminalState;
             context.ErrorCode = NormalizeErrorCode(errorCode);
             context.StatusMessage = NormalizeReason(statusMessage) ?? statusMessage;
+            FileTransferCoordinator.TerminalizeLeg(context.CurrentTransferLeg);
             context.UserPaused = false;
             context.UserPauseReason = null;
             context.UserPausedSinceUtc = null;
@@ -272,6 +273,7 @@ public sealed partial class SessionFileTransferService
             context.State = terminalState;
             context.ErrorCode = NormalizeErrorCode(errorCode);
             context.StatusMessage = NormalizeReason(statusMessage) ?? statusMessage;
+            FileTransferCoordinator.TerminalizeLeg(context.CurrentTransferLeg);
             context.AcceptInProgress = false;
             context.UserPaused = false;
             context.UserPauseReason = null;
