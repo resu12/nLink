@@ -125,7 +125,14 @@ public sealed record SessionRecoveryContractSnapshot(
     DateTimeOffset ObservedSendDeadlineUtc,
     string? AuthorizedObservedLane,
     string? AuthorityFailureReason,
-    int AuthorityAttempt);
+    int AuthorityAttempt,
+    long RuntimeUnlockTransactionGeneration = 0,
+    long RuntimeUnlockTransactionOfferGeneration = 0,
+    string RuntimeUnlockTransactionState = "none",
+    bool RuntimeUnlockPeerProofObserved = false,
+    bool RuntimeUnlockRouteCommitPending = false,
+    bool RuntimeUnlockRouteCommitted = false,
+    string? RuntimeUnlockTransactionFailureReason = null);
 
 public interface ISessionRecoveryStateContract
 {

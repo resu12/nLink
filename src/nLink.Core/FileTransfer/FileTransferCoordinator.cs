@@ -10,6 +10,7 @@ internal enum FileTransferCoordinatorEventKind
     BridgeRecoveryStarted,
     BridgeRecoveryCompleted,
     BridgeRecoveryExhausted,
+    RuntimeUnlockCommitRequested,
     Terminalized,
 }
 
@@ -42,7 +43,8 @@ internal readonly record struct FileTransferCoordinatorEvent(
     int BridgeRecoveryGeneration,
     string? CheckpointRequestId = null,
     string? CheckpointPriority = null,
-    int CheckpointGeneration = 0);
+    int CheckpointGeneration = 0,
+    RuntimeUnlockRouteCommitProof? RuntimeUnlockCommitProof = null);
 
 internal sealed record FileTransferCoordinatorDecision(
     FileTransferCoordinatorState State,
@@ -54,7 +56,9 @@ internal sealed record FileTransferCoordinatorDecision(
     FileTransferLeg? FrozenLeg,
     FileTransferLeg? AcceptedCheckpointLeg,
     bool FallbackCheckpointRequired,
-    string Reason);
+    string Reason,
+    bool RuntimeUnlockCommitAccepted = false,
+    string? RuntimeUnlockCommitRejectedReason = null);
 
 internal readonly record struct FileTransferLegStartRequest(
     FileTransferRouteSelection RouteSelection,
@@ -162,6 +166,7 @@ internal static class FileTransferCoordinator
             FileTransferCoordinatorEventKind.BridgeRecoveryStarted => MarkCurrentFallbackLegState(state, FileTransferLegState.RecoveryActive, reason),
             FileTransferCoordinatorEventKind.BridgeRecoveryCompleted => PassThrough(state, reason),
             FileTransferCoordinatorEventKind.BridgeRecoveryExhausted => MarkCurrentFallbackLegState(state, FileTransferLegState.BridgeRestartPending, reason),
+            FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested => ApplyRuntimeUnlockCommit(coordinatorEvent, state, reason),
             FileTransferCoordinatorEventKind.Terminalized => Terminalize(state, reason),
             _ => PassThrough(state, reason),
         };
@@ -458,6 +463,33 @@ internal static class FileTransferCoordinator
         }
 
         return PassThrough(state, reason);
+    }
+
+    private static FileTransferCoordinatorDecision ApplyRuntimeUnlockCommit(
+        FileTransferCoordinatorEvent coordinatorEvent,
+        FileTransferCoordinatorState state,
+        string reason)
+    {
+        var rejectionReason = "transaction_proof_missing";
+        if (coordinatorEvent.RuntimeUnlockCommitProof is not { } proof ||
+            !RuntimeUnlockTransaction.CanCommitRoute(proof, state, out rejectionReason))
+        {
+            return Decision(state, reason) with
+            {
+                RuntimeUnlockCommitRejectedReason = rejectionReason,
+            };
+        }
+
+        var transition = TransitionToRoute(
+            coordinatorEvent,
+            state,
+            reason,
+            recoverEpoch: true);
+        return transition with
+        {
+            RuntimeUnlockCommitAccepted = true,
+            RuntimeUnlockCommitRejectedReason = null,
+        };
     }
 
     private static FileTransferCoordinatorDecision Terminalize(

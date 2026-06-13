@@ -63,6 +63,163 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void RuntimeUnlockTransaction_LocalObservedSendCannotCommitRoute()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var started = StartRegular(regular);
+        var transaction = RuntimeUnlockTransaction.Apply(
+            new RuntimeUnlockTransactionEvent(
+                RuntimeUnlockTransactionEventKind.OfferGenerationCreated,
+                started.State.SessionId,
+                started.State.TransferId,
+                TransactionGeneration: 1,
+                OfferGeneration: 10,
+                Reason: "runtime_unlock"),
+            RuntimeUnlockTransactionSnapshot.Idle).State;
+        transaction = RuntimeUnlockTransaction.Apply(
+            new RuntimeUnlockTransactionEvent(
+                RuntimeUnlockTransactionEventKind.ObservedSend,
+                started.State.SessionId,
+                started.State.TransferId,
+                TransactionGeneration: 1,
+                OfferGeneration: 10,
+                Reason: "control_priority",
+                ObservedLane: "control_priority"),
+            transaction).State;
+
+        var proof = RuntimeUnlockTransaction.CreateRouteCommitProof(transaction, "local_only");
+        var decision = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested,
+                tuna,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                "runtime_unlock_commit",
+                FileTransferLegState.Active,
+                canSendData: true,
+                runtimeUnlockCommitProof: proof),
+            started.State);
+
+        Assert.False(decision.RuntimeUnlockCommitAccepted);
+        Assert.Equal("peer_visible_proof_missing", decision.RuntimeUnlockCommitRejectedReason);
+        Assert.Equal(FileTransferRoute.RegularNknV4Fast, decision.State.RouteSelection.Route);
+    }
+
+    [Fact]
+    public void RuntimeUnlockTransaction_PeerProofPermitsRouteCommit()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var started = StartRegular(regular);
+        var transaction = RuntimeUnlockTransaction.Apply(
+            new RuntimeUnlockTransactionEvent(
+                RuntimeUnlockTransactionEventKind.OfferGenerationCreated,
+                started.State.SessionId,
+                started.State.TransferId,
+                TransactionGeneration: 2,
+                OfferGeneration: 22,
+                Reason: "runtime_unlock"),
+            RuntimeUnlockTransactionSnapshot.Idle).State;
+        transaction = RuntimeUnlockTransaction.Apply(
+            new RuntimeUnlockTransactionEvent(
+                RuntimeUnlockTransactionEventKind.PeerReceived,
+                started.State.SessionId,
+                started.State.TransferId,
+                TransactionGeneration: 2,
+                OfferGeneration: 22,
+                Reason: "tuna_acceleration_offer_received_raw"),
+            transaction).State;
+        transaction = RuntimeUnlockTransaction.Apply(
+            new RuntimeUnlockTransactionEvent(
+                RuntimeUnlockTransactionEventKind.AnswerReceived,
+                started.State.SessionId,
+                started.State.TransferId,
+                TransactionGeneration: 2,
+                OfferGeneration: 22,
+                Reason: "transport_acceleration_answer"),
+            transaction).State;
+
+        var proof = RuntimeUnlockTransaction.CreateRouteCommitProof(transaction, "answer_received");
+        var decision = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested,
+                tuna,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                "runtime_unlock_commit",
+                FileTransferLegState.Active,
+                canSendData: true,
+                committedChunk: 3,
+                highestObservedChunk: 3,
+                runtimeUnlockCommitProof: proof),
+            started.State);
+
+        Assert.True(decision.RuntimeUnlockCommitAccepted);
+        Assert.True(decision.RouteChanged);
+        Assert.Equal(FileTransferRoute.FileTunaV4, decision.State.RouteSelection.Route);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV4, decision.State.RouteSelection.ProtocolVersion);
+        Assert.NotNull(decision.RecoveredLiveRouteEpoch);
+        Assert.Equal(1, decision.RecoveredLiveRouteEpoch!.EpochId);
+    }
+
+    [Fact]
+    public void RuntimeUnlockTransaction_StaleSessionOrTerminalTransferRejectsCommit()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var started = StartRegular(regular);
+        var staleProof = new RuntimeUnlockRouteCommitProof(
+            "different_session",
+            started.State.TransferId,
+            TransactionGeneration: 1,
+            OfferGeneration: 1,
+            PeerVisibleProof: true,
+            PeerReceived: true,
+            AnswerReceived: false,
+            FileTransferRoute.FileTunaV4,
+            FileTransferProtocol.ProtocolVersionV4,
+            FileTransferTransportHandoffKind.NormalToTunaActivation,
+            FileTransferTransportKind.Tuna,
+            RuntimeUnlockTransactionState.PeerReceived,
+            "test");
+
+        var stale = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested,
+                tuna,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                "runtime_unlock_commit",
+                FileTransferLegState.Active,
+                canSendData: true,
+                runtimeUnlockCommitProof: staleProof),
+            started.State);
+
+        Assert.False(stale.RuntimeUnlockCommitAccepted);
+        Assert.Equal("session_mismatch", stale.RuntimeUnlockCommitRejectedReason);
+
+        var terminal = FileTransferCoordinator.Apply(
+            CoordinatorEvent(FileTransferCoordinatorEventKind.Terminalized, regular, reason: "completed"),
+            started.State);
+        var proof = staleProof with { SessionId = started.State.SessionId };
+        var terminalRejected = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested,
+                tuna,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                "runtime_unlock_commit",
+                FileTransferLegState.Active,
+                canSendData: true,
+                runtimeUnlockCommitProof: proof),
+            terminal.State);
+
+        Assert.True(terminalRejected.TerminalMutationRejected);
+        Assert.Equal(FileTransferRoute.RegularNknV4Fast, terminalRejected.State.RouteSelection.Route);
+    }
+
+    [Fact]
     public void FallbackV6Checkpoint_AcceptanceEnablesCurrentGenerationOnly()
     {
         var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
@@ -256,7 +413,8 @@ public sealed class FileTransferCoordinatorTests
         long transportEpoch = 0,
         int bridgeRecoveryGeneration = 0,
         string? checkpointRequestId = null,
-        string? checkpointPriority = null)
+        string? checkpointPriority = null,
+        RuntimeUnlockRouteCommitProof? runtimeUnlockCommitProof = null)
         => new(
             kind,
             routeSelection,
@@ -270,5 +428,6 @@ public sealed class FileTransferCoordinatorTests
             transportEpoch,
             bridgeRecoveryGeneration,
             checkpointRequestId,
-            checkpointPriority);
+            checkpointPriority,
+            RuntimeUnlockCommitProof: runtimeUnlockCommitProof);
 }

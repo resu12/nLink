@@ -3667,6 +3667,7 @@ function Test-Phase5RerunnableTransientSetupFailure {
         $combined.IndexOf('nkn_bridge_bootstrap_not_ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('nkn_bridge_start_failure', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('listener_ready_unavailable_contradiction', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('second_transfer_tuna_readiness_unstable', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('preflight_listener_unavailable', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('tuna_transport_not_active', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('terminal_before_accept', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or

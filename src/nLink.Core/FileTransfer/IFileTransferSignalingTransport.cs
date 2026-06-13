@@ -119,6 +119,37 @@ public interface IFileTransferRouteCompletionObserver
     void ObserveFileTransferRouteCompleted(FileTransferRouteCompletedNotification notification);
 }
 
+internal sealed record RuntimeUnlockRouteCommitSnapshot(
+    string SessionId,
+    string? TransferId,
+    long TransactionGeneration,
+    long OfferGeneration,
+    bool PeerVisibleProof,
+    bool PeerReceived,
+    bool AnswerReceived,
+    FileTransferRoute TargetRoute,
+    int ProtocolVersion,
+    FileTransferTransportHandoffKind HandoffKind,
+    FileTransferTransportKind TargetTransport,
+    string TransactionState,
+    string Reason);
+
+internal interface IRuntimeUnlockRouteCommitProofProvider
+{
+    bool TryGetRuntimeUnlockRouteCommitProof(
+        string sessionId,
+        string transferId,
+        out RuntimeUnlockRouteCommitSnapshot snapshot);
+
+    void NotifyRuntimeUnlockRouteCommitResult(
+        string sessionId,
+        string transferId,
+        long transactionGeneration,
+        long offerGeneration,
+        bool accepted,
+        string reason);
+}
+
 public interface IFileTransferSessionContextProvider
 {
     string? CurrentFileTransferSessionId { get; }

@@ -1476,7 +1476,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Equal(8, GetIntProperty(queuedRepair, "RequestedChunkCount"));
         Assert.Equal(0, GetIntProperty(queuedRepair, "SkippedFutureCount"));
 
-        var logTail = ReadOperationalLogTail(logStart);
+        var logTail = ReadOperationalLogTail(logStart) + Environment.NewLine + LocalOperationalLog.GetRecentLogText();
         Assert.Contains("event=filetransfer_fallback_checkpoint_accepted; direction=outbound;", logTail, StringComparison.Ordinal);
         Assert.Contains("proven_highest_observed_chunk=180", logTail, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_v4_repair_scheduled; transfer_id=transfer_post_tuna_fallback_backfill_authority", logTail, StringComparison.Ordinal);

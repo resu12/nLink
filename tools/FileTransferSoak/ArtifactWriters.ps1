@@ -3586,6 +3586,14 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_cutthrough_peer_received_count={0}" -f $recoveryClassification.RuntimeUnlockCutThroughPeerReceivedCount),
         ("runtime_unlock_cutthrough_timeout_count={0}" -f $recoveryClassification.RuntimeUnlockCutThroughTimeoutCount),
         ("runtime_unlock_cutthrough_verdict={0}" -f $recoveryClassification.RuntimeUnlockCutThroughVerdict),
+        ("runtime_unlock_transaction_started_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionStartedCount),
+        ("runtime_unlock_transaction_observed_send_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionObservedSendCount),
+        ("runtime_unlock_transaction_peer_proof_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionPeerProofCount),
+        ("runtime_unlock_transaction_commit_pending_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionCommitPendingCount),
+        ("runtime_unlock_transaction_committed_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionCommittedCount),
+        ("runtime_unlock_transaction_failed_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionFailedCount),
+        ("runtime_unlock_transaction_local_only_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionLocalOnlyRejectedCount),
+        ("runtime_unlock_transaction_proof_verdict={0}" -f $recoveryClassification.RuntimeUnlockTransactionProofVerdict),
         ("listener_ready_unavailable_contradiction_count={0}" -f $recoveryClassification.ListenerReadyUnavailableContradictionCount),
         ("listener_rearm_required_count={0}" -f $recoveryClassification.ListenerRearmRequiredCount),
         ("listener_rearm_completed_count={0}" -f $recoveryClassification.ListenerRearmCompletedCount),
@@ -4087,6 +4095,36 @@ function Get-FileTransferRecoveryFailureClassification {
             (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'runtime_unlock_active_filetransfer_requires_direct_observed_send'
         )
     })
+    $runtimeUnlockTransactionStartedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_transaction_offer_generation_created'
+    })
+    $runtimeUnlockTransactionObservedSendEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_transaction_observed_send'
+    })
+    $runtimeUnlockTransactionPeerProofEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_transaction_peer_received' -or
+        $_.EventName -eq 'runtime_unlock_transaction_answer_received'
+    })
+    $runtimeUnlockTransactionCommitPendingEvents = @($events | Where-Object {
+        ($_.EventName -like 'runtime_unlock_transaction_*') -and
+        (Get-FileTransferEventField -Event $_ -Name 'route_commit_pending' -Default '0') -eq '1'
+    })
+    $runtimeUnlockTransactionCommittedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_transaction_route_committed' -or
+        $_.EventName -eq 'filetransfer_runtime_unlock_route_commit_accepted'
+    })
+    $runtimeUnlockTransactionFailedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_transaction_failed' -or
+        $_.EventName -eq 'runtime_unlock_transaction_retired' -or
+        $_.EventName -eq 'filetransfer_runtime_unlock_route_commit_rejected'
+    })
+    $runtimeUnlockTransactionLocalOnlyRejectedEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_runtime_unlock_route_commit_rejected' -and
+        (
+            (Get-FileTransferEventField -Event $_ -Name 'rejection_reason' -Default '') -eq 'transaction_proof_missing' -or
+            (Get-FileTransferEventField -Event $_ -Name 'rejection_reason' -Default '') -eq 'peer_visible_proof_missing'
+        )
+    })
     $sessionLivenessTimeoutEvents = @($events | Where-Object { $_.EventName -eq 'session_liveness_timeout' })
     $peerDisconnectedTerminalEvents = @($events | Where-Object {
         ($_.EventName -eq 'file_transfer_outbound_terminal' -or
@@ -4121,6 +4159,16 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     elseif ($fallbackTailProof.Verdict -eq 'fail') {
         $class = 'fallback_tail_reconciliation'
+    }
+    elseif ($runtimeUnlockTransactionObservedSendEvents.Count -gt 0 -and
+        $runtimeUnlockTransactionPeerProofEvents.Count -eq 0 -and
+        ($runtimeUnlockTransactionLocalOnlyRejectedEvents.Count -gt 0 -or $sessionLivenessTimeoutEvents.Count -gt 0)) {
+        $class = 'runtime_unlock_transaction_local_only'
+    }
+    elseif ($runtimeUnlockTransactionCommitPendingEvents.Count -gt 0 -and
+        $runtimeUnlockTransactionCommittedEvents.Count -eq 0 -and
+        ($sessionLivenessTimeoutEvents.Count -gt 0 -or $runtimeUnlockTransactionFailedEvents.Count -gt 0)) {
+        $class = 'runtime_unlock_transaction_commit_missing'
     }
     elseif ($runtimeUnlockOfferNotObservedEvents.Count -gt 0 -and
         $sessionRecoveryContractRetryDispatchedEvents.Count -gt 0 -and
@@ -4197,6 +4245,20 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockCutThroughVerdict = if ($runtimeUnlockCutThroughStartedEvents.Count -eq 0) {
             'none'
         } elseif ($runtimeUnlockCutThroughPeerReceivedEvents.Count -gt 0 -and $runtimeUnlockCutThroughFailedEvents.Count -eq 0) {
+            'pass'
+        } else {
+            'fail'
+        }
+        RuntimeUnlockTransactionStartedCount = $runtimeUnlockTransactionStartedEvents.Count
+        RuntimeUnlockTransactionObservedSendCount = $runtimeUnlockTransactionObservedSendEvents.Count
+        RuntimeUnlockTransactionPeerProofCount = $runtimeUnlockTransactionPeerProofEvents.Count
+        RuntimeUnlockTransactionCommitPendingCount = $runtimeUnlockTransactionCommitPendingEvents.Count
+        RuntimeUnlockTransactionCommittedCount = $runtimeUnlockTransactionCommittedEvents.Count
+        RuntimeUnlockTransactionFailedCount = $runtimeUnlockTransactionFailedEvents.Count
+        RuntimeUnlockTransactionLocalOnlyRejectedCount = $runtimeUnlockTransactionLocalOnlyRejectedEvents.Count
+        RuntimeUnlockTransactionProofVerdict = if ($runtimeUnlockTransactionStartedEvents.Count -eq 0) {
+            'none'
+        } elseif ($runtimeUnlockTransactionCommittedEvents.Count -gt 0 -and $runtimeUnlockTransactionPeerProofEvents.Count -gt 0) {
             'pass'
         } else {
             'fail'
@@ -4290,6 +4352,14 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_cutthrough_peer_received_count={0}" -f $recoveryClassification.RuntimeUnlockCutThroughPeerReceivedCount),
         ("runtime_unlock_cutthrough_timeout_count={0}" -f $recoveryClassification.RuntimeUnlockCutThroughTimeoutCount),
         ("runtime_unlock_cutthrough_verdict={0}" -f $recoveryClassification.RuntimeUnlockCutThroughVerdict),
+        ("runtime_unlock_transaction_started_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionStartedCount),
+        ("runtime_unlock_transaction_observed_send_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionObservedSendCount),
+        ("runtime_unlock_transaction_peer_proof_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionPeerProofCount),
+        ("runtime_unlock_transaction_commit_pending_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionCommitPendingCount),
+        ("runtime_unlock_transaction_committed_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionCommittedCount),
+        ("runtime_unlock_transaction_failed_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionFailedCount),
+        ("runtime_unlock_transaction_local_only_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionLocalOnlyRejectedCount),
+        ("runtime_unlock_transaction_proof_verdict={0}" -f $recoveryClassification.RuntimeUnlockTransactionProofVerdict),
         ("listener_ready_unavailable_contradiction_count={0}" -f $recoveryClassification.ListenerReadyUnavailableContradictionCount),
         ("listener_rearm_required_count={0}" -f $recoveryClassification.ListenerRearmRequiredCount),
         ("listener_rearm_completed_count={0}" -f $recoveryClassification.ListenerRearmCompletedCount),

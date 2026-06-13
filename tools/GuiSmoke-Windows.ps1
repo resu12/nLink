@@ -3319,9 +3319,66 @@ function Unlock-TunaFromSessionHeader {
     $toggle = Wait-ControlEnabledStateByAutomationId -Window $Window -AutomationId 'SessionHeader.TunaUnlockToggle' -IsEnabled $true -TimeoutMs 45000
     Click-Element $toggle
 
-    $dialog = Wait-Until -TimeoutMs 20000 -PollMs 200 -OnTimeoutMessage "Timed out waiting for $RoleLabel Tuna wallet password dialog." -Condition {
-        Get-WalletPasswordDialogForProcess -ProcessId $Process.Id
+    $runtimeEvidenceNeedleSets = @(
+        @('event=tuna_runtime_unlocked'),
+        @('event=tuna_acceleration_payer_intent_queued', 'trigger=runtime_unlock'),
+        @('event=tuna_acceleration_timeline', 'status=selected_payer_starting_listener'),
+        @('event=tuna_acceleration_timeline', 'status=listener_starting'),
+        @('event=tuna_acceleration_timeline', 'status=waiting_for_answer'),
+        @('event=tuna_acceleration_negotiated'),
+        @('event=tuna_acceleration_timeline', 'active=1')
+    )
+
+    $findRuntimeEvidence = {
+        foreach ($line in @(Get-AppLogLinesAfterBookmark -Bookmark $bookmark)) {
+            foreach ($needleSet in $runtimeEvidenceNeedleSets) {
+                $matched = $true
+                foreach ($needle in @($needleSet)) {
+                    if ($line.IndexOf([string]$needle, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+                        $matched = $false
+                        break
+                    }
+                }
+
+                if ($matched) {
+                    return [string]$line
+                }
+            }
+        }
+
+        return $null
     }
+
+    $dialogOrEvidence = Wait-Until -TimeoutMs 20000 -PollMs 200 -OnTimeoutMessage "Timed out waiting for $RoleLabel Tuna wallet password dialog." -Condition {
+        $dialog = Get-WalletPasswordDialogForProcess -ProcessId $Process.Id
+        if ($dialog) {
+            return [pscustomobject]@{
+                Kind = 'dialog'
+                Dialog = $dialog
+                EvidenceLine = ''
+            }
+        }
+
+        if ($WaitForRuntimeEvidence) {
+            $evidenceLine = & $findRuntimeEvidence
+            if (-not [string]::IsNullOrWhiteSpace($evidenceLine)) {
+                return [pscustomobject]@{
+                    Kind = 'runtime_evidence'
+                    Dialog = $null
+                    EvidenceLine = $evidenceLine
+                }
+            }
+        }
+
+        return $null
+    }
+
+    if ([string]::Equals([string]$dialogOrEvidence.Kind, 'runtime_evidence', [System.StringComparison]::OrdinalIgnoreCase)) {
+        Write-Host "[GUI Smoke][filetransfer_tuna] $RoleLabel Tuna unlock already had runtime evidence after toggle." -ForegroundColor Green
+        return
+    }
+
+    $dialog = $dialogOrEvidence.Dialog
     $passwordBox = Wait-Until -TimeoutMs 10000 -PollMs 200 -OnTimeoutMessage "Timed out waiting for $RoleLabel Tuna wallet password box." -Condition {
         Find-VisibleByAutomationId -Root $dialog -AutomationId 'WalletPassword.Password'
     }
@@ -3334,13 +3391,7 @@ function Unlock-TunaFromSessionHeader {
     Click-Element $accept
 
     if ($WaitForRuntimeEvidence) {
-        [void](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
-            @('event=tuna_runtime_unlocked'),
-            @('event=tuna_acceleration_payer_intent_queued', 'trigger=runtime_unlock'),
-            @('event=tuna_acceleration_timeline', 'status=selected_payer_starting_listener'),
-            @('event=tuna_acceleration_timeline', 'status=listener_starting'),
-            @('event=tuna_acceleration_timeline', 'status=waiting_for_answer')
-        ) -TimeoutMs 90000 -Description "$RoleLabel Tuna runtime unlocked or runtime-unlock negotiation started")
+        [void](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets $runtimeEvidenceNeedleSets -TimeoutMs 90000 -Description "$RoleLabel Tuna runtime unlocked or runtime-unlock negotiation started")
         Write-Host "[GUI Smoke][filetransfer_tuna] $RoleLabel Tuna unlock completed." -ForegroundColor Green
         return
     }

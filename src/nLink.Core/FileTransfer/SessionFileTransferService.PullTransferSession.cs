@@ -2093,6 +2093,134 @@ public sealed partial class SessionFileTransferService
             handoffKind,
             targetTransport);
 
+    private bool TryAcceptRuntimeUnlockRouteCommitLocked(
+        OutboundTransferContext context,
+        FileTransferRouteSelection routeSelection,
+        string reason)
+        => TryAcceptRuntimeUnlockRouteCommitLocked(
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Outbound,
+            CreateCoordinatorStateLocked(context),
+            routeSelection,
+            Math.Clamp(context.ChunksTransferred, 0, Math.Max(0, context.ChunkCount)),
+            Math.Max(-1, context.ChunksTransferred - 1),
+            reason);
+
+    private bool TryAcceptRuntimeUnlockRouteCommitLocked(
+        InboundTransferContext context,
+        FileTransferRouteSelection routeSelection,
+        string reason)
+        => TryAcceptRuntimeUnlockRouteCommitLocked(
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            CreateCoordinatorStateLocked(context),
+            routeSelection,
+            Math.Max(0, context.NextChunkIndex),
+            context.PullHighestReceivedChunkIndex,
+            reason);
+
+    private bool TryAcceptRuntimeUnlockRouteCommitLocked(
+        string sessionId,
+        string transferId,
+        FileTransferDirection direction,
+        FileTransferCoordinatorState coordinatorState,
+        FileTransferRouteSelection routeSelection,
+        int committedChunkIndex,
+        int highestObservedChunkIndex,
+        string reason)
+    {
+        if (transport is not IRuntimeUnlockRouteCommitProofProvider proofProvider)
+        {
+            return true;
+        }
+
+        if (!proofProvider.TryGetRuntimeUnlockRouteCommitProof(sessionId, transferId, out var snapshot))
+        {
+            LogRuntimeUnlockRouteCommitRejected(
+                direction,
+                transferId,
+                sessionId,
+                reason,
+                "transaction_proof_missing");
+            return false;
+        }
+
+        var proof = RuntimeUnlockTransaction.CreateRouteCommitProof(snapshot);
+        var decision = FileTransferCoordinator.Apply(
+            new FileTransferCoordinatorEvent(
+                FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested,
+                routeSelection,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                reason,
+                FileTransferLegState.Active,
+                CanSendData: true,
+                committedChunkIndex,
+                highestObservedChunkIndex,
+                TransportEpochId: 0,
+                BridgeRecoveryGeneration: 0,
+                RuntimeUnlockCommitProof: proof),
+            coordinatorState);
+
+        if (decision.RuntimeUnlockCommitAccepted)
+        {
+            proofProvider.NotifyRuntimeUnlockRouteCommitResult(
+                sessionId,
+                transferId,
+                snapshot.TransactionGeneration,
+                snapshot.OfferGeneration,
+                accepted: true,
+                reason);
+            LogRuntimeUnlockRouteCommitAccepted(
+                direction,
+                transferId,
+                sessionId,
+                snapshot.TransactionGeneration,
+                snapshot.OfferGeneration,
+                reason);
+            return true;
+        }
+
+        var rejectionReason = decision.RuntimeUnlockCommitRejectedReason ?? "transaction_commit_rejected";
+        proofProvider.NotifyRuntimeUnlockRouteCommitResult(
+            sessionId,
+            transferId,
+            snapshot.TransactionGeneration,
+            snapshot.OfferGeneration,
+            accepted: false,
+            rejectionReason);
+        LogRuntimeUnlockRouteCommitRejected(
+            direction,
+            transferId,
+            sessionId,
+            reason,
+            rejectionReason);
+        return false;
+    }
+
+    private static void LogRuntimeUnlockRouteCommitAccepted(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        long transactionGeneration,
+        long offerGeneration,
+        string reason)
+        => LocalOperationalLog.Info(
+            "FileTransfer",
+            $"event=filetransfer_runtime_unlock_route_commit_accepted; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={transactionGeneration}; offer_generation={offerGeneration}; reason={FormatProtocolLogValue(reason)}");
+
+    private static void LogRuntimeUnlockRouteCommitRejected(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        string reason,
+        string rejectionReason)
+        => LocalOperationalLog.Warn(
+            "FileTransfer",
+            $"event=filetransfer_runtime_unlock_route_commit_rejected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; reason={FormatProtocolLogValue(reason)}; rejection_reason={FormatProtocolLogValue(rejectionReason)}");
+
     private bool TryPromoteOutboundRegularNknV4ToFileTunaV4Locked(
         OutboundTransferContext context,
         string reason,
@@ -2117,6 +2245,11 @@ public sealed partial class SessionFileTransferService
             HandoffKind: FileTransferTransportHandoffKind.NormalToTunaActivation,
             TransportProfileKind: ResolveTransportProfileKind(transport));
         var routeSelection = FileTransferRouteResolver.Resolve(routeInput);
+        if (!TryAcceptRuntimeUnlockRouteCommitLocked(context, routeSelection, reason))
+        {
+            return false;
+        }
+
         var runtimeSelection = FileTransferRuntimeProfileSelection.FromRouteSelection(routeSelection);
         var liveRouteEpoch = StartLiveRouteEpoch(
             context.LastLiveRouteEpochId,
@@ -2196,6 +2329,11 @@ public sealed partial class SessionFileTransferService
             HandoffKind: FileTransferTransportHandoffKind.NormalToTunaActivation,
             TransportProfileKind: ResolveTransportProfileKind(transport));
         var routeSelection = FileTransferRouteResolver.Resolve(routeInput);
+        if (!TryAcceptRuntimeUnlockRouteCommitLocked(context, routeSelection, reason))
+        {
+            return false;
+        }
+
         var runtimeSelection = FileTransferRuntimeProfileSelection.FromRouteSelection(routeSelection);
         var liveRouteEpoch = StartLiveRouteEpoch(
             context.LastLiveRouteEpochId,
@@ -2332,6 +2470,11 @@ public sealed partial class SessionFileTransferService
             HandoffKind: FileTransferTransportHandoffKind.NormalToTunaActivation,
             TransportProfileKind: ResolveTransportProfileKind(transport));
         var routeSelection = FileTransferRouteResolver.Resolve(routeInput);
+        if (!TryAcceptRuntimeUnlockRouteCommitLocked(context, routeSelection, reason))
+        {
+            return false;
+        }
+
         var runtimeSelection = FileTransferRuntimeProfileSelection.FromRouteSelection(routeSelection);
         var liveRouteEpoch = StartLiveRouteEpoch(
             context.LastLiveRouteEpochId,
@@ -2410,6 +2553,11 @@ public sealed partial class SessionFileTransferService
             HandoffKind: FileTransferTransportHandoffKind.NormalToTunaActivation,
             TransportProfileKind: ResolveTransportProfileKind(transport));
         var routeSelection = FileTransferRouteResolver.Resolve(routeInput);
+        if (!TryAcceptRuntimeUnlockRouteCommitLocked(context, routeSelection, reason))
+        {
+            return false;
+        }
+
         var runtimeSelection = FileTransferRuntimeProfileSelection.FromRouteSelection(routeSelection);
         var liveRouteEpoch = StartLiveRouteEpoch(
             context.LastLiveRouteEpochId,
