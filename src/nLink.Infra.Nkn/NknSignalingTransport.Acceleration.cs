@@ -3491,6 +3491,30 @@ public sealed partial class NknSignalingTransport
         return null;
     }
 
+    private bool IsActiveRegularV4FileTransferRouteHint(string? sessionId, string? transferId)
+    {
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? string.Empty : sessionId.Trim();
+        var normalizedTransferId = string.IsNullOrWhiteSpace(transferId) ? string.Empty : transferId.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedSessionId) ||
+            string.IsNullOrWhiteSpace(normalizedTransferId))
+        {
+            return false;
+        }
+
+        lock (gate)
+        {
+            if (!fileTransferDataSessions.TryGetValue(normalizedTransferId, out var session) ||
+                session.IsDisposed ||
+                !string.Equals(session.SessionId, normalizedSessionId, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            return !fileTransferRouteHints.TryGetValue(normalizedTransferId, out var routeHint) ||
+                   routeHint.Route == FileTransferRoute.RegularNknV4Fast;
+        }
+    }
+
     private bool TryRequestFileTransferTunaActivationOfferSendRecovery(
         string purpose,
         string? activationSessionId,
@@ -5829,7 +5853,7 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
-        if (requiresContractLocalListenerRetry)
+        if (requiresContractLocalListenerRetry || HasRuntimeUnlockRecoveryContractPendingCutThrough(sessionId))
         {
             MarkRuntimeUnlockRecoveryContractListenerRearmCompleted(sessionId, reason);
         }
@@ -6378,7 +6402,15 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
-        return !state.RequiresLocalListenerRetry ||
+        if ((state.RequiresLocalListenerRetry || state.CutThroughPending) &&
+            !state.ListenerRearmCompleted &&
+            !state.CutThroughActive &&
+            !state.ObservedSendPending)
+        {
+            return false;
+        }
+
+        return !(state.RequiresLocalListenerRetry || state.CutThroughPending) ||
                state.ListenerRearmCompleted ||
                state.ObservedSendPending ||
                state.CurrentOfferGeneration > state.RetiredOfferGeneration;
@@ -6401,6 +6433,25 @@ public sealed partial class NknSignalingTransport
                    (IsSessionRecoveryContractRetryRequired(state) ||
                     state.ContractState == SessionRecoveryContractState.RetryDispatched ||
                     state.RetryAuthorityPending) &&
+                   state.ContractState is not (SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed) &&
+                   string.Equals(state.SessionId, sessionId.Trim(), StringComparison.Ordinal);
+        }
+    }
+
+    private bool HasRuntimeUnlockRecoveryContractPendingCutThrough(string? sessionId)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return false;
+        }
+
+        lock (accelerationGate)
+        {
+            var state = runtimeUnlockRecoveryRetryState;
+            return state is not null &&
+                   state.CutThroughPending &&
+                   !state.CutThroughActive &&
+                   !state.RetryObserved &&
                    state.ContractState is not (SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed) &&
                    string.Equals(state.SessionId, sessionId.Trim(), StringComparison.Ordinal);
         }
@@ -7300,17 +7351,17 @@ public sealed partial class NknSignalingTransport
         {
             var state = runtimeUnlockRecoveryRetryState;
             if (state is null ||
-                !state.RequiresLocalListenerRetry ||
+                (!state.RequiresLocalListenerRetry && !state.CutThroughPending) ||
                 state.ContractState is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed ||
                 !string.Equals(state.SessionId, normalizedSessionId, StringComparison.Ordinal))
             {
                 return;
             }
 
+            var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            RefreshRuntimeUnlockRecoveryContractOfferSendWindowUnsafe(state, nowMs);
             state.AuthorityFailureReason = null;
             state.ListenerRearmCompleted = true;
-            state.RetryAuthorityPending = true;
-            state.RetryAuthorityGranted = true;
             state.ObservedSendPending = false;
             state.ContractState = state.RetryDispatched
                 ? SessionRecoveryContractState.RetryDispatched
@@ -7576,16 +7627,23 @@ public sealed partial class NknSignalingTransport
             var now = DateTimeOffset.UtcNow;
             var nowMs = now.ToUnixTimeMilliseconds();
             var contractGeneration = ++runtimeUnlockRecoveryContractNextGeneration;
-            var regularV4CutThroughCandidate = HasActiveRegularV4FileTransferRouteHint(normalizedSessionId);
-            var cutThroughPending = regularV4CutThroughCandidate &&
-                (string.Equals(
-                     SanitizeLogToken(retryReason),
-                     RuntimeUnlockCutThroughRetryReason,
-                     StringComparison.Ordinal) ||
-                 string.Equals(
-                     SanitizeLogToken(recoveryReason),
-                     RuntimeUnlockCutThroughRecoveryReason,
-                     StringComparison.Ordinal));
+            var cutThroughReason =
+                string.Equals(
+                    SanitizeLogToken(retryReason),
+                    RuntimeUnlockCutThroughRetryReason,
+                    StringComparison.Ordinal) ||
+                string.Equals(
+                    SanitizeLogToken(recoveryReason),
+                    RuntimeUnlockCutThroughRecoveryReason,
+                    StringComparison.Ordinal);
+            var regularV4CutThroughCandidate =
+                IsActiveRegularV4FileTransferRouteHint(normalizedSessionId, transferId) ||
+                HasActiveRegularV4FileTransferRouteHint(normalizedSessionId) ||
+                (cutThroughReason &&
+                 !string.IsNullOrWhiteSpace(transferId) &&
+                 !HasActivePostTunaFallbackFileTransferRouteHint(normalizedSessionId) &&
+                 !TryGetUnresolvedFileTransferV6TransportEpochForCurrentSession(out _));
+            var cutThroughPending = regularV4CutThroughCandidate && cutThroughReason;
             runtimeUnlockRecoveryRetryState = new RuntimeUnlockRecoveryRetryState
             {
                 ContractGeneration = contractGeneration,

@@ -6685,7 +6685,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
     {
         FakeNknClient.ResetNetwork();
         var previousAuthorityDeadline = NknSignalingTransport.RuntimeUnlockRetryAuthorityDeadlineOverrideForTests;
+        var previousOfferReplayDelay = NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests;
         NknSignalingTransport.RuntimeUnlockRetryAuthorityDeadlineOverrideForTests = TimeSpan.FromMilliseconds(25);
+        NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests = TimeSpan.FromSeconds(5);
         try
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
@@ -6748,6 +6750,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
         finally
         {
             NknSignalingTransport.RuntimeUnlockRetryAuthorityDeadlineOverrideForTests = previousAuthorityDeadline;
+            NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests = previousOfferReplayDelay;
             FakeNknClient.ResetNetwork();
         }
     }
@@ -14625,6 +14628,105 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
         {
             NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = previousHelpeePriorityDelay;
             NknSignalingTransport.RuntimeUnlockRecoverySoftSettleDelayOverrideForTests = previousSoftSettleDelay;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockCutThroughPendingListenerStartupDoesNotExpireAuthorityBeforeListenerReady()
+    {
+        FakeNknClient.ResetNetwork();
+        var previousAuthorityDeadline = NknSignalingTransport.RuntimeUnlockRetryAuthorityDeadlineOverrideForTests;
+        NknSignalingTransport.RuntimeUnlockRetryAuthorityDeadlineOverrideForTests = TimeSpan.FromMilliseconds(25);
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.tuna.runtime-unlock-cutthrough-listener-ready.address");
+            var helperClient = new FakeNknClient("helper.tuna.runtime-unlock-cutthrough-listener-ready.address");
+            var hostLane = new RetryableTunaAccelerationSession(canListen: true, failedDialAttemptsBeforeSuccess: 0);
+            var helperLane = new RetryableTunaAccelerationSession(canListen: false, failedDialAttemptsBeforeSuccess: 0);
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-cutthrough-listener-ready-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                hostLane);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-runtime-unlock-cutthrough-listener-ready-id", helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                helperLane);
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare);
+            const string transferId = "transfer_runtime_unlock_cutthrough_listener_ready";
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            InvokePrivateMethod(
+                host,
+                "TrackFileTransferRouteHint",
+                transferId,
+                FileTransferRouteResolver.RegularNknV4FastToken,
+                FileTransferProtocol.ProtocolVersionV4,
+                "test_regular_route");
+            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
+                host,
+                "HasActiveRegularV4FileTransferRouteHint",
+                sessionId)));
+            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
+                host,
+                "IsActiveRegularV4FileTransferRouteHint",
+                sessionId,
+                transferId)));
+
+            var logStart = GetOperationalLogLength();
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                123L,
+                sessionId,
+                "runtime_unlock_offer_peer_response_timeout",
+                "tuna_activation_offer_peer_response_timeout",
+                false);
+            InvokePrivateMethod(host, "MarkFileTransferTunaActivationBridgeRecoverySettled", "test_recovery_settled");
+            var armedTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=session_recovery_contract_started;", armedTail, StringComparison.Ordinal);
+            Assert.True(
+                armedTail.Contains("cutthrough_pending=1", StringComparison.Ordinal),
+                armedTail);
+            Assert.Contains("event=session_recovery_contract_retry_authority_granted;", armedTail, StringComparison.Ordinal);
+
+            await Task.Delay(TimeSpan.FromMilliseconds(75), cts.Token);
+            var contractProvider = Assert.IsAssignableFrom<ISessionRecoveryStateContract>(host);
+            Assert.True(contractProvider.TryGetActiveSessionRecoveryContract(sessionId, out var beforeReady));
+            Assert.Equal(SessionRecoveryContractKind.RuntimeUnlockActivation, beforeReady.Kind);
+            Assert.NotEqual(SessionRecoveryContractState.Failed, beforeReady.State);
+            Assert.True(
+                beforeReady.RetryAuthorityPending,
+                $"state={beforeReady.State}; retry_required={beforeReady.RetryRequired}; retry_dispatching={beforeReady.RetryDispatching}; retry_dispatched={beforeReady.RetryDispatched}; retry_authority_granted={beforeReady.RetryAuthorityGranted}; observed_send_pending={beforeReady.ObservedSendPending}; authority_failure_reason={beforeReady.AuthorityFailureReason ?? "(none)"}");
+
+            InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractListenerRearmCompleted", sessionId, "runtime_unlock");
+
+            Assert.True(contractProvider.TryGetActiveSessionRecoveryContract(sessionId, out var afterReady));
+            Assert.Equal(SessionRecoveryContractKind.RuntimeUnlockActivation, afterReady.Kind);
+            Assert.NotEqual(SessionRecoveryContractState.Failed, afterReady.State);
+            Assert.True(afterReady.RetryAuthorityPending);
+            Assert.True(afterReady.RetryAuthorityGranted);
+            Assert.True(afterReady.ObservedSendDeadlineUtc > DateTimeOffset.UtcNow);
+
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=session_recovery_contract_listener_rearm_completed;", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=session_recovery_contract_retry_authority_failed;", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain("authority_failure_reason=runtime_unlock_retry_authority_expired", tail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            NknSignalingTransport.RuntimeUnlockRetryAuthorityDeadlineOverrideForTests = previousAuthorityDeadline;
             FakeNknClient.ResetNetwork();
         }
     }

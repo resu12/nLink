@@ -2300,6 +2300,81 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task NknTransport_FileTransferRecoveryFeedbackBypassesQueuedChunkFrames()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(8.0));
+            NknTransportOptions options = NknTransportOptions.Load();
+            FakeNknClient hostClient = new FakeNknClient("host.filetransfer.priority-feedback.address");
+            FakeNknClient helperClient = new FakeNknClient("helper.filetransfer.priority-feedback.address");
+            NknIdentity hostIdentity = new NknIdentity("host-priority-feedback-id", hostClient.Address);
+            NknIdentity helperIdentity = new NknIdentity("helper-priority-feedback-id", helperClient.Address);
+            using NknSignalingTransport host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using NknSignalingTransport helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            const string transferId = "transfer_nkn_priority_feedback";
+            string sessionId = await CoreSmokeTestsBase.ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            IFileTransferDataSession inboundSession = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+
+            for (var i = 0; i < 8; i++)
+            {
+                DeliverFileTransferDataFrameDirectly(
+                    inboundSession,
+                    new FileTransferChunkBatchFrameV6
+                    {
+                        SessionId = sessionId,
+                        TransferId = transferId,
+                        StartChunkIndex = i,
+                        ChunkCount = 1,
+                        DataSegments = [new byte[1024]],
+                    },
+                    NknBridgeChannel.Bulk);
+            }
+
+            DeliverFileTransferDataFrameDirectly(
+                inboundSession,
+                new FileTransferReceiverStateFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    Epoch = 10,
+                    TransportEpoch = 2,
+                    ContiguousCommittedChunkIndex = 4,
+                    DurableReceivedHighestChunkIndex = 7,
+                    CreditUntilChunkIndexExclusive = 16,
+                    BytesCommitted = 4 * 1024L,
+                },
+                NknBridgeChannel.Control);
+
+            FileTransferReceivedDataFrame first = await inboundSession.ReceiveWithMetadataAsync(cts.Token);
+            var receiverState = Assert.IsType<FileTransferReceiverStateFrameV6>(first.Frame);
+            Assert.Equal(10, receiverState.Epoch);
+            Assert.Equal("control", first.Lane);
+
+            FileTransferReceivedDataFrame second = await inboundSession.ReceiveWithMetadataAsync(cts.Token);
+            Assert.IsType<FileTransferChunkBatchFrameV6>(second.Frame);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    private static void DeliverFileTransferDataFrameDirectly(
+        IFileTransferDataSession session,
+        FileTransferDataFrame frame,
+        NknBridgeChannel channel)
+    {
+        var deliver = session.GetType().GetMethod(
+            "Deliver",
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        Assert.NotNull(deliver);
+        deliver.Invoke(session, [frame, channel, FileTransferTransportKind.RegularNkn]);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public void NknTransport_FileTransferSecureStateReset_ClearsRemoteOpenSuppression()
     {
         FakeNknClient.ResetNetwork();

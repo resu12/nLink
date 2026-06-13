@@ -5999,6 +5999,13 @@ public sealed partial class NknSignalingTransport
                 FullMode = BoundedChannelFullMode.Wait,
                 AllowSynchronousContinuations = false,
             });
+        private readonly Channel<QueuedFileTransferDataFrame> priorityFrames = Channel.CreateUnbounded<QueuedFileTransferDataFrame>(
+            new UnboundedChannelOptions
+            {
+                SingleReader = true,
+                SingleWriter = false,
+                AllowSynchronousContinuations = false,
+            });
         private int queuedFrameCount;
         private long queuedBytes;
         private int disposed;
@@ -6091,13 +6098,40 @@ public sealed partial class NknSignalingTransport
 
             try
             {
-                var queuedFrame = await frames.Reader.ReadAsync(ct).ConfigureAwait(false);
+                var queuedFrame = await ReadQueuedFrameAsync(ct).ConfigureAwait(false);
                 ReleaseQueuedFrame(queuedFrame.EstimatedBytes);
                 return queuedFrame.ReceivedFrame;
             }
             finally
             {
                 Volatile.Write(ref activeReader, 0);
+            }
+        }
+
+        private async ValueTask<QueuedFileTransferDataFrame> ReadQueuedFrameAsync(CancellationToken ct)
+        {
+            while (true)
+            {
+                if (priorityFrames.Reader.TryRead(out var priorityFrame))
+                {
+                    return priorityFrame;
+                }
+
+                if (frames.Reader.TryRead(out var regularFrame))
+                {
+                    return regularFrame;
+                }
+
+                var priorityReady = priorityFrames.Reader.WaitToReadAsync(ct).AsTask();
+                var regularReady = frames.Reader.WaitToReadAsync(ct).AsTask();
+                var completed = await Task.WhenAny(priorityReady, regularReady).ConfigureAwait(false);
+                var canRead = await completed.ConfigureAwait(false);
+                if (!canRead &&
+                    priorityFrames.Reader.Completion.IsCompleted &&
+                    frames.Reader.Completion.IsCompleted)
+                {
+                    throw new ChannelClosedException();
+                }
             }
         }
 
@@ -6838,7 +6872,9 @@ public sealed partial class NknSignalingTransport
                     : receivedTransportKind,
                 MapBridgeChannel(channel),
                 DateTimeOffset.UtcNow);
-            if (!frames.Writer.TryWrite(new QueuedFileTransferDataFrame(receivedFrame, estimatedBytes)))
+            var prioritized = ShouldPrioritizeQueuedFileTransferDataFrame(frame);
+            var writer = prioritized ? priorityFrames.Writer : frames.Writer;
+            if (!writer.TryWrite(new QueuedFileTransferDataFrame(receivedFrame, estimatedBytes)))
             {
                 ReleaseQueuedFrame(estimatedBytes);
                 if (disposed == 0)
@@ -6853,9 +6889,15 @@ public sealed partial class NknSignalingTransport
             {
                 LocalOperationalLog.Info(
                     "SessionSecurity",
-                    $"event=filetransfer_data_frame_dispatched; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}; lane={MapBridgeChannel(channel)}; queued_frames={queuedFramesAfter}; queued_bytes={queuedBytesAfter}");
+                    $"event=filetransfer_data_frame_dispatched; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}; lane={MapBridgeChannel(channel)}; priority={(prioritized ? 1 : 0)}; queued_frames={queuedFramesAfter}; queued_bytes={queuedBytesAfter}");
             }
         }
+
+        private static bool ShouldPrioritizeQueuedFileTransferDataFrame(FileTransferDataFrame frame)
+            => IsReceiverFeedbackDataFrame(frame) ||
+               IsV6RecoveryControlDataFrame(frame) ||
+               IsTerminalDataFrame(frame) ||
+               frame is FileTransferPauseControlFrameV4;
 
         private void RecordChunkBatchTransportSummary(
             long rawBytes,
@@ -7001,6 +7043,7 @@ public sealed partial class NknSignalingTransport
                     requiresResumeRequest: true));
 
             frames.Writer.TryComplete(new InvalidOperationException(FileTransferResultCodes.ReceiverBufferExhausted));
+            priorityFrames.Writer.TryComplete(new InvalidOperationException(FileTransferResultCodes.ReceiverBufferExhausted));
             owner.RemoveFileTransferDataSession(
                 this,
                 requireLocalOpenForRemoteDelivery: true,
@@ -7203,6 +7246,7 @@ public sealed partial class NknSignalingTransport
 
             LogChunkBatchTransportSummary();
             frames.Writer.TryComplete();
+            priorityFrames.Writer.TryComplete();
             owner.RemoveFileTransferDataSession(this);
         }
 
