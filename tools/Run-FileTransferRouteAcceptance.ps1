@@ -2922,13 +2922,21 @@ function Invoke-Phase5BridgeReadinessPreflight {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
         [Parameter(Mandatory = $true)][string]$RunRoot,
-        [string]$ResolvedExePath = ''
+        [string]$ResolvedExePath = '',
+        [string]$ArtifactName = 'preflight-bridge-ready'
     )
 
-    $artifactDir = Join-Path $RunRoot 'preflight-bridge-ready'
+    $artifactDir = Join-Path $RunRoot $ArtifactName
     New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
 
-    if (Test-RouteAcceptanceEnvEnabled -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_BRIDGE_BOOTSTRAP_FAIL') {
+    $fakeFailOnceMarkerPath = Join-Path $RunRoot '.phase5-preflight-fake-fail-once'
+    $fakeFailAlways = Test-RouteAcceptanceEnvEnabled -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_BRIDGE_BOOTSTRAP_FAIL'
+    $fakeFailOnce = Test-RouteAcceptanceEnvEnabled -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_BRIDGE_BOOTSTRAP_FAIL_ONCE'
+    if ($fakeFailAlways -or ($fakeFailOnce -and -not (Test-Path -LiteralPath $fakeFailOnceMarkerPath -PathType Leaf))) {
+        if ($fakeFailOnce) {
+            'failed' | Set-Content -LiteralPath $fakeFailOnceMarkerPath -Encoding UTF8
+        }
+
         $reason = Get-RouteAcceptanceEnvValue -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_FAILURE_REASON' -DefaultValue 'nkn_bridge_bootstrap_not_ready'
         $lines = @(
             'Phase 5 Bridge Readiness Preflight',
@@ -2956,6 +2964,38 @@ function Invoke-Phase5BridgeReadinessPreflight {
             FailureClass = 'preflight_bridge_bootstrap'
             FailureReason = $reason
             ExitCode = 1
+        }
+    }
+
+    if ($fakeFailOnce) {
+        $lines = @(
+            'Phase 5 Bridge Readiness Preflight',
+            'verdict=PASS',
+            'failure_class=none',
+            'failure_reason=',
+            'scenario=NKN_DIRECT_CONNECT',
+            ("artifact_dir={0}" -f $artifactDir),
+            'exit_code=0',
+            'fake_mode=1'
+        )
+        $lines | Set-Content -LiteralPath (Join-Path $artifactDir 'phase5-bridge-readiness-preflight-summary.txt') -Encoding UTF8
+        ([ordered]@{
+            event = 'phase5_bridge_readiness_preflight'
+            verdict = 'PASS'
+            failureClass = 'none'
+            failureReason = ''
+            scenario = 'NKN_DIRECT_CONNECT'
+            artifactDir = $artifactDir
+            exitCode = 0
+            fakeMode = 1
+        }) | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $artifactDir 'phase5-bridge-readiness-preflight-summary.json') -Encoding UTF8
+
+        return [pscustomobject]@{
+            Passed = $true
+            ArtifactDir = $artifactDir
+            FailureClass = 'none'
+            FailureReason = ''
+            ExitCode = 0
         }
     }
 
@@ -3106,6 +3146,118 @@ function Invoke-Phase5BridgeReadinessPreflight {
     }
 }
 
+function Test-Phase5BridgeReadinessPreflightRetryableFailure {
+    param(
+        [Parameter(Mandatory = $true)]$PreflightResult
+    )
+
+    if ($null -eq $PreflightResult -or $PreflightResult.Passed) {
+        return $false
+    }
+
+    $reason = [string]$PreflightResult.FailureReason
+    return $reason -eq 'helpee_invite_readiness_timeout' -or
+        $reason -eq 'nkn_bridge_start_failure' -or
+        $reason -eq 'nkn_bridge_bootstrap_not_ready'
+}
+
+function Write-Phase5BridgeReadinessPreflightAttemptSummary {
+    param(
+        [Parameter(Mandatory = $true)][string]$RunRoot,
+        [Parameter(Mandatory = $true)]$PreflightResult
+    )
+
+    $attemptCount = if ($PreflightResult.PSObject.Properties.Name -contains 'AttemptCount') { [int]$PreflightResult.AttemptCount } else { 1 }
+    $retryUsed = if ($PreflightResult.PSObject.Properties.Name -contains 'RetryUsed' -and $PreflightResult.RetryUsed) { 1 } else { 0 }
+    $selectedAttempt = if ($PreflightResult.PSObject.Properties.Name -contains 'SelectedAttempt') { [int]$PreflightResult.SelectedAttempt } else { 1 }
+    $firstFailureReason = if ($PreflightResult.PSObject.Properties.Name -contains 'FirstFailureReason') { [string]$PreflightResult.FirstFailureReason } else { '' }
+    $firstArtifactDir = if ($PreflightResult.PSObject.Properties.Name -contains 'FirstArtifactDir') { [string]$PreflightResult.FirstArtifactDir } else { '' }
+    $verdict = if ($PreflightResult.Passed) { 'PASS' } else { 'FAIL' }
+
+    $lines = @(
+        'Phase 5 Bridge Readiness Preflight Attempts',
+        ("verdict={0}" -f $verdict),
+        ("attempt_count={0}" -f $attemptCount),
+        ("retry_used={0}" -f $retryUsed),
+        ("selected_attempt={0}" -f $selectedAttempt),
+        ("final_failure_class={0}" -f $PreflightResult.FailureClass),
+        ("final_failure_reason={0}" -f $PreflightResult.FailureReason),
+        ("final_artifact_dir={0}" -f $PreflightResult.ArtifactDir),
+        ("final_exit_code={0}" -f $PreflightResult.ExitCode),
+        ("first_failure_reason={0}" -f $firstFailureReason),
+        ("first_artifact_dir={0}" -f $firstArtifactDir)
+    )
+    $lines | Set-Content -LiteralPath (Join-Path $RunRoot 'phase5-bridge-readiness-preflight-attempts.txt') -Encoding UTF8
+
+    ([ordered]@{
+        event = 'phase5_bridge_readiness_preflight_attempts'
+        verdict = $verdict
+        attemptCount = $attemptCount
+        retryUsed = $retryUsed
+        selectedAttempt = $selectedAttempt
+        finalFailureClass = $PreflightResult.FailureClass
+        finalFailureReason = $PreflightResult.FailureReason
+        finalArtifactDir = $PreflightResult.ArtifactDir
+        finalExitCode = $PreflightResult.ExitCode
+        firstFailureReason = $firstFailureReason
+        firstArtifactDir = $firstArtifactDir
+    }) | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $RunRoot 'phase5-bridge-readiness-preflight-attempts.json') -Encoding UTF8
+}
+
+function Invoke-Phase5BridgeReadinessPreflightWithRetry {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$RunRoot,
+        [string]$ResolvedExePath = ''
+    )
+
+    $first = Invoke-Phase5BridgeReadinessPreflight -RepoRoot $RepoRoot -RunRoot $RunRoot -ResolvedExePath $ResolvedExePath
+    if ($first.Passed -or -not (Test-Phase5BridgeReadinessPreflightRetryableFailure -PreflightResult $first)) {
+        $result = [pscustomobject]@{
+            Passed = $first.Passed
+            ArtifactDir = $first.ArtifactDir
+            FailureClass = $first.FailureClass
+            FailureReason = $first.FailureReason
+            ExitCode = $first.ExitCode
+            AttemptCount = 1
+            RetryUsed = $false
+            SelectedAttempt = 1
+            FirstFailureReason = ''
+            FirstArtifactDir = ''
+        }
+        Write-Phase5BridgeReadinessPreflightAttemptSummary -RunRoot $RunRoot -PreflightResult $result
+        return $result
+    }
+
+    $firstArtifactDir = Join-Path $RunRoot 'preflight-bridge-ready-attempt-1'
+    if (Test-Path -LiteralPath $firstArtifactDir) {
+        throw "Phase 5 preflight retry artifact directory already exists: $firstArtifactDir"
+    }
+
+    if (Test-Path -LiteralPath $first.ArtifactDir) {
+        Move-Item -LiteralPath $first.ArtifactDir -Destination $firstArtifactDir
+    }
+
+    Write-Host ("[FileTransfer Phase5 Preflight] setup/bootstrap preflight failed with {0}; retrying once from a clean preflight artifact directory." -f $first.FailureReason) -ForegroundColor Yellow
+    Start-Sleep -Seconds 2
+
+    $second = Invoke-Phase5BridgeReadinessPreflight -RepoRoot $RepoRoot -RunRoot $RunRoot -ResolvedExePath $ResolvedExePath
+    $result = [pscustomobject]@{
+        Passed = $second.Passed
+        ArtifactDir = $second.ArtifactDir
+        FailureClass = $second.FailureClass
+        FailureReason = $second.FailureReason
+        ExitCode = $second.ExitCode
+        AttemptCount = 2
+        RetryUsed = $true
+        SelectedAttempt = 2
+        FirstFailureReason = $first.FailureReason
+        FirstArtifactDir = $firstArtifactDir
+    }
+    Write-Phase5BridgeReadinessPreflightAttemptSummary -RunRoot $RunRoot -PreflightResult $result
+    return $result
+}
+
 function Write-Phase5PreflightFailureSummaryFiles {
     param(
         [Parameter(Mandatory = $true)][string]$RunRoot,
@@ -3114,6 +3266,10 @@ function Write-Phase5PreflightFailureSummaryFiles {
     )
 
     $failureLine = "phase5-preflight-bridge-ready: {0}" -f $PreflightResult.FailureReason
+    $attemptCount = if ($PreflightResult.PSObject.Properties.Name -contains 'AttemptCount') { [int]$PreflightResult.AttemptCount } else { 1 }
+    $retryUsed = if ($PreflightResult.PSObject.Properties.Name -contains 'RetryUsed' -and $PreflightResult.RetryUsed) { 1 } else { 0 }
+    $firstFailureReason = if ($PreflightResult.PSObject.Properties.Name -contains 'FirstFailureReason') { [string]$PreflightResult.FirstFailureReason } else { '' }
+    $firstArtifactDir = if ($PreflightResult.PSObject.Properties.Name -contains 'FirstArtifactDir') { [string]$PreflightResult.FirstArtifactDir } else { '' }
     $textLines = @(
         'Phase 5 File Transfer Analyzer/GUI Acceptance',
         'verdict=FAIL',
@@ -3128,6 +3284,10 @@ function Write-Phase5PreflightFailureSummaryFiles {
         ("preflight_failure_reason={0}" -f $PreflightResult.FailureReason),
         ("preflight_artifact_dir={0}" -f $PreflightResult.ArtifactDir),
         ("preflight_exit_code={0}" -f $PreflightResult.ExitCode),
+        ("preflight_attempt_count={0}" -f $attemptCount),
+        ("preflight_retry_used={0}" -f $retryUsed),
+        ("preflight_first_failure_reason={0}" -f $firstFailureReason),
+        ("preflight_first_artifact_dir={0}" -f $firstArtifactDir),
         'run_count=0',
         'failure_count=1',
         'correctness_failure_count=1',
@@ -3170,6 +3330,10 @@ function Write-Phase5PreflightFailureSummaryFiles {
         preflightFailureReason = $PreflightResult.FailureReason
         preflightArtifactDir = $PreflightResult.ArtifactDir
         preflightExitCode = $PreflightResult.ExitCode
+        preflightAttemptCount = $attemptCount
+        preflightRetryUsed = $retryUsed
+        preflightFirstFailureReason = $firstFailureReason
+        preflightFirstArtifactDir = $firstArtifactDir
         failureCount = 1
         correctnessFailureCount = 1
         performanceFailureCount = 0
@@ -4517,9 +4681,11 @@ try {
 
         $shouldRunPhase5Preflight = $acceptancePhase -eq 'phase5' -and
             -not (Test-RouteAcceptanceEnvEnabled -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_SKIP_PHASE5_PREFLIGHT') -and
-            ((-not $fakeMode) -or (Test-RouteAcceptanceEnvEnabled -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_BRIDGE_BOOTSTRAP_FAIL'))
+            ((-not $fakeMode) -or
+                (Test-RouteAcceptanceEnvEnabled -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_BRIDGE_BOOTSTRAP_FAIL') -or
+                (Test-RouteAcceptanceEnvEnabled -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_BRIDGE_BOOTSTRAP_FAIL_ONCE'))
         if ($shouldRunPhase5Preflight) {
-            $preflightResult = Invoke-Phase5BridgeReadinessPreflight -RepoRoot $repoRoot -RunRoot $runRoot -ResolvedExePath $resolvedExePath
+            $preflightResult = Invoke-Phase5BridgeReadinessPreflightWithRetry -RepoRoot $repoRoot -RunRoot $runRoot -ResolvedExePath $resolvedExePath
             if (-not $preflightResult.Passed) {
                 Write-Phase5PreflightFailureSummaryFiles -RunRoot $runRoot -BaselinePath ([string]$baseline.Path) -PreflightResult $preflightResult
                 Write-Host ("[FileTransfer Phase5 Analyzer/GUI Acceptance] verdict=FAIL; preflight_failure_class={0}; artifact_root={1}" -f $preflightResult.FailureClass, $runRoot) -ForegroundColor Red
