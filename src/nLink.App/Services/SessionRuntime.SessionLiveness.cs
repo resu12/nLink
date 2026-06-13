@@ -54,7 +54,19 @@ public sealed partial class SessionRuntime
     private DateTimeOffset sessionLivenessLatestFileTransferTerminalProofUtc = DateTimeOffset.MinValue;
     private DateTimeOffset sessionLivenessFileTransferTerminalProofDeferralUntilUtc = DateTimeOffset.MinValue;
     private int sessionLivenessFileTransferTerminalProofDeferralCount;
+    private BridgeExhaustedSiblingDeferral? sessionLivenessBridgeExhaustedSiblingDeferral;
     private bool sessionLivenessSuspectLogged;
+
+    private sealed record BridgeExhaustedSiblingDeferral(
+        string SessionId,
+        string TransferId,
+        string RouteToken,
+        int ProtocolVersion,
+        int TransferLegGeneration,
+        int BridgeRecoveryGeneration,
+        string RecoveryFamily,
+        DateTimeOffset UntilUtc,
+        string Source);
 
     private void StartSessionLivenessWatchdog(string reason)
     {
@@ -106,6 +118,7 @@ public sealed partial class SessionRuntime
             sessionLivenessLatestFileTransferTerminalProofUtc = DateTimeOffset.MinValue;
             sessionLivenessFileTransferTerminalProofDeferralUntilUtc = DateTimeOffset.MinValue;
             sessionLivenessFileTransferTerminalProofDeferralCount = 0;
+            sessionLivenessBridgeExhaustedSiblingDeferral = null;
             sessionLivenessFileTransferRecoveryDeferralUntilUtc = DateTimeOffset.MinValue;
             sessionLivenessHeartbeatInFlight = 0;
             sessionLivenessHeartbeatInFlightSinceUtc = DateTimeOffset.MinValue;
@@ -899,6 +912,7 @@ public sealed partial class SessionRuntime
             sessionLivenessFileTransferRecoveryDeferralKey = null;
             sessionLivenessFileTransferTerminalProofDeferralUntilUtc = DateTimeOffset.MinValue;
             sessionLivenessFileTransferTerminalProofDeferralCount = 0;
+            sessionLivenessBridgeExhaustedSiblingDeferral = null;
             sessionLivenessSuspectLogged = false;
         }
 
@@ -1041,6 +1055,7 @@ public sealed partial class SessionRuntime
             sessionLivenessFileTransferRecoveryDeferralKey = null;
             sessionLivenessFileTransferTerminalProofDeferralUntilUtc = DateTimeOffset.MinValue;
             sessionLivenessFileTransferTerminalProofDeferralCount = 0;
+            sessionLivenessBridgeExhaustedSiblingDeferral = null;
             sessionLivenessSuspectLogged = false;
             progressProofUtc = sessionLivenessLatestFileTransferProgressUtc;
         }
@@ -1175,6 +1190,131 @@ public sealed partial class SessionRuntime
     private static string CreateFileTransferRecoveryLivenessDeferralKey(FileTransferRecoveryLivenessSnapshot snapshot)
         => $"{snapshot.SessionId}:{snapshot.TransferId}:{snapshot.TransferLegGeneration}:{snapshot.BridgeRecoveryGeneration}:{snapshot.TransportEpoch}";
 
+    private static string? NormalizeBridgeExhaustedSiblingRecoveryFamily(string? bridgeReason)
+    {
+        if (string.IsNullOrWhiteSpace(bridgeReason))
+        {
+            return null;
+        }
+
+        var normalized = bridgeReason.Trim();
+        if (normalized.Contains("post_tuna_fallback", StringComparison.OrdinalIgnoreCase))
+        {
+            return "post_tuna_fallback_recovery";
+        }
+
+        return null;
+    }
+
+    private void ArmBridgeExhaustedSiblingDeferralLocked(
+        string sessionId,
+        string bridgeReason,
+        DateTimeOffset untilUtc,
+        string transferId,
+        string? routeToken,
+        int protocolVersion,
+        int transferLegGeneration,
+        int bridgeRecoveryGeneration,
+        string source)
+    {
+        var recoveryFamily = NormalizeBridgeExhaustedSiblingRecoveryFamily(bridgeReason);
+        if (recoveryFamily is null ||
+            string.IsNullOrWhiteSpace(sessionId) ||
+            string.IsNullOrWhiteSpace(transferId) ||
+            !string.Equals(routeToken, "post_tuna_fallback_v6", StringComparison.Ordinal) ||
+            protocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+            untilUtc <= nowProvider())
+        {
+            return;
+        }
+
+        sessionLivenessBridgeExhaustedSiblingDeferral = new BridgeExhaustedSiblingDeferral(
+            sessionId,
+            transferId,
+            routeToken!,
+            protocolVersion,
+            transferLegGeneration,
+            bridgeRecoveryGeneration,
+            recoveryFamily,
+            untilUtc,
+            source);
+    }
+
+    private bool TrySuppressBridgeReceiveStallRecoveryExhaustedForSiblingDeferral(
+        string sessionIdSnapshot,
+        string bridgeReason,
+        DateTimeOffset now)
+    {
+        var recoveryFamily = NormalizeBridgeExhaustedSiblingRecoveryFamily(bridgeReason);
+        if (recoveryFamily is null)
+        {
+            return false;
+        }
+
+        BridgeExhaustedSiblingDeferral? deferral;
+        bool expired;
+        lock (sessionLivenessGate)
+        {
+            deferral = sessionLivenessBridgeExhaustedSiblingDeferral;
+            if (deferral is null ||
+                !string.Equals(deferral.SessionId, sessionIdSnapshot, StringComparison.Ordinal) ||
+                !string.Equals(deferral.RecoveryFamily, recoveryFamily, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            expired = now > deferral.UntilUtc;
+            if (expired)
+            {
+                sessionLivenessBridgeExhaustedSiblingDeferral = null;
+            }
+        }
+
+        if (expired)
+        {
+            LocalOperationalLog.Warn(
+                "Session",
+                $"event=bridge_receive_stall_recovery_exhausted_sibling_deferral_expired; session_id={sessionIdSnapshot}; transfer_id={deferral.TransferId}; recovery_family={deferral.RecoveryFamily}; bridge_reason={SanitizeSessionLivenessReason(bridgeReason)}; route={deferral.RouteToken}; protocol_version={deferral.ProtocolVersion}; leg_generation={deferral.TransferLegGeneration}; bridge_recovery_generation={deferral.BridgeRecoveryGeneration}; source={SanitizeSessionLivenessReason(deferral.Source)}; liveness_deferral_deadline_utc_ms={deferral.UntilUtc.ToUnixTimeMilliseconds()}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+            return false;
+        }
+
+        if (!IsBridgeExhaustedSiblingDeferralCurrent(deferral))
+        {
+            return false;
+        }
+
+        LocalOperationalLog.Warn(
+            "Session",
+            $"event=bridge_receive_stall_recovery_exhausted_suppressed_by_sibling_deferral; session_id={sessionIdSnapshot}; transfer_id={deferral.TransferId}; recovery_family={deferral.RecoveryFamily}; bridge_reason={SanitizeSessionLivenessReason(bridgeReason)}; route={deferral.RouteToken}; protocol_version={deferral.ProtocolVersion}; leg_generation={deferral.TransferLegGeneration}; bridge_recovery_generation={deferral.BridgeRecoveryGeneration}; source={SanitizeSessionLivenessReason(deferral.Source)}; liveness_deferral_deadline_utc_ms={deferral.UntilUtc.ToUnixTimeMilliseconds()}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+        return true;
+    }
+
+    private bool IsBridgeExhaustedSiblingDeferralCurrent(BridgeExhaustedSiblingDeferral deferral)
+    {
+        var snapshot = latestFileTransferSnapshot;
+        if (TryFindActiveFileTransferForBridgeExhaustedSiblingDeferral(snapshot.Outbound, deferral) ||
+            TryFindActiveFileTransferForBridgeExhaustedSiblingDeferral(snapshot.Inbound, deferral))
+        {
+            return true;
+        }
+
+        snapshot = fileTransferService.Snapshot;
+        return TryFindActiveFileTransferForBridgeExhaustedSiblingDeferral(snapshot.Outbound, deferral) ||
+               TryFindActiveFileTransferForBridgeExhaustedSiblingDeferral(snapshot.Inbound, deferral);
+    }
+
+    private static bool TryFindActiveFileTransferForBridgeExhaustedSiblingDeferral(
+        FileTransferTransferSnapshot? transfer,
+        BridgeExhaustedSiblingDeferral deferral)
+    {
+        return transfer is not null &&
+               !transfer.IsTerminal &&
+               string.Equals(transfer.SessionId, deferral.SessionId, StringComparison.Ordinal) &&
+               string.Equals(transfer.TransferId, deferral.TransferId, StringComparison.Ordinal) &&
+               string.Equals(transfer.RouteToken, deferral.RouteToken, StringComparison.Ordinal) &&
+               (transfer.ProtocolVersion ?? 0) == deferral.ProtocolVersion;
+    }
+
     private static string CreateSessionRecoveryContractAnswerWaitDeferralKey(
         string sessionId,
         SessionRecoveryContractSnapshot snapshot)
@@ -1270,6 +1410,16 @@ public sealed partial class SessionRuntime
 
     private void ObserveSessionLivenessBridgeRecoveryEvent(BridgeLifecycleEvent e)
     {
+        if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryReceiveResumed)
+        {
+            lock (sessionLivenessGate)
+            {
+                sessionLivenessBridgeExhaustedSiblingDeferral = null;
+            }
+
+            return;
+        }
+
         if (e.Kind is not (BridgeLifecycleEventKind.ReceiveStallRecoveryStarted or
             BridgeLifecycleEventKind.ReceiveStallRecoveryCompleted or
             BridgeLifecycleEventKind.ReceiveStallRecoveryDeferred))
@@ -1469,6 +1619,17 @@ public sealed partial class SessionRuntime
             {
                 sessionLivenessFileTransferRecoveryDeferralUntilUtc = deferralDeadlineUtc;
             }
+
+            ArmBridgeExhaustedSiblingDeferralLocked(
+                sessionIdSnapshot,
+                bridgeReason,
+                deferralDeadlineUtc,
+                snapshot.TransferId,
+                snapshot.RouteToken,
+                snapshot.ProtocolVersion,
+                snapshot.TransferLegGeneration,
+                snapshot.BridgeRecoveryGeneration,
+                "filetransfer_recovery");
         }
 
         LocalOperationalLog.Warn(
@@ -1508,6 +1669,17 @@ public sealed partial class SessionRuntime
             {
                 sessionLivenessFileTransferRecoveryDeferralUntilUtc = deferralUntil;
             }
+
+            ArmBridgeExhaustedSiblingDeferralLocked(
+                sessionIdSnapshot,
+                bridgeReason,
+                deferralUntil,
+                transfer.TransferId,
+                transfer.RouteToken,
+                transfer.ProtocolVersion ?? 0,
+                0,
+                0,
+                "active_filetransfer_progress");
         }
 
         LocalOperationalLog.Warn(
@@ -1550,6 +1722,7 @@ public sealed partial class SessionRuntime
 
             sessionLivenessFileTransferRecoveryDeferralUntilUtc = DateTimeOffset.MinValue;
             sessionLivenessFileTransferRecoveryDeferralKey = null;
+            sessionLivenessBridgeExhaustedSiblingDeferral = null;
         }
 
         LocalOperationalLog.Warn(
@@ -2031,6 +2204,7 @@ public sealed partial class SessionRuntime
             sessionLivenessLatestFileTransferTerminalProofUtc = DateTimeOffset.MinValue;
             sessionLivenessFileTransferTerminalProofDeferralUntilUtc = DateTimeOffset.MinValue;
             sessionLivenessFileTransferTerminalProofDeferralCount = 0;
+            sessionLivenessBridgeExhaustedSiblingDeferral = null;
             sessionLivenessHeartbeatInFlightSinceUtc = DateTimeOffset.MinValue;
         }
 
@@ -2099,6 +2273,7 @@ public sealed partial class SessionRuntime
                 sessionLivenessFileTransferTerminalProofDeferralUntilUtc = DateTimeOffset.MinValue;
                 sessionLivenessFileTransferTerminalProofDeferralCount = 0;
             }
+            sessionLivenessBridgeExhaustedSiblingDeferral = null;
             sessionLivenessSuspectLogged = false;
         }
 

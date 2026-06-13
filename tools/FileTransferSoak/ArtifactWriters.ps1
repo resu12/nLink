@@ -2022,6 +2022,9 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("bridge_recovery_exhausted_without_proof_count={0}" -f $bridgeLivenessProof.RecoveryExhaustedWithoutProofCount)) | Out-Null
     $lines.Add(("fallback_leg_authority_liveness_deferral_count={0}" -f $bridgeLivenessProof.FallbackLegAuthorityLivenessDeferralCount)) | Out-Null
     $lines.Add(("bridge_liveness_stale_deferral_count={0}" -f $bridgeLivenessProof.StaleDeferralCount)) | Out-Null
+    $lines.Add(("bridge_exhausted_sibling_deferral_suppressed_count={0}" -f $bridgeLivenessProof.SiblingDeferralSuppressedCount)) | Out-Null
+    $lines.Add(("bridge_exhausted_sibling_deferral_expired_count={0}" -f $bridgeLivenessProof.SiblingDeferralExpiredCount)) | Out-Null
+    $lines.Add(("bridge_exhausted_terminal_during_valid_deferral_count={0}" -f $bridgeLivenessProof.TerminalDuringValidSiblingDeferralCount)) | Out-Null
 
     $index = 0
     foreach ($event in @($routeSelectedEvents | Sort-Object Sequence)) {
@@ -3642,6 +3645,9 @@ function New-FileTransferStabilityGateSummaryLines {
         ("bridge_recovery_exhausted_without_proof_count={0}" -f $bridgeLivenessProof.RecoveryExhaustedWithoutProofCount),
         ("fallback_leg_authority_liveness_deferral_count={0}" -f $bridgeLivenessProof.FallbackLegAuthorityLivenessDeferralCount),
         ("bridge_liveness_stale_deferral_count={0}" -f $bridgeLivenessProof.StaleDeferralCount),
+        ("bridge_exhausted_sibling_deferral_suppressed_count={0}" -f $bridgeLivenessProof.SiblingDeferralSuppressedCount),
+        ("bridge_exhausted_sibling_deferral_expired_count={0}" -f $bridgeLivenessProof.SiblingDeferralExpiredCount),
+        ("bridge_exhausted_terminal_during_valid_deferral_count={0}" -f $bridgeLivenessProof.TerminalDuringValidSiblingDeferralCount),
         ("next_artifact={0}" -f $GateResult.NextArtifact),
         ("gui_progress_timeout_count={0}" -f $Summary.LiveProgressTimeoutCount),
         ("terminal_missing_after_progress_timeout={0}" -f $Summary.TerminalMissingAfterProgressTimeout),
@@ -4347,6 +4353,9 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("bridge_recovery_exhausted_without_proof_count={0}" -f $bridgeLivenessProof.RecoveryExhaustedWithoutProofCount),
         ("fallback_leg_authority_liveness_deferral_count={0}" -f $bridgeLivenessProof.FallbackLegAuthorityLivenessDeferralCount),
         ("bridge_liveness_stale_deferral_count={0}" -f $bridgeLivenessProof.StaleDeferralCount),
+        ("bridge_exhausted_sibling_deferral_suppressed_count={0}" -f $bridgeLivenessProof.SiblingDeferralSuppressedCount),
+        ("bridge_exhausted_sibling_deferral_expired_count={0}" -f $bridgeLivenessProof.SiblingDeferralExpiredCount),
+        ("bridge_exhausted_terminal_during_valid_deferral_count={0}" -f $bridgeLivenessProof.TerminalDuringValidSiblingDeferralCount),
         ("live_route_epoch_proof_mode={0}" -f $LiveRouteProofMode),
         ("live_route_epoch_proof_verdict={0}" -f $liveRouteProof.Verdict),
         ("live_route_epoch_metadata_missing_count={0}" -f $liveRouteProof.MetadataMissingCount),

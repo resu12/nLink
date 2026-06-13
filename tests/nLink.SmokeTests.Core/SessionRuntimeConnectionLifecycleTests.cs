@@ -3549,6 +3549,134 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public void SessionRuntime_BridgeReceiveStallRecoveryExhausted_SuppressesSiblingPostTunaFallbackExhaustionDuringActiveProgressDeferral()
+    {
+        var scripted = new ScriptedSignalingTransport();
+        using var runtime = new SessionRuntime(() => scripted);
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        var securityState = CreateApprovedSecurityState(
+            new PeerAddress(scripted.LocalPeerAddress),
+            new PeerAddress("scripted.helpee.bridge-exhausted-post-tuna-sibling"));
+        var sessionId = securityState.SessionId!.Value.Value;
+        scripted.SetSessionSecurityStateForTests(securityState);
+        InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
+        SetLatestFileTransferSnapshot(runtime, CreatePostTunaFallbackTransfer(sessionId, "ft_post_tuna_sibling"));
+        var disconnectedCount = 0;
+        runtime.Disconnected += (_, _) => disconnectedCount++;
+
+        RaiseBridgeExhausted(runtime, "post_tuna_fallback_stale_state_refresh_send_retired_recovery_failed");
+        RaiseBridgeExhausted(runtime, "post_tuna_fallback_state_refresh_failed_recovery_failed");
+
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.Equal("Connected", runtime.StatusText);
+        Assert.False(runtime.LastDisconnectWasRemoteEnd);
+        Assert.Equal(0, disconnectedCount);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void SessionRuntime_BridgeReceiveStallRecoveryExhausted_TerminalizesPostTunaSiblingAfterDeferralExpires()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var scripted = new ScriptedSignalingTransport();
+        using var runtime = new SessionRuntime(() => scripted, SessionRuntimeWatchdogOptions.Default, nowProvider: () => now);
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        var securityState = CreateApprovedSecurityState(
+            new PeerAddress(scripted.LocalPeerAddress),
+            new PeerAddress("scripted.helpee.bridge-exhausted-post-tuna-expired"));
+        var sessionId = securityState.SessionId!.Value.Value;
+        scripted.SetSessionSecurityStateForTests(securityState);
+        InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
+        SetLatestFileTransferSnapshot(runtime, CreatePostTunaFallbackTransfer(sessionId, "ft_post_tuna_expired"));
+        var disconnectedCount = 0;
+        runtime.Disconnected += (_, _) => disconnectedCount++;
+
+        RaiseBridgeExhausted(runtime, "post_tuna_fallback_stale_state_refresh_send_retired_recovery_failed");
+        now = now.AddSeconds(36);
+        RaiseBridgeExhausted(runtime, "post_tuna_fallback_state_refresh_failed_recovery_failed");
+
+        Assert.Equal(SessionRuntimeState.Failed, runtime.State);
+        Assert.Equal("Connection lost.", runtime.StatusText);
+        Assert.False(runtime.LastDisconnectWasRemoteEnd);
+        Assert.Equal(1, disconnectedCount);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void SessionRuntime_BridgeReceiveStallRecoveryExhausted_ReceiveResumedKeepsSuppressedSiblingFromDisconnecting()
+    {
+        var scripted = new ScriptedSignalingTransport();
+        using var runtime = new SessionRuntime(() => scripted);
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        var securityState = CreateApprovedSecurityState(
+            new PeerAddress(scripted.LocalPeerAddress),
+            new PeerAddress("scripted.helpee.bridge-exhausted-post-tuna-resumed"));
+        var sessionId = securityState.SessionId!.Value.Value;
+        scripted.SetSessionSecurityStateForTests(securityState);
+        InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
+        SetLatestFileTransferSnapshot(runtime, CreatePostTunaFallbackTransfer(sessionId, "ft_post_tuna_resumed"));
+        var disconnectedCount = 0;
+        runtime.Disconnected += (_, _) => disconnectedCount++;
+
+        RaiseBridgeExhausted(runtime, "post_tuna_fallback_stale_state_refresh_send_retired_recovery_failed");
+        RaiseBridgeExhausted(runtime, "post_tuna_fallback_state_refresh_failed_recovery_failed");
+        InvokePrivateMethod(
+            runtime,
+            "OnBridgeLifecycle",
+            null,
+            new BridgeLifecycleEvent(
+                BridgeLifecycleEventKind.ReceiveStallRecoveryReceiveResumed,
+                StartMode: null,
+                Pid: null,
+                ReadyTimeMs: null,
+                PingRttMs: null,
+                UptimeMs: null,
+                ExitCode: null,
+                ExitReasonKind: null,
+                ExitReasonText: "post_tuna_fallback_state_refresh_failed_recovery_resumed"));
+
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.Equal("Connected", runtime.StatusText);
+        Assert.Equal(0, disconnectedCount);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void SessionRuntime_BridgeReceiveStallRecoveryExhausted_DoesNotSuppressUnrelatedPostTunaTransfer()
+    {
+        var scripted = new ScriptedSignalingTransport();
+        using var runtime = new SessionRuntime(() => scripted);
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        var securityState = CreateApprovedSecurityState(
+            new PeerAddress(scripted.LocalPeerAddress),
+            new PeerAddress("scripted.helpee.bridge-exhausted-post-tuna-unrelated"));
+        var sessionId = securityState.SessionId!.Value.Value;
+        scripted.SetSessionSecurityStateForTests(securityState);
+        InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
+        SetLatestFileTransferSnapshot(runtime, CreatePostTunaFallbackTransfer(sessionId, "ft_post_tuna_first"));
+        var disconnectedCount = 0;
+        runtime.Disconnected += (_, _) => disconnectedCount++;
+
+        RaiseBridgeExhausted(runtime, "post_tuna_fallback_stale_state_refresh_send_retired_recovery_failed");
+        SetLatestFileTransferSnapshot(runtime, CreatePostTunaFallbackTransfer(sessionId, "ft_post_tuna_second"));
+        RaiseBridgeExhausted(runtime, "post_tuna_fallback_state_refresh_failed_recovery_failed");
+
+        Assert.Equal(SessionRuntimeState.Failed, runtime.State);
+        Assert.Equal("Connection lost.", runtime.StatusText);
+        Assert.False(runtime.LastDisconnectWasRemoteEnd);
+        Assert.Equal(1, disconnectedCount);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public void SessionRuntime_DisconnectAfterMappedFail_KeepsMappedStatusText()
     {
         using var scripted = new ScriptedSignalingTransport();
@@ -3598,6 +3726,52 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
         Assert.Equal(SessionRuntimeState.Connected, runtime.State);
         Assert.Equal("Connected", runtime.StatusText);
     }
+
+    private static FileTransferTransferSnapshot CreatePostTunaFallbackTransfer(string sessionId, string transferId)
+        => new(
+            sessionId,
+            transferId,
+            FileTransferDirection.Inbound,
+            FileTransferTransferState.Receiving,
+            "post-tuna-fallback-progress.bin",
+            128L * 1024L * 1024L,
+            Sha256Base64: null,
+            BytesTransferred: 18_432_000,
+            ChunksTransferred: 858,
+            ChunkCount: 6242,
+            ChunkSizeBytes: 21_504,
+            ErrorCode: null,
+            StatusMessage: "Receiving...",
+            RouteToken: "post_tuna_fallback_v6",
+            ProtocolVersion: FileTransferProtocol.ProtocolVersionV6);
+
+    private static void SetLatestFileTransferSnapshot(SessionRuntime runtime, FileTransferTransferSnapshot transfer)
+    {
+        var snapshot = transfer.Direction == FileTransferDirection.Outbound
+            ? new SessionFileTransferSnapshot(Outbound: transfer, Inbound: null)
+            : new SessionFileTransferSnapshot(Outbound: null, Inbound: transfer);
+        InvokePrivateMethod(
+            runtime,
+            "OnFileTransferChanged",
+            runtime,
+            new SessionFileTransferSnapshotChangedEventArgs(snapshot));
+    }
+
+    private static void RaiseBridgeExhausted(SessionRuntime runtime, string reason)
+        => InvokePrivateMethod(
+            runtime,
+            "OnBridgeLifecycle",
+            null,
+            new BridgeLifecycleEvent(
+                BridgeLifecycleEventKind.ReceiveStallRecoveryExhausted,
+                StartMode: null,
+                Pid: null,
+                ReadyTimeMs: null,
+                PingRttMs: null,
+                UptimeMs: null,
+                ExitCode: null,
+                ExitReasonKind: null,
+                ExitReasonText: reason));
 
     private static async Task<DirectHelpRequestFixture> CreateDirectHelpRequestFixtureAsync(string scenario)
     {

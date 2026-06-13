@@ -8141,6 +8141,16 @@ public sealed partial class SessionRuntime
             return;
         }
 
+        var sessionIdSnapshot = GetApprovedSessionIdForLiveness();
+        if (!string.IsNullOrWhiteSpace(sessionIdSnapshot) &&
+            TrySuppressBridgeReceiveStallRecoveryExhaustedForSiblingDeferral(
+                sessionIdSnapshot,
+                bridgeReason,
+                nowProvider()))
+        {
+            return;
+        }
+
         LocalOperationalLog.Warn(
             "Session",
             $"event=peer_liveness_visible_disconnect; reason=receive_stall_recovery_exhausted; bridge_reason={bridgeReason}; role={role}; state={state}; transport_state={transportState}; run_id={GetRunIdForLog()}; session_id={GetSessionIdForLog()}; scenario={GetScenarioForLog()}");

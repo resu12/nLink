@@ -70,14 +70,18 @@ function Get-FileTransferBridgeLivenessIntegrationProof {
         $_.EventName -eq 'bridge_receive_stall_recovery_exhausted' -or
         $_.EventName -eq 'nkn_bridge_receive_stall_recovery_exhausted_for_filetransfer'
     })
+    [object[]]$siblingSuppressedEvents = @($events | Where-Object { $_.EventName -eq 'bridge_receive_stall_recovery_exhausted_suppressed_by_sibling_deferral' })
+    [object[]]$siblingExpiredEvents = @($events | Where-Object { $_.EventName -eq 'bridge_receive_stall_recovery_exhausted_sibling_deferral_expired' })
 
     $findings = New-Object System.Collections.Generic.List[string]
     $evidence = New-Object System.Collections.Generic.List[object]
     $activeAuthorities = @{}
     $pendingStaleDeferrals = New-Object System.Collections.Generic.List[object]
+    $pendingSiblingDeferrals = New-Object System.Collections.Generic.List[object]
     $timeoutDuringValidRecovery = 0
     $staleDeferralCount = 0
     $exhaustedWithoutProofCount = 0
+    $terminalDuringValidSiblingDeferralCount = 0
 
     foreach ($event in @($events | Sort-Object Sequence)) {
         $eventName = [string]$event.EventName
@@ -114,6 +118,12 @@ function Get-FileTransferBridgeLivenessIntegrationProof {
             }
         }
 
+        if (($eventName -eq 'bridge_receive_stall_recovery_exhausted_deferred_for_filetransfer_recovery' -or
+             $eventName -eq 'bridge_receive_stall_recovery_exhausted_deferred_for_active_filetransfer_progress') -and
+            (Get-FileTransferEventField -Event $event -Name 'bridge_reason' -Default '') -like '*post_tuna_fallback*') {
+            $pendingSiblingDeferrals.Add($event) | Out-Null
+        }
+
         if ($pendingStaleDeferrals.Count -gt 0 -and
             ($eventName -eq 'filetransfer_fallback_leg_authority_checkpoint_accepted' -or
              $eventName -eq 'filetransfer_fallback_leg_authority_completed' -or
@@ -144,6 +154,31 @@ function Get-FileTransferBridgeLivenessIntegrationProof {
                     $pendingStaleDeferrals.RemoveAt($pendingIndex)
                 }
             }
+        }
+
+        if ($pendingSiblingDeferrals.Count -gt 0 -and
+            ($eventName -eq 'bridge_receive_stall_recovery_exhausted_sibling_deferral_expired' -or
+             $eventName -eq 'bridge_receive_stall_recovery_receive_resumed' -or
+             $eventName -eq 'nkn_bridge_receive_stall_recovery_receive_resumed' -or
+             $eventName -eq 'filetransfer_fallback_leg_authority_checkpoint_accepted' -or
+             $eventName -eq 'filetransfer_fallback_leg_authority_completed')) {
+            $pendingSiblingDeferrals.Clear()
+        }
+
+        if ($pendingSiblingDeferrals.Count -gt 0 -and
+            ($eventName -eq 'peer_liveness_visible_disconnect' -or
+             $eventName -eq 'session_liveness_timeout' -or
+             (($eventName -eq 'file_transfer_inbound_terminal' -or
+               $eventName -eq 'file_transfer_outbound_terminal' -or
+               $eventName -eq 'transfer_terminal') -and
+                (Get-FileTransferEventField -Event $event -Name 'error_code' -Default '') -eq 'peer_disconnected'))) {
+            $terminalDuringValidSiblingDeferralCount++
+            $findings.Add(("bridge exhausted terminalized during valid sibling deferral: {0}" -f (Format-FileTransferEvidenceLine -Event $event))) | Out-Null
+            $evidence.Add($event) | Out-Null
+            foreach ($pending in @($pendingSiblingDeferrals.ToArray() | Select-Object -First 3)) {
+                $evidence.Add($pending) | Out-Null
+            }
+            $pendingSiblingDeferrals.Clear()
         }
 
         if ($eventName -eq 'session_liveness_timeout' -and $activeAuthorities.Count -gt 0) {
@@ -188,6 +223,9 @@ function Get-FileTransferBridgeLivenessIntegrationProof {
         RecoveryExhaustedWithoutProofCount = $exhaustedWithoutProofCount
         FallbackLegAuthorityLivenessDeferralCount = $currentDeferralEvents.Count
         StaleDeferralCount = $staleDeferralCount
+        SiblingDeferralSuppressedCount = $siblingSuppressedEvents.Count
+        SiblingDeferralExpiredCount = $siblingExpiredEvents.Count
+        TerminalDuringValidSiblingDeferralCount = $terminalDuringValidSiblingDeferralCount
         Findings = $findings
         EvidenceEvents = @($evidence.ToArray() | Select-Object -First 20)
     }
