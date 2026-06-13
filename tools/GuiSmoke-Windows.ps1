@@ -2432,7 +2432,15 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $phase = 'unknown'
     $reason = 'unknown'
     $listenerReadyUnavailableContradiction = $listenerReady -and ($listenerUnavailable -or $listenerSidecarUnavailable)
-    if ($ErrorMessage.IndexOf('Chat.FileTransfer.Accept', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+    if ($ErrorMessage.IndexOf('Timed out waiting for helpee invite to become ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        $phase = 'preactivation_readiness'
+        $reason = 'helpee_invite_readiness_timeout'
+    }
+    elseif ($ErrorMessage.IndexOf('Helpee reached Connection failed before invite became ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        $phase = 'preactivation_readiness'
+        $reason = 'nkn_bridge_bootstrap_not_ready'
+    }
+    elseif ($ErrorMessage.IndexOf('Chat.FileTransfer.Accept', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         if (-not $tunaActive -and $listenerReadyUnavailableContradiction) {
             $phase = 'preactivation_readiness'
             $reason = 'listener_ready_unavailable_contradiction'

@@ -6506,6 +6506,56 @@ if (-not $result.RegressionFailed) {
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task RunFileTransferRouteAcceptance_Phase5HelpeeInviteReadinessTimeoutRerunsCleanAttempt()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "phase5-helpee-invite-readiness-timeout-rerun-pass");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-helpee-invite-readiness-timeout-rerun-pass");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_LIVE_SWITCH_OFF_HELPEE_64MB_TRANSIENT_SETUP_FAILURE"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_LIVE_SWITCH_OFF_HELPEE_64MB_TRANSIENT_SETUP_PHASE"] = "preactivation_readiness";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_LIVE_SWITCH_OFF_HELPEE_64MB_TRANSIENT_SETUP_REASON"] = "helpee_invite_readiness_timeout";
+
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"Expected helpee invite readiness timeout to require and pass a clean Phase 5 rerun.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+            var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal("PASS", summary["verdict"]);
+            Assert.Equal("1", summary["live-switch-off-helpee-64mb.retry_used"]);
+            Assert.Equal("2", summary["live-switch-off-helpee-64mb.selected_attempt"]);
+            Assert.False(summary.ContainsKey("live-switch-off-helpee-64mb.setup_failure_phase"));
+            Assert.False(summary.ContainsKey("live-switch-off-helpee-64mb.setup_failure_reason"));
+            Assert.Contains("helpee_invite_readiness_timeout", summary["live-switch-off-helpee-64mb.first_failure_reason"], StringComparison.Ordinal);
+            Assert.Equal("none", summary["live-switch-off-helpee-64mb.acceptance_failure_class"]);
+            Assert.True(Directory.Exists(Path.Combine(runRoot, "live-switch-off-helpee-64mb-rerun-1")));
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task RunFileTransferRouteAcceptance_Phase5RegularV4ReceiveRecoveryUnprovenRerunsCleanAttempt()
     {
         if (!OperatingSystem.IsWindows())
