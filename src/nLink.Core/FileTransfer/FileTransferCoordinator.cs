@@ -249,6 +249,77 @@ internal static class FileTransferCoordinator
            !string.IsNullOrWhiteSpace(leg.CheckpointRequestId) &&
            leg.State is FileTransferLegState.CheckpointPending or FileTransferLegState.BridgeRestartPending;
 
+    public static bool IsCurrentPostTunaFallbackLegAwaitingCheckpoint(FileTransferLeg? leg)
+        => IsCurrentPostTunaFallbackLeg(leg) &&
+           !leg!.CanSendData &&
+           leg.State is FileTransferLegState.CheckpointPending or FileTransferLegState.BridgeRestartPending;
+
+    public static bool TryValidateCurrentFallbackCheckpointProof(
+        FileTransferLeg? leg,
+        FileTransferRoute currentRoute,
+        int protocolVersion,
+        int currentLiveRouteEpochId,
+        long proofTransportEpochId,
+        string? proofCheckpointRequestId,
+        out string rejectionReason)
+    {
+        rejectionReason = "ok";
+        if (!IsCurrentPostTunaFallbackLeg(leg))
+        {
+            rejectionReason = "not_current_post_tuna_fallback_leg";
+            return false;
+        }
+
+        if (currentRoute != FileTransferRoute.PostTunaFallbackV6 ||
+            protocolVersion != FileTransferProtocol.ProtocolVersionV6)
+        {
+            rejectionReason = "route_or_protocol_mismatch";
+            return false;
+        }
+
+        if (!IsCurrentPostTunaFallbackLegAwaitingCheckpoint(leg))
+        {
+            rejectionReason = "checkpoint_not_pending";
+            return false;
+        }
+
+        if (leg!.LiveRouteEpochId > 0 &&
+            currentLiveRouteEpochId > 0 &&
+            currentLiveRouteEpochId != leg.LiveRouteEpochId)
+        {
+            rejectionReason = "live_route_epoch_mismatch";
+            return false;
+        }
+
+        if (leg.TransportEpochId <= 0 ||
+            proofTransportEpochId <= 0 ||
+            proofTransportEpochId != leg.TransportEpochId)
+        {
+            rejectionReason = "transport_epoch_mismatch";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(leg.CheckpointRequestId))
+        {
+            rejectionReason = "checkpoint_request_missing_current_leg";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(proofCheckpointRequestId))
+        {
+            rejectionReason = "checkpoint_request_missing_proof";
+            return false;
+        }
+
+        if (!string.Equals(leg.CheckpointRequestId, proofCheckpointRequestId, StringComparison.Ordinal))
+        {
+            rejectionReason = "checkpoint_request_mismatch";
+            return false;
+        }
+
+        return true;
+    }
+
     public static bool CanTransitionToRoute(
         FileTransferRouteRuntimeDescriptor currentRuntime,
         int negotiatedProtocolVersion,

@@ -1336,6 +1336,9 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             Log(
                 "event=filetransfer_fallback_leg_authority_bridge_recovery_escalated; " +
                 $"trigger={SanitizeLogToken(trigger)}; requested_reason={SanitizeLogToken(requestedReason)}; stall_reason={SanitizeLogToken(stallReason)}; recovery_count={Volatile.Read(ref receiveStallRecoveryCount)}{FormatPostTunaFallbackLegAuthorityFields(authoritySnapshot)}");
+            Log(
+                "event=filetransfer_clean_fallback_bridge_recovery_escalated; " +
+                $"trigger={SanitizeLogToken(trigger)}; requested_reason={SanitizeLogToken(requestedReason)}; stall_reason={SanitizeLogToken(stallReason)}; recovery_count={Volatile.Read(ref receiveStallRecoveryCount)}{FormatPostTunaFallbackLegAuthorityFields(authoritySnapshot)}");
         }
 
         return true;

@@ -296,6 +296,98 @@ public sealed partial class NknSignalingTransport
             .ConfigureAwait(false);
     }
 
+    public async Task<FileTransferControlPlaneDeliveryResult> SendFileTransferControlPlaneFrameAsync(
+        FileTransferControlPlaneDeliveryRequest request,
+        CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ThrowIfDisposed();
+
+        var frame = request.Frame ?? throw new ArgumentException("Control-plane frame is required.", nameof(request));
+        var normalizedTransferId = NormalizeRequiredFileTransferId(frame.TransferId);
+        if (!string.Equals(normalizedTransferId, frame.TransferId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Control-plane frame transfer id is not normalized.");
+        }
+
+        if (!TryGetCurrentEnvelopeCode(out var envelopeCode))
+        {
+            NknRuntimeDiagnostics.SetLastError("filetransfer_control_plane_no_session_context");
+            Log("SendFileTransferControlPlaneFrameAsync failed (reason=no_session_context)");
+            throw new InvalidOperationException("Session context is not set.");
+        }
+
+        if (string.IsNullOrWhiteSpace(remoteEndpoint))
+        {
+            NknRuntimeDiagnostics.SetLastError("filetransfer_control_plane_no_remote_endpoint");
+            Log("SendFileTransferControlPlaneFrameAsync failed (reason=no_remote_endpoint)");
+            throw new InvalidOperationException("Remote endpoint is not known yet.");
+        }
+
+        var serializedFrame = SerializeFileTransferDataFrameForWire(frame);
+        var controlPayload = CreateSecureFileTransferPayload(
+            MsgType.FileTransferDataFrame,
+            normalizedTransferId,
+            serializedFrame);
+        var controlEnvelope = CreateEnvelope(envelopeCode, MsgType.FileTransferDataFrame, controlPayload, replyTo: null);
+
+        Envelope? bulkEnvelope = null;
+        if (!string.IsNullOrWhiteSpace(remoteBulkEndpoint))
+        {
+            var bulkPayload = CreateSecureFileTransferPayload(
+                MsgType.FileTransferDataFrame,
+                normalizedTransferId,
+                serializedFrame,
+                useBulkIdentity: true);
+            bulkEnvelope = CreateEnvelope(envelopeCode, MsgType.FileTransferDataFrame, bulkPayload, replyTo: null);
+        }
+
+        var result = await SendLifecycleEnvelopeAsync(
+                new LifecycleDeliveryOptions(
+                    MessageType: MsgType.FileTransferDataFrame,
+                    RequestId: request.CheckpointRequestId ?? normalizedTransferId,
+                    ControlDestination: remoteEndpoint,
+                    BulkDestination: remoteBulkEndpoint,
+                    LogCategory: "SessionSecurity",
+                    LogEvent: "filetransfer_control_plane_delivery",
+                    AllowBulkDuplicate: true,
+                    IgnoreCallerCancellation: request.IgnoreCallerCancellation,
+                    AcceptancePolicy: request.PeerVisibleRequired
+                        ? LifecycleDeliveryAcceptancePolicy.PeerVisibleRequired
+                        : LifecycleDeliveryAcceptancePolicy.AnyAccepted,
+                    UseControlAckRetry: false,
+                    PeerCopyAttempts: Math.Max(1, request.PeerCopyAttempts),
+                    ThrowOnFailure: false),
+                new LifecycleEnvelopeSet(controlEnvelope, bulkEnvelope),
+                ct)
+            .ConfigureAwait(false);
+
+        if (result.AcceptedAny)
+        {
+            TrackOutboundFileTransferDataFrameLifecycle(frame);
+        }
+
+        LocalOperationalLog.Info(
+            "SessionSecurity",
+            $"event=filetransfer_control_plane_delivery_result; transport=nkn; kind={FormatFileTransferControlPlaneKind(request.Kind)}; transfer_id={normalizedTransferId}; session_id={SanitizeLogToken(frame.SessionId)}; route={SanitizeLogToken(request.RouteToken ?? "(none)")}; protocol_version={request.ProtocolVersion}; live_route_epoch={request.LiveRouteEpoch}; leg_generation={request.TransferLegGeneration}; bridge_recovery_generation={request.BridgeRecoveryGeneration}; transport_epoch={request.TransportEpoch}; checkpoint_request_id={SanitizeLogToken(request.CheckpointRequestId ?? "(none)")}; reason={SanitizeLogToken(request.Reason)}; frame_type={SanitizeLogToken(frame.Type)}; msg_id={result.MessageId}; control_queue={(result.ControlQueue ? 1 : 0)}; control_copy={(result.ControlCopy ? 1 : 0)}; bulk_copy={(result.BulkCopy ? 1 : 0)}; peer_visible_any={(result.PeerVisibleAny ? 1 : 0)}; accepted_any={(result.AcceptedAny ? 1 : 0)}; local_only_rejected={(result.ControlQueue && !result.PeerVisibleAny && request.PeerVisibleRequired ? 1 : 0)}; control_queue_error={result.ControlQueueErrorName}; control_copy_error={result.ControlCopyErrorName}; bulk_copy_error={result.BulkCopyErrorName}");
+
+        return new FileTransferControlPlaneDeliveryResult(
+            request.Kind,
+            normalizedTransferId,
+            frame.SessionId,
+            result.MessageId,
+            result.ControlQueue,
+            result.ControlAck,
+            result.ControlCopy,
+            result.BulkCopy,
+            result.PeerVisibleAny,
+            result.AcceptedAny,
+            result.ControlQueueErrorName,
+            result.ControlAckErrorName,
+            result.ControlCopyErrorName,
+            result.BulkCopyErrorName);
+    }
+
     public Task<IFileTransferDataSession> OpenFileTransferDataSessionAsync(string sessionId, string transferId, CancellationToken ct)
     {
         ThrowIfDisposed();
@@ -401,6 +493,23 @@ public sealed partial class NknSignalingTransport
 
     private static ControlOutboundLane ResolveControlOutboundLane(MsgType messageType, bool isLowPriorityMouseMove = false)
         => ControlOutboundQueue.ResolveLane(messageType, isLowPriorityMouseMove);
+
+    private static string FormatFileTransferControlPlaneKind(FileTransferControlPlaneKind kind)
+        => kind switch
+        {
+            FileTransferControlPlaneKind.RouteEpoch => "route_epoch",
+            FileTransferControlPlaneKind.FallbackCheckpointRequest => "fallback_checkpoint_request",
+            FileTransferControlPlaneKind.FallbackCheckpointProof => "fallback_checkpoint_proof",
+            FileTransferControlPlaneKind.ReceiverState => "receiver_state",
+            FileTransferControlPlaneKind.FrontierRequest => "frontier_request",
+            FileTransferControlPlaneKind.RuntimeUnlockOffer => "runtime_unlock_offer",
+            FileTransferControlPlaneKind.RuntimeUnlockAnswer => "runtime_unlock_answer",
+            FileTransferControlPlaneKind.RuntimeUnlockAnswerAck => "runtime_unlock_answer_ack",
+            FileTransferControlPlaneKind.TransferCancel => "transfer_cancel",
+            FileTransferControlPlaneKind.SessionEnd => "session_end",
+            FileTransferControlPlaneKind.LivenessProof => "liveness_proof",
+            _ => "unknown",
+        };
 
     private async Task SendFileTransferEnvelopeAsync(
         MsgType messageType,

@@ -16,7 +16,7 @@ using NLink.Core.SessionSecurity;
 namespace NLink.Infra.Nkn;
 
 #pragma warning disable CS0067
-public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, ISessionLivenessSignalingTransport, ISessionRecoveryStateContract, ITransportAccelerationStatus, ITransportAccelerationControl, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IScreenShareTransportBackpressureProbe, IScreenShareTransportPolicyController, IFileTransferSignalingTransport, IFileTransferSessionContextProvider, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferRecoveryLivenessState, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRouteCompletionObserver, IRuntimeUnlockRouteCommitProofProvider, IAuthoritativeConnectedAddressSource
+public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, ISessionLivenessSignalingTransport, ISessionRecoveryStateContract, ITransportAccelerationStatus, ITransportAccelerationControl, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IScreenShareTransportBackpressureProbe, IScreenShareTransportPolicyController, IFileTransferSignalingTransport, IFileTransferSessionContextProvider, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferControlPlaneDeliveryTransport, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferRecoveryLivenessState, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRouteCompletionObserver, IRuntimeUnlockRouteCommitProofProvider, IAuthoritativeConnectedAddressSource
 {
     private readonly record struct FileTransferV6TransportEpochKey(
         string SessionId,
@@ -2207,14 +2207,47 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
                 effectiveCt);
         }
 
-        var controlQueueResult = await controlQueueTask.ConfigureAwait(false);
-        var controlAckResult = controlAckTask is null
-            ? new LifecycleCopySendResult("control_ack", false, null)
-            : await controlAckTask.ConfigureAwait(false);
-        var controlCopyResult = await controlCopyTask.ConfigureAwait(false);
-        var bulkCopyResult = bulkCopyTask is null
-            ? new LifecycleCopySendResult("bulk_copy", false, null)
-            : await bulkCopyTask.ConfigureAwait(false);
+        LifecycleCopySendResult controlQueueResult;
+        LifecycleCopySendResult controlAckResult;
+        LifecycleCopySendResult controlCopyResult;
+        LifecycleCopySendResult bulkCopyResult;
+        if (options.AcceptancePolicy == LifecycleDeliveryAcceptancePolicy.PeerVisibleRequired)
+        {
+            controlCopyResult = await controlCopyTask.ConfigureAwait(false);
+            bulkCopyResult = bulkCopyTask is null
+                ? new LifecycleCopySendResult("bulk_copy", false, null)
+                : await bulkCopyTask.ConfigureAwait(false);
+
+            var peerCopySucceeded = controlCopyResult.Succeeded || bulkCopyResult.Succeeded;
+            controlAckResult = controlAckTask is null
+                ? new LifecycleCopySendResult("control_ack", false, null)
+                : peerCopySucceeded
+                    ? await WaitForLifecycleBoundedCopyResultAsync(
+                            controlAckTask,
+                            options,
+                            "control_ack",
+                            effectiveCt)
+                        .ConfigureAwait(false)
+                    : await controlAckTask.ConfigureAwait(false);
+
+            controlQueueResult = await WaitForLifecycleBoundedCopyResultAsync(
+                    controlQueueTask,
+                    options,
+                    "control_queue",
+                    effectiveCt)
+                .ConfigureAwait(false);
+        }
+        else
+        {
+            controlQueueResult = await controlQueueTask.ConfigureAwait(false);
+            controlAckResult = controlAckTask is null
+                ? new LifecycleCopySendResult("control_ack", false, null)
+                : await controlAckTask.ConfigureAwait(false);
+            controlCopyResult = await controlCopyTask.ConfigureAwait(false);
+            bulkCopyResult = bulkCopyTask is null
+                ? new LifecycleCopySendResult("bulk_copy", false, null)
+                : await bulkCopyTask.ConfigureAwait(false);
+        }
 
         var peerVisibleAny = controlAckResult.Succeeded || controlCopyResult.Succeeded || bulkCopyResult.Succeeded;
         var acceptedAny = options.AcceptancePolicy == LifecycleDeliveryAcceptancePolicy.PeerVisibleRequired
@@ -2251,6 +2284,37 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         }
 
         return result;
+    }
+
+    private async Task<LifecycleCopySendResult> WaitForLifecycleBoundedCopyResultAsync(
+        Task<LifecycleCopySendResult> copyTask,
+        LifecycleDeliveryOptions options,
+        string lane,
+        CancellationToken ct)
+    {
+        if (copyTask.IsCompleted)
+        {
+            return await copyTask.ConfigureAwait(false);
+        }
+
+        Task delayTask;
+        try
+        {
+            delayTask = Task.Delay(ControlPlaneLifecycleCopyTimeout, ct);
+            if (await Task.WhenAny(copyTask, delayTask).ConfigureAwait(false) == copyTask)
+            {
+                return await copyTask.ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException ex)
+        {
+            return new LifecycleCopySendResult(lane, false, ex);
+        }
+
+        LocalOperationalLog.Warn(
+            lane == "control_queue" ? "SessionSecurity" : options.LogCategory,
+            $"event={options.LogEvent}_{lane}_bounded_wait_expired; transport=nkn; message_type={MapControlPlaneLifecycleMessageType(options.MessageType)}; timeout_ms={(int)ControlPlaneLifecycleCopyTimeout.TotalMilliseconds}");
+        return new LifecycleCopySendResult(lane, false, new TimeoutException());
     }
 
     private async Task<LifecycleCopySendResult> SendLifecycleControlQueueCopyAsync(
@@ -2367,6 +2431,9 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             MsgType.ScreenShareStop => "screenshare_stop",
             MsgType.SessionEnd => "session_end",
             MsgType.FileTransferCancel => "file_transfer_cancel",
+            MsgType.TransportAccelerationOffer => "transport_acceleration_offer",
+            MsgType.TransportAccelerationAnswer => "transport_acceleration_answer",
+            MsgType.TransportAccelerationAnswerAck => "transport_acceleration_answer_ack",
             _ => messageType.ToString(),
         };
 

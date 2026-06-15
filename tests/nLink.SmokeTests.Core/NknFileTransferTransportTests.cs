@@ -30,6 +30,27 @@ namespace NLink.SmokeTests;
 public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
 {
     [Fact]
+    public void NknTransport_AdvertisesFileTransferControlPlaneDeliveryTransport()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var options = NknTransportOptions.Load();
+            var client = new FakeNknClient("filetransfer.control-plane.interface.address");
+            using var transport = new NknSignalingTransport(
+                client,
+                options,
+                new NknIdentity("filetransfer-control-plane-interface", client.Address));
+
+            Assert.IsAssignableFrom<IFileTransferControlPlaneDeliveryTransport>(transport);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
     public async Task NknTransport_SessionHeartbeat_ControlAckRaisesLivenessProof()
     {
         FakeNknClient.ResetNetwork();

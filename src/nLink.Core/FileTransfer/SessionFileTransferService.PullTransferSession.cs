@@ -1827,22 +1827,17 @@ public sealed partial class SessionFileTransferService
         FileTransferTransportHandoffKind handoffKind,
         FileTransferTransportKind targetTransport)
     {
-        var normalizedReason = NormalizeReason(reason);
-        if (string.IsNullOrWhiteSpace(normalizedReason) ||
-            normalizedReason.Contains("activation", StringComparison.OrdinalIgnoreCase) ||
-            IsTunaActivationNegotiationTransportPauseReason(normalizedReason))
-        {
-            return false;
-        }
-
-        return routeRuntime.UsesRegularNknV4FastRuntime &&
-            IsTunaFallbackTransportPauseReason(normalizedReason) &&
-            FileTransferCoordinator.CanTransitionToRoute(
-                routeRuntime,
-                negotiatedProtocolVersion,
-                FileTransferRoute.PostTunaFallbackV6,
-                handoffKind,
-                targetTransport);
+        // A post-Tuna fallback leg is valid only after this transfer has actually
+        // committed a file_tuna_v4 runtime leg. Treat fallback-shaped transport
+        // events during plain regular V4 as activation/setup noise, otherwise a
+        // stale sidecar state can poison a regular transfer into fallback V6
+        // before file metadata or Tuna proof exists.
+        _ = routeRuntime;
+        _ = negotiatedProtocolVersion;
+        _ = reason;
+        _ = handoffKind;
+        _ = targetTransport;
+        return false;
     }
 
     private bool TryPromoteOutboundFileTunaV4FallbackToPostTunaV6Locked(
@@ -3056,7 +3051,7 @@ public sealed partial class SessionFileTransferService
             }
 
             var now = DateTimeOffset.UtcNow;
-            var transportEpoch = context.V6TransportEpoch?.EpochId ?? Math.Max(0, context.PullTransportRebindGeneration);
+            var transportEpoch = ResolveOutboundV6SparseRuntimeStateRefreshTransportEpoch(context);
             var epochState = context.V6TransportEpoch is null ? "none" : FormatV6TransportEpochState(context.V6TransportEpoch.State);
             var committed = Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, Math.Max(0, context.ChunkCount));
             request = CreateOutboundV4SparseRuntimeStateRefreshRequestLocked(
@@ -3143,6 +3138,7 @@ public sealed partial class SessionFileTransferService
         context.V6RequestedChunkMetadataByChunkIndex.Clear();
         context.V6AppliedFrontierRequestIds.Clear();
         context.V6PendingEpochRepairRequestIds.Clear();
+        ClearOutboundFallbackCheckpointRepairAuthorityLocked(context);
         context.V6CurrentNormalRequestKey = null;
         context.V6ChunkSendsInFlight.Clear();
         context.SentAwaitingAck.Clear();

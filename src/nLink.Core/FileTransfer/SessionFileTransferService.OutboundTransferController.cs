@@ -630,10 +630,34 @@ public sealed partial class SessionFileTransferService
                     TransferId = transferId,
                     Reason = NormalizeReason(reason),
                 };
-            await dataSession.SendAsync(
+            if (protocolVersion >= FileTransferProtocol.ProtocolVersionV6)
+            {
+                var request = new FileTransferControlPlaneDeliveryRequest(
+                    FileTransferControlPlaneKind.TransferCancel,
                     frame,
-                    timeout.Token)
-                .ConfigureAwait(false);
+                    source)
+                {
+                    RouteToken = FileTransferRouteResolver.PostTunaFallbackV6Token,
+                    ProtocolVersion = protocolVersion,
+                    TransportEpoch = Math.Max(0, transportEpoch),
+                    PeerVisibleRequired = true,
+                    IgnoreCallerCancellation = string.Equals(reason, "session_end", StringComparison.OrdinalIgnoreCase),
+                    PeerCopyAttempts = 2,
+                };
+                await SendFileTransferControlPlaneOrDataSessionAsync(
+                        dataSession,
+                        request,
+                        timeout.Token)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                await dataSession.SendAsync(
+                        frame,
+                        timeout.Token)
+                    .ConfigureAwait(false);
+            }
+
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=filetransfer_cancel_data_frame_sent; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; protocol_version={protocolVersion}; transport_epoch={Math.Max(0, transportEpoch)}; source={source}");

@@ -4865,9 +4865,10 @@ public sealed partial class SessionFileTransferService
             var now = DateTimeOffset.UtcNow;
             var postTunaFallbackCheckpoint =
                 context.RouteRuntime.UsesPostTunaFallbackV6Runtime &&
-                string.Equals(reason, V6RegularNknStateRefreshRecoveryMode, StringComparison.Ordinal) &&
-                IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg) &&
-                !string.IsNullOrWhiteSpace(context.CurrentTransferLeg!.CheckpointRequestId);
+                !string.IsNullOrWhiteSpace(context.CurrentTransferLeg?.CheckpointRequestId) &&
+                (IsCurrentPostTunaFallbackLegCheckpointPending(context.CurrentTransferLeg) ||
+                 string.Equals(reason, V6RegularNknStateRefreshRecoveryMode, StringComparison.Ordinal) &&
+                 IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg));
             var receiverStateRetryInterval = TimeSpan.FromMilliseconds(V6ReceiverStateRetryIntervalMs);
             if (forceSend &&
                 !terminalReady &&
@@ -4953,7 +4954,37 @@ public sealed partial class SessionFileTransferService
 
         try
         {
-            await dataSession.SendAsync(state, context.LifetimeCts.Token).ConfigureAwait(false);
+            FileTransferControlPlaneDeliveryRequest? controlPlaneRequest = null;
+            lock (gate)
+            {
+                if (ReferenceEquals(inboundTransfer, context) &&
+                    !context.IsTerminal &&
+                    ShouldUseFallbackControlPlaneForInboundFrame(context, state))
+                {
+                    var kind = string.Equals(state.RecoveryMode, V6RegularNknStateRefreshRecoveryMode, StringComparison.Ordinal)
+                        ? FileTransferControlPlaneKind.FallbackCheckpointProof
+                        : FileTransferControlPlaneKind.ReceiverState;
+                    controlPlaneRequest = CreateInboundControlPlaneDeliveryRequestLocked(
+                        context,
+                        kind,
+                        state,
+                        reason);
+                }
+            }
+
+            if (controlPlaneRequest is not null)
+            {
+                await SendFileTransferControlPlaneOrDataSessionAsync(
+                        dataSession,
+                        controlPlaneRequest,
+                        context.LifetimeCts.Token)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                await dataSession.SendAsync(state, context.LifetimeCts.Token).ConfigureAwait(false);
+            }
+
             var requestedChunkCount = 0;
             foreach (var range in state.MissingRanges)
             {
@@ -5201,7 +5232,34 @@ public sealed partial class SessionFileTransferService
 
         try
         {
-            await dataSession.SendAsync(request, context.LifetimeCts.Token).ConfigureAwait(false);
+            FileTransferControlPlaneDeliveryRequest? controlPlaneRequest = null;
+            lock (gate)
+            {
+                if (ReferenceEquals(inboundTransfer, context) &&
+                    !context.IsTerminal &&
+                    ShouldUseFallbackControlPlaneForInboundFrame(context, request))
+                {
+                    controlPlaneRequest = CreateInboundControlPlaneDeliveryRequestLocked(
+                        context,
+                        FileTransferControlPlaneKind.FrontierRequest,
+                        request,
+                        reason);
+                }
+            }
+
+            if (controlPlaneRequest is not null)
+            {
+                await SendFileTransferControlPlaneOrDataSessionAsync(
+                        dataSession,
+                        controlPlaneRequest,
+                        context.LifetimeCts.Token)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                await dataSession.SendAsync(request, context.LifetimeCts.Token).ConfigureAwait(false);
+            }
+
             var totalRequestedChunks = request.MissingRanges.Sum(static range => range.ChunkCount);
             LocalOperationalLog.Info(
                 "FileTransferService",

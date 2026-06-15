@@ -293,6 +293,79 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void FallbackV6Checkpoint_RequiresCurrentRequestAndTransportEpoch()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        var activated = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.TunaActivated,
+                tuna,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                "runtime_unlock",
+                FileTransferLegState.Active,
+                canSendData: true,
+                committedChunk: 9,
+                highestObservedChunk: 11),
+            StartRegular(regular).State);
+        var fallbackDecision = FallBack(activated.State, fallback, committedChunk: 9, transportEpoch: 4);
+        var requested = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.FallbackCheckpointRequested,
+                fallback,
+                reason: "checkpoint",
+                state: FileTransferLegState.CheckpointPending,
+                canSendData: false,
+                transportEpoch: 4,
+                checkpointRequestId: "checkpoint:4",
+                checkpointPriority: "state_refresh"),
+            fallbackDecision.State);
+        var leg = requested.State.CurrentLeg;
+
+        Assert.False(FileTransferCoordinator.TryValidateCurrentFallbackCheckpointProof(
+            leg,
+            FileTransferRoute.PostTunaFallbackV6,
+            FileTransferProtocol.ProtocolVersionV6,
+            requested.State.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            proofTransportEpochId: 4,
+            proofCheckpointRequestId: null,
+            out var missingRequestReason));
+        Assert.Equal("checkpoint_request_missing_proof", missingRequestReason);
+
+        Assert.False(FileTransferCoordinator.TryValidateCurrentFallbackCheckpointProof(
+            leg,
+            FileTransferRoute.PostTunaFallbackV6,
+            FileTransferProtocol.ProtocolVersionV6,
+            requested.State.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            proofTransportEpochId: 5,
+            proofCheckpointRequestId: "checkpoint:4",
+            out var transportMismatchReason));
+        Assert.Equal("transport_epoch_mismatch", transportMismatchReason);
+
+        Assert.False(FileTransferCoordinator.TryValidateCurrentFallbackCheckpointProof(
+            leg,
+            FileTransferRoute.PostTunaFallbackV6,
+            FileTransferProtocol.ProtocolVersionV6,
+            requested.State.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            proofTransportEpochId: 4,
+            proofCheckpointRequestId: "checkpoint:old",
+            out var checkpointMismatchReason));
+        Assert.Equal("checkpoint_request_mismatch", checkpointMismatchReason);
+
+        Assert.True(FileTransferCoordinator.TryValidateCurrentFallbackCheckpointProof(
+            leg,
+            FileTransferRoute.PostTunaFallbackV6,
+            FileTransferProtocol.ProtocolVersionV6,
+            requested.State.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            proofTransportEpochId: 4,
+            proofCheckpointRequestId: "checkpoint:4",
+            out var acceptedReason));
+        Assert.Equal("ok", acceptedReason);
+    }
+
+    [Fact]
     public void OffOnOffRouteCycle_UsesStrictlyIncreasingEpochsAndNeverFileTunaV6()
     {
         var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);

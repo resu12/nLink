@@ -185,6 +185,71 @@ public interface IFileTransferSignalingTransport
     Task<IFileTransferDataSession> OpenFileTransferDataSessionAsync(string sessionId, string transferId, CancellationToken ct);
 }
 
+public enum FileTransferControlPlaneKind
+{
+    Unknown = 0,
+    RouteEpoch = 1,
+    FallbackCheckpointRequest = 2,
+    FallbackCheckpointProof = 3,
+    ReceiverState = 4,
+    FrontierRequest = 5,
+    RuntimeUnlockOffer = 6,
+    RuntimeUnlockAnswer = 7,
+    RuntimeUnlockAnswerAck = 8,
+    TransferCancel = 9,
+    SessionEnd = 10,
+    LivenessProof = 11,
+}
+
+public sealed record FileTransferControlPlaneDeliveryRequest(
+    FileTransferControlPlaneKind Kind,
+    FileTransferDataFrame Frame,
+    string Reason)
+{
+    public string? RouteToken { get; init; }
+
+    public int ProtocolVersion { get; init; }
+
+    public int LiveRouteEpoch { get; init; }
+
+    public int TransferLegGeneration { get; init; }
+
+    public int BridgeRecoveryGeneration { get; init; }
+
+    public long TransportEpoch { get; init; }
+
+    public string? CheckpointRequestId { get; init; }
+
+    public bool PeerVisibleRequired { get; init; } = true;
+
+    public bool IgnoreCallerCancellation { get; init; }
+
+    public int PeerCopyAttempts { get; init; } = 1;
+}
+
+public sealed record FileTransferControlPlaneDeliveryResult(
+    FileTransferControlPlaneKind Kind,
+    string TransferId,
+    string SessionId,
+    string MessageId,
+    bool ControlQueue,
+    bool ControlAck,
+    bool ControlCopy,
+    bool BulkCopy,
+    bool PeerVisibleAny,
+    bool AcceptedAny,
+    string ControlQueueErrorName,
+    string ControlAckErrorName,
+    string ControlCopyErrorName,
+    string BulkCopyErrorName);
+
+public interface IFileTransferControlPlaneDeliveryTransport
+{
+    Task<FileTransferControlPlaneDeliveryResult> SendFileTransferControlPlaneFrameAsync(
+        FileTransferControlPlaneDeliveryRequest request,
+        CancellationToken ct);
+}
+
 public sealed record FileTransferReceivedDataFrame(
     FileTransferDataFrame Frame,
     FileTransferTransportKind TransportKind,
