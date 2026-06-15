@@ -292,7 +292,8 @@ function Test-FileTransferRouteAwareEvent {
 function Test-FileTransferLegHistoryRouteEvent {
     param([Parameter(Mandatory = $true)]$Event)
 
-    return $Event.EventName -eq 'filetransfer_leg_frozen'
+    return $Event.EventName -eq 'filetransfer_leg_frozen' -or
+        $Event.EventName -eq 'filetransfer_clean_fallback_leg_frozen'
 }
 
 function Test-FileTransferLiveRouteEpochRouteEvent {
@@ -334,6 +335,43 @@ function Test-FileTransferRouteEventSupersededBySelectedRoute {
     if (-not [string]::IsNullOrWhiteSpace($supersededByProtocol) -and
         -not [string]::IsNullOrWhiteSpace($ExpectedProtocol) -and
         $supersededByProtocol -ne $ExpectedProtocol) {
+        return $false
+    }
+
+    return $true
+}
+
+function Test-FileTransferControlPlaneRouteEventSupersededByNewerLiveEpoch {
+    param(
+        [Parameter(Mandatory = $true)]$Event,
+        [Parameter(Mandatory = $true)]$Selected
+    )
+
+    if ($Event.EventName -ne 'filetransfer_control_plane_delivery_result' -and
+        $Event.EventName -ne 'filetransfer_control_plane_delivery_observed') {
+        return $false
+    }
+
+    $eventRoute = Get-FileTransferEventField -Event $Event -Name 'route' -Default ''
+    if ([string]::IsNullOrWhiteSpace($eventRoute)) {
+        return $false
+    }
+
+    $eventLiveRouteEpoch = Get-FileTransferEventInt64Field -Event $Event -Name 'live_route_epoch' -Default 0
+    $selectedLiveRouteEpoch = Get-FileTransferEventInt64Field -Event $Selected -Name 'live_route_epoch' -Default 0
+    if ($eventLiveRouteEpoch -le 0 -or
+        $selectedLiveRouteEpoch -le 0 -or
+        $eventLiveRouteEpoch -ge $selectedLiveRouteEpoch) {
+        return $false
+    }
+
+    $expectedEventProtocol = Get-FileTransferRouteExpectedProtocol -Route $eventRoute
+    if ([string]::IsNullOrWhiteSpace($expectedEventProtocol)) {
+        return $false
+    }
+
+    $eventProtocol = Get-FileTransferEventField -Event $Event -Name 'protocol_version' -Default ''
+    if (-not [string]::IsNullOrWhiteSpace($eventProtocol) -and $eventProtocol -ne $expectedEventProtocol) {
         return $false
     }
 
@@ -645,13 +683,14 @@ function Get-FileTransferRouteConsistency {
 
         $eventRoute = Get-FileTransferEventField -Event $event -Name 'route' -Default ''
         $eventSupersededBySelectedRoute = Test-FileTransferRouteEventSupersededBySelectedRoute -Event $event -SelectedRoute $selectedRoute -ExpectedProtocol $expectedProtocol
+        $eventSupersededByNewerLiveRouteEpoch = Test-FileTransferControlPlaneRouteEventSupersededByNewerLiveEpoch -Event $event -Selected $selected
         if (-not [string]::IsNullOrWhiteSpace($eventRoute) -and $eventRoute -ne $selectedRoute) {
-            if (-not $eventSupersededBySelectedRoute) {
+            if (-not $eventSupersededBySelectedRoute -and -not $eventSupersededByNewerLiveRouteEpoch) {
                 Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding ("route token mismatch: selected_route={0}; event_route={1}; event={2}" -f $selectedRoute, $eventRoute, (Format-FileTransferEvidenceLine -Event $event)) -Event $event
             }
         }
 
-        if ($eventSupersededBySelectedRoute) {
+        if ($eventSupersededBySelectedRoute -or $eventSupersededByNewerLiveRouteEpoch) {
             Add-FileTransferRouteSelfConsistencyFindings -Findings $findings -EvidenceEvents $evidenceEvents -Event $event -Context 'superseded route event'
             continue
         }

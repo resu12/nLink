@@ -1932,6 +1932,186 @@ function Get-FileTransferFallbackTailReconciliationProof {
     }
 }
 
+function Get-FileTransferControlPlaneIsolationProof {
+    param(
+        [Parameter(Mandatory = $true)]$Summary
+    )
+
+    [object[]]$events = @($Summary.TransferEvents)
+    [object[]]$postTunaRouteSelected = @(
+        $events |
+            Where-Object {
+                $_.EventName -eq 'filetransfer_route_selected' -and
+                (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6'
+            }
+    )
+    [object[]]$deliveryResultEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_control_plane_delivery_result' } | Sort-Object Sequence)
+    [object[]]$observedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_control_plane_delivery_observed' } | Sort-Object Sequence)
+    [object[]]$failedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_control_plane_delivery_failed' } | Sort-Object Sequence)
+    [object[]]$unavailableEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_control_plane_delivery_unavailable' } | Sort-Object Sequence)
+    [object[]]$sessionLivenessTimeoutEvents = @($events | Where-Object { $_.EventName -eq 'session_liveness_timeout' } | Sort-Object Sequence)
+    [object[]]$terminalFailureEvents = @(
+        $events |
+            Where-Object {
+                if ($_.EventName -eq 'file_transfer_inbound_terminal' -or
+                    $_.EventName -eq 'file_transfer_outbound_terminal' -or
+                    $_.EventName -eq 'transfer_terminal') {
+                    return (Get-FileTransferEventField -Event $_ -Name 'error_code' -Default '(none)') -ne '(none)'
+                }
+
+                return $false
+            } |
+            Sort-Object Sequence
+    )
+    [object[]]$terminalCompletedEvents = @(
+        $events |
+            Where-Object {
+                ($_.EventName -eq 'file_transfer_inbound_terminal' -or
+                    $_.EventName -eq 'file_transfer_outbound_terminal' -or
+                    $_.EventName -eq 'transfer_terminal') -and
+                (Get-FileTransferEventField -Event $_ -Name 'state' -Default '') -eq 'Completed' -and
+                (Get-FileTransferEventField -Event $_ -Name 'error_code' -Default '(none)') -eq '(none)'
+            } |
+            Sort-Object Sequence
+    )
+
+    [object[]]$peerVisibleEvents = @(
+        $deliveryResultEvents |
+            Where-Object { (Get-FileTransferEventInt64Field -Event $_ -Name 'peer_visible_any' -Default 0) -gt 0 }
+    )
+    [object[]]$localOnlyRejectedEvents = @(
+        $deliveryResultEvents |
+            Where-Object {
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'local_only_rejected' -Default 0) -gt 0 -or
+                (
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'control_queue' -Default 0) -gt 0 -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'peer_visible_any' -Default 0) -le 0 -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'accepted_any' -Default 0) -le 0
+                )
+            }
+    )
+    [object[]]$acceptedFailureEvents = @(
+        $deliveryResultEvents |
+            Where-Object { (Get-FileTransferEventInt64Field -Event $_ -Name 'accepted_any' -Default 0) -le 0 }
+    )
+    [object[]]$checkpointExchangeEvents = @(
+        $deliveryResultEvents |
+            Where-Object {
+                $kind = Get-FileTransferEventField -Event $_ -Name 'kind' -Default ''
+                ($kind -eq 'fallback_checkpoint_request' -or $kind -eq 'fallback_checkpoint_proof') -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'peer_visible_any' -Default 0) -gt 0
+            }
+    )
+    [object[]]$metadataCheckEvents = @(
+        $deliveryResultEvents |
+            Where-Object {
+                $kind = Get-FileTransferEventField -Event $_ -Name 'kind' -Default ''
+                $kind -eq 'fallback_checkpoint_request' -or
+                    $kind -eq 'fallback_checkpoint_proof' -or
+                    $kind -eq 'receiver_state' -or
+                    $kind -eq 'frontier_request'
+            }
+    )
+
+    $metadataMissing = New-Object System.Collections.Generic.List[object]
+    foreach ($event in @($metadataCheckEvents)) {
+        $kind = Get-FileTransferEventField -Event $event -Name 'kind' -Default ''
+        $route = Get-FileTransferEventField -Event $event -Name 'route' -Default ''
+        $protocol = Get-FileTransferEventInt64Field -Event $event -Name 'protocol_version' -Default 0
+        $legGeneration = Get-FileTransferEventInt64Field -Event $event -Name 'leg_generation' -Default 0
+        $liveRouteEpoch = Get-FileTransferEventInt64Field -Event $event -Name 'live_route_epoch' -Default 0
+        $transportEpoch = Get-FileTransferEventInt64Field -Event $event -Name 'transport_epoch' -Default -1
+        $checkpointId = Get-FileTransferEventField -Event $event -Name 'checkpoint_request_id' -Default ''
+        $requiresCheckpointId = $kind -eq 'fallback_checkpoint_request' -or
+            $kind -eq 'fallback_checkpoint_proof' -or
+            $kind -eq 'frontier_request'
+        if ($route -ne 'post_tuna_fallback_v6' -or
+            $protocol -ne 6 -or
+            $legGeneration -le 0 -or
+            $liveRouteEpoch -le 0 -or
+            $transportEpoch -lt 0 -or
+            ($requiresCheckpointId -and
+                ([string]::IsNullOrWhiteSpace($checkpointId) -or
+                    $checkpointId -eq '(none)'))) {
+            $metadataMissing.Add($event) | Out-Null
+        }
+    }
+
+    $timeoutDuringValidExchangeCount = 0
+    if ($postTunaRouteSelected.Count -gt 0 -and
+        $deliveryResultEvents.Count -gt 0 -and
+        $sessionLivenessTimeoutEvents.Count -gt 0) {
+        $timeoutDuringValidExchangeCount = $sessionLivenessTimeoutEvents.Count
+    }
+
+    $findings = New-Object System.Collections.Generic.List[string]
+    $evidence = New-Object System.Collections.Generic.List[object]
+    foreach ($event in @($metadataMissing.ToArray())) {
+        $findings.Add(("control-plane metadata missing: {0}" -f (Format-FileTransferEvidenceLine -Event $event))) | Out-Null
+        $evidence.Add($event) | Out-Null
+    }
+
+    if ($localOnlyRejectedEvents.Count -gt 0) {
+        $findings.Add(("control-plane peer-visible proof rejected local-only delivery count={0}" -f $localOnlyRejectedEvents.Count)) | Out-Null
+        foreach ($event in @($localOnlyRejectedEvents | Select-Object -First 5)) {
+            $evidence.Add($event) | Out-Null
+        }
+    }
+
+    $deliveryFailureCount = $failedEvents.Count + $acceptedFailureEvents.Count
+    $recoveredDeliveryFailureCount = 0
+    if ($deliveryFailureCount -gt 0 -and
+        $checkpointExchangeEvents.Count -gt 0 -and
+        $localOnlyRejectedEvents.Count -eq 0 -and
+        $metadataMissing.Count -eq 0 -and
+        $timeoutDuringValidExchangeCount -eq 0 -and
+        $terminalFailureEvents.Count -eq 0 -and
+        $terminalCompletedEvents.Count -gt 0) {
+        $recoveredDeliveryFailureCount = $deliveryFailureCount
+    }
+
+    if ($deliveryFailureCount -gt 0 -and $recoveredDeliveryFailureCount -eq 0) {
+        $findings.Add(("control-plane delivery failed count={0}" -f $deliveryFailureCount)) | Out-Null
+        foreach ($event in @($failedEvents + $acceptedFailureEvents | Select-Object -First 5)) {
+            $evidence.Add($event) | Out-Null
+        }
+    }
+
+    if ($postTunaRouteSelected.Count -gt 0 -and $checkpointExchangeEvents.Count -eq 0) {
+        $findings.Add('post-Tuna fallback route missing peer-visible control-plane checkpoint exchange') | Out-Null
+        foreach ($event in @($postTunaRouteSelected + $sessionLivenessTimeoutEvents + $terminalFailureEvents | Select-Object -First 8)) {
+            $evidence.Add($event) | Out-Null
+        }
+    }
+
+    if ($timeoutDuringValidExchangeCount -gt 0) {
+        $findings.Add(("session liveness timeout occurred during a fallback control-plane exchange count={0}" -f $timeoutDuringValidExchangeCount)) | Out-Null
+        foreach ($event in @($sessionLivenessTimeoutEvents | Select-Object -First 5)) {
+            $evidence.Add($event) | Out-Null
+        }
+    }
+
+    $verdict = if ($findings.Count -eq 0) { 'pass' } else { 'fail' }
+    if ($postTunaRouteSelected.Count -eq 0 -and $deliveryResultEvents.Count -eq 0 -and $observedEvents.Count -eq 0 -and $failedEvents.Count -eq 0 -and $unavailableEvents.Count -eq 0) {
+        $verdict = 'none'
+    }
+
+    return [pscustomobject]@{
+        Verdict = $verdict
+        DeliveryResultCount = $deliveryResultEvents.Count
+        PeerVisibleCount = $peerVisibleEvents.Count
+        LocalOnlyRejectedCount = $localOnlyRejectedEvents.Count
+        CheckpointExchangeCount = $checkpointExchangeEvents.Count
+        DeliveryFailureCount = $deliveryFailureCount
+        RecoveredDeliveryFailureCount = $recoveredDeliveryFailureCount
+        UnavailableCount = $unavailableEvents.Count
+        MetadataMissingCount = $metadataMissing.Count
+        LivenessTimeoutDuringValidExchangeCount = $timeoutDuringValidExchangeCount
+        Findings = $findings
+        EvidenceEvents = @(@($evidence.ToArray()) + @($deliveryResultEvents) | Select-Object -First 20)
+    }
+}
+
 function New-FileTransferRouteConsistencySummaryLines {
     param(
         [Parameter(Mandatory = $true)]$Summary,
@@ -1976,6 +2156,7 @@ function New-FileTransferRouteConsistencySummaryLines {
     $fallbackAuthorityProof = Get-FileTransferFallbackLegAuthorityProof -TransferEvents $Summary.TransferEvents
     $fallbackTailProof = Get-FileTransferFallbackTailReconciliationProof -Summary $Summary
     $bridgeLivenessProof = Get-FileTransferBridgeLivenessIntegrationProof -Summary $Summary
+    $controlPlaneProof = Get-FileTransferControlPlaneIsolationProof -Summary $Summary
     [object[]]$fallbackAuthoritySequence = @($fallbackAuthorityProof.Sequence)
 
     $lines = New-Object System.Collections.Generic.List[string]
@@ -1996,6 +2177,7 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("live_route_epoch_sequence={0}" -f ($(if ($liveRouteEpochSequence.Length -gt 0) { $liveRouteEpochSequence -join ',' } else { '(none)' })))) | Out-Null
     $lines.Add(("live_route_epoch_route_changes={0}" -f ($(if ($liveRouteEpochRouteChanges.Length -gt 0) { $liveRouteEpochRouteChanges -join ',' } else { '(none)' })))) | Out-Null
     $lines.Add(("fallback_leg_authority_proof_verdict={0}" -f $fallbackAuthorityProof.Verdict)) | Out-Null
+    $lines.Add(("clean_fallback_leg_proof_verdict={0}" -f $fallbackAuthorityProof.Verdict)) | Out-Null
     $lines.Add(("fallback_leg_authority_generation_sequence={0}" -f ($(if ($fallbackAuthoritySequence.Length -gt 0) { $fallbackAuthoritySequence -join ',' } else { '(none)' })))) | Out-Null
     $lines.Add(("fallback_leg_authority_started_count={0}" -f $fallbackAuthorityProof.StartedCount)) | Out-Null
     $lines.Add(("fallback_leg_authority_checkpoint_accepted_count={0}" -f $fallbackAuthorityProof.CheckpointAcceptedCount)) | Out-Null
@@ -2025,6 +2207,16 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("bridge_exhausted_sibling_deferral_suppressed_count={0}" -f $bridgeLivenessProof.SiblingDeferralSuppressedCount)) | Out-Null
     $lines.Add(("bridge_exhausted_sibling_deferral_expired_count={0}" -f $bridgeLivenessProof.SiblingDeferralExpiredCount)) | Out-Null
     $lines.Add(("bridge_exhausted_terminal_during_valid_deferral_count={0}" -f $bridgeLivenessProof.TerminalDuringValidSiblingDeferralCount)) | Out-Null
+    $lines.Add(("control_plane_isolation_verdict={0}" -f $controlPlaneProof.Verdict)) | Out-Null
+    $lines.Add(("control_plane_delivery_result_count={0}" -f $controlPlaneProof.DeliveryResultCount)) | Out-Null
+    $lines.Add(("control_plane_peer_visible_count={0}" -f $controlPlaneProof.PeerVisibleCount)) | Out-Null
+    $lines.Add(("control_plane_local_only_rejected_count={0}" -f $controlPlaneProof.LocalOnlyRejectedCount)) | Out-Null
+    $lines.Add(("control_plane_checkpoint_exchange_count={0}" -f $controlPlaneProof.CheckpointExchangeCount)) | Out-Null
+    $lines.Add(("control_plane_delivery_failure_count={0}" -f $controlPlaneProof.DeliveryFailureCount)) | Out-Null
+    $lines.Add(("control_plane_delivery_failure_recovered_count={0}" -f $controlPlaneProof.RecoveredDeliveryFailureCount)) | Out-Null
+    $lines.Add(("control_plane_unavailable_count={0}" -f $controlPlaneProof.UnavailableCount)) | Out-Null
+    $lines.Add(("control_plane_metadata_missing_count={0}" -f $controlPlaneProof.MetadataMissingCount)) | Out-Null
+    $lines.Add(("control_plane_liveness_timeout_during_valid_exchange_count={0}" -f $controlPlaneProof.LivenessTimeoutDuringValidExchangeCount)) | Out-Null
 
     $index = 0
     foreach ($event in @($routeSelectedEvents | Sort-Object Sequence)) {
@@ -2097,6 +2289,19 @@ function New-FileTransferRouteConsistencySummaryLines {
         foreach ($finding in @($bridgeLivenessProof.Findings)) {
             $bridgeLivenessIndex++
             $lines.Add(("bridge_liveness.{0}={1}" -f $bridgeLivenessIndex, $finding)) | Out-Null
+        }
+    }
+    else {
+        $lines.Add('(none)') | Out-Null
+    }
+
+    $lines.Add('') | Out-Null
+    $lines.Add('control_plane_isolation_findings:') | Out-Null
+    if ($controlPlaneProof.Findings.Count -gt 0) {
+        $controlPlaneIndex = 0
+        foreach ($finding in @($controlPlaneProof.Findings)) {
+            $controlPlaneIndex++
+            $lines.Add(("control_plane.{0}={1}" -f $controlPlaneIndex, $finding)) | Out-Null
         }
     }
     else {
@@ -3569,6 +3774,7 @@ function New-FileTransferStabilityGateSummaryLines {
     $fallbackAuthorityProof = Get-FileTransferFallbackLegAuthorityProof -TransferEvents $Summary.TransferEvents
     $fallbackTailProof = Get-FileTransferFallbackTailReconciliationProof -Summary $Summary
     $bridgeLivenessProof = Get-FileTransferBridgeLivenessIntegrationProof -Summary $Summary
+    $controlPlaneProof = Get-FileTransferControlPlaneIsolationProof -Summary $Summary
 
     return @(
         ("verdict={0}" -f $GateResult.Verdict),
@@ -3594,6 +3800,12 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_transaction_failed_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionFailedCount),
         ("runtime_unlock_transaction_local_only_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionLocalOnlyRejectedCount),
         ("runtime_unlock_transaction_proof_verdict={0}" -f $recoveryClassification.RuntimeUnlockTransactionProofVerdict),
+        ("regular_v4_efficiency_pressure_class={0}" -f $recoveryClassification.RegularV4EfficiencyPressureClass),
+        ("regular_v4_frontier_rebind_count={0}" -f $recoveryClassification.RegularV4FrontierRebindCount),
+        ("regular_v4_frontier_rebind_rejected_count={0}" -f $recoveryClassification.RegularV4FrontierRebindRejectedCount),
+        ("regular_v4_frontier_stall_missing_range_count={0}" -f $recoveryClassification.RegularV4FrontierStallMissingRangeCount),
+        ("regular_v4_repair_requested_count={0}" -f $recoveryClassification.RegularV4RepairRequestedCount),
+        ("regular_v4_repair_cache_pressure_count={0}" -f $recoveryClassification.RegularV4RepairCachePressureCount),
         ("listener_ready_unavailable_contradiction_count={0}" -f $recoveryClassification.ListenerReadyUnavailableContradictionCount),
         ("listener_rearm_required_count={0}" -f $recoveryClassification.ListenerRearmRequiredCount),
         ("listener_rearm_completed_count={0}" -f $recoveryClassification.ListenerRearmCompletedCount),
@@ -3605,6 +3817,12 @@ function New-FileTransferStabilityGateSummaryLines {
         ("classification_fallback_tail_reconciliation_requested_count={0}" -f $recoveryClassification.FallbackTailReconciliationRequestedCount),
         ("classification_fallback_tail_reconciliation_accepted_count={0}" -f $recoveryClassification.FallbackTailReconciliationAcceptedCount),
         ("classification_fallback_tail_normal_zero_credit_state_refresh_count={0}" -f $recoveryClassification.FallbackTailNormalZeroCreditStateRefreshCount),
+        ("classification_control_plane_isolation_verdict={0}" -f $recoveryClassification.ControlPlaneIsolationVerdict),
+        ("classification_control_plane_peer_visible_count={0}" -f $recoveryClassification.ControlPlanePeerVisibleCount),
+        ("classification_control_plane_local_only_rejected_count={0}" -f $recoveryClassification.ControlPlaneLocalOnlyRejectedCount),
+        ("classification_control_plane_checkpoint_exchange_count={0}" -f $recoveryClassification.ControlPlaneCheckpointExchangeCount),
+        ("classification_control_plane_delivery_failure_count={0}" -f $recoveryClassification.ControlPlaneDeliveryFailureCount),
+        ("classification_control_plane_liveness_timeout_during_valid_exchange_count={0}" -f $recoveryClassification.ControlPlaneLivenessTimeoutDuringValidExchangeCount),
         ("hard_failure_count={0}" -f $GateResult.HardFailures.Count),
         ("warning_count={0}" -f $GateResult.Warnings.Count),
         ("warning_cap_policy={0}" -f ($(if ($null -ne $warningCap) { $warningCap.Policy } else { 'strict_small' }))),
@@ -3629,6 +3847,7 @@ function New-FileTransferStabilityGateSummaryLines {
         ("fallback_v6_sender_repair_active_evidence_count={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.SenderRepairActiveEvidenceCount } else { 0 }))),
         ("fallback_v6_sender_still_repairing={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.SenderStillRepairing } else { 0 }))),
         ("fallback_leg_authority_proof_verdict={0}" -f $fallbackAuthorityProof.Verdict),
+        ("clean_fallback_leg_proof_verdict={0}" -f $fallbackAuthorityProof.Verdict),
         ("fallback_leg_authority_started_count={0}" -f $fallbackAuthorityProof.StartedCount),
         ("fallback_leg_authority_checkpoint_accepted_count={0}" -f $fallbackAuthorityProof.CheckpointAcceptedCount),
         ("fallback_leg_authority_bridge_recovery_requested_count={0}" -f $fallbackAuthorityProof.BridgeRecoveryRequestedCount),
@@ -3656,6 +3875,13 @@ function New-FileTransferStabilityGateSummaryLines {
         ("bridge_exhausted_sibling_deferral_suppressed_count={0}" -f $bridgeLivenessProof.SiblingDeferralSuppressedCount),
         ("bridge_exhausted_sibling_deferral_expired_count={0}" -f $bridgeLivenessProof.SiblingDeferralExpiredCount),
         ("bridge_exhausted_terminal_during_valid_deferral_count={0}" -f $bridgeLivenessProof.TerminalDuringValidSiblingDeferralCount),
+        ("control_plane_isolation_verdict={0}" -f $controlPlaneProof.Verdict),
+        ("control_plane_peer_visible_count={0}" -f $controlPlaneProof.PeerVisibleCount),
+        ("control_plane_local_only_rejected_count={0}" -f $controlPlaneProof.LocalOnlyRejectedCount),
+        ("control_plane_checkpoint_exchange_count={0}" -f $controlPlaneProof.CheckpointExchangeCount),
+        ("control_plane_delivery_failure_count={0}" -f $controlPlaneProof.DeliveryFailureCount),
+        ("control_plane_delivery_failure_recovered_count={0}" -f $controlPlaneProof.RecoveredDeliveryFailureCount),
+        ("control_plane_liveness_timeout_during_valid_exchange_count={0}" -f $controlPlaneProof.LivenessTimeoutDuringValidExchangeCount),
         ("next_artifact={0}" -f $GateResult.NextArtifact),
         ("gui_progress_timeout_count={0}" -f $Summary.LiveProgressTimeoutCount),
         ("terminal_missing_after_progress_timeout={0}" -f $Summary.TerminalMissingAfterProgressTimeout),
@@ -4125,6 +4351,25 @@ function Get-FileTransferRecoveryFailureClassification {
             (Get-FileTransferEventField -Event $_ -Name 'rejection_reason' -Default '') -eq 'peer_visible_proof_missing'
         )
     })
+    $regularV4FrontierRebindEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_receive_recovery_frontier_rebind'
+    })
+    $regularV4FrontierRebindRejectedEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_rebind_rejected'
+    })
+    $regularV4FrontierStallMissingRangeEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_v4_frontier_stall_missing_range_due'
+    })
+    $regularV4RepairRequestedEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_v4_repair_requested'
+    })
+    $regularV4RepairCachePressureEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_sender_repair_cache_pressure_entered'
+    })
+    $regularV4RepairSkippedNotYetSentEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_sender_repair_chunk_skipped' -and
+        (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'not_yet_sent'
+    })
     $sessionLivenessTimeoutEvents = @($events | Where-Object { $_.EventName -eq 'session_liveness_timeout' })
     $peerDisconnectedTerminalEvents = @($events | Where-Object {
         ($_.EventName -eq 'file_transfer_outbound_terminal' -or
@@ -4136,6 +4381,7 @@ function Get-FileTransferRecoveryFailureClassification {
         (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'file_tuna_v6'
     })
     $fallbackTailProof = Get-FileTransferFallbackTailReconciliationProof -Summary $Summary
+    $controlPlaneProof = Get-FileTransferControlPlaneIsolationProof -Summary $Summary
 
     $routeChanges = New-Object System.Collections.Generic.List[string]
     $lastRoute = ''
@@ -4159,6 +4405,11 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     elseif ($fallbackTailProof.Verdict -eq 'fail') {
         $class = 'fallback_tail_reconciliation'
+    }
+    elseif ($controlPlaneProof.Verdict -eq 'fail' -and
+        $routeChanges -contains 'post_tuna_fallback_v6' -and
+        ($sessionLivenessTimeoutEvents.Count -gt 0 -or $peerDisconnectedTerminalEvents.Count -gt 0)) {
+        $class = 'fallback_control_plane_starvation'
     }
     elseif ($runtimeUnlockTransactionObservedSendEvents.Count -gt 0 -and
         $runtimeUnlockTransactionPeerProofEvents.Count -eq 0 -and
@@ -4230,6 +4481,23 @@ function Get-FileTransferRecoveryFailureClassification {
         $class = 'session_liveness_timeout'
     }
 
+    $regularV4EfficiencyPressureClass = if ($routeChanges.Count -eq 1 -and
+        $routeChanges[0] -eq 'regular_nkn_v4_fast' -and
+        (
+            $regularV4FrontierRebindEvents.Count -gt 3 -or
+            ($regularV4FrontierRebindEvents.Count -gt 0 -and $regularV4RepairSkippedNotYetSentEvents.Count -gt 0) -or
+            (
+                $regularV4FrontierRebindEvents.Count -gt 0 -and
+                $regularV4FrontierStallMissingRangeEvents.Count -gt 0 -and
+                ($regularV4RepairRequestedEvents.Count -gt 0 -or $regularV4RepairCachePressureEvents.Count -gt 0)
+            )
+        )) {
+        'regular_v4_recovery_rewind_treadmill'
+    }
+    else {
+        '(none)'
+    }
+
     [pscustomobject]@{
         Class = $class
         RuntimeUnlockOfferNotObservedCount = $runtimeUnlockOfferNotObservedEvents.Count
@@ -4256,6 +4524,12 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockTransactionCommittedCount = $runtimeUnlockTransactionCommittedEvents.Count
         RuntimeUnlockTransactionFailedCount = $runtimeUnlockTransactionFailedEvents.Count
         RuntimeUnlockTransactionLocalOnlyRejectedCount = $runtimeUnlockTransactionLocalOnlyRejectedEvents.Count
+        RegularV4EfficiencyPressureClass = $regularV4EfficiencyPressureClass
+        RegularV4FrontierRebindCount = $regularV4FrontierRebindEvents.Count
+        RegularV4FrontierRebindRejectedCount = $regularV4FrontierRebindRejectedEvents.Count
+        RegularV4FrontierStallMissingRangeCount = $regularV4FrontierStallMissingRangeEvents.Count
+        RegularV4RepairRequestedCount = $regularV4RepairRequestedEvents.Count
+        RegularV4RepairCachePressureCount = $regularV4RepairCachePressureEvents.Count
         RuntimeUnlockTransactionProofVerdict = if ($runtimeUnlockTransactionStartedEvents.Count -eq 0) {
             'none'
         } elseif ($runtimeUnlockTransactionCommittedEvents.Count -gt 0 -and $runtimeUnlockTransactionPeerProofEvents.Count -gt 0) {
@@ -4274,6 +4548,12 @@ function Get-FileTransferRecoveryFailureClassification {
         FallbackTailReconciliationRequestedCount = $fallbackTailProof.RequestedCount
         FallbackTailReconciliationAcceptedCount = $fallbackTailProof.AcceptedCount
         FallbackTailNormalZeroCreditStateRefreshCount = $fallbackTailProof.NormalZeroCreditTailStateRefreshCount
+        ControlPlaneIsolationVerdict = $controlPlaneProof.Verdict
+        ControlPlanePeerVisibleCount = $controlPlaneProof.PeerVisibleCount
+        ControlPlaneLocalOnlyRejectedCount = $controlPlaneProof.LocalOnlyRejectedCount
+        ControlPlaneCheckpointExchangeCount = $controlPlaneProof.CheckpointExchangeCount
+        ControlPlaneDeliveryFailureCount = $controlPlaneProof.DeliveryFailureCount
+        ControlPlaneLivenessTimeoutDuringValidExchangeCount = $controlPlaneProof.LivenessTimeoutDuringValidExchangeCount
     }
 }
 
@@ -4334,6 +4614,7 @@ function Write-FileTransferDiagnosticsArtifacts {
     $fallbackAuthorityProof = Get-FileTransferFallbackLegAuthorityProof -TransferEvents $Summary.TransferEvents
     $fallbackTailProof = Get-FileTransferFallbackTailReconciliationProof -Summary $Summary
     $bridgeLivenessProof = Get-FileTransferBridgeLivenessIntegrationProof -Summary $Summary
+    $controlPlaneProof = Get-FileTransferControlPlaneIsolationProof -Summary $Summary
 
     $verdictLines = @(
         ("verdict={0}" -f $GateResult.Verdict),
@@ -4360,6 +4641,12 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_transaction_failed_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionFailedCount),
         ("runtime_unlock_transaction_local_only_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionLocalOnlyRejectedCount),
         ("runtime_unlock_transaction_proof_verdict={0}" -f $recoveryClassification.RuntimeUnlockTransactionProofVerdict),
+        ("regular_v4_efficiency_pressure_class={0}" -f $recoveryClassification.RegularV4EfficiencyPressureClass),
+        ("regular_v4_frontier_rebind_count={0}" -f $recoveryClassification.RegularV4FrontierRebindCount),
+        ("regular_v4_frontier_rebind_rejected_count={0}" -f $recoveryClassification.RegularV4FrontierRebindRejectedCount),
+        ("regular_v4_frontier_stall_missing_range_count={0}" -f $recoveryClassification.RegularV4FrontierStallMissingRangeCount),
+        ("regular_v4_repair_requested_count={0}" -f $recoveryClassification.RegularV4RepairRequestedCount),
+        ("regular_v4_repair_cache_pressure_count={0}" -f $recoveryClassification.RegularV4RepairCachePressureCount),
         ("listener_ready_unavailable_contradiction_count={0}" -f $recoveryClassification.ListenerReadyUnavailableContradictionCount),
         ("listener_rearm_required_count={0}" -f $recoveryClassification.ListenerRearmRequiredCount),
         ("listener_rearm_completed_count={0}" -f $recoveryClassification.ListenerRearmCompletedCount),
@@ -4371,6 +4658,12 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("classification_fallback_tail_reconciliation_requested_count={0}" -f $recoveryClassification.FallbackTailReconciliationRequestedCount),
         ("classification_fallback_tail_reconciliation_accepted_count={0}" -f $recoveryClassification.FallbackTailReconciliationAcceptedCount),
         ("classification_fallback_tail_normal_zero_credit_state_refresh_count={0}" -f $recoveryClassification.FallbackTailNormalZeroCreditStateRefreshCount),
+        ("classification_control_plane_isolation_verdict={0}" -f $recoveryClassification.ControlPlaneIsolationVerdict),
+        ("classification_control_plane_peer_visible_count={0}" -f $recoveryClassification.ControlPlanePeerVisibleCount),
+        ("classification_control_plane_local_only_rejected_count={0}" -f $recoveryClassification.ControlPlaneLocalOnlyRejectedCount),
+        ("classification_control_plane_checkpoint_exchange_count={0}" -f $recoveryClassification.ControlPlaneCheckpointExchangeCount),
+        ("classification_control_plane_delivery_failure_count={0}" -f $recoveryClassification.ControlPlaneDeliveryFailureCount),
+        ("classification_control_plane_liveness_timeout_during_valid_exchange_count={0}" -f $recoveryClassification.ControlPlaneLivenessTimeoutDuringValidExchangeCount),
         ("observed_start_utc={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.FirstTimestamp)) { '(unknown)' } else { $Summary.FirstTimestamp }))),
         ("observed_end_utc={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.LastTimestamp)) { '(unknown)' } else { $Summary.LastTimestamp }))),
         ("analyzed_files={0}" -f $analyzedFiles),
@@ -4399,6 +4692,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("fallback_v6_sender_repair_active_evidence_count={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.SenderRepairActiveEvidenceCount } else { 0 }))),
         ("fallback_v6_sender_still_repairing={0}" -f ($(if ($null -ne $fallbackDiagnostics) { $fallbackDiagnostics.SenderStillRepairing } else { 0 }))),
         ("fallback_leg_authority_proof_verdict={0}" -f $fallbackAuthorityProof.Verdict),
+        ("clean_fallback_leg_proof_verdict={0}" -f $fallbackAuthorityProof.Verdict),
         ("fallback_leg_authority_started_count={0}" -f $fallbackAuthorityProof.StartedCount),
         ("fallback_leg_authority_checkpoint_accepted_count={0}" -f $fallbackAuthorityProof.CheckpointAcceptedCount),
         ("fallback_leg_authority_bridge_recovery_requested_count={0}" -f $fallbackAuthorityProof.BridgeRecoveryRequestedCount),
@@ -4426,6 +4720,13 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("bridge_exhausted_sibling_deferral_suppressed_count={0}" -f $bridgeLivenessProof.SiblingDeferralSuppressedCount),
         ("bridge_exhausted_sibling_deferral_expired_count={0}" -f $bridgeLivenessProof.SiblingDeferralExpiredCount),
         ("bridge_exhausted_terminal_during_valid_deferral_count={0}" -f $bridgeLivenessProof.TerminalDuringValidSiblingDeferralCount),
+        ("control_plane_isolation_verdict={0}" -f $controlPlaneProof.Verdict),
+        ("control_plane_peer_visible_count={0}" -f $controlPlaneProof.PeerVisibleCount),
+        ("control_plane_local_only_rejected_count={0}" -f $controlPlaneProof.LocalOnlyRejectedCount),
+        ("control_plane_checkpoint_exchange_count={0}" -f $controlPlaneProof.CheckpointExchangeCount),
+        ("control_plane_delivery_failure_count={0}" -f $controlPlaneProof.DeliveryFailureCount),
+        ("control_plane_delivery_failure_recovered_count={0}" -f $controlPlaneProof.RecoveredDeliveryFailureCount),
+        ("control_plane_liveness_timeout_during_valid_exchange_count={0}" -f $controlPlaneProof.LivenessTimeoutDuringValidExchangeCount),
         ("live_route_epoch_proof_mode={0}" -f $LiveRouteProofMode),
         ("live_route_epoch_proof_verdict={0}" -f $liveRouteProof.Verdict),
         ("live_route_epoch_metadata_missing_count={0}" -f $liveRouteProof.MetadataMissingCount),

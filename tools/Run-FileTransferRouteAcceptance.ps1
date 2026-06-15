@@ -221,7 +221,9 @@ function New-RouteAcceptanceRunResult {
         controlledRestartAnalysis = $null
         liveRouteEpochProofVerdict = '(missing)'
         fallbackLegAuthorityProofVerdict = '(missing)'
+        cleanFallbackLegProofVerdict = '(missing)'
         bridgeLivenessIntegrationVerdict = '(missing)'
+        controlPlaneIsolationVerdict = '(missing)'
         sessionLivenessTimeoutCount = 0
         bridgeLivenessStaleDeferralCount = 0
         bridgeLivenessTimeoutDuringValidRecoveryCount = 0
@@ -236,6 +238,25 @@ function Add-RouteAcceptanceFailure {
     )
 
     $Result.failures.Add($Message) | Out-Null
+}
+
+function Assert-RouteAcceptanceRegularNknTransportEvidence {
+    param([Parameter(Mandatory = $true)]$Result)
+
+    $retainedLogPath = Join-Path $Result.artifactDir 'filetransfer-retained-log-slice.log'
+    if (-not (Test-Path -LiteralPath $retainedLogPath -PathType Leaf)) {
+        Add-RouteAcceptanceFailure -Result $Result -Message 'regular NKN retained log missing; cannot prove NKN transport'
+        return
+    }
+
+    $retainedText = Get-Content -LiteralPath $retainedLogPath -Raw
+    if ($retainedText -match '(?i)(Active transport selected:\s*DevLocal|transport=devlocal|address=devlocal\.|target=devlocal\.|helper_identity=devlocal\.)') {
+        Add-RouteAcceptanceFailure -Result $Result -Message 'regular NKN artifact used DevLocal transport; rerun with NLINK_TRANSPORT=NKN'
+    }
+
+    if ($retainedText -notmatch '(?i)(Active transport selected:\s*NKN|NLINK_TRANSPORT=NKN|transport=nkn|transport_profile=nkn|transport_profile=conservative_nkn_startup)') {
+        Add-RouteAcceptanceFailure -Result $Result -Message 'regular NKN artifact lacks positive NKN transport evidence'
+    }
 }
 
 function Remove-RouteAcceptanceFailuresMatching {
@@ -496,7 +517,8 @@ function Test-Phase5RegularNknCompletedExternalTransportVariance {
         -not $Result.completed -or
         -not $Result.shaOk -or
         $Result.bridgeBulkSendFailureCount -ne 0 -or
-        $Result.bridgeLivenessIntegrationVerdict -eq 'fail') {
+        $Result.bridgeLivenessIntegrationVerdict -eq 'fail' -or
+        $Result.controlPlaneIsolationVerdict -eq 'fail') {
         return $false
     }
 
@@ -568,6 +590,7 @@ function Test-Phase5CompletedLiveFallbackWarningVariance {
         $Result.liveRouteEpochProofVerdict -eq 'fail' -or
         $Result.fallbackLegAuthorityProofVerdict -eq 'fail' -or
         $Result.bridgeLivenessIntegrationVerdict -eq 'fail' -or
+        $Result.controlPlaneIsolationVerdict -eq 'fail' -or
         $Result.route.IndexOf('file_tuna_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $Result.route.IndexOf('diagnostic_regular_nkn_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         return $false
@@ -1004,6 +1027,7 @@ function Assert-RegularNknRouteAcceptanceRun {
     Assert-RouteAcceptanceRouteSummary -Result $result -ExpectedRoute 'regular_nkn_v4_fast' -ExpectedProtocol 4 -ExpectedRuntime 'regular_nkn_v4_fast' -ExpectedBridgePolicy 'regular_nkn_v4_fast'
     Assert-RouteAcceptanceTerminalSummary -Result $result
     Assert-RouteAcceptanceOperatorVerdict -Result $result -ExpectedRoute 'regular_nkn_v4_fast'
+    Assert-RouteAcceptanceRegularNknTransportEvidence -Result $result
 
     if (Assert-RouteAcceptanceFileExists -Result $result -RelativePath 'filetransfer-live-nkn-summary.txt') {
         $summary = Read-RouteAcceptanceKeyValueArtifact -Path (Join-Path $ArtifactDir 'filetransfer-live-nkn-summary.txt')
@@ -1196,7 +1220,9 @@ function Assert-Phase4RouteSummary {
     $Result.liveRouteEpochRouteChanges = @(Split-RouteAcceptanceTokenList -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'live_route_epoch_route_changes' -DefaultValue '(none)'))
     $Result.liveRouteEpochProofVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'live_route_epoch_proof_verdict' -DefaultValue '(missing)'
     $Result.fallbackLegAuthorityProofVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'fallback_leg_authority_proof_verdict' -DefaultValue '(missing)'
+    $Result.cleanFallbackLegProofVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'clean_fallback_leg_proof_verdict' -DefaultValue $Result.fallbackLegAuthorityProofVerdict
     $Result.bridgeLivenessIntegrationVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'bridge_liveness_integration_verdict' -DefaultValue '(missing)'
+    $Result.controlPlaneIsolationVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'control_plane_isolation_verdict' -DefaultValue '(missing)'
     $Result.bridgeLivenessStaleDeferralCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'bridge_liveness_stale_deferral_count' -DefaultValue '0')
     $Result.bridgeLivenessTimeoutDuringValidRecoveryCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'session_liveness_timeout_during_valid_recovery_count' -DefaultValue '0')
 
@@ -1410,6 +1436,8 @@ function Assert-Phase4ScenarioRun {
     }
 
     if ($Scenario.Kind -eq 'regular') {
+        Assert-RouteAcceptanceRegularNknTransportEvidence -Result $result
+
         $regularCyclesCompleted = $false
         $regularCyclesIntegrityOk = $false
         if (Assert-RouteAcceptanceFileExists -Result $result -RelativePath 'filetransfer-live-nkn-summary.txt') {
@@ -2065,6 +2093,8 @@ function Write-RouteAcceptanceFakePhase4Run {
         }
         else {
             $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($authorityOffset + 2) -Message ("event=bridge_receive_stall_recovery_receive_resumed; session_id={0}; transfer_id={1}; route={2}; protocol_version=6; leg_generation={3}; bridge_recovery_generation={4}; reason=phase5_fake_receive_resumed" -f $sessionId, $transferId, $authorityRoute, $fallbackAuthorityLegGeneration, $authorityBridgeGeneration))) | Out-Null
+            $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($authorityOffset + 2) -Message ("event=filetransfer_control_plane_delivery_result; kind=fallback_checkpoint_request; transfer_id={0}; session_id={1}; route={2}; protocol_version={3}; live_route_epoch={4}; leg_generation={5}; bridge_recovery_generation={6}; transport_epoch={7}; checkpoint_request_id={8}; reason=phase5_fake_checkpoint_request; frame_type=filetransfer.frontier_request.v6; control_queue=1; control_copy=1; bulk_copy=0; peer_visible_any=1; accepted_any=1; local_only_rejected=0" -f $transferId, $sessionId, $authorityRoute, $authorityProtocol, $authorityLiveEpoch, $fallbackAuthorityLegGeneration, $authorityBridgeGeneration, $authorityTransportEpoch, $authorityCheckpointId))) | Out-Null
+            $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($authorityOffset + 3) -Message ("event=filetransfer_control_plane_delivery_result; kind=fallback_checkpoint_proof; transfer_id={0}; session_id={1}; route={2}; protocol_version={3}; live_route_epoch={4}; leg_generation={5}; bridge_recovery_generation={6}; transport_epoch={7}; checkpoint_request_id={8}; reason=phase5_fake_checkpoint_proof; frame_type=filetransfer.receiver_state.v6; control_queue=1; control_copy=0; bulk_copy=1; peer_visible_any=1; accepted_any=1; local_only_rejected=0" -f $transferId, $sessionId, $authorityRoute, $authorityProtocol, $authorityLiveEpoch, $fallbackAuthorityLegGeneration, $authorityBridgeGeneration, $authorityTransportEpoch, $authorityCheckpointId))) | Out-Null
             $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($authorityOffset + 3) -Message ("event=filetransfer_fallback_leg_authority_checkpoint_accepted; direction=outbound; transfer_id={0}; session_id={1}; leg_generation={2}; route={3}; protocol_version={4}; live_route_epoch={5}; transport_epoch={6}; bridge_recovery_generation={7}; checkpoint_request_id={8}; proven_committed_chunk=128; proven_highest_observed_chunk=160; reason=phase5_fake_receiver_state" -f $transferId, $sessionId, $fallbackAuthorityLegGeneration, $authorityRoute, $authorityProtocol, $authorityLiveEpoch, $authorityTransportEpoch, $authorityBridgeGeneration, $authorityCheckpointId))) | Out-Null
             $lines.Add((New-RouteAcceptanceFakeLogLine -SecondsOffset ($authorityOffset + 4) -Message ("event=filetransfer_fallback_leg_authority_completed; direction=outbound; transfer_id={0}; session_id={1}; leg_generation={2}; route={3}; protocol_version={4}; live_route_epoch={5}; transport_epoch={6}; bridge_recovery_generation={7}; checkpoint_request_id={8}; authority_reason={9}; proof=phase5_fake_receiver_state" -f $transferId, $sessionId, $fallbackAuthorityLegGeneration, $authorityRoute, $authorityProtocol, $authorityLiveEpoch, $authorityTransportEpoch, $authorityBridgeGeneration, $authorityCheckpointId, $authorityReason))) | Out-Null
         }
@@ -3930,6 +3960,13 @@ function Get-Phase5FailureClass {
     }
 
     foreach ($line in $failureLines) {
+        if ($line.IndexOf('control-plane', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('control plane', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'fallback_authority'
+        }
+    }
+
+    foreach ($line in $failureLines) {
         if ($line.IndexOf('warning cap exceeded', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $line.IndexOf('operator verdict', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $line.IndexOf('external_transport_churn', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
@@ -3998,6 +4035,10 @@ function Assert-Phase5ScenarioRun {
         Add-RouteAcceptanceFailure -Result $Result -Message 'bridge liveness integration verdict is fail'
     }
 
+    if ($Result.controlPlaneIsolationVerdict -eq 'fail' -and [string]$Scenario.Name -ne 'second-transfer-after-reactivation') {
+        Add-RouteAcceptanceFailure -Result $Result -Message 'control-plane isolation verdict is fail'
+    }
+
     $canonicalRepeatedToggle = Test-Phase5CanonicalRepeatedToggleScenario -Scenario $Scenario
     if ($canonicalRepeatedToggle) {
         if ($Result.liveRouteEpochProofVerdict -ne 'pass') {
@@ -4010,6 +4051,10 @@ function Assert-Phase5ScenarioRun {
 
         if ($Result.bridgeLivenessIntegrationVerdict -ne 'pass') {
             Add-RouteAcceptanceFailure -Result $Result -Message ("canonical repeated-toggle bridge liveness integration proof must pass, actual {0}" -f $Result.bridgeLivenessIntegrationVerdict)
+        }
+
+        if ($Result.controlPlaneIsolationVerdict -ne 'pass') {
+            Add-RouteAcceptanceFailure -Result $Result -Message ("canonical repeated-toggle control-plane isolation proof must pass, actual {0}" -f $Result.controlPlaneIsolationVerdict)
         }
     }
     elseif ($Result.bridgeLivenessIntegrationVerdict -eq 'none') {
@@ -4370,7 +4415,9 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.route_consistency_verdict={1}" -f $prefix, $result.routeConsistencyVerdict)
         $textLines += ("{0}.live_route_epoch_proof_verdict={1}" -f $prefix, $result.liveRouteEpochProofVerdict)
         $textLines += ("{0}.fallback_leg_authority_proof_verdict={1}" -f $prefix, $result.fallbackLegAuthorityProofVerdict)
+        $textLines += ("{0}.clean_fallback_leg_proof_verdict={1}" -f $prefix, $result.cleanFallbackLegProofVerdict)
         $textLines += ("{0}.bridge_liveness_integration_verdict={1}" -f $prefix, $result.bridgeLivenessIntegrationVerdict)
+        $textLines += ("{0}.control_plane_isolation_verdict={1}" -f $prefix, $result.controlPlaneIsolationVerdict)
         $textLines += ("{0}.operator_verdict={1}" -f $prefix, $result.operatorVerdict)
         $textLines += ("{0}.hard_failure_count={1}" -f $prefix, $result.hardFailureCount)
         $textLines += ("{0}.warning_count={1}" -f $prefix, $result.warningCount)
@@ -4477,7 +4524,9 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
                 routeConsistencyVerdict = $result.routeConsistencyVerdict
                 liveRouteEpochProofVerdict = $result.liveRouteEpochProofVerdict
                 fallbackLegAuthorityProofVerdict = $result.fallbackLegAuthorityProofVerdict
+                cleanFallbackLegProofVerdict = $result.cleanFallbackLegProofVerdict
                 bridgeLivenessIntegrationVerdict = $result.bridgeLivenessIntegrationVerdict
+                controlPlaneIsolationVerdict = $result.controlPlaneIsolationVerdict
                 operatorVerdict = $result.operatorVerdict
                 hardFailureCount = $result.hardFailureCount
                 warningCount = $result.warningCount

@@ -1765,7 +1765,9 @@ function Get-FileTransferWarningCapResult {
     param(
         [Parameter(Mandatory = $true)]$Summary,
         [object[]]$WarningGroups = @(),
-        $FallbackDiagnostics = $null
+        $FallbackDiagnostics = $null,
+        $FallbackAuthorityProof = $null,
+        $BridgeLivenessProof = $null
     )
 
     $countLimit = 3
@@ -1809,6 +1811,8 @@ function Get-FileTransferWarningCapResult {
             $exemption = Test-FileTransferWarningCapExemption `
                     -Summary $Summary `
                     -FallbackDiagnostics $FallbackDiagnostics `
+                    -FallbackAuthorityProof $FallbackAuthorityProof `
+                    -BridgeLivenessProof $BridgeLivenessProof `
                     -Kind $kind `
                     -Context $context `
                     -CountExceeded $countExceeded `
@@ -1852,6 +1856,8 @@ function Test-FileTransferWarningCapExemption {
     param(
         [Parameter(Mandatory = $true)]$Summary,
         $FallbackDiagnostics = $null,
+        $FallbackAuthorityProof = $null,
+        $BridgeLivenessProof = $null,
         [Parameter(Mandatory = $true)][string]$Kind,
         [Parameter(Mandatory = $true)][string]$Context,
         [Parameter(Mandatory = $true)][bool]$CountExceeded,
@@ -1865,7 +1871,22 @@ function Test-FileTransferWarningCapExemption {
     }
 
     if ($RateExceeded -and $CountExceeded) {
-        return [pscustomobject]@{ Applies = $false; Reason = '(none)' }
+        if ($Kind -ne 'fallback_frontier_repair_churn' -or
+            $null -eq $FallbackAuthorityProof -or
+            $null -eq $BridgeLivenessProof -or
+            [string]$FallbackAuthorityProof.Verdict -ne 'pass' -or
+            [int]$FallbackAuthorityProof.CheckpointAcceptedCount -le 0 -or
+            [int]$FallbackAuthorityProof.MetadataMissingCount -ne 0 -or
+            [string]$BridgeLivenessProof.Verdict -ne 'pass' -or
+            [int]$BridgeLivenessProof.TimeoutDuringValidRecoveryCount -ne 0 -or
+            [int]$BridgeLivenessProof.RecoveryExhaustedWithoutProofCount -ne 0) {
+            return [pscustomobject]@{ Applies = $false; Reason = '(none)' }
+        }
+
+        return [pscustomobject]@{
+            Applies = $true
+            Reason = 'completed_clean_fallback_leg_frontier_repair_churn_terminal_proof'
+        }
     }
 
     if ($Summary.InboundTerminalEvents.Count -eq 0 -or
@@ -1983,6 +2004,7 @@ function Get-FileTransferStabilizationGateResult {
         Add-FileTransferGateFinding -List $hardFailures -Finding ("live route epoch proof: {0}" -f $operatorFinding)
     }
 
+    $fallbackAuthorityProof = Get-FileTransferFallbackLegAuthorityProof -TransferEvents $Summary.TransferEvents
     $bridgeLivenessProof = Get-FileTransferBridgeLivenessIntegrationProof -Summary $Summary
     foreach ($finding in @($bridgeLivenessProof.Findings)) {
         $operatorFinding = ([string]$finding).Replace('=', ':')
@@ -2132,7 +2154,7 @@ function Get-FileTransferStabilizationGateResult {
         Add-FileTransferGateFinding -List $warnings -Finding 'repair/reorder/degraded pressure recovered before terminal completion'
     }
 
-    $warningCap = Get-FileTransferWarningCapResult -Summary $Summary -WarningGroups $warningGroups -FallbackDiagnostics $fallbackDiagnostics
+    $warningCap = Get-FileTransferWarningCapResult -Summary $Summary -WarningGroups $warningGroups -FallbackDiagnostics $fallbackDiagnostics -FallbackAuthorityProof $fallbackAuthorityProof -BridgeLivenessProof $bridgeLivenessProof
     if ($warningCap.ExceededKinds.Count -gt 0) {
         $hardFailures = New-Object System.Collections.Generic.List[string]
         foreach ($detail in @($warningCap.ExceededDetails)) {
