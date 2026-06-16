@@ -6814,6 +6814,72 @@ if (-not $result.RegressionFailed) {
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task RunFileTransferRouteAcceptance_Phase5ScenarioIsolationFailureRerunsCleanAttempt()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "phase5-scenario-isolation-rerun-pass");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-scenario-isolation-rerun-pass");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_ACTIVE_TUNA_V4_64MB_SCENARIO_ISOLATION_FAIL"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_ACTIVE_TUNA_V4_64MB_SCENARIO_ISOLATION_REASON"] = "listener_ready_unavailable_contradiction";
+
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"Expected scenario-isolation preflight failure to require and pass a clean Phase 5 rerun.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+            var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal("PASS", summary["verdict"]);
+            Assert.Equal("1", summary["active-tuna-v4-64mb.retry_used"]);
+            Assert.Equal("2", summary["active-tuna-v4-64mb.selected_attempt"]);
+            Assert.False(summary.ContainsKey("active-tuna-v4-64mb.setup_failure_phase"));
+            Assert.False(summary.ContainsKey("active-tuna-v4-64mb.setup_failure_reason"));
+            Assert.Contains("phase=scenario_isolation", summary["active-tuna-v4-64mb.first_failure_reason"], StringComparison.Ordinal);
+            Assert.Contains("listener_ready_unavailable_contradiction", summary["active-tuna-v4-64mb.first_failure_reason"], StringComparison.Ordinal);
+            Assert.Equal("1", summary["active-tuna-v4-64mb.scenario_isolation_preflight_count"]);
+            Assert.Equal("1", summary["active-tuna-v4-64mb.scenario_isolation_clean_window_passed"]);
+            Assert.Contains("scenario-isolation-active-tuna-v4-64mb-attempt-2", summary["active-tuna-v4-64mb.scenario_isolation_artifact_dirs"], StringComparison.Ordinal);
+            Assert.Equal("none", summary["active-tuna-v4-64mb.acceptance_failure_class"]);
+            Assert.True(Directory.Exists(Path.Combine(runRoot, "scenario-isolation-active-tuna-v4-64mb-attempt-1")));
+            Assert.True(Directory.Exists(Path.Combine(runRoot, "scenario-isolation-active-tuna-v4-64mb-attempt-2")));
+            Assert.True(Directory.Exists(Path.Combine(runRoot, "active-tuna-v4-64mb-rerun-1")));
+
+            var firstIsolation = ReadArtifactReport(
+                Path.Combine(runRoot, "scenario-isolation-active-tuna-v4-64mb-attempt-1"),
+                "phase5-scenario-isolation-summary.txt");
+            Assert.Equal("FAIL", firstIsolation["verdict"]);
+            Assert.Equal("listener_ready_unavailable_contradiction", firstIsolation["failure_reason"]);
+
+            var selectedIsolation = ReadArtifactReport(
+                Path.Combine(runRoot, "scenario-isolation-active-tuna-v4-64mb-attempt-2"),
+                "phase5-scenario-isolation-summary.txt");
+            Assert.Equal("PASS", selectedIsolation["verdict"]);
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task RunFileTransferRouteAcceptance_Phase5HelpeeInviteReadinessTimeoutRerunsCleanAttempt()
     {
         if (!OperatingSystem.IsWindows())
@@ -6953,7 +7019,12 @@ if (-not $result.RegressionFailed) {
             Assert.False(summary.ContainsKey("regular-v4-live-activation-off-on-off-256mb.setup_failure_phase"));
             Assert.False(summary.ContainsKey("regular-v4-live-activation-off-on-off-256mb.setup_failure_reason"));
             Assert.Contains("regular_v4_receive_recovery_unproven", summary["regular-v4-live-activation-off-on-off-256mb.first_failure_reason"], StringComparison.Ordinal);
+            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-256mb.scenario_isolation_preflight_count"]);
+            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-256mb.scenario_isolation_clean_window_passed"]);
+            Assert.Contains("scenario-isolation-regular-v4-live-activation-off-on-off-256mb-attempt-2", summary["regular-v4-live-activation-off-on-off-256mb.scenario_isolation_artifact_dirs"], StringComparison.Ordinal);
             Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.acceptance_failure_class"]);
+            Assert.True(Directory.Exists(Path.Combine(runRoot, "scenario-isolation-regular-v4-live-activation-off-on-off-256mb-attempt-1")));
+            Assert.True(Directory.Exists(Path.Combine(runRoot, "scenario-isolation-regular-v4-live-activation-off-on-off-256mb-attempt-2")));
             Assert.True(Directory.Exists(Path.Combine(runRoot, "regular-v4-live-activation-off-on-off-256mb-rerun-1")));
         }
         finally

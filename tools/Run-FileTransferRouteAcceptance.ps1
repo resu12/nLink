@@ -218,6 +218,10 @@ function New-RouteAcceptanceRunResult {
         rerunFailureReason = ''
         setupFailurePhase = ''
         setupFailureReason = ''
+        scenarioIsolationPreflightCount = 0
+        scenarioIsolationCleanWindowPassed = 0
+        scenarioIsolationFailureReason = ''
+        scenarioIsolationArtifactDirs = @()
         controlledRestartAnalysis = $null
         liveRouteEpochProofVerdict = '(missing)'
         fallbackLegAuthorityProofVerdict = '(missing)'
@@ -3288,6 +3292,151 @@ function Invoke-Phase5BridgeReadinessPreflightWithRetry {
     return $result
 }
 
+function Test-Phase5ScenarioRequiresIsolation {
+    param([Parameter(Mandatory = $true)]$Scenario)
+
+    if ([string]$Scenario.Kind -ne 'tuna') {
+        return $false
+    }
+
+    return @(
+        'active-tuna-v4-64mb',
+        'live-switch-off-helpee-64mb',
+        'live-switch-off-helper-64mb',
+        'regular-v4-live-activation-off-on-off-256mb',
+        'second-transfer-after-reactivation'
+    ) -contains [string]$Scenario.Name
+}
+
+function Write-Phase5ScenarioIsolationSummary {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)][string]$ScenarioName,
+        [Parameter(Mandatory = $true)][int]$AttemptIndex,
+        [Parameter(Mandatory = $true)][bool]$Passed,
+        [string]$FailureReason = '',
+        [int]$ExitCode = 0,
+        [string]$SourceArtifactDir = ''
+    )
+
+    New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
+    $verdict = if ($Passed) { 'PASS' } else { 'FAIL' }
+    $cleanWindow = if ($Passed) { 1 } else { 0 }
+    $lines = @(
+        'Phase 5 Scenario Isolation Preflight',
+        ("verdict={0}" -f $verdict),
+        ("scenario={0}" -f $ScenarioName),
+        ("attempt_index={0}" -f $AttemptIndex),
+        ("scenario_runtime_clean_window_passed={0}" -f $cleanWindow),
+        ("failure_reason={0}" -f $FailureReason),
+        ("source_artifact_dir={0}" -f $SourceArtifactDir),
+        ("exit_code={0}" -f $ExitCode)
+    )
+    $lines | Set-Content -LiteralPath (Join-Path $ArtifactDir 'phase5-scenario-isolation-summary.txt') -Encoding UTF8
+    ([ordered]@{
+        event = 'phase5_scenario_isolation_preflight'
+        verdict = $verdict
+        scenario = $ScenarioName
+        attemptIndex = $AttemptIndex
+        scenarioRuntimeCleanWindowPassed = [bool]$Passed
+        failureReason = $FailureReason
+        sourceArtifactDir = $SourceArtifactDir
+        exitCode = $ExitCode
+    }) | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'phase5-scenario-isolation-summary.json') -Encoding UTF8
+}
+
+function Invoke-Phase5ScenarioIsolationPreflight {
+    param(
+        [Parameter(Mandatory = $true)]$Scenario,
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$RunRoot,
+        [Parameter(Mandatory = $true)][bool]$FakeMode,
+        [int]$AttemptIndex = 1,
+        [string]$ResolvedExePath = ''
+    )
+
+    $scenarioName = [string]$Scenario.Name
+    $artifactName = "scenario-isolation-{0}-attempt-{1}" -f $scenarioName, $AttemptIndex
+    $artifactDir = Join-Path $RunRoot $artifactName
+    New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+
+    if ($FakeMode) {
+        $globalFail = Test-RouteAcceptanceEnvEnabled -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_SCENARIO_ISOLATION_FAIL'
+        $scenarioFail = if ($AttemptIndex -gt 1) {
+            Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'RERUN_SCENARIO_ISOLATION_FAIL'
+        }
+        else {
+            Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'SCENARIO_ISOLATION_FAIL'
+        }
+
+        if ($globalFail -or $scenarioFail) {
+            $reason = if ($AttemptIndex -gt 1) {
+                Get-RouteAcceptanceScenarioEnvValue -ScenarioName $scenarioName -Suffix 'RERUN_SCENARIO_ISOLATION_REASON' -DefaultValue (Get-RouteAcceptanceScenarioEnvValue -ScenarioName $scenarioName -Suffix 'SCENARIO_ISOLATION_REASON' -DefaultValue 'scenario_runtime_clean_window_failed')
+            }
+            else {
+                Get-RouteAcceptanceScenarioEnvValue -ScenarioName $scenarioName -Suffix 'SCENARIO_ISOLATION_REASON' -DefaultValue 'scenario_runtime_clean_window_failed'
+            }
+            Write-Phase5ScenarioIsolationSummary -ArtifactDir $artifactDir -ScenarioName $scenarioName -AttemptIndex $AttemptIndex -Passed:$false -FailureReason $reason -ExitCode 1
+            return [pscustomobject]@{
+                Passed = $false
+                ArtifactDir = $artifactDir
+                FailureReason = $reason
+                ExitCode = 1
+            }
+        }
+
+        Write-Phase5ScenarioIsolationSummary -ArtifactDir $artifactDir -ScenarioName $scenarioName -AttemptIndex $AttemptIndex -Passed:$true
+        return [pscustomobject]@{
+            Passed = $true
+            ArtifactDir = $artifactDir
+            FailureReason = ''
+            ExitCode = 0
+        }
+    }
+
+    $preflight = Invoke-Phase5BridgeReadinessPreflight -RepoRoot $RepoRoot -RunRoot $RunRoot -ResolvedExePath $ResolvedExePath -ArtifactName $artifactName
+    $sourceDir = [string]$preflight.ArtifactDir
+    $passed = [bool]$preflight.Passed
+    $reason = [string]$preflight.FailureReason
+    if (-not $passed -and [string]::IsNullOrWhiteSpace($reason)) {
+        $reason = 'scenario_runtime_clean_window_failed'
+    }
+
+    Write-Phase5ScenarioIsolationSummary -ArtifactDir $artifactDir -ScenarioName $scenarioName -AttemptIndex $AttemptIndex -Passed:$passed -FailureReason $reason -ExitCode ([int]$preflight.ExitCode) -SourceArtifactDir $sourceDir
+    return [pscustomobject]@{
+        Passed = $passed
+        ArtifactDir = $artifactDir
+        FailureReason = $reason
+        ExitCode = [int]$preflight.ExitCode
+    }
+}
+
+function Set-RouteAcceptanceScenarioIsolationResult {
+    param(
+        [Parameter(Mandatory = $true)]$Result,
+        [Parameter(Mandatory = $true)]$IsolationResult
+    )
+
+    $Result.scenarioIsolationPreflightCount = [int]$Result.scenarioIsolationPreflightCount + 1
+    if ([bool]$IsolationResult.Passed) {
+        $Result.scenarioIsolationCleanWindowPassed = [int]$Result.scenarioIsolationCleanWindowPassed + 1
+    }
+    elseif ([string]::IsNullOrWhiteSpace([string]$Result.scenarioIsolationFailureReason)) {
+        $Result.scenarioIsolationFailureReason = [string]$IsolationResult.FailureReason
+    }
+
+    $dirs = New-Object System.Collections.Generic.List[string]
+    foreach ($dir in @($Result.scenarioIsolationArtifactDirs)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$dir)) {
+            $dirs.Add([string]$dir) | Out-Null
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace([string]$IsolationResult.ArtifactDir)) {
+        $dirs.Add([string]$IsolationResult.ArtifactDir) | Out-Null
+    }
+    $Result.scenarioIsolationArtifactDirs = @($dirs.ToArray())
+}
+
 function Write-Phase5PreflightFailureSummaryFiles {
     param(
         [Parameter(Mandatory = $true)][string]$RunRoot,
@@ -4113,64 +4262,86 @@ function Invoke-Phase4RouteAcceptanceScenario {
     $artifactDir = Join-Path $RunRoot ([string]$Scenario.Name)
     New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
     $payloadSize = Get-Phase4ScenarioPayloadSizeText -Scenario $Scenario
+    $expectedRouteChanges = @($Scenario.ExpectedRouteChanges)
+    $expectedFinalRoute = if ($expectedRouteChanges.Count -gt 0) {
+        [string]$expectedRouteChanges[$expectedRouteChanges.Count - 1]
+    }
+    else {
+        '(unknown)'
+    }
+
+    $expectedProtocol = 0
+    if (-not [string]::IsNullOrWhiteSpace($expectedFinalRoute) -and $expectedFinalRoute -ne '(unknown)') {
+        $expectedMetadata = Get-RouteAcceptanceRouteMetadata -Route $expectedFinalRoute
+        if ($null -ne $expectedMetadata) {
+            $expectedProtocol = [int]$expectedMetadata.Protocol
+        }
+    }
 
     $scenarioExecutionFailure = ''
-    try {
-        if ($FakeMode) {
-            Write-RouteAcceptanceFakePhase4Run -Scenario $Scenario -ArtifactDir $artifactDir
+    $result = $null
+    $scenarioIsolationResult = $null
+    $skipScenarioRun = $false
+
+    if ($AcceptancePhase -eq 'phase5' -and (Test-Phase5ScenarioRequiresIsolation -Scenario $Scenario)) {
+        $scenarioIsolationResult = Invoke-Phase5ScenarioIsolationPreflight -Scenario $Scenario -RepoRoot $RepoRoot -RunRoot $RunRoot -FakeMode $FakeMode -AttemptIndex 1 -ResolvedExePath $ResolvedExePath
+        if (-not [bool]$scenarioIsolationResult.Passed) {
+            $skipScenarioRun = $true
+            $result = New-RouteAcceptanceRunResult -Name ([string]$Scenario.Name) -ArtifactDir $artifactDir -ExpectedRoute $expectedFinalRoute -ExpectedProtocol $expectedProtocol
+            Set-RouteAcceptanceScenarioIsolationResult -Result $result -IsolationResult $scenarioIsolationResult
+            $result.setupFailurePhase = 'scenario_isolation'
+            $result.setupFailureReason = [string]$scenarioIsolationResult.FailureReason
+            Add-RouteAcceptanceFailure -Result $result -Message ("scenario isolation failed before run: {0}" -f $result.setupFailureReason)
         }
-        elseif ($Scenario.Kind -eq 'regular') {
-            Invoke-RegularNknRouteAcceptanceRun -RepoRoot $RepoRoot -ArtifactDir $artifactDir -PayloadSize $payloadSize -ResolvedExePath $ResolvedExePath
-        }
-        else {
-            Invoke-TunaRouteAcceptanceRun `
-                -RepoRoot $RepoRoot `
-                -ArtifactDir $artifactDir `
-                -ResolvedExePath $ResolvedExePath `
-                -ResolvedWalletPath $ResolvedWalletPath `
-                -ResolvedSidecarPath $ResolvedSidecarPath `
-                -EffectiveWalletPassword $EffectiveWalletPassword `
-                -RouteMode ([string]$Scenario.RouteMode) `
-                -Fault ([string]$Scenario.Fault) `
-                -PayerMode ([string]$Scenario.PayerMode) `
-                -PayloadSize $payloadSize `
-                -LiveToggleSequence ([string]$Scenario.LiveToggleSequence) `
-                -LiveProofMode ([string]$Scenario.LiveProofMode)
-        }
-    }
-    catch {
-        $scenarioExecutionFailure = (($_ | Out-String).Trim() -replace '[\r\n]+', ' ')
     }
 
-    try {
-        $result = Assert-Phase4ScenarioRun -Scenario $Scenario -ArtifactDir $artifactDir
-    }
-    catch {
-        $assertionFailure = (($_ | Out-String).Trim() -replace '[\r\n]+', ' ')
-        $assertionStack = [string]$_.ScriptStackTrace
-        if (-not [string]::IsNullOrWhiteSpace($assertionStack)) {
-            $assertionFailure = "{0}; stack={1}" -f $assertionFailure, ($assertionStack -replace '[\r\n]+', ' ')
-        }
-        $expectedRouteChanges = @($Scenario.ExpectedRouteChanges)
-        $expectedFinalRoute = if ($expectedRouteChanges.Count -gt 0) {
-            [string]$expectedRouteChanges[$expectedRouteChanges.Count - 1]
-        }
-        else {
-            '(unknown)'
-        }
-
-        $expectedProtocol = 0
-        if (-not [string]::IsNullOrWhiteSpace($expectedFinalRoute) -and $expectedFinalRoute -ne '(unknown)') {
-            $expectedMetadata = Get-RouteAcceptanceRouteMetadata -Route $expectedFinalRoute
-            if ($null -ne $expectedMetadata) {
-                $expectedProtocol = [int]$expectedMetadata.Protocol
+    if (-not $skipScenarioRun) {
+        try {
+            if ($FakeMode) {
+                Write-RouteAcceptanceFakePhase4Run -Scenario $Scenario -ArtifactDir $artifactDir
+            }
+            elseif ($Scenario.Kind -eq 'regular') {
+                Invoke-RegularNknRouteAcceptanceRun -RepoRoot $RepoRoot -ArtifactDir $artifactDir -PayloadSize $payloadSize -ResolvedExePath $ResolvedExePath
+            }
+            else {
+                Invoke-TunaRouteAcceptanceRun `
+                    -RepoRoot $RepoRoot `
+                    -ArtifactDir $artifactDir `
+                    -ResolvedExePath $ResolvedExePath `
+                    -ResolvedWalletPath $ResolvedWalletPath `
+                    -ResolvedSidecarPath $ResolvedSidecarPath `
+                    -EffectiveWalletPassword $EffectiveWalletPassword `
+                    -RouteMode ([string]$Scenario.RouteMode) `
+                    -Fault ([string]$Scenario.Fault) `
+                    -PayerMode ([string]$Scenario.PayerMode) `
+                    -PayloadSize $payloadSize `
+                    -LiveToggleSequence ([string]$Scenario.LiveToggleSequence) `
+                    -LiveProofMode ([string]$Scenario.LiveProofMode)
             }
         }
+        catch {
+            $scenarioExecutionFailure = (($_ | Out-String).Trim() -replace '[\r\n]+', ' ')
+        }
 
-        $result = New-RouteAcceptanceRunResult -Name ([string]$Scenario.Name) -ArtifactDir $artifactDir -ExpectedRoute $expectedFinalRoute -ExpectedProtocol $expectedProtocol
-        $result.setupFailurePhase = 'assertion'
-        $result.setupFailureReason = $assertionFailure
-        Add-RouteAcceptanceFailure -Result $result -Message ("scenario assertion failed: {0}" -f $assertionFailure)
+        try {
+            $result = Assert-Phase4ScenarioRun -Scenario $Scenario -ArtifactDir $artifactDir
+        }
+        catch {
+            $assertionFailure = (($_ | Out-String).Trim() -replace '[\r\n]+', ' ')
+            $assertionStack = [string]$_.ScriptStackTrace
+            if (-not [string]::IsNullOrWhiteSpace($assertionStack)) {
+                $assertionFailure = "{0}; stack={1}" -f $assertionFailure, ($assertionStack -replace '[\r\n]+', ' ')
+            }
+
+            $result = New-RouteAcceptanceRunResult -Name ([string]$Scenario.Name) -ArtifactDir $artifactDir -ExpectedRoute $expectedFinalRoute -ExpectedProtocol $expectedProtocol
+            $result.setupFailurePhase = 'assertion'
+            $result.setupFailureReason = $assertionFailure
+            Add-RouteAcceptanceFailure -Result $result -Message ("scenario assertion failed: {0}" -f $assertionFailure)
+        }
+
+        if ($null -ne $scenarioIsolationResult) {
+            Set-RouteAcceptanceScenarioIsolationResult -Result $result -IsolationResult $scenarioIsolationResult
+        }
     }
     if (-not [string]::IsNullOrWhiteSpace($scenarioExecutionFailure)) {
         Add-RouteAcceptanceFailure -Result $result -Message ("scenario execution failed: {0}" -f $scenarioExecutionFailure)
@@ -4219,34 +4390,53 @@ function Invoke-Phase4RouteAcceptanceScenario {
             $rerunDir = Join-Path $RunRoot ("{0}-rerun-{1}" -f $Scenario.Name, $rerun)
             New-Item -ItemType Directory -Force -Path $rerunDir | Out-Null
             $rerunExecutionFailure = ''
-            try {
-                if ($FakeMode) {
-                    Write-RouteAcceptanceFakePhase4Run -Scenario $Scenario -ArtifactDir $rerunDir -RerunAttempt $rerun
+            $rerunIsolationResult = $null
+            $skipRerunScenarioRun = $false
+            if ($AcceptancePhase -eq 'phase5' -and (Test-Phase5ScenarioRequiresIsolation -Scenario $Scenario)) {
+                $rerunIsolationResult = Invoke-Phase5ScenarioIsolationPreflight -Scenario $Scenario -RepoRoot $RepoRoot -RunRoot $RunRoot -FakeMode $FakeMode -AttemptIndex ($rerun + 1) -ResolvedExePath $ResolvedExePath
+                if (-not [bool]$rerunIsolationResult.Passed) {
+                    $skipRerunScenarioRun = $true
+                    $rerunResult = New-RouteAcceptanceRunResult -Name ([string]$Scenario.Name) -ArtifactDir $rerunDir -ExpectedRoute $expectedFinalRoute -ExpectedProtocol $expectedProtocol
+                    Set-RouteAcceptanceScenarioIsolationResult -Result $rerunResult -IsolationResult $rerunIsolationResult
+                    $rerunResult.setupFailurePhase = 'scenario_isolation'
+                    $rerunResult.setupFailureReason = [string]$rerunIsolationResult.FailureReason
+                    Add-RouteAcceptanceFailure -Result $rerunResult -Message ("scenario isolation failed before rerun: {0}" -f $rerunResult.setupFailureReason)
                 }
-                elseif ($Scenario.Kind -eq 'regular') {
-                    Invoke-RegularNknRouteAcceptanceRun -RepoRoot $RepoRoot -ArtifactDir $rerunDir -PayloadSize $payloadSize -ResolvedExePath $ResolvedExePath
-                }
-                else {
-                    Invoke-TunaRouteAcceptanceRun `
-                        -RepoRoot $RepoRoot `
-                        -ArtifactDir $rerunDir `
-                        -ResolvedExePath $ResolvedExePath `
-                        -ResolvedWalletPath $ResolvedWalletPath `
-                        -ResolvedSidecarPath $ResolvedSidecarPath `
-                        -EffectiveWalletPassword $EffectiveWalletPassword `
-                        -RouteMode ([string]$Scenario.RouteMode) `
-                        -Fault ([string]$Scenario.Fault) `
-                        -PayerMode ([string]$Scenario.PayerMode) `
-                        -PayloadSize $payloadSize `
-                        -LiveToggleSequence ([string]$Scenario.LiveToggleSequence) `
-                        -LiveProofMode ([string]$Scenario.LiveProofMode)
-                }
-            }
-            catch {
-                $rerunExecutionFailure = (($_ | Out-String).Trim() -replace '[\r\n]+', ' ')
             }
 
-            $rerunResult = Assert-Phase4ScenarioRun -Scenario $Scenario -ArtifactDir $rerunDir
+            if (-not $skipRerunScenarioRun) {
+                try {
+                    if ($FakeMode) {
+                        Write-RouteAcceptanceFakePhase4Run -Scenario $Scenario -ArtifactDir $rerunDir -RerunAttempt $rerun
+                    }
+                    elseif ($Scenario.Kind -eq 'regular') {
+                        Invoke-RegularNknRouteAcceptanceRun -RepoRoot $RepoRoot -ArtifactDir $rerunDir -PayloadSize $payloadSize -ResolvedExePath $ResolvedExePath
+                    }
+                    else {
+                        Invoke-TunaRouteAcceptanceRun `
+                            -RepoRoot $RepoRoot `
+                            -ArtifactDir $rerunDir `
+                            -ResolvedExePath $ResolvedExePath `
+                            -ResolvedWalletPath $ResolvedWalletPath `
+                            -ResolvedSidecarPath $ResolvedSidecarPath `
+                            -EffectiveWalletPassword $EffectiveWalletPassword `
+                            -RouteMode ([string]$Scenario.RouteMode) `
+                            -Fault ([string]$Scenario.Fault) `
+                            -PayerMode ([string]$Scenario.PayerMode) `
+                            -PayloadSize $payloadSize `
+                            -LiveToggleSequence ([string]$Scenario.LiveToggleSequence) `
+                            -LiveProofMode ([string]$Scenario.LiveProofMode)
+                    }
+                }
+                catch {
+                    $rerunExecutionFailure = (($_ | Out-String).Trim() -replace '[\r\n]+', ' ')
+                }
+
+                $rerunResult = Assert-Phase4ScenarioRun -Scenario $Scenario -ArtifactDir $rerunDir
+                if ($null -ne $rerunIsolationResult) {
+                    Set-RouteAcceptanceScenarioIsolationResult -Result $rerunResult -IsolationResult $rerunIsolationResult
+                }
+            }
             if (-not [string]::IsNullOrWhiteSpace($rerunExecutionFailure)) {
                 Add-RouteAcceptanceFailure -Result $rerunResult -Message ("scenario rerun execution failed: {0}" -f $rerunExecutionFailure)
             }
@@ -4435,6 +4625,14 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.attempt_count={1}" -f $prefix, $result.attemptCount)
         $textLines += ("{0}.retry_used={1}" -f $prefix, ($(if ($result.retryUsed) { 1 } else { 0 })))
         $textLines += ("{0}.selected_attempt={1}" -f $prefix, $result.selectedAttempt)
+        if ([int]$result.scenarioIsolationPreflightCount -gt 0) {
+            $textLines += ("{0}.scenario_isolation_preflight_count={1}" -f $prefix, $result.scenarioIsolationPreflightCount)
+            $textLines += ("{0}.scenario_isolation_clean_window_passed={1}" -f $prefix, $result.scenarioIsolationCleanWindowPassed)
+            $textLines += ("{0}.scenario_isolation_artifact_dirs={1}" -f $prefix, (Join-RouteAcceptanceTokenList -Values $result.scenarioIsolationArtifactDirs))
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$result.scenarioIsolationFailureReason)) {
+            $textLines += ("{0}.scenario_isolation_failure_reason={1}" -f $prefix, $result.scenarioIsolationFailureReason)
+        }
         if (-not [string]::IsNullOrWhiteSpace([string]$result.firstFailureReason)) {
             $textLines += ("{0}.first_failure_reason={1}" -f $prefix, $result.firstFailureReason)
         }
@@ -4545,6 +4743,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
                 attemptCount = $result.attemptCount
                 retryUsed = $result.retryUsed
                 selectedAttempt = $result.selectedAttempt
+                scenarioIsolationPreflightCount = $result.scenarioIsolationPreflightCount
+                scenarioIsolationCleanWindowPassed = $result.scenarioIsolationCleanWindowPassed
+                scenarioIsolationFailureReason = $result.scenarioIsolationFailureReason
+                scenarioIsolationArtifactDirs = @($result.scenarioIsolationArtifactDirs)
                 firstFailureReason = $result.firstFailureReason
                 rerunArtifactDir = $result.rerunArtifactDir
                 rerunFailureReason = $result.rerunFailureReason
