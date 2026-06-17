@@ -1937,6 +1937,7 @@ function Get-FileTransferControlPlaneIsolationProof {
         [Parameter(Mandatory = $true)]$Summary
     )
 
+    $staleGenerationTreadmillScoreLimit = 6
     [object[]]$events = @($Summary.TransferEvents)
     [object[]]$postTunaRouteSelected = @(
         $events |
@@ -1949,6 +1950,20 @@ function Get-FileTransferControlPlaneIsolationProof {
     [object[]]$observedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_control_plane_delivery_observed' } | Sort-Object Sequence)
     [object[]]$failedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_control_plane_delivery_failed' } | Sort-Object Sequence)
     [object[]]$unavailableEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_control_plane_delivery_unavailable' } | Sort-Object Sequence)
+    [object[]]$retiredStaleSendEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_control_plane_send_retired_stale_generation' } | Sort-Object Sequence)
+    [object[]]$checkpointExchangeRetiredEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_checkpoint_exchange_retired' } | Sort-Object Sequence)
+    [object[]]$checkpointOwnerViolationEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_checkpoint_owner_violation' } | Sort-Object Sequence)
+    [object[]]$staleDeferredReplayDiscardedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_post_tuna_fallback_state_refresh_deferred_discarded' } | Sort-Object Sequence)
+    [object[]]$checkpointNotPendingReissueSuppressedEvents = @(
+        $events |
+            Where-Object {
+                $_.EventName -eq 'filetransfer_fallback_checkpoint_reissue_suppressed' -and
+                (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'checkpoint_not_pending'
+            } |
+            Sort-Object Sequence
+    )
+    [object[]]$staleProofIgnoredEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_stale_proof_ignored' } | Sort-Object Sequence)
+    [object[]]$staleProofReplaySuppressedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_stale_proof_replay_suppressed' } | Sort-Object Sequence)
     [object[]]$sessionLivenessTimeoutEvents = @($events | Where-Object { $_.EventName -eq 'session_liveness_timeout' } | Sort-Object Sequence)
     [object[]]$terminalFailureEvents = @(
         $events |
@@ -1974,6 +1989,209 @@ function Get-FileTransferControlPlaneIsolationProof {
             } |
             Sort-Object Sequence
     )
+
+    $fallbackControlPlaneKinds = @(
+        'fallback_checkpoint_request',
+        'fallback_checkpoint_proof',
+        'receiver_state',
+        'frontier_request'
+    )
+    $checkpointOwnerEventNames = @(
+        'filetransfer_fallback_leg_authority_started',
+        'filetransfer_fallback_checkpoint_reissue_requested',
+        'filetransfer_fallback_tail_reconciliation_requested'
+    )
+    $checkpointOwnerKinds = @(
+        'fallback_checkpoint_request',
+        'fallback_checkpoint_proof',
+        'frontier_request'
+    )
+    $checkpointIdsByLeg = @{}
+    $activeCheckpointByLeg = @{}
+    $bridgeGenerationByLeg = @{}
+    $inferredCheckpointOwnerViolationEvents = New-Object System.Collections.Generic.List[object]
+    $nonCurrentLegGenerationSendEvents = New-Object System.Collections.Generic.List[object]
+    $currentRoute = ''
+    $currentLiveRouteEpoch = 0
+    $currentFallbackLegGeneration = 0
+
+    function Add-FileTransferCheckpointIdForLeg {
+        param(
+            [int64]$LegGeneration,
+            [string]$CheckpointId
+        )
+
+        if ($LegGeneration -le 0 -or
+            [string]::IsNullOrWhiteSpace($CheckpointId) -or
+            $CheckpointId -eq '(none)' -or
+            $CheckpointId -eq 'none') {
+            return
+        }
+
+        $key = [string]$LegGeneration
+        if (-not $checkpointIdsByLeg.ContainsKey($key)) {
+            $checkpointIdsByLeg[$key] = New-Object System.Collections.Generic.List[string]
+        }
+
+        if (-not $checkpointIdsByLeg[$key].Contains($CheckpointId)) {
+            $checkpointIdsByLeg[$key].Add($CheckpointId) | Out-Null
+        }
+    }
+
+    function Clear-FileTransferActiveCheckpointForLeg {
+        param(
+            [int64]$LegGeneration,
+            [string]$CheckpointId = ''
+        )
+
+        if ($LegGeneration -le 0) {
+            return
+        }
+
+        $key = [string]$LegGeneration
+        if (-not $activeCheckpointByLeg.ContainsKey($key)) {
+            return
+        }
+
+        if ([string]::IsNullOrWhiteSpace($CheckpointId) -or
+            $CheckpointId -eq '(none)' -or
+            $CheckpointId -eq 'none' -or
+            [string]::Equals([string]$activeCheckpointByLeg[$key], $CheckpointId, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $activeCheckpointByLeg.Remove($key)
+        }
+    }
+
+    foreach ($event in @($events | Sort-Object Sequence)) {
+        if ($event.EventName -eq 'filetransfer_route_selected') {
+            $route = Get-FileTransferEventField -Event $event -Name 'route' -Default ''
+            if (-not [string]::IsNullOrWhiteSpace($route)) {
+                $currentRoute = $route
+            }
+
+            $liveRouteEpoch = Get-FileTransferEventInt64Field -Event $event -Name 'live_route_epoch' -Default $currentLiveRouteEpoch
+            if ($liveRouteEpoch -gt 0) {
+                $currentLiveRouteEpoch = $liveRouteEpoch
+            }
+
+            if ($route -ne 'post_tuna_fallback_v6') {
+                $currentFallbackLegGeneration = 0
+            }
+
+            continue
+        }
+
+        if ($event.EventName -eq 'filetransfer_leg_started' -or
+            $event.EventName -eq 'filetransfer_fallback_leg_authority_started') {
+            $route = Get-FileTransferEventField -Event $event -Name 'route' -Default ''
+            $legGeneration = Get-FileTransferEventInt64Field -Event $event -Name 'leg_generation' -Default 0
+            $checkpointId = Get-FileTransferEventField -Event $event -Name 'checkpoint_request_id' -Default ''
+            $bridgeGeneration = Get-FileTransferEventInt64Field -Event $event -Name 'bridge_recovery_generation' -Default -1
+            if ($route -eq 'post_tuna_fallback_v6' -and $legGeneration -gt 0) {
+                $currentFallbackLegGeneration = $legGeneration
+                Add-FileTransferCheckpointIdForLeg -LegGeneration $legGeneration -CheckpointId $checkpointId
+                if (-not [string]::IsNullOrWhiteSpace($checkpointId) -and
+                    $checkpointId -ne '(none)' -and
+                    $checkpointId -ne 'none') {
+                    $activeCheckpointByLeg[[string]$legGeneration] = $checkpointId
+                }
+                if ($bridgeGeneration -ge 0) {
+                    $bridgeGenerationByLeg[[string]$legGeneration] = $bridgeGeneration
+                }
+            }
+
+            continue
+        }
+
+        if ($event.EventName -eq 'filetransfer_fallback_checkpoint_exchange_retired') {
+            $retiredLegGeneration = Get-FileTransferEventInt64Field -Event $event -Name 'retired_leg_generation' -Default 0
+            $currentLegGeneration = Get-FileTransferEventInt64Field -Event $event -Name 'current_leg_generation' -Default 0
+            $retiredCheckpointId = Get-FileTransferEventField -Event $event -Name 'retired_checkpoint_request_id' -Default ''
+            $currentCheckpointId = Get-FileTransferEventField -Event $event -Name 'current_checkpoint_request_id' -Default ''
+            Clear-FileTransferActiveCheckpointForLeg -LegGeneration $retiredLegGeneration -CheckpointId $retiredCheckpointId
+            Add-FileTransferCheckpointIdForLeg -LegGeneration $retiredLegGeneration -CheckpointId $retiredCheckpointId
+            Add-FileTransferCheckpointIdForLeg -LegGeneration $currentLegGeneration -CheckpointId $currentCheckpointId
+            if ($currentLegGeneration -gt 0 -and
+                -not [string]::IsNullOrWhiteSpace($currentCheckpointId) -and
+                $currentCheckpointId -ne '(none)' -and
+                $currentCheckpointId -ne 'none') {
+                $activeCheckpointByLeg[[string]$currentLegGeneration] = $currentCheckpointId
+            }
+
+            continue
+        }
+
+        $eventKind = Get-FileTransferEventField -Event $event -Name 'kind' -Default ''
+        $eventRoute = Get-FileTransferEventField -Event $event -Name 'route' -Default ''
+        $eventProtocol = Get-FileTransferEventInt64Field -Event $event -Name 'protocol_version' -Default 0
+        $eventLegGeneration = Get-FileTransferEventInt64Field -Event $event -Name 'leg_generation' -Default 0
+        $eventLiveRouteEpoch = Get-FileTransferEventInt64Field -Event $event -Name 'live_route_epoch' -Default 0
+        $eventBridgeGeneration = Get-FileTransferEventInt64Field -Event $event -Name 'bridge_recovery_generation' -Default -1
+        $eventCheckpointId = Get-FileTransferEventField -Event $event -Name 'checkpoint_request_id' -Default ''
+
+        if ($event.EventName -eq 'filetransfer_control_plane_delivery_result' -and
+            $fallbackControlPlaneKinds -contains $eventKind) {
+            $isNonCurrentFallbackSend = $eventRoute -eq 'post_tuna_fallback_v6' -and
+                (
+                    $currentRoute -ne 'post_tuna_fallback_v6' -or
+                    ($currentFallbackLegGeneration -gt 0 -and $eventLegGeneration -gt 0 -and $eventLegGeneration -ne $currentFallbackLegGeneration)
+                )
+            if ($isNonCurrentFallbackSend) {
+                $nonCurrentLegGenerationSendEvents.Add($event) | Out-Null
+            }
+        }
+
+        if ($eventRoute -eq 'post_tuna_fallback_v6' -and
+            $eventProtocol -eq 6 -and
+            $eventLegGeneration -gt 0) {
+            Add-FileTransferCheckpointIdForLeg -LegGeneration $eventLegGeneration -CheckpointId $eventCheckpointId
+
+            $legKey = [string]$eventLegGeneration
+            if ($eventBridgeGeneration -ge 0) {
+                if ($bridgeGenerationByLeg.ContainsKey($legKey) -and
+                    $eventBridgeGeneration -gt [int64]$bridgeGenerationByLeg[$legKey]) {
+                    $activeCheckpointByLeg.Remove($legKey)
+                }
+
+                $bridgeGenerationByLeg[$legKey] = $eventBridgeGeneration
+            }
+
+            if (($checkpointOwnerEventNames -contains $event.EventName) -or
+                ($event.EventName -eq 'filetransfer_control_plane_delivery_result' -and $checkpointOwnerKinds -contains $eventKind)) {
+                if (-not [string]::IsNullOrWhiteSpace($eventCheckpointId) -and
+                    $eventCheckpointId -ne '(none)' -and
+                    $eventCheckpointId -ne 'none') {
+                    if ($activeCheckpointByLeg.ContainsKey($legKey) -and
+                        -not [string]::Equals([string]$activeCheckpointByLeg[$legKey], $eventCheckpointId, [System.StringComparison]::OrdinalIgnoreCase)) {
+                        $inferredCheckpointOwnerViolationEvents.Add($event) | Out-Null
+                    }
+
+                    $activeCheckpointByLeg[$legKey] = $eventCheckpointId
+                }
+            }
+
+            if ($event.EventName -eq 'filetransfer_fallback_leg_authority_checkpoint_accepted' -or
+                $event.EventName -eq 'filetransfer_fallback_tail_reconciliation_accepted') {
+                Clear-FileTransferActiveCheckpointForLeg -LegGeneration $eventLegGeneration -CheckpointId $eventCheckpointId
+            }
+        }
+    }
+
+    $checkpointIdsByLegTextParts = New-Object System.Collections.Generic.List[string]
+    $checkpointIdCountMaxPerLeg = 0
+    foreach ($entry in @($checkpointIdsByLeg.GetEnumerator() | Sort-Object { [int64]$_.Key })) {
+        [object[]]$ids = @($entry.Value)
+        if ($ids.Length -gt $checkpointIdCountMaxPerLeg) {
+            $checkpointIdCountMaxPerLeg = $ids.Length
+        }
+
+        $checkpointIdsByLegTextParts.Add(("{0}:{1}" -f $entry.Key, ($ids -join '|'))) | Out-Null
+    }
+    $checkpointIdsByLegText = if ($checkpointIdsByLegTextParts.Count -gt 0) {
+        $checkpointIdsByLegTextParts.ToArray() -join ';'
+    }
+    else {
+        '(none)'
+    }
 
     [object[]]$peerVisibleEvents = @(
         $deliveryResultEvents |
@@ -2091,8 +2309,44 @@ function Get-FileTransferControlPlaneIsolationProof {
         }
     }
 
+    $checkpointOwnerViolationCount = $checkpointOwnerViolationEvents.Count + $inferredCheckpointOwnerViolationEvents.Count
+    $staleDeferredReplayDiscardedCount = 0
+    foreach ($event in @($staleDeferredReplayDiscardedEvents)) {
+        $reason = Get-FileTransferEventField -Event $event -Name 'reason' -Default ''
+        if ($reason -eq 'checkpoint_request_mismatch' -or
+            $reason -eq 'transport_epoch_mismatch' -or
+            $reason -eq 'checkpoint_not_pending') {
+            $staleDeferredReplayDiscardedCount++
+        }
+    }
+    $staleGenerationTreadmillScore = $retiredStaleSendEvents.Count +
+        $staleProofIgnoredEvents.Count +
+        $staleProofReplaySuppressedEvents.Count +
+        $checkpointOwnerViolationCount +
+        $staleDeferredReplayDiscardedCount
+    if ($checkpointOwnerViolationCount -gt 0) {
+        $findings.Add(("fallback checkpoint owner violation count={0}; checkpoint_ids_by_leg_generation={1}" -f $checkpointOwnerViolationCount, $checkpointIdsByLegText)) | Out-Null
+        foreach ($event in @($checkpointOwnerViolationEvents + $inferredCheckpointOwnerViolationEvents.ToArray() | Select-Object -First 8)) {
+            $evidence.Add($event) | Out-Null
+        }
+    }
+
+    if ($nonCurrentLegGenerationSendEvents.Count -gt 0) {
+        $findings.Add(("fallback control-plane send used non-current leg generation count={0}" -f $nonCurrentLegGenerationSendEvents.Count)) | Out-Null
+        foreach ($event in @($nonCurrentLegGenerationSendEvents.ToArray() | Select-Object -First 8)) {
+            $evidence.Add($event) | Out-Null
+        }
+    }
+
+    if ($staleGenerationTreadmillScore -gt $staleGenerationTreadmillScoreLimit) {
+        $findings.Add(("fallback control-plane stale generation treadmill: score={0}; limit={1}; stale_ignored={2}; stale_replay_suppressed={3}; retired_stale_send={4}; owner_violation={5}; stale_deferred_replay_discarded={6}; checkpoint_exchange_count={7}" -f $staleGenerationTreadmillScore, $staleGenerationTreadmillScoreLimit, $staleProofIgnoredEvents.Count, $staleProofReplaySuppressedEvents.Count, $retiredStaleSendEvents.Count, $checkpointOwnerViolationCount, $staleDeferredReplayDiscardedCount, $checkpointExchangeEvents.Count)) | Out-Null
+        foreach ($event in @($retiredStaleSendEvents + $staleProofIgnoredEvents + $staleProofReplaySuppressedEvents + $staleDeferredReplayDiscardedEvents | Select-Object -First 8)) {
+            $evidence.Add($event) | Out-Null
+        }
+    }
+
     $verdict = if ($findings.Count -eq 0) { 'pass' } else { 'fail' }
-    if ($postTunaRouteSelected.Count -eq 0 -and $deliveryResultEvents.Count -eq 0 -and $observedEvents.Count -eq 0 -and $failedEvents.Count -eq 0 -and $unavailableEvents.Count -eq 0) {
+    if ($postTunaRouteSelected.Count -eq 0 -and $deliveryResultEvents.Count -eq 0 -and $observedEvents.Count -eq 0 -and $failedEvents.Count -eq 0 -and $unavailableEvents.Count -eq 0 -and $retiredStaleSendEvents.Count -eq 0) {
         $verdict = 'none'
     }
 
@@ -2107,6 +2361,19 @@ function Get-FileTransferControlPlaneIsolationProof {
         UnavailableCount = $unavailableEvents.Count
         MetadataMissingCount = $metadataMissing.Count
         LivenessTimeoutDuringValidExchangeCount = $timeoutDuringValidExchangeCount
+        RetiredStaleSendCount = $retiredStaleSendEvents.Count
+        CheckpointExchangeRetiredCount = $checkpointExchangeRetiredEvents.Count
+        CheckpointOwnerViolationCount = $checkpointOwnerViolationCount
+        StaleDeferredReplayDiscardedCount = $staleDeferredReplayDiscardedCount
+        CheckpointNotPendingReissueSuppressedCount = $checkpointNotPendingReissueSuppressedEvents.Count
+        StaleProofIgnoredCount = $staleProofIgnoredEvents.Count
+        StaleProofReplaySuppressedCount = $staleProofReplaySuppressedEvents.Count
+        StaleReplayTreadmillCount = $staleGenerationTreadmillScore
+        StaleGenerationTreadmillScore = $staleGenerationTreadmillScore
+        StaleGenerationTreadmillScoreLimit = $staleGenerationTreadmillScoreLimit
+        CheckpointIdsByLegGeneration = $checkpointIdsByLegText
+        CheckpointIdCountMaxPerLeg = $checkpointIdCountMaxPerLeg
+        ControlPlaneNonCurrentLegGenerationSendCount = $nonCurrentLegGenerationSendEvents.Count
         Findings = $findings
         EvidenceEvents = @(@($evidence.ToArray()) + @($deliveryResultEvents) | Select-Object -First 20)
     }
@@ -2217,6 +2484,19 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("control_plane_unavailable_count={0}" -f $controlPlaneProof.UnavailableCount)) | Out-Null
     $lines.Add(("control_plane_metadata_missing_count={0}" -f $controlPlaneProof.MetadataMissingCount)) | Out-Null
     $lines.Add(("control_plane_liveness_timeout_during_valid_exchange_count={0}" -f $controlPlaneProof.LivenessTimeoutDuringValidExchangeCount)) | Out-Null
+    $lines.Add(("control_plane_stale_send_retired_count={0}" -f $controlPlaneProof.RetiredStaleSendCount)) | Out-Null
+    $lines.Add(("fallback_checkpoint_exchange_retired_count={0}" -f $controlPlaneProof.CheckpointExchangeRetiredCount)) | Out-Null
+    $lines.Add(("fallback_checkpoint_owner_violation_count={0}" -f $controlPlaneProof.CheckpointOwnerViolationCount)) | Out-Null
+    $lines.Add(("fallback_stale_deferred_replay_discarded_count={0}" -f $controlPlaneProof.StaleDeferredReplayDiscardedCount)) | Out-Null
+    $lines.Add(("fallback_checkpoint_not_pending_reissue_suppressed_count={0}" -f $controlPlaneProof.CheckpointNotPendingReissueSuppressedCount)) | Out-Null
+    $lines.Add(("fallback_stale_proof_ignored_count={0}" -f $controlPlaneProof.StaleProofIgnoredCount)) | Out-Null
+    $lines.Add(("fallback_stale_proof_replay_suppressed_count={0}" -f $controlPlaneProof.StaleProofReplaySuppressedCount)) | Out-Null
+    $lines.Add(("fallback_control_plane_stale_replay_treadmill_count={0}" -f $controlPlaneProof.StaleReplayTreadmillCount)) | Out-Null
+    $lines.Add(("fallback_stale_generation_treadmill_score={0}" -f $controlPlaneProof.StaleGenerationTreadmillScore)) | Out-Null
+    $lines.Add(("fallback_stale_generation_treadmill_score_limit={0}" -f $controlPlaneProof.StaleGenerationTreadmillScoreLimit)) | Out-Null
+    $lines.Add(("fallback_checkpoint_ids_by_leg_generation={0}" -f $controlPlaneProof.CheckpointIdsByLegGeneration)) | Out-Null
+    $lines.Add(("fallback_checkpoint_id_count_max_per_leg={0}" -f $controlPlaneProof.CheckpointIdCountMaxPerLeg)) | Out-Null
+    $lines.Add(("fallback_control_plane_non_current_leg_generation_send_count={0}" -f $controlPlaneProof.ControlPlaneNonCurrentLegGenerationSendCount)) | Out-Null
 
     $index = 0
     foreach ($event in @($routeSelectedEvents | Sort-Object Sequence)) {
@@ -3823,6 +4103,19 @@ function New-FileTransferStabilityGateSummaryLines {
         ("classification_control_plane_checkpoint_exchange_count={0}" -f $recoveryClassification.ControlPlaneCheckpointExchangeCount),
         ("classification_control_plane_delivery_failure_count={0}" -f $recoveryClassification.ControlPlaneDeliveryFailureCount),
         ("classification_control_plane_liveness_timeout_during_valid_exchange_count={0}" -f $recoveryClassification.ControlPlaneLivenessTimeoutDuringValidExchangeCount),
+        ("classification_control_plane_stale_send_retired_count={0}" -f $recoveryClassification.ControlPlaneRetiredStaleSendCount),
+        ("classification_fallback_checkpoint_exchange_retired_count={0}" -f $recoveryClassification.FallbackCheckpointExchangeRetiredCount),
+        ("classification_fallback_checkpoint_owner_violation_count={0}" -f $recoveryClassification.FallbackCheckpointOwnerViolationCount),
+        ("classification_fallback_stale_deferred_replay_discarded_count={0}" -f $recoveryClassification.FallbackStaleDeferredReplayDiscardedCount),
+        ("classification_fallback_checkpoint_not_pending_reissue_suppressed_count={0}" -f $recoveryClassification.FallbackCheckpointNotPendingReissueSuppressedCount),
+        ("classification_fallback_stale_proof_ignored_count={0}" -f $recoveryClassification.FallbackStaleProofIgnoredCount),
+        ("classification_fallback_stale_proof_replay_suppressed_count={0}" -f $recoveryClassification.FallbackStaleProofReplaySuppressedCount),
+        ("classification_fallback_control_plane_stale_replay_treadmill_count={0}" -f $recoveryClassification.FallbackControlPlaneStaleReplayTreadmillCount),
+        ("classification_fallback_stale_generation_treadmill_score={0}" -f $recoveryClassification.FallbackStaleGenerationTreadmillScore),
+        ("classification_fallback_stale_generation_treadmill_score_limit={0}" -f $recoveryClassification.FallbackStaleGenerationTreadmillScoreLimit),
+        ("classification_fallback_checkpoint_ids_by_leg_generation={0}" -f $recoveryClassification.FallbackCheckpointIdsByLegGeneration),
+        ("classification_fallback_checkpoint_id_count_max_per_leg={0}" -f $recoveryClassification.FallbackCheckpointIdCountMaxPerLeg),
+        ("classification_fallback_control_plane_non_current_leg_generation_send_count={0}" -f $recoveryClassification.FallbackControlPlaneNonCurrentLegGenerationSendCount),
         ("hard_failure_count={0}" -f $GateResult.HardFailures.Count),
         ("warning_count={0}" -f $GateResult.Warnings.Count),
         ("warning_cap_policy={0}" -f ($(if ($null -ne $warningCap) { $warningCap.Policy } else { 'strict_small' }))),
@@ -3882,6 +4175,19 @@ function New-FileTransferStabilityGateSummaryLines {
         ("control_plane_delivery_failure_count={0}" -f $controlPlaneProof.DeliveryFailureCount),
         ("control_plane_delivery_failure_recovered_count={0}" -f $controlPlaneProof.RecoveredDeliveryFailureCount),
         ("control_plane_liveness_timeout_during_valid_exchange_count={0}" -f $controlPlaneProof.LivenessTimeoutDuringValidExchangeCount),
+        ("control_plane_stale_send_retired_count={0}" -f $controlPlaneProof.RetiredStaleSendCount),
+        ("fallback_checkpoint_exchange_retired_count={0}" -f $controlPlaneProof.CheckpointExchangeRetiredCount),
+        ("fallback_checkpoint_owner_violation_count={0}" -f $controlPlaneProof.CheckpointOwnerViolationCount),
+        ("fallback_stale_deferred_replay_discarded_count={0}" -f $controlPlaneProof.StaleDeferredReplayDiscardedCount),
+        ("fallback_checkpoint_not_pending_reissue_suppressed_count={0}" -f $controlPlaneProof.CheckpointNotPendingReissueSuppressedCount),
+        ("fallback_stale_proof_ignored_count={0}" -f $controlPlaneProof.StaleProofIgnoredCount),
+        ("fallback_stale_proof_replay_suppressed_count={0}" -f $controlPlaneProof.StaleProofReplaySuppressedCount),
+        ("fallback_control_plane_stale_replay_treadmill_count={0}" -f $controlPlaneProof.StaleReplayTreadmillCount),
+        ("fallback_stale_generation_treadmill_score={0}" -f $controlPlaneProof.StaleGenerationTreadmillScore),
+        ("fallback_stale_generation_treadmill_score_limit={0}" -f $controlPlaneProof.StaleGenerationTreadmillScoreLimit),
+        ("fallback_checkpoint_ids_by_leg_generation={0}" -f $controlPlaneProof.CheckpointIdsByLegGeneration),
+        ("fallback_checkpoint_id_count_max_per_leg={0}" -f $controlPlaneProof.CheckpointIdCountMaxPerLeg),
+        ("fallback_control_plane_non_current_leg_generation_send_count={0}" -f $controlPlaneProof.ControlPlaneNonCurrentLegGenerationSendCount),
         ("next_artifact={0}" -f $GateResult.NextArtifact),
         ("gui_progress_timeout_count={0}" -f $Summary.LiveProgressTimeoutCount),
         ("terminal_missing_after_progress_timeout={0}" -f $Summary.TerminalMissingAfterProgressTimeout),
@@ -4406,6 +4712,12 @@ function Get-FileTransferRecoveryFailureClassification {
     elseif ($fallbackTailProof.Verdict -eq 'fail') {
         $class = 'fallback_tail_reconciliation'
     }
+    elseif (($controlPlaneProof.StaleReplayTreadmillCount -gt $controlPlaneProof.StaleGenerationTreadmillScoreLimit -or
+            $controlPlaneProof.CheckpointOwnerViolationCount -gt 0 -or
+            $controlPlaneProof.ControlPlaneNonCurrentLegGenerationSendCount -gt 0) -and
+        $routeChanges -contains 'post_tuna_fallback_v6') {
+        $class = 'fallback_control_plane_stale_generation_treadmill'
+    }
     elseif ($controlPlaneProof.Verdict -eq 'fail' -and
         $routeChanges -contains 'post_tuna_fallback_v6' -and
         ($sessionLivenessTimeoutEvents.Count -gt 0 -or $peerDisconnectedTerminalEvents.Count -gt 0)) {
@@ -4554,6 +4866,19 @@ function Get-FileTransferRecoveryFailureClassification {
         ControlPlaneCheckpointExchangeCount = $controlPlaneProof.CheckpointExchangeCount
         ControlPlaneDeliveryFailureCount = $controlPlaneProof.DeliveryFailureCount
         ControlPlaneLivenessTimeoutDuringValidExchangeCount = $controlPlaneProof.LivenessTimeoutDuringValidExchangeCount
+        ControlPlaneRetiredStaleSendCount = $controlPlaneProof.RetiredStaleSendCount
+        FallbackCheckpointExchangeRetiredCount = $controlPlaneProof.CheckpointExchangeRetiredCount
+        FallbackCheckpointOwnerViolationCount = $controlPlaneProof.CheckpointOwnerViolationCount
+        FallbackStaleDeferredReplayDiscardedCount = $controlPlaneProof.StaleDeferredReplayDiscardedCount
+        FallbackCheckpointNotPendingReissueSuppressedCount = $controlPlaneProof.CheckpointNotPendingReissueSuppressedCount
+        FallbackStaleProofIgnoredCount = $controlPlaneProof.StaleProofIgnoredCount
+        FallbackStaleProofReplaySuppressedCount = $controlPlaneProof.StaleProofReplaySuppressedCount
+        FallbackControlPlaneStaleReplayTreadmillCount = $controlPlaneProof.StaleReplayTreadmillCount
+        FallbackStaleGenerationTreadmillScore = $controlPlaneProof.StaleGenerationTreadmillScore
+        FallbackStaleGenerationTreadmillScoreLimit = $controlPlaneProof.StaleGenerationTreadmillScoreLimit
+        FallbackCheckpointIdsByLegGeneration = $controlPlaneProof.CheckpointIdsByLegGeneration
+        FallbackCheckpointIdCountMaxPerLeg = $controlPlaneProof.CheckpointIdCountMaxPerLeg
+        FallbackControlPlaneNonCurrentLegGenerationSendCount = $controlPlaneProof.ControlPlaneNonCurrentLegGenerationSendCount
     }
 }
 
@@ -4664,6 +4989,19 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("classification_control_plane_checkpoint_exchange_count={0}" -f $recoveryClassification.ControlPlaneCheckpointExchangeCount),
         ("classification_control_plane_delivery_failure_count={0}" -f $recoveryClassification.ControlPlaneDeliveryFailureCount),
         ("classification_control_plane_liveness_timeout_during_valid_exchange_count={0}" -f $recoveryClassification.ControlPlaneLivenessTimeoutDuringValidExchangeCount),
+        ("classification_control_plane_stale_send_retired_count={0}" -f $recoveryClassification.ControlPlaneRetiredStaleSendCount),
+        ("classification_fallback_checkpoint_exchange_retired_count={0}" -f $recoveryClassification.FallbackCheckpointExchangeRetiredCount),
+        ("classification_fallback_checkpoint_owner_violation_count={0}" -f $recoveryClassification.FallbackCheckpointOwnerViolationCount),
+        ("classification_fallback_stale_deferred_replay_discarded_count={0}" -f $recoveryClassification.FallbackStaleDeferredReplayDiscardedCount),
+        ("classification_fallback_checkpoint_not_pending_reissue_suppressed_count={0}" -f $recoveryClassification.FallbackCheckpointNotPendingReissueSuppressedCount),
+        ("classification_fallback_stale_proof_ignored_count={0}" -f $recoveryClassification.FallbackStaleProofIgnoredCount),
+        ("classification_fallback_stale_proof_replay_suppressed_count={0}" -f $recoveryClassification.FallbackStaleProofReplaySuppressedCount),
+        ("classification_fallback_control_plane_stale_replay_treadmill_count={0}" -f $recoveryClassification.FallbackControlPlaneStaleReplayTreadmillCount),
+        ("classification_fallback_stale_generation_treadmill_score={0}" -f $recoveryClassification.FallbackStaleGenerationTreadmillScore),
+        ("classification_fallback_stale_generation_treadmill_score_limit={0}" -f $recoveryClassification.FallbackStaleGenerationTreadmillScoreLimit),
+        ("classification_fallback_checkpoint_ids_by_leg_generation={0}" -f $recoveryClassification.FallbackCheckpointIdsByLegGeneration),
+        ("classification_fallback_checkpoint_id_count_max_per_leg={0}" -f $recoveryClassification.FallbackCheckpointIdCountMaxPerLeg),
+        ("classification_fallback_control_plane_non_current_leg_generation_send_count={0}" -f $recoveryClassification.FallbackControlPlaneNonCurrentLegGenerationSendCount),
         ("observed_start_utc={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.FirstTimestamp)) { '(unknown)' } else { $Summary.FirstTimestamp }))),
         ("observed_end_utc={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.LastTimestamp)) { '(unknown)' } else { $Summary.LastTimestamp }))),
         ("analyzed_files={0}" -f $analyzedFiles),
@@ -4727,6 +5065,19 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("control_plane_delivery_failure_count={0}" -f $controlPlaneProof.DeliveryFailureCount),
         ("control_plane_delivery_failure_recovered_count={0}" -f $controlPlaneProof.RecoveredDeliveryFailureCount),
         ("control_plane_liveness_timeout_during_valid_exchange_count={0}" -f $controlPlaneProof.LivenessTimeoutDuringValidExchangeCount),
+        ("control_plane_stale_send_retired_count={0}" -f $controlPlaneProof.RetiredStaleSendCount),
+        ("fallback_checkpoint_exchange_retired_count={0}" -f $controlPlaneProof.CheckpointExchangeRetiredCount),
+        ("fallback_checkpoint_owner_violation_count={0}" -f $controlPlaneProof.CheckpointOwnerViolationCount),
+        ("fallback_stale_deferred_replay_discarded_count={0}" -f $controlPlaneProof.StaleDeferredReplayDiscardedCount),
+        ("fallback_checkpoint_not_pending_reissue_suppressed_count={0}" -f $controlPlaneProof.CheckpointNotPendingReissueSuppressedCount),
+        ("fallback_stale_proof_ignored_count={0}" -f $controlPlaneProof.StaleProofIgnoredCount),
+        ("fallback_stale_proof_replay_suppressed_count={0}" -f $controlPlaneProof.StaleProofReplaySuppressedCount),
+        ("fallback_control_plane_stale_replay_treadmill_count={0}" -f $controlPlaneProof.StaleReplayTreadmillCount),
+        ("fallback_stale_generation_treadmill_score={0}" -f $controlPlaneProof.StaleGenerationTreadmillScore),
+        ("fallback_stale_generation_treadmill_score_limit={0}" -f $controlPlaneProof.StaleGenerationTreadmillScoreLimit),
+        ("fallback_checkpoint_ids_by_leg_generation={0}" -f $controlPlaneProof.CheckpointIdsByLegGeneration),
+        ("fallback_checkpoint_id_count_max_per_leg={0}" -f $controlPlaneProof.CheckpointIdCountMaxPerLeg),
+        ("fallback_control_plane_non_current_leg_generation_send_count={0}" -f $controlPlaneProof.ControlPlaneNonCurrentLegGenerationSendCount),
         ("live_route_epoch_proof_mode={0}" -f $LiveRouteProofMode),
         ("live_route_epoch_proof_verdict={0}" -f $liveRouteProof.Verdict),
         ("live_route_epoch_metadata_missing_count={0}" -f $liveRouteProof.MetadataMissingCount),
