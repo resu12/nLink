@@ -4144,6 +4144,9 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_retry_authority_granted_count={0}" -f $recoveryClassification.RuntimeUnlockRetryAuthorityGrantedCount),
         ("runtime_unlock_retry_authority_observed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryAuthorityObservedCount),
         ("runtime_unlock_retry_authority_failed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryAuthorityFailedCount),
+        ("runtime_unlock_broken_state_fresh_retry_consumed_count={0}" -f $recoveryClassification.RuntimeUnlockBrokenStateFreshRetryConsumedCount),
+        ("runtime_unlock_broken_state_retry_suppressed_count={0}" -f $recoveryClassification.RuntimeUnlockBrokenStateRetrySuppressedCount),
+        ("runtime_unlock_broken_state_transaction_failed_count={0}" -f $recoveryClassification.RuntimeUnlockBrokenStateTransactionFailedCount),
         ("runtime_unlock_cutthrough_attempt_count={0}" -f $recoveryClassification.RuntimeUnlockCutThroughAttemptCount),
         ("runtime_unlock_cutthrough_peer_received_count={0}" -f $recoveryClassification.RuntimeUnlockCutThroughPeerReceivedCount),
         ("runtime_unlock_cutthrough_timeout_count={0}" -f $recoveryClassification.RuntimeUnlockCutThroughTimeoutCount),
@@ -4657,6 +4660,12 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockRetryQueuedBehindActiveNegotiationEvents = @($runtimeUnlockRetryScheduledEvents | Where-Object {
         (Get-FileTransferEventField -Event $_ -Name 'queued_behind_active_negotiation' -Default '0') -eq '1'
     })
+    $runtimeUnlockBrokenStateFreshRetryConsumedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_broken_state_fresh_retry_consumed'
+    })
+    $runtimeUnlockBrokenStateRetrySuppressedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_broken_state_retry_suppressed'
+    })
     $sessionRecoveryContractRetryDispatchedEvents = @($events | Where-Object {
         $_.EventName -eq 'session_recovery_contract_retry_dispatched'
     })
@@ -4784,6 +4793,10 @@ function Get-FileTransferRecoveryFailureClassification {
         $_.EventName -eq 'runtime_unlock_transaction_retired' -or
         $_.EventName -eq 'filetransfer_runtime_unlock_route_commit_rejected'
     })
+    $runtimeUnlockBrokenStateTransactionFailedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_transaction_failed' -and
+        (Get-FileTransferEventField -Event $_ -Name 'failure_reason' -Default '') -like 'runtime_unlock_broken_state_retry_exhausted*'
+    })
     $runtimeUnlockTransactionLocalOnlyRejectedEvents = @($events | Where-Object {
         $_.EventName -eq 'filetransfer_runtime_unlock_route_commit_rejected' -and
         (
@@ -4893,6 +4906,13 @@ function Get-FileTransferRecoveryFailureClassification {
         $runtimeUnlockProbeFailedEvents.Count -gt 0) {
         $class = 'runtime_unlock_probe_failed'
     }
+    elseif ($runtimeUnlockBrokenStateRetrySuppressedEvents.Count -gt 0 -or
+        $runtimeUnlockBrokenStateTransactionFailedEvents.Count -gt 0 -or
+        ($runtimeUnlockBrokenStateFreshRetryConsumedEvents.Count -gt 0 -and
+         $runtimeUnlockOfferNotObservedEvents.Count -gt 1 -and
+         $runtimeUnlockTransactionPeerProofEvents.Count -eq 0)) {
+        $class = 'runtime_unlock_broken_state_retry_churn'
+    }
     elseif ($runtimeUnlockTransactionObservedSendEvents.Count -gt 0 -and
         $runtimeUnlockTransactionPeerProofEvents.Count -eq 0 -and
         ($runtimeUnlockTransactionLocalOnlyRejectedEvents.Count -gt 0 -or $sessionLivenessTimeoutEvents.Count -gt 0)) {
@@ -4988,6 +5008,9 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockRetryAuthorityGrantedCount = $sessionRecoveryContractRetryAuthorityGrantedEvents.Count
         RuntimeUnlockRetryAuthorityObservedCount = $sessionRecoveryContractRetryAuthorityObservedEvents.Count
         RuntimeUnlockRetryAuthorityFailedCount = $sessionRecoveryContractRetryAuthorityFailedEvents.Count
+        RuntimeUnlockBrokenStateFreshRetryConsumedCount = $runtimeUnlockBrokenStateFreshRetryConsumedEvents.Count
+        RuntimeUnlockBrokenStateRetrySuppressedCount = $runtimeUnlockBrokenStateRetrySuppressedEvents.Count
+        RuntimeUnlockBrokenStateTransactionFailedCount = $runtimeUnlockBrokenStateTransactionFailedEvents.Count
         RuntimeUnlockCutThroughAttemptCount = $runtimeUnlockCutThroughStartedEvents.Count
         RuntimeUnlockCutThroughPeerReceivedCount = $runtimeUnlockCutThroughPeerReceivedEvents.Count
         RuntimeUnlockCutThroughTimeoutCount = $runtimeUnlockCutThroughFailedEvents.Count
@@ -5153,6 +5176,9 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_retry_authority_granted_count={0}" -f $recoveryClassification.RuntimeUnlockRetryAuthorityGrantedCount),
         ("runtime_unlock_retry_authority_observed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryAuthorityObservedCount),
         ("runtime_unlock_retry_authority_failed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryAuthorityFailedCount),
+        ("runtime_unlock_broken_state_fresh_retry_consumed_count={0}" -f $recoveryClassification.RuntimeUnlockBrokenStateFreshRetryConsumedCount),
+        ("runtime_unlock_broken_state_retry_suppressed_count={0}" -f $recoveryClassification.RuntimeUnlockBrokenStateRetrySuppressedCount),
+        ("runtime_unlock_broken_state_transaction_failed_count={0}" -f $recoveryClassification.RuntimeUnlockBrokenStateTransactionFailedCount),
         ("runtime_unlock_cutthrough_attempt_count={0}" -f $recoveryClassification.RuntimeUnlockCutThroughAttemptCount),
         ("runtime_unlock_cutthrough_peer_received_count={0}" -f $recoveryClassification.RuntimeUnlockCutThroughPeerReceivedCount),
         ("runtime_unlock_cutthrough_timeout_count={0}" -f $recoveryClassification.RuntimeUnlockCutThroughTimeoutCount),

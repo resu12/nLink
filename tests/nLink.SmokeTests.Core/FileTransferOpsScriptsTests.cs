@@ -3542,6 +3542,31 @@ public sealed class FileTransferOpsScriptsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockBrokenStateRetryChurn_ClassifiesBoundedFailure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockBrokenStateRetryChurnFixture(),
+            ["-LiveRouteProofMode", "RegularActivationCycle"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("runtime_unlock_broken_state_retry_churn", verdict["recovery_failure_class"]);
+        Assert.Equal("2", verdict["runtime_unlock_offer_not_observed_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_broken_state_fresh_retry_consumed_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_broken_state_retry_suppressed_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_broken_state_transaction_failed_count"]);
+        Assert.Equal("fail", verdict["runtime_unlock_transaction_proof_verdict"]);
+
+        var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
+        Assert.Equal("runtime_unlock_broken_state_retry_churn", stability["recovery_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_RuntimeUnlockCutThroughPeerReceivedWithRegularActivationCycle_IsAccepted()
     {
         if (!OperatingSystem.IsWindows())
@@ -9898,6 +9923,25 @@ if (-not $result.RegressionFailed) {
             LogLine($"event=session_liveness_timeout; session_id={sessionId}; generation=1; silence_ms=90000; terminal_timeout_ms=18000; role=Helper", secondsOffset: 90),
             LogLine($"event=file_transfer_outbound_terminal; role=Helpee; session_id={sessionId}; transfer_id={transferId}; state=Failed; error_code=peer_disconnected", secondsOffset: 91),
             LogLine($"event=transfer_terminal; direction=outbound; transfer_id={transferId}; session_id={sessionId}; file_name_len=33; file_size_bytes=536870912; bytes_transferred=0; chunks_transferred=0; chunk_count=24962; error_code=peer_disconnected; reason=Peer disconnected.; saved_path=(none); route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4", secondsOffset: 92)
+        ];
+    }
+
+    private static string[] BuildRuntimeUnlockBrokenStateRetryChurnFixture()
+    {
+        const string transferId = "transfer_runtime_unlock_broken_state";
+        const string sessionId = "sess_runtime_unlock_broken_state";
+        return
+        [
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id={sessionId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4; file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=conservative_nkn_startup", secondsOffset: 0),
+            LogLine($"event=runtime_unlock_transaction_offer_generation_created; session_id={sessionId}; transaction_generation=4; offer_generation=11; state=offerpreparing; peer_visible_proof=0; peer_received=0; answer_received=0; route_commit_pending=0; route_committed=0; failure_reason=(none); retired_reason=(none); reason=runtime_unlock", secondsOffset: 3),
+            LogLine($"event=tuna_acceleration_activation_offer_not_observed; trigger=runtime_unlock; session_id={sessionId}; payer_decision_id=9; generation=11; retry_scheduled=0; retry_after_recovery_armed=1; recovery_requested=1; recovery_reason=tuna_activation_offer_send_timeout; retry_reason=runtime_unlock_offer_send_not_observed", secondsOffset: 20),
+            LogLine($"event=runtime_unlock_broken_state_fresh_retry_consumed; session_id={sessionId}; transfer_id={transferId}; contract_generation=4; offer_generation=11; reason=runtime_unlock_offer_send_not_observed; family=offer_send_not_observed; fresh_retry_attempt=1; max_fresh_retries=1", secondsOffset: 40),
+            LogLine($"event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled; session_id={sessionId}; retired_generation=11; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=tuna_activation_offer_send_timeout; trigger=receive_resumed; queued_behind_active_negotiation=0", secondsOffset: 41),
+            LogLine($"event=tuna_acceleration_activation_offer_not_observed; trigger=runtime_unlock; session_id={sessionId}; payer_decision_id=10; generation=12; retry_scheduled=0; retry_after_recovery_armed=1; recovery_requested=1; recovery_reason=tuna_activation_offer_send_timeout; retry_reason=runtime_unlock_offer_send_not_observed", secondsOffset: 60),
+            LogLine($"event=runtime_unlock_broken_state_retry_suppressed; session_id={sessionId}; transfer_id={transferId}; contract_generation=5; offer_generation=12; reason=runtime_unlock_offer_send_not_observed; family=offer_send_not_observed; fresh_retry_attempts=1; max_fresh_retries=1; final_reason=runtime_unlock_broken_state_retry_exhausted_offer_send_not_observed", secondsOffset: 61),
+            LogLine($"event=runtime_unlock_transaction_failed; session_id={sessionId}; transaction_generation=4; offer_generation=12; state=failed; peer_visible_proof=0; peer_received=0; answer_received=0; route_commit_pending=0; route_committed=0; failure_reason=runtime_unlock_broken_state_retry_exhausted_offer_send_not_observed; retired_reason=(none); reason=runtime_unlock_broken_state_retry_exhausted_offer_send_not_observed", secondsOffset: 62),
+            LogLine($"event=session_recovery_contract_failed; session_id={sessionId}; transfer_id={transferId}; contract_generation=5; offer_generation=12; retired_offer_generation=12; kind=runtime_unlock_activation; state=failed; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=tuna_activation_offer_send_timeout; recovery_pending=0; recovery_settled=1; retry_required=0; retry_dispatching=0; retry_dispatched=0; retry_observed=0; queued_behind_active_negotiation=0; retry_authority_pending=0; retry_authority_granted=0; observed_send_pending=0; authority_attempt=1; authorized_observed_lane=(none); authority_failure_reason=runtime_unlock_broken_state_retry_exhausted_offer_send_not_observed; broken_state_fresh_retry_attempt=1; broken_state_fresh_retry_limit=1; broken_state_finalized=1; broken_state_failure_reason=runtime_unlock_broken_state_retry_exhausted_offer_send_not_observed", secondsOffset: 63),
+            LogLine($"event=transfer_terminal; direction=outbound; transfer_id={transferId}; session_id={sessionId}; file_name_len=33; file_size_bytes=268435456; bytes_transferred=268435456; chunks_transferred=12481; chunk_count=12481; error_code=(none); reason=Completed.; saved_path=(none); route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4", secondsOffset: 120)
         ];
     }
 
