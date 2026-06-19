@@ -1409,6 +1409,16 @@ public sealed partial class SessionRuntime
            snapshot.State is not (SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed) &&
            snapshot.LivenessDeferralDeadlineUtc > now;
 
+    private static bool IsRuntimeUnlockPathProbePending(
+        SessionRecoveryContractSnapshot snapshot,
+        DateTimeOffset now)
+        => snapshot.RuntimeUnlockPeerProofObserved &&
+           !snapshot.RuntimeUnlockRouteCommitted &&
+           string.Equals(snapshot.RuntimeUnlockPathProbeState, "started", StringComparison.OrdinalIgnoreCase) &&
+           string.Equals(snapshot.RuntimeUnlockPathProbeTransport, "tuna", StringComparison.OrdinalIgnoreCase) &&
+           snapshot.State is not (SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed) &&
+           snapshot.LivenessDeferralDeadlineUtc > now;
+
     private bool TryDeferSessionLivenessTimeoutForRuntimeUnlockStartup(
         string sessionIdSnapshot,
         long generation,
@@ -1587,13 +1597,15 @@ public sealed partial class SessionRuntime
         }
 
         var routeCommitPending = IsRuntimeUnlockRouteCommitPending(snapshot, now);
+        var pathProbePending = IsRuntimeUnlockPathProbePending(snapshot, now);
         var recoveryActionPending = snapshot.RecoveryPending ||
             snapshot.RetryRequired ||
             snapshot.RetryAuthorityPending ||
             snapshot.ObservedSendPending ||
             snapshot.RetryDispatching ||
             snapshot.RetryDispatched && !snapshot.RetryObserved ||
-            routeCommitPending;
+            routeCommitPending ||
+            pathProbePending;
         if (!recoveryActionPending ||
             now > snapshot.LivenessDeferralDeadlineUtc)
         {
@@ -1620,7 +1632,7 @@ public sealed partial class SessionRuntime
                 sessionLivenessFileTransferRecoveryDeferralKey =
                     CreateSessionRecoveryContractAnswerWaitDeferralKey(sessionIdSnapshot, snapshot);
             }
-            else if (routeCommitPending)
+            else if (routeCommitPending || pathProbePending)
             {
                 sessionLivenessFileTransferRecoveryDeferralKey =
                     CreateSessionRecoveryContractRouteCommitDeferralKey(sessionIdSnapshot, snapshot);
@@ -1629,7 +1641,7 @@ public sealed partial class SessionRuntime
 
         LocalOperationalLog.Warn(
             "Session",
-            $"event=bridge_receive_stall_recovery_exhausted_deferred_for_session_recovery_contract; session_id={sessionIdSnapshot}; transfer_id={snapshot.TransferId ?? "(none)"}; bridge_reason={SanitizeSessionLivenessReason(bridgeReason)}; contract_generation={snapshot.ContractGeneration}; offer_generation={snapshot.OfferGeneration}; state={snapshot.State.ToString().ToLowerInvariant()}; recovery_pending={(snapshot.RecoveryPending ? 1 : 0)}; retry_required={(snapshot.RetryRequired ? 1 : 0)}; retry_dispatching={(snapshot.RetryDispatching ? 1 : 0)}; retry_dispatched={(snapshot.RetryDispatched ? 1 : 0)}; retry_observed={(snapshot.RetryObserved ? 1 : 0)}; retry_authority_pending={(snapshot.RetryAuthorityPending ? 1 : 0)}; observed_send_pending={(snapshot.ObservedSendPending ? 1 : 0)}; runtime_unlock_peer_proof={(snapshot.RuntimeUnlockPeerProofObserved ? 1 : 0)}; runtime_unlock_route_commit_pending={(snapshot.RuntimeUnlockRouteCommitPending ? 1 : 0)}; liveness_deferral_deadline_utc_ms={snapshot.LivenessDeferralDeadlineUtc.ToUnixTimeMilliseconds()}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+            $"event=bridge_receive_stall_recovery_exhausted_deferred_for_session_recovery_contract; session_id={sessionIdSnapshot}; transfer_id={snapshot.TransferId ?? "(none)"}; bridge_reason={SanitizeSessionLivenessReason(bridgeReason)}; contract_generation={snapshot.ContractGeneration}; offer_generation={snapshot.OfferGeneration}; state={snapshot.State.ToString().ToLowerInvariant()}; recovery_pending={(snapshot.RecoveryPending ? 1 : 0)}; retry_required={(snapshot.RetryRequired ? 1 : 0)}; retry_dispatching={(snapshot.RetryDispatching ? 1 : 0)}; retry_dispatched={(snapshot.RetryDispatched ? 1 : 0)}; retry_observed={(snapshot.RetryObserved ? 1 : 0)}; retry_authority_pending={(snapshot.RetryAuthorityPending ? 1 : 0)}; observed_send_pending={(snapshot.ObservedSendPending ? 1 : 0)}; runtime_unlock_peer_proof={(snapshot.RuntimeUnlockPeerProofObserved ? 1 : 0)}; runtime_unlock_route_commit_pending={(snapshot.RuntimeUnlockRouteCommitPending ? 1 : 0)}; runtime_unlock_path_probe_state={SanitizeSessionLivenessReason(snapshot.RuntimeUnlockPathProbeState)}; runtime_unlock_path_probe_transport={SanitizeSessionLivenessReason(snapshot.RuntimeUnlockPathProbeTransport)}; liveness_deferral_deadline_utc_ms={snapshot.LivenessDeferralDeadlineUtc.ToUnixTimeMilliseconds()}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
         return true;
     }
 
@@ -2057,10 +2069,12 @@ public sealed partial class SessionRuntime
 
         var now = nowProvider();
         var routeCommitPending = IsRuntimeUnlockRouteCommitPending(snapshot, now);
+        var pathProbePending = IsRuntimeUnlockPathProbePending(snapshot, now);
         var recoveryActionPending = snapshot.RetryRequired ||
             snapshot.RetryAuthorityPending ||
             snapshot.ObservedSendPending ||
-            routeCommitPending;
+            routeCommitPending ||
+            pathProbePending;
         if (!recoveryActionPending ||
             snapshot.State is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed ||
             now > snapshot.LivenessDeferralDeadlineUtc)
@@ -2071,7 +2085,7 @@ public sealed partial class SessionRuntime
             return false;
         }
 
-        if (routeCommitPending &&
+        if ((routeCommitPending || pathProbePending) &&
             TryDeferSessionLivenessTimeoutForRecoveryContractRouteCommit(
                 sessionIdSnapshot,
                 generation,
@@ -2154,7 +2168,7 @@ public sealed partial class SessionRuntime
 
         LocalOperationalLog.Warn(
             "Session",
-            $"event=session_liveness_timeout_deferred_for_runtime_unlock_route_commit; session_id={sessionIdSnapshot}; transfer_id={snapshot.TransferId ?? "(none)"}; contract_generation={snapshot.ContractGeneration}; transaction_generation={snapshot.RuntimeUnlockTransactionGeneration}; offer_generation={snapshot.RuntimeUnlockTransactionOfferGeneration}; state={SanitizeSessionLivenessReason(snapshot.RuntimeUnlockTransactionState)}; peer_visible_proof={(snapshot.RuntimeUnlockPeerProofObserved ? 1 : 0)}; route_commit_pending={(snapshot.RuntimeUnlockRouteCommitPending ? 1 : 0)}; silence_ms={(long)silence.TotalMilliseconds}; liveness_deferral_deadline_utc_ms={deferralUntil.ToUnixTimeMilliseconds()}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+            $"event=session_liveness_timeout_deferred_for_runtime_unlock_route_commit; session_id={sessionIdSnapshot}; transfer_id={snapshot.TransferId ?? "(none)"}; contract_generation={snapshot.ContractGeneration}; transaction_generation={snapshot.RuntimeUnlockTransactionGeneration}; offer_generation={snapshot.RuntimeUnlockTransactionOfferGeneration}; state={SanitizeSessionLivenessReason(snapshot.RuntimeUnlockTransactionState)}; peer_visible_proof={(snapshot.RuntimeUnlockPeerProofObserved ? 1 : 0)}; route_commit_pending={(snapshot.RuntimeUnlockRouteCommitPending ? 1 : 0)}; path_probe_id={SanitizeSessionLivenessReason(snapshot.RuntimeUnlockPathProbeId ?? "(none)")}; path_probe_state={SanitizeSessionLivenessReason(snapshot.RuntimeUnlockPathProbeState)}; path_probe_transport={SanitizeSessionLivenessReason(snapshot.RuntimeUnlockPathProbeTransport)}; path_probe_acked_utc_ms={snapshot.RuntimeUnlockPathProbeAckedUtcMs}; silence_ms={(long)silence.TotalMilliseconds}; liveness_deferral_deadline_utc_ms={deferralUntil.ToUnixTimeMilliseconds()}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
         return true;
     }
 

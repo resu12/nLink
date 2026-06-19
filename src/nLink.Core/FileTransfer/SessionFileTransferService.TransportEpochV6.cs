@@ -14,6 +14,13 @@ public sealed partial class SessionFileTransferService
         => epoch is not null &&
            epoch.State is not V6TransportEpochState.Recovered and not V6TransportEpochState.Terminal;
 
+    private static bool IsRuntimeUnlockTunaPathProbeEpoch(V6TransportEpoch? epoch)
+        => epoch is
+        {
+            Kind: FileTransferTransportHandoffKind.NormalToTunaActivation,
+            TargetTransport: FileTransferTransportKind.Tuna,
+        };
+
     private static string FormatV6TransportEpochState(V6TransportEpochState state)
         => state switch
         {
@@ -150,6 +157,52 @@ public sealed partial class SessionFileTransferService
                 epoch.State,
                 epoch.TerminalReason ?? epoch.Reason,
                 IsV6TransportEpochUnresolved(epoch)));
+    }
+
+    private void NotifyRuntimeUnlockPathProbeStarted(
+        string sessionId,
+        string transferId,
+        V6TransportEpoch epoch,
+        string reason)
+    {
+        if (!IsRuntimeUnlockTunaPathProbeEpoch(epoch) ||
+            transport is not IRuntimeUnlockRouteCommitProofProvider proofProvider ||
+            string.IsNullOrWhiteSpace(epoch.ProbeId))
+        {
+            return;
+        }
+
+        proofProvider.NotifyRuntimeUnlockPathProbeStarted(
+            sessionId,
+            transferId,
+            epoch.EpochId,
+            epoch.ProbeId,
+            epoch.TargetTransport,
+            reason);
+    }
+
+    private void NotifyRuntimeUnlockPathProbeResult(
+        string sessionId,
+        string transferId,
+        V6TransportEpoch epoch,
+        bool acked,
+        string reason)
+    {
+        if (!IsRuntimeUnlockTunaPathProbeEpoch(epoch) ||
+            transport is not IRuntimeUnlockRouteCommitProofProvider proofProvider ||
+            string.IsNullOrWhiteSpace(epoch.ProbeId))
+        {
+            return;
+        }
+
+        proofProvider.NotifyRuntimeUnlockPathProbeResult(
+            sessionId,
+            transferId,
+            epoch.EpochId,
+            epoch.ProbeId,
+            epoch.TargetTransport,
+            acked,
+            reason);
     }
 
     private void StartOutboundV6TransportEpochLocked(
@@ -374,6 +427,7 @@ public sealed partial class SessionFileTransferService
         }
 
         await SendV6TransportEpochControlAsync(context.SessionId, context.TransferId, epoch).ConfigureAwait(false);
+        NotifyRuntimeUnlockPathProbeStarted(context.SessionId, context.TransferId, epoch, "transport_probe_sent");
         await SendV6TransportProbeFrameAsync(context.SessionId, context.TransferId, epoch, dataSession, context.LifetimeCts.Token).ConfigureAwait(false);
         lock (gate)
         {
@@ -418,6 +472,7 @@ public sealed partial class SessionFileTransferService
         }
 
         await SendV6TransportEpochControlAsync(context.SessionId, context.TransferId, epoch).ConfigureAwait(false);
+        NotifyRuntimeUnlockPathProbeStarted(context.SessionId, context.TransferId, epoch, "transport_probe_sent");
         await SendV6TransportProbeFrameAsync(context.SessionId, context.TransferId, epoch, dataSession, context.LifetimeCts.Token).ConfigureAwait(false);
         lock (gate)
         {
@@ -990,6 +1045,12 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        NotifyRuntimeUnlockPathProbeResult(
+            context.SessionId,
+            context.TransferId,
+            epoch,
+            acked: true,
+            "transport_probe_ack");
         return CompleteOutboundV6TransportEpochLocked(context, "transport_probe_ack");
     }
 
@@ -1005,6 +1066,12 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        NotifyRuntimeUnlockPathProbeResult(
+            context.SessionId,
+            context.TransferId,
+            epoch,
+            acked: true,
+            "transport_probe_ack");
         return CompleteInboundV6TransportEpochLocked(context, "transport_probe_ack");
     }
 
@@ -1451,11 +1518,18 @@ public sealed partial class SessionFileTransferService
         else if (epoch.Kind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
                  epoch.TargetTransport == FileTransferTransportKind.Tuna)
         {
-            TryPromoteOutboundPostTunaFallbackV6ToFileTunaV4Locked(
-                context,
-                reason,
-                epoch.Kind,
-                epoch.TargetTransport);
+            if (!TryPromoteOutboundRegularNknV4ToFileTunaV4Locked(
+                    context,
+                    reason,
+                    epoch.Kind,
+                    epoch.TargetTransport))
+            {
+                TryPromoteOutboundPostTunaFallbackV6ToFileTunaV4Locked(
+                    context,
+                    reason,
+                    epoch.Kind,
+                    epoch.TargetTransport);
+            }
         }
 
         LocalOperationalLog.Info(
@@ -1509,11 +1583,18 @@ public sealed partial class SessionFileTransferService
         else if (epoch.Kind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
                  epoch.TargetTransport == FileTransferTransportKind.Tuna)
         {
-            TryPromoteInboundPostTunaFallbackV6ToFileTunaV4Locked(
-                context,
-                reason,
-                epoch.Kind,
-                epoch.TargetTransport);
+            if (!TryPromoteInboundRegularNknV4ToFileTunaV4Locked(
+                    context,
+                    reason,
+                    epoch.Kind,
+                    epoch.TargetTransport))
+            {
+                TryPromoteInboundPostTunaFallbackV6ToFileTunaV4Locked(
+                    context,
+                    reason,
+                    epoch.Kind,
+                    epoch.TargetTransport);
+            }
         }
 
         return true;

@@ -2153,10 +2153,25 @@ public sealed partial class SessionFileTransferService
             handoffKind,
             targetTransport);
 
+    private static bool ShouldStartRuntimeUnlockTunaPathProbeAfterCommitRejection(string? rejectionReason)
+        => string.Equals(rejectionReason, "runtime_unlock_probe_missing", StringComparison.Ordinal) ||
+           string.Equals(rejectionReason, "transaction_not_commit_ready", StringComparison.Ordinal);
+
     private bool TryAcceptRuntimeUnlockRouteCommitLocked(
         OutboundTransferContext context,
         FileTransferRouteSelection routeSelection,
         string reason)
+        => TryAcceptRuntimeUnlockRouteCommitLocked(
+            context,
+            routeSelection,
+            reason,
+            out _);
+
+    private bool TryAcceptRuntimeUnlockRouteCommitLocked(
+        OutboundTransferContext context,
+        FileTransferRouteSelection routeSelection,
+        string reason,
+        out string rejectionReason)
         => TryAcceptRuntimeUnlockRouteCommitLocked(
             context.SessionId,
             context.TransferId,
@@ -2165,12 +2180,24 @@ public sealed partial class SessionFileTransferService
             routeSelection,
             Math.Clamp(context.ChunksTransferred, 0, Math.Max(0, context.ChunkCount)),
             Math.Max(-1, context.ChunksTransferred - 1),
-            reason);
+            reason,
+            out rejectionReason);
 
     private bool TryAcceptRuntimeUnlockRouteCommitLocked(
         InboundTransferContext context,
         FileTransferRouteSelection routeSelection,
         string reason)
+        => TryAcceptRuntimeUnlockRouteCommitLocked(
+            context,
+            routeSelection,
+            reason,
+            out _);
+
+    private bool TryAcceptRuntimeUnlockRouteCommitLocked(
+        InboundTransferContext context,
+        FileTransferRouteSelection routeSelection,
+        string reason,
+        out string rejectionReason)
         => TryAcceptRuntimeUnlockRouteCommitLocked(
             context.SessionId,
             context.TransferId,
@@ -2179,7 +2206,8 @@ public sealed partial class SessionFileTransferService
             routeSelection,
             Math.Max(0, context.NextChunkIndex),
             context.PullHighestReceivedChunkIndex,
-            reason);
+            reason,
+            out rejectionReason);
 
     private bool TryAcceptRuntimeUnlockRouteCommitLocked(
         string sessionId,
@@ -2189,8 +2217,10 @@ public sealed partial class SessionFileTransferService
         FileTransferRouteSelection routeSelection,
         int committedChunkIndex,
         int highestObservedChunkIndex,
-        string reason)
+        string reason,
+        out string rejectionReason)
     {
+        rejectionReason = "none";
         if (transport is not IRuntimeUnlockRouteCommitProofProvider proofProvider)
         {
             return true;
@@ -2198,12 +2228,13 @@ public sealed partial class SessionFileTransferService
 
         if (!proofProvider.TryGetRuntimeUnlockRouteCommitProof(sessionId, transferId, out var snapshot))
         {
+            rejectionReason = "transaction_proof_missing";
             LogRuntimeUnlockRouteCommitRejected(
                 direction,
                 transferId,
                 sessionId,
                 reason,
-                "transaction_proof_missing");
+                rejectionReason);
             return false;
         }
 
@@ -2243,14 +2274,18 @@ public sealed partial class SessionFileTransferService
             return true;
         }
 
-        var rejectionReason = decision.RuntimeUnlockCommitRejectedReason ?? "transaction_commit_rejected";
-        proofProvider.NotifyRuntimeUnlockRouteCommitResult(
-            sessionId,
-            transferId,
-            snapshot.TransactionGeneration,
-            snapshot.OfferGeneration,
-            accepted: false,
-            rejectionReason);
+        rejectionReason = decision.RuntimeUnlockCommitRejectedReason ?? "transaction_commit_rejected";
+        if (!ShouldStartRuntimeUnlockTunaPathProbeAfterCommitRejection(rejectionReason))
+        {
+            proofProvider.NotifyRuntimeUnlockRouteCommitResult(
+                sessionId,
+                transferId,
+                snapshot.TransactionGeneration,
+                snapshot.OfferGeneration,
+                accepted: false,
+                rejectionReason);
+        }
+
         LogRuntimeUnlockRouteCommitRejected(
             direction,
             transferId,
@@ -2305,8 +2340,15 @@ public sealed partial class SessionFileTransferService
             HandoffKind: FileTransferTransportHandoffKind.NormalToTunaActivation,
             TransportProfileKind: ResolveTransportProfileKind(transport));
         var routeSelection = FileTransferRouteResolver.Resolve(routeInput);
-        if (!TryAcceptRuntimeUnlockRouteCommitLocked(context, routeSelection, reason))
+        if (!TryAcceptRuntimeUnlockRouteCommitLocked(context, routeSelection, reason, out var rejectionReason))
         {
+            if (ShouldStartRuntimeUnlockTunaPathProbeAfterCommitRejection(rejectionReason))
+            {
+                StartOutboundV6TransportEpochLocked(context, reason, handoffKind, targetTransport);
+                _ = AnnounceAndProbeOutboundV6TransportEpochAsync(context);
+                return true;
+            }
+
             return false;
         }
 
@@ -2389,8 +2431,15 @@ public sealed partial class SessionFileTransferService
             HandoffKind: FileTransferTransportHandoffKind.NormalToTunaActivation,
             TransportProfileKind: ResolveTransportProfileKind(transport));
         var routeSelection = FileTransferRouteResolver.Resolve(routeInput);
-        if (!TryAcceptRuntimeUnlockRouteCommitLocked(context, routeSelection, reason))
+        if (!TryAcceptRuntimeUnlockRouteCommitLocked(context, routeSelection, reason, out var rejectionReason))
         {
+            if (ShouldStartRuntimeUnlockTunaPathProbeAfterCommitRejection(rejectionReason))
+            {
+                StartInboundV6TransportEpochLocked(context, reason, handoffKind, targetTransport);
+                _ = AnnounceAndProbeInboundV6TransportEpochAsync(context);
+                return true;
+            }
+
             return false;
         }
 
@@ -2530,8 +2579,15 @@ public sealed partial class SessionFileTransferService
             HandoffKind: FileTransferTransportHandoffKind.NormalToTunaActivation,
             TransportProfileKind: ResolveTransportProfileKind(transport));
         var routeSelection = FileTransferRouteResolver.Resolve(routeInput);
-        if (!TryAcceptRuntimeUnlockRouteCommitLocked(context, routeSelection, reason))
+        if (!TryAcceptRuntimeUnlockRouteCommitLocked(context, routeSelection, reason, out var rejectionReason))
         {
+            if (ShouldStartRuntimeUnlockTunaPathProbeAfterCommitRejection(rejectionReason))
+            {
+                StartOutboundV6TransportEpochLocked(context, reason, handoffKind, targetTransport);
+                _ = AnnounceAndProbeOutboundV6TransportEpochAsync(context);
+                return true;
+            }
+
             return false;
         }
 
@@ -2613,8 +2669,15 @@ public sealed partial class SessionFileTransferService
             HandoffKind: FileTransferTransportHandoffKind.NormalToTunaActivation,
             TransportProfileKind: ResolveTransportProfileKind(transport));
         var routeSelection = FileTransferRouteResolver.Resolve(routeInput);
-        if (!TryAcceptRuntimeUnlockRouteCommitLocked(context, routeSelection, reason))
+        if (!TryAcceptRuntimeUnlockRouteCommitLocked(context, routeSelection, reason, out var rejectionReason))
         {
+            if (ShouldStartRuntimeUnlockTunaPathProbeAfterCommitRejection(rejectionReason))
+            {
+                StartInboundV6TransportEpochLocked(context, reason, handoffKind, targetTransport);
+                _ = AnnounceAndProbeInboundV6TransportEpochAsync(context);
+                return true;
+            }
+
             return false;
         }
 

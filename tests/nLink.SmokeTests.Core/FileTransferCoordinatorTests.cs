@@ -107,7 +107,7 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
-    public void RuntimeUnlockTransaction_PeerProofPermitsRouteCommit()
+    public void RuntimeUnlockTransaction_PeerProofWithoutPathProbeRejectsRouteCommit()
     {
         var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
         var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
@@ -138,6 +138,82 @@ public sealed class FileTransferCoordinatorTests
                 TransactionGeneration: 2,
                 OfferGeneration: 22,
                 Reason: "transport_acceleration_answer"),
+            transaction).State;
+
+        var proof = RuntimeUnlockTransaction.CreateRouteCommitProof(transaction, "answer_received");
+        var decision = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested,
+                tuna,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                "runtime_unlock_commit",
+                FileTransferLegState.Active,
+                canSendData: true,
+                committedChunk: 3,
+                highestObservedChunk: 3,
+                runtimeUnlockCommitProof: proof),
+            started.State);
+
+        Assert.False(decision.RuntimeUnlockCommitAccepted);
+        Assert.Equal("runtime_unlock_probe_missing", decision.RuntimeUnlockCommitRejectedReason);
+        Assert.Equal(FileTransferRoute.RegularNknV4Fast, decision.State.RouteSelection.Route);
+    }
+
+    [Fact]
+    public void RuntimeUnlockTransaction_PeerProofAndTunaPathProbePermitRouteCommit()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var started = StartRegular(regular);
+        var transaction = RuntimeUnlockTransaction.Apply(
+            new RuntimeUnlockTransactionEvent(
+                RuntimeUnlockTransactionEventKind.OfferGenerationCreated,
+                started.State.SessionId,
+                started.State.TransferId,
+                TransactionGeneration: 2,
+                OfferGeneration: 22,
+                Reason: "runtime_unlock"),
+            RuntimeUnlockTransactionSnapshot.Idle).State;
+        transaction = RuntimeUnlockTransaction.Apply(
+            new RuntimeUnlockTransactionEvent(
+                RuntimeUnlockTransactionEventKind.PeerReceived,
+                started.State.SessionId,
+                started.State.TransferId,
+                TransactionGeneration: 2,
+                OfferGeneration: 22,
+                Reason: "tuna_acceleration_offer_received_raw"),
+            transaction).State;
+        transaction = RuntimeUnlockTransaction.Apply(
+            new RuntimeUnlockTransactionEvent(
+                RuntimeUnlockTransactionEventKind.AnswerReceived,
+                started.State.SessionId,
+                started.State.TransferId,
+                TransactionGeneration: 2,
+                OfferGeneration: 22,
+                Reason: "transport_acceleration_answer"),
+            transaction).State;
+        transaction = RuntimeUnlockTransaction.Apply(
+            new RuntimeUnlockTransactionEvent(
+                RuntimeUnlockTransactionEventKind.PathProbeStarted,
+                started.State.SessionId,
+                started.State.TransferId,
+                TransactionGeneration: 2,
+                OfferGeneration: 22,
+                Reason: "transport_probe_sent",
+                PathProbeId: "probe-22",
+                PathProbeTransport: FileTransferTransportKind.Tuna),
+            transaction).State;
+        transaction = RuntimeUnlockTransaction.Apply(
+            new RuntimeUnlockTransactionEvent(
+                RuntimeUnlockTransactionEventKind.PathProbeAcked,
+                started.State.SessionId,
+                started.State.TransferId,
+                TransactionGeneration: 2,
+                OfferGeneration: 22,
+                Reason: "transport_probe_ack",
+                PathProbeId: "probe-22",
+                PathProbeTransport: FileTransferTransportKind.Tuna),
             transaction).State;
 
         var proof = RuntimeUnlockTransaction.CreateRouteCommitProof(transaction, "answer_received");
@@ -237,6 +313,17 @@ public sealed class FileTransferCoordinatorTests
                 TransactionGeneration: 4,
                 OfferGeneration: 44,
                 Reason: "transport_acceleration_answer"),
+            transaction).State;
+        transaction = RuntimeUnlockTransaction.Apply(
+            new RuntimeUnlockTransactionEvent(
+                RuntimeUnlockTransactionEventKind.PathProbeAcked,
+                started.State.SessionId,
+                started.State.TransferId,
+                TransactionGeneration: 4,
+                OfferGeneration: 44,
+                Reason: "transport_probe_ack",
+                PathProbeId: "probe-44",
+                PathProbeTransport: FileTransferTransportKind.Tuna),
             transaction).State;
         var lease = RuntimeUnlockTunaPathLease.Start(
             started.State.SessionId,

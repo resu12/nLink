@@ -3611,7 +3611,10 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Equal("1", verdict["runtime_unlock_transaction_started_count"]);
         Assert.Equal("1", verdict["runtime_unlock_transaction_observed_send_count"]);
         Assert.Equal("2", verdict["runtime_unlock_transaction_peer_proof_count"]);
-        Assert.Equal("2", verdict["runtime_unlock_transaction_commit_pending_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_probe_started_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_probe_acked_count"]);
+        Assert.Equal("pass", verdict["runtime_unlock_make_before_break_verdict"]);
+        Assert.Equal("1", verdict["runtime_unlock_transaction_commit_pending_count"]);
         Assert.Equal("2", verdict["runtime_unlock_transaction_committed_count"]);
         Assert.Equal("0", verdict["runtime_unlock_transaction_local_only_rejected_count"]);
         Assert.Equal("pass", verdict["runtime_unlock_transaction_proof_verdict"]);
@@ -3635,13 +3638,15 @@ public sealed class FileTransferOpsScriptsTests
             BuildRuntimeUnlockTransactionPendingCommitAfterPriorCommitFixture());
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
-        Assert.Equal("runtime_unlock_transaction_commit_missing", verdict["recovery_failure_class"]);
+        Assert.Equal("runtime_unlock_route_commit_before_probe", verdict["recovery_failure_class"]);
+        Assert.Equal("0", verdict["runtime_unlock_probe_acked_count"]);
+        Assert.Equal("fail", verdict["runtime_unlock_make_before_break_verdict"]);
         Assert.Equal("4", verdict["runtime_unlock_transaction_commit_pending_count"]);
         Assert.Equal("2", verdict["runtime_unlock_transaction_committed_count"]);
         Assert.Equal("fail", verdict["runtime_unlock_transaction_proof_verdict"]);
 
         var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
-        Assert.Equal("runtime_unlock_transaction_commit_missing", stability["recovery_failure_class"]);
+        Assert.Equal("runtime_unlock_route_commit_before_probe", stability["recovery_failure_class"]);
         Assert.Equal("fail", stability["runtime_unlock_transaction_proof_verdict"]);
     }
 
@@ -9907,10 +9912,14 @@ if (-not $result.RegressionFailed) {
         [
             LogLine($"event=runtime_unlock_transaction_offer_generation_created; session_id={sessionId}; transaction_generation=1; offer_generation=7; state=offerpreparing; peer_visible_proof=0; peer_received=0; answer_received=0; route_commit_pending=0; route_committed=0; failure_reason=(none); retired_reason=(none); reason=runtime_unlock", secondsOffset: 1),
             LogLine($"event=runtime_unlock_transaction_observed_send; session_id={sessionId}; transaction_generation=1; offer_generation=7; state=offersentobserved; peer_visible_proof=0; peer_received=0; answer_received=0; route_commit_pending=0; route_committed=0; failure_reason=(none); retired_reason=(none); reason=offer_observed_send", secondsOffset: 2),
-            LogLine($"event=runtime_unlock_transaction_peer_received; session_id={sessionId}; transaction_generation=1; offer_generation=7; state=peerreceived; peer_visible_proof=1; peer_received=1; answer_received=0; route_commit_pending=1; route_committed=0; failure_reason=(none); retired_reason=(none); reason=transport_acceleration_offer_received", secondsOffset: 3),
-            LogLine($"event=runtime_unlock_transaction_answer_received; session_id={sessionId}; transaction_generation=1; offer_generation=7; state=answerreceived; peer_visible_proof=1; peer_received=1; answer_received=1; route_commit_pending=1; route_committed=0; failure_reason=(none); retired_reason=(none); reason=transport_acceleration_answer_received", secondsOffset: 4),
-            LogLine($"event=filetransfer_runtime_unlock_route_commit_accepted; direction=outbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=1; offer_generation=7; reason=normal_to_tuna_activation", secondsOffset: 5),
-            LogLine($"event=runtime_unlock_transaction_route_committed; session_id={sessionId}; transaction_generation=1; offer_generation=7; state=committed; peer_visible_proof=1; peer_received=1; answer_received=1; route_commit_pending=0; route_committed=1; failure_reason=(none); retired_reason=(none); reason=normal_to_tuna_activation", secondsOffset: 6),
+            LogLine($"event=runtime_unlock_transaction_peer_received; session_id={sessionId}; transaction_generation=1; offer_generation=7; state=peerreceived; peer_visible_proof=1; peer_received=1; answer_received=0; path_probe_id=(none); path_probe_state=none; path_probe_transport=unknown; route_commit_pending=0; route_committed=0; failure_reason=(none); retired_reason=(none); reason=transport_acceleration_offer_received", secondsOffset: 3),
+            LogLine($"event=runtime_unlock_transaction_answer_received; session_id={sessionId}; transaction_generation=1; offer_generation=7; state=answerreceived; peer_visible_proof=1; peer_received=1; answer_received=1; path_probe_id=(none); path_probe_state=none; path_probe_transport=unknown; route_commit_pending=0; route_committed=0; failure_reason=(none); retired_reason=(none); reason=transport_acceleration_answer_received", secondsOffset: 4),
+            LogLine($"event=runtime_unlock_probe_started; session_id={sessionId}; transfer_id={transferId}; transaction_generation=1; offer_generation=7; probe_id=probe-7; target_transport=tuna; transport_epoch=1; acked=0; state=started; reason=transport_probe_sent", secondsOffset: 5),
+            LogLine($"event=runtime_unlock_transaction_path_probe_started; session_id={sessionId}; transaction_generation=1; offer_generation=7; state=answerreceived; peer_visible_proof=1; peer_received=1; answer_received=1; path_probe_id=probe-7; path_probe_state=started; path_probe_transport=tuna; route_commit_pending=0; route_committed=0; failure_reason=(none); retired_reason=(none); reason=transport_probe_sent", secondsOffset: 6),
+            LogLine($"event=runtime_unlock_probe_acked; session_id={sessionId}; transfer_id={transferId}; transaction_generation=1; offer_generation=7; probe_id=probe-7; target_transport=tuna; transport_epoch=1; acked=1; state=acked; reason=transport_probe_ack", secondsOffset: 7),
+            LogLine($"event=runtime_unlock_transaction_path_probe_acked; session_id={sessionId}; transaction_generation=1; offer_generation=7; state=routecommitpending; peer_visible_proof=1; peer_received=1; answer_received=1; path_probe_id=probe-7; path_probe_state=acked; path_probe_transport=tuna; route_commit_pending=1; route_committed=0; failure_reason=(none); retired_reason=(none); reason=transport_probe_ack", secondsOffset: 8),
+            LogLine($"event=filetransfer_runtime_unlock_route_commit_accepted; direction=outbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=1; offer_generation=7; reason=normal_to_tuna_activation", secondsOffset: 9),
+            LogLine($"event=runtime_unlock_transaction_route_committed; session_id={sessionId}; transaction_generation=1; offer_generation=7; state=committed; peer_visible_proof=1; peer_received=1; answer_received=1; path_probe_id=probe-7; path_probe_state=acked; path_probe_transport=tuna; route_commit_pending=0; route_committed=1; failure_reason=(none); retired_reason=(none); reason=normal_to_tuna_activation", secondsOffset: 10),
             .. BuildRouteAwareLiveRegularActivationCycleFixture()
         ];
     }

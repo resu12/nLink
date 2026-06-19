@@ -23,6 +23,9 @@ internal enum RuntimeUnlockTransactionEventKind
     ObservedSend,
     PeerReceived,
     AnswerReceived,
+    PathProbeStarted,
+    PathProbeAcked,
+    PathProbeFailed,
     Timeout,
     BridgeRecoveryStarted,
     BridgeRecoverySettled,
@@ -32,6 +35,14 @@ internal enum RuntimeUnlockTransactionEventKind
     Terminalized,
     Failed,
     Retired,
+}
+
+internal enum RuntimeUnlockPathProbeState
+{
+    None,
+    Started,
+    Acked,
+    Failed,
 }
 
 internal enum RuntimeUnlockTunaPathLeaseState
@@ -214,7 +225,9 @@ internal readonly record struct RuntimeUnlockTransactionEvent(
     long OfferGeneration,
     string Reason,
     long UtcMs = 0,
-    string? ObservedLane = null);
+    string? ObservedLane = null,
+    string? PathProbeId = null,
+    FileTransferTransportKind PathProbeTransport = FileTransferTransportKind.Unknown);
 
 internal sealed record RuntimeUnlockTransactionSnapshot(
     string SessionId,
@@ -231,6 +244,11 @@ internal sealed record RuntimeUnlockTransactionSnapshot(
     string? ObservedLane,
     bool PeerReceived,
     bool AnswerReceived,
+    string? PathProbeId,
+    RuntimeUnlockPathProbeState PathProbeState,
+    FileTransferTransportKind PathProbeTransport,
+    long PathProbeAckedUtcMs,
+    string? PathProbeFailureReason,
     bool RouteCommitPending,
     bool RouteCommitted,
     string? FailureReason,
@@ -243,6 +261,10 @@ internal sealed record RuntimeUnlockTransactionSnapshot(
 {
     public bool HasPeerVisibleProof => PeerReceived || AnswerReceived;
 
+    public bool HasTunaPathProbeProof => PathProbeState == RuntimeUnlockPathProbeState.Acked &&
+        PathProbeTransport == FileTransferTransportKind.Tuna &&
+        !string.IsNullOrWhiteSpace(PathProbeId);
+
     public bool IsTerminal => State is
         RuntimeUnlockTransactionState.Committed or
         RuntimeUnlockTransactionState.Failed or
@@ -250,9 +272,8 @@ internal sealed record RuntimeUnlockTransactionSnapshot(
 
     public bool CanRequestRouteCommit => !IsTerminal &&
         HasPeerVisibleProof &&
-        State is RuntimeUnlockTransactionState.PeerReceived or
-            RuntimeUnlockTransactionState.AnswerReceived or
-            RuntimeUnlockTransactionState.RouteCommitPending;
+        HasTunaPathProbeProof &&
+        State == RuntimeUnlockTransactionState.RouteCommitPending;
 
     public static RuntimeUnlockTransactionSnapshot Idle { get; } = new(
         SessionId: string.Empty,
@@ -269,6 +290,11 @@ internal sealed record RuntimeUnlockTransactionSnapshot(
         ObservedLane: null,
         PeerReceived: false,
         AnswerReceived: false,
+        PathProbeId: null,
+        PathProbeState: RuntimeUnlockPathProbeState.None,
+        PathProbeTransport: FileTransferTransportKind.Unknown,
+        PathProbeAckedUtcMs: 0,
+        PathProbeFailureReason: null,
         RouteCommitPending: false,
         RouteCommitted: false,
         FailureReason: null,
@@ -296,6 +322,11 @@ internal readonly record struct RuntimeUnlockRouteCommitProof(
     FileTransferTransportKind TargetTransport,
     RuntimeUnlockTransactionState TransactionState,
     string Reason,
+    string? PathProbeId = null,
+    RuntimeUnlockPathProbeState PathProbeState = RuntimeUnlockPathProbeState.None,
+    FileTransferTransportKind PathProbeTransport = FileTransferTransportKind.Unknown,
+    long PathProbeAckedUtcMs = 0,
+    string? PathProbeFailureReason = null,
     bool TunaPathLeaseRequired = false,
     long TunaPathLeaseGeneration = 0,
     RuntimeUnlockTunaPathLeaseState TunaPathLeaseState = RuntimeUnlockTunaPathLeaseState.None,
@@ -342,6 +373,11 @@ internal static class RuntimeUnlockTransaction
                 ObservedLane: null,
                 PeerReceived: false,
                 AnswerReceived: false,
+                PathProbeId: null,
+                PathProbeState: RuntimeUnlockPathProbeState.None,
+                PathProbeTransport: FileTransferTransportKind.Unknown,
+                PathProbeAckedUtcMs: 0,
+                PathProbeFailureReason: null,
                 RouteCommitPending: false,
                 RouteCommitted: false,
                 FailureReason: null,
@@ -381,7 +417,6 @@ internal static class RuntimeUnlockTransaction
             {
                 PeerReceived = true,
                 State = RuntimeUnlockTransactionState.PeerReceived,
-                RouteCommitPending = true,
                 UpdatedUtcMs = nowMs,
             },
             RuntimeUnlockTransactionEventKind.AnswerReceived => current with
@@ -389,7 +424,46 @@ internal static class RuntimeUnlockTransaction
                 PeerReceived = true,
                 AnswerReceived = true,
                 State = RuntimeUnlockTransactionState.AnswerReceived,
-                RouteCommitPending = true,
+                UpdatedUtcMs = nowMs,
+            },
+            RuntimeUnlockTransactionEventKind.PathProbeStarted => current with
+            {
+                PathProbeId = NormalizeNullable(transactionEvent.PathProbeId),
+                PathProbeState = RuntimeUnlockPathProbeState.Started,
+                PathProbeTransport = transactionEvent.PathProbeTransport,
+                PathProbeAckedUtcMs = 0,
+                PathProbeFailureReason = null,
+                RouteCommitPending = false,
+                UpdatedUtcMs = nowMs,
+            },
+            RuntimeUnlockTransactionEventKind.PathProbeAcked => current with
+            {
+                PathProbeId = NormalizeNullable(transactionEvent.PathProbeId),
+                PathProbeState = RuntimeUnlockPathProbeState.Acked,
+                PathProbeTransport = transactionEvent.PathProbeTransport,
+                PathProbeAckedUtcMs = nowMs,
+                PathProbeFailureReason = null,
+                State = current.HasPeerVisibleProof &&
+                    transactionEvent.PathProbeTransport == FileTransferTransportKind.Tuna &&
+                    !string.IsNullOrWhiteSpace(transactionEvent.PathProbeId)
+                        ? RuntimeUnlockTransactionState.RouteCommitPending
+                        : current.State,
+                RouteCommitPending = current.HasPeerVisibleProof &&
+                    transactionEvent.PathProbeTransport == FileTransferTransportKind.Tuna &&
+                    !string.IsNullOrWhiteSpace(transactionEvent.PathProbeId),
+                UpdatedUtcMs = nowMs,
+            },
+            RuntimeUnlockTransactionEventKind.PathProbeFailed => current with
+            {
+                PathProbeId = NormalizeNullable(transactionEvent.PathProbeId) ?? current.PathProbeId,
+                PathProbeState = RuntimeUnlockPathProbeState.Failed,
+                PathProbeTransport = transactionEvent.PathProbeTransport == FileTransferTransportKind.Unknown
+                    ? current.PathProbeTransport
+                    : transactionEvent.PathProbeTransport,
+                PathProbeFailureReason = reason,
+                State = RuntimeUnlockTransactionState.Failed,
+                RouteCommitPending = false,
+                FailureReason = reason,
                 UpdatedUtcMs = nowMs,
             },
             RuntimeUnlockTransactionEventKind.BridgeRecoveryStarted => current with
@@ -457,6 +531,11 @@ internal static class RuntimeUnlockTransaction
             FileTransferTransportKind.Tuna,
             state.State,
             NormalizeReason(reason),
+            state.PathProbeId,
+            state.PathProbeState,
+            state.PathProbeTransport,
+            state.PathProbeAckedUtcMs,
+            state.PathProbeFailureReason,
             TunaPathLeaseRequired: state.TunaPathLeaseGeneration > 0,
             state.TunaPathLeaseGeneration,
             state.TunaPathLeaseState,
@@ -485,6 +564,16 @@ internal static class RuntimeUnlockTransaction
                 ? state
                 : RuntimeUnlockTransactionState.Failed,
             NormalizeReason(snapshot.Reason),
+            snapshot.PathProbeId,
+            Enum.TryParse<RuntimeUnlockPathProbeState>(
+                snapshot.PathProbeState,
+                ignoreCase: true,
+                out var pathProbeState)
+                ? pathProbeState
+                : RuntimeUnlockPathProbeState.None,
+            snapshot.PathProbeTransport,
+            snapshot.PathProbeAckedUtcMs,
+            snapshot.PathProbeFailureReason,
             snapshot.TunaPathLeaseRequired,
             snapshot.TunaPathLeaseGeneration,
             Enum.TryParse<RuntimeUnlockTunaPathLeaseState>(
@@ -562,9 +651,26 @@ internal static class RuntimeUnlockTransaction
             }
         }
 
-        if (proof.TransactionState is not RuntimeUnlockTransactionState.PeerReceived and
-            not RuntimeUnlockTransactionState.AnswerReceived and
-            not RuntimeUnlockTransactionState.RouteCommitPending)
+        if (proof.PathProbeState == RuntimeUnlockPathProbeState.Failed)
+        {
+            rejectionReason = "runtime_unlock_probe_failed";
+            return false;
+        }
+
+        if (proof.PathProbeState != RuntimeUnlockPathProbeState.Acked ||
+            string.IsNullOrWhiteSpace(proof.PathProbeId))
+        {
+            rejectionReason = "runtime_unlock_probe_missing";
+            return false;
+        }
+
+        if (proof.PathProbeTransport != FileTransferTransportKind.Tuna)
+        {
+            rejectionReason = "runtime_unlock_probe_target_invalid";
+            return false;
+        }
+
+        if (proof.TransactionState != RuntimeUnlockTransactionState.RouteCommitPending)
         {
             rejectionReason = "transaction_not_commit_ready";
             return false;

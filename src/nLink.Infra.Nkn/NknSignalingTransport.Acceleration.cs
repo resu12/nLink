@@ -3565,11 +3565,109 @@ public sealed partial class NknSignalingTransport
             RuntimeUnlockRouteCommitPending: runtimeUnlockTransactionState.RouteCommitPending,
             RuntimeUnlockRouteCommitted: runtimeUnlockTransactionState.RouteCommitted,
             RuntimeUnlockTransactionFailureReason: runtimeUnlockTransactionState.FailureReason,
+            RuntimeUnlockPathProbeId: runtimeUnlockTransactionState.PathProbeId,
+            RuntimeUnlockPathProbeState: runtimeUnlockTransactionState.PathProbeState.ToString().ToLowerInvariant(),
+            RuntimeUnlockPathProbeTransport: FormatFileTransferTransportKindForLog(runtimeUnlockTransactionState.PathProbeTransport),
+            RuntimeUnlockPathProbeAckedUtcMs: runtimeUnlockTransactionState.PathProbeAckedUtcMs,
+            RuntimeUnlockPathProbeFailureReason: runtimeUnlockTransactionState.PathProbeFailureReason,
             RuntimeUnlockTunaPathLeaseGeneration: runtimeUnlockTunaPathLeaseState.LeaseGeneration,
             RuntimeUnlockTunaPathLeaseState: runtimeUnlockTunaPathLeaseState.State.ToString().ToLowerInvariant(),
             RuntimeUnlockTunaPathLeaseListenerRunId: runtimeUnlockTunaPathLeaseState.ListenerRunId,
             RuntimeUnlockTunaPathLeaseCurrent: runtimeUnlockTunaPathLeaseState.IsCurrent,
             RuntimeUnlockTunaPathLeaseFailureReason: runtimeUnlockTunaPathLeaseState.FailureReason);
+
+    void IRuntimeUnlockRouteCommitProofProvider.NotifyRuntimeUnlockPathProbeStarted(
+        string sessionId,
+        string transferId,
+        long transportEpoch,
+        string probeId,
+        FileTransferTransportKind targetTransport,
+        string reason)
+    {
+        NotifyRuntimeUnlockPathProbe(
+            RuntimeUnlockTransactionEventKind.PathProbeStarted,
+            sessionId,
+            transferId,
+            transportEpoch,
+            probeId,
+            targetTransport,
+            acked: false,
+            reason);
+    }
+
+    void IRuntimeUnlockRouteCommitProofProvider.NotifyRuntimeUnlockPathProbeResult(
+        string sessionId,
+        string transferId,
+        long transportEpoch,
+        string probeId,
+        FileTransferTransportKind targetTransport,
+        bool acked,
+        string reason)
+    {
+        NotifyRuntimeUnlockPathProbe(
+            acked
+                ? RuntimeUnlockTransactionEventKind.PathProbeAcked
+                : RuntimeUnlockTransactionEventKind.PathProbeFailed,
+            sessionId,
+            transferId,
+            transportEpoch,
+            probeId,
+            targetTransport,
+            acked,
+            reason);
+    }
+
+    private void NotifyRuntimeUnlockPathProbe(
+        RuntimeUnlockTransactionEventKind kind,
+        string sessionId,
+        string transferId,
+        long transportEpoch,
+        string probeId,
+        FileTransferTransportKind targetTransport,
+        bool acked,
+        string reason)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId) ||
+            string.IsNullOrWhiteSpace(probeId))
+        {
+            return;
+        }
+
+        RuntimeUnlockTransactionDecision? decision;
+        lock (accelerationGate)
+        {
+            var current = runtimeUnlockTransactionState;
+            if (current.IsTerminal ||
+                !string.Equals(current.SessionId, sessionId.Trim(), StringComparison.Ordinal) ||
+                (!string.IsNullOrWhiteSpace(current.TransferId) &&
+                 !string.IsNullOrWhiteSpace(transferId) &&
+                 !string.Equals(current.TransferId, transferId.Trim(), StringComparison.Ordinal)))
+            {
+                LocalOperationalLog.Warn(
+                    "NKN.Tuna",
+                    "event=runtime_unlock_probe_stale_ignored; " +
+                    $"session_id={SanitizeLogToken(sessionId)}; transfer_id={SanitizeLogToken(transferId)}; " +
+                    $"transaction_generation={current.TransactionGeneration}; offer_generation={current.OfferGeneration}; " +
+                    $"probe_id={SanitizeLogToken(probeId)}; target_transport={FormatFileTransferTransportKindForLog(targetTransport)}; " +
+                    $"transport_epoch={transportEpoch}; state={current.State.ToString().ToLowerInvariant()}; reason={SanitizeLogToken(reason)}");
+                return;
+            }
+
+            decision = ApplyRuntimeUnlockTransactionUnsafe(
+                kind,
+                sessionId.Trim(),
+                current.OfferGeneration,
+                reason,
+                transactionGeneration: current.TransactionGeneration,
+                pathProbeId: probeId.Trim(),
+                pathProbeTransport: targetTransport);
+        }
+
+        LogRuntimeUnlockTransactionDecision(kind, decision);
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event={GetRuntimeUnlockProbeEventName(kind)}; session_id={SanitizeLogToken(sessionId)}; transfer_id={SanitizeLogToken(transferId)}; transaction_generation={decision.State.TransactionGeneration}; offer_generation={decision.State.OfferGeneration}; probe_id={SanitizeLogToken(probeId)}; target_transport={FormatFileTransferTransportKindForLog(targetTransport)}; transport_epoch={transportEpoch}; acked={(acked ? 1 : 0)}; state={decision.State.PathProbeState.ToString().ToLowerInvariant()}; reason={SanitizeLogToken(reason)}");
+    }
 
     bool IRuntimeUnlockRouteCommitProofProvider.TryGetRuntimeUnlockRouteCommitProof(
         string sessionId,
@@ -3587,7 +3685,8 @@ public sealed partial class NknSignalingTransport
         lock (accelerationGate)
         {
             var state = runtimeUnlockTransactionState;
-            if (!state.CanRequestRouteCommit ||
+            if (state.IsTerminal ||
+                !state.HasPeerVisibleProof ||
                 !string.Equals(state.SessionId, normalizedSessionId, StringComparison.Ordinal) ||
                 (!string.IsNullOrWhiteSpace(state.TransferId) &&
                  !string.IsNullOrWhiteSpace(normalizedTransferId) &&
@@ -3616,6 +3715,11 @@ public sealed partial class NknSignalingTransport
                 FileTransferTransportKind.Tuna,
                 state.State.ToString(),
                 "runtime_unlock_transaction_peer_proof",
+                PathProbeId: state.PathProbeId,
+                PathProbeState: state.PathProbeState.ToString(),
+                PathProbeTransport: state.PathProbeTransport,
+                PathProbeAckedUtcMs: state.PathProbeAckedUtcMs,
+                PathProbeFailureReason: state.PathProbeFailureReason,
                 TunaPathLeaseRequired: leaseRequired,
                 TunaPathLeaseGeneration: leaseRequired ? lease.LeaseGeneration : 0,
                 TunaPathLeaseState: leaseRequired ? lease.State.ToString() : "None",
@@ -3749,7 +3853,9 @@ public sealed partial class NknSignalingTransport
         long offerGeneration,
         string reason,
         long transactionGeneration = 0,
-        string? observedLane = null)
+        string? observedLane = null,
+        string? pathProbeId = null,
+        FileTransferTransportKind pathProbeTransport = FileTransferTransportKind.Unknown)
     {
         var effectiveTransactionGeneration = transactionGeneration > 0
             ? transactionGeneration
@@ -3763,7 +3869,9 @@ public sealed partial class NknSignalingTransport
                 offerGeneration,
                 SanitizeLogToken(reason),
                 UtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                ObservedLane: observedLane),
+                ObservedLane: observedLane,
+                PathProbeId: pathProbeId,
+                PathProbeTransport: pathProbeTransport),
             runtimeUnlockTransactionState);
         var stateWithLease = AttachRuntimeUnlockTunaPathLeaseUnsafe(decision.State);
         runtimeUnlockTransactionState = stateWithLease;
@@ -3812,7 +3920,7 @@ public sealed partial class NknSignalingTransport
         var state = decision.State;
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=runtime_unlock_transaction_{GetRuntimeUnlockTransactionEventName(kind)}; session_id={SanitizeLogToken(state.SessionId)}; transaction_generation={state.TransactionGeneration}; offer_generation={state.OfferGeneration}; state={state.State.ToString().ToLowerInvariant()}; peer_visible_proof={(state.HasPeerVisibleProof ? 1 : 0)}; peer_received={(state.PeerReceived ? 1 : 0)}; answer_received={(state.AnswerReceived ? 1 : 0)}; route_commit_pending={(state.RouteCommitPending ? 1 : 0)}; route_committed={(state.RouteCommitted ? 1 : 0)}; failure_reason={SanitizeLogToken(state.FailureReason ?? "(none)")}; retired_reason={SanitizeLogToken(state.RetiredReason ?? "(none)")}; tuna_path_lease_generation={state.TunaPathLeaseGeneration}; tuna_path_lease_state={state.TunaPathLeaseState.ToString().ToLowerInvariant()}; tuna_path_lease_current={(state.TunaPathLeaseCurrent ? 1 : 0)}; tuna_path_lease_listener_run_id={SanitizeLogToken(state.TunaPathLeaseListenerRunId ?? "(none)")}; tuna_path_lease_failure_reason={SanitizeLogToken(state.TunaPathLeaseFailureReason ?? "(none)")}; reason={SanitizeLogToken(decision.Reason)}");
+            $"event=runtime_unlock_transaction_{GetRuntimeUnlockTransactionEventName(kind)}; session_id={SanitizeLogToken(state.SessionId)}; transaction_generation={state.TransactionGeneration}; offer_generation={state.OfferGeneration}; state={state.State.ToString().ToLowerInvariant()}; peer_visible_proof={(state.HasPeerVisibleProof ? 1 : 0)}; peer_received={(state.PeerReceived ? 1 : 0)}; answer_received={(state.AnswerReceived ? 1 : 0)}; path_probe_id={SanitizeLogToken(state.PathProbeId ?? "(none)")}; path_probe_state={state.PathProbeState.ToString().ToLowerInvariant()}; path_probe_transport={FormatFileTransferTransportKindForLog(state.PathProbeTransport)}; path_probe_acked_utc_ms={state.PathProbeAckedUtcMs}; path_probe_failure_reason={SanitizeLogToken(state.PathProbeFailureReason ?? "(none)")}; route_commit_pending={(state.RouteCommitPending ? 1 : 0)}; route_committed={(state.RouteCommitted ? 1 : 0)}; failure_reason={SanitizeLogToken(state.FailureReason ?? "(none)")}; retired_reason={SanitizeLogToken(state.RetiredReason ?? "(none)")}; tuna_path_lease_generation={state.TunaPathLeaseGeneration}; tuna_path_lease_state={state.TunaPathLeaseState.ToString().ToLowerInvariant()}; tuna_path_lease_current={(state.TunaPathLeaseCurrent ? 1 : 0)}; tuna_path_lease_listener_run_id={SanitizeLogToken(state.TunaPathLeaseListenerRunId ?? "(none)")}; tuna_path_lease_failure_reason={SanitizeLogToken(state.TunaPathLeaseFailureReason ?? "(none)")}; reason={SanitizeLogToken(decision.Reason)}");
     }
 
     private static string GetRuntimeUnlockTransactionEventName(RuntimeUnlockTransactionEventKind kind)
@@ -3824,6 +3932,9 @@ public sealed partial class NknSignalingTransport
             RuntimeUnlockTransactionEventKind.ObservedSend => "observed_send",
             RuntimeUnlockTransactionEventKind.PeerReceived => "peer_received",
             RuntimeUnlockTransactionEventKind.AnswerReceived => "answer_received",
+            RuntimeUnlockTransactionEventKind.PathProbeStarted => "path_probe_started",
+            RuntimeUnlockTransactionEventKind.PathProbeAcked => "path_probe_acked",
+            RuntimeUnlockTransactionEventKind.PathProbeFailed => "path_probe_failed",
             RuntimeUnlockTransactionEventKind.Timeout => "timeout",
             RuntimeUnlockTransactionEventKind.BridgeRecoveryStarted => "bridge_recovery_started",
             RuntimeUnlockTransactionEventKind.BridgeRecoverySettled => "bridge_recovery_settled",
@@ -3834,6 +3945,15 @@ public sealed partial class NknSignalingTransport
             RuntimeUnlockTransactionEventKind.Failed => "failed",
             RuntimeUnlockTransactionEventKind.Retired => "retired",
             _ => kind.ToString().ToLowerInvariant(),
+        };
+
+    private static string GetRuntimeUnlockProbeEventName(RuntimeUnlockTransactionEventKind kind)
+        => kind switch
+        {
+            RuntimeUnlockTransactionEventKind.PathProbeStarted => "runtime_unlock_probe_started",
+            RuntimeUnlockTransactionEventKind.PathProbeAcked => "runtime_unlock_probe_acked",
+            RuntimeUnlockTransactionEventKind.PathProbeFailed => "runtime_unlock_probe_failed",
+            _ => "runtime_unlock_probe_event",
         };
 
     private RuntimeUnlockTunaPathLeaseSnapshot StartRuntimeUnlockTunaPathLeaseUnsafe(

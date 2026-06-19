@@ -13671,7 +13671,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task TransportAccelerationAnswer_RuntimeUnlockPendingAnswerSurvivesPayerYieldReset()
+    public async Task TransportAccelerationAnswer_RuntimeUnlockPendingAnswerAfterPayerYieldResetRequiresCurrentLease()
     {
         FakeNknClient.ResetNetwork();
         try
@@ -13731,13 +13731,15 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             InvokePrivateMethod(host, "HandleTransportAccelerationAnswer", helperClient.Address, envelope);
 
             await WaitUntilAsync(
-                () => ReadOperationalLogTail(logStart).Contains("event=tuna_acceleration_retired_offer_answer_accepted;", StringComparison.Ordinal),
+                () => ReadOperationalLogTail(logStart).Contains("event=runtime_unlock_answer_rejected_tuna_path_lease_unavailable;", StringComparison.Ordinal),
                 TimeSpan.FromSeconds(6));
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=tuna_acceleration_pending_runtime_unlock_answer_preserved; reason=payer_yield_pending_runtime_unlock_answer", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_acceleration_negotiated;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_answer_rejected_tuna_path_lease_unavailable;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_retired_offer_answer_accepted;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_negotiated;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("reason=nonce_mismatch", logTail, StringComparison.Ordinal);
-            Assert.Equal(NknAccelerationLaneKind.File, host.AccelerationNegotiatedLanesForTests);
+            Assert.Equal(NknAccelerationLaneKind.None, host.AccelerationNegotiatedLanesForTests);
         }
         finally
         {

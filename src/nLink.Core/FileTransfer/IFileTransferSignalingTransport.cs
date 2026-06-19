@@ -133,6 +133,11 @@ internal sealed record RuntimeUnlockRouteCommitSnapshot(
     FileTransferTransportKind TargetTransport,
     string TransactionState,
     string Reason,
+    string? PathProbeId = null,
+    string PathProbeState = "none",
+    FileTransferTransportKind PathProbeTransport = FileTransferTransportKind.Unknown,
+    long PathProbeAckedUtcMs = 0,
+    string? PathProbeFailureReason = null,
     bool TunaPathLeaseRequired = false,
     long TunaPathLeaseGeneration = 0,
     string TunaPathLeaseState = "none",
@@ -142,6 +147,23 @@ internal sealed record RuntimeUnlockRouteCommitSnapshot(
 
 internal interface IRuntimeUnlockRouteCommitProofProvider
 {
+    void NotifyRuntimeUnlockPathProbeStarted(
+        string sessionId,
+        string transferId,
+        long transportEpoch,
+        string probeId,
+        FileTransferTransportKind targetTransport,
+        string reason);
+
+    void NotifyRuntimeUnlockPathProbeResult(
+        string sessionId,
+        string transferId,
+        long transportEpoch,
+        string probeId,
+        FileTransferTransportKind targetTransport,
+        bool acked,
+        string reason);
+
     bool TryGetRuntimeUnlockRouteCommitProof(
         string sessionId,
         string transferId,
