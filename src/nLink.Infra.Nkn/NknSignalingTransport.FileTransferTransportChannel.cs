@@ -367,9 +367,11 @@ public sealed partial class NknSignalingTransport
             TrackOutboundFileTransferDataFrameLifecycle(frame);
         }
 
+        RecordPostTunaFallbackControlPlaneProofHint(request, result);
+
         LocalOperationalLog.Info(
             "SessionSecurity",
-            $"event=filetransfer_control_plane_delivery_result; transport=nkn; kind={FormatFileTransferControlPlaneKind(request.Kind)}; transfer_id={normalizedTransferId}; session_id={SanitizeLogToken(frame.SessionId)}; route={SanitizeLogToken(request.RouteToken ?? "(none)")}; protocol_version={request.ProtocolVersion}; live_route_epoch={request.LiveRouteEpoch}; leg_generation={request.TransferLegGeneration}; bridge_recovery_generation={request.BridgeRecoveryGeneration}; transport_epoch={request.TransportEpoch}; checkpoint_request_id={SanitizeLogToken(request.CheckpointRequestId ?? "(none)")}; reason={SanitizeLogToken(request.Reason)}; frame_type={SanitizeLogToken(frame.Type)}; msg_id={result.MessageId}; control_queue={(result.ControlQueue ? 1 : 0)}; control_copy={(result.ControlCopy ? 1 : 0)}; bulk_copy={(result.BulkCopy ? 1 : 0)}; peer_visible_any={(result.PeerVisibleAny ? 1 : 0)}; accepted_any={(result.AcceptedAny ? 1 : 0)}; local_only_rejected={(result.ControlQueue && !result.PeerVisibleAny && request.PeerVisibleRequired ? 1 : 0)}; control_queue_error={result.ControlQueueErrorName}; control_copy_error={result.ControlCopyErrorName}; bulk_copy_error={result.BulkCopyErrorName}");
+            $"event=filetransfer_control_plane_delivery_result; transport=nkn; direction={FormatFileTransferDirection(request.Direction)}; kind={FormatFileTransferControlPlaneKind(request.Kind)}; transfer_id={normalizedTransferId}; session_id={SanitizeLogToken(frame.SessionId)}; route={SanitizeLogToken(request.RouteToken ?? "(none)")}; protocol_version={request.ProtocolVersion}; live_route_epoch={request.LiveRouteEpoch}; leg_generation={request.TransferLegGeneration}; bridge_recovery_generation={request.BridgeRecoveryGeneration}; transport_epoch={request.TransportEpoch}; checkpoint_request_id={SanitizeLogToken(request.CheckpointRequestId ?? "(none)")}; reason={SanitizeLogToken(request.Reason)}; frame_type={SanitizeLogToken(frame.Type)}; msg_id={result.MessageId}; control_queue={(result.ControlQueue ? 1 : 0)}; control_copy={(result.ControlCopy ? 1 : 0)}; bulk_copy={(result.BulkCopy ? 1 : 0)}; peer_visible_any={(result.PeerVisibleAny ? 1 : 0)}; accepted_any={(result.AcceptedAny ? 1 : 0)}; local_only_rejected={(result.ControlQueue && !result.PeerVisibleAny && request.PeerVisibleRequired ? 1 : 0)}; control_queue_error={result.ControlQueueErrorName}; control_copy_error={result.ControlCopyErrorName}; bulk_copy_error={result.BulkCopyErrorName}");
 
         return new FileTransferControlPlaneDeliveryResult(
             request.Kind,
@@ -510,6 +512,11 @@ public sealed partial class NknSignalingTransport
             FileTransferControlPlaneKind.LivenessProof => "liveness_proof",
             _ => "unknown",
         };
+
+    private static string FormatFileTransferDirection(FileTransferDirection? direction)
+        => direction is { } value
+            ? value.ToString().ToLowerInvariant()
+            : "(none)";
 
     private async Task SendFileTransferEnvelopeAsync(
         MsgType messageType,
@@ -1490,14 +1497,17 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
-        if (ShouldBypassActiveFileTunaSuppressionForReceiveStallFallback(
+        if (ShouldBypassActiveFileTunaSuppressionForPostTunaFallbackRecovery(
                 reason,
                 handoffKind,
                 targetTransport))
         {
+            var bypassEventName = handoffKind == FileTransferTransportHandoffKind.RegularNknRecovery
+                ? "filetransfer_v6_availability_active_tuna_suppression_bypassed_for_receive_stall"
+                : "filetransfer_v6_availability_active_tuna_suppression_bypassed_for_fallback_recovery";
             LocalOperationalLog.Info(
                 "NKN.Tuna",
-                $"event=filetransfer_v6_availability_active_tuna_suppression_bypassed_for_receive_stall; session_id={SanitizeLogToken(session.SessionId)}; transfer_id={SanitizeLogToken(session.TransferId)}; reason={SanitizeLogToken(reason)}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(handoffKind)}; target_transport={FormatFileTransferTransportKindForLog(targetTransport)}; suppressed_route={SanitizeLogToken(routeHint.Token)}; suppressed_protocol_version={routeHint.ProtocolVersion}; route_hint_source={SanitizeLogToken(routeHint.Source)}");
+                $"event={bypassEventName}; session_id={SanitizeLogToken(session.SessionId)}; transfer_id={SanitizeLogToken(session.TransferId)}; reason={SanitizeLogToken(reason)}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(handoffKind)}; target_transport={FormatFileTransferTransportKindForLog(targetTransport)}; suppressed_route={SanitizeLogToken(routeHint.Token)}; suppressed_protocol_version={routeHint.ProtocolVersion}; route_hint_source={SanitizeLogToken(routeHint.Source)}");
             return false;
         }
 
@@ -1507,13 +1517,32 @@ public sealed partial class NknSignalingTransport
         return true;
     }
 
-    private static bool ShouldBypassActiveFileTunaSuppressionForReceiveStallFallback(
+    private static bool ShouldBypassActiveFileTunaSuppressionForPostTunaFallbackRecovery(
         string reason,
         FileTransferTransportHandoffKind handoffKind,
         FileTransferTransportKind targetTransport)
-        => targetTransport == FileTransferTransportKind.RegularNkn &&
-           handoffKind == FileTransferTransportHandoffKind.RegularNknRecovery &&
-           string.Equals(SanitizeLogToken(reason), "receive_stall_recovery", StringComparison.OrdinalIgnoreCase);
+    {
+        if (targetTransport != FileTransferTransportKind.RegularNkn)
+        {
+            return false;
+        }
+
+        var normalizedReason = SanitizeLogToken(reason);
+        if (handoffKind == FileTransferTransportHandoffKind.RegularNknRecovery)
+        {
+            return string.Equals(normalizedReason, "receive_stall_recovery", StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (handoffKind != FileTransferTransportHandoffKind.TunaToNormalFallback)
+        {
+            return false;
+        }
+
+        return string.Equals(normalizedReason, "transport_recovered", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(normalizedReason, "sidecar_remote_closed", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(normalizedReason, "remote_sidecar_remote_closed", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(normalizedReason, "remote_closed", StringComparison.OrdinalIgnoreCase);
+    }
 
     private bool TryRequestCurrentTunaActivationHandoffForFileTransferSession(TransportFileTransferDataSession session, string trigger)
     {
@@ -1664,7 +1693,7 @@ public sealed partial class NknSignalingTransport
                 FileTransferProtocol.ProtocolVersionV6,
                 source);
         }
-        else if (ShouldBypassActiveFileTunaSuppressionForReceiveStallFallback(reason ?? string.Empty, handoffKind, targetTransport))
+        else if (ShouldBypassActiveFileTunaSuppressionForPostTunaFallbackRecovery(reason ?? string.Empty, handoffKind, targetTransport))
         {
             TrackFileTransferRouteHint(
                 transferId,
@@ -1675,11 +1704,9 @@ public sealed partial class NknSignalingTransport
         else if (handoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
                  targetTransport == FileTransferTransportKind.Tuna)
         {
-            TrackFileTransferRouteHint(
-                transferId,
-                FileTransferRouteResolver.FileTunaV4Token,
-                FileTransferProtocol.ProtocolVersionV4,
-                source);
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=filetransfer_normal_to_tuna_handoff_route_hint_deferred; transfer_id={SanitizeLogToken(transferId)}; source={SanitizeLogToken(source)}; reason={SanitizeLogToken(reason ?? "none")}; route=file_tuna_v4; protocol_version={FileTransferProtocol.ProtocolVersionV4}");
         }
     }
 

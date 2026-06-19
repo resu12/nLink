@@ -1,3 +1,5 @@
+using System.Globalization;
+
 namespace NLink.Core.FileTransfer;
 
 internal enum RuntimeUnlockTransactionState
@@ -32,6 +34,178 @@ internal enum RuntimeUnlockTransactionEventKind
     Retired,
 }
 
+internal enum RuntimeUnlockTunaPathLeaseState
+{
+    None,
+    ListenerStarting,
+    ListenerReady,
+    Failed,
+    Retired,
+}
+
+internal readonly record struct RuntimeUnlockTunaPathLeaseSnapshot(
+    string SessionId,
+    string? TransferId,
+    long TransactionGeneration,
+    long OfferGeneration,
+    long LeaseGeneration,
+    string? ListenerRunId,
+    long PayerDecisionId,
+    RuntimeUnlockTunaPathLeaseState State,
+    long CreatedUtcMs,
+    long UpdatedUtcMs,
+    long DeadlineUtcMs,
+    string? FailureReason,
+    string? RetiredReason)
+{
+    public bool IsCurrent => State == RuntimeUnlockTunaPathLeaseState.ListenerReady &&
+        LeaseGeneration > 0 &&
+        !string.IsNullOrWhiteSpace(ListenerRunId);
+
+    public bool IsTerminal => State is RuntimeUnlockTunaPathLeaseState.Failed or RuntimeUnlockTunaPathLeaseState.Retired;
+
+    public static RuntimeUnlockTunaPathLeaseSnapshot None { get; } = new(
+        SessionId: string.Empty,
+        TransferId: null,
+        TransactionGeneration: 0,
+        OfferGeneration: 0,
+        LeaseGeneration: 0,
+        ListenerRunId: null,
+        PayerDecisionId: 0,
+        State: RuntimeUnlockTunaPathLeaseState.None,
+        CreatedUtcMs: 0,
+        UpdatedUtcMs: 0,
+        DeadlineUtcMs: 0,
+        FailureReason: null,
+        RetiredReason: null);
+}
+
+internal static class RuntimeUnlockTunaPathLease
+{
+    public static RuntimeUnlockTunaPathLeaseSnapshot Start(
+        string sessionId,
+        string? transferId,
+        long leaseGeneration,
+        string listenerRunId,
+        long payerDecisionId,
+        long nowUtcMs)
+        => new(
+            NormalizeSessionId(sessionId),
+            NormalizeNullable(transferId),
+            TransactionGeneration: 0,
+            OfferGeneration: 0,
+            LeaseGeneration: Math.Max(1, leaseGeneration),
+            ListenerRunId: NormalizeNullable(listenerRunId) ?? Math.Max(1, leaseGeneration).ToString(CultureInfo.InvariantCulture),
+            PayerDecisionId: payerDecisionId,
+            State: RuntimeUnlockTunaPathLeaseState.ListenerStarting,
+            CreatedUtcMs: nowUtcMs,
+            UpdatedUtcMs: nowUtcMs,
+            DeadlineUtcMs: 0,
+            FailureReason: null,
+            RetiredReason: null);
+
+    public static RuntimeUnlockTunaPathLeaseSnapshot BindOffer(
+        RuntimeUnlockTunaPathLeaseSnapshot lease,
+        long transactionGeneration,
+        long offerGeneration,
+        long payerDecisionId,
+        long nowUtcMs)
+        => lease.State == RuntimeUnlockTunaPathLeaseState.None
+            ? lease
+            : lease with
+            {
+                TransactionGeneration = Math.Max(0, transactionGeneration),
+                OfferGeneration = Math.Max(0, offerGeneration),
+                PayerDecisionId = payerDecisionId > 0 ? payerDecisionId : lease.PayerDecisionId,
+                UpdatedUtcMs = nowUtcMs,
+            };
+
+    public static bool TryMarkListenerReady(
+        RuntimeUnlockTunaPathLeaseSnapshot lease,
+        string sessionId,
+        long leaseGeneration,
+        string? listenerRunId,
+        long nowUtcMs,
+        out RuntimeUnlockTunaPathLeaseSnapshot updated)
+    {
+        updated = lease;
+        if (!IsCurrentListenerProof(lease, sessionId, leaseGeneration, listenerRunId))
+        {
+            return false;
+        }
+
+        updated = lease with
+        {
+            State = RuntimeUnlockTunaPathLeaseState.ListenerReady,
+            FailureReason = null,
+            RetiredReason = null,
+            UpdatedUtcMs = nowUtcMs,
+        };
+        return true;
+    }
+
+    public static RuntimeUnlockTunaPathLeaseSnapshot Fail(
+        RuntimeUnlockTunaPathLeaseSnapshot lease,
+        string reason,
+        long nowUtcMs)
+        => lease.State is RuntimeUnlockTunaPathLeaseState.None or RuntimeUnlockTunaPathLeaseState.Retired
+            ? lease
+            : lease with
+            {
+                State = RuntimeUnlockTunaPathLeaseState.Failed,
+                FailureReason = NormalizeReason(reason),
+                UpdatedUtcMs = nowUtcMs,
+            };
+
+    public static RuntimeUnlockTunaPathLeaseSnapshot Retire(
+        RuntimeUnlockTunaPathLeaseSnapshot lease,
+        string reason,
+        long nowUtcMs)
+        => lease.State == RuntimeUnlockTunaPathLeaseState.None
+            ? lease
+            : lease with
+            {
+                State = RuntimeUnlockTunaPathLeaseState.Retired,
+                RetiredReason = NormalizeReason(reason),
+                UpdatedUtcMs = nowUtcMs,
+            };
+
+    public static bool IsApplicableToOffer(
+        RuntimeUnlockTunaPathLeaseSnapshot lease,
+        string sessionId,
+        long transactionGeneration,
+        long offerGeneration)
+        => lease.LeaseGeneration > 0 &&
+           string.Equals(lease.SessionId, NormalizeSessionId(sessionId), StringComparison.Ordinal) &&
+           (lease.TransactionGeneration <= 0 || lease.TransactionGeneration == transactionGeneration) &&
+           (lease.OfferGeneration <= 0 || lease.OfferGeneration == offerGeneration);
+
+    public static bool CanSatisfyRouteCommit(RuntimeUnlockTunaPathLeaseSnapshot lease)
+        => lease.State == RuntimeUnlockTunaPathLeaseState.ListenerReady && lease.IsCurrent;
+
+    private static bool IsCurrentListenerProof(
+        RuntimeUnlockTunaPathLeaseSnapshot lease,
+        string sessionId,
+        long leaseGeneration,
+        string? listenerRunId)
+        => lease.LeaseGeneration > 0 &&
+           lease.LeaseGeneration == leaseGeneration &&
+           string.Equals(lease.SessionId, NormalizeSessionId(sessionId), StringComparison.Ordinal) &&
+           string.Equals(
+               lease.ListenerRunId,
+               NormalizeNullable(listenerRunId),
+               StringComparison.Ordinal);
+
+    private static string NormalizeSessionId(string? value)
+        => string.IsNullOrWhiteSpace(value) ? string.Empty : value.Trim();
+
+    private static string? NormalizeNullable(string? value)
+        => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    private static string NormalizeReason(string? reason)
+        => string.IsNullOrWhiteSpace(reason) ? "runtime_unlock_tuna_path_lease" : reason.Trim();
+}
+
 internal readonly record struct RuntimeUnlockTransactionEvent(
     RuntimeUnlockTransactionEventKind Kind,
     string SessionId,
@@ -60,7 +234,12 @@ internal sealed record RuntimeUnlockTransactionSnapshot(
     bool RouteCommitPending,
     bool RouteCommitted,
     string? FailureReason,
-    string? RetiredReason)
+    string? RetiredReason,
+    long TunaPathLeaseGeneration = 0,
+    RuntimeUnlockTunaPathLeaseState TunaPathLeaseState = RuntimeUnlockTunaPathLeaseState.None,
+    string? TunaPathLeaseListenerRunId = null,
+    bool TunaPathLeaseCurrent = false,
+    string? TunaPathLeaseFailureReason = null)
 {
     public bool HasPeerVisibleProof => PeerReceived || AnswerReceived;
 
@@ -116,7 +295,13 @@ internal readonly record struct RuntimeUnlockRouteCommitProof(
     FileTransferTransportHandoffKind HandoffKind,
     FileTransferTransportKind TargetTransport,
     RuntimeUnlockTransactionState TransactionState,
-    string Reason);
+    string Reason,
+    bool TunaPathLeaseRequired = false,
+    long TunaPathLeaseGeneration = 0,
+    RuntimeUnlockTunaPathLeaseState TunaPathLeaseState = RuntimeUnlockTunaPathLeaseState.None,
+    string? TunaPathLeaseListenerRunId = null,
+    bool TunaPathLeaseCurrent = false,
+    string? TunaPathLeaseFailureReason = null);
 
 internal static class RuntimeUnlockTransaction
 {
@@ -271,7 +456,13 @@ internal static class RuntimeUnlockTransaction
             FileTransferTransportHandoffKind.NormalToTunaActivation,
             FileTransferTransportKind.Tuna,
             state.State,
-            NormalizeReason(reason));
+            NormalizeReason(reason),
+            TunaPathLeaseRequired: state.TunaPathLeaseGeneration > 0,
+            state.TunaPathLeaseGeneration,
+            state.TunaPathLeaseState,
+            state.TunaPathLeaseListenerRunId,
+            state.TunaPathLeaseCurrent,
+            state.TunaPathLeaseFailureReason);
 
     public static RuntimeUnlockRouteCommitProof CreateRouteCommitProof(
         RuntimeUnlockRouteCommitSnapshot snapshot)
@@ -293,7 +484,18 @@ internal static class RuntimeUnlockTransaction
                 out var state)
                 ? state
                 : RuntimeUnlockTransactionState.Failed,
-            NormalizeReason(snapshot.Reason));
+            NormalizeReason(snapshot.Reason),
+            snapshot.TunaPathLeaseRequired,
+            snapshot.TunaPathLeaseGeneration,
+            Enum.TryParse<RuntimeUnlockTunaPathLeaseState>(
+                snapshot.TunaPathLeaseState,
+                ignoreCase: true,
+                out var leaseState)
+                ? leaseState
+                : RuntimeUnlockTunaPathLeaseState.None,
+            snapshot.TunaPathLeaseListenerRunId,
+            snapshot.TunaPathLeaseCurrent,
+            snapshot.TunaPathLeaseFailureReason);
 
     public static bool CanCommitRoute(
         RuntimeUnlockRouteCommitProof proof,
@@ -330,6 +532,34 @@ internal static class RuntimeUnlockTransaction
         {
             rejectionReason = "peer_visible_proof_missing";
             return false;
+        }
+
+        if (proof.TunaPathLeaseRequired)
+        {
+            if (proof.TunaPathLeaseGeneration <= 0)
+            {
+                rejectionReason = "tuna_path_lease_generation_missing";
+                return false;
+            }
+
+            if (proof.TunaPathLeaseState == RuntimeUnlockTunaPathLeaseState.Failed)
+            {
+                rejectionReason = "tuna_path_lease_failed";
+                return false;
+            }
+
+            if (proof.TunaPathLeaseState == RuntimeUnlockTunaPathLeaseState.Retired)
+            {
+                rejectionReason = "tuna_path_lease_retired";
+                return false;
+            }
+
+            if (proof.TunaPathLeaseState != RuntimeUnlockTunaPathLeaseState.ListenerReady ||
+                !proof.TunaPathLeaseCurrent)
+            {
+                rejectionReason = "tuna_path_lease_unavailable";
+                return false;
+            }
         }
 
         if (proof.TransactionState is not RuntimeUnlockTransactionState.PeerReceived and

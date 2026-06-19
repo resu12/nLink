@@ -80,6 +80,7 @@ public sealed partial class SessionFileTransferService
             context.State = terminalState;
             context.ErrorCode = NormalizeErrorCode(errorCode);
             context.StatusMessage = NormalizeReason(statusMessage) ?? statusMessage;
+            ClearOutboundFallbackCheckpointRetryStateLocked(context, null, "transfer_terminal");
             FileTransferCoordinator.TerminalizeLeg(context.CurrentTransferLeg);
             context.UserPaused = false;
             context.UserPauseReason = null;
@@ -637,6 +638,7 @@ public sealed partial class SessionFileTransferService
                     frame,
                     source)
                 {
+                    Direction = direction,
                     RouteToken = FileTransferRouteResolver.PostTunaFallbackV6Token,
                     ProtocolVersion = protocolVersion,
                     TransportEpoch = Math.Max(0, transportEpoch),

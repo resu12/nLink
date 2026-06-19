@@ -132,7 +132,13 @@ internal sealed record RuntimeUnlockRouteCommitSnapshot(
     FileTransferTransportHandoffKind HandoffKind,
     FileTransferTransportKind TargetTransport,
     string TransactionState,
-    string Reason);
+    string Reason,
+    bool TunaPathLeaseRequired = false,
+    long TunaPathLeaseGeneration = 0,
+    string TunaPathLeaseState = "none",
+    string? TunaPathLeaseListenerRunId = null,
+    bool TunaPathLeaseCurrent = false,
+    string? TunaPathLeaseFailureReason = null);
 
 internal interface IRuntimeUnlockRouteCommitProofProvider
 {
@@ -206,6 +212,8 @@ public sealed record FileTransferControlPlaneDeliveryRequest(
     FileTransferDataFrame Frame,
     string Reason)
 {
+    public FileTransferDirection? Direction { get; init; }
+
     public string? RouteToken { get; init; }
 
     public int ProtocolVersion { get; init; }

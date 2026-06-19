@@ -42,6 +42,7 @@ public sealed partial class SessionRuntime
     private DateTimeOffset sessionLivenessFileTransferFinalRecoveryDeferralUntilUtc;
     private int sessionLivenessRuntimeUnlockStartupDeferralCount;
     private long sessionLivenessRuntimeUnlockAnswerWaitDeferralContractGeneration;
+    private long sessionLivenessRuntimeUnlockRouteCommitDeferralContractGeneration;
     private long sessionLivenessRecoveryContractDeferralGeneration;
     private string? sessionLivenessFileTransferRecoveryDeferralKey;
     private string? sessionLivenessFileTransferProgressProofKey;
@@ -106,6 +107,7 @@ public sealed partial class SessionRuntime
             sessionLivenessFileTransferFinalRecoveryDeferralUntilUtc = DateTimeOffset.MinValue;
             sessionLivenessRuntimeUnlockStartupDeferralCount = 0;
             sessionLivenessRuntimeUnlockAnswerWaitDeferralContractGeneration = 0;
+            sessionLivenessRuntimeUnlockRouteCommitDeferralContractGeneration = 0;
             sessionLivenessRecoveryContractDeferralGeneration = 0;
             sessionLivenessFileTransferRecoveryDeferralKey = null;
             sessionLivenessFileTransferProgressProofKey = null;
@@ -907,6 +909,7 @@ public sealed partial class SessionRuntime
             sessionLivenessBridgeExhaustedActiveRecoveryDeferralCount = 0;
             sessionLivenessRuntimeUnlockStartupDeferralCount = 0;
             sessionLivenessRuntimeUnlockAnswerWaitDeferralContractGeneration = 0;
+            sessionLivenessRuntimeUnlockRouteCommitDeferralContractGeneration = 0;
             sessionLivenessRecoveryContractDeferralGeneration = 0;
             sessionLivenessFileTransferRecoveryDeferralUntilUtc = DateTimeOffset.MinValue;
             sessionLivenessFileTransferRecoveryDeferralKey = null;
@@ -1050,6 +1053,7 @@ public sealed partial class SessionRuntime
             sessionLivenessFileTransferFinalRecoveryDeferralUntilUtc = DateTimeOffset.MinValue;
             sessionLivenessRuntimeUnlockStartupDeferralCount = 0;
             sessionLivenessRuntimeUnlockAnswerWaitDeferralContractGeneration = 0;
+            sessionLivenessRuntimeUnlockRouteCommitDeferralContractGeneration = 0;
             sessionLivenessRecoveryContractDeferralGeneration = 0;
             sessionLivenessFileTransferRecoveryDeferralUntilUtc = DateTimeOffset.MinValue;
             sessionLivenessFileTransferRecoveryDeferralKey = null;
@@ -1289,6 +1293,47 @@ public sealed partial class SessionRuntime
         return true;
     }
 
+    private bool TrySuppressBridgeReceiveStallRecoveryExhaustedForActiveFileTransferDeferral(
+        string sessionIdSnapshot,
+        string bridgeReason,
+        DateTimeOffset now)
+    {
+        if (!IsFileTransferBridgeRecoveryReason(bridgeReason) ||
+            !TryGetActiveFileTransferPeerVisibleProgressSnapshot(sessionIdSnapshot, out var transfer, out var progressBytes) ||
+            !string.Equals(transfer.RouteToken, "post_tuna_fallback_v6", StringComparison.Ordinal) ||
+            (transfer.ProtocolVersion ?? 0) != FileTransferProtocol.ProtocolVersionV6)
+        {
+            return false;
+        }
+
+        DateTimeOffset deferralUntil;
+        lock (sessionLivenessGate)
+        {
+            var siblingDeferral = sessionLivenessBridgeExhaustedSiblingDeferral;
+            deferralUntil = sessionLivenessFileTransferRecoveryDeferralUntilUtc;
+            if (sessionLivenessCts is null ||
+                state != SessionRuntimeState.Connected ||
+                transportState != TransportState.Connected ||
+                !string.Equals(GetApprovedSessionIdForLiveness(), sessionIdSnapshot, StringComparison.Ordinal) ||
+                now > deferralUntil)
+            {
+                return false;
+            }
+
+            if (siblingDeferral is not null &&
+                (!string.Equals(siblingDeferral.SessionId, sessionIdSnapshot, StringComparison.Ordinal) ||
+                 !string.Equals(siblingDeferral.TransferId, transfer.TransferId, StringComparison.Ordinal)))
+            {
+                return false;
+            }
+        }
+
+        LocalOperationalLog.Warn(
+            "Session",
+            $"event=bridge_receive_stall_recovery_exhausted_suppressed_by_active_filetransfer_deferral; session_id={sessionIdSnapshot}; transfer_id={transfer.TransferId}; direction={transfer.Direction.ToString().ToLowerInvariant()}; bridge_reason={SanitizeSessionLivenessReason(bridgeReason)}; route={SanitizeSessionLivenessReason(transfer.RouteToken)}; protocol_version={transfer.ProtocolVersion ?? 0}; progress_bytes={progressBytes}; liveness_deferral_deadline_utc_ms={deferralUntil.ToUnixTimeMilliseconds()}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+        return true;
+    }
+
     private bool IsBridgeExhaustedSiblingDeferralCurrent(BridgeExhaustedSiblingDeferral deferral)
     {
         var snapshot = latestFileTransferSnapshot;
@@ -1320,6 +1365,11 @@ public sealed partial class SessionRuntime
         SessionRecoveryContractSnapshot snapshot)
         => $"runtime_unlock_contract_answer_wait:{sessionId}:{snapshot.ContractGeneration}:{snapshot.OfferGeneration}";
 
+    private static string CreateSessionRecoveryContractRouteCommitDeferralKey(
+        string sessionId,
+        SessionRecoveryContractSnapshot snapshot)
+        => $"runtime_unlock_contract_route_commit:{sessionId}:{snapshot.ContractGeneration}:{snapshot.RuntimeUnlockTransactionGeneration}:{snapshot.RuntimeUnlockTransactionOfferGeneration}";
+
     private static bool IsSessionRecoveryContractAnswerWaitDeferralKey(string? deferralKey)
         => deferralKey is not null &&
            deferralKey.StartsWith("runtime_unlock_contract_answer_wait:", StringComparison.Ordinal);
@@ -1349,6 +1399,15 @@ public sealed partial class SessionRuntime
                 CreateSessionRecoveryContractAnswerWaitDeferralKey(sessionIdSnapshot, snapshot),
                 StringComparison.Ordinal);
     }
+
+    private static bool IsRuntimeUnlockRouteCommitPending(
+        SessionRecoveryContractSnapshot snapshot,
+        DateTimeOffset now)
+        => snapshot.RuntimeUnlockRouteCommitPending &&
+           snapshot.RuntimeUnlockPeerProofObserved &&
+           !snapshot.RuntimeUnlockRouteCommitted &&
+           snapshot.State is not (SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed) &&
+           snapshot.LivenessDeferralDeadlineUtc > now;
 
     private bool TryDeferSessionLivenessTimeoutForRuntimeUnlockStartup(
         string sessionIdSnapshot,
@@ -1527,12 +1586,14 @@ public sealed partial class SessionRuntime
             return false;
         }
 
+        var routeCommitPending = IsRuntimeUnlockRouteCommitPending(snapshot, now);
         var recoveryActionPending = snapshot.RecoveryPending ||
             snapshot.RetryRequired ||
             snapshot.RetryAuthorityPending ||
             snapshot.ObservedSendPending ||
             snapshot.RetryDispatching ||
-            snapshot.RetryDispatched && !snapshot.RetryObserved;
+            snapshot.RetryDispatched && !snapshot.RetryObserved ||
+            routeCommitPending;
         if (!recoveryActionPending ||
             now > snapshot.LivenessDeferralDeadlineUtc)
         {
@@ -1559,11 +1620,16 @@ public sealed partial class SessionRuntime
                 sessionLivenessFileTransferRecoveryDeferralKey =
                     CreateSessionRecoveryContractAnswerWaitDeferralKey(sessionIdSnapshot, snapshot);
             }
+            else if (routeCommitPending)
+            {
+                sessionLivenessFileTransferRecoveryDeferralKey =
+                    CreateSessionRecoveryContractRouteCommitDeferralKey(sessionIdSnapshot, snapshot);
+            }
         }
 
         LocalOperationalLog.Warn(
             "Session",
-            $"event=bridge_receive_stall_recovery_exhausted_deferred_for_session_recovery_contract; session_id={sessionIdSnapshot}; transfer_id={snapshot.TransferId ?? "(none)"}; bridge_reason={SanitizeSessionLivenessReason(bridgeReason)}; contract_generation={snapshot.ContractGeneration}; offer_generation={snapshot.OfferGeneration}; state={snapshot.State.ToString().ToLowerInvariant()}; recovery_pending={(snapshot.RecoveryPending ? 1 : 0)}; retry_required={(snapshot.RetryRequired ? 1 : 0)}; retry_dispatching={(snapshot.RetryDispatching ? 1 : 0)}; retry_dispatched={(snapshot.RetryDispatched ? 1 : 0)}; retry_observed={(snapshot.RetryObserved ? 1 : 0)}; retry_authority_pending={(snapshot.RetryAuthorityPending ? 1 : 0)}; observed_send_pending={(snapshot.ObservedSendPending ? 1 : 0)}; liveness_deferral_deadline_utc_ms={snapshot.LivenessDeferralDeadlineUtc.ToUnixTimeMilliseconds()}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+            $"event=bridge_receive_stall_recovery_exhausted_deferred_for_session_recovery_contract; session_id={sessionIdSnapshot}; transfer_id={snapshot.TransferId ?? "(none)"}; bridge_reason={SanitizeSessionLivenessReason(bridgeReason)}; contract_generation={snapshot.ContractGeneration}; offer_generation={snapshot.OfferGeneration}; state={snapshot.State.ToString().ToLowerInvariant()}; recovery_pending={(snapshot.RecoveryPending ? 1 : 0)}; retry_required={(snapshot.RetryRequired ? 1 : 0)}; retry_dispatching={(snapshot.RetryDispatching ? 1 : 0)}; retry_dispatched={(snapshot.RetryDispatched ? 1 : 0)}; retry_observed={(snapshot.RetryObserved ? 1 : 0)}; retry_authority_pending={(snapshot.RetryAuthorityPending ? 1 : 0)}; observed_send_pending={(snapshot.ObservedSendPending ? 1 : 0)}; runtime_unlock_peer_proof={(snapshot.RuntimeUnlockPeerProofObserved ? 1 : 0)}; runtime_unlock_route_commit_pending={(snapshot.RuntimeUnlockRouteCommitPending ? 1 : 0)}; liveness_deferral_deadline_utc_ms={snapshot.LivenessDeferralDeadlineUtc.ToUnixTimeMilliseconds()}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
         return true;
     }
 
@@ -1782,6 +1848,11 @@ public sealed partial class SessionRuntime
                normalized.Equals("selected_payer_starting_listener", StringComparison.OrdinalIgnoreCase) ||
                normalized.Equals("listener_starting", StringComparison.OrdinalIgnoreCase) ||
                normalized.Equals("listener_ready", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Equals("listener_unavailable", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Equals("listener_rearm_required", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Equals("listener_rearm_pending", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Equals("listener_rearm_completed", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Equals("listener_rearm_failed", StringComparison.OrdinalIgnoreCase) ||
                normalized.Equals("dialer_starting", StringComparison.OrdinalIgnoreCase) ||
                normalized.Equals("dialer_ready", StringComparison.OrdinalIgnoreCase) ||
                normalized.Equals("waiting_for_answer", StringComparison.OrdinalIgnoreCase) ||
@@ -1985,9 +2056,11 @@ public sealed partial class SessionRuntime
         }
 
         var now = nowProvider();
+        var routeCommitPending = IsRuntimeUnlockRouteCommitPending(snapshot, now);
         var recoveryActionPending = snapshot.RetryRequired ||
             snapshot.RetryAuthorityPending ||
-            snapshot.ObservedSendPending;
+            snapshot.ObservedSendPending ||
+            routeCommitPending;
         if (!recoveryActionPending ||
             snapshot.State is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed ||
             now > snapshot.LivenessDeferralDeadlineUtc)
@@ -1996,6 +2069,17 @@ public sealed partial class SessionRuntime
                 "Session",
                 $"event=session_liveness_timeout_session_recovery_contract_not_deferred; session_id={sessionIdSnapshot}; contract_generation={snapshot.ContractGeneration}; state={snapshot.State.ToString().ToLowerInvariant()}; retry_required={(snapshot.RetryRequired ? 1 : 0)}; retry_authority_pending={(snapshot.RetryAuthorityPending ? 1 : 0)}; observed_send_pending={(snapshot.ObservedSendPending ? 1 : 0)}; retry_dispatched={(snapshot.RetryDispatched ? 1 : 0)}; retry_observed={(snapshot.RetryObserved ? 1 : 0)}; authority_failure_reason={SanitizeSessionLivenessReason(snapshot.AuthorityFailureReason ?? "(none)")}; observed_send_deadline_utc_ms={snapshot.ObservedSendDeadlineUtc.ToUnixTimeMilliseconds()}; liveness_deferral_deadline_utc_ms={snapshot.LivenessDeferralDeadlineUtc.ToUnixTimeMilliseconds()}; silence_ms={(long)silence.TotalMilliseconds}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
             return false;
+        }
+
+        if (routeCommitPending &&
+            TryDeferSessionLivenessTimeoutForRecoveryContractRouteCommit(
+                sessionIdSnapshot,
+                generation,
+                silence,
+                snapshot,
+                now))
+        {
+            return true;
         }
 
         var observedSendAnswerWaitPending = snapshot.ObservedSendPending &&
@@ -2032,6 +2116,45 @@ public sealed partial class SessionRuntime
         LocalOperationalLog.Warn(
             "Session",
             $"event=session_liveness_timeout_deferred_for_session_recovery_contract; session_id={sessionIdSnapshot}; transfer_id={snapshot.TransferId ?? "(none)"}; contract_generation={snapshot.ContractGeneration}; offer_generation={snapshot.OfferGeneration}; kind=runtime_unlock_activation; state={snapshot.State.ToString().ToLowerInvariant()}; retry_reason={SanitizeSessionLivenessReason(snapshot.RetryReason)}; recovery_reason={SanitizeSessionLivenessReason(snapshot.RecoveryReason)}; recovery_pending={(snapshot.RecoveryPending ? 1 : 0)}; recovery_settled={(snapshot.RecoverySettled ? 1 : 0)}; retry_dispatching={(snapshot.RetryDispatching ? 1 : 0)}; retry_dispatched={(snapshot.RetryDispatched ? 1 : 0)}; retry_observed={(snapshot.RetryObserved ? 1 : 0)}; queued_behind_active_negotiation={(snapshot.QueuedBehindActiveNegotiation ? 1 : 0)}; retry_authority_pending={(snapshot.RetryAuthorityPending ? 1 : 0)}; retry_authority_granted={(snapshot.RetryAuthorityGranted ? 1 : 0)}; observed_send_pending={(snapshot.ObservedSendPending ? 1 : 0)}; authority_attempt={snapshot.AuthorityAttempt}; authorized_observed_lane={SanitizeSessionLivenessReason(snapshot.AuthorizedObservedLane ?? "(none)")}; authority_failure_reason={SanitizeSessionLivenessReason(snapshot.AuthorityFailureReason ?? "(none)")}; observed_send_deadline_utc_ms={snapshot.ObservedSendDeadlineUtc.ToUnixTimeMilliseconds()}; silence_ms={(long)silence.TotalMilliseconds}; liveness_deferral_deadline_utc_ms={snapshot.LivenessDeferralDeadlineUtc.ToUnixTimeMilliseconds()}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+        return true;
+    }
+
+    private bool TryDeferSessionLivenessTimeoutForRecoveryContractRouteCommit(
+        string sessionIdSnapshot,
+        long generation,
+        TimeSpan silence,
+        SessionRecoveryContractSnapshot snapshot,
+        DateTimeOffset now)
+    {
+        var deferralKey = CreateSessionRecoveryContractRouteCommitDeferralKey(sessionIdSnapshot, snapshot);
+        DateTimeOffset deferralUntil;
+        lock (sessionLivenessGate)
+        {
+            if (generation != sessionLivenessGeneration ||
+                sessionLivenessCts is null ||
+                state != SessionRuntimeState.Connected ||
+                transportState != TransportState.Connected ||
+                !string.Equals(GetApprovedSessionIdForLiveness(), sessionIdSnapshot, StringComparison.Ordinal) ||
+                sessionLivenessRuntimeUnlockRouteCommitDeferralContractGeneration == snapshot.ContractGeneration)
+            {
+                return false;
+            }
+
+            sessionLivenessRuntimeUnlockRouteCommitDeferralContractGeneration = snapshot.ContractGeneration;
+            deferralUntil = snapshot.LivenessDeferralDeadlineUtc > now
+                ? snapshot.LivenessDeferralDeadlineUtc
+                : now.Add(SessionLivenessRuntimeUnlockStartupDeferral);
+            if (sessionLivenessFileTransferRecoveryDeferralUntilUtc < deferralUntil)
+            {
+                sessionLivenessFileTransferRecoveryDeferralUntilUtc = deferralUntil;
+            }
+
+            sessionLivenessFileTransferRecoveryDeferralKey = deferralKey;
+        }
+
+        LocalOperationalLog.Warn(
+            "Session",
+            $"event=session_liveness_timeout_deferred_for_runtime_unlock_route_commit; session_id={sessionIdSnapshot}; transfer_id={snapshot.TransferId ?? "(none)"}; contract_generation={snapshot.ContractGeneration}; transaction_generation={snapshot.RuntimeUnlockTransactionGeneration}; offer_generation={snapshot.RuntimeUnlockTransactionOfferGeneration}; state={SanitizeSessionLivenessReason(snapshot.RuntimeUnlockTransactionState)}; peer_visible_proof={(snapshot.RuntimeUnlockPeerProofObserved ? 1 : 0)}; route_commit_pending={(snapshot.RuntimeUnlockRouteCommitPending ? 1 : 0)}; silence_ms={(long)silence.TotalMilliseconds}; liveness_deferral_deadline_utc_ms={deferralUntil.ToUnixTimeMilliseconds()}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
         return true;
     }
 
@@ -2192,6 +2315,7 @@ public sealed partial class SessionRuntime
             sessionLivenessFileTransferFinalRecoveryDeferralUntilUtc = DateTimeOffset.MinValue;
             sessionLivenessRuntimeUnlockStartupDeferralCount = 0;
             sessionLivenessRuntimeUnlockAnswerWaitDeferralContractGeneration = 0;
+            sessionLivenessRuntimeUnlockRouteCommitDeferralContractGeneration = 0;
             sessionLivenessRecoveryContractDeferralGeneration = 0;
             sessionLivenessFileTransferRecoveryDeferralUntilUtc = DateTimeOffset.MinValue;
             sessionLivenessFileTransferRecoveryDeferralKey = null;
@@ -2258,6 +2382,7 @@ public sealed partial class SessionRuntime
             sessionLivenessFileTransferFinalRecoveryDeferralUntilUtc = DateTimeOffset.MinValue;
             sessionLivenessRuntimeUnlockStartupDeferralCount = 0;
             sessionLivenessRuntimeUnlockAnswerWaitDeferralContractGeneration = 0;
+            sessionLivenessRuntimeUnlockRouteCommitDeferralContractGeneration = 0;
             sessionLivenessRecoveryContractDeferralGeneration = 0;
             sessionLivenessFileTransferRecoveryDeferralUntilUtc = DateTimeOffset.MinValue;
             sessionLivenessFileTransferRecoveryDeferralKey = null;

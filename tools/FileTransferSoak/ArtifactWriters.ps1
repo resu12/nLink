@@ -1719,6 +1719,22 @@ function Get-FileTransferFallbackLegAuthorityProof {
             Where-Object { $_.EventName -eq 'filetransfer_fallback_stale_proof_ignored' } |
             Sort-Object Sequence
     )
+    [object[]]$continuousReceiverStateProofEvents = @(
+        $TransferEvents |
+            Where-Object {
+                $_.EventName -eq 'filetransfer_control_plane_delivery_result' -and
+                (Get-FileTransferEventField -Event $_ -Name 'kind' -Default '') -eq 'receiver_state' -and
+                (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'protocol_version' -Default 0) -eq 6 -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'leg_generation' -Default 0) -gt 0 -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'live_route_epoch' -Default 0) -gt 0 -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'transport_epoch' -Default -1) -ge 0 -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'peer_visible_any' -Default 0) -gt 0 -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'accepted_any' -Default 0) -gt 0 -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'local_only_rejected' -Default 0) -le 0
+            } |
+            Sort-Object Sequence
+    )
 
     $metadataMissing = New-Object System.Collections.Generic.List[object]
     foreach ($event in @($authorityEvents)) {
@@ -1764,7 +1780,9 @@ function Get-FileTransferFallbackLegAuthorityProof {
                 (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound'
             }
     )
-    if ($postTunaOutboundRouteSelected.Count -gt 0 -and $authorityEvents.Count -eq 0) {
+    if ($postTunaOutboundRouteSelected.Count -gt 0 -and
+        $authorityEvents.Count -eq 0 -and
+        $continuousReceiverStateProofEvents.Count -eq 0) {
         $findings.Add('fallback leg authority missing for post_tuna_fallback_v6 route') | Out-Null
         foreach ($event in @($postTunaOutboundRouteSelected | Select-Object -First 3)) {
             $evidence.Add($event) | Out-Null
@@ -1785,10 +1803,11 @@ function Get-FileTransferFallbackLegAuthorityProof {
         BridgeRecoveryEscalatedCount = $bridgeEscalatedEvents.Count
         CompletedCount = $completedEvents.Count
         SendBlockedCount = $sendBlockedEvents.Count
+        ContinuousReceiverStateProofCount = $continuousReceiverStateProofEvents.Count
         StaleProofIgnoredCount = $staleProofIgnoredEvents.Count
         MetadataMissingCount = $metadataMissing.Count
         Findings = $findings
-        EvidenceEvents = @(@($evidence.ToArray()) + @($authorityEvents) | Select-Object -First 20)
+        EvidenceEvents = @(@($evidence.ToArray()) + @($authorityEvents) + @($continuousReceiverStateProofEvents) | Select-Object -First 20)
     }
 }
 
@@ -2014,6 +2033,21 @@ function Get-FileTransferControlPlaneIsolationProof {
     $currentRoute = ''
     $currentLiveRouteEpoch = 0
     $currentFallbackLegGeneration = 0
+    $currentRouteByDirection = @{}
+    $currentFallbackLegGenerationByDirection = @{}
+
+    function Get-FileTransferControlPlaneDirectionKey {
+        param($Event)
+
+        $direction = Get-FileTransferEventField -Event $Event -Name 'direction' -Default ''
+        if ([string]::IsNullOrWhiteSpace($direction) -or
+            $direction -eq '(none)' -or
+            $direction -eq 'none') {
+            return ''
+        }
+
+        return $direction.ToLowerInvariant()
+    }
 
     function Add-FileTransferCheckpointIdForLeg {
         param(
@@ -2063,9 +2097,13 @@ function Get-FileTransferControlPlaneIsolationProof {
 
     foreach ($event in @($events | Sort-Object Sequence)) {
         if ($event.EventName -eq 'filetransfer_route_selected') {
+            $directionKey = Get-FileTransferControlPlaneDirectionKey -Event $event
             $route = Get-FileTransferEventField -Event $event -Name 'route' -Default ''
             if (-not [string]::IsNullOrWhiteSpace($route)) {
                 $currentRoute = $route
+                if (-not [string]::IsNullOrWhiteSpace($directionKey)) {
+                    $currentRouteByDirection[$directionKey] = $route
+                }
             }
 
             $liveRouteEpoch = Get-FileTransferEventInt64Field -Event $event -Name 'live_route_epoch' -Default $currentLiveRouteEpoch
@@ -2075,6 +2113,9 @@ function Get-FileTransferControlPlaneIsolationProof {
 
             if ($route -ne 'post_tuna_fallback_v6') {
                 $currentFallbackLegGeneration = 0
+                if (-not [string]::IsNullOrWhiteSpace($directionKey)) {
+                    $currentFallbackLegGenerationByDirection[$directionKey] = 0
+                }
             }
 
             continue
@@ -2082,12 +2123,17 @@ function Get-FileTransferControlPlaneIsolationProof {
 
         if ($event.EventName -eq 'filetransfer_leg_started' -or
             $event.EventName -eq 'filetransfer_fallback_leg_authority_started') {
+            $directionKey = Get-FileTransferControlPlaneDirectionKey -Event $event
             $route = Get-FileTransferEventField -Event $event -Name 'route' -Default ''
             $legGeneration = Get-FileTransferEventInt64Field -Event $event -Name 'leg_generation' -Default 0
             $checkpointId = Get-FileTransferEventField -Event $event -Name 'checkpoint_request_id' -Default ''
             $bridgeGeneration = Get-FileTransferEventInt64Field -Event $event -Name 'bridge_recovery_generation' -Default -1
             if ($route -eq 'post_tuna_fallback_v6' -and $legGeneration -gt 0) {
                 $currentFallbackLegGeneration = $legGeneration
+                if (-not [string]::IsNullOrWhiteSpace($directionKey)) {
+                    $currentFallbackLegGenerationByDirection[$directionKey] = $legGeneration
+                    $currentRouteByDirection[$directionKey] = $route
+                }
                 Add-FileTransferCheckpointIdForLeg -LegGeneration $legGeneration -CheckpointId $checkpointId
                 if (-not [string]::IsNullOrWhiteSpace($checkpointId) -and
                     $checkpointId -ne '(none)' -and
@@ -2127,13 +2173,25 @@ function Get-FileTransferControlPlaneIsolationProof {
         $eventLiveRouteEpoch = Get-FileTransferEventInt64Field -Event $event -Name 'live_route_epoch' -Default 0
         $eventBridgeGeneration = Get-FileTransferEventInt64Field -Event $event -Name 'bridge_recovery_generation' -Default -1
         $eventCheckpointId = Get-FileTransferEventField -Event $event -Name 'checkpoint_request_id' -Default ''
+        $eventDirectionKey = Get-FileTransferControlPlaneDirectionKey -Event $event
 
         if ($event.EventName -eq 'filetransfer_control_plane_delivery_result' -and
             $fallbackControlPlaneKinds -contains $eventKind) {
+            $routeForEvent = $currentRoute
+            $fallbackLegGenerationForEvent = $currentFallbackLegGeneration
+            if (-not [string]::IsNullOrWhiteSpace($eventDirectionKey)) {
+                if ($currentRouteByDirection.ContainsKey($eventDirectionKey)) {
+                    $routeForEvent = [string]$currentRouteByDirection[$eventDirectionKey]
+                }
+                if ($currentFallbackLegGenerationByDirection.ContainsKey($eventDirectionKey)) {
+                    $fallbackLegGenerationForEvent = [int64]$currentFallbackLegGenerationByDirection[$eventDirectionKey]
+                }
+            }
+
             $isNonCurrentFallbackSend = $eventRoute -eq 'post_tuna_fallback_v6' -and
                 (
-                    $currentRoute -ne 'post_tuna_fallback_v6' -or
-                    ($currentFallbackLegGeneration -gt 0 -and $eventLegGeneration -gt 0 -and $eventLegGeneration -ne $currentFallbackLegGeneration)
+                    $routeForEvent -ne 'post_tuna_fallback_v6' -or
+                    ($fallbackLegGenerationForEvent -gt 0 -and $eventLegGeneration -gt 0 -and $eventLegGeneration -ne $fallbackLegGenerationForEvent)
                 )
             if ($isNonCurrentFallbackSend) {
                 $nonCurrentLegGenerationSendEvents.Add($event) | Out-Null
@@ -2220,6 +2278,20 @@ function Get-FileTransferControlPlaneIsolationProof {
                     (Get-FileTransferEventInt64Field -Event $_ -Name 'peer_visible_any' -Default 0) -gt 0
             }
     )
+    [object[]]$continuousReceiverStateProofEvents = @(
+        $deliveryResultEvents |
+            Where-Object {
+                (Get-FileTransferEventField -Event $_ -Name 'kind' -Default '') -eq 'receiver_state' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'protocol_version' -Default 0) -eq 6 -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'leg_generation' -Default 0) -gt 0 -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'live_route_epoch' -Default 0) -gt 0 -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'transport_epoch' -Default -1) -ge 0 -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'peer_visible_any' -Default 0) -gt 0 -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'accepted_any' -Default 0) -gt 0 -and
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'local_only_rejected' -Default 0) -le 0
+            }
+    )
     [object[]]$metadataCheckEvents = @(
         $deliveryResultEvents |
             Where-Object {
@@ -2241,8 +2313,7 @@ function Get-FileTransferControlPlaneIsolationProof {
         $transportEpoch = Get-FileTransferEventInt64Field -Event $event -Name 'transport_epoch' -Default -1
         $checkpointId = Get-FileTransferEventField -Event $event -Name 'checkpoint_request_id' -Default ''
         $requiresCheckpointId = $kind -eq 'fallback_checkpoint_request' -or
-            $kind -eq 'fallback_checkpoint_proof' -or
-            $kind -eq 'frontier_request'
+            $kind -eq 'fallback_checkpoint_proof'
         if ($route -ne 'post_tuna_fallback_v6' -or
             $protocol -ne 6 -or
             $legGeneration -le 0 -or
@@ -2279,7 +2350,7 @@ function Get-FileTransferControlPlaneIsolationProof {
     $deliveryFailureCount = $failedEvents.Count + $acceptedFailureEvents.Count
     $recoveredDeliveryFailureCount = 0
     if ($deliveryFailureCount -gt 0 -and
-        $checkpointExchangeEvents.Count -gt 0 -and
+        ($checkpointExchangeEvents.Count -gt 0 -or $continuousReceiverStateProofEvents.Count -gt 0) -and
         $localOnlyRejectedEvents.Count -eq 0 -and
         $metadataMissing.Count -eq 0 -and
         $timeoutDuringValidExchangeCount -eq 0 -and
@@ -2295,7 +2366,9 @@ function Get-FileTransferControlPlaneIsolationProof {
         }
     }
 
-    if ($postTunaRouteSelected.Count -gt 0 -and $checkpointExchangeEvents.Count -eq 0) {
+    if ($postTunaRouteSelected.Count -gt 0 -and
+        $checkpointExchangeEvents.Count -eq 0 -and
+        $continuousReceiverStateProofEvents.Count -eq 0) {
         $findings.Add('post-Tuna fallback route missing peer-visible control-plane checkpoint exchange') | Out-Null
         foreach ($event in @($postTunaRouteSelected + $sessionLivenessTimeoutEvents + $terminalFailureEvents | Select-Object -First 8)) {
             $evidence.Add($event) | Out-Null
@@ -2356,6 +2429,7 @@ function Get-FileTransferControlPlaneIsolationProof {
         PeerVisibleCount = $peerVisibleEvents.Count
         LocalOnlyRejectedCount = $localOnlyRejectedEvents.Count
         CheckpointExchangeCount = $checkpointExchangeEvents.Count
+        ContinuousReceiverStateProofCount = $continuousReceiverStateProofEvents.Count
         DeliveryFailureCount = $deliveryFailureCount
         RecoveredDeliveryFailureCount = $recoveredDeliveryFailureCount
         UnavailableCount = $unavailableEvents.Count
@@ -2452,6 +2526,7 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("fallback_leg_authority_bridge_recovery_escalated_count={0}" -f $fallbackAuthorityProof.BridgeRecoveryEscalatedCount)) | Out-Null
     $lines.Add(("fallback_leg_authority_completed_count={0}" -f $fallbackAuthorityProof.CompletedCount)) | Out-Null
     $lines.Add(("fallback_leg_authority_send_blocked_count={0}" -f $fallbackAuthorityProof.SendBlockedCount)) | Out-Null
+    $lines.Add(("fallback_leg_authority_continuous_receiver_state_proof_count={0}" -f $fallbackAuthorityProof.ContinuousReceiverStateProofCount)) | Out-Null
     $lines.Add(("fallback_leg_authority_stale_proof_ignored_count={0}" -f $fallbackAuthorityProof.StaleProofIgnoredCount)) | Out-Null
     $lines.Add(("fallback_leg_authority_metadata_missing_count={0}" -f $fallbackAuthorityProof.MetadataMissingCount)) | Out-Null
     $lines.Add(("fallback_tail_reconciliation_verdict={0}" -f $fallbackTailProof.Verdict)) | Out-Null
@@ -2479,6 +2554,7 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("control_plane_peer_visible_count={0}" -f $controlPlaneProof.PeerVisibleCount)) | Out-Null
     $lines.Add(("control_plane_local_only_rejected_count={0}" -f $controlPlaneProof.LocalOnlyRejectedCount)) | Out-Null
     $lines.Add(("control_plane_checkpoint_exchange_count={0}" -f $controlPlaneProof.CheckpointExchangeCount)) | Out-Null
+    $lines.Add(("control_plane_continuous_receiver_state_proof_count={0}" -f $controlPlaneProof.ContinuousReceiverStateProofCount)) | Out-Null
     $lines.Add(("control_plane_delivery_failure_count={0}" -f $controlPlaneProof.DeliveryFailureCount)) | Out-Null
     $lines.Add(("control_plane_delivery_failure_recovered_count={0}" -f $controlPlaneProof.RecoveredDeliveryFailureCount)) | Out-Null
     $lines.Add(("control_plane_unavailable_count={0}" -f $controlPlaneProof.UnavailableCount)) | Out-Null
@@ -4080,6 +4156,12 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_transaction_failed_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionFailedCount),
         ("runtime_unlock_transaction_local_only_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionLocalOnlyRejectedCount),
         ("runtime_unlock_transaction_proof_verdict={0}" -f $recoveryClassification.RuntimeUnlockTransactionProofVerdict),
+        ("runtime_unlock_tuna_path_lease_started_count={0}" -f $recoveryClassification.RuntimeUnlockTunaPathLeaseStartedCount),
+        ("runtime_unlock_tuna_path_lease_ready_count={0}" -f $recoveryClassification.RuntimeUnlockTunaPathLeaseReadyCount),
+        ("runtime_unlock_tuna_path_lease_failed_count={0}" -f $recoveryClassification.RuntimeUnlockTunaPathLeaseFailedCount),
+        ("runtime_unlock_tuna_path_lease_retired_count={0}" -f $recoveryClassification.RuntimeUnlockTunaPathLeaseRetiredCount),
+        ("runtime_unlock_tuna_path_lease_stale_listener_ignored_count={0}" -f $recoveryClassification.RuntimeUnlockTunaPathLeaseStaleListenerIgnoredCount),
+        ("runtime_unlock_answer_rejected_tuna_path_lease_unavailable_count={0}" -f $recoveryClassification.RuntimeUnlockAnswerRejectedTunaPathLeaseUnavailableCount),
         ("regular_v4_efficiency_pressure_class={0}" -f $recoveryClassification.RegularV4EfficiencyPressureClass),
         ("regular_v4_frontier_rebind_count={0}" -f $recoveryClassification.RegularV4FrontierRebindCount),
         ("regular_v4_frontier_rebind_rejected_count={0}" -f $recoveryClassification.RegularV4FrontierRebindRejectedCount),
@@ -4146,6 +4228,7 @@ function New-FileTransferStabilityGateSummaryLines {
         ("fallback_leg_authority_bridge_recovery_requested_count={0}" -f $fallbackAuthorityProof.BridgeRecoveryRequestedCount),
         ("fallback_leg_authority_bridge_recovery_escalated_count={0}" -f $fallbackAuthorityProof.BridgeRecoveryEscalatedCount),
         ("fallback_leg_authority_completed_count={0}" -f $fallbackAuthorityProof.CompletedCount),
+        ("fallback_leg_authority_continuous_receiver_state_proof_count={0}" -f $fallbackAuthorityProof.ContinuousReceiverStateProofCount),
         ("fallback_leg_authority_stale_proof_ignored_count={0}" -f $fallbackAuthorityProof.StaleProofIgnoredCount),
         ("fallback_leg_authority_metadata_missing_count={0}" -f $fallbackAuthorityProof.MetadataMissingCount),
         ("fallback_tail_reconciliation_verdict={0}" -f $fallbackTailProof.Verdict),
@@ -4172,6 +4255,7 @@ function New-FileTransferStabilityGateSummaryLines {
         ("control_plane_peer_visible_count={0}" -f $controlPlaneProof.PeerVisibleCount),
         ("control_plane_local_only_rejected_count={0}" -f $controlPlaneProof.LocalOnlyRejectedCount),
         ("control_plane_checkpoint_exchange_count={0}" -f $controlPlaneProof.CheckpointExchangeCount),
+        ("control_plane_continuous_receiver_state_proof_count={0}" -f $controlPlaneProof.ContinuousReceiverStateProofCount),
         ("control_plane_delivery_failure_count={0}" -f $controlPlaneProof.DeliveryFailureCount),
         ("control_plane_delivery_failure_recovered_count={0}" -f $controlPlaneProof.RecoveredDeliveryFailureCount),
         ("control_plane_liveness_timeout_during_valid_exchange_count={0}" -f $controlPlaneProof.LivenessTimeoutDuringValidExchangeCount),
@@ -4614,6 +4698,22 @@ function Get-FileTransferRecoveryFailureClassification {
         $_.EventName -eq 'filetransfer_tuna_gui_handoff_fallback_failure' -and
         (Get-FileTransferEventField -Event $_ -Name 'failureReason' -Default '') -eq 'listener_ready_unavailable_contradiction'
     })
+    $tunaPathLeaseStartedEvents = @($events | Where-Object { $_.EventName -eq 'tuna_path_lease_started' })
+    $tunaPathLeaseReadyEvents = @($events | Where-Object { $_.EventName -eq 'tuna_path_lease_listener_ready' })
+    $tunaPathLeaseFailedEvents = @($events | Where-Object { $_.EventName -eq 'tuna_path_lease_failed' })
+    $tunaPathLeaseRetiredEvents = @($events | Where-Object { $_.EventName -eq 'tuna_path_lease_retired' })
+    $tunaPathLeaseStaleListenerIgnoredEvents = @($events | Where-Object { $_.EventName -eq 'tuna_path_lease_stale_listener_event_ignored' })
+    $runtimeUnlockAnswerRejectedTunaPathLeaseUnavailableEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_answer_rejected_tuna_path_lease_unavailable'
+    })
+    $runtimeUnlockTunaPathLeaseRouteCommitRejectedEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_runtime_unlock_route_commit_rejected' -and
+        (
+            (Get-FileTransferEventField -Event $_ -Name 'rejection_reason' -Default '') -eq 'tuna_path_lease_failed' -or
+            (Get-FileTransferEventField -Event $_ -Name 'rejection_reason' -Default '') -eq 'tuna_path_lease_unavailable' -or
+            (Get-FileTransferEventField -Event $_ -Name 'rejection_reason' -Default '') -eq 'tuna_path_lease_retired'
+        )
+    })
     $runtimeUnlockOfferRejectedWithoutObservationEvents = @($events | Where-Object {
         $_.EventName -eq 'tuna_acceleration_offer_rejected' -and
         (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'runtime_unlock' -and
@@ -4723,13 +4823,16 @@ function Get-FileTransferRecoveryFailureClassification {
         ($sessionLivenessTimeoutEvents.Count -gt 0 -or $peerDisconnectedTerminalEvents.Count -gt 0)) {
         $class = 'fallback_control_plane_starvation'
     }
+    elseif ($runtimeUnlockAnswerRejectedTunaPathLeaseUnavailableEvents.Count -gt 0 -or
+        $runtimeUnlockTunaPathLeaseRouteCommitRejectedEvents.Count -gt 0) {
+        $class = 'tuna_path_lease_unavailable_at_answer'
+    }
     elseif ($runtimeUnlockTransactionObservedSendEvents.Count -gt 0 -and
         $runtimeUnlockTransactionPeerProofEvents.Count -eq 0 -and
         ($runtimeUnlockTransactionLocalOnlyRejectedEvents.Count -gt 0 -or $sessionLivenessTimeoutEvents.Count -gt 0)) {
         $class = 'runtime_unlock_transaction_local_only'
     }
-    elseif ($runtimeUnlockTransactionCommitPendingEvents.Count -gt 0 -and
-        $runtimeUnlockTransactionCommittedEvents.Count -eq 0 -and
+    elseif ($runtimeUnlockTransactionCommitPendingEvents.Count -gt $runtimeUnlockTransactionCommittedEvents.Count -and
         ($sessionLivenessTimeoutEvents.Count -gt 0 -or $runtimeUnlockTransactionFailedEvents.Count -gt 0)) {
         $class = 'runtime_unlock_transaction_commit_missing'
     }
@@ -4836,6 +4939,12 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockTransactionCommittedCount = $runtimeUnlockTransactionCommittedEvents.Count
         RuntimeUnlockTransactionFailedCount = $runtimeUnlockTransactionFailedEvents.Count
         RuntimeUnlockTransactionLocalOnlyRejectedCount = $runtimeUnlockTransactionLocalOnlyRejectedEvents.Count
+        RuntimeUnlockTunaPathLeaseStartedCount = $tunaPathLeaseStartedEvents.Count
+        RuntimeUnlockTunaPathLeaseReadyCount = $tunaPathLeaseReadyEvents.Count
+        RuntimeUnlockTunaPathLeaseFailedCount = $tunaPathLeaseFailedEvents.Count
+        RuntimeUnlockTunaPathLeaseRetiredCount = $tunaPathLeaseRetiredEvents.Count
+        RuntimeUnlockTunaPathLeaseStaleListenerIgnoredCount = $tunaPathLeaseStaleListenerIgnoredEvents.Count
+        RuntimeUnlockAnswerRejectedTunaPathLeaseUnavailableCount = $runtimeUnlockAnswerRejectedTunaPathLeaseUnavailableEvents.Count
         RegularV4EfficiencyPressureClass = $regularV4EfficiencyPressureClass
         RegularV4FrontierRebindCount = $regularV4FrontierRebindEvents.Count
         RegularV4FrontierRebindRejectedCount = $regularV4FrontierRebindRejectedEvents.Count
@@ -4844,7 +4953,9 @@ function Get-FileTransferRecoveryFailureClassification {
         RegularV4RepairCachePressureCount = $regularV4RepairCachePressureEvents.Count
         RuntimeUnlockTransactionProofVerdict = if ($runtimeUnlockTransactionStartedEvents.Count -eq 0) {
             'none'
-        } elseif ($runtimeUnlockTransactionCommittedEvents.Count -gt 0 -and $runtimeUnlockTransactionPeerProofEvents.Count -gt 0) {
+        } elseif ($runtimeUnlockTransactionCommittedEvents.Count -gt 0 -and
+            $runtimeUnlockTransactionPeerProofEvents.Count -gt 0 -and
+            $runtimeUnlockTransactionCommitPendingEvents.Count -le $runtimeUnlockTransactionCommittedEvents.Count) {
             'pass'
         } else {
             'fail'
@@ -4966,6 +5077,12 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_transaction_failed_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionFailedCount),
         ("runtime_unlock_transaction_local_only_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionLocalOnlyRejectedCount),
         ("runtime_unlock_transaction_proof_verdict={0}" -f $recoveryClassification.RuntimeUnlockTransactionProofVerdict),
+        ("runtime_unlock_tuna_path_lease_started_count={0}" -f $recoveryClassification.RuntimeUnlockTunaPathLeaseStartedCount),
+        ("runtime_unlock_tuna_path_lease_ready_count={0}" -f $recoveryClassification.RuntimeUnlockTunaPathLeaseReadyCount),
+        ("runtime_unlock_tuna_path_lease_failed_count={0}" -f $recoveryClassification.RuntimeUnlockTunaPathLeaseFailedCount),
+        ("runtime_unlock_tuna_path_lease_retired_count={0}" -f $recoveryClassification.RuntimeUnlockTunaPathLeaseRetiredCount),
+        ("runtime_unlock_tuna_path_lease_stale_listener_ignored_count={0}" -f $recoveryClassification.RuntimeUnlockTunaPathLeaseStaleListenerIgnoredCount),
+        ("runtime_unlock_answer_rejected_tuna_path_lease_unavailable_count={0}" -f $recoveryClassification.RuntimeUnlockAnswerRejectedTunaPathLeaseUnavailableCount),
         ("regular_v4_efficiency_pressure_class={0}" -f $recoveryClassification.RegularV4EfficiencyPressureClass),
         ("regular_v4_frontier_rebind_count={0}" -f $recoveryClassification.RegularV4FrontierRebindCount),
         ("regular_v4_frontier_rebind_rejected_count={0}" -f $recoveryClassification.RegularV4FrontierRebindRejectedCount),
@@ -5036,6 +5153,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("fallback_leg_authority_bridge_recovery_requested_count={0}" -f $fallbackAuthorityProof.BridgeRecoveryRequestedCount),
         ("fallback_leg_authority_bridge_recovery_escalated_count={0}" -f $fallbackAuthorityProof.BridgeRecoveryEscalatedCount),
         ("fallback_leg_authority_completed_count={0}" -f $fallbackAuthorityProof.CompletedCount),
+        ("fallback_leg_authority_continuous_receiver_state_proof_count={0}" -f $fallbackAuthorityProof.ContinuousReceiverStateProofCount),
         ("fallback_leg_authority_stale_proof_ignored_count={0}" -f $fallbackAuthorityProof.StaleProofIgnoredCount),
         ("fallback_leg_authority_metadata_missing_count={0}" -f $fallbackAuthorityProof.MetadataMissingCount),
         ("fallback_tail_reconciliation_verdict={0}" -f $fallbackTailProof.Verdict),
@@ -5062,6 +5180,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("control_plane_peer_visible_count={0}" -f $controlPlaneProof.PeerVisibleCount),
         ("control_plane_local_only_rejected_count={0}" -f $controlPlaneProof.LocalOnlyRejectedCount),
         ("control_plane_checkpoint_exchange_count={0}" -f $controlPlaneProof.CheckpointExchangeCount),
+        ("control_plane_continuous_receiver_state_proof_count={0}" -f $controlPlaneProof.ContinuousReceiverStateProofCount),
         ("control_plane_delivery_failure_count={0}" -f $controlPlaneProof.DeliveryFailureCount),
         ("control_plane_delivery_failure_recovered_count={0}" -f $controlPlaneProof.RecoveredDeliveryFailureCount),
         ("control_plane_liveness_timeout_during_valid_exchange_count={0}" -f $controlPlaneProof.LivenessTimeoutDuringValidExchangeCount),

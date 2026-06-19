@@ -285,6 +285,10 @@ function Get-FileTransferRouteEventDirection {
 function Test-FileTransferRouteAwareEvent {
     param([Parameter(Mandatory = $true)]$Event)
 
+    if ($Event.EventName -eq 'filetransfer_normal_to_tuna_handoff_route_hint_deferred') {
+        return $false
+    }
+
     return $Event.EventName -eq 'filetransfer_route_selected' -or
         ($null -ne $Event.Fields -and $Event.Fields.ContainsKey('route'))
 }

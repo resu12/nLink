@@ -2218,17 +2218,14 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
                 ? new LifecycleCopySendResult("bulk_copy", false, null)
                 : await bulkCopyTask.ConfigureAwait(false);
 
-            var peerCopySucceeded = controlCopyResult.Succeeded || bulkCopyResult.Succeeded;
             controlAckResult = controlAckTask is null
                 ? new LifecycleCopySendResult("control_ack", false, null)
-                : peerCopySucceeded
-                    ? await WaitForLifecycleBoundedCopyResultAsync(
-                            controlAckTask,
-                            options,
-                            "control_ack",
-                            effectiveCt)
-                        .ConfigureAwait(false)
-                    : await controlAckTask.ConfigureAwait(false);
+                : await WaitForLifecycleBoundedCopyResultAsync(
+                        controlAckTask,
+                        options,
+                        "control_ack",
+                        effectiveCt)
+                    .ConfigureAwait(false);
 
             controlQueueResult = await WaitForLifecycleBoundedCopyResultAsync(
                     controlQueueTask,
@@ -2297,10 +2294,11 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             return await copyTask.ConfigureAwait(false);
         }
 
+        var copyTimeout = ResolveLifecycleCopyTimeout(options);
         Task delayTask;
         try
         {
-            delayTask = Task.Delay(ControlPlaneLifecycleCopyTimeout, ct);
+            delayTask = Task.Delay(copyTimeout, ct);
             if (await Task.WhenAny(copyTask, delayTask).ConfigureAwait(false) == copyTask)
             {
                 return await copyTask.ConfigureAwait(false);
@@ -2313,7 +2311,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
 
         LocalOperationalLog.Warn(
             lane == "control_queue" ? "SessionSecurity" : options.LogCategory,
-            $"event={options.LogEvent}_{lane}_bounded_wait_expired; transport=nkn; message_type={MapControlPlaneLifecycleMessageType(options.MessageType)}; timeout_ms={(int)ControlPlaneLifecycleCopyTimeout.TotalMilliseconds}");
+            $"event={options.LogEvent}_{lane}_bounded_wait_expired; transport=nkn; message_type={MapControlPlaneLifecycleMessageType(options.MessageType)}; timeout_ms={(int)copyTimeout.TotalMilliseconds}");
         return new LifecycleCopySendResult(lane, false, new TimeoutException());
     }
 
@@ -2395,8 +2393,9 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     {
         try
         {
+            var copyTimeout = ResolveLifecycleCopyTimeout(options);
             using var copyCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            copyCts.CancelAfter(ControlPlaneLifecycleCopyTimeout);
+            copyCts.CancelAfter(copyTimeout);
 
             if (useBulkLane)
             {
@@ -2417,6 +2416,11 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             return new LifecycleCopySendResult(lane, false, ex);
         }
     }
+
+    private static TimeSpan ResolveLifecycleCopyTimeout(LifecycleDeliveryOptions options)
+        => options.CopyTimeout is { } timeout && timeout > TimeSpan.Zero
+            ? timeout
+            : ControlPlaneLifecycleCopyTimeout;
 
     private static string FormatLifecycleErrorName(Exception? error)
         => error?.GetType().Name ?? "(none)";
@@ -2473,7 +2477,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         LifecycleDeliveryAcceptancePolicy AcceptancePolicy,
         bool UseControlAckRetry,
         int PeerCopyAttempts,
-        bool ThrowOnFailure);
+        bool ThrowOnFailure,
+        TimeSpan? CopyTimeout = null);
 
     private readonly record struct LifecycleEnvelopeSet(
         Envelope ControlEnvelope,

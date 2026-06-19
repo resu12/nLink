@@ -127,6 +127,8 @@ internal sealed class FileTransferLeg
 
     public string? CheckpointPriority { get; set; }
 
+    public DateTimeOffset? CheckpointRequestedUtc { get; set; }
+
     public int CheckpointGeneration { get; set; }
 
     public int BridgeRecoveryGeneration { get; set; }
@@ -234,6 +236,9 @@ internal static class FileTransferCoordinator
 
         leg.State = FileTransferLegState.Terminal;
         leg.CanSendData = false;
+        leg.CheckpointRequestId = null;
+        leg.CheckpointPriority = null;
+        leg.CheckpointRequestedUtc = null;
     }
 
     public static bool IsCurrentPostTunaFallbackLeg(FileTransferLeg? leg)
@@ -252,6 +257,7 @@ internal static class FileTransferCoordinator
     public static bool IsCurrentPostTunaFallbackLegAwaitingCheckpoint(FileTransferLeg? leg)
         => IsCurrentPostTunaFallbackLeg(leg) &&
            !leg!.CanSendData &&
+           !string.IsNullOrWhiteSpace(leg.CheckpointRequestId) &&
            leg.State is FileTransferLegState.CheckpointPending or FileTransferLegState.BridgeRestartPending;
 
     public static bool TryValidateCurrentFallbackCheckpointProof(
@@ -358,18 +364,21 @@ internal static class FileTransferCoordinator
         leg.ProvenHighestObservedChunkIndex = Math.Max(-1, provenHighestObservedChunkIndex);
         leg.CheckpointRequestId = null;
         leg.CheckpointPriority = null;
+        leg.CheckpointRequestedUtc = null;
     }
 
     public static void MarkFallbackCheckpointRequested(
         FileTransferLeg leg,
         string? checkpointRequestId,
         string? checkpointPriority,
-        long transportEpochId)
+        long transportEpochId,
+        DateTimeOffset? requestedUtc = null)
     {
         leg.State = FileTransferLegState.CheckpointPending;
         leg.CanSendData = false;
         leg.CheckpointRequestId = checkpointRequestId;
         leg.CheckpointPriority = checkpointPriority;
+        leg.CheckpointRequestedUtc = requestedUtc ?? DateTimeOffset.UtcNow;
         leg.CheckpointGeneration++;
         leg.TransportEpochId = transportEpochId > 0 ? transportEpochId : leg.TransportEpochId;
     }
@@ -378,6 +387,7 @@ internal static class FileTransferCoordinator
     {
         leg.CheckpointRequestId = null;
         leg.CheckpointPriority = null;
+        leg.CheckpointRequestedUtc = null;
         leg.State = FileTransferLegState.RecoveryActive;
         leg.CanSendData = true;
     }

@@ -164,6 +164,7 @@ public sealed partial class SessionFileTransferService
         {
             if (ShouldReuseCurrentV6TransportEpoch(current, handoffKind, targetTransport))
             {
+                AdoptOutboundFallbackLegTransportEpochLocked(context, current.EpochId, reason);
                 LogV6TransportEpochReused(FileTransferDirection.Outbound, context.TransferId, context.SessionId, current, reason);
                 return;
             }
@@ -203,6 +204,7 @@ public sealed partial class SessionFileTransferService
             context,
             epoch.EpochId,
             "transport_epoch_started");
+        AdoptOutboundFallbackLegTransportEpochLocked(context, epoch.EpochId, reason);
         context.StatusMessage = GetV6TransportEpochStatus(epoch);
         LogV6TransportEpochStarted(context.TransferId, context.SessionId, epoch);
         PublishV6TransportEpochSnapshot(context.SessionId, context.TransferId, epoch);
@@ -221,6 +223,7 @@ public sealed partial class SessionFileTransferService
             if (ShouldReuseCurrentV6TransportEpoch(current, handoffKind, targetTransport))
             {
                 LogV6TransportEpochReused(FileTransferDirection.Inbound, context.TransferId, context.SessionId, current, reason);
+                AdoptInboundFallbackLegTransportEpochLocked(context, current.EpochId, reason);
                 return;
             }
 
@@ -247,6 +250,7 @@ public sealed partial class SessionFileTransferService
         context.V6ReceiverTransportEpoch = epoch.EpochId;
         context.V6LastReceiverStateSentUtc = null;
         context.V6LastFrontierRequestSentUtc = null;
+        AdoptInboundFallbackLegTransportEpochLocked(context, epoch.EpochId, reason);
         context.StatusMessage = GetV6TransportEpochStatus(epoch);
         LogV6TransportEpochStarted(context.TransferId, context.SessionId, epoch);
         PublishV6TransportEpochSnapshot(context.SessionId, context.TransferId, epoch);
@@ -1406,6 +1410,9 @@ public sealed partial class SessionFileTransferService
         context.PullTransportGraceDeadlineUtc = null;
         context.PullTransportPauseReason = null;
         context.PullTransportResumeRequestPending = false;
+        ClearOutboundFallbackCheckpointDeliveryRecoveryPendingLocked(
+            context,
+            $"transport_epoch_completed_{reason}");
         context.PullTransportRebindGeneration = 0;
         context.PullTransportLastSafetyReplayGeneration = 0;
         context.PullTransportLastSafetyReplayFrontierChunkIndex = -1;

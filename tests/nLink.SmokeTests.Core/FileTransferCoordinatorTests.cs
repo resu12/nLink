@@ -164,6 +164,152 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void RuntimeUnlockTransaction_FailedTunaPathLeaseRejectsRouteCommit()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var started = StartRegular(regular);
+        var transaction = RuntimeUnlockTransaction.Apply(
+            new RuntimeUnlockTransactionEvent(
+                RuntimeUnlockTransactionEventKind.OfferGenerationCreated,
+                started.State.SessionId,
+                started.State.TransferId,
+                TransactionGeneration: 3,
+                OfferGeneration: 33,
+                Reason: "runtime_unlock"),
+            RuntimeUnlockTransactionSnapshot.Idle).State;
+        transaction = RuntimeUnlockTransaction.Apply(
+            new RuntimeUnlockTransactionEvent(
+                RuntimeUnlockTransactionEventKind.AnswerReceived,
+                started.State.SessionId,
+                started.State.TransferId,
+                TransactionGeneration: 3,
+                OfferGeneration: 33,
+                Reason: "transport_acceleration_answer"),
+            transaction).State;
+
+        var proof = RuntimeUnlockTransaction.CreateRouteCommitProof(transaction, "answer_received") with
+        {
+            TunaPathLeaseRequired = true,
+            TunaPathLeaseGeneration = 7,
+            TunaPathLeaseState = RuntimeUnlockTunaPathLeaseState.Failed,
+            TunaPathLeaseListenerRunId = "listener-start-7",
+            TunaPathLeaseCurrent = false,
+            TunaPathLeaseFailureReason = "runtime_unlock_answer_rejected_tuna_path_lease_unavailable",
+        };
+        var decision = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested,
+                tuna,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                "runtime_unlock_commit",
+                FileTransferLegState.Active,
+                canSendData: true,
+                runtimeUnlockCommitProof: proof),
+            started.State);
+
+        Assert.False(decision.RuntimeUnlockCommitAccepted);
+        Assert.Equal("tuna_path_lease_failed", decision.RuntimeUnlockCommitRejectedReason);
+        Assert.Equal(FileTransferRoute.RegularNknV4Fast, decision.State.RouteSelection.Route);
+    }
+
+    [Fact]
+    public void RuntimeUnlockTunaPathLease_CurrentListenerProofAllowsCommit()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var started = StartRegular(regular);
+        var transaction = RuntimeUnlockTransaction.Apply(
+            new RuntimeUnlockTransactionEvent(
+                RuntimeUnlockTransactionEventKind.OfferGenerationCreated,
+                started.State.SessionId,
+                started.State.TransferId,
+                TransactionGeneration: 4,
+                OfferGeneration: 44,
+                Reason: "runtime_unlock"),
+            RuntimeUnlockTransactionSnapshot.Idle).State;
+        transaction = RuntimeUnlockTransaction.Apply(
+            new RuntimeUnlockTransactionEvent(
+                RuntimeUnlockTransactionEventKind.AnswerReceived,
+                started.State.SessionId,
+                started.State.TransferId,
+                TransactionGeneration: 4,
+                OfferGeneration: 44,
+                Reason: "transport_acceleration_answer"),
+            transaction).State;
+        var lease = RuntimeUnlockTunaPathLease.Start(
+            started.State.SessionId,
+            started.State.TransferId,
+            leaseGeneration: 9,
+            listenerRunId: "listener-start-9",
+            payerDecisionId: 123,
+            nowUtcMs: 100);
+        lease = RuntimeUnlockTunaPathLease.BindOffer(
+            lease,
+            transaction.TransactionGeneration,
+            transaction.OfferGeneration,
+            payerDecisionId: 123,
+            nowUtcMs: 101);
+        Assert.True(RuntimeUnlockTunaPathLease.TryMarkListenerReady(
+            lease,
+            started.State.SessionId,
+            leaseGeneration: 9,
+            listenerRunId: "listener-start-9",
+            nowUtcMs: 102,
+            out lease));
+
+        var proof = RuntimeUnlockTransaction.CreateRouteCommitProof(transaction, "answer_received") with
+        {
+            TunaPathLeaseRequired = true,
+            TunaPathLeaseGeneration = lease.LeaseGeneration,
+            TunaPathLeaseState = lease.State,
+            TunaPathLeaseListenerRunId = lease.ListenerRunId,
+            TunaPathLeaseCurrent = lease.IsCurrent,
+            TunaPathLeaseFailureReason = lease.FailureReason,
+        };
+        var decision = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested,
+                tuna,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                "runtime_unlock_commit",
+                FileTransferLegState.Active,
+                canSendData: true,
+                runtimeUnlockCommitProof: proof),
+            started.State);
+
+        Assert.True(decision.RuntimeUnlockCommitAccepted);
+        Assert.Equal(FileTransferRoute.FileTunaV4, decision.State.RouteSelection.Route);
+    }
+
+    [Fact]
+    public void RuntimeUnlockTunaPathLease_StaleListenerReadyProofIsIgnored()
+    {
+        var lease = RuntimeUnlockTunaPathLease.Start(
+            "session_a",
+            transferId: "transfer_a",
+            leaseGeneration: 5,
+            listenerRunId: "listener-start-5",
+            payerDecisionId: 1,
+            nowUtcMs: 100);
+        lease = RuntimeUnlockTunaPathLease.Fail(lease, "listener_sidecar_unavailable", nowUtcMs: 101);
+
+        var marked = RuntimeUnlockTunaPathLease.TryMarkListenerReady(
+            lease,
+            "session_a",
+            leaseGeneration: 4,
+            listenerRunId: "listener-start-4",
+            nowUtcMs: 102,
+            out var updated);
+
+        Assert.False(marked);
+        Assert.Equal(RuntimeUnlockTunaPathLeaseState.Failed, updated.State);
+        Assert.False(updated.IsCurrent);
+    }
+
+    [Fact]
     public void RuntimeUnlockTransaction_StaleSessionOrTerminalTransferRejectsCommit()
     {
         var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);

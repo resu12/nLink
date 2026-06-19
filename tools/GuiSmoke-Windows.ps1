@@ -369,6 +369,39 @@ function Wait-AutomationTextEquals {
     }
 }
 
+function Wait-SessionHeaderConnectedState {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [int]$TimeoutMs = 10000
+    )
+
+    return Wait-Until -TimeoutMs $TimeoutMs -PollMs 200 -OnTimeoutMessage "Timed out waiting for SessionHeader.StatusText to be a connected state." -Condition {
+        $el = Find-VisibleByAutomationId -Root $Window -AutomationId 'SessionHeader.StatusText'
+        if (-not $el) { return $null }
+
+        $text = (Get-ElementTextSafe -Element $el).Trim()
+        if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+        if ([string]::Equals($text, 'Connected', [System.StringComparison]::Ordinal)) {
+            return [pscustomobject]@{
+                Element = $el
+                Text = $text
+            }
+        }
+
+        if ($text.StartsWith('Connected', [System.StringComparison]::Ordinal)) {
+            $suffix = $text.Substring('Connected'.Length)
+            if ($suffix.Length -gt 0 -and ([char]::IsWhiteSpace($suffix[0]) -or $suffix[0] -eq [char]0x2022)) {
+                return [pscustomobject]@{
+                    Element = $el
+                    Text = $text
+                }
+            }
+        }
+
+        return $null
+    }
+}
+
 function Wait-AutomationElementVisibleState {
     param(
         [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
@@ -973,6 +1006,25 @@ function Copy-GuiSmokeProcessOutputIfPresent {
             # Best-effort failure artifacts.
         }
     }
+}
+
+function Read-GuiSmokeProcessOutputLinesSnapshot {
+    $lines = New-Object System.Collections.Generic.List[string]
+    if ($script:GuiSmokeProcessOutputFiles.Count -le 0) {
+        return $lines.ToArray()
+    }
+
+    foreach ($path in @($script:GuiSmokeProcessOutputFiles)) {
+        if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            continue
+        }
+
+        foreach ($line in @(Read-AppLogLinesSafe -Path $path)) {
+            $lines.Add([string]$line) | Out-Null
+        }
+    }
+
+    return $lines.ToArray()
 }
 
 function Copy-AppLogsIfPresent {
@@ -2126,6 +2178,7 @@ function Wait-FileTransferTerminalPairAfterBookmark {
     $ignoredUnresolvedTerminalCandidates = @{}
     $terminalPathResolveStartedMs = -1L
     $terminalPathResolveTransferId = ''
+    $terminalQuietGraceStartedMs = -1L
 
     while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
         $byTransfer = @{}
@@ -2266,9 +2319,37 @@ function Wait-FileTransferTerminalPairAfterBookmark {
         if ($progressEventCount -gt $lastProgressEventCount) {
             $lastProgressEventCount = $progressEventCount
             $lastProgressMs = $sw.ElapsedMilliseconds
+            $terminalQuietGraceStartedMs = -1L
         }
 
         if (($sw.ElapsedMilliseconds - $lastProgressMs) -ge $ProgressTimeoutMs) {
+            $terminalQuietGraceMs = [Math]::Min(
+                30000,
+                [Math]::Max(10000, [long]($ProgressTimeoutMs / 6)))
+            if ($terminalQuietGraceStartedMs -lt 0) {
+                $terminalQuietGraceStartedMs = $sw.ElapsedMilliseconds
+                if (-not [string]::IsNullOrWhiteSpace($ArtifactDir)) {
+                    Append-FileTransferLiveHarnessDiagnostic -ArtifactDir $ArtifactDir -Diagnostic ([ordered]@{
+                            event = 'filetransfer_live_progress_timeout_terminal_grace_started'
+                            reason = 'quiet_progress_before_terminal_decision'
+                            progress_timeout_ms = $ProgressTimeoutMs
+                            terminal_quiet_grace_ms = $terminalQuietGraceMs
+                            wait_elapsed_ms = $sw.ElapsedMilliseconds
+                            receiver_next_chunk = $maxReceiverNextChunkIndex.Value
+                            receiver_highest_chunk = $maxReceiverHighestChunkIndex.Value
+                            progress_events = $lastProgressEventCount
+                        })
+                }
+
+                Start-Sleep -Milliseconds 500
+                continue
+            }
+
+            if (($sw.ElapsedMilliseconds - $terminalQuietGraceStartedMs) -lt $terminalQuietGraceMs) {
+                Start-Sleep -Milliseconds 500
+                continue
+            }
+
             throw ("Timed out waiting for live file-transfer progress: no useful data progress for {0:N0}s; total_wait_s={1:N0}; receiver_next_chunk={2}; receiver_highest_chunk={3}; progress_events={4}." -f `
                 ($ProgressTimeoutMs / 1000),
                 ($sw.ElapsedMilliseconds / 1000),
@@ -2409,6 +2490,41 @@ function Test-TunaGuiLogLinesContain {
     return $false
 }
 
+function Test-TunaGuiBridgeBootstrapNotReadyEvidence {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Lines)
+
+    $bridgeConnectFailure = $false
+    $readyNeverEmitted = $false
+    $lanesNotReady = $false
+    foreach ($line in @($Lines)) {
+        $text = [string]$line
+        if ([string]::IsNullOrWhiteSpace($text)) {
+            continue
+        }
+
+        if ($text.IndexOf('RPC call failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $text.IndexOf('Connect failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $text.IndexOf('HostByAddressAsync failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $text.IndexOf('BridgeStartFailure', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $bridgeConnectFailure = $true
+        }
+
+        if ($text.IndexOf('ready_emitted=0', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $text.IndexOf('rdy=0', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $readyNeverEmitted = $true
+        }
+
+        if (($text.IndexOf('control_ready=0', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $text.IndexOf('cr=0', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -and
+            ($text.IndexOf('bulk_ready=0', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $text.IndexOf('br=0', [System.StringComparison]::OrdinalIgnoreCase) -ge 0)) {
+            $lanesNotReady = $true
+        }
+    }
+
+    return $bridgeConnectFailure -or ($readyNeverEmitted -and $lanesNotReady)
+}
+
 function Get-TunaGuiFileTransferSetupFailureClassification {
     param(
         [Parameter(Mandatory = $true)][int]$Bookmark,
@@ -2417,10 +2533,13 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     )
 
     $lines = @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)
-    $rawListenerUnavailable = Test-TunaGuiLogLinesContain -Lines $lines -Needles @('listener_unavailable')
-    $rawListenerSidecarUnavailable = Test-TunaGuiLogLinesContain -Lines $lines -Needles @('listener_sidecar_unavailable')
-    $rawListenerReady = (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_acceleration_timeline', 'status=listener_ready')) -or
-        (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_listener_startup_stage', 'stage=listener_ready'))
+    $processLines = @(Read-GuiSmokeProcessOutputLinesSnapshot)
+    $evidenceLines = @($lines + $processLines)
+    $bridgeBootstrapNotReady = Test-TunaGuiBridgeBootstrapNotReadyEvidence -Lines $evidenceLines
+    $rawListenerUnavailable = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('listener_unavailable')
+    $rawListenerSidecarUnavailable = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('listener_sidecar_unavailable')
+    $rawListenerReady = (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=tuna_acceleration_timeline', 'status=listener_ready')) -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=tuna_listener_startup_stage', 'stage=listener_ready'))
     $readinessState = Get-TunaGuiReadinessStateAfterBookmark -Bookmark $Bookmark
     $listenerUnavailable = [bool]$readinessState.ListenerUnavailable
     $listenerSidecarUnavailable = [bool]($readinessState.ListenerUnavailable -and $rawListenerSidecarUnavailable)
@@ -2430,33 +2549,45 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $listenerUnavailable = [bool]$rawListenerUnavailable
         $listenerSidecarUnavailable = [bool]$rawListenerSidecarUnavailable
         $listenerReady = [bool]$rawListenerReady
-        $tunaActive = Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_acceleration_timeline', 'active=1')
+        $tunaActive = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=tuna_acceleration_timeline', 'active=1')
     }
-    $routeSelected = Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=filetransfer_route_selected')
-    $activationOfferNotObserved = (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_acceleration_activation_offer_not_observed')) -or
-        (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('reason=offer_send_not_observed')) -or
-        (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_acceleration_control_send_wait_timeout', 'purpose=offer'))
-    $activationOfferWaitingAnswer = (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_acceleration_offer_queued')) -or
-        (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('status=waiting_for_answer')) -or
-        (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_acceleration_offer_replay_sent'))
-    $runtimeUnlockDispatchDeferredForRegularV4ReceiveRecovery = Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_acceleration_runtime_unlock_dispatch_deferred_for_regular_v4_receive_recovery')
-    $measuredOfferSent = (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('message_type=file_transfer_offer')) -or
-        (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=offer_sent'))
-    $measuredOfferReceived = Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=offer_received')
-    $activationOfferSent = (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_acceleration_offer_queued')) -or
-        (Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_acceleration_offer_replay_sent'))
-    $activationOfferReceived = Test-TunaGuiLogLinesContain -Lines $lines -Needles @('event=tuna_acceleration_offer_received_raw')
+    $routeSelected = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_route_selected')
+    $activationOfferNotObserved = (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=tuna_acceleration_activation_offer_not_observed')) -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('reason=offer_send_not_observed')) -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=tuna_acceleration_control_send_wait_timeout', 'purpose=offer'))
+    $activationOfferWaitingAnswer = (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=tuna_acceleration_offer_queued')) -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('status=waiting_for_answer')) -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=tuna_acceleration_offer_replay_sent'))
+    $runtimeUnlockDispatchDeferredForRegularV4ReceiveRecovery = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=tuna_acceleration_runtime_unlock_dispatch_deferred_for_regular_v4_receive_recovery')
+    $measuredOfferSent = (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('message_type=file_transfer_offer')) -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=offer_sent'))
+    $measuredOfferReceived = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=offer_received')
+    $activationOfferSent = (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=tuna_acceleration_offer_queued')) -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=tuna_acceleration_offer_replay_sent'))
+    $activationOfferReceived = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=tuna_acceleration_offer_received_raw')
     $activationPhaseEvidence = (-not $tunaActive) -and ($activationOfferNotObserved -or $activationOfferWaitingAnswer -or $activationOfferSent -or $activationOfferReceived)
     $offerSent = if ($activationPhaseEvidence) { $activationOfferSent } else { $measuredOfferSent }
     $offerReceived = if ($activationPhaseEvidence) { $activationOfferReceived } else { $measuredOfferReceived }
-    $terminalObserved = Test-TunaGuiLogLinesContain -Lines $lines -Needles @('_terminal')
+    $terminalObserved = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('_terminal')
 
     $phase = 'unknown'
     $reason = 'unknown'
     $listenerReadyUnavailableContradiction = $listenerReady -and ($listenerUnavailable -or $listenerSidecarUnavailable)
-    if ($ErrorMessage.IndexOf('Timed out waiting for helpee invite to become ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+    if ($ErrorMessage.IndexOf('live multi-toggle normal-to-Tuna route epoch started', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        $phase = 'live_route_proof'
+        $reason = 'normal_to_tuna_live_epoch_missing'
+    }
+    elseif ($ErrorMessage.IndexOf('live multi-toggle normal-to-Tuna route epoch recovered', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        $phase = 'live_route_proof'
+        $reason = 'normal_to_tuna_live_epoch_recovery_missing'
+    }
+    elseif ($ErrorMessage.IndexOf('live multi-toggle file Tuna V4 route selection', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        $phase = 'route_runtime'
+        $reason = 'normal_to_tuna_route_selection_missing'
+    }
+    elseif ($ErrorMessage.IndexOf('Timed out waiting for helpee invite to become ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         $phase = 'preactivation_readiness'
-        $reason = 'helpee_invite_readiness_timeout'
+        $reason = if ($bridgeBootstrapNotReady) { 'nkn_bridge_bootstrap_not_ready' } else { 'helpee_invite_readiness_timeout' }
     }
     elseif ($ErrorMessage.IndexOf('Helpee reached Connection failed before invite became ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         $phase = 'preactivation_readiness'
@@ -2537,6 +2668,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         ActivationOfferNotObserved = [bool]$activationOfferNotObserved
         ActivationOfferWaitingAnswer = [bool]$activationOfferWaitingAnswer
         RuntimeUnlockDispatchDeferredForRegularV4ReceiveRecovery = [bool]$runtimeUnlockDispatchDeferredForRegularV4ReceiveRecovery
+        BridgeBootstrapNotReady = [bool]$bridgeBootstrapNotReady
         ActivationOfferSent = [bool]$activationOfferSent
         ActivationOfferReceived = [bool]$activationOfferReceived
         MeasuredOfferSent = [bool]$measuredOfferSent
@@ -2560,7 +2692,7 @@ function Wait-TunaGuiFileTransferAcceptOrThrow {
     }
     catch {
         $classification = Get-TunaGuiFileTransferSetupFailureClassification -Bookmark $Bookmark -ErrorMessage $_.Exception.Message -RouteMode $RouteMode
-        throw ("Tuna GUI measured file-transfer accept did not become enabled: phase={0}; reason={1}; route_mode={2}; tuna_active={3}; listener_ready={4}; listener_unavailable={5}; route_selected={6}; activation_offer_not_observed={7}; activation_offer_waiting_answer={8}; runtime_unlock_dispatch_deferred_for_regular_v4_receive_recovery={9}; activation_offer_sent={10}; activation_offer_received={11}; measured_offer_sent={12}; measured_offer_received={13}; offer_sent={14}; offer_received={15}; terminal_observed={16}; original_error={17}" -f `
+        throw ("Tuna GUI measured file-transfer accept did not become enabled: phase={0}; reason={1}; route_mode={2}; tuna_active={3}; listener_ready={4}; listener_unavailable={5}; route_selected={6}; activation_offer_not_observed={7}; activation_offer_waiting_answer={8}; runtime_unlock_dispatch_deferred_for_regular_v4_receive_recovery={9}; bridge_bootstrap_not_ready={10}; activation_offer_sent={11}; activation_offer_received={12}; measured_offer_sent={13}; measured_offer_received={14}; offer_sent={15}; offer_received={16}; terminal_observed={17}; original_error={18}" -f `
             $classification.Phase,
             $classification.Reason,
             $classification.RouteMode,
@@ -2571,6 +2703,7 @@ function Wait-TunaGuiFileTransferAcceptOrThrow {
             ($(if ($classification.ActivationOfferNotObserved) { 1 } else { 0 })),
             ($(if ($classification.ActivationOfferWaitingAnswer) { 1 } else { 0 })),
             ($(if ($classification.RuntimeUnlockDispatchDeferredForRegularV4ReceiveRecovery) { 1 } else { 0 })),
+            ($(if ($classification.BridgeBootstrapNotReady) { 1 } else { 0 })),
             ($(if ($classification.ActivationOfferSent) { 1 } else { 0 })),
             ($(if ($classification.ActivationOfferReceived) { 1 } else { 0 })),
             ($(if ($classification.MeasuredOfferSent) { 1 } else { 0 })),
@@ -5595,8 +5728,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     }
 
     if (-not (Test-GuiSmokeEnvEnabled -Name 'NLINK_TUNA_GUI_MIXED_SCREENSHARE')) {
-        [void](Wait-AutomationTextEquals -Window $Context.HelperWindow -AutomationId 'SessionHeader.StatusText' -ExpectedText 'Connected' -TimeoutMs 10000)
-        [void](Wait-AutomationTextEquals -Window $Context.HelpeeWindow -AutomationId 'SessionHeader.StatusText' -ExpectedText 'Connected' -TimeoutMs 10000)
+        [void](Wait-SessionHeaderConnectedState -Window $Context.HelperWindow -TimeoutMs 10000)
+        [void](Wait-SessionHeaderConnectedState -Window $Context.HelpeeWindow -TimeoutMs 10000)
     }
 
     Write-Host ("[GUI Smoke][filetransfer_tuna] PASS direction={0} bytes={1} transfer_id={2} sent_chunk_bytes={3} received_chunk_bytes={4}" -f `
@@ -5752,6 +5885,7 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
             activationOfferNotObserved = [bool]$failureClassification.ActivationOfferNotObserved
             activationOfferWaitingAnswer = [bool]$failureClassification.ActivationOfferWaitingAnswer
             runtimeUnlockDispatchDeferredForRegularV4ReceiveRecovery = [bool]$failureClassification.RuntimeUnlockDispatchDeferredForRegularV4ReceiveRecovery
+            bridgeBootstrapNotReady = [bool]$failureClassification.BridgeBootstrapNotReady
             activationOfferSent = [bool]$failureClassification.ActivationOfferSent
             activationOfferReceived = [bool]$failureClassification.ActivationOfferReceived
             measuredOfferSent = [bool]$failureClassification.MeasuredOfferSent
@@ -7746,7 +7880,7 @@ function Run-ScenarioNknDirectConnect {
     [void](Wait-ConnectedChatVisibleProcessAware -Context $Context -TimeoutMs 120000)
 
     $msg = "gui smoke nkn direct connect"
-    Send-ChatMessage -Window $Context.HelperWindow -Text $msg
+    Send-ChatMessage -Window $Context.HelperWindow -Text $msg -UseEnter
     Wait-MessageVisible -Window $Context.HelpeeWindow -MessageText $msg -TimeoutMs 30000
 }
 
@@ -8310,8 +8444,8 @@ function Run-ScenarioScreenShareStopWhileControlApprovalPending {
                 [void](Wait-ScreenShareButtonText -Window $Context.HelpeeWindow -ExpectedText 'Share screen' -TimeoutMs 5000)
                 [void](Wait-ScreenShareViewerVisibleState -Window $Context.HelpeeWindow -IsVisible $false -TimeoutMs 5000)
                 [void](Wait-AutomationElementVisibleState -Window $Context.HelpeeWindow -AutomationId 'Helpee.ControlConsent.Allow' -IsVisible $false -TimeoutMs 5000)
-                [void](Wait-AutomationTextEquals -Window $Context.HelpeeWindow -AutomationId 'SessionHeader.StatusText' -ExpectedText 'Connected' -TimeoutMs 5000)
-                [void](Wait-AutomationTextEquals -Window $Context.HelperWindow -AutomationId 'SessionHeader.StatusText' -ExpectedText 'Connected' -TimeoutMs 5000)
+                [void](Wait-SessionHeaderConnectedState -Window $Context.HelpeeWindow -TimeoutMs 5000)
+                [void](Wait-SessionHeaderConnectedState -Window $Context.HelperWindow -TimeoutMs 5000)
                 [void](Wait-AutomationElementVisibleState -Window $Context.HelperWindow -AutomationId 'SessionHeader.StopControl' -IsVisible $false -TimeoutMs 5000)
                 [void](Wait-AutomationElementVisibleState -Window $Context.HelperWindow -AutomationId 'SessionHeader.RequestControl' -IsVisible $false -TimeoutMs 5000)
                 return

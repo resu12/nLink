@@ -132,7 +132,12 @@ public sealed record SessionRecoveryContractSnapshot(
     bool RuntimeUnlockPeerProofObserved = false,
     bool RuntimeUnlockRouteCommitPending = false,
     bool RuntimeUnlockRouteCommitted = false,
-    string? RuntimeUnlockTransactionFailureReason = null);
+    string? RuntimeUnlockTransactionFailureReason = null,
+    long RuntimeUnlockTunaPathLeaseGeneration = 0,
+    string RuntimeUnlockTunaPathLeaseState = "none",
+    string? RuntimeUnlockTunaPathLeaseListenerRunId = null,
+    bool RuntimeUnlockTunaPathLeaseCurrent = false,
+    string? RuntimeUnlockTunaPathLeaseFailureReason = null);
 
 public interface ISessionRecoveryStateContract
 {

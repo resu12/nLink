@@ -1078,6 +1078,10 @@ internal static int GetOperationalLogLength()
 
         if (startIndex > logText.Length)
         {
+            // The operational log can rotate between the initial length snapshot
+            // and the final read during long smoke-test filters. In that case
+            // the current contents are a better diagnostic tail than an empty
+            // string from a stale absolute offset.
             return logText;
         }
 

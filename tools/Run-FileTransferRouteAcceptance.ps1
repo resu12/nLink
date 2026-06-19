@@ -3128,18 +3128,20 @@ function Invoke-Phase5BridgeReadinessPreflight {
     $failureReason = ''
     if ($exitCode -ne 0) {
         $joined = $outputLines -join "`n"
-        if ($joined.IndexOf('Timed out waiting for helpee invite to become ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-            $failureReason = 'helpee_invite_readiness_timeout'
-        }
-        elseif ($joined.IndexOf('Timed out waiting for helper address in app log', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        if ($joined.IndexOf('Timed out waiting for helper address in app log', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $joined.IndexOf('BridgeStartFailure', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $joined.IndexOf('Please reinstall', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             $failureReason = 'nkn_bridge_start_failure'
         }
         elseif ($joined.IndexOf('RPC call failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $joined.IndexOf('Connect failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-            $joined.IndexOf('ready_emitted=0', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $joined.IndexOf('HostByAddressAsync failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $joined.IndexOf('ready_emitted=0', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $joined.IndexOf('bridge_bootstrap_not_ready=1', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             $failureReason = 'nkn_bridge_bootstrap_not_ready'
+        }
+        elseif ($joined.IndexOf('Timed out waiting for helpee invite to become ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $failureReason = 'helpee_invite_readiness_timeout'
         }
         else {
             $failureReason = 'nkn_direct_connect_preflight_failed'

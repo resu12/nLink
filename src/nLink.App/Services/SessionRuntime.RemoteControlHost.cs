@@ -2854,6 +2854,11 @@ public sealed partial class SessionRuntime
             return;
         }
 
+        if (TryDeferTransportDisconnectedForActiveFileTransferRecovery())
+        {
+            return;
+        }
+
         CancelSessionLivenessWatchdog("transport_disconnected");
 
         // A transport-level disconnect often follows an explicit SessionEnd envelope.
@@ -8143,6 +8148,15 @@ public sealed partial class SessionRuntime
 
         var sessionIdSnapshot = GetApprovedSessionIdForLiveness();
         if (!string.IsNullOrWhiteSpace(sessionIdSnapshot) &&
+            TrySuppressBridgeReceiveStallRecoveryExhaustedForActiveFileTransferDeferral(
+                sessionIdSnapshot,
+                bridgeReason,
+                nowProvider()))
+        {
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(sessionIdSnapshot) &&
             TrySuppressBridgeReceiveStallRecoveryExhaustedForSiblingDeferral(
                 sessionIdSnapshot,
                 bridgeReason,
@@ -8313,6 +8327,30 @@ public sealed partial class SessionRuntime
         {
             await TerminalizeAndDetachFileTransferTransportForPeerDisconnectedAsync(reason).ConfigureAwait(false);
         });
+    }
+
+    private bool TryDeferTransportDisconnectedForActiveFileTransferRecovery()
+    {
+        if (state != SessionRuntimeState.Connected ||
+            transportState != TransportState.Connected)
+        {
+            return false;
+        }
+
+        var sessionIdSnapshot = GetApprovedSessionIdForLiveness();
+        if (string.IsNullOrWhiteSpace(sessionIdSnapshot) ||
+            !TryGetValidFileTransferRecoveryLivenessSnapshot(
+                sessionIdSnapshot,
+                nowProvider(),
+                out var snapshot))
+        {
+            return false;
+        }
+
+        LocalOperationalLog.Warn(
+            "Session",
+            $"event=transport_disconnected_deferred_for_filetransfer_recovery; session_id={sessionIdSnapshot}; transfer_id={snapshot.TransferId}; route={snapshot.RouteToken}; protocol_version={snapshot.ProtocolVersion}; live_route_epoch={snapshot.LiveRouteEpoch}; leg_generation={snapshot.TransferLegGeneration}; bridge_recovery_generation={snapshot.BridgeRecoveryGeneration}; transport_epoch={snapshot.TransportEpoch}; checkpoint_request_id={SanitizeSessionLivenessReason(snapshot.CheckpointRequestId ?? "(none)")}; authority_reason={SanitizeSessionLivenessReason(snapshot.AuthorityReason)}; recovery_state={snapshot.State.ToString().ToLowerInvariant()}; liveness_deferral_deadline_utc_ms={snapshot.LivenessDeferralDeadlineUtc.ToUnixTimeMilliseconds()}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+        return true;
     }
 
     private async Task TerminalizeAndDetachFileTransferTransportForPeerSessionEndAsync(string reason)
