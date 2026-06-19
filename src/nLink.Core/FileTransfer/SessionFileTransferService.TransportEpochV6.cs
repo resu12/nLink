@@ -574,6 +574,12 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        if (!expectAck)
+        {
+            _ = direction;
+            return true;
+        }
+
         if (transport is not IRuntimeUnlockRouteCommitProofProvider proofProvider ||
             !proofProvider.TryGetRuntimeUnlockRouteCommitProof(sessionId, transferId, out var snapshot))
         {
@@ -590,8 +596,7 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        if (expectAck &&
-            !string.Equals(snapshot.PathProbeId, frame.ProbeId, StringComparison.Ordinal))
+        if (!string.Equals(snapshot.PathProbeId, frame.ProbeId, StringComparison.Ordinal))
         {
             reason = "probe_id_mismatch";
             return false;
