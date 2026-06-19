@@ -14483,7 +14483,8 @@ public sealed partial class NknSignalingTransport
         MsgType messageType,
         NknBridgeChannel channel,
         byte[] envelopeBytes,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool allowDuringRegularNknFallback = false)
     {
         var lane = messageType switch
         {
@@ -14498,7 +14499,8 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
-        if (ShouldSuppressAcceleratedFileTransferBulkDuringRegularNknFallback(lane))
+        if (!allowDuringRegularNknFallback &&
+            ShouldSuppressAcceleratedFileTransferBulkDuringRegularNknFallback(lane))
         {
             return false;
         }

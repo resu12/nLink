@@ -829,7 +829,9 @@ public sealed partial class NknSignalingTransport
         int rawPayloadBytes = 0,
         int batchChunkCount = 0,
         string? batchProfile = null,
-        bool forceRegularNknBulk = false)
+        bool forceRegularNknBulk = false,
+        bool requireAcceleratedBulk = false,
+        bool allowAccelerationDuringRegularNknFallback = false)
     {
         var normalizedTransferId = NormalizeRequiredFileTransferId(transferId);
 
@@ -890,8 +892,17 @@ public sealed partial class NknSignalingTransport
                     envelope,
                     transportPayload,
                     ct,
-                    allowAcceleration: !forceRegularNknBulk)
+                    allowAcceleration: !forceRegularNknBulk,
+                    allowAccelerationDuringRegularNknFallback: allowAccelerationDuringRegularNknFallback)
                 .ConfigureAwait(false);
+
+            if (requireAcceleratedBulk && !sentViaAcceleration)
+            {
+                LocalOperationalLog.Warn(
+                    "SessionSecurity",
+                    $"event=filetransfer_required_tuna_bulk_send_not_observed; transport=nkn; message_type={MapSecureFileTransferMessageType(messageType)}; frame_type={frameType ?? "(none)"}; transfer_id={normalizedTransferId}; force_regular_nkn_bulk={(forceRegularNknBulk ? 1 : 0)}");
+                throw new InvalidOperationException("Required Tuna file-transfer bulk send was not observed.");
+            }
         }
         else
         {
@@ -6322,6 +6333,7 @@ public sealed partial class NknSignalingTransport
                 }
 
                 var useBulkLane = ShouldUseBulkLane(frame);
+                var requireTunaBulk = ShouldRequireTunaBulk(frame);
 
                 await owner.SendFileTransferEnvelopeRawAsync(
                         MsgType.FileTransferDataFrame,
@@ -6333,7 +6345,9 @@ public sealed partial class NknSignalingTransport
                         rawPayloadBytes: GetFrameRawPayloadBytes(frame),
                         batchChunkCount: GetFrameBatchChunkCount(frame),
                         batchProfile: ResolvePayloadEfficiencyProfileNameForDiagnostics(),
-                        forceRegularNknBulk: ShouldForceRegularNknBulk(frame))
+                        forceRegularNknBulk: ShouldForceRegularNknBulk(frame),
+                        requireAcceleratedBulk: requireTunaBulk,
+                        allowAccelerationDuringRegularNknFallback: requireTunaBulk)
                     .ConfigureAwait(false);
             }
             catch (OperationCanceledException ex) when (!ct.IsCancellationRequested && IsTunaActivationPauseSendCancellation(out var pauseReason))
@@ -7416,6 +7430,10 @@ public sealed partial class NknSignalingTransport
     private static bool ShouldForceRegularNknBulk(FileTransferDataFrame frame)
         => frame is FileTransferTransportProbeFrameV6 probe &&
            string.Equals(probe.TargetTransport, "regular_nkn", StringComparison.OrdinalIgnoreCase);
+
+    private static bool ShouldRequireTunaBulk(FileTransferDataFrame frame)
+        => frame is FileTransferRuntimeUnlockPreCommitProbeFrameBase probe &&
+           string.Equals(probe.TargetTransport, "tuna", StringComparison.OrdinalIgnoreCase);
 
     private static bool ShouldSendV4ReceiverFeedbackWithBulkRedundancy(FileTransferDataFrame frame)
     {

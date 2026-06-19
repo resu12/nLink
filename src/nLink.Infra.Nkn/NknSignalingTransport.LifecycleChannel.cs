@@ -2378,14 +2378,21 @@ public sealed partial class NknSignalingTransport
         Envelope envelope,
         byte[] bytes,
         CancellationToken ct,
-        bool allowAcceleration = true)
+        bool allowAcceleration = true,
+        bool allowAccelerationDuringRegularNknFallback = false)
     {
 
         try
         {
             if (allowAcceleration &&
                 envelope.Type == MsgType.FileTransferDataFrame &&
-                await TrySendAcceleratedEnvelopeAsync(envelope.Type, NknBridgeChannel.Bulk, bytes, ct).ConfigureAwait(false))
+                await TrySendAcceleratedEnvelopeAsync(
+                        envelope.Type,
+                        NknBridgeChannel.Bulk,
+                        bytes,
+                        ct,
+                        allowDuringRegularNknFallback: allowAccelerationDuringRegularNknFallback)
+                    .ConfigureAwait(false))
             {
                 LocalOperationalLog.Info(
                     "NKN.Tuna",
