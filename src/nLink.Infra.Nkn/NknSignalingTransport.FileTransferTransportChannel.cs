@@ -5425,6 +5425,8 @@ public sealed partial class NknSignalingTransport
     private static bool IsV6RecoveryControlDataFrame(FileTransferDataFrame frame)
         => frame is FileTransferTransportEpochFrameV6
             or FileTransferTransportProbeFrameV6
+            or FileTransferRuntimeUnlockPreCommitProbeFrame
+            or FileTransferRuntimeUnlockPreCommitProbeAckFrame
             or FileTransferFrontierRequestFrameV6
             or FileTransferRepairProofFrameV6;
 

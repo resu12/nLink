@@ -412,6 +412,8 @@ public sealed class FileTransferDataFrameCodecTests
         Assert.True(FileTransferDataFrameCodec.TryDeserialize(probePayload, out var probeFrame));
         var probe = Assert.IsType<FileTransferRuntimeUnlockPreCommitProbeFrame>(probeFrame);
         Assert.Equal(FileTransferProtocol.RuntimeUnlockPreCommitProbeFrameType, probe.Type);
+        Assert.True(FileTransferProtocol.IsV6DataFrame(probe));
+        Assert.True(FileTransferProtocol.IsV6DataFrameType(probe.Type));
         Assert.Equal("session_a", probe.SessionId);
         Assert.Equal("transfer_probe", probe.TransferId);
         Assert.Equal(3, probe.TransactionGeneration);
@@ -426,6 +428,8 @@ public sealed class FileTransferDataFrameCodecTests
         Assert.True(FileTransferDataFrameCodec.TryDeserialize(ackPayload, out var ackFrame));
         var ack = Assert.IsType<FileTransferRuntimeUnlockPreCommitProbeAckFrame>(ackFrame);
         Assert.Equal(FileTransferProtocol.RuntimeUnlockPreCommitProbeAckFrameType, ack.Type);
+        Assert.True(FileTransferProtocol.IsV6DataFrame(ack));
+        Assert.True(FileTransferProtocol.IsV6DataFrameType(ack.Type));
         Assert.Equal("probe-1", ack.ProbeId);
         Assert.True(ack.Accepted);
         Assert.Equal("precommit_probe_received", ack.Reason);

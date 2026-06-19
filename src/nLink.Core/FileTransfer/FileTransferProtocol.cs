@@ -74,6 +74,8 @@ public static class FileTransferProtocol
             or FileTransferChunkBatchFrameV6
             or FileTransferTransportEpochFrameV6
             or FileTransferTransportProbeFrameV6
+            or FileTransferRuntimeUnlockPreCommitProbeFrame
+            or FileTransferRuntimeUnlockPreCommitProbeAckFrame
             or FileTransferFrontierRequestFrameV6
             or FileTransferRepairProofFrameV6
             or FileTransferCompleteFrameV6
@@ -88,6 +90,8 @@ public static class FileTransferProtocol
             or ChunkBatchFrameTypeV6
             or TransportEpochFrameTypeV6
             or TransportProbeFrameTypeV6
+            or RuntimeUnlockPreCommitProbeFrameType
+            or RuntimeUnlockPreCommitProbeAckFrameType
             or FrontierRequestFrameTypeV6
             or RepairProofFrameTypeV6
             or SessionCompleteFrameTypeV6
