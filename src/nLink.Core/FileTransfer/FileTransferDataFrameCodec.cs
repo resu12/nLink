@@ -220,6 +220,14 @@ public static class FileTransferDataFrameCodec
                 WriteOptionalString(buffer, probe.ProbeId);
                 WriteOptionalString(buffer, probe.TargetTransport);
                 break;
+            case FileTransferRuntimeUnlockPreCommitProbeFrame probe:
+                WriteRuntimeUnlockPreCommitProbeFields(buffer, probe);
+                break;
+            case FileTransferRuntimeUnlockPreCommitProbeAckFrame ack:
+                WriteRuntimeUnlockPreCommitProbeFields(buffer, ack);
+                WriteBool(buffer, ack.Accepted);
+                WriteOptionalString(buffer, ack.Reason);
+                break;
             case FileTransferFrontierRequestFrameV6 frontierRequest:
                 if (!TryNormalizeV4MissingRanges(
                         frontierRequest.MissingRanges,
@@ -643,6 +651,64 @@ public static class FileTransferDataFrameCodec
                     TransportEpoch = metadata.TransportEpoch,
                     ProbeId = probeId,
                     TargetTransport = targetTransport,
+                };
+                break;
+            case 52:
+                if (!TryReadRuntimeUnlockPreCommitProbeFields(ref reader, out var preCommitProbeFields) ||
+                    !reader.IsFullyConsumed)
+                {
+                    return false;
+                }
+
+                frame = new FileTransferRuntimeUnlockPreCommitProbeFrame
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    TransportEpoch = metadata.TransportEpoch,
+                    BatchId = metadata.BatchId,
+                    RepairRequestId = metadata.RepairRequestId,
+                    Priority = metadata.Priority,
+                    RecoveryMode = metadata.RecoveryMode,
+                    TransactionGeneration = preCommitProbeFields.TransactionGeneration,
+                    OfferGeneration = preCommitProbeFields.OfferGeneration,
+                    TunaPathLeaseGeneration = preCommitProbeFields.TunaPathLeaseGeneration,
+                    ProbeId = preCommitProbeFields.ProbeId,
+                    TargetRoute = preCommitProbeFields.TargetRoute,
+                    TargetProtocolVersion = preCommitProbeFields.TargetProtocolVersion,
+                    TargetTransport = preCommitProbeFields.TargetTransport,
+                    HandoffKind = preCommitProbeFields.HandoffKind,
+                    SentUnixTimeMilliseconds = preCommitProbeFields.SentUnixTimeMilliseconds,
+                };
+                break;
+            case 53:
+                if (!TryReadRuntimeUnlockPreCommitProbeFields(ref reader, out var preCommitAckFields) ||
+                    !reader.TryReadBool(out var preCommitAccepted) ||
+                    !reader.TryReadOptionalString(out var preCommitAckReason) ||
+                    !reader.IsFullyConsumed)
+                {
+                    return false;
+                }
+
+                frame = new FileTransferRuntimeUnlockPreCommitProbeAckFrame
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    TransportEpoch = metadata.TransportEpoch,
+                    BatchId = metadata.BatchId,
+                    RepairRequestId = metadata.RepairRequestId,
+                    Priority = metadata.Priority,
+                    RecoveryMode = metadata.RecoveryMode,
+                    TransactionGeneration = preCommitAckFields.TransactionGeneration,
+                    OfferGeneration = preCommitAckFields.OfferGeneration,
+                    TunaPathLeaseGeneration = preCommitAckFields.TunaPathLeaseGeneration,
+                    ProbeId = preCommitAckFields.ProbeId,
+                    TargetRoute = preCommitAckFields.TargetRoute,
+                    TargetProtocolVersion = preCommitAckFields.TargetProtocolVersion,
+                    TargetTransport = preCommitAckFields.TargetTransport,
+                    HandoffKind = preCommitAckFields.HandoffKind,
+                    SentUnixTimeMilliseconds = preCommitAckFields.SentUnixTimeMilliseconds,
+                    Accepted = preCommitAccepted,
+                    Reason = preCommitAckReason,
                 };
                 break;
             case 45:
@@ -1188,9 +1254,108 @@ public static class FileTransferDataFrameCodec
                     TransferId = transferId,
                 };
                 return true;
+            case FileTransferRuntimeUnlockPreCommitProbeFrame probe when
+                TryNormalizeRuntimeUnlockPreCommitProbe(probe, sessionId, transferId, out var normalizedProbe):
+                normalized = normalizedProbe;
+                return true;
+            case FileTransferRuntimeUnlockPreCommitProbeAckFrame ack when
+                TryNormalizeRuntimeUnlockPreCommitProbeAck(ack, sessionId, transferId, out var normalizedAck):
+                normalized = normalizedAck;
+                return true;
             default:
                 return false;
         }
+    }
+
+    private static bool TryNormalizeRuntimeUnlockPreCommitProbe(
+        FileTransferRuntimeUnlockPreCommitProbeFrame frame,
+        string sessionId,
+        string transferId,
+        out FileTransferRuntimeUnlockPreCommitProbeFrame normalized)
+    {
+        normalized = frame;
+        if (!TryNormalizeRuntimeUnlockPreCommitProbeFields(frame, out var fields))
+        {
+            return false;
+        }
+
+        normalized = frame with
+        {
+            Kind = FileTransferProtocol.Kind,
+            Type = FileTransferProtocol.RuntimeUnlockPreCommitProbeFrameType,
+            SessionId = sessionId,
+            TransferId = transferId,
+            ProbeId = fields.ProbeId,
+            TargetRoute = fields.TargetRoute,
+            TargetTransport = fields.TargetTransport,
+            HandoffKind = fields.HandoffKind,
+            BatchId = NormalizeTransportMetadataToken(frame.BatchId),
+            RepairRequestId = NormalizeTransportMetadataToken(frame.RepairRequestId),
+            Priority = NormalizeTransportMetadataToken(frame.Priority),
+            RecoveryMode = NormalizeTransportMetadataToken(frame.RecoveryMode),
+        };
+        return true;
+    }
+
+    private static bool TryNormalizeRuntimeUnlockPreCommitProbeAck(
+        FileTransferRuntimeUnlockPreCommitProbeAckFrame frame,
+        string sessionId,
+        string transferId,
+        out FileTransferRuntimeUnlockPreCommitProbeAckFrame normalized)
+    {
+        normalized = frame;
+        if (!TryNormalizeRuntimeUnlockPreCommitProbeFields(frame, out var fields) ||
+            !FileTransferPayloadCodec.TryNormalizeOptional(frame.Reason, FileTransferProtocol.MaxReasonLength, out var reason))
+        {
+            return false;
+        }
+
+        normalized = frame with
+        {
+            Kind = FileTransferProtocol.Kind,
+            Type = FileTransferProtocol.RuntimeUnlockPreCommitProbeAckFrameType,
+            SessionId = sessionId,
+            TransferId = transferId,
+            ProbeId = fields.ProbeId,
+            TargetRoute = fields.TargetRoute,
+            TargetTransport = fields.TargetTransport,
+            HandoffKind = fields.HandoffKind,
+            Reason = reason,
+            BatchId = NormalizeTransportMetadataToken(frame.BatchId),
+            RepairRequestId = NormalizeTransportMetadataToken(frame.RepairRequestId),
+            Priority = NormalizeTransportMetadataToken(frame.Priority),
+            RecoveryMode = NormalizeTransportMetadataToken(frame.RecoveryMode),
+        };
+        return true;
+    }
+
+    private static bool TryNormalizeRuntimeUnlockPreCommitProbeFields(
+        FileTransferRuntimeUnlockPreCommitProbeFrameBase frame,
+        out (string ProbeId, string TargetRoute, string TargetTransport, string HandoffKind) fields)
+    {
+        fields = default;
+        if (frame.TransactionGeneration <= 0 ||
+            frame.OfferGeneration <= 0 ||
+            frame.TunaPathLeaseGeneration <= 0 ||
+            frame.TargetProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+            frame.SentUnixTimeMilliseconds < 0 ||
+            !FileTransferPayloadCodec.TryNormalizeOptional(frame.ProbeId, FileTransferProtocol.MaxReasonLength, out var probeId) ||
+            string.IsNullOrWhiteSpace(probeId) ||
+            !FileTransferPayloadCodec.TryNormalizeOptional(frame.TargetRoute, FileTransferProtocol.MaxReasonLength, out var targetRoute) ||
+            string.IsNullOrWhiteSpace(targetRoute) ||
+            !string.Equals(targetRoute, FileTransferRouteResolver.FileTunaV4Token, StringComparison.Ordinal) ||
+            !FileTransferPayloadCodec.TryNormalizeOptional(frame.TargetTransport, FileTransferProtocol.MaxReasonLength, out var targetTransport) ||
+            string.IsNullOrWhiteSpace(targetTransport) ||
+            !string.Equals(targetTransport, "tuna", StringComparison.OrdinalIgnoreCase) ||
+            !FileTransferPayloadCodec.TryNormalizeOptional(frame.HandoffKind, FileTransferProtocol.MaxReasonLength, out var handoffKind) ||
+            string.IsNullOrWhiteSpace(handoffKind) ||
+            !string.Equals(handoffKind, "normal_to_tuna_activation", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        fields = (probeId, targetRoute, targetTransport.ToLowerInvariant(), handoffKind.ToLowerInvariant());
+        return true;
     }
 
     private static void WriteTransportMetadata(Stream stream, FileTransferDataFrame frame)
@@ -1211,6 +1376,21 @@ public static class FileTransferDataFrameCodec
         WriteOptionalString(stream, repairRequestId);
         WriteOptionalString(stream, priority);
         WriteOptionalString(stream, recoveryMode);
+    }
+
+    private static void WriteRuntimeUnlockPreCommitProbeFields(
+        Stream stream,
+        FileTransferRuntimeUnlockPreCommitProbeFrameBase frame)
+    {
+        WriteInt64(stream, frame.TransactionGeneration);
+        WriteInt64(stream, frame.OfferGeneration);
+        WriteInt64(stream, frame.TunaPathLeaseGeneration);
+        WriteOptionalString(stream, frame.ProbeId);
+        WriteString(stream, frame.TargetRoute);
+        WriteInt32(stream, frame.TargetProtocolVersion);
+        WriteString(stream, frame.TargetTransport);
+        WriteString(stream, frame.HandoffKind);
+        WriteInt64(stream, frame.SentUnixTimeMilliseconds);
     }
 
     private static bool TryReadTransportMetadata(ref BinaryFrameReader reader, out TransportMetadata metadata)
@@ -1234,6 +1414,37 @@ public static class FileTransferDataFrameCodec
         return true;
     }
 
+    private static bool TryReadRuntimeUnlockPreCommitProbeFields(
+        ref BinaryFrameReader reader,
+        out RuntimeUnlockPreCommitProbeFields fields)
+    {
+        fields = default;
+        if (!reader.TryReadInt64(out var transactionGeneration) ||
+            !reader.TryReadInt64(out var offerGeneration) ||
+            !reader.TryReadInt64(out var tunaPathLeaseGeneration) ||
+            !reader.TryReadOptionalString(out var probeId) ||
+            !reader.TryReadString(out var targetRoute) ||
+            !reader.TryReadInt32(out var targetProtocolVersion) ||
+            !reader.TryReadString(out var targetTransport) ||
+            !reader.TryReadString(out var handoffKind) ||
+            !reader.TryReadInt64(out var sentUnixTimeMilliseconds))
+        {
+            return false;
+        }
+
+        fields = new RuntimeUnlockPreCommitProbeFields(
+            transactionGeneration,
+            offerGeneration,
+            tunaPathLeaseGeneration,
+            probeId,
+            targetRoute,
+            targetProtocolVersion,
+            targetTransport,
+            handoffKind,
+            sentUnixTimeMilliseconds);
+        return true;
+    }
+
     private static string? NormalizeTransportMetadataToken(string? value)
         => string.IsNullOrWhiteSpace(value)
             ? null
@@ -1250,6 +1461,17 @@ public static class FileTransferDataFrameCodec
         string? RepairRequestId,
         string? Priority,
         string? RecoveryMode);
+
+    private readonly record struct RuntimeUnlockPreCommitProbeFields(
+        long TransactionGeneration,
+        long OfferGeneration,
+        long TunaPathLeaseGeneration,
+        string? ProbeId,
+        string TargetRoute,
+        int TargetProtocolVersion,
+        string TargetTransport,
+        string HandoffKind,
+        long SentUnixTimeMilliseconds);
 
     private static bool IsValidV4ChunkRange(int startChunkIndex, int chunkCount)
     {
@@ -1395,6 +1617,8 @@ public static class FileTransferDataFrameCodec
             FileTransferErrorFrameV6 => 49,
             FileTransferPauseControlFrameV6 => 50,
             FileTransferHeartbeatFrameV6 => 51,
+            FileTransferRuntimeUnlockPreCommitProbeFrame => 52,
+            FileTransferRuntimeUnlockPreCommitProbeAckFrame => 53,
             _ => throw new InvalidOperationException($"Unsupported file-transfer data frame type '{frame.GetType().Name}'."),
         };
 

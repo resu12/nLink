@@ -3652,6 +3652,32 @@ public sealed class FileTransferOpsScriptsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockOldV6ProbeRejectedByV4Peer_ClassifiesPreCommitProbeMismatch()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockOldV6ProbeRejectedByV4PeerFixture(),
+            ["-LiveRouteProofMode", "RegularActivationCycle"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("runtime_unlock_precommit_probe_protocol_mismatch", verdict["recovery_failure_class"]);
+        Assert.Equal("1", verdict["runtime_unlock_probe_started_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_probe_acked_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_precommit_probe_started_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_precommit_probe_protocol_mismatch_count"]);
+        Assert.Equal("fail", verdict["runtime_unlock_make_before_break_verdict"]);
+
+        var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
+        Assert.Equal("runtime_unlock_precommit_probe_protocol_mismatch", stability["recovery_failure_class"]);
+        Assert.Equal("1", stability["runtime_unlock_precommit_probe_protocol_mismatch_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_RuntimeUnlockTunaPathLeaseUnavailableAtAnswer_ClassifiesLeaseFailure()
     {
         if (!OperatingSystem.IsWindows())
@@ -9941,6 +9967,31 @@ if (-not $result.RegressionFailed) {
             LogLine($"event=runtime_unlock_transaction_answer_received; session_id={sessionId}; transaction_generation=2; offer_generation=9; state=answerreceived; peer_visible_proof=1; peer_received=1; answer_received=1; route_commit_pending=1; route_committed=0; failure_reason=(none); retired_reason=(none); reason=transport_acceleration_answer_pending", secondsOffset: 22),
             LogLine($"event=runtime_unlock_transaction_failed; session_id={sessionId}; transaction_generation=2; offer_generation=9; state=failed; peer_visible_proof=1; peer_received=1; answer_received=1; route_commit_pending=0; route_committed=0; failure_reason=runtime_unlock_answer_ack_timeout; retired_reason=(none); reason=runtime_unlock_answer_ack_timeout", secondsOffset: 60),
             LogLine($"event=session_liveness_timeout; session_id={sessionId}; generation=1; silence_ms=90000; terminal_timeout_ms=18000; role=Helper", secondsOffset: 90)
+        ];
+    }
+
+    private static string[] BuildRuntimeUnlockOldV6ProbeRejectedByV4PeerFixture()
+    {
+        const string transferId = "transfer_runtime_unlock_old_v6_probe";
+        const string sessionId = "sess_runtime_unlock_old_v6_probe";
+        return
+        [
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id={sessionId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4; file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=conservative_nkn_startup", secondsOffset: 0),
+            LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id={sessionId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4; file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=conservative_nkn_startup", secondsOffset: 1),
+            LogLine($"event=tuna_path_lease_started; session_id={sessionId}; transfer_id={transferId}; transaction_generation=1; offer_generation=7; lease_generation=3; listener_run_id=listener-start-3; payer_decision_id=5; state=listenerstarting; reason=runtime_unlock", secondsOffset: 2),
+            LogLine($"event=tuna_path_lease_listener_ready; session_id={sessionId}; transfer_id={transferId}; transaction_generation=1; offer_generation=7; lease_generation=3; listener_run_id=listener-start-3; payer_decision_id=5; state=listenerready; current=1; failure_reason=(none); retired_reason=(none); reason=runtime_unlock", secondsOffset: 3),
+            LogLine($"event=runtime_unlock_transaction_offer_generation_created; session_id={sessionId}; transaction_generation=1; offer_generation=7; state=offerpreparing; peer_visible_proof=0; peer_received=0; answer_received=0; path_probe_id=(none); path_probe_state=none; path_probe_transport=unknown; route_commit_pending=0; route_committed=0; failure_reason=(none); retired_reason=(none); tuna_path_lease_generation=3; tuna_path_lease_state=listenerready; tuna_path_lease_current=1; tuna_path_lease_listener_run_id=listener-start-3; tuna_path_lease_failure_reason=(none); reason=runtime_unlock", secondsOffset: 4),
+            LogLine($"event=runtime_unlock_transaction_observed_send; session_id={sessionId}; transaction_generation=1; offer_generation=7; state=offersentobserved; peer_visible_proof=0; peer_received=0; answer_received=0; path_probe_id=(none); path_probe_state=none; path_probe_transport=unknown; route_commit_pending=0; route_committed=0; failure_reason=(none); retired_reason=(none); tuna_path_lease_generation=3; tuna_path_lease_state=listenerready; tuna_path_lease_current=1; tuna_path_lease_listener_run_id=listener-start-3; tuna_path_lease_failure_reason=(none); reason=offer_observed_send", secondsOffset: 5),
+            LogLine($"event=runtime_unlock_transaction_peer_received; session_id={sessionId}; transaction_generation=1; offer_generation=7; state=peerreceived; peer_visible_proof=1; peer_received=1; answer_received=0; path_probe_id=(none); path_probe_state=none; path_probe_transport=unknown; route_commit_pending=0; route_committed=0; failure_reason=(none); retired_reason=(none); tuna_path_lease_generation=3; tuna_path_lease_state=listenerready; tuna_path_lease_current=1; tuna_path_lease_listener_run_id=listener-start-3; tuna_path_lease_failure_reason=(none); reason=transport_acceleration_offer_received", secondsOffset: 6),
+            LogLine($"event=runtime_unlock_transaction_answer_received; session_id={sessionId}; transaction_generation=1; offer_generation=7; state=answerreceived; peer_visible_proof=1; peer_received=1; answer_received=1; path_probe_id=(none); path_probe_state=none; path_probe_transport=unknown; route_commit_pending=0; route_committed=0; failure_reason=(none); retired_reason=(none); tuna_path_lease_generation=3; tuna_path_lease_state=listenerready; tuna_path_lease_current=1; tuna_path_lease_listener_run_id=listener-start-3; tuna_path_lease_failure_reason=(none); reason=transport_acceleration_answer_received", secondsOffset: 7),
+            LogLine($"event=filetransfer_runtime_unlock_route_commit_rejected; direction=outbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=1; offer_generation=7; tuna_path_lease_generation=3; reason=normal_to_tuna_activation; rejection_reason=runtime_unlock_probe_missing", secondsOffset: 8),
+            LogLine($"event=runtime_unlock_probe_started; session_id={sessionId}; transfer_id={transferId}; transaction_generation=1; offer_generation=7; tuna_path_lease_generation=3; probe_id=v6-probe-7; target_transport=tuna; transport_epoch=5; acked=0; state=started; reason=transport_probe_sent", secondsOffset: 9),
+            LogLine($"event=runtime_unlock_transaction_path_probe_started; session_id={sessionId}; transaction_generation=1; offer_generation=7; state=answerreceived; peer_visible_proof=1; peer_received=1; answer_received=1; path_probe_id=v6-probe-7; path_probe_state=started; path_probe_transport=tuna; route_commit_pending=0; route_committed=0; failure_reason=(none); retired_reason=(none); tuna_path_lease_generation=3; tuna_path_lease_state=listenerready; tuna_path_lease_current=1; tuna_path_lease_listener_run_id=listener-start-3; tuna_path_lease_failure_reason=(none); reason=transport_probe_sent", secondsOffset: 10),
+            LogLine($"event=filetransfer_v6_transport_probe_sent; direction=outbound; transfer_id={transferId}; session_id={sessionId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; target_transport=tuna; transport_epoch=5; probe_id=v6-probe-7; reason=runtime_unlock_probe_missing", secondsOffset: 11),
+            LogLine($"event=filetransfer_data_frame_ignored; direction=inbound; transfer_id={transferId}; session_id={sessionId}; route=regular_nkn_v4_fast; protocol_version=4; frame_type=filetransfer.transport_probe.v6; reason=protocol_not_v4; transport=tuna; transport_epoch=5; probe_id=v6-probe-7", secondsOffset: 12),
+            LogLine($"event=session_liveness_timeout; session_id={sessionId}; generation=1; silence_ms=90000; terminal_timeout_ms=18000; role=Helper", secondsOffset: 90),
+            LogLine($"event=file_transfer_outbound_terminal; role=Helpee; session_id={sessionId}; transfer_id={transferId}; state=Failed; error_code=peer_disconnected", secondsOffset: 91),
+            LogLine($"event=transfer_terminal; direction=outbound; transfer_id={transferId}; session_id={sessionId}; file_name_len=33; file_size_bytes=268435456; bytes_transferred=0; chunks_transferred=0; chunk_count=12481; error_code=peer_disconnected; reason=Peer disconnected.; saved_path=(none); route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4", secondsOffset: 92)
         ];
     }
 

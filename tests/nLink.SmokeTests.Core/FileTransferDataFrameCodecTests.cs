@@ -374,6 +374,64 @@ public sealed class FileTransferDataFrameCodecTests
     }
 
     [Fact]
+    public void RuntimeUnlockPreCommitProbeFrames_RoundTrip()
+    {
+        var probePayload = FileTransferDataFrameCodec.Serialize(
+            new FileTransferRuntimeUnlockPreCommitProbeFrame
+            {
+                SessionId = " session_a ",
+                TransferId = " transfer_probe ",
+                TransactionGeneration = 3,
+                OfferGeneration = 9,
+                TunaPathLeaseGeneration = 5,
+                ProbeId = " probe-1 ",
+                TargetRoute = " file_tuna_v4 ",
+                TargetProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                TargetTransport = " tuna ",
+                HandoffKind = " normal_to_tuna_activation ",
+                SentUnixTimeMilliseconds = 1_717_171_717_000,
+            });
+        var ackPayload = FileTransferDataFrameCodec.Serialize(
+            new FileTransferRuntimeUnlockPreCommitProbeAckFrame
+            {
+                SessionId = "session_a",
+                TransferId = "transfer_probe",
+                TransactionGeneration = 3,
+                OfferGeneration = 9,
+                TunaPathLeaseGeneration = 5,
+                ProbeId = "probe-1",
+                TargetRoute = "file_tuna_v4",
+                TargetProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                TargetTransport = "tuna",
+                HandoffKind = "normal_to_tuna_activation",
+                SentUnixTimeMilliseconds = 1_717_171_717_111,
+                Accepted = true,
+                Reason = " precommit_probe_received ",
+            });
+
+        Assert.True(FileTransferDataFrameCodec.TryDeserialize(probePayload, out var probeFrame));
+        var probe = Assert.IsType<FileTransferRuntimeUnlockPreCommitProbeFrame>(probeFrame);
+        Assert.Equal(FileTransferProtocol.RuntimeUnlockPreCommitProbeFrameType, probe.Type);
+        Assert.Equal("session_a", probe.SessionId);
+        Assert.Equal("transfer_probe", probe.TransferId);
+        Assert.Equal(3, probe.TransactionGeneration);
+        Assert.Equal(9, probe.OfferGeneration);
+        Assert.Equal(5, probe.TunaPathLeaseGeneration);
+        Assert.Equal("probe-1", probe.ProbeId);
+        Assert.Equal("file_tuna_v4", probe.TargetRoute);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV4, probe.TargetProtocolVersion);
+        Assert.Equal("tuna", probe.TargetTransport);
+        Assert.Equal("normal_to_tuna_activation", probe.HandoffKind);
+
+        Assert.True(FileTransferDataFrameCodec.TryDeserialize(ackPayload, out var ackFrame));
+        var ack = Assert.IsType<FileTransferRuntimeUnlockPreCommitProbeAckFrame>(ackFrame);
+        Assert.Equal(FileTransferProtocol.RuntimeUnlockPreCommitProbeAckFrameType, ack.Type);
+        Assert.Equal("probe-1", ack.ProbeId);
+        Assert.True(ack.Accepted);
+        Assert.Equal("precommit_probe_received", ack.Reason);
+    }
+
+    [Fact]
     public void V6RecoveryFrames_RejectMalformedPayloads()
     {
         Assert.Throws<InvalidOperationException>(() => FileTransferDataFrameCodec.Serialize(

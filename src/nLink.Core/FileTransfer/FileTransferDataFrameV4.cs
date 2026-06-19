@@ -221,6 +221,57 @@ public record FileTransferTransportProbeFrameV6 : FileTransferDataFrame
     public string? TargetTransport { get; init; }
 }
 
+public abstract record FileTransferRuntimeUnlockPreCommitProbeFrameBase : FileTransferDataFrame, IFileTransferTransportMetadataFrame
+{
+    public long TransportEpoch { get; init; }
+
+    public string? BatchId { get; init; }
+
+    public string? RepairRequestId { get; init; }
+
+    public string? Priority { get; init; }
+
+    public string? RecoveryMode { get; init; }
+
+    public long TransactionGeneration { get; init; }
+
+    public long OfferGeneration { get; init; }
+
+    public long TunaPathLeaseGeneration { get; init; }
+
+    public string? ProbeId { get; init; }
+
+    public string TargetRoute { get; init; } = "file_tuna_v4";
+
+    public int TargetProtocolVersion { get; init; } = FileTransferProtocol.ProtocolVersionV4;
+
+    public string TargetTransport { get; init; } = "tuna";
+
+    public string HandoffKind { get; init; } = "normal_to_tuna_activation";
+
+    public long SentUnixTimeMilliseconds { get; init; }
+}
+
+public record FileTransferRuntimeUnlockPreCommitProbeFrame : FileTransferRuntimeUnlockPreCommitProbeFrameBase
+{
+    public FileTransferRuntimeUnlockPreCommitProbeFrame()
+    {
+        Type = FileTransferProtocol.RuntimeUnlockPreCommitProbeFrameType;
+    }
+}
+
+public record FileTransferRuntimeUnlockPreCommitProbeAckFrame : FileTransferRuntimeUnlockPreCommitProbeFrameBase
+{
+    public FileTransferRuntimeUnlockPreCommitProbeAckFrame()
+    {
+        Type = FileTransferProtocol.RuntimeUnlockPreCommitProbeAckFrameType;
+    }
+
+    public bool Accepted { get; init; } = true;
+
+    public string? Reason { get; init; }
+}
+
 public record FileTransferFrontierRequestFrameV6 : FileTransferDataFrame
 {
     public FileTransferFrontierRequestFrameV6()

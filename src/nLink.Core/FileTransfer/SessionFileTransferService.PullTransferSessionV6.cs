@@ -157,6 +157,17 @@ public sealed partial class SessionFileTransferService
                     continue;
                 }
 
+                if (await TryHandleRuntimeUnlockPreCommitProbeDataFrameAsync(
+                        context.SessionId,
+                        context.TransferId,
+                        FileTransferDirection.Outbound,
+                        frame,
+                        received.TransportKind,
+                        dataSession).ConfigureAwait(false))
+                {
+                    continue;
+                }
+
                 if (!FileTransferProtocol.IsV6DataFrame(frame))
                 {
                     SessionFileTransferSnapshot? legacyProofSnapshot = null;
@@ -4083,6 +4094,17 @@ public sealed partial class SessionFileTransferService
                 if (!IsFrameForContext(context, frame))
                 {
                     LogInboundV4FrameIgnored(context, frame, "session_or_transfer_mismatch_v6");
+                    continue;
+                }
+
+                if (await TryHandleRuntimeUnlockPreCommitProbeDataFrameAsync(
+                        context.SessionId,
+                        context.TransferId,
+                        FileTransferDirection.Inbound,
+                        frame,
+                        received.TransportKind,
+                        dataSession).ConfigureAwait(false))
+                {
                     continue;
                 }
 

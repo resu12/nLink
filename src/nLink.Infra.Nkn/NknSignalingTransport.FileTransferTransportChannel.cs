@@ -7400,12 +7400,16 @@ public sealed partial class NknSignalingTransport
         => frame.Type is FileTransferProtocol.ReceiverStateFrameTypeV6
             or FileTransferProtocol.TransportEpochFrameTypeV6
             or FileTransferProtocol.TransportProbeFrameTypeV6
+            or FileTransferProtocol.RuntimeUnlockPreCommitProbeFrameType
+            or FileTransferProtocol.RuntimeUnlockPreCommitProbeAckFrameType
             or FileTransferProtocol.FrontierRequestFrameTypeV6
             or FileTransferProtocol.RepairProofFrameTypeV6;
 
     private static bool ShouldUseBulkLane(FileTransferDataFrame frame)
         => frame is FileTransferChunkBatchFrameV4
-            or FileTransferTransportProbeFrameV6;
+            or FileTransferTransportProbeFrameV6
+            or FileTransferRuntimeUnlockPreCommitProbeFrame
+            or FileTransferRuntimeUnlockPreCommitProbeAckFrame;
 
     private static bool ShouldForceRegularNknBulk(FileTransferDataFrame frame)
         => frame is FileTransferTransportProbeFrameV6 probe &&

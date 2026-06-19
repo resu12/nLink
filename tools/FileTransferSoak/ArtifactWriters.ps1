@@ -4154,6 +4154,10 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_probe_started_count={0}" -f $recoveryClassification.RuntimeUnlockProbeStartedCount),
         ("runtime_unlock_probe_acked_count={0}" -f $recoveryClassification.RuntimeUnlockProbeAckedCount),
         ("runtime_unlock_probe_failed_count={0}" -f $recoveryClassification.RuntimeUnlockProbeFailedCount),
+        ("runtime_unlock_precommit_probe_started_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeStartedCount),
+        ("runtime_unlock_precommit_probe_acked_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckedCount),
+        ("runtime_unlock_precommit_probe_failed_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeFailedCount),
+        ("runtime_unlock_precommit_probe_protocol_mismatch_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeProtocolMismatchCount),
         ("runtime_unlock_make_before_break_verdict={0}" -f $recoveryClassification.RuntimeUnlockMakeBeforeBreakVerdict),
         ("runtime_unlock_transaction_commit_pending_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionCommitPendingCount),
         ("runtime_unlock_transaction_committed_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionCommittedCount),
@@ -4750,6 +4754,23 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockProbeFailedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_probe_failed'
     })
+    $runtimeUnlockPreCommitProbeProtocolMismatchEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_data_frame_ignored' -and
+        (Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -eq 'filetransfer.transport_probe.v6' -and
+        (
+            (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'protocol_not_v4' -or
+            (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'protocol_not_v6'
+        )
+    })
+    $runtimeUnlockPreCommitProbeStartedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_precommit_probe_started'
+    })
+    $runtimeUnlockPreCommitProbeAckedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_precommit_probe_acked'
+    })
+    $runtimeUnlockPreCommitProbeFailedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_precommit_probe_failed'
+    })
     $runtimeUnlockTransactionCommitPendingEvents = @($events | Where-Object {
         ($_.EventName -like 'runtime_unlock_transaction_*') -and
         (Get-FileTransferEventField -Event $_ -Name 'route_commit_pending' -Default '0') -eq '1'
@@ -4854,6 +4875,12 @@ function Get-FileTransferRecoveryFailureClassification {
     elseif ($runtimeUnlockTransactionCommittedEvents.Count -gt 0 -and
         $runtimeUnlockProbeAckedEvents.Count -eq 0) {
         $class = 'runtime_unlock_route_commit_before_probe'
+    }
+    elseif ($runtimeUnlockProbeStartedEvents.Count -gt 0 -and
+        $runtimeUnlockPreCommitProbeStartedEvents.Count -eq 0 -and
+        $runtimeUnlockPreCommitProbeProtocolMismatchEvents.Count -gt 0 -and
+        $runtimeUnlockProbeAckedEvents.Count -eq 0) {
+        $class = 'runtime_unlock_precommit_probe_protocol_mismatch'
     }
     elseif ($runtimeUnlockTransactionPeerProofEvents.Count -gt 0 -and
         $runtimeUnlockProbeAckedEvents.Count -eq 0 -and
@@ -4977,6 +5004,10 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockProbeStartedCount = $runtimeUnlockProbeStartedEvents.Count
         RuntimeUnlockProbeAckedCount = $runtimeUnlockProbeAckedEvents.Count
         RuntimeUnlockProbeFailedCount = $runtimeUnlockProbeFailedEvents.Count
+        RuntimeUnlockPreCommitProbeStartedCount = $runtimeUnlockPreCommitProbeStartedEvents.Count
+        RuntimeUnlockPreCommitProbeAckedCount = $runtimeUnlockPreCommitProbeAckedEvents.Count
+        RuntimeUnlockPreCommitProbeFailedCount = $runtimeUnlockPreCommitProbeFailedEvents.Count
+        RuntimeUnlockPreCommitProbeProtocolMismatchCount = $runtimeUnlockPreCommitProbeProtocolMismatchEvents.Count
         RuntimeUnlockMakeBeforeBreakVerdict = if ($runtimeUnlockTransactionStartedEvents.Count -eq 0) {
             'none'
         } elseif ($runtimeUnlockTransactionCommittedEvents.Count -gt 0 -and
@@ -5132,6 +5163,10 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_probe_started_count={0}" -f $recoveryClassification.RuntimeUnlockProbeStartedCount),
         ("runtime_unlock_probe_acked_count={0}" -f $recoveryClassification.RuntimeUnlockProbeAckedCount),
         ("runtime_unlock_probe_failed_count={0}" -f $recoveryClassification.RuntimeUnlockProbeFailedCount),
+        ("runtime_unlock_precommit_probe_started_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeStartedCount),
+        ("runtime_unlock_precommit_probe_acked_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckedCount),
+        ("runtime_unlock_precommit_probe_failed_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeFailedCount),
+        ("runtime_unlock_precommit_probe_protocol_mismatch_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeProtocolMismatchCount),
         ("runtime_unlock_make_before_break_verdict={0}" -f $recoveryClassification.RuntimeUnlockMakeBeforeBreakVerdict),
         ("runtime_unlock_transaction_commit_pending_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionCommitPendingCount),
         ("runtime_unlock_transaction_committed_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionCommittedCount),

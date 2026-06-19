@@ -2344,8 +2344,7 @@ public sealed partial class SessionFileTransferService
         {
             if (ShouldStartRuntimeUnlockTunaPathProbeAfterCommitRejection(rejectionReason))
             {
-                StartOutboundV6TransportEpochLocked(context, reason, handoffKind, targetTransport);
-                _ = AnnounceAndProbeOutboundV6TransportEpochAsync(context);
+                StartOutboundRuntimeUnlockPreCommitProbe(context, reason);
                 return true;
             }
 
@@ -2435,8 +2434,7 @@ public sealed partial class SessionFileTransferService
         {
             if (ShouldStartRuntimeUnlockTunaPathProbeAfterCommitRejection(rejectionReason))
             {
-                StartInboundV6TransportEpochLocked(context, reason, handoffKind, targetTransport);
-                _ = AnnounceAndProbeInboundV6TransportEpochAsync(context);
+                StartInboundRuntimeUnlockPreCommitProbe(context, reason);
                 return true;
             }
 
@@ -2583,8 +2581,7 @@ public sealed partial class SessionFileTransferService
         {
             if (ShouldStartRuntimeUnlockTunaPathProbeAfterCommitRejection(rejectionReason))
             {
-                StartOutboundV6TransportEpochLocked(context, reason, handoffKind, targetTransport);
-                _ = AnnounceAndProbeOutboundV6TransportEpochAsync(context);
+                StartOutboundRuntimeUnlockPreCommitProbe(context, reason);
                 return true;
             }
 
@@ -2673,8 +2670,7 @@ public sealed partial class SessionFileTransferService
         {
             if (ShouldStartRuntimeUnlockTunaPathProbeAfterCommitRejection(rejectionReason))
             {
-                StartInboundV6TransportEpochLocked(context, reason, handoffKind, targetTransport);
-                _ = AnnounceAndProbeInboundV6TransportEpochAsync(context);
+                StartInboundRuntimeUnlockPreCommitProbe(context, reason);
                 return true;
             }
 

@@ -645,6 +645,17 @@ public sealed partial class SessionFileTransferService
                     continue;
                 }
 
+                if (await TryHandleRuntimeUnlockPreCommitProbeDataFrameAsync(
+                        context.SessionId,
+                        context.TransferId,
+                        FileTransferDirection.Outbound,
+                        frame,
+                        received.TransportKind,
+                        dataSession).ConfigureAwait(false))
+                {
+                    continue;
+                }
+
                 if (!ShouldAcceptSparseCreditRuntimeDataFrame(context, frame))
                 {
                     if (TryPromoteOutboundFileTunaV4FallbackFromPeerV6Proof(context, frame, out var promotedSnapshot) &&
@@ -9140,6 +9151,17 @@ public sealed partial class SessionFileTransferService
                 if (!IsFrameForContext(context, frame))
                 {
                     LogInboundV4FrameIgnored(context, frame, "session_or_transfer_mismatch");
+                    continue;
+                }
+
+                if (await TryHandleRuntimeUnlockPreCommitProbeDataFrameAsync(
+                        context.SessionId,
+                        context.TransferId,
+                        FileTransferDirection.Inbound,
+                        frame,
+                        received.TransportKind,
+                        context.DataSession).ConfigureAwait(false))
+                {
                     continue;
                 }
 

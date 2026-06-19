@@ -4344,7 +4344,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
             Assert.True(Volatile.Read(ref delayedOfferSendCount) > 0);
             var logTail = ReadOperationalLogTail(logStart);
-            Assert.Contains("event=tuna_acceleration_control_queue_accepted; purpose=offer", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=tuna_acceleration_offer_queued;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_offer_received_raw;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_negotiated;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_activation_offer_not_observed;", logTail, StringComparison.Ordinal);

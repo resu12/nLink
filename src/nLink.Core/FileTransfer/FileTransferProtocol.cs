@@ -23,6 +23,8 @@ public static class FileTransferProtocol
     public const string ChunkBatchFrameTypeV6 = "filetransfer.chunk_batch.v6";
     public const string TransportEpochFrameTypeV6 = "filetransfer.transport_epoch.v6";
     public const string TransportProbeFrameTypeV6 = "filetransfer.transport_probe.v6";
+    public const string RuntimeUnlockPreCommitProbeFrameType = "filetransfer.runtime_unlock.precommit_probe";
+    public const string RuntimeUnlockPreCommitProbeAckFrameType = "filetransfer.runtime_unlock.precommit_probe_ack";
     public const string FrontierRequestFrameTypeV6 = "filetransfer.frontier_request.v6";
     public const string RepairProofFrameTypeV6 = "filetransfer.repair_proof.v6";
     public const string SessionCompleteFrameTypeV6 = "filetransfer.complete.v6";

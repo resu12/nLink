@@ -8573,7 +8573,7 @@ public sealed partial class NknSignalingTransport
         {
             var state = runtimeUnlockRecoveryRetryState;
             if (state is null ||
-                (!state.RequiresLocalListenerRetry && !state.CutThroughPending) ||
+                (!state.RequiresLocalListenerRetry && !state.CutThroughPending && !state.RetryAuthorityPending) ||
                 state.ContractState is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed ||
                 !string.Equals(state.SessionId, normalizedSessionId, StringComparison.Ordinal))
             {
