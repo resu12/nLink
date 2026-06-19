@@ -2453,6 +2453,114 @@ function Get-FileTransferControlPlaneIsolationProof {
     }
 }
 
+function Get-FileTransferFallbackRuntimeUnlockSeparationProof {
+    param(
+        [Parameter(Mandatory = $true)]$Summary
+    )
+
+    [object[]]$events = @()
+    if ($null -ne $Summary.PSObject.Properties['AllEvents']) {
+        $events = @($Summary.AllEvents)
+    }
+
+    if ($events.Count -eq 0) {
+        $events = @($Summary.GlobalEvents + $Summary.TransferEvents)
+    }
+
+    $fallbackAuthorityProof = Get-FileTransferFallbackLegAuthorityProof -TransferEvents $Summary.TransferEvents
+    $waitingEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_runtime_unlock_waiting_for_fallback_survival' })
+    $activationWindowGrantedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_runtime_unlock_activation_window_granted' })
+    $fallbackResumedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_runtime_unlock_probe_failed_fallback_resumed' })
+    $preCommitProbeStartedEvents = @($events | Where-Object { $_.EventName -eq 'runtime_unlock_precommit_probe_started' })
+    $preCommitProbeFailedEvents = @($events | Where-Object { $_.EventName -eq 'runtime_unlock_precommit_probe_failed' })
+    $regularNknProbeRejectedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_precommit_probe_ignored' -and
+        (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'not_tuna_transport'
+    })
+    $fallbackUnavailableMarkEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_runtime_unlock_marked_fallback_unavailable' -or
+        (
+            (Get-FileTransferEventField -Event $_ -Name 'trigger' -Default '') -eq 'post_tuna_fallback_offer_send_prepare' -or
+            (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'post_tuna_fallback_offer_send_prepare'
+        )
+    })
+
+    $postTunaRouteSelected = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_route_selected' -and
+        (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6'
+    })
+
+    $probeStartedWithoutActivationWindowCount = 0
+    $inFallback = $false
+    $activationWindowOpen = $false
+    foreach ($event in @($events | Sort-Object Sequence)) {
+        if ($event.EventName -eq 'filetransfer_route_selected') {
+            $route = Get-FileTransferEventField -Event $event -Name 'route' -Default ''
+            if ($route -eq 'post_tuna_fallback_v6') {
+                $inFallback = $true
+                $activationWindowOpen = $false
+            }
+            elseif ($route -eq 'file_tuna_v4' -or $route -eq 'regular_nkn_v4_fast') {
+                $inFallback = $false
+                $activationWindowOpen = $false
+            }
+        }
+        elseif ($event.EventName -eq 'filetransfer_runtime_unlock_activation_window_granted' -and $inFallback) {
+            $activationWindowOpen = $true
+        }
+        elseif ($event.EventName -eq 'runtime_unlock_precommit_probe_started' -and $inFallback -and -not $activationWindowOpen) {
+            $probeStartedWithoutActivationWindowCount++
+        }
+    }
+
+    $findings = New-Object System.Collections.Generic.List[string]
+    $evidence = New-Object System.Collections.Generic.List[object]
+    if ($fallbackUnavailableMarkEvents.Count -gt 0) {
+        $findings.Add(("runtime unlock marked or paused fallback unavailable count={0}" -f $fallbackUnavailableMarkEvents.Count)) | Out-Null
+        foreach ($event in @($fallbackUnavailableMarkEvents | Select-Object -First 5)) {
+            $evidence.Add($event) | Out-Null
+        }
+    }
+
+    if ($probeStartedWithoutActivationWindowCount -gt 0) {
+        $findings.Add(("runtime unlock precommit probe started while fallback owned recovery without activation window count={0}" -f $probeStartedWithoutActivationWindowCount)) | Out-Null
+        foreach ($event in @($preCommitProbeStartedEvents | Select-Object -First 5)) {
+            $evidence.Add($event) | Out-Null
+        }
+    }
+
+    if ($postTunaRouteSelected.Count -gt 0 -and
+        ($preCommitProbeFailedEvents.Count -gt 0 -or $regularNknProbeRejectedEvents.Count -gt 0) -and
+        $fallbackAuthorityProof.Verdict -eq 'fail') {
+        $findings.Add('runtime unlock probe failed while fallback leg authority proof was missing or failed') | Out-Null
+        foreach ($event in @($postTunaRouteSelected + $preCommitProbeFailedEvents + $regularNknProbeRejectedEvents | Select-Object -First 8)) {
+            $evidence.Add($event) | Out-Null
+        }
+    }
+
+    $verdict = if ($findings.Count -eq 0) { 'pass' } else { 'fail' }
+    if ($postTunaRouteSelected.Count -eq 0 -and
+        $waitingEvents.Count -eq 0 -and
+        $activationWindowGrantedEvents.Count -eq 0 -and
+        $fallbackResumedEvents.Count -eq 0 -and
+        $preCommitProbeStartedEvents.Count -eq 0 -and
+        $preCommitProbeFailedEvents.Count -eq 0) {
+        $verdict = 'none'
+    }
+
+    [pscustomobject]@{
+        Verdict = $verdict
+        WaitingForFallbackSurvivalCount = $waitingEvents.Count
+        ActivationWindowGrantedCount = $activationWindowGrantedEvents.Count
+        ProbeFailedFallbackResumedCount = $fallbackResumedEvents.Count
+        ProbeStartedWithoutActivationWindowCount = $probeStartedWithoutActivationWindowCount
+        RegularNknProbeRejectedCount = $regularNknProbeRejectedEvents.Count
+        FallbackUnavailableMarkCount = $fallbackUnavailableMarkEvents.Count
+        Findings = $findings
+        EvidenceEvents = @($evidence.ToArray())
+    }
+}
+
 function New-FileTransferRouteConsistencySummaryLines {
     param(
         [Parameter(Mandatory = $true)]$Summary,
@@ -2498,6 +2606,7 @@ function New-FileTransferRouteConsistencySummaryLines {
     $fallbackTailProof = Get-FileTransferFallbackTailReconciliationProof -Summary $Summary
     $bridgeLivenessProof = Get-FileTransferBridgeLivenessIntegrationProof -Summary $Summary
     $controlPlaneProof = Get-FileTransferControlPlaneIsolationProof -Summary $Summary
+    $fallbackRuntimeUnlockSeparationProof = Get-FileTransferFallbackRuntimeUnlockSeparationProof -Summary $Summary
     [object[]]$fallbackAuthoritySequence = @($fallbackAuthorityProof.Sequence)
 
     $lines = New-Object System.Collections.Generic.List[string]
@@ -2573,6 +2682,13 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("fallback_checkpoint_ids_by_leg_generation={0}" -f $controlPlaneProof.CheckpointIdsByLegGeneration)) | Out-Null
     $lines.Add(("fallback_checkpoint_id_count_max_per_leg={0}" -f $controlPlaneProof.CheckpointIdCountMaxPerLeg)) | Out-Null
     $lines.Add(("fallback_control_plane_non_current_leg_generation_send_count={0}" -f $controlPlaneProof.ControlPlaneNonCurrentLegGenerationSendCount)) | Out-Null
+    $lines.Add(("fallback_runtime_unlock_separation_verdict={0}" -f $fallbackRuntimeUnlockSeparationProof.Verdict)) | Out-Null
+    $lines.Add(("fallback_runtime_unlock_waiting_count={0}" -f $fallbackRuntimeUnlockSeparationProof.WaitingForFallbackSurvivalCount)) | Out-Null
+    $lines.Add(("runtime_unlock_activation_window_granted_count={0}" -f $fallbackRuntimeUnlockSeparationProof.ActivationWindowGrantedCount)) | Out-Null
+    $lines.Add(("runtime_unlock_probe_failed_fallback_resumed_count={0}" -f $fallbackRuntimeUnlockSeparationProof.ProbeFailedFallbackResumedCount)) | Out-Null
+    $lines.Add(("runtime_unlock_probe_started_without_activation_window_count={0}" -f $fallbackRuntimeUnlockSeparationProof.ProbeStartedWithoutActivationWindowCount)) | Out-Null
+    $lines.Add(("runtime_unlock_regular_nkn_probe_rejected_count={0}" -f $fallbackRuntimeUnlockSeparationProof.RegularNknProbeRejectedCount)) | Out-Null
+    $lines.Add(("runtime_unlock_fallback_unavailable_mark_count={0}" -f $fallbackRuntimeUnlockSeparationProof.FallbackUnavailableMarkCount)) | Out-Null
 
     $index = 0
     foreach ($event in @($routeSelectedEvents | Sort-Object Sequence)) {
@@ -4846,6 +4962,7 @@ function Get-FileTransferRecoveryFailureClassification {
     })
     $fallbackTailProof = Get-FileTransferFallbackTailReconciliationProof -Summary $Summary
     $controlPlaneProof = Get-FileTransferControlPlaneIsolationProof -Summary $Summary
+    $fallbackRuntimeUnlockSeparationProof = Get-FileTransferFallbackRuntimeUnlockSeparationProof -Summary $Summary
 
     $routeChanges = New-Object System.Collections.Generic.List[string]
     $lastRoute = ''
@@ -4901,6 +5018,10 @@ function Get-FileTransferRecoveryFailureClassification {
          $sessionLivenessTimeoutEvents.Count -gt 0 -or
          $peerDisconnectedTerminalEvents.Count -gt 0)) {
         $class = 'runtime_unlock_offer_answer_without_probe'
+    }
+    elseif ($fallbackRuntimeUnlockSeparationProof.Verdict -eq 'fail' -and
+        $routeChanges -contains 'post_tuna_fallback_v6') {
+        $class = 'fallback_runtime_unlock_overlap_missing_fallback_owner'
     }
     elseif ($runtimeUnlockProbeInvalidRejectedEvents.Count -gt 0 -or
         $runtimeUnlockProbeFailedEvents.Count -gt 0) {
@@ -5101,6 +5222,13 @@ function Get-FileTransferRecoveryFailureClassification {
         FallbackCheckpointIdsByLegGeneration = $controlPlaneProof.CheckpointIdsByLegGeneration
         FallbackCheckpointIdCountMaxPerLeg = $controlPlaneProof.CheckpointIdCountMaxPerLeg
         FallbackControlPlaneNonCurrentLegGenerationSendCount = $controlPlaneProof.ControlPlaneNonCurrentLegGenerationSendCount
+        FallbackRuntimeUnlockSeparationVerdict = $fallbackRuntimeUnlockSeparationProof.Verdict
+        FallbackRuntimeUnlockWaitingCount = $fallbackRuntimeUnlockSeparationProof.WaitingForFallbackSurvivalCount
+        RuntimeUnlockActivationWindowGrantedCount = $fallbackRuntimeUnlockSeparationProof.ActivationWindowGrantedCount
+        RuntimeUnlockProbeFailedFallbackResumedCount = $fallbackRuntimeUnlockSeparationProof.ProbeFailedFallbackResumedCount
+        RuntimeUnlockProbeStartedWithoutActivationWindowCount = $fallbackRuntimeUnlockSeparationProof.ProbeStartedWithoutActivationWindowCount
+        RuntimeUnlockRegularNknProbeRejectedCount = $fallbackRuntimeUnlockSeparationProof.RegularNknProbeRejectedCount
+        RuntimeUnlockFallbackUnavailableMarkCount = $fallbackRuntimeUnlockSeparationProof.FallbackUnavailableMarkCount
     }
 }
 
@@ -5162,6 +5290,7 @@ function Write-FileTransferDiagnosticsArtifacts {
     $fallbackTailProof = Get-FileTransferFallbackTailReconciliationProof -Summary $Summary
     $bridgeLivenessProof = Get-FileTransferBridgeLivenessIntegrationProof -Summary $Summary
     $controlPlaneProof = Get-FileTransferControlPlaneIsolationProof -Summary $Summary
+    $fallbackRuntimeUnlockSeparationProof = Get-FileTransferFallbackRuntimeUnlockSeparationProof -Summary $Summary
 
     $verdictLines = @(
         ("verdict={0}" -f $GateResult.Verdict),
@@ -5194,6 +5323,13 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_precommit_probe_failed_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeFailedCount),
         ("runtime_unlock_precommit_probe_protocol_mismatch_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeProtocolMismatchCount),
         ("runtime_unlock_make_before_break_verdict={0}" -f $recoveryClassification.RuntimeUnlockMakeBeforeBreakVerdict),
+        ("fallback_runtime_unlock_separation_verdict={0}" -f $fallbackRuntimeUnlockSeparationProof.Verdict),
+        ("fallback_runtime_unlock_waiting_count={0}" -f $fallbackRuntimeUnlockSeparationProof.WaitingForFallbackSurvivalCount),
+        ("runtime_unlock_activation_window_granted_count={0}" -f $fallbackRuntimeUnlockSeparationProof.ActivationWindowGrantedCount),
+        ("runtime_unlock_probe_failed_fallback_resumed_count={0}" -f $fallbackRuntimeUnlockSeparationProof.ProbeFailedFallbackResumedCount),
+        ("runtime_unlock_probe_started_without_activation_window_count={0}" -f $fallbackRuntimeUnlockSeparationProof.ProbeStartedWithoutActivationWindowCount),
+        ("runtime_unlock_regular_nkn_probe_rejected_count={0}" -f $fallbackRuntimeUnlockSeparationProof.RegularNknProbeRejectedCount),
+        ("runtime_unlock_fallback_unavailable_mark_count={0}" -f $fallbackRuntimeUnlockSeparationProof.FallbackUnavailableMarkCount),
         ("runtime_unlock_transaction_commit_pending_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionCommitPendingCount),
         ("runtime_unlock_transaction_committed_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionCommittedCount),
         ("runtime_unlock_transaction_failed_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionFailedCount),

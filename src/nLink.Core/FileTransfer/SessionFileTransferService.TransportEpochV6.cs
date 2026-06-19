@@ -267,6 +267,11 @@ public sealed partial class SessionFileTransferService
                 snapshot.TunaPathLeaseGeneration,
                 snapshot.PathProbeId ?? "(none)",
                 "snapshot_not_usable");
+            MarkRuntimeUnlockPreCommitProbeFailedFallbackResumedLocked(
+                direction,
+                sessionId,
+                transferId,
+                "snapshot_not_usable");
             return;
         }
 
@@ -331,6 +336,11 @@ public sealed partial class SessionFileTransferService
                 frame.TunaPathLeaseGeneration,
                 probeId,
                 ex.GetType().Name);
+            MarkRuntimeUnlockPreCommitProbeFailedFallbackResumedLocked(
+                direction,
+                sessionId,
+                transferId,
+                ex.GetType().Name);
         }
     }
 
@@ -380,6 +390,11 @@ public sealed partial class SessionFileTransferService
             offerGeneration,
             leaseGeneration,
             probeId,
+            "timeout");
+        MarkRuntimeUnlockPreCommitProbeFailedFallbackResumedLocked(
+            direction,
+            sessionId,
+            transferId,
             "timeout");
     }
 
@@ -528,6 +543,11 @@ public sealed partial class SessionFileTransferService
                 ack.TunaPathLeaseGeneration,
                 ack.ProbeId ?? "(none)",
                 NormalizeReason(ack.Reason) ?? "precommit_probe_rejected");
+            MarkRuntimeUnlockPreCommitProbeFailedFallbackResumedLocked(
+                direction,
+                sessionId,
+                transferId,
+                NormalizeReason(ack.Reason) ?? "precommit_probe_rejected");
             return;
         }
 
@@ -629,11 +649,24 @@ public sealed partial class SessionFileTransferService
                 }
                 else if (outbound.RouteRuntime.UsesPostTunaFallbackV6Runtime)
                 {
-                    TryPromoteOutboundPostTunaFallbackV6ToFileTunaV4Locked(
-                        outbound,
-                        reason,
-                        FileTransferTransportHandoffKind.NormalToTunaActivation,
-                        FileTransferTransportKind.Tuna);
+                    if (!outbound.RuntimeUnlockActivationWindowGranted &&
+                        IsFallbackSurvivalProofPending(outbound))
+                    {
+                        MarkOutboundRuntimeUnlockWaitingForFallbackSurvivalLocked(outbound, reason, "precommit_probe_ack");
+                    }
+                    else
+                    {
+                        if (!outbound.RuntimeUnlockActivationWindowGranted)
+                        {
+                            GrantOutboundRuntimeUnlockActivationWindowLocked(outbound, reason);
+                        }
+
+                        TryPromoteOutboundPostTunaFallbackV6ToFileTunaV4Locked(
+                            outbound,
+                            reason,
+                            FileTransferTransportHandoffKind.NormalToTunaActivation,
+                            FileTransferTransportKind.Tuna);
+                    }
                 }
 
                 if (outbound.RouteRuntime.UsesFileTunaV4Runtime)
@@ -655,11 +688,24 @@ public sealed partial class SessionFileTransferService
                 }
                 else if (inbound.RouteRuntime.UsesPostTunaFallbackV6Runtime)
                 {
-                    TryPromoteInboundPostTunaFallbackV6ToFileTunaV4Locked(
-                        inbound,
-                        reason,
-                        FileTransferTransportHandoffKind.NormalToTunaActivation,
-                        FileTransferTransportKind.Tuna);
+                    if (!inbound.RuntimeUnlockActivationWindowGranted &&
+                        IsFallbackSurvivalProofPending(inbound))
+                    {
+                        MarkInboundRuntimeUnlockWaitingForFallbackSurvivalLocked(inbound, reason, "precommit_probe_ack");
+                    }
+                    else
+                    {
+                        if (!inbound.RuntimeUnlockActivationWindowGranted)
+                        {
+                            GrantInboundRuntimeUnlockActivationWindowLocked(inbound, reason);
+                        }
+
+                        TryPromoteInboundPostTunaFallbackV6ToFileTunaV4Locked(
+                            inbound,
+                            reason,
+                            FileTransferTransportHandoffKind.NormalToTunaActivation,
+                            FileTransferTransportKind.Tuna);
+                    }
                 }
 
                 if (inbound.RouteRuntime.UsesFileTunaV4Runtime)
@@ -672,6 +718,49 @@ public sealed partial class SessionFileTransferService
         if (snapshot is not null)
         {
             RaiseTransferChanged(snapshot);
+        }
+    }
+
+    private void MarkRuntimeUnlockPreCommitProbeFailedFallbackResumedLocked(
+        FileTransferDirection direction,
+        string sessionId,
+        string transferId,
+        string reason)
+    {
+        FileTransferLeg? leg = null;
+        var resumed = false;
+        lock (gate)
+        {
+            if (direction == FileTransferDirection.Outbound &&
+                IsOutboundLifecycleMessageMatchLocked(sessionId, transferId) &&
+                outboundTransfer is { IsTerminal: false } outbound &&
+                outbound.RouteRuntime.UsesPostTunaFallbackV6Runtime)
+            {
+                leg = outbound.CurrentTransferLeg;
+                resumed = outbound.RuntimeUnlockActivationWindowGranted ||
+                    outbound.RuntimeUnlockWaitingForFallbackSurvival;
+                ClearOutboundRuntimeUnlockFallbackSeparationStateLocked(outbound);
+            }
+            else if (direction == FileTransferDirection.Inbound &&
+                     IsInboundLifecycleMessageMatchLocked(sessionId, transferId) &&
+                     inboundTransfer is { IsTerminal: false } inbound &&
+                     inbound.RouteRuntime.UsesPostTunaFallbackV6Runtime)
+            {
+                leg = inbound.CurrentTransferLeg;
+                resumed = inbound.RuntimeUnlockActivationWindowGranted ||
+                    inbound.RuntimeUnlockWaitingForFallbackSurvival;
+                ClearInboundRuntimeUnlockFallbackSeparationStateLocked(inbound);
+            }
+        }
+
+        if (resumed)
+        {
+            LogRuntimeUnlockProbeFailedFallbackResumed(
+                direction,
+                transferId,
+                sessionId,
+                leg,
+                reason);
         }
     }
 
@@ -696,6 +785,16 @@ public sealed partial class SessionFileTransferService
         => LocalOperationalLog.Warn(
             "FileTransferService",
             $"event=runtime_unlock_precommit_probe_failed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={transactionGeneration}; offer_generation={offerGeneration}; tuna_path_lease_generation={leaseGeneration}; probe_id={FormatProtocolLogValue(probeId)}; reason={FormatProtocolLogValue(reason)}");
+
+    private static void LogRuntimeUnlockProbeFailedFallbackResumed(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        FileTransferLeg? leg,
+        string reason)
+        => LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_runtime_unlock_probe_failed_fallback_resumed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; reason={FormatProtocolLogValue(reason)}; leg_id={FormatProtocolLogValue(leg?.LegId ?? "(none)")}; leg_generation={leg?.Generation ?? 0}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? "(none)")}; protocol_version={leg?.ProtocolVersion ?? 0}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(leg?.CheckpointRequestId ?? "(none)")}; state={FormatProtocolLogValue(leg is null ? "none" : FormatFileTransferLegState(leg.State))}; can_send_data={(leg?.CanSendData == true ? 1 : 0)}");
 
     private static void LogRuntimeUnlockPreCommitProbeIgnored(
         FileTransferDirection direction,

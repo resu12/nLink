@@ -333,6 +333,10 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
+            TryResumeOutboundRuntimeUnlockAfterFallbackSurvivalProofLocked(
+                context,
+                "fallback_checkpoint_accepted");
+
             context.V6LastReceiverFeedbackReceivedUtc = DateTimeOffset.UtcNow;
             var receiverProgressChanged = UpdateOutboundReceiverAcknowledgedProgressFromV4StateLocked(context, state);
             var recoveredFromReceiverStateProof = TryRecoverOutboundV6RegularNknEpochFromPeerControlLocked(

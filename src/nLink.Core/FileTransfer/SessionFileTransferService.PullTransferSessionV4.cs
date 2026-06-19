@@ -4357,6 +4357,10 @@ public sealed partial class SessionFileTransferService
                     return;
                 }
 
+                TryResumeOutboundRuntimeUnlockAfterFallbackSurvivalProofLocked(
+                    context,
+                    "fallback_checkpoint_accepted");
+
                 if (checkpointReissueRequest is not null)
                 {
                     fallbackCheckpointReissueRequest = checkpointReissueRequest;

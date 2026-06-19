@@ -5688,6 +5688,17 @@ public sealed partial class SessionFileTransferService : IDisposable
             "FileTransferService",
             $"event=filetransfer_fallback_leg_authority_send_blocked; direction=outbound; transfer_id={context.TransferId}; session_id={FormatProtocolLogValue(context.SessionId)}; reason={FormatProtocolLogValue(reason)}; leg_id={FormatProtocolLogValue(leg.LegId)}; leg_generation={leg.Generation}; route={leg.RouteSelection.TelemetryToken}; protocol_version={leg.ProtocolVersion}; live_route_epoch={leg.LiveRouteEpochId}; transport_epoch={leg.TransportEpochId}; bridge_recovery_generation={leg.BridgeRecoveryGeneration}; checkpoint_request_id={FormatProtocolLogValue(leg.CheckpointRequestId ?? "(none)")}; proven_committed_chunk={leg.ProvenCommittedChunkIndex}; state={FormatFileTransferLegState(leg.State)}; can_send_data={(leg.CanSendData ? 1 : 0)}");
 
+    private static void LogFileTransferFallbackLegAuthorityStarted(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        FileTransferLeg leg,
+        string? requestId,
+        string reason)
+        => LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_fallback_leg_authority_started; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; leg_id={FormatProtocolLogValue(leg.LegId)}; leg_generation={leg.Generation}; route={leg.RouteSelection.TelemetryToken}; protocol_version={leg.ProtocolVersion}; live_route_epoch={leg.LiveRouteEpochId}; transport_epoch={leg.TransportEpochId}; bridge_recovery_generation={leg.BridgeRecoveryGeneration}; checkpoint_request_id={FormatProtocolLogValue(requestId ?? "(none)")}; authority_reason={FormatProtocolLogValue(reason)}; state={FormatFileTransferLegState(leg.State)}; can_send_data={(leg.CanSendData ? 1 : 0)}");
+
     private static void LogFileTransferFallbackLegAuthorityCheckpointAccepted(
         FileTransferDirection direction,
         string transferId,
@@ -5718,6 +5729,13 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         var currentLeg = context.CurrentTransferLeg!;
         var requestedChunkIndex = request.MissingRanges.Count > 0 ? request.MissingRanges[0].StartChunkIndex : -1;
+        LogFileTransferFallbackLegAuthorityStarted(
+            FileTransferDirection.Outbound,
+            context.TransferId,
+            context.SessionId,
+            currentLeg,
+            request.RepairRequestId,
+            reason);
         LogFileTransferFallbackCheckpointRequested(
             FileTransferDirection.Outbound,
             context.TransferId,
@@ -5749,6 +5767,13 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         var currentLeg = context.CurrentTransferLeg!;
         var requestedChunkIndex = request.MissingRanges.Count > 0 ? request.MissingRanges[0].StartChunkIndex : -1;
+        LogFileTransferFallbackLegAuthorityStarted(
+            FileTransferDirection.Inbound,
+            context.TransferId,
+            context.SessionId,
+            currentLeg,
+            request.RepairRequestId,
+            reason);
         LogFileTransferFallbackCheckpointRequested(
             FileTransferDirection.Inbound,
             context.TransferId,
@@ -6684,7 +6709,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             highestObserved);
     }
 
-    private static void MarkInboundFallbackCheckpointAcceptedLocked(
+    private void MarkInboundFallbackCheckpointAcceptedLocked(
         InboundTransferContext context,
         string? requestId,
         long transportEpoch,
@@ -6801,6 +6826,9 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.SessionId,
             context.CurrentLiveRouteEpoch,
             currentLeg);
+        TryResumeInboundRuntimeUnlockAfterFallbackSurvivalProofLocked(
+            context,
+            "fallback_checkpoint_accepted");
     }
 
     private static bool ShouldUseV6RegularNknSparseRuntime(OutboundTransferContext context)
@@ -7652,6 +7680,18 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public int LastTransferLegGeneration { get; set; }
 
+        public bool RuntimeUnlockWaitingForFallbackSurvival { get; set; }
+
+        public string? RuntimeUnlockWaitingForFallbackSurvivalReason { get; set; }
+
+        public DateTimeOffset? RuntimeUnlockWaitingForFallbackSurvivalUtc { get; set; }
+
+        public bool RuntimeUnlockActivationWindowGranted { get; set; }
+
+        public string? RuntimeUnlockActivationWindowReason { get; set; }
+
+        public DateTimeOffset? RuntimeUnlockActivationWindowGrantedUtc { get; set; }
+
         public FileTransferRuntimeProfile RuntimeProfile { get; set; }
 
         public FileTransferBridgeRecoveryPolicy BridgeRecoveryPolicy { get; set; } =
@@ -8411,6 +8451,18 @@ public sealed partial class SessionFileTransferService : IDisposable
         public List<FileTransferLeg> TransferLegHistory { get; } = [];
 
         public int LastTransferLegGeneration { get; set; }
+
+        public bool RuntimeUnlockWaitingForFallbackSurvival { get; set; }
+
+        public string? RuntimeUnlockWaitingForFallbackSurvivalReason { get; set; }
+
+        public DateTimeOffset? RuntimeUnlockWaitingForFallbackSurvivalUtc { get; set; }
+
+        public bool RuntimeUnlockActivationWindowGranted { get; set; }
+
+        public string? RuntimeUnlockActivationWindowReason { get; set; }
+
+        public DateTimeOffset? RuntimeUnlockActivationWindowGrantedUtc { get; set; }
 
         public FileTransferRuntimeProfile RuntimeProfile { get; set; }
 
