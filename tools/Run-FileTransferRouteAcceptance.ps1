@@ -49,6 +49,171 @@ function Get-RouteAcceptanceEnvValue {
     return $value
 }
 
+function Get-RouteAcceptanceAppProcessesForExePath {
+    param([string]$ResolvedExePath)
+
+    if ([string]::IsNullOrWhiteSpace($ResolvedExePath)) {
+        return @()
+    }
+
+    $expectedPath = ''
+    try {
+        $expectedPath = [System.IO.Path]::GetFullPath($ResolvedExePath)
+    }
+    catch {
+        return @()
+    }
+
+    $expectedProcessName = [System.IO.Path]::GetFileNameWithoutExtension($expectedPath)
+    if ([string]::IsNullOrWhiteSpace($expectedProcessName)) {
+        return @()
+    }
+
+    $matches = New-Object System.Collections.Generic.List[object]
+    foreach ($process in @(Get-Process -Name $expectedProcessName -ErrorAction SilentlyContinue)) {
+        $actualPath = ''
+        try {
+            $actualPath = [string]$process.Path
+        }
+        catch {
+            $actualPath = ''
+        }
+
+        if ([string]::IsNullOrWhiteSpace($actualPath)) {
+            try {
+                $cim = Get-CimInstance Win32_Process -Filter ("ProcessId = {0}" -f [int]$process.Id) -ErrorAction SilentlyContinue
+                if ($null -ne $cim) {
+                    $actualPath = [string]$cim.ExecutablePath
+                }
+            }
+            catch {
+                $actualPath = ''
+            }
+        }
+
+        if ([string]::IsNullOrWhiteSpace($actualPath)) {
+            continue
+        }
+
+        $actualFullPath = ''
+        try {
+            $actualFullPath = [System.IO.Path]::GetFullPath($actualPath)
+        }
+        catch {
+            continue
+        }
+
+        if ([string]::Equals($actualFullPath, $expectedPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $matches.Add([pscustomobject]@{
+                Id = [int]$process.Id
+                ProcessName = [string]$process.ProcessName
+                Path = $actualFullPath
+                MainWindowTitle = [string]$process.MainWindowTitle
+                StartTime = try { $process.StartTime.ToUniversalTime().ToString('o') } catch { '' }
+            }) | Out-Null
+        }
+    }
+
+    return @($matches.ToArray())
+}
+
+function Write-RouteAcceptanceProcessCleanupArtifacts {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)][string]$Reason,
+        [AllowEmptyCollection()][object[]]$Before,
+        [AllowEmptyCollection()][object[]]$After
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ArtifactDir)) {
+        return
+    }
+
+    try {
+        New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
+        $safeReason = ([string]$Reason) -replace '[^A-Za-z0-9_.-]', '_'
+        if ([string]::IsNullOrWhiteSpace($safeReason)) {
+            $safeReason = 'unknown'
+        }
+
+        $summary = [ordered]@{
+            event = 'route_acceptance_app_process_cleanup'
+            reason = $Reason
+            beforeCount = @($Before).Count
+            afterCount = @($After).Count
+            cleanedAny = @($Before).Count -gt 0
+            remainingAny = @($After).Count -gt 0
+            before = @($Before)
+            after = @($After)
+        }
+
+        $jsonPath = Join-Path $ArtifactDir ("process-cleanup-{0}.json" -f $safeReason)
+        $txtPath = Join-Path $ArtifactDir ("process-cleanup-{0}.txt" -f $safeReason)
+        $summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
+
+        $lines = New-Object System.Collections.Generic.List[string]
+        $lines.Add(("reason={0}" -f $Reason)) | Out-Null
+        $lines.Add(("before_count={0}" -f @($Before).Count)) | Out-Null
+        $lines.Add(("after_count={0}" -f @($After).Count)) | Out-Null
+        foreach ($item in @($Before)) {
+            $lines.Add(("before pid={0} name={1} title={2} path={3}" -f $item.Id, $item.ProcessName, $item.MainWindowTitle, $item.Path)) | Out-Null
+        }
+        foreach ($item in @($After)) {
+            $lines.Add(("after pid={0} name={1} title={2} path={3}" -f $item.Id, $item.ProcessName, $item.MainWindowTitle, $item.Path)) | Out-Null
+        }
+        $lines | Set-Content -LiteralPath $txtPath -Encoding UTF8
+    }
+    catch {
+        Write-Warning ("Failed to write process cleanup artifacts: {0}" -f $_.Exception.Message)
+    }
+}
+
+function Assert-RouteAcceptanceCleanAppProcessState {
+    param(
+        [Parameter(Mandatory = $true)][string]$ResolvedExePath,
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ResolvedExePath)) {
+        return
+    }
+
+    $before = @(Get-RouteAcceptanceAppProcessesForExePath -ResolvedExePath $ResolvedExePath)
+    if ($before.Count -le 0) {
+        return
+    }
+
+    foreach ($process in @($before)) {
+        try {
+            $live = Get-Process -Id ([int]$process.Id) -ErrorAction SilentlyContinue
+            if ($null -ne $live -and -not $live.HasExited) {
+                [void]$live.CloseMainWindow()
+            }
+        }
+        catch {
+        }
+    }
+
+    Start-Sleep -Seconds 3
+    $afterClose = @(Get-RouteAcceptanceAppProcessesForExePath -ResolvedExePath $ResolvedExePath)
+    foreach ($process in @($afterClose)) {
+        try {
+            Stop-Process -Id ([int]$process.Id) -Force -ErrorAction SilentlyContinue
+        }
+        catch {
+        }
+    }
+
+    Start-Sleep -Seconds 1
+    $after = @(Get-RouteAcceptanceAppProcessesForExePath -ResolvedExePath $ResolvedExePath)
+    Write-RouteAcceptanceProcessCleanupArtifacts -ArtifactDir $ArtifactDir -Reason $Reason -Before $before -After $after
+
+    if ($after.Count -gt 0) {
+        throw ("nLink app process cleanup failed before/after route acceptance step '{0}'; remaining_count={1}; artifact_dir={2}" -f $Reason, $after.Count, $ArtifactDir)
+    }
+}
+
 function ConvertTo-RouteAcceptanceDouble {
     param(
         [AllowNull()]$Value,
@@ -4298,6 +4463,10 @@ function Invoke-Phase4RouteAcceptanceScenario {
     }
 
     if (-not $skipScenarioRun) {
+        if (-not $FakeMode -and -not [string]::IsNullOrWhiteSpace($ResolvedExePath)) {
+            Assert-RouteAcceptanceCleanAppProcessState -ResolvedExePath $ResolvedExePath -ArtifactDir $artifactDir -Reason ("{0}_before_attempt_1" -f [string]$Scenario.Name)
+        }
+
         try {
             if ($FakeMode) {
                 Write-RouteAcceptanceFakePhase4Run -Scenario $Scenario -ArtifactDir $artifactDir
@@ -4323,6 +4492,22 @@ function Invoke-Phase4RouteAcceptanceScenario {
         }
         catch {
             $scenarioExecutionFailure = (($_ | Out-String).Trim() -replace '[\r\n]+', ' ')
+        }
+        finally {
+            if (-not $FakeMode -and -not [string]::IsNullOrWhiteSpace($ResolvedExePath)) {
+                try {
+                    Assert-RouteAcceptanceCleanAppProcessState -ResolvedExePath $ResolvedExePath -ArtifactDir $artifactDir -Reason ("{0}_after_attempt_1" -f [string]$Scenario.Name)
+                }
+                catch {
+                    $cleanupFailure = (($_ | Out-String).Trim() -replace '[\r\n]+', ' ')
+                    if ([string]::IsNullOrWhiteSpace($scenarioExecutionFailure)) {
+                        $scenarioExecutionFailure = $cleanupFailure
+                    }
+                    else {
+                        $scenarioExecutionFailure = "{0}; cleanup_failure={1}" -f $scenarioExecutionFailure, $cleanupFailure
+                    }
+                }
+            }
         }
 
         try {
@@ -4407,6 +4592,10 @@ function Invoke-Phase4RouteAcceptanceScenario {
             }
 
             if (-not $skipRerunScenarioRun) {
+                if (-not $FakeMode -and -not [string]::IsNullOrWhiteSpace($ResolvedExePath)) {
+                    Assert-RouteAcceptanceCleanAppProcessState -ResolvedExePath $ResolvedExePath -ArtifactDir $rerunDir -Reason ("{0}_before_rerun_{1}" -f [string]$Scenario.Name, $rerun)
+                }
+
                 try {
                     if ($FakeMode) {
                         Write-RouteAcceptanceFakePhase4Run -Scenario $Scenario -ArtifactDir $rerunDir -RerunAttempt $rerun
@@ -4432,6 +4621,22 @@ function Invoke-Phase4RouteAcceptanceScenario {
                 }
                 catch {
                     $rerunExecutionFailure = (($_ | Out-String).Trim() -replace '[\r\n]+', ' ')
+                }
+                finally {
+                    if (-not $FakeMode -and -not [string]::IsNullOrWhiteSpace($ResolvedExePath)) {
+                        try {
+                            Assert-RouteAcceptanceCleanAppProcessState -ResolvedExePath $ResolvedExePath -ArtifactDir $rerunDir -Reason ("{0}_after_rerun_{1}" -f [string]$Scenario.Name, $rerun)
+                        }
+                        catch {
+                            $cleanupFailure = (($_ | Out-String).Trim() -replace '[\r\n]+', ' ')
+                            if ([string]::IsNullOrWhiteSpace($rerunExecutionFailure)) {
+                                $rerunExecutionFailure = $cleanupFailure
+                            }
+                            else {
+                                $rerunExecutionFailure = "{0}; cleanup_failure={1}" -f $rerunExecutionFailure, $cleanupFailure
+                            }
+                        }
+                    }
                 }
 
                 $rerunResult = Assert-Phase4ScenarioRun -Scenario $Scenario -ArtifactDir $rerunDir
@@ -4934,6 +5139,7 @@ try {
             $resolvedExePath = (Resolve-Path -LiteralPath (Resolve-RouteAcceptancePath -RepoRoot $repoRoot -Path $ExePath)).Path
             $resolvedWalletPath = (Resolve-Path -LiteralPath (Resolve-RouteAcceptancePath -RepoRoot $repoRoot -Path $WalletPath)).Path
             $resolvedSidecarPath = (Resolve-Path -LiteralPath (Resolve-RouteAcceptancePath -RepoRoot $repoRoot -Path $SidecarPath)).Path
+            Assert-RouteAcceptanceCleanAppProcessState -ResolvedExePath $resolvedExePath -ArtifactDir $runRoot -Reason ("{0}_matrix_start" -f $acceptancePhase)
         }
 
         $shouldRunPhase5Preflight = $acceptancePhase -eq 'phase5' -and
