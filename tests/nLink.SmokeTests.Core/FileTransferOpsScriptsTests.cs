@@ -3780,6 +3780,31 @@ public sealed class FileTransferOpsScriptsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockPreCommitRouteEpochProof_IsAccepted()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockPreCommitRouteEpochProofFixture(),
+            ["-LiveRouteProofMode", "RegularActivationCycle"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("(none)", verdict["recovery_failure_class"]);
+        Assert.Equal("2", verdict["runtime_unlock_precommit_probe_acked_count"]);
+        Assert.Equal("pass", verdict["runtime_unlock_make_before_break_verdict"]);
+        Assert.Equal("pass", verdict["runtime_unlock_transaction_proof_verdict"]);
+        Assert.Equal("pass", verdict["live_route_epoch_proof_verdict"]);
+
+        var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
+        Assert.Equal("(none)", stability["recovery_failure_class"]);
+        Assert.Equal("pass", stability["runtime_unlock_transaction_proof_verdict"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_RuntimeUnlockTransactionPendingCommitAfterPriorCommit_Fails()
     {
         if (!OperatingSystem.IsWindows())
@@ -10135,6 +10160,29 @@ if (-not $result.RegressionFailed) {
             LogLine($"event=runtime_unlock_transaction_route_committed; session_id={sessionId}; transaction_generation=1; offer_generation=7; state=committed; peer_visible_proof=1; peer_received=1; answer_received=1; path_probe_id=probe-7; path_probe_state=acked; path_probe_transport=tuna; route_commit_pending=0; route_committed=1; failure_reason=(none); retired_reason=(none); reason=normal_to_tuna_activation", secondsOffset: 10),
             .. BuildRouteAwareLiveRegularActivationCycleFixture()
         ];
+    }
+
+    private static string[] BuildRuntimeUnlockPreCommitRouteEpochProofFixture()
+    {
+        return BuildRouteAwareLiveRegularActivationCycleFixture()
+            .Select(line =>
+            {
+                if (!line.Contains("route=file_tuna_v4", StringComparison.Ordinal) ||
+                    !line.Contains("handoff_kind=normal_to_tuna_activation", StringComparison.Ordinal) ||
+                    !line.Contains("target_transport=tuna", StringComparison.Ordinal) ||
+                    (!line.Contains("event=filetransfer_live_route_epoch_started", StringComparison.Ordinal) &&
+                     !line.Contains("event=filetransfer_live_route_epoch_recovered", StringComparison.Ordinal)))
+                {
+                    return line;
+                }
+
+                var updated = line
+                    .Replace("reason=tuna_unlocked_during_regular_transfer", "reason=precommit_probe_ack", StringComparison.Ordinal)
+                    .Replace("reason=tuna_reenabled", "reason=precommit_probe_ack", StringComparison.Ordinal)
+                    .Replace("reason=transport_probe_ack", "reason=precommit_probe_ack", StringComparison.Ordinal);
+                return updated;
+            })
+            .ToArray();
     }
 
     private static string[] BuildRuntimeUnlockTransactionPendingCommitAfterPriorCommitFixture()

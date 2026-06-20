@@ -1337,6 +1337,15 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                     "event=tuna_acceleration_control_send_preferred_bulk_observed_lane_selected; purpose=offer",
                     StringComparison.Ordinal),
                 TimeSpan.FromSeconds(3));
+            await WaitUntilAsync(
+                () =>
+                {
+                    var tail = ReadOperationalLogTail(logStart);
+                    return tail.Contains("event=session_recovery_contract_retry_authority_granted;", StringComparison.Ordinal) &&
+                           tail.Contains("event=session_recovery_contract_retry_authority_send_started;", StringComparison.Ordinal) &&
+                           tail.Contains("event=session_recovery_contract_retry_authority_observed;", StringComparison.Ordinal);
+                },
+                TimeSpan.FromSeconds(3));
 
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=session_recovery_contract_retry_authority_granted;", logTail, StringComparison.Ordinal);
@@ -3944,6 +3953,91 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockPreCommitProbeAck_UsesOneShotTunaAuthorityBeforeRouteAccepted()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-precommit-ack-authority.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-precommit-ack-authority.address");
+            var hostLane = new FakeNknAccelerationLane(isAvailable: true);
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-precommit-ack-authority-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                hostLane);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-runtime-unlock-precommit-ack-authority-id", helperClient.Address));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_runtime_unlock_precommit_ack_authority";
+            var dataSession = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+
+            var probe = new FileTransferRuntimeUnlockPreCommitProbeFrame
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                TransactionGeneration = 11,
+                OfferGeneration = 12,
+                TunaPathLeaseGeneration = 13,
+                ProbeId = "probe-one-shot-authority",
+                TargetRoute = FileTransferRouteResolver.FileTunaV4Token,
+                TargetProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                TargetTransport = "tuna",
+                HandoffKind = "normal_to_tuna_activation",
+                SentUnixTimeMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            };
+            var ack = new FileTransferRuntimeUnlockPreCommitProbeAckFrame
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                TransactionGeneration = probe.TransactionGeneration,
+                OfferGeneration = probe.OfferGeneration,
+                TunaPathLeaseGeneration = probe.TunaPathLeaseGeneration,
+                ProbeId = probe.ProbeId,
+                TargetRoute = probe.TargetRoute,
+                TargetProtocolVersion = probe.TargetProtocolVersion,
+                TargetTransport = probe.TargetTransport,
+                HandoffKind = probe.HandoffKind,
+                SentUnixTimeMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                Accepted = true,
+                Reason = "precommit_probe_received",
+            };
+
+            var logStart = GetOperationalLogLength();
+            Assert.False(host.IsAccelerationAvailableForTests);
+            var authorizer = Assert.IsAssignableFrom<IFileTransferRuntimeUnlockPreCommitProbeAckAuthorizer>(dataSession);
+            authorizer.AuthorizeRuntimeUnlockPreCommitProbeAck(probe, FileTransferTransportKind.Tuna);
+
+            await dataSession.SendAsync(ack, cts.Token);
+
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.False(host.IsAccelerationAvailableForTests);
+            Assert.Single(hostLane.Sent);
+            Assert.Equal(NknBridgeChannel.Bulk, hostLane.Sent.Single().Lane);
+            Assert.Contains("event=runtime_unlock_precommit_ack_authority_granted;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_precommit_ack_authority_consumed;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_precommit_ack_authority_sent;", logTail, StringComparison.Ordinal);
+            Assert.Contains("effective_transport=tuna", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_required_tuna_bulk_send_not_observed;", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task PostTunaFallbackV6Route_TunaReactivationKeepsFallbackAvailableUntilHandoff()
     {
         FakeNknClient.ResetNetwork();
@@ -4702,6 +4796,14 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             await WaitUntilAsync(
                 () => host.IsAccelerationAvailableForTests && helper.IsAccelerationAvailableForTests,
                 TimeSpan.FromSeconds(12));
+            await WaitUntilAsync(
+                () =>
+                {
+                    var tail = ReadOperationalLogTail(logStart);
+                    return tail.Contains("event=tuna_acceleration_offer_received_raw;", StringComparison.Ordinal) &&
+                           tail.Contains("event=tuna_acceleration_negotiated;", StringComparison.Ordinal);
+                },
+                TimeSpan.FromSeconds(3));
 
             Assert.True(Volatile.Read(ref delayedOfferSendCount) > 0);
             var logTail = ReadOperationalLogTail(logStart);

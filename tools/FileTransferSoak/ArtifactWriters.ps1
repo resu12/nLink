@@ -4913,6 +4913,17 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockPreCommitProbeAckedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_precommit_probe_acked'
     })
+    $runtimeUnlockPreCommitRouteEpochProofEvents = @($events | Where-Object {
+        ($_.EventName -eq 'filetransfer_live_route_epoch_started' -or $_.EventName -eq 'filetransfer_live_route_epoch_recovered') -and
+        (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'file_tuna_v4' -and
+        (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -eq '4' -and
+        (Get-FileTransferEventField -Event $_ -Name 'handoff_kind' -Default '') -eq 'normal_to_tuna_activation' -and
+        (Get-FileTransferEventField -Event $_ -Name 'target_transport' -Default '') -eq 'tuna' -and
+        (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'precommit_probe_ack'
+    })
+    $runtimeUnlockPreCommitRouteEpochRecoveredEvents = @($runtimeUnlockPreCommitRouteEpochProofEvents | Where-Object {
+        $_.EventName -eq 'filetransfer_live_route_epoch_recovered'
+    })
     $runtimeUnlockPreCommitProbeFailedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_precommit_probe_failed'
     })
@@ -5155,6 +5166,19 @@ function Get-FileTransferRecoveryFailureClassification {
         '(none)'
     }
 
+    $runtimeUnlockHasMakeBeforeBreakEvidence =
+        $runtimeUnlockTransactionStartedEvents.Count -gt 0 -or
+        $runtimeUnlockPreCommitRouteEpochRecoveredEvents.Count -gt 0
+    $runtimeUnlockHasPreCommitAckProof =
+        $runtimeUnlockProbeAckedEvents.Count -gt 0 -or
+        $runtimeUnlockPreCommitProbeAckedEvents.Count -gt 0 -or
+        $runtimeUnlockPreCommitRouteEpochRecoveredEvents.Count -gt 0
+    $runtimeUnlockHasMakeBeforeBreakInvalidEvidence =
+        $runtimeUnlockProbeInvalidRejectedEvents.Count -gt 0 -or
+        $runtimeUnlockProbeMissingRejectedEvents.Count -gt 0 -or
+        $runtimeUnlockProbeFailedEvents.Count -gt 0 -or
+        $runtimeUnlockPreCommitProbeFailedEvents.Count -gt 0
+
     $runtimeUnlockRegularV4RecoveryArbitrationVerdict = if ($runtimeUnlockRegularV4ActivationWindowStartedEvents.Count -eq 0 -and
         $runtimeUnlockDispatchDeferredForRegularV4RecoveryEvents.Count -eq 0) {
         'none'
@@ -5194,15 +5218,18 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockProbeAckedCount = $runtimeUnlockProbeAckedEvents.Count
         RuntimeUnlockProbeFailedCount = $runtimeUnlockProbeFailedEvents.Count
         RuntimeUnlockPreCommitProbeStartedCount = $runtimeUnlockPreCommitProbeStartedEvents.Count
-        RuntimeUnlockPreCommitProbeAckedCount = $runtimeUnlockPreCommitProbeAckedEvents.Count
+        RuntimeUnlockPreCommitProbeAckedCount = ($runtimeUnlockPreCommitProbeAckedEvents.Count + $runtimeUnlockPreCommitRouteEpochRecoveredEvents.Count)
         RuntimeUnlockPreCommitProbeFailedCount = $runtimeUnlockPreCommitProbeFailedEvents.Count
         RuntimeUnlockPreCommitProbeProtocolMismatchCount = $runtimeUnlockPreCommitProbeProtocolMismatchEvents.Count
-        RuntimeUnlockMakeBeforeBreakVerdict = if ($runtimeUnlockTransactionStartedEvents.Count -eq 0) {
+        RuntimeUnlockMakeBeforeBreakVerdict = if (-not $runtimeUnlockHasMakeBeforeBreakEvidence) {
             'none'
         } elseif ($runtimeUnlockTransactionCommittedEvents.Count -gt 0 -and
             $runtimeUnlockTransactionPeerProofEvents.Count -gt 0 -and
             $runtimeUnlockProbeAckedEvents.Count -gt 0 -and
             $runtimeUnlockProbeInvalidRejectedEvents.Count -eq 0) {
+            'pass'
+        } elseif ($runtimeUnlockPreCommitRouteEpochRecoveredEvents.Count -gt 0 -and
+            -not $runtimeUnlockHasMakeBeforeBreakInvalidEvidence) {
             'pass'
         } elseif ($runtimeUnlockTransactionPeerProofEvents.Count -gt 0 -or
             $runtimeUnlockProbeMissingRejectedEvents.Count -gt 0 -or
@@ -5227,12 +5254,15 @@ function Get-FileTransferRecoveryFailureClassification {
         RegularV4FrontierStallMissingRangeCount = $regularV4FrontierStallMissingRangeEvents.Count
         RegularV4RepairRequestedCount = $regularV4RepairRequestedEvents.Count
         RegularV4RepairCachePressureCount = $regularV4RepairCachePressureEvents.Count
-        RuntimeUnlockTransactionProofVerdict = if ($runtimeUnlockTransactionStartedEvents.Count -eq 0) {
+        RuntimeUnlockTransactionProofVerdict = if (-not $runtimeUnlockHasMakeBeforeBreakEvidence) {
             'none'
         } elseif ($runtimeUnlockTransactionCommittedEvents.Count -gt 0 -and
             $runtimeUnlockTransactionPeerProofEvents.Count -gt 0 -and
             $runtimeUnlockProbeAckedEvents.Count -gt 0 -and
             $runtimeUnlockTransactionCommitPendingEvents.Count -le $runtimeUnlockTransactionCommittedEvents.Count) {
+            'pass'
+        } elseif ($runtimeUnlockPreCommitRouteEpochRecoveredEvents.Count -gt 0 -and
+            -not $runtimeUnlockHasMakeBeforeBreakInvalidEvidence) {
             'pass'
         } else {
             'fail'

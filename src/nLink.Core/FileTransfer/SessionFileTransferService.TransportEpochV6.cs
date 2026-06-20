@@ -399,11 +399,21 @@ public sealed partial class SessionFileTransferService
     }
 
     private static bool IsRuntimeUnlockPreCommitProbeSnapshotUsable(RuntimeUnlockRouteCommitSnapshot snapshot)
-        => snapshot.PeerVisibleProof &&
-           snapshot.TunaPathLeaseRequired &&
-           snapshot.TunaPathLeaseCurrent &&
-           snapshot.TunaPathLeaseGeneration > 0 &&
-           string.Equals(snapshot.TunaPathLeaseState, RuntimeUnlockTunaPathLeaseState.ListenerReady.ToString(), StringComparison.OrdinalIgnoreCase);
+    {
+        if (!snapshot.PeerVisibleProof)
+        {
+            return false;
+        }
+
+        if (!snapshot.TunaPathLeaseRequired)
+        {
+            return snapshot.PeerReceived && snapshot.AnswerReceived;
+        }
+
+        return snapshot.TunaPathLeaseCurrent &&
+               snapshot.TunaPathLeaseGeneration > 0 &&
+               string.Equals(snapshot.TunaPathLeaseState, RuntimeUnlockTunaPathLeaseState.ListenerReady.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
 
     private async Task<bool> TryHandleRuntimeUnlockPreCommitProbeDataFrameAsync(
         string sessionId,
@@ -482,6 +492,11 @@ public sealed partial class SessionFileTransferService
             Reason = "precommit_probe_received",
         };
 
+        if (dataSession is IFileTransferRuntimeUnlockPreCommitProbeAckAuthorizer ackAuthorizer)
+        {
+            ackAuthorizer.AuthorizeRuntimeUnlockPreCommitProbeAck(probe, receivedTransportKind);
+        }
+
         try
         {
             using var timeoutCts = new CancellationTokenSource(ResolveV6TransportProbeAckSendTimeout());
@@ -489,6 +504,7 @@ public sealed partial class SessionFileTransferService
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=runtime_unlock_precommit_probe_ack_sent; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={ack.TransactionGeneration}; offer_generation={ack.OfferGeneration}; tuna_path_lease_generation={ack.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(ack.ProbeId ?? "(none)")}; received_transport={FormatFileTransferTransportKind(receivedTransportKind)}");
+            TryCommitRuntimeUnlockRouteAfterPreCommitProbeAck(direction, sessionId, transferId, "precommit_probe_ack_sent");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -584,7 +600,7 @@ public sealed partial class SessionFileTransferService
         if (string.IsNullOrWhiteSpace(frame.ProbeId) ||
             frame.TransactionGeneration <= 0 ||
             frame.OfferGeneration <= 0 ||
-            frame.TunaPathLeaseGeneration <= 0 ||
+            frame.TunaPathLeaseGeneration < 0 ||
             !string.Equals(frame.TargetRoute, FileTransferRouteResolver.FileTunaV4Token, StringComparison.Ordinal) ||
             frame.TargetProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
             !string.Equals(frame.TargetTransport, "tuna", StringComparison.OrdinalIgnoreCase) ||

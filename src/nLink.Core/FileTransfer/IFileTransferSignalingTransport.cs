@@ -317,6 +317,13 @@ public interface IFileTransferDataSession : IDisposable
     Task SendAsync(FileTransferDataFrame frame, CancellationToken ct);
 }
 
+public interface IFileTransferRuntimeUnlockPreCommitProbeAckAuthorizer
+{
+    void AuthorizeRuntimeUnlockPreCommitProbeAck(
+        FileTransferRuntimeUnlockPreCommitProbeFrame probe,
+        FileTransferTransportKind receivedTransportKind);
+}
+
 public sealed class FileTransferDataSessionAvailabilityChangedEventArgs : EventArgs
 {
     public FileTransferDataSessionAvailabilityChangedEventArgs(
