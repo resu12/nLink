@@ -2391,6 +2391,22 @@ function Copy-FileTransferLiveLogSlice {
     }
 }
 
+function Write-TunaGuiMilestoneEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)]$ObservedEvidenceLines
+    )
+
+    if ($null -eq $ObservedEvidenceLines -or $ObservedEvidenceLines.Count -le 0) {
+        return
+    }
+
+    [System.IO.File]::WriteAllText(
+        (Join-Path $ArtifactDir 'filetransfer-tuna-gui-milestone-evidence.log'),
+        (@($ObservedEvidenceLines.ToArray()) -join [Environment]::NewLine),
+        [System.Text.Encoding]::UTF8)
+}
+
 function Test-TunaGuiSecondTransferPostTerminalNoiseLine {
     param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Line)
 
@@ -2584,6 +2600,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     elseif ($ErrorMessage.IndexOf('live multi-toggle file Tuna V4 route selection', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         $phase = 'route_runtime'
         $reason = 'normal_to_tuna_route_selection_missing'
+    }
+    elseif ($ErrorMessage.IndexOf('live_toggle_window_missed_transfer_completed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        $phase = 'live_toggle_window'
+        $reason = 'transfer_completed_before_same_transfer_reactivation'
     }
     elseif ($ErrorMessage.IndexOf('Timed out waiting for helpee invite to become ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         $phase = 'preactivation_readiness'
@@ -5173,7 +5193,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                     $activationStartedLine = Wait-TunaGuiLiveRouteEpochStarted -Bookmark $stepBookmark -FallbackBookmark $bookmark -Route 'file_tuna_v4' -ProtocolVersion 4 -HandoffKind 'normal_to_tuna_activation' -TargetTransport 'tuna' -Description 'live multi-toggle normal-to-Tuna route epoch started' -AfterLiveRouteEpoch $lastObservedLiveRouteEpoch -TimeoutMs $activationProofTimeoutMs
                 }
                 catch {
-                    if ($RouteMode -eq 'live-reactivation-second-transfer') {
+                    if ($RouteMode -eq 'live-reactivation-second-transfer' -or
+                        $RouteMode -eq 'live-regular-activation-cycle') {
                         $terminalProbeInboundRole = if ($Direction -eq 'helper-to-helpee') { 'helpee' } else { 'helper' }
                         $terminalProbeOutboundRole = if ($Direction -eq 'helper-to-helpee') { 'helper' } else { 'helpee' }
                         try {
@@ -5198,11 +5219,24 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                                 $firstTransferTerminalBeforeLiveReactivation = $true
                                 $firstTransferTerminalBeforeLiveReactivationTransferId = [string]$terminalProbe.TransferId
                                 $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_reactivation_first_transfer_terminal_before_activation; route_mode={1}; transfer_id={2}; step={3}; action=on; reason=terminal_before_same_transfer_reactivation; fallback_epoch_recovered={4}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $RouteMode, $firstTransferTerminalBeforeLiveReactivationTransferId, $stepNumber, ($(if ($fallbackEpochRecoveredObserved) { 1 } else { 0 })))) | Out-Null
-                                Write-Host '[GUI Smoke][filetransfer_tuna] First transfer completed cleanly in fallback before same-transfer reactivation; continuing to second-transfer Tuna proof.' -ForegroundColor Yellow
-                                continue
+                                Write-TunaGuiMilestoneEvidence -ArtifactDir $ArtifactDir -ObservedEvidenceLines $observedEvidenceLines
+                                Copy-FileTransferLiveLogSlice -ArtifactDir $ArtifactDir -Bookmark $bookmark
+                                if ($RouteMode -eq 'live-reactivation-second-transfer') {
+                                    Write-Host '[GUI Smoke][filetransfer_tuna] First transfer completed cleanly in fallback before same-transfer reactivation; continuing to second-transfer Tuna proof.' -ForegroundColor Yellow
+                                    continue
+                                }
+
+                                throw ("Tuna GUI live regular activation cycle transfer completed before same-transfer reactivation; route_mode={0}; transfer_id={1}; step={2}; action=on; reason=live_toggle_window_missed_transfer_completed; fallback_epoch_recovered={3}" -f `
+                                    $RouteMode,
+                                    $firstTransferTerminalBeforeLiveReactivationTransferId,
+                                    $stepNumber,
+                                    ($(if ($fallbackEpochRecoveredObserved) { 1 } else { 0 })))
                             }
                         }
                         catch {
+                            if ($_.Exception.Message.IndexOf('live_toggle_window_missed_transfer_completed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                                throw
+                            }
                         }
                     }
 
@@ -5456,12 +5490,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         evidence = $evidence
     }
     $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json') -Encoding UTF8
-    if ($observedEvidenceLines.Count -gt 0) {
-        [System.IO.File]::WriteAllText(
-            (Join-Path $ArtifactDir 'filetransfer-tuna-gui-milestone-evidence.log'),
-            ($observedEvidenceLines.ToArray() -join [Environment]::NewLine),
-            [System.Text.Encoding]::UTF8)
-    }
+    Write-TunaGuiMilestoneEvidence -ArtifactDir $ArtifactDir -ObservedEvidenceLines $observedEvidenceLines
     Copy-FileTransferLiveLogSlice -ArtifactDir $ArtifactDir -Bookmark $bookmark
 
     if (-not $integrityOk) {

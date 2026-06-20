@@ -119,6 +119,18 @@ public interface IFileTransferRouteCompletionObserver
     void ObserveFileTransferRouteCompleted(FileTransferRouteCompletedNotification notification);
 }
 
+public sealed record FileTransferRouteHintNotification(
+    string SessionId,
+    string TransferId,
+    string RouteToken,
+    int ProtocolVersion,
+    string Source);
+
+public interface IFileTransferRouteHintObserver
+{
+    void ObserveFileTransferRouteHint(FileTransferRouteHintNotification notification);
+}
+
 internal sealed record RuntimeUnlockRouteCommitSnapshot(
     string SessionId,
     string? TransferId,
@@ -255,6 +267,8 @@ public sealed record FileTransferControlPlaneDeliveryRequest(
     public bool IgnoreCallerCancellation { get; init; }
 
     public int PeerCopyAttempts { get; init; } = 1;
+
+    public TimeSpan? CopyTimeout { get; init; }
 }
 
 public sealed record FileTransferControlPlaneDeliveryResult(

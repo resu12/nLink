@@ -240,13 +240,20 @@ public sealed partial class SessionFileTransferService
         {
             if (!ReferenceEquals(inboundTransfer, context) ||
                 context.IsTerminal ||
-                !context.RouteRuntime.UsesFileTunaV4Runtime ||
                 context.NegotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV4)
             {
                 return false;
             }
 
-            if (IsRecoveredFileTunaV4LiveActivationEpoch(context.CurrentLiveRouteEpoch) &&
+            var canPromoteFromFileTuna = context.RouteRuntime.UsesFileTunaV4Runtime;
+            var canPromoteFromRegularV4 = context.RouteRuntime.UsesRegularNknV4FastRuntime;
+            if (!canPromoteFromFileTuna && !canPromoteFromRegularV4)
+            {
+                return false;
+            }
+
+            if (canPromoteFromFileTuna &&
+                IsRecoveredFileTunaV4LiveActivationEpoch(context.CurrentLiveRouteEpoch) &&
                 !IsFreshPostReactivationFallbackV6Proof(context, frame))
             {
                 LogPeerPostTunaFallbackV6ProofIgnoredAfterLiveActivation(
@@ -258,11 +265,21 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
-            if (!TryPromoteInboundFileTunaV4FallbackToPostTunaV6Locked(
+            var promotionReason = currentLiveFallbackFrame
+                ? "current_post_tuna_fallback_live_route_frame"
+                : "peer_post_tuna_fallback_v6_proof";
+            var promoted = canPromoteFromFileTuna
+                ? TryPromoteInboundFileTunaV4FallbackToPostTunaV6Locked(
                     context,
-                    currentLiveFallbackFrame ? "current_post_tuna_fallback_live_route_frame" : "peer_post_tuna_fallback_v6_proof",
+                    promotionReason,
                     FileTransferTransportHandoffKind.TunaToNormalFallback,
-                    FileTransferTransportKind.RegularNkn))
+                    FileTransferTransportKind.RegularNkn)
+                : TryPromoteInboundRegularNknV4FallbackToPostTunaV6Locked(
+                    context,
+                    promotionReason,
+                    FileTransferTransportHandoffKind.TunaToNormalFallback,
+                    FileTransferTransportKind.RegularNkn);
+            if (!promoted)
             {
                 return false;
             }
@@ -10720,6 +10737,16 @@ public sealed partial class SessionFileTransferService
                 state = state with { CreditUntilChunkIndexExclusive = advertisedRegularV4CreditUntilChunkIndexExclusive };
             }
 
+            if (regularV4FrontierRepairCreditCapped &&
+                ShouldCoalesceInboundRegularV4FrontierRepairStateLocked(context, state, reason))
+            {
+                context.V4RegularFrontierRepairSpamCoalescedCountTotal++;
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=filetransfer_regular_v4_repair_spam_coalesced; direction=inbound; transfer_id={state.TransferId}; session_id={state.SessionId}; reason={FormatProtocolLogValue(reason)}; epoch={state.Epoch}; contiguous_committed_chunk_index={state.ContiguousCommittedChunkIndex}; durable_received_highest_chunk_index={state.DurableReceivedHighestChunkIndex}; credit_until_chunk_index_exclusive={state.CreditUntilChunkIndexExclusive}; start_chunk_index={state.MissingRanges[0].StartChunkIndex}; requested_chunk_count={state.MissingRanges[0].ChunkCount}; coalesced_count_total={context.V4RegularFrontierRepairSpamCoalescedCountTotal}; frontier_stall_age_ms={frontierStallAgeMs}");
+                return true;
+            }
+
             context.V4LastStateCreditUntilChunkIndexExclusive = state.CreditUntilChunkIndexExclusive;
             context.V4LastStateContiguousCommittedChunkIndex = state.ContiguousCommittedChunkIndex;
             context.V4LastStateDurableHighestChunkIndex = state.DurableReceivedHighestChunkIndex;
@@ -10771,6 +10798,10 @@ public sealed partial class SessionFileTransferService
                 if (ReferenceEquals(inboundTransfer, context))
                 {
                     context.PullV4StateSentCountTotal++;
+                    if (regularV4FrontierRepairCreditCapped && state.MissingRanges.Count > 0)
+                    {
+                        RememberInboundRegularV4FrontierRepairStateLocked(context, state);
+                    }
                 }
             }
 
@@ -10833,6 +10864,47 @@ public sealed partial class SessionFileTransferService
                 ct: CancellationToken.None).ConfigureAwait(false);
             return false;
         }
+    }
+
+    private static bool ShouldCoalesceInboundRegularV4FrontierRepairStateLocked(
+        InboundTransferContext context,
+        FileTransferStateFrameV4 state,
+        string reason)
+    {
+        if (!string.Equals(reason, "frontier_stall_repair_due", StringComparison.Ordinal) ||
+            state.MissingRanges.Count == 0 ||
+            context.V4LastRegularFrontierRepairStartChunkIndex < 0)
+        {
+            return false;
+        }
+
+        var firstRange = state.MissingRanges[0];
+        return context.RouteRuntime.UsesRegularNknV4FastRuntime &&
+               context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+               !context.PullPostTunaRecoveryActive &&
+               context.V6TransportHandoff is null &&
+               context.V4LastRegularFrontierRepairStartChunkIndex == firstRange.StartChunkIndex &&
+               context.V4LastRegularFrontierRepairChunkCount == firstRange.ChunkCount &&
+               context.V4LastRegularFrontierRepairCommittedChunkIndex == state.ContiguousCommittedChunkIndex &&
+               context.V4LastRegularFrontierRepairDurableHighestChunkIndex == state.DurableReceivedHighestChunkIndex &&
+               context.V4LastRegularFrontierRepairCreditUntilChunkIndexExclusive == state.CreditUntilChunkIndexExclusive;
+    }
+
+    private static void RememberInboundRegularV4FrontierRepairStateLocked(
+        InboundTransferContext context,
+        FileTransferStateFrameV4 state)
+    {
+        if (state.MissingRanges.Count == 0)
+        {
+            return;
+        }
+
+        var firstRange = state.MissingRanges[0];
+        context.V4LastRegularFrontierRepairStartChunkIndex = firstRange.StartChunkIndex;
+        context.V4LastRegularFrontierRepairChunkCount = firstRange.ChunkCount;
+        context.V4LastRegularFrontierRepairCommittedChunkIndex = state.ContiguousCommittedChunkIndex;
+        context.V4LastRegularFrontierRepairDurableHighestChunkIndex = state.DurableReceivedHighestChunkIndex;
+        context.V4LastRegularFrontierRepairCreditUntilChunkIndexExclusive = state.CreditUntilChunkIndexExclusive;
     }
 
     private static bool ShouldClampInboundV4CreditForTransportRebind(

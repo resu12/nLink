@@ -2188,7 +2188,10 @@ function Get-FileTransferControlPlaneIsolationProof {
                 }
             }
 
+            $currentFallbackStateKnown = (-not [string]::IsNullOrWhiteSpace($routeForEvent)) -or
+                $fallbackLegGenerationForEvent -gt 0
             $isNonCurrentFallbackSend = $eventRoute -eq 'post_tuna_fallback_v6' -and
+                $currentFallbackStateKnown -and
                 (
                     $routeForEvent -ne 'post_tuna_fallback_v6' -or
                     ($fallbackLegGenerationForEvent -gt 0 -and $eventLegGeneration -gt 0 -and $eventLegGeneration -ne $fallbackLegGenerationForEvent)
@@ -4301,6 +4304,11 @@ function New-FileTransferStabilityGateSummaryLines {
         ("listener_rearm_failed_count={0}" -f $recoveryClassification.ListenerRearmFailedCount),
         ("runtime_unlock_offer_dispatched_after_listener_rearm_count={0}" -f $recoveryClassification.RuntimeUnlockOfferDispatchedAfterListenerRearmCount),
         ("runtime_unlock_dispatch_deferred_for_regular_v4_recovery_count={0}" -f $recoveryClassification.RuntimeUnlockDispatchDeferredForRegularV4RecoveryCount),
+        ("runtime_unlock_regular_v4_activation_window_started_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4ActivationWindowStartedCount),
+        ("runtime_unlock_regular_v4_activation_window_peer_visible_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4ActivationWindowPeerVisibleCount),
+        ("runtime_unlock_regular_v4_activation_window_failed_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4ActivationWindowFailedCount),
+        ("regular_v4_repair_spam_coalesced_count={0}" -f $recoveryClassification.RegularV4RepairSpamCoalescedCount),
+        ("runtime_unlock_regular_v4_recovery_arbitration_verdict={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryArbitrationVerdict),
         ("runtime_unlock_offer_observation_blocked_count={0}" -f $recoveryClassification.RuntimeUnlockOfferObservationBlockedCount),
         ("session_liveness_timeout_after_runtime_unlock_count={0}" -f $recoveryClassification.SessionLivenessTimeoutAfterRuntimeUnlockCount),
         ("classification_fallback_tail_reconciliation_requested_count={0}" -f $recoveryClassification.FallbackTailReconciliationRequestedCount),
@@ -4827,6 +4835,18 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockDispatchDeferredForRegularV4RecoveryEvents = @($events | Where-Object {
         $_.EventName -eq 'tuna_acceleration_runtime_unlock_dispatch_deferred_for_regular_v4_receive_recovery'
     })
+    $runtimeUnlockRegularV4ActivationWindowStartedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_regular_v4_activation_window_started'
+    })
+    $runtimeUnlockRegularV4ActivationWindowPeerVisibleEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_regular_v4_activation_window_peer_visible'
+    })
+    $runtimeUnlockRegularV4ActivationWindowFailedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_regular_v4_activation_window_failed'
+    })
+    $regularV4RepairSpamCoalescedEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_repair_spam_coalesced'
+    })
     $listenerReadyUnavailableContradictionEvents = @($events | Where-Object {
         $_.EventName -eq 'filetransfer_tuna_gui_handoff_fallback_failure' -and
         (Get-FileTransferEventField -Event $_ -Name 'failureReason' -Default '') -eq 'listener_ready_unavailable_contradiction'
@@ -5027,6 +5047,21 @@ function Get-FileTransferRecoveryFailureClassification {
         $runtimeUnlockProbeFailedEvents.Count -gt 0) {
         $class = 'runtime_unlock_probe_failed'
     }
+    elseif (($runtimeUnlockRegularV4ActivationWindowFailedEvents.Count -gt 0 -or
+            $runtimeUnlockDispatchDeferredForRegularV4RecoveryEvents.Count -gt 0 -or
+            (
+                $runtimeUnlockBrokenStateRetrySuppressedEvents.Count -gt 0 -and
+                $regularV4FrontierStallMissingRangeEvents.Count -gt 0
+            )) -and
+        $routeChanges.Count -eq 1 -and
+        $routeChanges[0] -eq 'regular_nkn_v4_fast' -and
+        $runtimeUnlockTransactionCommittedEvents.Count -eq 0 -and
+        $runtimeUnlockProbeAckedEvents.Count -eq 0 -and
+        ($sessionLivenessTimeoutEvents.Count -gt 0 -or
+         $peerDisconnectedTerminalEvents.Count -gt 0 -or
+         $runtimeUnlockTransactionFailedEvents.Count -gt 0)) {
+        $class = 'runtime_unlock_regular_v4_recovery_arbitration'
+    }
     elseif ($runtimeUnlockBrokenStateRetrySuppressedEvents.Count -gt 0 -or
         $runtimeUnlockBrokenStateTransactionFailedEvents.Count -gt 0 -or
         ($runtimeUnlockBrokenStateFreshRetryConsumedEvents.Count -gt 0 -and
@@ -5120,6 +5155,16 @@ function Get-FileTransferRecoveryFailureClassification {
         '(none)'
     }
 
+    $runtimeUnlockRegularV4RecoveryArbitrationVerdict = if ($runtimeUnlockRegularV4ActivationWindowStartedEvents.Count -eq 0 -and
+        $runtimeUnlockDispatchDeferredForRegularV4RecoveryEvents.Count -eq 0) {
+        'none'
+    } elseif ($runtimeUnlockRegularV4ActivationWindowPeerVisibleEvents.Count -gt 0 -and
+        $runtimeUnlockRegularV4ActivationWindowFailedEvents.Count -eq 0) {
+        'pass'
+    } else {
+        'fail'
+    }
+
     [pscustomobject]@{
         Class = $class
         RuntimeUnlockOfferNotObservedCount = $runtimeUnlockOfferNotObservedEvents.Count
@@ -5198,6 +5243,11 @@ function Get-FileTransferRecoveryFailureClassification {
         ListenerRearmFailedCount = $listenerRearmFailedEvents.Count
         RuntimeUnlockOfferDispatchedAfterListenerRearmCount = $runtimeUnlockOfferDispatchedAfterListenerRearmEvents.Count
         RuntimeUnlockDispatchDeferredForRegularV4RecoveryCount = $runtimeUnlockDispatchDeferredForRegularV4RecoveryEvents.Count
+        RuntimeUnlockRegularV4ActivationWindowStartedCount = $runtimeUnlockRegularV4ActivationWindowStartedEvents.Count
+        RuntimeUnlockRegularV4ActivationWindowPeerVisibleCount = $runtimeUnlockRegularV4ActivationWindowPeerVisibleEvents.Count
+        RuntimeUnlockRegularV4ActivationWindowFailedCount = $runtimeUnlockRegularV4ActivationWindowFailedEvents.Count
+        RegularV4RepairSpamCoalescedCount = $regularV4RepairSpamCoalescedEvents.Count
+        RuntimeUnlockRegularV4RecoveryArbitrationVerdict = $runtimeUnlockRegularV4RecoveryArbitrationVerdict
         RuntimeUnlockOfferObservationBlockedCount = $runtimeUnlockOfferRejectedWithoutObservationEvents.Count + $runtimeUnlockReceiveRecoveryBlockedOfferEvents.Count
         SessionLivenessTimeoutAfterRuntimeUnlockCount = if ($runtimeUnlockOfferNotObservedEvents.Count -gt 0) { $sessionLivenessTimeoutEvents.Count } else { 0 }
         FallbackTailReconciliationRequestedCount = $fallbackTailProof.RequestedCount
@@ -5353,6 +5403,11 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("listener_rearm_failed_count={0}" -f $recoveryClassification.ListenerRearmFailedCount),
         ("runtime_unlock_offer_dispatched_after_listener_rearm_count={0}" -f $recoveryClassification.RuntimeUnlockOfferDispatchedAfterListenerRearmCount),
         ("runtime_unlock_dispatch_deferred_for_regular_v4_recovery_count={0}" -f $recoveryClassification.RuntimeUnlockDispatchDeferredForRegularV4RecoveryCount),
+        ("runtime_unlock_regular_v4_activation_window_started_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4ActivationWindowStartedCount),
+        ("runtime_unlock_regular_v4_activation_window_peer_visible_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4ActivationWindowPeerVisibleCount),
+        ("runtime_unlock_regular_v4_activation_window_failed_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4ActivationWindowFailedCount),
+        ("regular_v4_repair_spam_coalesced_count={0}" -f $recoveryClassification.RegularV4RepairSpamCoalescedCount),
+        ("runtime_unlock_regular_v4_recovery_arbitration_verdict={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryArbitrationVerdict),
         ("runtime_unlock_offer_observation_blocked_count={0}" -f $recoveryClassification.RuntimeUnlockOfferObservationBlockedCount),
         ("session_liveness_timeout_after_runtime_unlock_count={0}" -f $recoveryClassification.SessionLivenessTimeoutAfterRuntimeUnlockCount),
         ("classification_fallback_tail_reconciliation_requested_count={0}" -f $recoveryClassification.FallbackTailReconciliationRequestedCount),

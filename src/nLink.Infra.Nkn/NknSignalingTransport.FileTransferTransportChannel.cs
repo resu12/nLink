@@ -357,7 +357,8 @@ public sealed partial class NknSignalingTransport
                         : LifecycleDeliveryAcceptancePolicy.AnyAccepted,
                     UseControlAckRetry: false,
                     PeerCopyAttempts: Math.Max(1, request.PeerCopyAttempts),
-                    ThrowOnFailure: false),
+                    ThrowOnFailure: false,
+                    CopyTimeout: request.CopyTimeout),
                 new LifecycleEnvelopeSet(controlEnvelope, bulkEnvelope),
                 ct)
             .ConfigureAwait(false);
@@ -1681,6 +1682,17 @@ public sealed partial class NknSignalingTransport
                 normalizedProtocolVersion,
                 source);
         }
+    }
+
+    public void ObserveFileTransferRouteHint(FileTransferRouteHintNotification notification)
+    {
+        TrackFileTransferRouteHint(
+            notification.TransferId,
+            notification.RouteToken,
+            notification.ProtocolVersion,
+            string.IsNullOrWhiteSpace(notification.Source)
+                ? "service_route_hint"
+                : notification.Source);
     }
 
     private void TrackFileTransferRouteHintForHandoff(
@@ -6299,15 +6311,26 @@ public sealed partial class NknSignalingTransport
             CancellationTokenSource? activationPauseLinkedCts = null;
             try
             {
-                if (TryGetTunaActivationPauseBlockingReason(out var pauseReason))
+                var runtimeUnlockPreCommitProbe = IsRuntimeUnlockPreCommitProbeFrame(frame);
+                if (!runtimeUnlockPreCommitProbe &&
+                    TryGetTunaActivationPauseBlockingReason(out var pauseReason))
                 {
                     throw new InvalidOperationException($"File-transfer data session is unavailable: {pauseReason}.");
                 }
 
-                activationPauseLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(
-                    ct,
-                    Volatile.Read(ref tunaActivationPauseCts).Token);
-                sendCt = activationPauseLinkedCts.Token;
+                if (runtimeUnlockPreCommitProbe)
+                {
+                    LocalOperationalLog.Info(
+                        "SessionSecurity",
+                        $"event=runtime_unlock_precommit_probe_activation_pause_bypassed; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}");
+                }
+                else
+                {
+                    activationPauseLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(
+                        ct,
+                        Volatile.Read(ref tunaActivationPauseCts).Token);
+                    sendCt = activationPauseLinkedCts.Token;
+                }
 
                 if (frame is FileTransferChunkBatchFrameV4 v4Batch && v4Batch.DataSegments.Count > 0)
                 {
@@ -7421,15 +7444,18 @@ public sealed partial class NknSignalingTransport
             or FileTransferProtocol.FrontierRequestFrameTypeV6
             or FileTransferProtocol.RepairProofFrameTypeV6;
 
-    private static bool ShouldUseBulkLane(FileTransferDataFrame frame)
-        => frame is FileTransferChunkBatchFrameV4
-            or FileTransferTransportProbeFrameV6
-            or FileTransferRuntimeUnlockPreCommitProbeFrame
-            or FileTransferRuntimeUnlockPreCommitProbeAckFrame;
+        private static bool ShouldUseBulkLane(FileTransferDataFrame frame)
+            => frame is FileTransferChunkBatchFrameV4
+                or FileTransferTransportProbeFrameV6
+                or FileTransferRuntimeUnlockPreCommitProbeFrame
+                or FileTransferRuntimeUnlockPreCommitProbeAckFrame;
 
-    private static bool ShouldForceRegularNknBulk(FileTransferDataFrame frame)
-        => frame is FileTransferTransportProbeFrameV6 probe &&
-           string.Equals(probe.TargetTransport, "regular_nkn", StringComparison.OrdinalIgnoreCase);
+        private static bool IsRuntimeUnlockPreCommitProbeFrame(FileTransferDataFrame frame)
+            => frame is FileTransferRuntimeUnlockPreCommitProbeFrameBase;
+
+        private static bool ShouldForceRegularNknBulk(FileTransferDataFrame frame)
+            => frame is FileTransferTransportProbeFrameV6 probe &&
+               string.Equals(probe.TargetTransport, "regular_nkn", StringComparison.OrdinalIgnoreCase);
 
     private static bool ShouldRequireTunaBulk(FileTransferDataFrame frame)
         => frame is FileTransferRuntimeUnlockPreCommitProbeFrameBase probe &&

@@ -1892,17 +1892,30 @@ public sealed partial class SessionFileTransferService
         FileTransferTransportHandoffKind handoffKind,
         FileTransferTransportKind targetTransport)
     {
-        // A post-Tuna fallback leg is valid only after this transfer has actually
-        // committed a file_tuna_v4 runtime leg. Treat fallback-shaped transport
-        // events during plain regular V4 as activation/setup noise, otherwise a
-        // stale sidecar state can poison a regular transfer into fallback V6
-        // before file metadata or Tuna proof exists.
-        _ = routeRuntime;
-        _ = negotiatedProtocolVersion;
-        _ = reason;
-        _ = handoffKind;
-        _ = targetTransport;
-        return false;
+        var normalizedReason = NormalizeReason(reason);
+        if (normalizedReason is not ("peer_post_tuna_fallback_v6_proof" or
+            "current_post_tuna_fallback_live_route_frame"))
+        {
+            // A post-Tuna fallback leg is valid only after this transfer has
+            // committed a file_tuna_v4 runtime leg or the peer has sent an
+            // explicit current V6 fallback proof. Treat fallback-shaped
+            // availability events during plain regular V4 as activation/setup
+            // noise, otherwise stale sidecar state can poison a regular
+            // transfer into fallback V6 before file metadata or Tuna proof
+            // exists.
+            return false;
+        }
+
+        return routeRuntime.UsesRegularNknV4FastRuntime &&
+            negotiatedProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+            handoffKind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
+            targetTransport == FileTransferTransportKind.RegularNkn &&
+            FileTransferCoordinator.CanTransitionToRoute(
+                routeRuntime,
+                negotiatedProtocolVersion,
+                FileTransferRoute.PostTunaFallbackV6,
+                handoffKind,
+                targetTransport);
     }
 
     private bool TryPromoteOutboundFileTunaV4FallbackToPostTunaV6Locked(
@@ -1960,6 +1973,13 @@ public sealed partial class SessionFileTransferService
             routeSelection,
             routeInput,
             liveRouteEpoch.EpochId);
+        NotifyFileTransferRouteHintObserver(
+            FileTransferDirection.Outbound,
+            context.TransferId,
+            context.SessionId,
+            routeSelection,
+            liveRouteEpoch.EpochId,
+            "service_live_route_transition");
         LogLiveRouteEpochStarted(
             FileTransferDirection.Outbound,
             context.TransferId,
@@ -2034,6 +2054,13 @@ public sealed partial class SessionFileTransferService
             routeSelection,
             routeInput,
             liveRouteEpoch.EpochId);
+        NotifyFileTransferRouteHintObserver(
+            FileTransferDirection.Inbound,
+            context.TransferId,
+            context.SessionId,
+            routeSelection,
+            liveRouteEpoch.EpochId,
+            "service_live_route_transition");
         LogLiveRouteEpochStarted(
             FileTransferDirection.Inbound,
             context.TransferId,
@@ -2109,6 +2136,13 @@ public sealed partial class SessionFileTransferService
             routeSelection,
             routeInput,
             liveRouteEpoch.EpochId);
+        NotifyFileTransferRouteHintObserver(
+            FileTransferDirection.Inbound,
+            context.TransferId,
+            context.SessionId,
+            routeSelection,
+            liveRouteEpoch.EpochId,
+            "service_live_route_transition");
         LogLiveRouteEpochStarted(
             FileTransferDirection.Inbound,
             context.TransferId,
@@ -2590,6 +2624,13 @@ public sealed partial class SessionFileTransferService
             routeSelection,
             routeInput,
             liveRouteEpoch.EpochId);
+        NotifyFileTransferRouteHintObserver(
+            FileTransferDirection.Outbound,
+            context.TransferId,
+            context.SessionId,
+            routeSelection,
+            liveRouteEpoch.EpochId,
+            "service_live_route_transition");
         LogLiveRouteEpochStarted(
             FileTransferDirection.Outbound,
             context.TransferId,
@@ -2680,6 +2721,13 @@ public sealed partial class SessionFileTransferService
             routeSelection,
             routeInput,
             liveRouteEpoch.EpochId);
+        NotifyFileTransferRouteHintObserver(
+            FileTransferDirection.Inbound,
+            context.TransferId,
+            context.SessionId,
+            routeSelection,
+            liveRouteEpoch.EpochId,
+            "service_live_route_transition");
         LogLiveRouteEpochStarted(
             FileTransferDirection.Inbound,
             context.TransferId,
@@ -2832,6 +2880,13 @@ public sealed partial class SessionFileTransferService
             routeSelection,
             routeInput,
             liveRouteEpoch.EpochId);
+        NotifyFileTransferRouteHintObserver(
+            FileTransferDirection.Outbound,
+            context.TransferId,
+            context.SessionId,
+            routeSelection,
+            liveRouteEpoch.EpochId,
+            "service_live_route_transition");
         LogLiveRouteEpochStarted(
             FileTransferDirection.Outbound,
             context.TransferId,
@@ -2922,6 +2977,13 @@ public sealed partial class SessionFileTransferService
             routeSelection,
             routeInput,
             liveRouteEpoch.EpochId);
+        NotifyFileTransferRouteHintObserver(
+            FileTransferDirection.Inbound,
+            context.TransferId,
+            context.SessionId,
+            routeSelection,
+            liveRouteEpoch.EpochId,
+            "service_live_route_transition");
         LogLiveRouteEpochStarted(
             FileTransferDirection.Inbound,
             context.TransferId,

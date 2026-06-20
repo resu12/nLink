@@ -312,7 +312,12 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             CancellationToken.None);
 
         await WaitUntilAsync(
-            () => ReadOperationalLogTail(logStart).Contains("reason=regular_nkn_legacy_v4_chunk_probe", StringComparison.Ordinal),
+            () =>
+            {
+                var tail = ReadOperationalLogTail(logStart);
+                return tail.Contains("event=filetransfer_v6_epoch_recovered; direction=inbound", StringComparison.Ordinal) &&
+                       tail.Contains("reason=regular_nkn_legacy_v4_chunk_probe", StringComparison.Ordinal);
+            },
             timeoutMs: 5000);
 
         var logTail = ReadOperationalLogTail(logStart);
@@ -698,10 +703,11 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             timeoutMs: 5000);
 
         var logTail = ReadOperationalLogTail(logStart);
-        Assert.Contains("event=filetransfer_v6_epoch_started; direction=outbound", logTail, StringComparison.Ordinal);
         Assert.Contains("handoff_kind=normal_to_tuna_activation", logTail, StringComparison.Ordinal);
         Assert.Contains("handoff_kind=tuna_to_normal_fallback", logTail, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_v6_transport_probe_sent; direction=outbound", logTail, StringComparison.Ordinal);
+        Assert.DoesNotContain("route=file_tuna_v6", logTail, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_v6_epoch_started; direction=outbound; transfer_id=transfer_v6_primary_bulk_tuna_epoch_guard; session_id=session_v6_primary_bulk_tuna_epoch_guard; transport_epoch=1; handoff_kind=normal_to_tuna_activation", logTail, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_primary_regular_nkn_bulk_v6_rebind_started; direction=outbound", logTail, StringComparison.Ordinal);
         Assert.DoesNotContain("recovery_mode=regular_nkn_checkpoint_sync", logTail, StringComparison.Ordinal);
     }

@@ -319,6 +319,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int V6RegularNknSparseRuntimeStaleCreditReceiveRecoveryMs = 30000;
     private const int V6RegularNknSparseRuntimeStateRefreshCooldownMs = 5000;
     private const int V6RegularNknSparseRuntimeStateRefreshSendTimeoutMs = 7500;
+    private const int V6PostTunaFallbackControlPlanePeerCopyTimeoutMs = 2500;
     private const int V6RegularNknCheckpointSyncFailuresBeforeBridgeRecovery = 2;
     private const int V6PostTunaFallbackStaleInflightRecoveryMinStateRefreshFailures = 3;
     private const int V6PostTunaFallbackStaleCreditRecoveryMinStateRefreshFailures = 3;
@@ -5572,6 +5573,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         int peerCopyAttempts = 1)
     {
         var leg = context.CurrentTransferLeg;
+        var durableFallbackCheckpointExchange = RequiresFallbackCheckpointRequestId(kind);
         return new FileTransferControlPlaneDeliveryRequest(kind, frame, reason)
         {
             Direction = FileTransferDirection.Outbound,
@@ -5589,8 +5591,13 @@ public sealed partial class SessionFileTransferService : IDisposable
             },
             CheckpointRequestId = ResolveFallbackControlPlaneCheckpointRequestId(kind, frame, leg),
             PeerVisibleRequired = true,
-            IgnoreCallerCancellation = ignoreCallerCancellation,
-            PeerCopyAttempts = peerCopyAttempts,
+            IgnoreCallerCancellation = ignoreCallerCancellation || durableFallbackCheckpointExchange,
+            PeerCopyAttempts = durableFallbackCheckpointExchange
+                ? Math.Max(2, peerCopyAttempts)
+                : peerCopyAttempts,
+            CopyTimeout = durableFallbackCheckpointExchange
+                ? TimeSpan.FromMilliseconds(V6PostTunaFallbackControlPlanePeerCopyTimeoutMs)
+                : null,
         };
     }
 
@@ -5603,6 +5610,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         int peerCopyAttempts = 1)
     {
         var leg = context.CurrentTransferLeg;
+        var durableFallbackCheckpointExchange = RequiresFallbackCheckpointRequestId(kind);
         return new FileTransferControlPlaneDeliveryRequest(kind, frame, reason)
         {
             Direction = FileTransferDirection.Inbound,
@@ -5620,8 +5628,13 @@ public sealed partial class SessionFileTransferService : IDisposable
             },
             CheckpointRequestId = ResolveFallbackControlPlaneCheckpointRequestId(kind, frame, leg),
             PeerVisibleRequired = true,
-            IgnoreCallerCancellation = ignoreCallerCancellation,
-            PeerCopyAttempts = peerCopyAttempts,
+            IgnoreCallerCancellation = ignoreCallerCancellation || durableFallbackCheckpointExchange,
+            PeerCopyAttempts = durableFallbackCheckpointExchange
+                ? Math.Max(2, peerCopyAttempts)
+                : peerCopyAttempts,
+            CopyTimeout = durableFallbackCheckpointExchange
+                ? TimeSpan.FromMilliseconds(V6PostTunaFallbackControlPlanePeerCopyTimeoutMs)
+                : null,
         };
     }
 
@@ -6892,6 +6905,36 @@ public sealed partial class SessionFileTransferService : IDisposable
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_route_selected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; route={routeSelection.TelemetryToken}; protocol_version={routeSelection.ProtocolVersion}; runtime_profile={FormatFileTransferRouteRuntimeProfile(routeSelection.RuntimeProfile)}; frame_family={FormatFileTransferFrameFamily(routeSelection.FrameFamily)}; handoff_kind={FormatFileTransferTransportHandoffKind(routeSelection.HandoffKind)}; bridge_recovery_policy={FormatFileTransferRouteBridgeRecoveryPolicy(routeSelection.BridgeRecoveryPolicy)}; liveness_terminal_policy={FormatFileTransferRouteLivenessTerminalPolicy(routeSelection.LivenessTerminalPolicy)}; selection_reason={FormatProtocolLogValue(routeSelection.SelectionReason)}; file_tuna_active={(routeInput.IsFileTunaActive ? 1 : 0)}; post_tuna_fallback_active={(routeInput.IsPostTunaFileFallbackActive ? 1 : 0)}; diagnostic_regular_nkn_v6={(routeInput.IsDiagnosticRegularNknV6RouteEnabled ? 1 : 0)}; transport_profile={FormatFileTransferTransportProfileKind(routeInput.TransportProfileKind)}{FormatLiveRouteEpochSuffix(liveRouteEpochId)}");
+    }
+
+    private void NotifyFileTransferRouteHintObserver(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        FileTransferRouteSelection routeSelection,
+        int liveRouteEpochId,
+        string source)
+    {
+        if (transport is not IFileTransferRouteHintObserver observer)
+        {
+            return;
+        }
+
+        try
+        {
+            observer.ObserveFileTransferRouteHint(new FileTransferRouteHintNotification(
+                sessionId,
+                transferId,
+                routeSelection.TelemetryToken,
+                routeSelection.ProtocolVersion,
+                source));
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Warn(
+                "FileTransferService",
+                $"event=filetransfer_route_hint_observer_failed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; route={routeSelection.TelemetryToken}; protocol_version={routeSelection.ProtocolVersion}; live_route_epoch={liveRouteEpochId}; source={FormatProtocolLogValue(source)}; error={FormatProtocolLogValue(ex.GetType().Name)}");
+        }
     }
 
     private static void LogFileTransferRouteTransitioned(
@@ -8646,6 +8689,18 @@ public sealed partial class SessionFileTransferService : IDisposable
         public DateTimeOffset? V4FrontierStallLastSuppressedLogUtc { get; set; }
 
         public int V4FrontierStallSuppressedCountTotal { get; set; }
+
+        public int V4LastRegularFrontierRepairStartChunkIndex { get; set; } = -1;
+
+        public int V4LastRegularFrontierRepairChunkCount { get; set; }
+
+        public int V4LastRegularFrontierRepairCommittedChunkIndex { get; set; } = -1;
+
+        public int V4LastRegularFrontierRepairDurableHighestChunkIndex { get; set; } = -1;
+
+        public int V4LastRegularFrontierRepairCreditUntilChunkIndexExclusive { get; set; }
+
+        public int V4RegularFrontierRepairSpamCoalescedCountTotal { get; set; }
 
         public bool V4ReceiverRepairSchedulerStarted { get; set; }
 

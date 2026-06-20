@@ -2650,6 +2650,11 @@ public sealed partial class NknSignalingTransport
             MsgType.SessionHeartbeat => false,
             MsgType.HelpRequest => false,
             MsgType.HelpRequestDecision => false,
+            MsgType.TransportAccelerationPayerIntent => false,
+            MsgType.TransportAccelerationOffer => false,
+            MsgType.TransportAccelerationAnswer => false,
+            MsgType.TransportAccelerationAnswerAck => false,
+            MsgType.TransportAccelerationDown => false,
             _ => true,
         };
     }
