@@ -14,7 +14,8 @@ param(
     [int]$TimeoutSeconds = 900,
     [int]$ProgressTimeoutSeconds = 180,
     [int]$FallbackMaxAttempts = 2,
-    [bool]$AllowExternalTransportWarnings = $true
+    [bool]$AllowExternalTransportWarnings = $true,
+    [string[]]$ScenarioName = @()
 )
 
 Set-StrictMode -Version Latest
@@ -211,6 +212,125 @@ function Assert-RouteAcceptanceCleanAppProcessState {
 
     if ($after.Count -gt 0) {
         throw ("nLink app process cleanup failed before/after route acceptance step '{0}'; remaining_count={1}; artifact_dir={2}" -f $Reason, $after.Count, $ArtifactDir)
+    }
+}
+
+function Assert-RouteAcceptanceBridgeBundleRuntime {
+    param(
+        [Parameter(Mandatory = $true)][string]$BridgeDir
+    )
+
+    $indexJs = Join-Path $BridgeDir 'index.js'
+    $nodeExe = Join-Path $BridgeDir 'node.exe'
+    $manifest = Join-Path $BridgeDir 'bridge-manifest.json'
+    $dependencies = Join-Path $BridgeDir 'bridge-dependencies.json'
+    $packageJson = Join-Path $BridgeDir 'package.json'
+    $packageLock = Join-Path $BridgeDir 'package-lock.json'
+
+    foreach ($requiredPath in @($indexJs, $nodeExe, $manifest, $dependencies, $packageJson, $packageLock)) {
+        if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+            throw ("NKN bridge runtime is incomplete; missing '{0}'." -f $requiredPath)
+        }
+    }
+}
+
+function Write-RouteAcceptanceBridgeRuntimeArtifact {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)][string]$Reason,
+        [Parameter(Mandatory = $true)][string]$ExeDir,
+        [Parameter(Mandatory = $true)][string]$BridgeDir,
+        [string]$SourceBridgeDir = '',
+        [string]$Failure = ''
+    )
+
+    try {
+        New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
+        $safeReason = ([string]$Reason) -replace '[^A-Za-z0-9_.-]', '_'
+        if ([string]::IsNullOrWhiteSpace($safeReason)) {
+            $safeReason = 'unknown'
+        }
+
+        $bridgeIndex = Join-Path $BridgeDir 'index.js'
+        $bridgeNode = Join-Path $BridgeDir 'node.exe'
+        $summary = [ordered]@{
+            event = 'route_acceptance_bridge_runtime_staging'
+            reason = $Reason
+            exeDir = $ExeDir
+            bridgeDir = $BridgeDir
+            sourceBridgeDir = $SourceBridgeDir
+            bridgeIndexExists = Test-Path -LiteralPath $bridgeIndex -PathType Leaf
+            nodeExists = Test-Path -LiteralPath $bridgeNode -PathType Leaf
+            failure = $Failure
+        }
+
+        $jsonPath = Join-Path $ArtifactDir ("bridge-runtime-{0}.json" -f $safeReason)
+        $txtPath = Join-Path $ArtifactDir ("bridge-runtime-{0}.txt" -f $safeReason)
+        $summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
+
+        $lines = @(
+            ("reason={0}" -f $Reason),
+            ("exe_dir={0}" -f $ExeDir),
+            ("bridge_dir={0}" -f $BridgeDir),
+            ("source_bridge_dir={0}" -f $SourceBridgeDir),
+            ("bridge_index_exists={0}" -f $summary.bridgeIndexExists),
+            ("node_exists={0}" -f $summary.nodeExists),
+            ("failure={0}" -f $Failure)
+        )
+        $lines | Set-Content -LiteralPath $txtPath -Encoding UTF8
+    }
+    catch {
+        Write-Warning ("Failed to write bridge runtime staging artifact: {0}" -f $_.Exception.Message)
+    }
+}
+
+function Ensure-RouteAcceptancePackagedBridgeRuntime {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$ResolvedExePath,
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [string]$Runtime = 'win-x64'
+    )
+
+    $exePath = (Resolve-Path -LiteralPath $ResolvedExePath).Path
+    $exeDir = [System.IO.Path]::GetDirectoryName($exePath)
+    $bridgeDir = Join-Path (Join-Path $exeDir 'bridge') $Runtime
+
+    try {
+        Assert-RouteAcceptanceBridgeBundleRuntime -BridgeDir $bridgeDir
+        Write-RouteAcceptanceBridgeRuntimeArtifact -ArtifactDir $ArtifactDir -Reason 'already_packaged' -ExeDir $exeDir -BridgeDir $bridgeDir
+        return
+    }
+    catch {
+        $candidateBridgeDirs = @(
+            (Join-Path (Join-Path $RepoRoot 'artifacts\bridge') $Runtime),
+            (Join-Path (Join-Path $RepoRoot 'artifacts\portable\nLink\win-x64\bridge') $Runtime)
+        )
+
+        foreach ($candidateBridgeDir in $candidateBridgeDirs) {
+            try {
+                Assert-RouteAcceptanceBridgeBundleRuntime -BridgeDir $candidateBridgeDir
+
+                $bridgeRoot = Join-Path $exeDir 'bridge'
+                if (Test-Path -LiteralPath $bridgeRoot) {
+                    Remove-Item -Recurse -Force -LiteralPath $bridgeRoot
+                }
+
+                New-Item -ItemType Directory -Force -Path $bridgeDir | Out-Null
+                Get-ChildItem -LiteralPath $candidateBridgeDir -Force | Copy-Item -Recurse -Force -Destination $bridgeDir
+                Assert-RouteAcceptanceBridgeBundleRuntime -BridgeDir $bridgeDir
+                Write-RouteAcceptanceBridgeRuntimeArtifact -ArtifactDir $ArtifactDir -Reason 'staged_from_repo_artifact' -ExeDir $exeDir -BridgeDir $bridgeDir -SourceBridgeDir $candidateBridgeDir
+                Write-Host ("[FileTransfer Acceptance] Staged NKN bridge runtime into app folder: {0}" -f $bridgeDir) -ForegroundColor DarkCyan
+                return
+            }
+            catch {
+                continue
+            }
+        }
+
+        $failure = $_.Exception.Message
+        Write-RouteAcceptanceBridgeRuntimeArtifact -ArtifactDir $ArtifactDir -Reason 'missing_bridge_runtime' -ExeDir $exeDir -BridgeDir $bridgeDir -Failure $failure
+        throw ("Route acceptance app is missing the packaged NKN bridge runtime for {0}. Build portable/installer first or stage artifacts\\bridge\\{0}; app_dir={1}; last_error={2}" -f $Runtime, $exeDir, $failure)
     }
 }
 
@@ -1728,10 +1848,12 @@ function Assert-Phase4ScenarioRun {
 
             if ($Scenario.Name -eq 'second-transfer-after-reactivation') {
                 $second = Get-JsonPropertyValue -Object $summary -Name 'secondTransfer' -DefaultValue $null
+                $secondTransferStarted = $true
                 if ($null -eq $second) {
                     Add-RouteAcceptanceFailure -Result $result -Message 'second transfer evidence is missing'
                 }
                 else {
+                    $secondTransferStarted = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $second -Name 'secondTransferStarted' -DefaultValue $true)
                     $secondRoute = [string](Get-JsonPropertyValue -Object $second -Name 'route' -DefaultValue '(missing)')
                     $secondProtocol = ConvertTo-RouteAcceptanceInt -Value (Get-JsonPropertyValue -Object $second -Name 'protocolVersion' -DefaultValue 0)
                     $secondCompleted = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $second -Name 'completed' -DefaultValue $false)
@@ -1753,12 +1875,26 @@ function Assert-Phase4ScenarioRun {
                     }
                 }
 
-                if (-not (Assert-RouteAcceptanceFileExists -Result $result -RelativePath 'filetransfer-second-transfer-retained-log-slice.log')) {
-                    Add-RouteAcceptanceFailure -Result $result -Message 'second transfer retained log slice is missing'
+                if (-not $secondTransferStarted) {
+                    $statusPath = Join-Path $result.artifactDir 'filetransfer-second-transfer-status.txt'
+                    if (Test-Path -LiteralPath $statusPath -PathType Leaf) {
+                        $status = Read-RouteAcceptanceKeyValueArtifact -Path $statusPath
+                        $failureClass = Get-RouteAcceptanceReportValue -Report $status -Name 'failure_class' -DefaultValue 'first_transfer_reactivation_or_fallback_incomplete'
+                        $failureReason = Get-RouteAcceptanceReportValue -Report $status -Name 'failure_reason' -DefaultValue '(unknown)'
+                        Add-RouteAcceptanceFailure -Result $result -Message ("second transfer did not start because first transfer setup failed: class={0}; reason={1}" -f $failureClass, $failureReason)
+                    }
+                    else {
+                        Add-RouteAcceptanceFailure -Result $result -Message 'second transfer did not start and status artifact is missing'
+                    }
                 }
+                else {
+                    if (-not (Assert-RouteAcceptanceFileExists -Result $result -RelativePath 'filetransfer-second-transfer-retained-log-slice.log')) {
+                        Add-RouteAcceptanceFailure -Result $result -Message 'second transfer retained log slice is missing'
+                    }
 
-                if (-not (Assert-RouteAcceptanceFileExists -Result $result -RelativePath 'second-transfer-analysis\filetransfer-route-consistency-summary.txt')) {
-                    Add-RouteAcceptanceFailure -Result $result -Message 'second transfer retained route analysis is missing'
+                    if (-not (Assert-RouteAcceptanceFileExists -Result $result -RelativePath 'second-transfer-analysis\filetransfer-route-consistency-summary.txt')) {
+                        Add-RouteAcceptanceFailure -Result $result -Message 'second transfer retained route analysis is missing'
+                    }
                 }
 
                 [void](Try-ApplySecondTransferSplitProofAcceptance -Result $result -Summary $summary)
@@ -2143,6 +2279,7 @@ function Write-RouteAcceptanceFakePhase4Run {
     $goodputSuffix = if ($RerunAttempt -gt 0) { 'RERUN_GOODPUT_BPS' } else { 'GOODPUT_BPS' }
     $goodput = ConvertTo-RouteAcceptanceDouble -Value (Get-RouteAcceptanceScenarioEnvValue -ScenarioName $scenarioName -Suffix $goodputSuffix -DefaultValue (Get-RouteAcceptanceScenarioEnvValue -ScenarioName $scenarioName -Suffix 'GOODPUT_BPS' -DefaultValue $defaultGoodput))
     $payloadBytes = [long]$Scenario.PayloadBytes
+    $secondTransferNotStarted = $false
     $completed = -not (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'SHA_FAIL')
     $terminalState = if ($receiveRecoveryExhaustedBeforeRuntimeUnlock -or $receiveRecoveryLivenessTimeoutBeforeRuntimeUnlock -or (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'TERMINAL_ERROR')) { 'Failed' } else { 'Completed' }
     if (-not $completed) {
@@ -2383,7 +2520,19 @@ function Write-RouteAcceptanceFakePhase4Run {
         ) | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-operator-verdict.txt') -Encoding UTF8
     }
 
-    if ($Scenario.Name -eq 'second-transfer-after-reactivation') {
+    if ($Scenario.Name -eq 'second-transfer-after-reactivation' -and
+        (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'SECOND_TRANSFER_NOT_STARTED')) {
+        @(
+            'event=filetransfer_second_transfer_status',
+            'second_transfer_started=0',
+            'first_transfer_terminal_state=(missing)',
+            'first_transfer_route_sequence=(see filetransfer-route-consistency-summary.txt)',
+            'reactivation_epoch_seen=0',
+            'failure_class=first_transfer_reactivation_or_fallback_incomplete',
+            'failure_reason=normal_to_tuna_live_epoch_missing'
+        ) | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-second-transfer-status.txt') -Encoding UTF8
+    }
+    elseif ($Scenario.Name -eq 'second-transfer-after-reactivation') {
         $secondSlicePath = Join-Path $ArtifactDir 'filetransfer-second-transfer-retained-log-slice.log'
         $secondAnalysisDir = Join-Path $ArtifactDir 'second-transfer-analysis'
         New-Item -ItemType Directory -Force -Path $secondAnalysisDir | Out-Null
@@ -2467,6 +2616,8 @@ function Write-RouteAcceptanceFakePhase4Run {
         $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-live-nkn-summary.json') -Encoding UTF8
     }
     else {
+        $secondTransferNotStarted = $Scenario.Name -eq 'second-transfer-after-reactivation' -and
+            (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'SECOND_TRANSFER_NOT_STARTED')
         $summary = [ordered]@{
             event = 'filetransfer_tuna_gui_handoff_fallback_summary'
             routeMode = [string]$Scenario.RouteMode
@@ -2503,17 +2654,37 @@ function Write-RouteAcceptanceFakePhase4Run {
             secondTransfer = if ($Scenario.Name -eq 'second-transfer-after-reactivation') {
                 $secondRoute = Get-RouteAcceptanceScenarioEnvValue -ScenarioName $scenarioName -Suffix 'SECOND_ROUTE' -DefaultValue 'file_tuna_v4'
                 $secondMetadata = Get-RouteAcceptanceRouteMetadata -Route $secondRoute
-                [ordered]@{
-                    route = $secondRoute
-                    protocolVersion = [int]$secondMetadata.Protocol
-                    completed = $completed -and $terminalState -eq 'Completed'
-                    integrityOk = $completed -and $terminalState -eq 'Completed'
-                    inboundState = $terminalState
-                    outboundState = $terminalState
-                    inboundErrorCode = $terminalError
-                    outboundErrorCode = $terminalError
-                    payloadBytes = 16777216
-                    goodputBytesPerSecond = $goodput
+                if ($secondTransferNotStarted) {
+                    [ordered]@{
+                        secondTransferStarted = $false
+                        route = '(unknown)'
+                        protocolVersion = 0
+                        completed = $false
+                        integrityOk = $false
+                        inboundState = '(not_started)'
+                        outboundState = '(not_started)'
+                        inboundErrorCode = '(not_started)'
+                        outboundErrorCode = '(not_started)'
+                        payloadBytes = 16777216
+                        goodputBytesPerSecond = 0
+                        setupFailurePhase = 'first_transfer'
+                        setupFailureReason = 'first_transfer_reactivation_or_fallback_incomplete'
+                    }
+                }
+                else {
+                    [ordered]@{
+                        secondTransferStarted = $true
+                        route = $secondRoute
+                        protocolVersion = [int]$secondMetadata.Protocol
+                        completed = $completed -and $terminalState -eq 'Completed'
+                        integrityOk = $completed -and $terminalState -eq 'Completed'
+                        inboundState = $terminalState
+                        outboundState = $terminalState
+                        inboundErrorCode = $terminalError
+                        outboundErrorCode = $terminalError
+                        payloadBytes = 16777216
+                        goodputBytesPerSecond = $goodput
+                    }
                 }
             }
             else {
@@ -4225,6 +4396,11 @@ function Get-Phase5FailureClass {
 
     foreach ($line in $failureLines) {
         if ($line.IndexOf('setup failure', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('transient setup failure', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('scenario isolation failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('scenario rerun setup failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('preflight', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('helpee_invite_readiness_timeout', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $line.IndexOf('scenario execution failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $line.IndexOf('missing artifact', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             return 'setup'
@@ -5121,6 +5297,18 @@ try {
         else {
             @(Get-Phase4RouteAcceptanceScenarios -BaselineManifest $baseline)
         }
+        $requestedScenarioNames = @($ScenarioName | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ })
+        if ($requestedScenarioNames.Count -gt 0) {
+            $requestedScenarioSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($requestedScenarioName in $requestedScenarioNames) {
+                [void]$requestedScenarioSet.Add($requestedScenarioName)
+            }
+
+            $scenarios = @($scenarios | Where-Object { $requestedScenarioSet.Contains([string]$_.Name) })
+            if ($scenarios.Count -le 0) {
+                throw ("No route-acceptance scenarios matched -ScenarioName {0}." -f ($requestedScenarioNames -join ','))
+            }
+        }
         $resolvedExePath = ''
         $resolvedWalletPath = ''
         $resolvedSidecarPath = ''
@@ -5139,6 +5327,7 @@ try {
             $resolvedExePath = (Resolve-Path -LiteralPath (Resolve-RouteAcceptancePath -RepoRoot $repoRoot -Path $ExePath)).Path
             $resolvedWalletPath = (Resolve-Path -LiteralPath (Resolve-RouteAcceptancePath -RepoRoot $repoRoot -Path $WalletPath)).Path
             $resolvedSidecarPath = (Resolve-Path -LiteralPath (Resolve-RouteAcceptancePath -RepoRoot $repoRoot -Path $SidecarPath)).Path
+            Ensure-RouteAcceptancePackagedBridgeRuntime -RepoRoot $repoRoot -ResolvedExePath $resolvedExePath -ArtifactDir $runRoot -Runtime $Runtime
             Assert-RouteAcceptanceCleanAppProcessState -ResolvedExePath $resolvedExePath -ArtifactDir $runRoot -Reason ("{0}_matrix_start" -f $acceptancePhase)
         }
 
@@ -5170,11 +5359,11 @@ try {
         }
 
         if ($acceptancePhase -eq 'phase5') {
-            $verdict = Write-Phase4RouteAcceptanceSummaryFiles -RunRoot $runRoot -BaselinePath ([string]$baseline.Path) -AcceptancePhase 'phase5' -SummaryBaseName 'phase5-analyzer-gui-acceptance' -SummaryTitle 'Phase 5 File Transfer Analyzer/GUI Acceptance' -ExpectedRunCount 6
+            $verdict = Write-Phase4RouteAcceptanceSummaryFiles -RunRoot $runRoot -BaselinePath ([string]$baseline.Path) -AcceptancePhase 'phase5' -SummaryBaseName 'phase5-analyzer-gui-acceptance' -SummaryTitle 'Phase 5 File Transfer Analyzer/GUI Acceptance' -ExpectedRunCount $scenarios.Count
             Write-Host ("[FileTransfer Phase5 Analyzer/GUI Acceptance] verdict={0}; artifact_root={1}" -f $verdict, $runRoot) -ForegroundColor ($(if ($verdict -eq 'PASS') { 'Green' } else { 'Red' }))
         }
         else {
-            $verdict = Write-Phase4RouteAcceptanceSummaryFiles -RunRoot $runRoot -BaselinePath ([string]$baseline.Path)
+            $verdict = Write-Phase4RouteAcceptanceSummaryFiles -RunRoot $runRoot -BaselinePath ([string]$baseline.Path) -ExpectedRunCount $scenarios.Count
             Write-Host ("[FileTransfer Phase4 A/B Acceptance] verdict={0}; artifact_root={1}" -f $verdict, $runRoot) -ForegroundColor ($(if ($verdict -eq 'PASS') { 'Green' } else { 'Red' }))
         }
         if ($verdict -ne 'PASS') {

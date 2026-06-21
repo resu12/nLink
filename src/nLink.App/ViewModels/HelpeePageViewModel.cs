@@ -2347,10 +2347,14 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                     ConnectionState = sessionRuntime.State is SessionRuntimeState.Failed or SessionRuntimeState.Disconnected
                         ? "Failed"
                         : "Disconnected";
-                    if (!HasShareInvite || IsProtectedSeedStorageReadFailure(message))
+                    if (!HasShareInvite ||
+                        IsProtectedSeedStorageReadFailure(message) ||
+                        IsInvitePreparationStatus(ShareInviteStatusText))
                     {
                         UpdateShareInviteStatusText(message);
                     }
+
+                    AppLog.Warn($"Helpee hosting failed before invite readiness; status={message}; runtime_state={sessionRuntime.State}; invite_status={ShareInviteStatusText}");
                 });
             }
         }
@@ -3690,6 +3694,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                     ? transportConfig.HelpeeDisconnectedText
                     : flow.TerminalStatusText;
                 ConnectionState = "Failed";
+                UpdateShareInviteStatusText(ConnectionStatus);
                 break;
             default:
                 ClearPeerEndedNotice();
@@ -4853,6 +4858,18 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     {
         return !string.IsNullOrWhiteSpace(message) &&
                message.Contains("Protected seed storage could not be read.", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsInvitePreparationStatus(string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return true;
+        }
+
+        var normalized = message.Trim();
+        return normalized.Contains("Preparing invite", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("Updating invite", StringComparison.OrdinalIgnoreCase);
     }
 
     private void PromoteProtectedSeedStorageStartupFailureIfNeeded()

@@ -2984,6 +2984,137 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         }
     }
 
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task Bridge_ReceiveStallRecovery_ControlOnlyOverrideReconnectsWhenPostTunaFallbackControlPlanePressureMarked()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-control-post-tuna-pressure", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-control-post-tuna-pressure.js");
+        WriteBridgeScriptWithManifest(
+            bridgePath,
+            BuildReceiveStallRecoveryMockBridgeScript(
+                countFile,
+                controlMessagesReceivedSinceLast: 0,
+                bulkMessagesReceivedSinceLast: 1,
+                totalMessagesReceivedSinceLast: 1,
+                controlLastReceivedAgeMs: 35_000,
+                bulkLastReceivedAgeMs: 100,
+                stallHealthSampleCount: 6));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var prevFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
+        var prevControlOnlyRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", "1");
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "control-post-tuna-pressure");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "control-post-tuna-pressure");
+            var identity = new NknIdentity("control-post-tuna-pressure", "control-post-tuna-pressure.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            const string transferId = "transfer-control-post-tuna-pressure";
+            const string sessionId = "session-control-post-tuna-pressure";
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.MarkActiveFileTransferPostTunaFallbackRuntime(transferId, "test");
+            adapter.MarkActiveFileTransferPostTunaFallbackLegAuthority(
+                transferId,
+                sessionId,
+                legGeneration: 4,
+                routeToken: "post_tuna_fallback_v6",
+                protocolVersion: 6,
+                liveRouteEpoch: 3,
+                transportEpoch: 7,
+                bridgeRecoveryGeneration: 2,
+                checkpointRequestId: "checkpoint-7",
+                authorityReason: "test_authority");
+            adapter.ReportPostTunaFallbackControlPlanePressure(
+                sessionId,
+                transferId,
+                "post_tuna_fallback_v6",
+                protocolVersion: 6,
+                liveRouteEpoch: 3,
+                legGeneration: 4,
+                bridgeRecoveryGeneration: 2,
+                transportEpoch: 7,
+                checkpointRequestId: "checkpoint-7",
+                kind: "receiver_state",
+                reason: "test_control_plane_pressure");
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await adapter.ConnectAsync(cts.Token);
+
+            await WaitUntilAsync(
+                () =>
+                {
+                    var text = LocalOperationalLog.GetRecentLogText();
+                    if (!text.Contains("event=nkn_bridge_control_receive_recovery_allowed", StringComparison.Ordinal) ||
+                        !text.Contains("reason=post_tuna_fallback_control_plane_pressure", StringComparison.Ordinal) ||
+                        !text.Contains("event=nkn_bridge_receive_stall_recovery_started", StringComparison.Ordinal))
+                    {
+                        return false;
+                    }
+
+                    return TryReadIntFileShared(countFile, out var count) &&
+                           count > 1;
+                },
+                TimeSpan.FromSeconds(5));
+
+            var logText = LocalOperationalLog.GetRecentLogText();
+            Assert.Contains("event=filetransfer_post_tuna_fallback_control_plane_pressure_marked", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_control_receive_recovery_allowed", logText, StringComparison.Ordinal);
+            Assert.Contains("reason=post_tuna_fallback_control_plane_pressure", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_receive_stall_recovery_started", logText, StringComparison.Ordinal);
+            Assert.True(File.Exists(countFile));
+            Assert.True(TryReadIntFileShared(countFile, out var finalCount));
+            Assert.True(finalCount > 1);
+
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevFastRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", prevControlOnlyRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
     private static bool TryReadIntFileShared(string path, out int value)
     {
         value = 0;

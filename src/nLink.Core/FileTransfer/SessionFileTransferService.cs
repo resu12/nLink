@@ -5359,6 +5359,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         try
         {
             await SendFileTransferControlPlaneOrDataSessionAsync(dataSession, request, ct).ConfigureAwait(false);
+            MaybeObserveInboundPostTunaFallbackControlPlanePressure(context, request);
             return true;
         }
         catch (Exception ex) when (request.Kind == FileTransferControlPlaneKind.ReceiverState &&
@@ -5371,6 +5372,50 @@ public sealed partial class SessionFileTransferService : IDisposable
         {
             return false;
         }
+    }
+
+    private void MaybeObserveInboundPostTunaFallbackControlPlanePressure(
+        InboundTransferContext context,
+        FileTransferControlPlaneDeliveryRequest request)
+    {
+        if (!string.Equals(request.RouteToken, FileTransferRouteResolver.PostTunaFallbackV6Token, StringComparison.Ordinal) ||
+            request.ProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+            request.TransferLegGeneration <= 0 ||
+            request.Kind is not (FileTransferControlPlaneKind.ReceiverState or
+                FileTransferControlPlaneKind.FrontierRequest or
+                FileTransferControlPlaneKind.FallbackCheckpointProof))
+        {
+            return;
+        }
+
+        IFileTransferPostTunaFallbackControlPlanePressureObserver? observer;
+        lock (gate)
+        {
+            if (!ReferenceEquals(inboundTransfer, context) ||
+                context.IsTerminal ||
+                !context.RouteRuntime.UsesPostTunaFallbackV6Runtime ||
+                !IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg) ||
+                context.CurrentTransferLeg!.Generation != request.TransferLegGeneration)
+            {
+                return;
+            }
+
+            observer = transport as IFileTransferPostTunaFallbackControlPlanePressureObserver;
+        }
+
+        observer?.ObservePostTunaFallbackControlPlanePressure(
+            new FileTransferPostTunaFallbackControlPlanePressure(
+                context.SessionId,
+                context.TransferId,
+                request.RouteToken ?? FileTransferRouteResolver.PostTunaFallbackV6Token,
+                request.ProtocolVersion,
+                request.LiveRouteEpoch,
+                request.TransferLegGeneration,
+                request.BridgeRecoveryGeneration,
+                request.TransportEpoch,
+                request.CheckpointRequestId,
+                FormatFileTransferControlPlaneKind(request.Kind),
+                request.Reason));
     }
 
     private bool TryValidateOutboundFallbackControlPlaneSendLocked(

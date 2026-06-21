@@ -551,6 +551,51 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public void HelpeePageViewModel_FailedBootstrap_ReplacesStaleInvitePreparationStatus()
+    {
+        using var runtime = new SessionRuntime(() => new DevLocalTransport());
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, CreateDevLocalTestConfig(), runtime);
+
+        InvokePrivateMethod(helpee, "UpdateShareInviteText", "stale-invite-token");
+        InvokePrivateMethod(helpee, "UpdateShareInviteStatusText", "Preparing invite…");
+        Assert.True(helpee.HasShareInvite);
+
+        SetPrivateField(runtime, "role", SessionRuntimeRole.Helpee);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Failed);
+        SetPrivateField(runtime, "transportState", TransportState.Failed);
+        SetPrivateField(runtime, "statusText", "Could not start the connection system");
+        SetPrivateField(
+            runtime,
+            "currentFlowSnapshot",
+            runtime.FlowSnapshot with
+            {
+                Phase = SessionFlowPhase.Failed,
+                UiPhase = SessionUiPhase.Failed,
+                Role = SessionRuntimeRole.Helpee,
+                RuntimeState = SessionRuntimeState.Failed,
+                TransportState = TransportState.Failed,
+                LastEndOrigin = SessionFlowEndOrigin.Failed,
+                ShouldSuppressConnectedControls = true,
+                TerminalKind = SessionTerminalKind.Failed,
+                TerminalStatusText = "Could not start the connection system",
+                FailureTitle = "Connection failed",
+                FailureMessage = "The session ended due to a connection problem.",
+                FailureActionText = "Retry",
+                ShouldClearConversationUi = true,
+                StatusText = "Could not start the connection system",
+                DisplayStatusText = "Connection failed",
+                DisplayConnectionState = "Failed",
+                ShowRetryAction = true,
+            });
+
+        InvokePrivateMethod(helpee, "SyncFromRuntime");
+
+        Assert.Equal("Connection failed", helpee.HeaderStatusText);
+        Assert.Equal("Could not start the connection system", helpee.ShareInviteStatusText);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public void HelpeePageViewModel_IncomingApproval_ClearsStalePeerEndedHeaderNotice()
     {
         using var runtime = new SessionRuntime(() => new DevLocalTransport());

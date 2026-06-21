@@ -108,6 +108,24 @@ public interface IFileTransferRegularV4ControlFeedbackPressureObserver
     void ObserveRegularV4ControlFeedbackPressure(FileTransferRegularV4ControlFeedbackPressure pressure);
 }
 
+public sealed record FileTransferPostTunaFallbackControlPlanePressure(
+    string SessionId,
+    string TransferId,
+    string RouteToken,
+    int ProtocolVersion,
+    int LiveRouteEpoch,
+    int TransferLegGeneration,
+    int BridgeRecoveryGeneration,
+    long TransportEpoch,
+    string? CheckpointRequestId,
+    string Kind,
+    string Reason);
+
+public interface IFileTransferPostTunaFallbackControlPlanePressureObserver
+{
+    void ObservePostTunaFallbackControlPlanePressure(FileTransferPostTunaFallbackControlPlanePressure pressure);
+}
+
 public sealed record FileTransferRouteCompletedNotification(
     string SessionId,
     string TransferId,

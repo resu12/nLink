@@ -1381,6 +1381,13 @@ public sealed partial class NknSignalingTransport
             }
         }
 
+        if (shouldLog && client is RealNknClientAdapter realClient)
+        {
+            realClient.ClearPostTunaFallbackControlPlanePressure(
+                normalizedTransferId,
+                "fallback_authority_completed");
+        }
+
         if (!shouldLog)
         {
             return;
@@ -1434,6 +1441,38 @@ public sealed partial class NknSignalingTransport
             pressure.CreditExhaustedTimeMs,
             pressure.FrontierLagChunks,
             pressure.PendingRepairCount);
+    }
+
+    public void ObservePostTunaFallbackControlPlanePressure(FileTransferPostTunaFallbackControlPlanePressure pressure)
+    {
+        var sessionId = string.IsNullOrWhiteSpace(pressure.SessionId)
+            ? currentSessionSecurityState.SessionId?.Value
+            : pressure.SessionId.Trim();
+        var transferId = string.IsNullOrWhiteSpace(pressure.TransferId) ? "(none)" : pressure.TransferId.Trim();
+        var reason = string.IsNullOrWhiteSpace(pressure.Reason)
+            ? "post_tuna_fallback_control_plane_pressure"
+            : SanitizeLogToken(pressure.Reason);
+
+        if (client is not RealNknClientAdapter realClient)
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=filetransfer_post_tuna_fallback_control_plane_pressure_unsupported; session_id={SanitizeLogToken(sessionId ?? "none")}; transfer_id={SanitizeLogToken(transferId)}; reason={reason}");
+            return;
+        }
+
+        realClient.ReportPostTunaFallbackControlPlanePressure(
+            sessionId ?? "none",
+            transferId,
+            pressure.RouteToken,
+            pressure.ProtocolVersion,
+            pressure.LiveRouteEpoch,
+            pressure.TransferLegGeneration,
+            pressure.BridgeRecoveryGeneration,
+            pressure.TransportEpoch,
+            pressure.CheckpointRequestId,
+            pressure.Kind,
+            reason);
     }
 
     public void ObserveFileTransferRouteCompleted(FileTransferRouteCompletedNotification notification)

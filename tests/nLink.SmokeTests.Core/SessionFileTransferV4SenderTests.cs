@@ -8388,7 +8388,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         var logStart = GetOperationalLogLength();
         serviceType
             .GetMethod("QueueOutboundV4SparseRuntimeStateRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, new ThrowingDataSession(request.SessionId, request.TransferId), request]);
+            .Invoke(service, [context, new ThrowingDataSession(request.SessionId, request.TransferId), request, "state_refresh_send_queued"]);
 
         await WaitUntilAsync(
             () => senderTransport.ReceiveRecoveryRequests.Any(recoveryRequest =>
@@ -8493,7 +8493,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         var logStart = GetOperationalLogLength();
         serviceType
             .GetMethod("QueueOutboundV4SparseRuntimeStateRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, new ThrowingDataSession(request.SessionId, request.TransferId), request]);
+            .Invoke(service, [context, new ThrowingDataSession(request.SessionId, request.TransferId), request, "state_refresh_send_queued"]);
 
         await WaitUntilAsync(
             () => senderTransport.ReceiveRecoveryRequests.Any(recoveryRequest =>
@@ -8823,7 +8823,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         var logStart = GetOperationalLogLength();
         serviceType
             .GetMethod("QueueOutboundV4SparseRuntimeStateRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, new CompletingDataSession(request.SessionId, request.TransferId), request]);
+            .Invoke(service, [context, new CompletingDataSession(request.SessionId, request.TransferId), request, "tail_reconciliation"]);
 
         Assert.Equal(0, GetPrivateProperty<int>(context, "V6RegularNknStateRefreshSendInFlight"));
         Assert.Equal(21L, GetPrivateProperty<long>(context, "V6RegularNknStateRefreshRetiredSendGeneration"));
@@ -9205,6 +9205,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                     context,
                     new CompletingDataSession(reissueRequest.SessionId, reissueRequest.TransferId),
                     reissueRequest,
+                    "checkpoint_response_timeout_reissue",
                 ]);
 
         await WaitUntilAsync(
@@ -9359,6 +9360,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                     context,
                     new CompletingDataSession(reissueRequest.SessionId, reissueRequest.TransferId),
                     reissueRequest,
+                    "checkpoint_response_timeout_reissue",
                 ]);
 
         await WaitUntilAsync(
@@ -9388,6 +9390,58 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Contains("request_id=v6-regular-nkn-state-refresh:1", log, StringComparison.Ordinal);
         Assert.DoesNotContain("skip_reason=fallback_checkpoint_pending", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_transport_rebind_safety_replay_started;", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PostTunaFallbackV6PendingCheckpointDuplicateStateRefresh_CoalescesSameOwner()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        const string transferId = "transfer_post_tuna_fallback_v6_duplicate_checkpoint_coalesced";
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 1164,
+            chunksAcceptedForTransport: 2560,
+            remoteGrantedUntilExclusive: 2560,
+            chunkCount: 4096);
+        serviceType
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        serviceType
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, "test_duplicate_checkpoint_coalesced"]);
+
+        var request = new FileTransferFrontierRequestFrameV6
+        {
+            SessionId = $"session_{transferId}",
+            TransferId = transferId,
+            TransportEpoch = 3,
+            RepairRequestId = "v6-regular-nkn-state-refresh:1",
+            MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = 1164, ChunkCount = 1 }],
+            Priority = "state_refresh",
+            RecoveryMode = "regular_nkn_state_refresh",
+        };
+        serviceType
+            .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, request, "test_duplicate_checkpoint_coalesced"]);
+
+        var logStart = GetOperationalLogLength();
+        serviceType
+            .GetMethod("QueueOutboundV4SparseRuntimeStateRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    context,
+                    new CompletingDataSession(request.SessionId, request.TransferId),
+                    request,
+                    "state_refresh_send_queued",
+                ]);
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_fallback_checkpoint_request_coalesced; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("checkpoint_request_id=v6-regular-nkn-state-refresh:1", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_v6_regular_nkn_state_refresh_send_queued;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_v6_regular_nkn_state_refresh_sent;", log, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -9481,7 +9535,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         var logStart = GetOperationalLogLength();
         serviceType
             .GetMethod("QueueOutboundV4SparseRuntimeStateRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, new ThrowingDataSession(request.SessionId, request.TransferId), request]);
+            .Invoke(service, [context, new ThrowingDataSession(request.SessionId, request.TransferId), request, "state_refresh_stale_inflight"]);
 
         await WaitUntilAsync(
             () => senderTransport.ReceiveRecoveryRequests.Any(recoveryRequest =>
@@ -9544,7 +9598,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         var logStart = GetOperationalLogLength();
         serviceType
             .GetMethod("QueueOutboundV4SparseRuntimeStateRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, new ThrowingDataSession(request.SessionId, request.TransferId), request]);
+            .Invoke(service, [context, new ThrowingDataSession(request.SessionId, request.TransferId), request, "state_refresh_stale_credit"]);
 
         await WaitUntilAsync(
             () => senderTransport.ReceiveRecoveryRequests.Any(recoveryRequest =>
@@ -9789,7 +9843,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         var secondLogStart = GetOperationalLogLength();
         serviceType
             .GetMethod("QueueOutboundV4SparseRuntimeStateRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, dataSession, nextRequest]);
+            .Invoke(service, [context, dataSession, nextRequest, "state_refresh_send_queued"]);
 
         Assert.Empty(dataSession.SentFrames);
         Assert.True(GetPrivateProperty<bool>(context, "V6RegularNknFallbackCheckpointDeliveryRecoveryPending"));
@@ -10173,7 +10227,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         var logStart = GetOperationalLogLength();
         serviceType
             .GetMethod("QueueOutboundV4SparseRuntimeStateRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, dataSession, request]);
+            .Invoke(service, [context, dataSession, request, "state_refresh_stale_inflight"]);
 
         await Task.Delay(100);
         Assert.False(dataSession.SendStarted.Task.IsCompleted);
@@ -10398,7 +10452,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         var logStart = GetOperationalLogLength();
         serviceType
             .GetMethod("QueueOutboundV4SparseRuntimeStateRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, freshDataSession, newRequest]);
+            .Invoke(service, [context, freshDataSession, newRequest, "state_refresh_stale_inflight"]);
         serviceType
             .GetMethod("QueueDeferredOutboundPostTunaFallbackStateRefreshAfterResume", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, [context, "transport_recovered"]);
@@ -10464,7 +10518,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         var logStart = GetOperationalLogLength();
         serviceType
             .GetMethod("QueueOutboundV4SparseRuntimeStateRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, new CompletingDataSession(request.SessionId, request.TransferId), request]);
+            .Invoke(service, [context, new CompletingDataSession(request.SessionId, request.TransferId), request, "state_refresh_send_queued"]);
 
         Assert.Equal(1, GetPrivateProperty<int>(context, "V6RegularNknStateRefreshSendInFlight"));
         Assert.Equal(2L, GetPrivateProperty<long>(context, "V6RegularNknStateRefreshActiveSendGeneration"));
@@ -11240,7 +11294,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         var logStart = GetOperationalLogLength();
         serviceType
             .GetMethod("QueueOutboundV4SparseRuntimeStateRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, new ThrowingDataSession(request.SessionId, request.TransferId), request]);
+            .Invoke(service, [context, new ThrowingDataSession(request.SessionId, request.TransferId), request, "state_refresh_send_queued"]);
 
         await WaitUntilAsync(
             () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_post_tuna_fallback_state_refresh_receive_recovery_deferred;", StringComparison.Ordinal),
@@ -11420,6 +11474,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                         request.TransferId,
                         "File-transfer data session is unavailable: tuna_activation_negotiating."),
                     request,
+                    "state_refresh_send_queued",
                 ]);
 
         await WaitUntilAsync(

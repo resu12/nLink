@@ -4308,6 +4308,12 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_regular_v4_activation_window_peer_visible_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4ActivationWindowPeerVisibleCount),
         ("runtime_unlock_regular_v4_activation_window_failed_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4ActivationWindowFailedCount),
         ("regular_v4_repair_spam_coalesced_count={0}" -f $recoveryClassification.RegularV4RepairSpamCoalescedCount),
+        ("post_tuna_fallback_control_plane_pressure_marked_count={0}" -f $recoveryClassification.PostTunaFallbackControlPlanePressureMarkedCount),
+        ("post_tuna_fallback_control_plane_pressure_cleared_count={0}" -f $recoveryClassification.PostTunaFallbackControlPlanePressureClearedCount),
+        ("post_tuna_fallback_control_plane_pressure_allowed_recovery_count={0}" -f $recoveryClassification.PostTunaFallbackControlPlanePressureAllowedRecoveryCount),
+        ("post_tuna_fallback_control_plane_pressure_budget_suppressed_count={0}" -f $recoveryClassification.PostTunaFallbackControlPlanePressureBudgetSuppressedCount),
+        ("post_tuna_fallback_bulk_active_suppressed_during_pressure_count={0}" -f $recoveryClassification.PostTunaFallbackBulkActiveSuppressedDuringPressureCount),
+        ("post_tuna_fallback_legacy_control_lane_starvation_count={0}" -f $recoveryClassification.PostTunaFallbackLegacyControlLaneStarvationCount),
         ("runtime_unlock_regular_v4_recovery_arbitration_verdict={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryArbitrationVerdict),
         ("runtime_unlock_offer_observation_blocked_count={0}" -f $recoveryClassification.RuntimeUnlockOfferObservationBlockedCount),
         ("session_liveness_timeout_after_runtime_unlock_count={0}" -f $recoveryClassification.SessionLivenessTimeoutAfterRuntimeUnlockCount),
@@ -4847,6 +4853,31 @@ function Get-FileTransferRecoveryFailureClassification {
     $regularV4RepairSpamCoalescedEvents = @($events | Where-Object {
         $_.EventName -eq 'filetransfer_regular_v4_repair_spam_coalesced'
     })
+    $postTunaFallbackControlPlanePressureMarkedEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_post_tuna_fallback_control_plane_pressure_marked'
+    })
+    $postTunaFallbackControlPlanePressureClearedEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_post_tuna_fallback_control_plane_pressure_cleared'
+    })
+    $postTunaFallbackControlPlanePressureAllowedEvents = @($events | Where-Object {
+        $_.EventName -eq 'nkn_bridge_control_receive_recovery_allowed' -and
+        (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'post_tuna_fallback_control_plane_pressure'
+    })
+    $postTunaFallbackControlPlanePressureBudgetSuppressedEvents = @($events | Where-Object {
+        $_.EventName -eq 'nkn_bridge_control_receive_recovery_suppressed' -and
+        (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'post_tuna_fallback_control_plane_pressure_budget_exhausted'
+    })
+    $postTunaFallbackBulkActiveSuppressedDuringPressureEvents = @($events | Where-Object {
+        $_.EventName -eq 'nkn_bridge_control_receive_recovery_suppressed' -and
+        (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -in @('bulk_receive_active', 'filetransfer_bulk_receive_active') -and
+        (Get-FileTransferEventField -Event $_ -Name 'post_tuna_fallback_control_plane_pressure' -Default '0') -eq '1' -and
+        (Get-FileTransferEventField -Event $_ -Name 'pressure_grace_exhausted' -Default '0') -eq '1'
+    })
+    $postTunaFallbackLegacyControlLaneStarvationEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_v6_post_tuna_fallback_control_coalesced' -or
+        $_.EventName -eq 'filetransfer_v6_post_tuna_fallback_frontier_rescue_requested' -or
+        $_.EventName -eq 'filetransfer_post_tuna_fallback_replay_accepted_tail_preserved'
+    })
     $listenerReadyUnavailableContradictionEvents = @($events | Where-Object {
         $_.EventName -eq 'filetransfer_tuna_gui_handoff_fallback_failure' -and
         (Get-FileTransferEventField -Event $_ -Name 'failureReason' -Default '') -eq 'listener_ready_unavailable_contradiction'
@@ -5010,6 +5041,12 @@ function Get-FileTransferRecoveryFailureClassification {
         $routeChanges.Add($route) | Out-Null
         $lastRoute = $route
     }
+    $hasPostTunaFallbackEvidence = $routeChanges -contains 'post_tuna_fallback_v6'
+    if (-not $hasPostTunaFallbackEvidence) {
+        $hasPostTunaFallbackEvidence = @($events | Where-Object {
+            (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6'
+        }).Count -gt 0
+    }
 
     $class = '(none)'
     if ($fileTunaV6Events.Count -gt 0) {
@@ -5021,11 +5058,29 @@ function Get-FileTransferRecoveryFailureClassification {
     elseif (($controlPlaneProof.StaleReplayTreadmillCount -gt $controlPlaneProof.StaleGenerationTreadmillScoreLimit -or
             $controlPlaneProof.CheckpointOwnerViolationCount -gt 0 -or
             $controlPlaneProof.ControlPlaneNonCurrentLegGenerationSendCount -gt 0) -and
-        $routeChanges -contains 'post_tuna_fallback_v6') {
+        $hasPostTunaFallbackEvidence) {
         $class = 'fallback_control_plane_stale_generation_treadmill'
     }
+    elseif ($hasPostTunaFallbackEvidence -and
+        (
+            $postTunaFallbackBulkActiveSuppressedDuringPressureEvents.Count -gt 0 -or
+            (
+                $postTunaFallbackControlPlanePressureMarkedEvents.Count -gt 0 -and
+                $postTunaFallbackControlPlanePressureAllowedEvents.Count -eq 0 -and
+                ($sessionLivenessTimeoutEvents.Count -gt 0 -or $peerDisconnectedTerminalEvents.Count -gt 0)
+            ) -or
+            (
+                $postTunaFallbackLegacyControlLaneStarvationEvents.Count -gt 32 -and
+                @($events | Where-Object {
+                    $_.EventName -eq 'nkn_bridge_control_receive_recovery_suppressed' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -in @('bulk_receive_active', 'filetransfer_bulk_receive_active')
+                }).Count -gt 0
+            )
+        )) {
+        $class = 'fallback_control_lane_starvation_under_bulk_receive'
+    }
     elseif ($controlPlaneProof.Verdict -eq 'fail' -and
-        $routeChanges -contains 'post_tuna_fallback_v6' -and
+        $hasPostTunaFallbackEvidence -and
         ($sessionLivenessTimeoutEvents.Count -gt 0 -or $peerDisconnectedTerminalEvents.Count -gt 0)) {
         $class = 'fallback_control_plane_starvation'
     }
@@ -5277,6 +5332,12 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockRegularV4ActivationWindowPeerVisibleCount = $runtimeUnlockRegularV4ActivationWindowPeerVisibleEvents.Count
         RuntimeUnlockRegularV4ActivationWindowFailedCount = $runtimeUnlockRegularV4ActivationWindowFailedEvents.Count
         RegularV4RepairSpamCoalescedCount = $regularV4RepairSpamCoalescedEvents.Count
+        PostTunaFallbackControlPlanePressureMarkedCount = $postTunaFallbackControlPlanePressureMarkedEvents.Count
+        PostTunaFallbackControlPlanePressureClearedCount = $postTunaFallbackControlPlanePressureClearedEvents.Count
+        PostTunaFallbackControlPlanePressureAllowedRecoveryCount = $postTunaFallbackControlPlanePressureAllowedEvents.Count
+        PostTunaFallbackControlPlanePressureBudgetSuppressedCount = $postTunaFallbackControlPlanePressureBudgetSuppressedEvents.Count
+        PostTunaFallbackBulkActiveSuppressedDuringPressureCount = $postTunaFallbackBulkActiveSuppressedDuringPressureEvents.Count
+        PostTunaFallbackLegacyControlLaneStarvationCount = $postTunaFallbackLegacyControlLaneStarvationEvents.Count
         RuntimeUnlockRegularV4RecoveryArbitrationVerdict = $runtimeUnlockRegularV4RecoveryArbitrationVerdict
         RuntimeUnlockOfferObservationBlockedCount = $runtimeUnlockOfferRejectedWithoutObservationEvents.Count + $runtimeUnlockReceiveRecoveryBlockedOfferEvents.Count
         SessionLivenessTimeoutAfterRuntimeUnlockCount = if ($runtimeUnlockOfferNotObservedEvents.Count -gt 0) { $sessionLivenessTimeoutEvents.Count } else { 0 }
@@ -5437,6 +5498,12 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_regular_v4_activation_window_peer_visible_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4ActivationWindowPeerVisibleCount),
         ("runtime_unlock_regular_v4_activation_window_failed_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4ActivationWindowFailedCount),
         ("regular_v4_repair_spam_coalesced_count={0}" -f $recoveryClassification.RegularV4RepairSpamCoalescedCount),
+        ("post_tuna_fallback_control_plane_pressure_marked_count={0}" -f $recoveryClassification.PostTunaFallbackControlPlanePressureMarkedCount),
+        ("post_tuna_fallback_control_plane_pressure_cleared_count={0}" -f $recoveryClassification.PostTunaFallbackControlPlanePressureClearedCount),
+        ("post_tuna_fallback_control_plane_pressure_allowed_recovery_count={0}" -f $recoveryClassification.PostTunaFallbackControlPlanePressureAllowedRecoveryCount),
+        ("post_tuna_fallback_control_plane_pressure_budget_suppressed_count={0}" -f $recoveryClassification.PostTunaFallbackControlPlanePressureBudgetSuppressedCount),
+        ("post_tuna_fallback_bulk_active_suppressed_during_pressure_count={0}" -f $recoveryClassification.PostTunaFallbackBulkActiveSuppressedDuringPressureCount),
+        ("post_tuna_fallback_legacy_control_lane_starvation_count={0}" -f $recoveryClassification.PostTunaFallbackLegacyControlLaneStarvationCount),
         ("runtime_unlock_regular_v4_recovery_arbitration_verdict={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryArbitrationVerdict),
         ("runtime_unlock_offer_observation_blocked_count={0}" -f $recoveryClassification.RuntimeUnlockOfferObservationBlockedCount),
         ("session_liveness_timeout_after_runtime_unlock_count={0}" -f $recoveryClassification.SessionLivenessTimeoutAfterRuntimeUnlockCount),

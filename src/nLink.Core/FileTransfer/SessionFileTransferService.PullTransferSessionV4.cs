@@ -1943,7 +1943,8 @@ public sealed partial class SessionFileTransferService
     private void QueueOutboundV4SparseRuntimeStateRefresh(
         OutboundTransferContext context,
         IFileTransferDataSession dataSession,
-        FileTransferFrontierRequestFrameV6 request)
+        FileTransferFrontierRequestFrameV6 request,
+        string source = "state_refresh_send_queued")
     {
         FileTransferReceiveRecoveryRequest? recoveryRequest = null;
         long sendGeneration;
@@ -2015,10 +2016,18 @@ public sealed partial class SessionFileTransferService
             }
             else
             {
+                if (ShouldCoalesceOutboundFallbackCheckpointStateRefreshSendLocked(
+                        context,
+                        request,
+                        source))
+                {
+                    return;
+                }
+
                 if (!MarkOutboundFallbackCheckpointRequestedLocked(
                         context,
                         request,
-                        "state_refresh_send_queued"))
+                        source))
                 {
                     return;
                 }
@@ -2044,12 +2053,51 @@ public sealed partial class SessionFileTransferService
 
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_v6_regular_nkn_state_refresh_send_queued; transfer_id={context.TransferId}; session_id={context.SessionId}; request_id={FormatProtocolLogValue(request.RepairRequestId)}; generation={sendGeneration}; priority={FormatProtocolLogValue(request.Priority)}; timeout_ms={V6RegularNknSparseRuntimeStateRefreshSendTimeoutMs}");
+            $"event=filetransfer_v6_regular_nkn_state_refresh_send_queued; transfer_id={context.TransferId}; session_id={context.SessionId}; request_id={FormatProtocolLogValue(request.RepairRequestId)}; generation={sendGeneration}; priority={FormatProtocolLogValue(request.Priority)}; timeout_ms={V6RegularNknSparseRuntimeStateRefreshSendTimeoutMs}; source={FormatProtocolLogValue(source)}");
         _ = SendOutboundV4SparseRuntimeStateRefreshAsync(context, dataSession, request, sendGeneration);
         if (recoveryRequest is not null)
         {
             TryRequestFileTransferReceiveRecovery(recoveryRequest);
         }
+    }
+
+    private static bool ShouldCoalesceOutboundFallbackCheckpointStateRefreshSendLocked(
+        OutboundTransferContext context,
+        FileTransferFrontierRequestFrameV6 request,
+        string source)
+    {
+        if (!string.Equals(source, "state_refresh_send_queued", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var leg = context.CurrentTransferLeg;
+        if (!IsCurrentPostTunaFallbackLegCheckpointPending(leg) ||
+            string.IsNullOrWhiteSpace(leg!.CheckpointRequestId) ||
+            string.IsNullOrWhiteSpace(request.RepairRequestId) ||
+            !string.Equals(leg.CheckpointRequestId, request.RepairRequestId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (leg.TransportEpochId > 0 &&
+            request.TransportEpoch > 0 &&
+            request.TransportEpoch != leg.TransportEpochId)
+        {
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(leg.CheckpointPriority) &&
+            !string.IsNullOrWhiteSpace(request.Priority) &&
+            !string.Equals(leg.CheckpointPriority, request.Priority, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_fallback_checkpoint_request_coalesced; direction=outbound; transfer_id={context.TransferId}; session_id={FormatProtocolLogValue(context.SessionId)}; source={FormatProtocolLogValue(source)}; reason=same_checkpoint_owner_pending; leg_id={FormatProtocolLogValue(leg.LegId)}; leg_generation={leg.Generation}; route={leg.RouteSelection.TelemetryToken}; protocol_version={leg.ProtocolVersion}; live_route_epoch={leg.LiveRouteEpochId}; transport_epoch={leg.TransportEpochId}; checkpoint_request_id={FormatProtocolLogValue(leg.CheckpointRequestId)}; request_transport_epoch={request.TransportEpoch}; priority={FormatProtocolLogValue(request.Priority ?? "(none)")}; state={FormatFileTransferLegState(leg.State)}; can_send_data={(leg.CanSendData ? 1 : 0)}");
+        return true;
     }
 
     private static void DeferOutboundPostTunaFallbackStateRefreshAfterRecoveryLocked(
@@ -2181,7 +2229,7 @@ public sealed partial class SessionFileTransferService
             "FileTransferService",
             $"event=filetransfer_post_tuna_fallback_state_refresh_deferred_replayed; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(resumeReason)}; deferred_reason={FormatProtocolLogValue(deferredReason)}; request_id={FormatProtocolLogValue(request.RepairRequestId)}; priority={FormatProtocolLogValue(request.Priority)}; deferred_age_ms={FormatNullableDurationMs(deferredUtc, DateTimeOffset.UtcNow)}; deferred_replace_count={replaceCount}; rebind_generation={context.PullTransportRebindGeneration}");
 
-        QueueOutboundV4SparseRuntimeStateRefresh(context, dataSession, request);
+        QueueOutboundV4SparseRuntimeStateRefresh(context, dataSession, request, "deferred_replay");
     }
 
     private static bool ShouldSuppressOutboundFallbackCheckpointSendForDeliveryRecoveryLocked(
@@ -3842,7 +3890,7 @@ public sealed partial class SessionFileTransferService
 
             if (tailStateRefreshRequest is not null)
             {
-                QueueOutboundV4SparseRuntimeStateRefresh(context, dataSession, tailStateRefreshRequest);
+                QueueOutboundV4SparseRuntimeStateRefresh(context, dataSession, tailStateRefreshRequest, "tail_reconciliation");
                 continue;
             }
 
@@ -4605,7 +4653,8 @@ public sealed partial class SessionFileTransferService
                 QueueOutboundV4SparseRuntimeStateRefresh(
                     context,
                     fallbackCheckpointReissueDataSession,
-                    fallbackCheckpointReissueRequest);
+                    fallbackCheckpointReissueRequest,
+                    "checkpoint_reissue");
             }
             else
             {
@@ -8505,7 +8554,7 @@ public sealed partial class SessionFileTransferService
                         out var checkpointReissueRequest) &&
                     checkpointReissueRequest is not null)
                 {
-                    QueueOutboundV4SparseRuntimeStateRefresh(context, checkpointDataSession, checkpointReissueRequest);
+                    QueueOutboundV4SparseRuntimeStateRefresh(context, checkpointDataSession, checkpointReissueRequest, "checkpoint_response_timeout_reissue");
                     return;
                 }
 

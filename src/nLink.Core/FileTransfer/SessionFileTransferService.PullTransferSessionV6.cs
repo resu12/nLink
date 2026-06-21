@@ -5420,8 +5420,7 @@ public sealed partial class SessionFileTransferService
     {
         if (string.Equals(reason, "regular_nkn_legacy_v4_chunk_probe", StringComparison.Ordinal) ||
             string.Equals(reason, "regular_nkn_legacy_v4_state_proof", StringComparison.Ordinal) ||
-            string.Equals(reason, V6RegularNknStateRefreshRecoveryMode, StringComparison.Ordinal) ||
-            string.Equals(reason, "post_tuna_fallback_proof_replay", StringComparison.Ordinal))
+            string.Equals(reason, V6RegularNknStateRefreshRecoveryMode, StringComparison.Ordinal))
         {
             return false;
         }

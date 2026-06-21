@@ -2179,6 +2179,7 @@ function Wait-FileTransferTerminalPairAfterBookmark {
     $terminalPathResolveStartedMs = -1L
     $terminalPathResolveTransferId = ''
     $terminalQuietGraceStartedMs = -1L
+    $terminalTailGraceStartedMs = -1L
 
     while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
         $byTransfer = @{}
@@ -2320,6 +2321,7 @@ function Wait-FileTransferTerminalPairAfterBookmark {
             $lastProgressEventCount = $progressEventCount
             $lastProgressMs = $sw.ElapsedMilliseconds
             $terminalQuietGraceStartedMs = -1L
+            $terminalTailGraceStartedMs = -1L
         }
 
         if (($sw.ElapsedMilliseconds - $lastProgressMs) -ge $ProgressTimeoutMs) {
@@ -2348,6 +2350,50 @@ function Wait-FileTransferTerminalPairAfterBookmark {
             if (($sw.ElapsedMilliseconds - $terminalQuietGraceStartedMs) -lt $terminalQuietGraceMs) {
                 Start-Sleep -Milliseconds 500
                 continue
+            }
+
+            $expectedChunkCount = if ($ExpectedSizeBytes -gt 0) {
+                [long][Math]::Ceiling($ExpectedSizeBytes / 21504.0)
+            }
+            else {
+                -1L
+            }
+            $remainingTailChunks = if ($expectedChunkCount -gt 0 -and $maxReceiverHighestChunkIndex.Value -ge 0) {
+                [Math]::Max(0L, ($expectedChunkCount - 1L) - [long]$maxReceiverHighestChunkIndex.Value)
+            }
+            else {
+                [long]::MaxValue
+            }
+            $nearTerminalTail = $remainingTailChunks -le 512L
+            if ($nearTerminalTail) {
+                $terminalTailGraceMs = [Math]::Min(
+                    120000,
+                    [Math]::Max(30000, [long]($ProgressTimeoutMs / 2)))
+                if ($terminalTailGraceStartedMs -lt 0) {
+                    $terminalTailGraceStartedMs = $sw.ElapsedMilliseconds
+                    if (-not [string]::IsNullOrWhiteSpace($ArtifactDir)) {
+                        Append-FileTransferLiveHarnessDiagnostic -ArtifactDir $ArtifactDir -Diagnostic ([ordered]@{
+                                event = 'filetransfer_live_progress_timeout_tail_terminal_grace_started'
+                                reason = 'near_terminal_tail_wait_for_terminal_proof'
+                                progress_timeout_ms = $ProgressTimeoutMs
+                                terminal_tail_grace_ms = $terminalTailGraceMs
+                                wait_elapsed_ms = $sw.ElapsedMilliseconds
+                                expected_chunk_count = $expectedChunkCount
+                                receiver_next_chunk = $maxReceiverNextChunkIndex.Value
+                                receiver_highest_chunk = $maxReceiverHighestChunkIndex.Value
+                                remaining_tail_chunks = $remainingTailChunks
+                                progress_events = $lastProgressEventCount
+                            })
+                    }
+
+                    Start-Sleep -Milliseconds 500
+                    continue
+                }
+
+                if (($sw.ElapsedMilliseconds - $terminalTailGraceStartedMs) -lt $terminalTailGraceMs) {
+                    Start-Sleep -Milliseconds 500
+                    continue
+                }
             }
 
             throw ("Timed out waiting for live file-transfer progress: no useful data progress for {0:N0}s; total_wait_s={1:N0}; receiver_next_chunk={2}; receiver_highest_chunk={3}; progress_events={4}." -f `
@@ -5238,6 +5284,42 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                                 throw
                             }
                         }
+
+                        if ($RouteMode -eq 'live-reactivation-second-transfer') {
+                            $firstTransferStatus = [ordered]@{
+                                event = 'filetransfer_second_transfer_status'
+                                second_transfer_started = 0
+                                first_transfer_terminal_state = '(missing)'
+                                first_transfer_route_sequence = '(see filetransfer-route-consistency-summary.txt)'
+                                reactivation_epoch_seen = 0
+                                failure_class = 'first_transfer_reactivation_or_fallback_incomplete'
+                                failure_reason = 'normal_to_tuna_live_epoch_missing'
+                                failed_at_utc = [DateTimeOffset]::UtcNow.ToString('O')
+                            }
+                            $firstTransferStatus.GetEnumerator() | ForEach-Object { "{0}={1}" -f $_.Key, $_.Value } | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-second-transfer-status.txt') -Encoding UTF8
+                            $firstTransferStatus | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-second-transfer-status.json') -Encoding UTF8
+
+                            $summary['secondTransfer'] = [ordered]@{
+                                name = 'second_transfer_after_reactivation_file_tuna_v4'
+                                secondTransferStarted = $false
+                                transferId = '(none)'
+                                route = '(unknown)'
+                                protocolVersion = 0
+                                payloadBytes = 16777216L
+                                durationMs = 0D
+                                goodputBytesPerSecond = 0D
+                                completed = $false
+                                integrityOk = $false
+                                inboundState = '(not_started)'
+                                outboundState = '(not_started)'
+                                inboundErrorCode = '(not_started)'
+                                outboundErrorCode = '(not_started)'
+                                setupFailurePhase = 'first_transfer'
+                                setupFailureReason = 'first_transfer_reactivation_or_fallback_incomplete'
+                                error = 'First transfer did not prove same-transfer file_tuna_v4 reactivation or clean terminal completion before second-transfer start.'
+                            }
+                            $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json') -Encoding UTF8
+                        }
                     }
 
                     throw
@@ -6320,6 +6402,87 @@ function Test-ConnectionFailedSurface {
     return [string]::Equals($status, 'Connection failed', [System.StringComparison]::Ordinal)
 }
 
+function Get-HelpeeInviteReadinessDiagnostic {
+    param([Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window)
+
+    $headerStatus = '(unavailable)'
+    $inviteStatus = '(missing)'
+    $requestHelpEnabled = '(missing)'
+    $helperInputEnabled = '(missing)'
+    $retryEnabled = '(missing)'
+
+    try {
+        $headerStatus = Format-ConnectionDiagnosticText -Text (Get-SessionHeaderStatusValue -Window $Window)
+    } catch {}
+
+    try {
+        $status = Find-VisibleByAutomationId -Root $Window -AutomationId 'Helpee.InviteStatus'
+        if ($status) {
+            $inviteStatus = Format-ConnectionDiagnosticText -Text (Get-ElementTextSafe -Element $status)
+        }
+    } catch {}
+
+    try {
+        $request = Find-VisibleByAutomationId -Root $Window -AutomationId 'Helpee.RequestHelp'
+        if ($request) {
+            $requestHelpEnabled = if ($request.Current.IsEnabled) { '1' } else { '0' }
+        }
+    } catch {}
+
+    try {
+        $input = Find-VisibleByAutomationId -Root $Window -AutomationId 'Helpee.HelperIdentityInput'
+        if ($input) {
+            $helperInputEnabled = if ($input.Current.IsEnabled) { '1' } else { '0' }
+        }
+    } catch {}
+
+    try {
+        $retry = Find-ByNameAndType -Root $Window -Name 'Retry' -ControlType ([System.Windows.Automation.ControlType]::Button)
+        if ($retry -and -not $retry.Current.IsOffscreen) {
+            $retryEnabled = if ($retry.Current.IsEnabled) { '1' } else { '0' }
+        }
+    } catch {}
+
+    return ("header_status='{0}'; invite_status='{1}'; request_help_enabled={2}; helper_identity_input_enabled={3}; retry_enabled={4}" -f `
+        $headerStatus,
+        $inviteStatus,
+        $requestHelpEnabled,
+        $helperInputEnabled,
+        $retryEnabled)
+}
+
+function Write-HelpeeInviteReadinessDiagnosticArtifact {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+
+    $artifactRoot = [string]$env:NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR
+    if ([string]::IsNullOrWhiteSpace($artifactRoot)) {
+        return
+    }
+
+    try {
+        $diagnosticDir = Join-Path ([System.IO.Path]::GetFullPath($artifactRoot)) 'diagnostics'
+        New-Item -ItemType Directory -Force -Path $diagnosticDir | Out-Null
+        $timestamp = (Get-Date).ToString('yyyyMMdd-HHmmss-fff')
+        $path = Join-Path $diagnosticDir "helpee-invite-readiness-$timestamp.txt"
+        $lines = New-Object System.Collections.Generic.List[string]
+        $lines.Add("reason=$Reason") | Out-Null
+        $lines.Add((Get-HelpeeInviteReadinessDiagnostic -Window $Window)) | Out-Null
+        $lines.Add('') | Out-Null
+        $lines.Add('process_output_tail:') | Out-Null
+        foreach ($line in @(Read-GuiSmokeProcessOutputLinesSnapshot | Select-Object -Last 120)) {
+            $lines.Add([string]$line) | Out-Null
+        }
+
+        [System.IO.File]::WriteAllText($path, ($lines -join [Environment]::NewLine), [System.Text.Encoding]::UTF8)
+    }
+    catch {
+        # Best-effort diagnostics.
+    }
+}
+
 function Format-ConnectionDiagnosticText {
     param([AllowNull()][string]$Text)
 
@@ -6882,30 +7045,42 @@ function Enter-HelpeeHelperIdentityAndRequestHelp {
 
     Submit-TextInputWithEnter -Element $input
 
-    [void](Wait-Until -TimeoutMs (Get-TransportAwareTimeoutMs -DefaultMs 10000 -NknMs 60000) -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helpee invite to become ready.' -Condition {
-        if (Test-ConnectionFailedSurface -Window $HelpeeWindow) {
-            throw 'Helpee reached Connection failed before invite became ready.'
-        }
-
-        $status = Find-VisibleByAutomationId -Root $HelpeeWindow -AutomationId 'Helpee.InviteStatus'
-        if ($status) {
-            $statusText = (Get-ElementTextSafe -Element $status).Trim()
-            if ($statusText -match 'Preparing invite|Updating invite') {
-                return $null
+    try {
+        [void](Wait-Until -TimeoutMs (Get-TransportAwareTimeoutMs -DefaultMs 10000 -NknMs 60000) -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helpee invite to become ready.' -Condition {
+            if (Test-ConnectionFailedSurface -Window $HelpeeWindow) {
+                throw ("Helpee reached Connection failed before invite became ready. {0}" -f (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow))
             }
+
+            $status = Find-VisibleByAutomationId -Root $HelpeeWindow -AutomationId 'Helpee.InviteStatus'
+            if ($status) {
+                $statusText = (Get-ElementTextSafe -Element $status).Trim()
+                if ($statusText -match 'Preparing invite|Updating invite') {
+                    return $null
+                }
+            }
+
+            return $true
+        })
+    }
+    catch {
+        Write-HelpeeInviteReadinessDiagnosticArtifact -Window $HelpeeWindow -Reason 'invite_ready_wait_failed'
+        throw ("{0} Diagnostic: {1}" -f $_.Exception.Message, (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow))
+    }
+
+    try {
+        $request = Wait-Until -TimeoutMs (Get-TransportAwareTimeoutMs -DefaultMs 10000 -NknMs 45000) -PollMs 200 -OnTimeoutMessage 'Timed out waiting for Helpee.RequestHelp to become enabled.' -Condition {
+            if (Test-ConnectionFailedSurface -Window $HelpeeWindow) {
+                throw ("Helpee reached Connection failed before Request help became enabled. {0}" -f (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow))
+            }
+
+            $btn = Find-VisibleByAutomationId -Root $HelpeeWindow -AutomationId 'Helpee.RequestHelp'
+            if ($btn -and $btn.Current.IsEnabled) { return $btn }
+            return $null
         }
-
-        return $true
-    })
-
-    $request = Wait-Until -TimeoutMs (Get-TransportAwareTimeoutMs -DefaultMs 10000 -NknMs 45000) -PollMs 200 -OnTimeoutMessage 'Timed out waiting for Helpee.RequestHelp to become enabled.' -Condition {
-        if (Test-ConnectionFailedSurface -Window $HelpeeWindow) {
-            throw 'Helpee reached Connection failed before Request help became enabled.'
-        }
-
-        $btn = Find-VisibleByAutomationId -Root $HelpeeWindow -AutomationId 'Helpee.RequestHelp'
-        if ($btn -and $btn.Current.IsEnabled) { return $btn }
-        return $null
+    }
+    catch {
+        Write-HelpeeInviteReadinessDiagnosticArtifact -Window $HelpeeWindow -Reason 'request_help_wait_failed'
+        throw ("{0} Diagnostic: {1}" -f $_.Exception.Message, (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow))
     }
 
     Click-Element $request
