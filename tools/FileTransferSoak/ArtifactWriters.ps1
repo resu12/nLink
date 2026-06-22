@@ -2096,7 +2096,9 @@ function Get-FileTransferControlPlaneIsolationProof {
     }
 
     foreach ($event in @($events | Sort-Object Sequence)) {
-        if ($event.EventName -eq 'filetransfer_route_selected') {
+        if ($event.EventName -eq 'filetransfer_route_selected' -or
+            $event.EventName -eq 'filetransfer_live_route_epoch_started' -or
+            $event.EventName -eq 'filetransfer_live_route_epoch_recovered') {
             $directionKey = Get-FileTransferControlPlaneDirectionKey -Event $event
             $route = Get-FileTransferEventField -Event $event -Name 'route' -Default ''
             if (-not [string]::IsNullOrWhiteSpace($route)) {
@@ -2186,6 +2188,15 @@ function Get-FileTransferControlPlaneIsolationProof {
                 if ($currentFallbackLegGenerationByDirection.ContainsKey($eventDirectionKey)) {
                     $fallbackLegGenerationForEvent = [int64]$currentFallbackLegGenerationByDirection[$eventDirectionKey]
                 }
+            }
+
+            if ($eventRoute -eq 'post_tuna_fallback_v6' -and
+                $eventProtocol -eq 6 -and
+                $eventLiveRouteEpoch -gt 0 -and
+                $currentLiveRouteEpoch -eq $eventLiveRouteEpoch -and
+                $currentRoute -eq 'post_tuna_fallback_v6') {
+                $routeForEvent = $currentRoute
+                $fallbackLegGenerationForEvent = $currentFallbackLegGeneration
             }
 
             $currentFallbackStateKnown = (-not [string]::IsNullOrWhiteSpace($routeForEvent)) -or
@@ -2487,6 +2498,9 @@ function Get-FileTransferFallbackRuntimeUnlockSeparationProof {
             (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'post_tuna_fallback_offer_send_prepare'
         )
     })
+    $fallbackUnavailableSuppressedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_fallback_unavailable_suppressed'
+    })
 
     $postTunaRouteSelected = @($events | Where-Object {
         $_.EventName -eq 'filetransfer_route_selected' -and
@@ -2559,6 +2573,7 @@ function Get-FileTransferFallbackRuntimeUnlockSeparationProof {
         ProbeStartedWithoutActivationWindowCount = $probeStartedWithoutActivationWindowCount
         RegularNknProbeRejectedCount = $regularNknProbeRejectedEvents.Count
         FallbackUnavailableMarkCount = $fallbackUnavailableMarkEvents.Count
+        FallbackUnavailableSuppressedCount = $fallbackUnavailableSuppressedEvents.Count
         Findings = $findings
         EvidenceEvents = @($evidence.ToArray())
     }
@@ -2686,12 +2701,14 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("fallback_checkpoint_id_count_max_per_leg={0}" -f $controlPlaneProof.CheckpointIdCountMaxPerLeg)) | Out-Null
     $lines.Add(("fallback_control_plane_non_current_leg_generation_send_count={0}" -f $controlPlaneProof.ControlPlaneNonCurrentLegGenerationSendCount)) | Out-Null
     $lines.Add(("fallback_runtime_unlock_separation_verdict={0}" -f $fallbackRuntimeUnlockSeparationProof.Verdict)) | Out-Null
+    $lines.Add(("runtime_fallback_separation_verdict={0}" -f $fallbackRuntimeUnlockSeparationProof.Verdict)) | Out-Null
     $lines.Add(("fallback_runtime_unlock_waiting_count={0}" -f $fallbackRuntimeUnlockSeparationProof.WaitingForFallbackSurvivalCount)) | Out-Null
     $lines.Add(("runtime_unlock_activation_window_granted_count={0}" -f $fallbackRuntimeUnlockSeparationProof.ActivationWindowGrantedCount)) | Out-Null
     $lines.Add(("runtime_unlock_probe_failed_fallback_resumed_count={0}" -f $fallbackRuntimeUnlockSeparationProof.ProbeFailedFallbackResumedCount)) | Out-Null
     $lines.Add(("runtime_unlock_probe_started_without_activation_window_count={0}" -f $fallbackRuntimeUnlockSeparationProof.ProbeStartedWithoutActivationWindowCount)) | Out-Null
     $lines.Add(("runtime_unlock_regular_nkn_probe_rejected_count={0}" -f $fallbackRuntimeUnlockSeparationProof.RegularNknProbeRejectedCount)) | Out-Null
     $lines.Add(("runtime_unlock_fallback_unavailable_mark_count={0}" -f $fallbackRuntimeUnlockSeparationProof.FallbackUnavailableMarkCount)) | Out-Null
+    $lines.Add(("runtime_unlock_fallback_unavailable_suppressed_count={0}" -f $fallbackRuntimeUnlockSeparationProof.FallbackUnavailableSuppressedCount)) | Out-Null
 
     $index = 0
     foreach ($event in @($routeSelectedEvents | Sort-Object Sequence)) {
@@ -4307,6 +4324,12 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_regular_v4_activation_window_started_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4ActivationWindowStartedCount),
         ("runtime_unlock_regular_v4_activation_window_peer_visible_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4ActivationWindowPeerVisibleCount),
         ("runtime_unlock_regular_v4_activation_window_failed_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4ActivationWindowFailedCount),
+        ("runtime_unlock_regular_v4_peer_visible_window_started_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4PeerVisibleWindowStartedCount),
+        ("runtime_unlock_regular_v4_peer_visible_window_delivery_started_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4PeerVisibleWindowDeliveryStartedCount),
+        ("runtime_unlock_regular_v4_peer_visible_window_proof_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4PeerVisibleWindowProofCount),
+        ("runtime_unlock_regular_v4_peer_visible_window_delivery_failed_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4PeerVisibleWindowDeliveryFailedCount),
+        ("runtime_unlock_regular_v4_peer_visible_window_late_proof_ignored_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4PeerVisibleWindowLateProofIgnoredCount),
+        ("runtime_unlock_regular_v4_peer_visible_window_failed_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4PeerVisibleWindowFailedCount),
         ("regular_v4_repair_spam_coalesced_count={0}" -f $recoveryClassification.RegularV4RepairSpamCoalescedCount),
         ("post_tuna_fallback_control_plane_pressure_marked_count={0}" -f $recoveryClassification.PostTunaFallbackControlPlanePressureMarkedCount),
         ("post_tuna_fallback_control_plane_pressure_cleared_count={0}" -f $recoveryClassification.PostTunaFallbackControlPlanePressureClearedCount),
@@ -4850,6 +4873,16 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockRegularV4ActivationWindowFailedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_regular_v4_activation_window_failed'
     })
+    $runtimeUnlockRegularV4PeerVisibleWindowDeliveryStartedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_regular_v4_peer_visible_window_delivery_started'
+    })
+    $runtimeUnlockRegularV4PeerVisibleWindowDeliveryFailedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_regular_v4_peer_visible_window_delivery_failed' -or
+        $_.EventName -eq 'runtime_unlock_control_plane_observed_send_failed'
+    })
+    $runtimeUnlockRegularV4PeerVisibleWindowLateProofIgnoredEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_regular_v4_peer_visible_window_late_proof_ignored'
+    })
     $regularV4RepairSpamCoalescedEvents = @($events | Where-Object {
         $_.EventName -eq 'filetransfer_regular_v4_repair_spam_coalesced'
     })
@@ -5052,6 +5085,10 @@ function Get-FileTransferRecoveryFailureClassification {
     if ($fileTunaV6Events.Count -gt 0) {
         $class = 'active_file_tuna_v6_evidence'
     }
+    elseif ($fallbackRuntimeUnlockSeparationProof.Verdict -eq 'fail' -and
+        $hasPostTunaFallbackEvidence) {
+        $class = 'runtime_fallback_separation_violation'
+    }
     elseif ($fallbackTailProof.Verdict -eq 'fail') {
         $class = 'fallback_tail_reconciliation'
     }
@@ -5107,11 +5144,30 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     elseif ($fallbackRuntimeUnlockSeparationProof.Verdict -eq 'fail' -and
         $routeChanges -contains 'post_tuna_fallback_v6') {
-        $class = 'fallback_runtime_unlock_overlap_missing_fallback_owner'
+        $class = 'runtime_fallback_separation_violation'
     }
     elseif ($runtimeUnlockProbeInvalidRejectedEvents.Count -gt 0 -or
         $runtimeUnlockProbeFailedEvents.Count -gt 0) {
         $class = 'runtime_unlock_probe_failed'
+    }
+    elseif ($runtimeUnlockRegularV4PeerVisibleWindowDeliveryStartedEvents.Count -gt 0 -and
+        $runtimeUnlockRegularV4ActivationWindowPeerVisibleEvents.Count -eq 0 -and
+        ($runtimeUnlockRegularV4PeerVisibleWindowDeliveryFailedEvents.Count -gt 0 -or
+         $runtimeUnlockRegularV4ActivationWindowFailedEvents.Count -gt 0) -and
+        $routeChanges.Count -eq 1 -and
+        $routeChanges[0] -eq 'regular_nkn_v4_fast' -and
+        $runtimeUnlockTransactionCommittedEvents.Count -eq 0) {
+        $class = 'runtime_unlock_regular_v4_peer_visible_window_delivery_failed'
+    }
+    elseif ($runtimeUnlockRegularV4ActivationWindowStartedEvents.Count -gt 0 -and
+        $runtimeUnlockTransactionObservedSendEvents.Count -gt 0 -and
+        $runtimeUnlockRegularV4ActivationWindowPeerVisibleEvents.Count -eq 0 -and
+        ($runtimeUnlockRegularV4ActivationWindowFailedEvents.Count -gt 0 -or
+         $runtimeUnlockRegularV4PeerVisibleWindowLateProofIgnoredEvents.Count -gt 0) -and
+        $routeChanges.Count -eq 1 -and
+        $routeChanges[0] -eq 'regular_nkn_v4_fast' -and
+        $runtimeUnlockTransactionCommittedEvents.Count -eq 0) {
+        $class = 'runtime_unlock_peer_visible_window_race'
     }
     elseif (($runtimeUnlockRegularV4ActivationWindowFailedEvents.Count -gt 0 -or
             $runtimeUnlockDispatchDeferredForRegularV4RecoveryEvents.Count -gt 0 -or
@@ -5331,6 +5387,12 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockRegularV4ActivationWindowStartedCount = $runtimeUnlockRegularV4ActivationWindowStartedEvents.Count
         RuntimeUnlockRegularV4ActivationWindowPeerVisibleCount = $runtimeUnlockRegularV4ActivationWindowPeerVisibleEvents.Count
         RuntimeUnlockRegularV4ActivationWindowFailedCount = $runtimeUnlockRegularV4ActivationWindowFailedEvents.Count
+        RuntimeUnlockRegularV4PeerVisibleWindowStartedCount = $runtimeUnlockRegularV4ActivationWindowStartedEvents.Count
+        RuntimeUnlockRegularV4PeerVisibleWindowDeliveryStartedCount = $runtimeUnlockRegularV4PeerVisibleWindowDeliveryStartedEvents.Count
+        RuntimeUnlockRegularV4PeerVisibleWindowProofCount = $runtimeUnlockRegularV4ActivationWindowPeerVisibleEvents.Count
+        RuntimeUnlockRegularV4PeerVisibleWindowDeliveryFailedCount = $runtimeUnlockRegularV4PeerVisibleWindowDeliveryFailedEvents.Count
+        RuntimeUnlockRegularV4PeerVisibleWindowLateProofIgnoredCount = $runtimeUnlockRegularV4PeerVisibleWindowLateProofIgnoredEvents.Count
+        RuntimeUnlockRegularV4PeerVisibleWindowFailedCount = $runtimeUnlockRegularV4ActivationWindowFailedEvents.Count
         RegularV4RepairSpamCoalescedCount = $regularV4RepairSpamCoalescedEvents.Count
         PostTunaFallbackControlPlanePressureMarkedCount = $postTunaFallbackControlPlanePressureMarkedEvents.Count
         PostTunaFallbackControlPlanePressureClearedCount = $postTunaFallbackControlPlanePressureClearedEvents.Count
@@ -5465,12 +5527,14 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_precommit_probe_protocol_mismatch_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeProtocolMismatchCount),
         ("runtime_unlock_make_before_break_verdict={0}" -f $recoveryClassification.RuntimeUnlockMakeBeforeBreakVerdict),
         ("fallback_runtime_unlock_separation_verdict={0}" -f $fallbackRuntimeUnlockSeparationProof.Verdict),
+        ("runtime_fallback_separation_verdict={0}" -f $fallbackRuntimeUnlockSeparationProof.Verdict),
         ("fallback_runtime_unlock_waiting_count={0}" -f $fallbackRuntimeUnlockSeparationProof.WaitingForFallbackSurvivalCount),
         ("runtime_unlock_activation_window_granted_count={0}" -f $fallbackRuntimeUnlockSeparationProof.ActivationWindowGrantedCount),
         ("runtime_unlock_probe_failed_fallback_resumed_count={0}" -f $fallbackRuntimeUnlockSeparationProof.ProbeFailedFallbackResumedCount),
         ("runtime_unlock_probe_started_without_activation_window_count={0}" -f $fallbackRuntimeUnlockSeparationProof.ProbeStartedWithoutActivationWindowCount),
         ("runtime_unlock_regular_nkn_probe_rejected_count={0}" -f $fallbackRuntimeUnlockSeparationProof.RegularNknProbeRejectedCount),
         ("runtime_unlock_fallback_unavailable_mark_count={0}" -f $fallbackRuntimeUnlockSeparationProof.FallbackUnavailableMarkCount),
+        ("runtime_unlock_fallback_unavailable_suppressed_count={0}" -f $fallbackRuntimeUnlockSeparationProof.FallbackUnavailableSuppressedCount),
         ("runtime_unlock_transaction_commit_pending_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionCommitPendingCount),
         ("runtime_unlock_transaction_committed_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionCommittedCount),
         ("runtime_unlock_transaction_failed_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionFailedCount),
@@ -5497,6 +5561,12 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_regular_v4_activation_window_started_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4ActivationWindowStartedCount),
         ("runtime_unlock_regular_v4_activation_window_peer_visible_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4ActivationWindowPeerVisibleCount),
         ("runtime_unlock_regular_v4_activation_window_failed_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4ActivationWindowFailedCount),
+        ("runtime_unlock_regular_v4_peer_visible_window_started_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4PeerVisibleWindowStartedCount),
+        ("runtime_unlock_regular_v4_peer_visible_window_delivery_started_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4PeerVisibleWindowDeliveryStartedCount),
+        ("runtime_unlock_regular_v4_peer_visible_window_proof_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4PeerVisibleWindowProofCount),
+        ("runtime_unlock_regular_v4_peer_visible_window_delivery_failed_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4PeerVisibleWindowDeliveryFailedCount),
+        ("runtime_unlock_regular_v4_peer_visible_window_late_proof_ignored_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4PeerVisibleWindowLateProofIgnoredCount),
+        ("runtime_unlock_regular_v4_peer_visible_window_failed_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4PeerVisibleWindowFailedCount),
         ("regular_v4_repair_spam_coalesced_count={0}" -f $recoveryClassification.RegularV4RepairSpamCoalescedCount),
         ("post_tuna_fallback_control_plane_pressure_marked_count={0}" -f $recoveryClassification.PostTunaFallbackControlPlanePressureMarkedCount),
         ("post_tuna_fallback_control_plane_pressure_cleared_count={0}" -f $recoveryClassification.PostTunaFallbackControlPlanePressureClearedCount),

@@ -60,22 +60,6 @@ function Wait-Until {
     throw $OnTimeoutMessage
 }
 
-function Get-WindowElementByProcessId {
-    param([int]$ProcessId)
-
-    $root = [System.Windows.Automation.AutomationElement]::RootElement
-    $procProp = [System.Windows.Automation.AutomationElement]::ProcessIdProperty
-    $cond = New-Object System.Windows.Automation.PropertyCondition($procProp, $ProcessId)
-    $windows = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $cond)
-    foreach ($window in @($windows)) {
-        if ([string]::Equals($window.Current.Name, 'nLink', [System.StringComparison]::Ordinal)) {
-            return $window
-        }
-    }
-
-    return $null
-}
-
 function Get-TopLevelWindowElementsByProcessId {
     param([int]$ProcessId)
 
@@ -88,6 +72,120 @@ function Get-TopLevelWindowElementsByProcessId {
     catch {
         return @()
     }
+}
+
+function Get-NLinkMainWindowCandidateRecord {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [int64]$PreferredNativeHandle = 0
+    )
+
+    $name = ''
+    $className = ''
+    $automationId = ''
+    $nativeHandle = 0L
+    $controlType = '(none)'
+    $isOffscreen = $true
+    try {
+        $name = [string]$Window.Current.Name
+        $className = [string]$Window.Current.ClassName
+        $automationId = [string]$Window.Current.AutomationId
+        $nativeHandle = [int64]$Window.Current.NativeWindowHandle
+        $controlType = if ($Window.Current.ControlType) { [string]$Window.Current.ControlType.ProgrammaticName } else { '(none)' }
+        $isOffscreen = [bool]$Window.Current.IsOffscreen
+    }
+    catch {
+        return [pscustomobject]@{
+            Window = $Window
+            Accepted = $false
+            Name = '(unavailable)'
+            ClassName = '(unavailable)'
+            AutomationId = '(unavailable)'
+            NativeWindowHandle = 0L
+            ControlType = '(unavailable)'
+            IsOffscreen = $true
+            RejectedReason = 'uia_current_unavailable'
+            PreferredHandleMatch = $false
+        }
+    }
+
+    $reasons = New-Object System.Collections.Generic.List[string]
+    if (-not [string]::Equals($name, 'nLink', [System.StringComparison]::Ordinal)) {
+        $reasons.Add('name_not_nlink') | Out-Null
+    }
+
+    if (-not [string]::Equals($className, 'MainWindow', [System.StringComparison]::Ordinal)) {
+        $reasons.Add('class_not_mainwindow') | Out-Null
+    }
+
+    if (-not [string]::Equals($controlType, 'ControlType.Window', [System.StringComparison]::Ordinal)) {
+        $reasons.Add('control_type_not_window') | Out-Null
+    }
+
+    if ($nativeHandle -eq 0) {
+        $reasons.Add('zero_native_handle') | Out-Null
+    }
+
+    if ($isOffscreen) {
+        $reasons.Add('offscreen') | Out-Null
+    }
+
+    return [pscustomobject]@{
+        Window = $Window
+        Accepted = ($reasons.Count -eq 0)
+        Name = $name
+        ClassName = $className
+        AutomationId = $automationId
+        NativeWindowHandle = $nativeHandle
+        ControlType = $controlType
+        IsOffscreen = $isOffscreen
+        RejectedReason = if ($reasons.Count -eq 0) { '(accepted)' } else { ($reasons -join ',') }
+        PreferredHandleMatch = ($PreferredNativeHandle -ne 0 -and $nativeHandle -eq $PreferredNativeHandle)
+    }
+}
+
+function Get-NLinkMainWindowCandidateRecordsByProcessId {
+    param(
+        [int]$ProcessId,
+        [int64]$PreferredNativeHandle = 0
+    )
+
+    $records = New-Object System.Collections.Generic.List[object]
+    foreach ($window in @(Get-TopLevelWindowElementsByProcessId -ProcessId $ProcessId)) {
+        $records.Add((Get-NLinkMainWindowCandidateRecord -Window $window -PreferredNativeHandle $PreferredNativeHandle)) | Out-Null
+    }
+
+    return @($records.ToArray())
+}
+
+function Get-NLinkMainWindowElementByProcessId {
+    param(
+        [int]$ProcessId,
+        [int64]$PreferredNativeHandle = 0
+    )
+
+    $records = @(Get-NLinkMainWindowCandidateRecordsByProcessId -ProcessId $ProcessId -PreferredNativeHandle $PreferredNativeHandle)
+    if ($PreferredNativeHandle -ne 0) {
+        foreach ($record in @($records)) {
+            if ($record.Accepted -and $record.NativeWindowHandle -eq $PreferredNativeHandle) {
+                return $record.Window
+            }
+        }
+    }
+
+    foreach ($record in @($records)) {
+        if ($record.Accepted) {
+            return $record.Window
+        }
+    }
+
+    return $null
+}
+
+function Get-WindowElementByProcessId {
+    param([int]$ProcessId)
+
+    return Get-NLinkMainWindowElementByProcessId -ProcessId $ProcessId
 }
 
 function Get-StartupWindowTimeoutMs {
@@ -128,25 +226,26 @@ function Get-ProcessSnapshot {
 function Get-TopLevelWindowInventoryText {
     param([Parameter(Mandatory = $true)]$Process)
 
-    $windows = @(Get-TopLevelWindowElementsByProcessId -ProcessId $Process.Id)
-    if ($windows.Count -eq 0) {
+    $records = @(Get-NLinkMainWindowCandidateRecordsByProcessId -ProcessId $Process.Id)
+    if ($records.Count -eq 0) {
         return "top_level_windows: (none)"
     }
 
     $lines = New-Object System.Collections.Generic.List[string]
     $index = 0
-    foreach ($window in $windows) {
+    foreach ($record in $records) {
         $index++
-        $controlType = if ($window.Current.ControlType) { $window.Current.ControlType.ProgrammaticName } else { '(none)' }
         $lines.Add(
-            ("[{0}] Name='{1}' Class='{2}' AutomationId='{3}' NativeWindowHandle='{4}' ControlType='{5}' IsOffscreen='{6}'" -f
+            ("[{0}] selected='{1}' rejected_reason='{2}' Name='{3}' Class='{4}' AutomationId='{5}' NativeWindowHandle='{6}' ControlType='{7}' IsOffscreen='{8}'" -f
                 $index,
-                $window.Current.Name,
-                $window.Current.ClassName,
-                $window.Current.AutomationId,
-                $window.Current.NativeWindowHandle,
-                $controlType,
-                $window.Current.IsOffscreen))
+                ($(if ($record.Accepted) { 1 } else { 0 })),
+                $record.RejectedReason,
+                $record.Name,
+                $record.ClassName,
+                $record.AutomationId,
+                $record.NativeWindowHandle,
+                $record.ControlType,
+                $record.IsOffscreen))
     }
 
     return ($lines -join [Environment]::NewLine)
@@ -915,6 +1014,26 @@ function Write-ProcessStartupArtifacts {
     )
 
     $snapshot = Get-ProcessSnapshot -Process $Process
+    $selectedWindow = Get-NLinkMainWindowElementByProcessId -ProcessId $Process.Id
+    $selectedHandle = 0L
+    $selectedClass = ''
+    $selectedName = ''
+    $selectedControlType = ''
+    if ($selectedWindow) {
+        try {
+            $selectedHandle = [int64]$selectedWindow.Current.NativeWindowHandle
+            $selectedClass = [string]$selectedWindow.Current.ClassName
+            $selectedName = [string]$selectedWindow.Current.Name
+            $selectedControlType = if ($selectedWindow.Current.ControlType) { [string]$selectedWindow.Current.ControlType.ProgrammaticName } else { '(none)' }
+        }
+        catch {
+            $selectedHandle = 0L
+            $selectedClass = '(unavailable)'
+            $selectedName = '(unavailable)'
+            $selectedControlType = '(unavailable)'
+        }
+    }
+
     $safeLabel = if ([string]::IsNullOrWhiteSpace($Label)) { 'process' } else { $Label.Trim().ToLowerInvariant() }
     $snapshotPath = Join-Path $ArtifactDir ("{0}-process-snapshot.txt" -f $safeLabel)
     $uiaPath = Join-Path $ArtifactDir ("{0}-top-level-windows.txt" -f $safeLabel)
@@ -926,6 +1045,10 @@ function Write-ProcessStartupArtifacts {
         ("is_running: {0}" -f $snapshot.IsRunning),
         ("main_window_handle: {0}" -f $snapshot.MainWindowHandle),
         ("main_window_title: {0}" -f $snapshot.MainWindowTitle),
+        ("nlink_main_window_handle: {0}" -f $selectedHandle),
+        ("nlink_main_window_name: {0}" -f $selectedName),
+        ("nlink_main_window_class: {0}" -f $selectedClass),
+        ("nlink_main_window_control_type: {0}" -f $selectedControlType),
         ("thread_count: {0}" -f $snapshot.ThreadCount),
         ("handle_count: {0}" -f $snapshot.HandleCount),
         ("working_set_mb: {0}" -f $snapshot.WorkingSetMb),
@@ -2651,11 +2774,13 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $phase = 'live_toggle_window'
         $reason = 'transfer_completed_before_same_transfer_reactivation'
     }
-    elseif ($ErrorMessage.IndexOf('Timed out waiting for helpee invite to become ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+    elseif ($ErrorMessage.IndexOf('Timed out waiting for helpee invite to become ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $ErrorMessage.IndexOf('Timed out waiting for helpee request flow to become ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         $phase = 'preactivation_readiness'
         $reason = if ($bridgeBootstrapNotReady) { 'nkn_bridge_bootstrap_not_ready' } else { 'helpee_invite_readiness_timeout' }
     }
-    elseif ($ErrorMessage.IndexOf('Helpee reached Connection failed before invite became ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+    elseif ($ErrorMessage.IndexOf('Helpee reached Connection failed before invite became ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $ErrorMessage.IndexOf('Helpee reached Connection failed before request flow became ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         $phase = 'preactivation_readiness'
         $reason = 'nkn_bridge_bootstrap_not_ready'
     }
@@ -6483,6 +6608,186 @@ function Write-HelpeeInviteReadinessDiagnosticArtifact {
     }
 }
 
+function Get-HelperIdentityClipboardCandidateKind {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return 'empty'
+    }
+
+    $trimmed = $Value.Trim()
+    if ($trimmed.StartsWith('nlinkh1.', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return 'helper_bootstrap_payload'
+    }
+
+    if ($trimmed.StartsWith('nhid1-', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return 'helper_identity_token'
+    }
+
+    if (Test-HelperIdentityValueUsable -Value $trimmed) {
+        return 'peer_address_like'
+    }
+
+    return 'invalid'
+}
+
+function Test-HelperIdentityClipboardCandidateUsable {
+    param([string]$Value)
+
+    $kind = Get-HelperIdentityClipboardCandidateKind -Value $Value
+    return $kind -eq 'helper_bootstrap_payload' -or
+        $kind -eq 'helper_identity_token' -or
+        $kind -eq 'peer_address_like'
+}
+
+function Get-HelperIdentityBootstrapDiagnostic {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [string]$Candidate = ''
+    )
+
+    $headerStatus = '(unavailable)'
+    $bootstrapTextKind = '(missing)'
+    $bootstrapTextLength = '(missing)'
+    $copyEnabled = '(missing)'
+    $regenerateEnabled = '(missing)'
+    $shareEnabled = '(missing)'
+    $windowProcessId = '(unavailable)'
+    $windowNativeHandle = '(unavailable)'
+    $windowClassName = '(unavailable)'
+    $windowControlType = '(unavailable)'
+    $candidateKind = Get-HelperIdentityClipboardCandidateKind -Value $Candidate
+    $candidateLength = if ([string]::IsNullOrWhiteSpace($Candidate)) { 0 } else { $Candidate.Trim().Length }
+
+    try {
+        $windowProcessId = [string]$Window.Current.ProcessId
+        $windowNativeHandle = [string]$Window.Current.NativeWindowHandle
+        $windowClassName = [string]$Window.Current.ClassName
+        $windowControlType = if ($Window.Current.ControlType) { [string]$Window.Current.ControlType.ProgrammaticName } else { '(none)' }
+    } catch {}
+
+    try {
+        $headerStatus = Format-ConnectionDiagnosticText -Text (Get-SessionHeaderStatusValue -Window $Window)
+    } catch {}
+
+    try {
+        $bootstrapText = Get-ElementValueSafe -Element (Find-VisibleByAutomationId -Root $Window -AutomationId 'Helper.HelperIdentityBootstrapTextBox')
+        $bootstrapTextKind = Get-HelperIdentityClipboardCandidateKind -Value $bootstrapText
+        $bootstrapTextLength = if ([string]::IsNullOrWhiteSpace($bootstrapText)) { 0 } else { $bootstrapText.Trim().Length }
+    } catch {}
+
+    try {
+        $copy = Find-VisibleByAutomationId -Root $Window -AutomationId 'Helper.CopyHelperIdentity'
+        if ($copy) {
+            $copyEnabled = if ($copy.Current.IsEnabled) { '1' } else { '0' }
+        }
+    } catch {}
+
+    try {
+        $regenerate = Find-VisibleByAutomationId -Root $Window -AutomationId 'Helper.RegenerateHelperIdentity'
+        if ($regenerate) {
+            $regenerateEnabled = if ($regenerate.Current.IsEnabled) { '1' } else { '0' }
+        }
+    } catch {}
+
+    try {
+        $share = Find-VisibleByAutomationId -Root $Window -AutomationId 'Helper.ShareHelperIdentity'
+        if ($share) {
+            $shareEnabled = if ($share.Current.IsEnabled) { '1' } else { '0' }
+        }
+    } catch {}
+
+    return ("header_status='{0}'; bootstrap_text_kind={1}; bootstrap_text_length={2}; copy_enabled={3}; regenerate_enabled={4}; share_enabled={5}; clipboard_candidate_kind={6}; clipboard_candidate_length={7}; window_process_id={8}; window_native_handle={9}; window_class={10}; window_control_type={11}" -f `
+        $headerStatus,
+        $bootstrapTextKind,
+        $bootstrapTextLength,
+        $copyEnabled,
+        $regenerateEnabled,
+        $shareEnabled,
+        $candidateKind,
+        $candidateLength,
+        $windowProcessId,
+        $windowNativeHandle,
+        $windowClassName,
+        $windowControlType)
+}
+
+function Write-HelperIdentityBootstrapDiagnosticArtifact {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [Parameter(Mandatory = $true)][string]$Reason,
+        [string]$Candidate = ''
+    )
+
+    $artifactRoot = [string]$env:NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR
+    if ([string]::IsNullOrWhiteSpace($artifactRoot)) {
+        return
+    }
+
+    try {
+        $diagnosticDir = Join-Path ([System.IO.Path]::GetFullPath($artifactRoot)) 'diagnostics'
+        New-Item -ItemType Directory -Force -Path $diagnosticDir | Out-Null
+        $timestamp = (Get-Date).ToString('yyyyMMdd-HHmmss-fff')
+        $path = Join-Path $diagnosticDir "helper-identity-bootstrap-$timestamp.txt"
+        $lines = New-Object System.Collections.Generic.List[string]
+        $lines.Add("reason=$Reason") | Out-Null
+        $lines.Add((Get-HelperIdentityBootstrapDiagnostic -Window $Window -Candidate $Candidate)) | Out-Null
+        $lines.Add('') | Out-Null
+        $lines.Add('process_output_tail:') | Out-Null
+        foreach ($line in @(Read-GuiSmokeProcessOutputLinesSnapshot | Select-Object -Last 120)) {
+            $lines.Add([string]$line) | Out-Null
+        }
+
+        [System.IO.File]::WriteAllText($path, ($lines -join [Environment]::NewLine), [System.Text.Encoding]::UTF8)
+    }
+    catch {
+        # Best-effort diagnostics.
+    }
+}
+
+function Wait-HelperIdentityBootstrapReadyForClipboard {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$HelperWindow,
+        [int]$TimeoutMs = 45000
+    )
+
+    return Wait-Until -TimeoutMs $TimeoutMs -PollMs 200 -OnTimeoutMessage 'Timed out waiting for current helper identity bootstrap UI before clipboard fallback.' -Condition {
+        if (Test-ConnectionFailedSurface -Window $HelperWindow) {
+            throw ("Helper reached Connection failed before helper identity bootstrap became current. {0}" -f (Get-HelperIdentityBootstrapDiagnostic -Window $HelperWindow))
+        }
+
+        $headerStatus = Get-SessionHeaderStatusValue -Window $HelperWindow
+
+        $bootstrap = Find-VisibleByAutomationId -Root $HelperWindow -AutomationId 'Helper.HelperIdentityBootstrapTextBox'
+        $copy = Find-VisibleByAutomationId -Root $HelperWindow -AutomationId 'Helper.CopyHelperIdentity'
+        $regenerate = Find-VisibleByAutomationId -Root $HelperWindow -AutomationId 'Helper.RegenerateHelperIdentity'
+        if (-not $bootstrap -or -not $copy) {
+            return $null
+        }
+
+        $candidate = (Get-ElementValueSafe -Element $bootstrap).Trim()
+        if (-not (Test-HelperIdentityClipboardCandidateUsable -Value $candidate)) {
+            return $null
+        }
+
+        if (-not $copy.Current.IsEnabled) {
+            return $null
+        }
+
+        $regenerateEnabled = $false
+        if ($regenerate) {
+            try { $regenerateEnabled = [bool]$regenerate.Current.IsEnabled } catch { $regenerateEnabled = $false }
+        }
+
+        return [pscustomobject]@{
+            Candidate = $candidate
+            HeaderStatus = $headerStatus
+            PendingStatus = ($headerStatus.StartsWith('Connecting', [System.StringComparison]::OrdinalIgnoreCase) -or -not $regenerateEnabled)
+            RegenerateEnabled = $regenerateEnabled
+        }
+    }
+}
+
 function Format-ConnectionDiagnosticText {
     param([AllowNull()][string]$Text)
 
@@ -6843,6 +7148,7 @@ function Ensure-HelperReadyForInviteEntry {
     $timeoutMs = Get-TransportAwareTimeoutMs -DefaultMs 10000 -NknMs 30000
     for ($attempt = 1; $attempt -le $attempts; $attempt++) {
         try {
+            [void](Refresh-ScenarioRoleWindow -Context $Context -RoleName 'helper' -Reason 'invite_entry')
             return Wait-HelperCodeInputEnabled -Window $Context.HelperWindow -TimeoutMs $timeoutMs
         }
         catch {
@@ -6880,6 +7186,27 @@ function Assert-ProcessStillRunning {
 function Copy-HelperIdentityAndReadClipboard {
     param([Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$HelperWindow)
 
+    $expectedClipboardValue = $null
+    if (Get-IsNknTransport) {
+        try {
+            $ready = Wait-HelperIdentityBootstrapReadyForClipboard -HelperWindow $HelperWindow -TimeoutMs (Get-TransportAwareTimeoutMs -DefaultMs 10000 -NknMs 45000)
+            if ($ready -and -not [string]::IsNullOrWhiteSpace([string]$ready.Candidate)) {
+                $expectedClipboardValue = ([string]$ready.Candidate).Trim()
+                if ($ready.PendingStatus) {
+                    Write-Host ("[GUI Smoke] event=helper_identity_clipboard_fallback_ready_pending_status; header_status='{0}'; regenerate_enabled={1}; candidate_kind={2}; candidate_length={3}" -f `
+                        (Format-ConnectionDiagnosticText -Text ([string]$ready.HeaderStatus)),
+                        ($(if ($ready.RegenerateEnabled) { 1 } else { 0 })),
+                        (Get-HelperIdentityClipboardCandidateKind -Value $expectedClipboardValue),
+                        $expectedClipboardValue.Length) -ForegroundColor DarkGray
+                }
+            }
+        }
+        catch {
+            Write-HelperIdentityBootstrapDiagnosticArtifact -Window $HelperWindow -Reason 'helper_identity_bootstrap_not_current_before_clipboard'
+            throw
+        }
+    }
+
     try { Set-Clipboard -Value '' } catch {}
 
     $copyBtn = Wait-Until -TimeoutMs (Get-TransportAwareTimeoutMs -DefaultMs 10000 -NknMs 45000) -PollMs 200 -OnTimeoutMessage 'Timed out waiting for Helper.CopyHelperIdentity.' -Condition {
@@ -6890,12 +7217,51 @@ function Copy-HelperIdentityAndReadClipboard {
 
     Click-Element $copyBtn
 
-    $raw = Wait-Until -TimeoutMs 5000 -PollMs 150 -OnTimeoutMessage 'Timed out waiting for helper identity on clipboard.' -Condition {
-        $text = [string](Get-ClipboardTextSafe)
-        if (-not [string]::IsNullOrWhiteSpace($text)) { return $text.Trim() }
-        return $null
+    try {
+        $raw = Wait-Until -TimeoutMs 5000 -PollMs 150 -OnTimeoutMessage 'Timed out waiting for current helper identity on clipboard.' -Condition {
+            $text = [string](Get-ClipboardTextSafe)
+            if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+
+            $text = $text.Trim()
+            if (-not (Test-HelperIdentityClipboardCandidateUsable -Value $text)) {
+                return $null
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($expectedClipboardValue) -and
+                -not [string]::Equals($text, $expectedClipboardValue, [System.StringComparison]::Ordinal)) {
+                return $null
+            }
+
+            return $text
+        }
+    }
+    catch {
+        $candidate = [string](Get-ClipboardTextSafe)
+        Write-HelperIdentityBootstrapDiagnosticArtifact -Window $HelperWindow -Reason 'helper_identity_clipboard_copy_not_current' -Candidate $candidate
+        throw
     }
 
+    $raw = ([string]$raw).Trim()
+    if (-not (Test-HelperIdentityClipboardCandidateUsable -Value $raw)) {
+        Write-HelperIdentityBootstrapDiagnosticArtifact -Window $HelperWindow -Reason 'helper_identity_clipboard_copy_invalid' -Candidate $raw
+        throw "Helper identity clipboard copy produced unusable text. $(Get-HelperIdentityBootstrapDiagnostic -Window $HelperWindow -Candidate $raw)"
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($expectedClipboardValue) -and
+        -not [string]::Equals($raw, $expectedClipboardValue, [System.StringComparison]::Ordinal)) {
+        Write-Host ("[GUI Smoke] event=helper_identity_clipboard_stale; expected_kind={0}; expected_length={1}; clipboard_kind={2}; clipboard_length={3}" -f `
+            (Get-HelperIdentityClipboardCandidateKind -Value $expectedClipboardValue),
+            $expectedClipboardValue.Length,
+            (Get-HelperIdentityClipboardCandidateKind -Value $raw),
+            $raw.Length) -ForegroundColor Yellow
+        Write-HelperIdentityBootstrapDiagnosticArtifact -Window $HelperWindow -Reason 'helper_identity_clipboard_copy_stale' -Candidate $raw
+        throw "Helper identity clipboard copy did not match the current helper bootstrap text. $(Get-HelperIdentityBootstrapDiagnostic -Window $HelperWindow -Candidate $raw)"
+    }
+
+    Write-Host ("[GUI Smoke] event=helper_identity_clipboard_current_match; candidate_kind={0}; candidate_length={1}; window_handle={2}" -f `
+        (Get-HelperIdentityClipboardCandidateKind -Value $raw),
+        $raw.Length,
+        (Get-AutomationNativeWindowHandleSafe -Window $HelperWindow)) -ForegroundColor DarkGray
     return [string]$raw
 }
 
@@ -6971,6 +7337,7 @@ function Copy-HelperIdentityWithRecovery {
     $attempts = if (Get-IsNknTransport) { 3 } else { 1 }
     for ($attempt = 1; $attempt -le $attempts; $attempt++) {
         try {
+            [void](Refresh-ScenarioRoleWindow -Context $Context -RoleName 'helper' -Reason 'copy_helper_identity')
             $copyButton = Find-VisibleByAutomationId -Root $Context.HelperWindow -AutomationId 'Helper.CopyHelperIdentity'
             if (-not (Get-IsNknTransport)) {
                 if ($copyButton -and $copyButton.Current.IsEnabled) {
@@ -6985,10 +7352,11 @@ function Copy-HelperIdentityWithRecovery {
             }
             catch {
                 if ($copyButton -and $copyButton.Current.IsEnabled) {
-                    Write-Host "[GUI Smoke] Helper identity log sync unavailable; falling back to helper clipboard copy for this run." -ForegroundColor DarkGray
+                    Write-Host "[GUI Smoke] Helper identity log sync unavailable; waiting for current helper bootstrap UI before clipboard fallback." -ForegroundColor DarkGray
                     return Copy-HelperIdentityAndReadClipboard -HelperWindow $Context.HelperWindow
                 }
 
+                Write-HelperIdentityBootstrapDiagnosticArtifact -Window $Context.HelperWindow -Reason 'helper_identity_log_sync_unavailable_no_clipboard_fallback'
                 throw
             }
         }
@@ -7046,9 +7414,14 @@ function Enter-HelpeeHelperIdentityAndRequestHelp {
     Submit-TextInputWithEnter -Element $input
 
     try {
-        [void](Wait-Until -TimeoutMs (Get-TransportAwareTimeoutMs -DefaultMs 10000 -NknMs 60000) -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helpee invite to become ready.' -Condition {
+        [void](Wait-Until -TimeoutMs (Get-TransportAwareTimeoutMs -DefaultMs 10000 -NknMs 60000) -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helpee request flow to become ready.' -Condition {
             if (Test-ConnectionFailedSurface -Window $HelpeeWindow) {
-                throw ("Helpee reached Connection failed before invite became ready. {0}" -f (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow))
+                throw ("Helpee reached Connection failed before request flow became ready. {0}" -f (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow))
+            }
+
+            $request = Find-VisibleByAutomationId -Root $HelpeeWindow -AutomationId 'Helpee.RequestHelp'
+            if ($request -and $request.Current.IsEnabled -and -not $request.Current.IsOffscreen) {
+                return $true
             }
 
             $status = Find-VisibleByAutomationId -Root $HelpeeWindow -AutomationId 'Helpee.InviteStatus'
@@ -7115,6 +7488,7 @@ function Wait-HelperAcceptRequestOrExit {
     )
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    [void](Refresh-ScenarioRoleWindow -Context $Context -RoleName 'helper' -Reason 'accept_request')
     while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
         Assert-ProcessStillRunning -Process $Context.HelperProc -Label 'Helper'
         Assert-ProcessStillRunning -Process $Context.HelpeeProc -Label 'Helpee'
@@ -7417,6 +7791,135 @@ function Invoke-Scenario {
     Write-Host "[GUI Smoke][$Name] PASS ($([math]::Round($sw.Elapsed.TotalSeconds,1))s)" -ForegroundColor Green
 }
 
+function Get-AutomationNativeWindowHandleSafe {
+    param([AllowNull()][System.Windows.Automation.AutomationElement]$Window)
+
+    if ($null -eq $Window) { return 0L }
+    try { return [int64]$Window.Current.NativeWindowHandle } catch { return 0L }
+}
+
+function Set-ScenarioRoleWindowIdentity {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][ValidateSet('helper', 'helpee')][string]$RoleName,
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window
+    )
+
+    $handle = Get-AutomationNativeWindowHandleSafe -Window $Window
+    if ($RoleName -eq 'helper') {
+        $Context.HelperWindow = $Window
+        $Context.HelperWindowNativeHandle = $handle
+        $Context.HelperWindowProcessId = if ($Context.HelperProc) { [int]$Context.HelperProc.Id } else { 0 }
+    }
+    else {
+        $Context.HelpeeWindow = $Window
+        $Context.HelpeeWindowNativeHandle = $handle
+        $Context.HelpeeWindowProcessId = if ($Context.HelpeeProc) { [int]$Context.HelpeeProc.Id } else { 0 }
+    }
+}
+
+function Clear-ScenarioRoleWindowIdentity {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][ValidateSet('helper', 'helpee')][string]$RoleName
+    )
+
+    if ($RoleName -eq 'helper') {
+        $Context.HelperWindow = $null
+        $Context.HelperWindowNativeHandle = 0L
+        $Context.HelperWindowProcessId = 0
+    }
+    else {
+        $Context.HelpeeWindow = $null
+        $Context.HelpeeWindowNativeHandle = 0L
+        $Context.HelpeeWindowProcessId = 0
+    }
+}
+
+function Remove-ScenarioTrackedProcess {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [AllowNull()]$Process
+    )
+
+    if ($null -eq $Process) { return }
+    try {
+        for ($index = $Context.Processes.Count - 1; $index -ge 0; $index--) {
+            $candidate = $Context.Processes[$index]
+            if ($candidate -and [int]$candidate.Id -eq [int]$Process.Id) {
+                $Context.Processes.RemoveAt($index)
+            }
+        }
+    }
+    catch {
+        # Best-effort tracked-process cleanup.
+    }
+}
+
+function Assert-ScenarioRoleProcessRetired {
+    param(
+        [AllowNull()]$Process,
+        [Parameter(Mandatory = $true)][ValidateSet('helper', 'helpee')][string]$RoleName
+    )
+
+    if ($null -eq $Process) { return }
+    $live = Get-Process -Id $Process.Id -ErrorAction SilentlyContinue
+    if ($live -and -not $live.HasExited) {
+        throw ("{0}_restart_cleanup_failed: previous {0} process still alive after cleanup. pid={1}" -f $RoleName, $Process.Id)
+    }
+}
+
+function Refresh-ScenarioRoleWindow {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][ValidateSet('helper', 'helpee')][string]$RoleName,
+        [string]$Reason = 'unspecified'
+    )
+
+    $process = if ($RoleName -eq 'helper') { $Context.HelperProc } else { $Context.HelpeeProc }
+    if ($null -eq $process) {
+        throw ("{0}_window_ownership_mismatch: missing process before {1}" -f $RoleName, $Reason)
+    }
+
+    Assert-ProcessStillRunning -Process $process -Label $RoleName
+    $oldHandle = if ($RoleName -eq 'helper') { [int64]$Context.HelperWindowNativeHandle } else { [int64]$Context.HelpeeWindowNativeHandle }
+    $ownershipEventName = if ($RoleName -eq 'helper' -and ([string]$Reason).IndexOf('helper_identity', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        'helper_identity_window_ownership_mismatch'
+    }
+    else {
+        ("{0}_window_ownership_mismatch" -f $RoleName)
+    }
+    $window = Get-NLinkMainWindowElementByProcessId -ProcessId $process.Id -PreferredNativeHandle $oldHandle
+    if (-not $window) {
+        $artifactDir = [string]$env:NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR
+        if (-not [string]::IsNullOrWhiteSpace($artifactDir)) {
+            try {
+                $diagnosticDir = Join-Path ([System.IO.Path]::GetFullPath($artifactDir)) 'diagnostics'
+                New-Item -ItemType Directory -Force -Path $diagnosticDir | Out-Null
+                $path = Join-Path $diagnosticDir ("{0}-window-ownership-mismatch-{1}.txt" -f $RoleName, ((Get-Date).ToString('yyyyMMdd-HHmmss-fff')))
+                @(
+                    ("event={0}" -f $ownershipEventName),
+                    ("reason={0}" -f $Reason),
+                    ("process_id={0}" -f $process.Id),
+                    ("expected_native_handle={0}" -f $oldHandle),
+                    (Get-TopLevelWindowInventoryText -Process $process)
+                ) | Set-Content -LiteralPath $path -Encoding UTF8
+            }
+            catch {}
+        }
+
+        throw ("{0}: no current nLink MainWindow for pid={1}; expected_handle={2}; reason={3}" -f $ownershipEventName, $process.Id, $oldHandle, $Reason)
+    }
+
+    $newHandle = Get-AutomationNativeWindowHandleSafe -Window $window
+    if ($oldHandle -ne 0 -and $newHandle -ne 0 -and $newHandle -ne $oldHandle) {
+        Write-Host ("[GUI Smoke] event={0}; reason={1}; process_id={2}; old_handle={3}; new_handle={4}; action=refreshed_current_mainwindow" -f $ownershipEventName, $Reason, $process.Id, $oldHandle, $newHandle) -ForegroundColor Yellow
+    }
+
+    Set-ScenarioRoleWindowIdentity -Context $Context -RoleName $RoleName -Window $window
+    return $window
+}
+
 function New-ScenarioContext {
     param([Parameter(Mandatory = $true)][string]$ExePath)
     return [pscustomobject]@{
@@ -7426,6 +7929,12 @@ function New-ScenarioContext {
         HelperProc = $null
         HelpeeWindow = $null
         HelperWindow = $null
+        HelpeeWindowNativeHandle = 0L
+        HelpeeWindowProcessId = 0
+        HelpeeLaunchGeneration = 0
+        HelperWindowNativeHandle = 0L
+        HelperWindowProcessId = 0
+        HelperLaunchGeneration = 0
         HelperLogBookmark = 0
         HelperRunId = ''
         HelperListenerGeneration = -1
@@ -7444,6 +7953,10 @@ function Reset-ScenarioContext {
     $Context.HelperProc = $null
     $Context.HelpeeWindow = $null
     $Context.HelperWindow = $null
+    $Context.HelpeeWindowNativeHandle = 0L
+    $Context.HelpeeWindowProcessId = 0
+    $Context.HelperWindowNativeHandle = 0L
+    $Context.HelperWindowProcessId = 0
     $Context.HelperLogBookmark = 0
     $Context.HelperRunId = ''
     $Context.HelperListenerGeneration = -1
@@ -7453,9 +7966,10 @@ function Reset-ScenarioContext {
 
 function Start-HelpeeFlow {
     param([Parameter(Mandatory = $true)]$Context)
+    $Context.HelpeeLaunchGeneration = [int]$Context.HelpeeLaunchGeneration + 1
     $Context.HelpeeProc = Start-AppInstance -ExePath $Context.ExePath -RoleName 'helpee'
     [void]$Context.Processes.Add($Context.HelpeeProc)
-    $Context.HelpeeWindow = Wait-Window -Process $Context.HelpeeProc -RoleName 'helpee' -TimeoutMs (Get-StartupWindowTimeoutMs)
+    Set-ScenarioRoleWindowIdentity -Context $Context -RoleName 'helpee' -Window (Wait-Window -Process $Context.HelpeeProc -RoleName 'helpee' -TimeoutMs (Get-StartupWindowTimeoutMs))
     Click-HomeButton -Window $Context.HelpeeWindow -Text 'I need help'
     if (Try-ClickRoleButtonIfPresent -Window $Context.HelpeeWindow -RoleButtonText 'I need help') {
         Write-Host "[GUI Smoke] Role page detected (helpee); selected 'I need help'." -ForegroundColor DarkGray
@@ -7464,6 +7978,7 @@ function Start-HelpeeFlow {
 
 function Start-HelperFlow {
     param([Parameter(Mandatory = $true)]$Context)
+    $Context.HelperLaunchGeneration = [int]$Context.HelperLaunchGeneration + 1
     $Context.HelperLogBookmark = Get-AppLogBookmark
     $Context.HelperRunId = ''
     $Context.HelperListenerGeneration = -1
@@ -7476,7 +7991,7 @@ function Start-HelperFlow {
         $Context.HelperStartedUtcMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     }
     [void]$Context.Processes.Add($Context.HelperProc)
-    $Context.HelperWindow = Wait-Window -Process $Context.HelperProc -RoleName 'helper' -TimeoutMs (Get-StartupWindowTimeoutMs)
+    Set-ScenarioRoleWindowIdentity -Context $Context -RoleName 'helper' -Window (Wait-Window -Process $Context.HelperProc -RoleName 'helper' -TimeoutMs (Get-StartupWindowTimeoutMs))
     Click-HomeButton -Window $Context.HelperWindow -Text 'I want to help someone'
     if (Try-ClickRoleButtonIfPresent -Window $Context.HelperWindow -RoleButtonText 'I want to help someone') {
         Write-Host "[GUI Smoke] Role page detected (helper); selected 'I want to help someone'." -ForegroundColor DarkGray
@@ -7486,24 +8001,30 @@ function Start-HelperFlow {
 function Restart-HelpeeFlow {
     param([Parameter(Mandatory = $true)]$Context)
 
+    $oldProc = $Context.HelpeeProc
     if ($Context.HelpeeProc) {
         Cleanup-Processes -Processes @($Context.HelpeeProc) -ExePath $Context.ExePath
     }
+    Assert-ScenarioRoleProcessRetired -Process $oldProc -RoleName 'helpee'
+    Remove-ScenarioTrackedProcess -Context $Context -Process $oldProc
 
     $Context.HelpeeProc = $null
-    $Context.HelpeeWindow = $null
+    Clear-ScenarioRoleWindowIdentity -Context $Context -RoleName 'helpee'
     Start-HelpeeFlow -Context $Context
 }
 
 function Restart-HelperFlow {
     param([Parameter(Mandatory = $true)]$Context)
 
+    $oldProc = $Context.HelperProc
     if ($Context.HelperProc) {
         Cleanup-Processes -Processes @($Context.HelperProc) -ExePath $Context.ExePath
     }
+    Assert-ScenarioRoleProcessRetired -Process $oldProc -RoleName 'helper'
+    Remove-ScenarioTrackedProcess -Context $Context -Process $oldProc
 
     $Context.HelperProc = $null
-    $Context.HelperWindow = $null
+    Clear-ScenarioRoleWindowIdentity -Context $Context -RoleName 'helper'
     Start-HelperFlow -Context $Context
 }
 
@@ -8073,9 +8594,7 @@ function Run-ScenarioNknDirectConnect {
     }
 
     Start-HelpeeFlow -Context $Context
-    [void](Enter-HelpeeHelperIdentityAndRequestHelp -HelpeeWindow $Context.HelpeeWindow -HelperIdentity $helperIdentity)
-
-    $accept = Wait-HelperAcceptRequestOrExit -Context $Context -TimeoutMs 90000
+    $accept = Connect-HelperIdentityRequestFlow -Context $Context -HelperIdentity $helperIdentity
     Click-Element $accept
 
     $allow = Wait-HelpeeAllowOrExit -Context $Context -TimeoutMs 90000

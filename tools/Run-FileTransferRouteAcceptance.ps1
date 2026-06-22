@@ -516,6 +516,11 @@ function New-RouteAcceptanceRunResult {
         sessionLivenessTimeoutCount = 0
         bridgeLivenessStaleDeferralCount = 0
         bridgeLivenessTimeoutDuringValidRecoveryCount = 0
+        fallbackReceiverStateDeferredCount = 0
+        fallbackReceiverStateCoalescedCount = 0
+        fallbackReceiverStateChurnWarningCount = 0
+        fallbackReceiverStateChurnRawEventCount = 0
+        fallbackReceiverStateChurnEfficiencyClass = 'none'
         failures = New-Object System.Collections.Generic.List[string]
     }
 }
@@ -663,6 +668,49 @@ function Join-RouteAcceptanceTokenList {
     }
 
     return ($tokens -join ',')
+}
+
+function Get-RouteAcceptanceKindCount {
+    param(
+        [AllowNull()][string]$Value,
+        [Parameter(Mandatory = $true)][string]$Kind
+    )
+
+    foreach ($token in @(Split-RouteAcceptanceTokenList -Value $Value)) {
+        $text = [string]$token
+        $index = $text.LastIndexOf(':')
+        if ($index -le 0) {
+            continue
+        }
+
+        $tokenKind = $text.Substring(0, $index)
+        if (-not [string]::Equals($tokenKind, $Kind, [System.StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+
+        return ConvertTo-RouteAcceptanceInt -Value $text.Substring($index + 1)
+    }
+
+    return 0
+}
+
+function ConvertTo-RouteAcceptanceSummaryStringArray {
+    param(
+        [AllowNull()]$Values,
+        [int]$Limit = 64
+    )
+
+    $tokens = @($Values | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($tokens.Count -le $Limit) {
+        return @($tokens)
+    }
+
+    $truncated = New-Object System.Collections.Generic.List[string]
+    for ($i = 0; $i -lt $Limit; $i++) {
+        $truncated.Add($tokens[$i]) | Out-Null
+    }
+    $truncated.Add(("...truncated:{0}" -f ($tokens.Count - $Limit))) | Out-Null
+    return $truncated.ToArray()
 }
 
 function ConvertTo-RouteAcceptanceEnvNameToken {
@@ -1570,8 +1618,25 @@ function Assert-Phase4OperatorVerdict {
     $Result.hardFailureCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'hard_failure_count' -DefaultValue '0')
     $Result.warningCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'warning_count' -DefaultValue '0')
     $Result.warningKinds = @(Split-RouteAcceptanceTokenList -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'warning_kinds' -DefaultValue '(none)'))
+    $warningKindCounts = Get-RouteAcceptanceReportValue -Report $operator -Name 'warning_kind_counts' -DefaultValue '(none)'
+    $warningRawEventCounts = Get-RouteAcceptanceReportValue -Report $operator -Name 'warning_kind_raw_event_counts' -DefaultValue '(none)'
     $warningCapExceeded = Get-RouteAcceptanceReportValue -Report $operator -Name 'warning_cap_exceeded_kinds' -DefaultValue '(none)'
     $Result.warningCapExceededKinds = $warningCapExceeded
+    $Result.fallbackReceiverStateDeferredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'fallback_v6_receiver_state_deferred_count' -DefaultValue '0')
+    $Result.fallbackReceiverStateCoalescedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'fallback_v6_receiver_state_coalesced_count' -DefaultValue '0')
+    $Result.fallbackReceiverStateChurnWarningCount = Get-RouteAcceptanceKindCount -Value $warningKindCounts -Kind 'fallback_receiver_state_churn'
+    $Result.fallbackReceiverStateChurnRawEventCount = Get-RouteAcceptanceKindCount -Value $warningRawEventCounts -Kind 'fallback_receiver_state_churn'
+    if ($Result.fallbackReceiverStateChurnWarningCount -gt 0) {
+        $Result.fallbackReceiverStateChurnEfficiencyClass = if ($warningCapExceeded.IndexOf('fallback_receiver_state_churn', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            'treadmill_or_over_cap'
+        }
+        else {
+            'recovered_under_cap'
+        }
+    }
+    elseif ($Result.fallbackReceiverStateDeferredCount -gt 0 -or $Result.fallbackReceiverStateCoalescedCount -gt 0) {
+        $Result.fallbackReceiverStateChurnEfficiencyClass = 'diagnostic_no_warning'
+    }
 
     if ($Result.hardFailureCount -gt 0) {
         Add-RouteAcceptanceFailure -Result $Result -Message ("operator hard failures observed: {0}" -f $Result.hardFailureCount)
@@ -3288,6 +3353,23 @@ function Invoke-RouteAcceptanceChildScriptNoThrow {
     return $exitCode
 }
 
+function Get-Phase5BridgeReadinessPreflightFailureClass {
+    param(
+        [string]$FailureReason = '',
+        [string]$OutputText = ''
+    )
+
+    if ([string]::Equals($FailureReason, 'helper_bootstrap_window_ownership', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($FailureReason, 'helper_identity_window_ownership_mismatch', [System.StringComparison]::OrdinalIgnoreCase) -or
+        $OutputText.IndexOf('Timed out waiting for current helper identity bootstrap UI before clipboard fallback', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $OutputText.IndexOf('helper_identity_window_ownership_mismatch', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $OutputText.IndexOf('helper_identity_clipboard_stale', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return 'preflight_helper_bootstrap_window_ownership'
+    }
+
+    return 'preflight_bridge_bootstrap'
+}
+
 function Invoke-Phase5BridgeReadinessPreflight {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
@@ -3308,10 +3390,11 @@ function Invoke-Phase5BridgeReadinessPreflight {
         }
 
         $reason = Get-RouteAcceptanceEnvValue -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_FAILURE_REASON' -DefaultValue 'nkn_bridge_bootstrap_not_ready'
+        $failureClass = Get-Phase5BridgeReadinessPreflightFailureClass -FailureReason $reason -OutputText $reason
         $lines = @(
             'Phase 5 Bridge Readiness Preflight',
             'verdict=FAIL',
-            'failure_class=preflight_bridge_bootstrap',
+            ("failure_class={0}" -f $failureClass),
             ("failure_reason={0}" -f $reason),
             'scenario=NKN_DIRECT_CONNECT',
             ("artifact_dir={0}" -f $artifactDir),
@@ -3321,7 +3404,7 @@ function Invoke-Phase5BridgeReadinessPreflight {
         ([ordered]@{
             event = 'phase5_bridge_readiness_preflight'
             verdict = 'FAIL'
-            failureClass = 'preflight_bridge_bootstrap'
+            failureClass = $failureClass
             failureReason = $reason
             scenario = 'NKN_DIRECT_CONNECT'
             artifactDir = $artifactDir
@@ -3331,7 +3414,7 @@ function Invoke-Phase5BridgeReadinessPreflight {
         return [pscustomobject]@{
             Passed = $false
             ArtifactDir = $artifactDir
-            FailureClass = 'preflight_bridge_bootstrap'
+            FailureClass = $failureClass
             FailureReason = $reason
             ExitCode = 1
         }
@@ -3464,7 +3547,12 @@ function Invoke-Phase5BridgeReadinessPreflight {
     $failureReason = ''
     if ($exitCode -ne 0) {
         $joined = $outputLines -join "`n"
-        if ($joined.IndexOf('Timed out waiting for helper address in app log', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        if ($joined.IndexOf('Timed out waiting for current helper identity bootstrap UI before clipboard fallback', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $joined.IndexOf('helper_identity_window_ownership_mismatch', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $joined.IndexOf('helper_identity_clipboard_stale', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $failureReason = 'helper_bootstrap_window_ownership'
+        }
+        elseif ($joined.IndexOf('Timed out waiting for helper address in app log', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $joined.IndexOf('BridgeStartFailure', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $joined.IndexOf('Please reinstall', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             $failureReason = 'nkn_bridge_start_failure'
@@ -3476,7 +3564,8 @@ function Invoke-Phase5BridgeReadinessPreflight {
             $joined.IndexOf('bridge_bootstrap_not_ready=1', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             $failureReason = 'nkn_bridge_bootstrap_not_ready'
         }
-        elseif ($joined.IndexOf('Timed out waiting for helpee invite to become ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        elseif ($joined.IndexOf('Timed out waiting for helpee invite to become ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $joined.IndexOf('Timed out waiting for helpee request flow to become ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             $failureReason = 'helpee_invite_readiness_timeout'
         }
         else {
@@ -3485,10 +3574,11 @@ function Invoke-Phase5BridgeReadinessPreflight {
     }
 
     $verdict = if ($exitCode -eq 0) { 'PASS' } else { 'FAIL' }
+    $failureClass = if ($exitCode -eq 0) { 'none' } else { Get-Phase5BridgeReadinessPreflightFailureClass -FailureReason $failureReason -OutputText ($outputLines -join "`n") }
     $lines = @(
         'Phase 5 Bridge Readiness Preflight',
         ("verdict={0}" -f $verdict),
-        ("failure_class={0}" -f ($(if ($exitCode -eq 0) { 'none' } else { 'preflight_bridge_bootstrap' }))),
+        ("failure_class={0}" -f $failureClass),
         ("failure_reason={0}" -f ($(if ($exitCode -eq 0) { '' } else { $failureReason }))),
         'scenario=NKN_DIRECT_CONNECT',
         ("artifact_dir={0}" -f $artifactDir),
@@ -3500,7 +3590,7 @@ function Invoke-Phase5BridgeReadinessPreflight {
     ([ordered]@{
         event = 'phase5_bridge_readiness_preflight'
         verdict = $verdict
-        failureClass = if ($exitCode -eq 0) { 'none' } else { 'preflight_bridge_bootstrap' }
+        failureClass = $failureClass
         failureReason = $failureReason
         scenario = 'NKN_DIRECT_CONNECT'
         artifactDir = $artifactDir
@@ -3512,7 +3602,7 @@ function Invoke-Phase5BridgeReadinessPreflight {
     return [pscustomobject]@{
         Passed = ($exitCode -eq 0)
         ArtifactDir = $artifactDir
-        FailureClass = if ($exitCode -eq 0) { 'none' } else { 'preflight_bridge_bootstrap' }
+        FailureClass = $failureClass
         FailureReason = $failureReason
         ExitCode = $exitCode
     }
@@ -3530,7 +3620,9 @@ function Test-Phase5BridgeReadinessPreflightRetryableFailure {
     $reason = [string]$PreflightResult.FailureReason
     return $reason -eq 'helpee_invite_readiness_timeout' -or
         $reason -eq 'nkn_bridge_start_failure' -or
-        $reason -eq 'nkn_bridge_bootstrap_not_ready'
+        $reason -eq 'nkn_bridge_bootstrap_not_ready' -or
+        $reason -eq 'helper_bootstrap_window_ownership' -or
+        [string]$PreflightResult.FailureClass -eq 'preflight_helper_bootstrap_window_ownership'
 }
 
 function Write-Phase5BridgeReadinessPreflightAttemptSummary {
@@ -3611,6 +3703,16 @@ function Invoke-Phase5BridgeReadinessPreflightWithRetry {
     }
 
     Write-Host ("[FileTransfer Phase5 Preflight] setup/bootstrap preflight failed with {0}; retrying once from a clean preflight artifact directory." -f $first.FailureReason) -ForegroundColor Yellow
+    $cleanupArtifactDir = Join-Path $RunRoot 'preflight-cleanup-after-attempt-1'
+    New-Item -ItemType Directory -Force -Path $cleanupArtifactDir | Out-Null
+    $cleanupBefore = @(Get-RouteAcceptanceAppProcessesForExePath -ResolvedExePath $ResolvedExePath)
+    if ($cleanupBefore.Count -gt 0) {
+        Assert-RouteAcceptanceCleanAppProcessState -ResolvedExePath $ResolvedExePath -ArtifactDir $cleanupArtifactDir -Reason 'preflight_after_attempt_1'
+    }
+    else {
+        Write-RouteAcceptanceProcessCleanupArtifacts -ArtifactDir $cleanupArtifactDir -Reason 'preflight_after_attempt_1' -Before @() -After @()
+    }
+
     Start-Sleep -Seconds 2
 
     $second = Invoke-Phase5BridgeReadinessPreflight -RepoRoot $RepoRoot -RunRoot $RunRoot -ResolvedExePath $ResolvedExePath
@@ -4912,6 +5014,71 @@ function Invoke-Phase4RouteAcceptanceScenario {
     $script:RunResults.Add($result) | Out-Null
 }
 
+function New-RouteAcceptanceSummaryRunDto {
+    param(
+        [Parameter(Mandatory = $true)]$Result,
+        [ValidateSet('phase4', 'phase5')]
+        [string]$AcceptancePhase = 'phase4'
+    )
+
+    $resultFailureLines = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $Result.failures -Limit 128)
+    $resultPerformanceFailureCount = @($resultFailureLines | Where-Object { Test-Phase4PerformanceFailureLine -Line ([string]$_) }).Count
+    $resultCorrectnessFailureCount = @($resultFailureLines | Where-Object { -not (Test-Phase4PerformanceFailureLine -Line ([string]$_)) }).Count
+
+    return [pscustomobject]([ordered]@{
+        name = [string]$Result.name
+        artifactDir = [string]$Result.artifactDir
+        expectedRoute = [string]$Result.expectedRoute
+        expectedProtocol = [int]$Result.expectedProtocol
+        finalRoute = [string]$Result.finalRoute
+        protocol = [string]$Result.protocol
+        selectedRouteSequence = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $Result.selectedRouteChanges -Limit 32)
+        liveRouteEpochRouteChanges = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $Result.liveRouteEpochRouteChanges -Limit 32)
+        routeConsistencyVerdict = [string]$Result.routeConsistencyVerdict
+        liveRouteEpochProofVerdict = [string]$Result.liveRouteEpochProofVerdict
+        fallbackLegAuthorityProofVerdict = [string]$Result.fallbackLegAuthorityProofVerdict
+        cleanFallbackLegProofVerdict = [string]$Result.cleanFallbackLegProofVerdict
+        bridgeLivenessIntegrationVerdict = [string]$Result.bridgeLivenessIntegrationVerdict
+        controlPlaneIsolationVerdict = [string]$Result.controlPlaneIsolationVerdict
+        operatorVerdict = [string]$Result.operatorVerdict
+        hardFailureCount = [int]$Result.hardFailureCount
+        warningCount = [int]$Result.warningCount
+        warningKinds = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $Result.warningKinds -Limit 32)
+        warningCapExceededKinds = [string]$Result.warningCapExceededKinds
+        environmentalClassification = [string]$Result.environmentalClassification
+        measurementContaminated = [bool]$Result.measurementContaminated
+        measurementContaminationReasons = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $Result.measurementContaminationReasons -Limit 32)
+        completed = [bool]$Result.completed
+        integrityOk = [bool]$Result.integrityOk
+        shaOk = [bool]$Result.shaOk
+        goodputBytesPerSecond = [double](ConvertTo-RouteAcceptanceDouble -Value $Result.goodputBytesPerSecond)
+        baselineGoodputBytesPerSecond = [double](ConvertTo-RouteAcceptanceDouble -Value $Result.baselineGoodputBytesPerSecond)
+        goodputRegressionFloorBytesPerSecond = [double](ConvertTo-RouteAcceptanceDouble -Value $Result.goodputRegressionFloorBytesPerSecond)
+        goodputRegressionPercent = [double](ConvertTo-RouteAcceptanceDouble -Value $Result.goodputRegressionPercent)
+        attemptCount = [int]$Result.attemptCount
+        retryUsed = [bool]$Result.retryUsed
+        selectedAttempt = [int]$Result.selectedAttempt
+        scenarioIsolationPreflightCount = [int]$Result.scenarioIsolationPreflightCount
+        scenarioIsolationCleanWindowPassed = [int]$Result.scenarioIsolationCleanWindowPassed
+        scenarioIsolationFailureReason = [string]$Result.scenarioIsolationFailureReason
+        scenarioIsolationArtifactDirs = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $Result.scenarioIsolationArtifactDirs -Limit 16)
+        firstFailureReason = [string]$Result.firstFailureReason
+        rerunArtifactDir = [string]$Result.rerunArtifactDir
+        rerunFailureReason = [string]$Result.rerunFailureReason
+        setupFailurePhase = [string]$Result.setupFailurePhase
+        setupFailureReason = [string]$Result.setupFailureReason
+        fallbackReceiverStateDeferredCount = [int]$Result.fallbackReceiverStateDeferredCount
+        fallbackReceiverStateCoalescedCount = [int]$Result.fallbackReceiverStateCoalescedCount
+        fallbackReceiverStateChurnWarningCount = [int]$Result.fallbackReceiverStateChurnWarningCount
+        fallbackReceiverStateChurnRawEventCount = [int]$Result.fallbackReceiverStateChurnRawEventCount
+        fallbackReceiverStateChurnEfficiencyClass = [string]$Result.fallbackReceiverStateChurnEfficiencyClass
+        correctnessFailureCount = [int]$resultCorrectnessFailureCount
+        performanceFailureCount = [int]$resultPerformanceFailureCount
+        acceptanceFailureClass = [string](Get-RouteAcceptanceResultFailureClass -AcceptancePhase $AcceptancePhase -Result $Result)
+        failures = @($resultFailureLines)
+    })
+}
+
 function Write-Phase4RouteAcceptanceSummaryFiles {
     param(
         [Parameter(Mandatory = $true)][string]$RunRoot,
@@ -4922,11 +5089,39 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         # Phase 5 writes phase5-analyzer-gui-acceptance-summary.txt.
         [string]$SummaryBaseName = 'phase4-ab-acceptance',
         [string]$SummaryTitle = 'Phase 4 File Transfer A/B Acceptance',
-        [int]$ExpectedRunCount = 7
+        [int]$ExpectedRunCount = 7,
+        [string[]]$RequestedScenarios = @()
     )
 
+    $summaryStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $diagnostics = [ordered]@{
+        event = 'phase5_summary_writer_diagnostics'
+        acceptancePhase = $AcceptancePhase
+        summaryBaseName = $SummaryBaseName
+        artifactRoot = $RunRoot
+        requestedScenarios = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $RequestedScenarios -Limit 32)
+        expectedRunCount = $ExpectedRunCount
+        observedRunCount = $script:RunResults.Count
+        dtoBuildMs = 0
+        textWriteMs = 0
+        varianceNoteWriteMs = 0
+        jsonWriteMs = 0
+        finalVerdict = '(pending)'
+        summaryJsonFailed = $false
+        summaryJsonFailureReason = ''
+    }
+
+    $dtoStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $runDtos = @(
+        foreach ($result in $script:RunResults) {
+            New-RouteAcceptanceSummaryRunDto -Result $result -AcceptancePhase $AcceptancePhase
+        }
+    )
+    $dtoStopwatch.Stop()
+    $diagnostics.dtoBuildMs = [long]$dtoStopwatch.ElapsedMilliseconds
+
     $failureLines = @()
-    foreach ($result in $script:RunResults) {
+    foreach ($result in $runDtos) {
         foreach ($failure in @($result.failures)) {
             $failureLines += ("{0}: {1}" -f $result.name, $failure)
         }
@@ -4966,6 +5161,9 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("network_variance_note={0}" -f $networkVarianceNote),
         'regular_nkn_external_transport_warning_policy=capped_external_transport_churn_requires_clean_rerun',
         'goodput_regression_policy=rerun_once_when_only_failure',
+        ("requested_scenarios={0}" -f (Join-RouteAcceptanceTokenList -Values $RequestedScenarios)),
+        ("expected_run_count={0}" -f $expectedRunCount),
+        'summary_json_failed=0',
         ("run_count={0}" -f $script:RunResults.Count),
         ("failure_count={0}" -f $failureLines.Count),
         ("correctness_failure_count={0}" -f $correctnessFailureLines.Count),
@@ -4973,15 +5171,12 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ''
     )
 
-    foreach ($result in $script:RunResults) {
+    foreach ($result in $runDtos) {
         $prefix = [string]$result.name
-        $resultFailureLines = @($result.failures | ForEach-Object { [string]$_ })
-        $resultPerformanceFailureCount = @($resultFailureLines | Where-Object { Test-Phase4PerformanceFailureLine -Line ([string]$_) }).Count
-        $resultCorrectnessFailureCount = @($resultFailureLines | Where-Object { -not (Test-Phase4PerformanceFailureLine -Line ([string]$_)) }).Count
         $textLines += ("{0}.artifact_dir={1}" -f $prefix, $result.artifactDir)
         $textLines += ("{0}.final_route={1}" -f $prefix, $result.finalRoute)
-        $textLines += ("{0}.selected_route_sequence={1}" -f $prefix, (Join-RouteAcceptanceTokenList -Values $result.selectedRouteChanges))
-        $textLines += ("{0}.route_sequence={1}" -f $prefix, (Join-RouteAcceptanceTokenList -Values $result.selectedRouteChanges))
+        $textLines += ("{0}.selected_route_sequence={1}" -f $prefix, (Join-RouteAcceptanceTokenList -Values $result.selectedRouteSequence))
+        $textLines += ("{0}.route_sequence={1}" -f $prefix, (Join-RouteAcceptanceTokenList -Values $result.selectedRouteSequence))
         $textLines += ("{0}.live_route_epoch_route_changes={1}" -f $prefix, (Join-RouteAcceptanceTokenList -Values $result.liveRouteEpochRouteChanges))
         $textLines += ("{0}.live_epoch_route_changes={1}" -f $prefix, (Join-RouteAcceptanceTokenList -Values $result.liveRouteEpochRouteChanges))
         $textLines += ("{0}.protocol={1}" -f $prefix, $result.protocol)
@@ -5005,6 +5200,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.baseline_goodput_bytes_per_second={1:F3}" -f $prefix, (ConvertTo-RouteAcceptanceDouble -Value $result.baselineGoodputBytesPerSecond))
         $textLines += ("{0}.goodput_floor_bytes_per_second={1:F3}" -f $prefix, (ConvertTo-RouteAcceptanceDouble -Value $result.goodputRegressionFloorBytesPerSecond))
         $textLines += ("{0}.goodput_regression_percent={1:F3}" -f $prefix, (ConvertTo-RouteAcceptanceDouble -Value $result.goodputRegressionPercent))
+        $textLines += ("{0}.fallback_receiver_state_deferred_count={1}" -f $prefix, $result.fallbackReceiverStateDeferredCount)
+        $textLines += ("{0}.fallback_receiver_state_coalesced_count={1}" -f $prefix, $result.fallbackReceiverStateCoalescedCount)
+        $textLines += ("{0}.fallback_receiver_state_churn_warning_count={1}" -f $prefix, $result.fallbackReceiverStateChurnWarningCount)
+        $textLines += ("{0}.fallback_receiver_state_churn_raw_event_count={1}" -f $prefix, $result.fallbackReceiverStateChurnRawEventCount)
+        $textLines += ("{0}.fallback_receiver_state_churn_efficiency_class={1}" -f $prefix, $result.fallbackReceiverStateChurnEfficiencyClass)
         $textLines += ("{0}.attempt_count={1}" -f $prefix, $result.attemptCount)
         $textLines += ("{0}.retry_used={1}" -f $prefix, ($(if ($result.retryUsed) { 1 } else { 0 })))
         $textLines += ("{0}.selected_attempt={1}" -f $prefix, $result.selectedAttempt)
@@ -5032,10 +5232,9 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
             $textLines += ("{0}.setup_failure_reason={1}" -f $prefix, $result.setupFailureReason)
         }
         $textLines += ("{0}.failure_count={1}" -f $prefix, $result.failures.Count)
-        $textLines += ("{0}.correctness_failure_count={1}" -f $prefix, $resultCorrectnessFailureCount)
-        $textLines += ("{0}.performance_failure_count={1}" -f $prefix, $resultPerformanceFailureCount)
-        $failureClass = Get-RouteAcceptanceResultFailureClass -AcceptancePhase $AcceptancePhase -Result $result
-        $textLines += ("{0}.acceptance_failure_class={1}" -f $prefix, $failureClass)
+        $textLines += ("{0}.correctness_failure_count={1}" -f $prefix, $result.correctnessFailureCount)
+        $textLines += ("{0}.performance_failure_count={1}" -f $prefix, $result.performanceFailureCount)
+        $textLines += ("{0}.acceptance_failure_class={1}" -f $prefix, $result.acceptanceFailureClass)
     }
 
     $textLines += ''
@@ -5048,9 +5247,13 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     }
 
     $summaryTxt = Join-Path $RunRoot ("{0}-summary.txt" -f $SummaryBaseName)
+    $textStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $textLines | Set-Content -LiteralPath $summaryTxt -Encoding UTF8
     $textLines | Set-Content -LiteralPath (Join-Path $RunRoot 'route-acceptance-summary.txt') -Encoding UTF8
+    $textStopwatch.Stop()
+    $diagnostics.textWriteMs = [long]$textStopwatch.ElapsedMilliseconds
 
+    $varianceStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $varianceNoteLines = @(
         ("# {0} Network Variance Note" -f ($(if ($AcceptancePhase -eq 'phase5') { 'Phase 5' } else { 'Phase 4' }))),
         '',
@@ -5087,61 +5290,8 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     }
     $varianceNoteName = if ($AcceptancePhase -eq 'phase5') { 'phase5-network-variance-note.md' } else { 'phase4-network-variance-note.md' }
     $varianceNoteLines | Set-Content -LiteralPath (Join-Path $RunRoot $varianceNoteName) -Encoding UTF8
-
-    $jsonRuns = @(
-        foreach ($result in $script:RunResults) {
-            $resultFailureLines = @($result.failures | ForEach-Object { [string]$_ })
-            $resultPerformanceFailureCount = @($resultFailureLines | Where-Object { Test-Phase4PerformanceFailureLine -Line ([string]$_) }).Count
-            $resultCorrectnessFailureCount = @($resultFailureLines | Where-Object { -not (Test-Phase4PerformanceFailureLine -Line ([string]$_)) }).Count
-            [ordered]@{
-                name = $result.name
-                artifactDir = $result.artifactDir
-                expectedRoute = $result.expectedRoute
-                expectedProtocol = $result.expectedProtocol
-                finalRoute = $result.finalRoute
-                protocol = $result.protocol
-                selectedRouteSequence = @($result.selectedRouteChanges)
-                liveRouteEpochRouteChanges = @($result.liveRouteEpochRouteChanges)
-                routeConsistencyVerdict = $result.routeConsistencyVerdict
-                liveRouteEpochProofVerdict = $result.liveRouteEpochProofVerdict
-                fallbackLegAuthorityProofVerdict = $result.fallbackLegAuthorityProofVerdict
-                cleanFallbackLegProofVerdict = $result.cleanFallbackLegProofVerdict
-                bridgeLivenessIntegrationVerdict = $result.bridgeLivenessIntegrationVerdict
-                controlPlaneIsolationVerdict = $result.controlPlaneIsolationVerdict
-                operatorVerdict = $result.operatorVerdict
-                hardFailureCount = $result.hardFailureCount
-                warningCount = $result.warningCount
-                warningKinds = @($result.warningKinds)
-                warningCapExceededKinds = $result.warningCapExceededKinds
-                environmentalClassification = $result.environmentalClassification
-                measurementContaminated = $result.measurementContaminated
-                measurementContaminationReasons = @($result.measurementContaminationReasons)
-                completed = $result.completed
-                integrityOk = $result.integrityOk
-                shaOk = $result.shaOk
-                goodputBytesPerSecond = $result.goodputBytesPerSecond
-                baselineGoodputBytesPerSecond = $result.baselineGoodputBytesPerSecond
-                goodputRegressionFloorBytesPerSecond = $result.goodputRegressionFloorBytesPerSecond
-                goodputRegressionPercent = $result.goodputRegressionPercent
-                attemptCount = $result.attemptCount
-                retryUsed = $result.retryUsed
-                selectedAttempt = $result.selectedAttempt
-                scenarioIsolationPreflightCount = $result.scenarioIsolationPreflightCount
-                scenarioIsolationCleanWindowPassed = $result.scenarioIsolationCleanWindowPassed
-                scenarioIsolationFailureReason = $result.scenarioIsolationFailureReason
-                scenarioIsolationArtifactDirs = @($result.scenarioIsolationArtifactDirs)
-                firstFailureReason = $result.firstFailureReason
-                rerunArtifactDir = $result.rerunArtifactDir
-                rerunFailureReason = $result.rerunFailureReason
-                setupFailurePhase = $result.setupFailurePhase
-                setupFailureReason = $result.setupFailureReason
-                correctnessFailureCount = $resultCorrectnessFailureCount
-                performanceFailureCount = $resultPerformanceFailureCount
-                acceptanceFailureClass = Get-RouteAcceptanceResultFailureClass -AcceptancePhase $AcceptancePhase -Result $result
-                failures = @($result.failures | ForEach-Object { [string]$_ })
-            }
-        }
-    )
+    $varianceStopwatch.Stop()
+    $diagnostics.varianceNoteWriteMs = [long]$varianceStopwatch.ElapsedMilliseconds
 
     $jsonSummary = [ordered]@{
         event = if ($AcceptancePhase -eq 'phase5') { 'phase5_filetransfer_analyzer_gui_acceptance_summary' } else { 'phase4_filetransfer_ab_acceptance_summary' }
@@ -5158,17 +5308,94 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         networkVarianceNote = $networkVarianceNote
         regularNknExternalTransportWarningPolicy = 'capped_external_transport_churn_requires_clean_rerun'
         goodputRegressionPolicy = 'rerun_once_when_only_failure'
+        requestedScenarios = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $RequestedScenarios -Limit 32)
+        expectedRunCount = $ExpectedRunCount
+        runCount = $script:RunResults.Count
+        summaryJsonFailed = $false
         failureCount = $failureLines.Count
         correctnessFailureCount = $correctnessFailureLines.Count
         performanceFailureCount = $performanceFailureLines.Count
-        runs = $jsonRuns
+        runs = $runDtos
         failures = @($failureLines)
         correctnessFailures = @($correctnessFailureLines)
         performanceFailures = @($performanceFailureLines)
     }
 
-    $jsonSummary | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $RunRoot ("{0}-summary.json" -f $SummaryBaseName)) -Encoding UTF8
-    $jsonSummary | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $RunRoot 'route-acceptance-summary.json') -Encoding UTF8
+    $jsonStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        if (Test-RouteAcceptanceEnvEnabled -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FORCE_SUMMARY_JSON_FAILURE') {
+            throw 'forced_summary_json_failure'
+        }
+
+        $summaryJsonTimeoutMs = 10000
+        $jsonText = $jsonSummary | ConvertTo-Json -Depth 8
+        if ($jsonStopwatch.ElapsedMilliseconds -gt $summaryJsonTimeoutMs) {
+            throw ("summary_json_timeout_ms={0}; elapsed_ms={1}" -f $summaryJsonTimeoutMs, $jsonStopwatch.ElapsedMilliseconds)
+        }
+
+        $jsonText | Set-Content -LiteralPath (Join-Path $RunRoot ("{0}-summary.json" -f $SummaryBaseName)) -Encoding UTF8
+        $jsonText | Set-Content -LiteralPath (Join-Path $RunRoot 'route-acceptance-summary.json') -Encoding UTF8
+    }
+    catch {
+        $diagnostics.summaryJsonFailed = $true
+        $diagnostics.summaryJsonFailureReason = (($_ | Out-String).Trim() -replace '[\r\n]+', ' ')
+        $verdict = 'FAIL'
+        $jsonSummary['summaryJsonFailed'] = $true
+        $failureLines += ("summary writer failed to write JSON: {0}" -f $diagnostics.summaryJsonFailureReason)
+        for ($i = 0; $i -lt $textLines.Count; $i++) {
+            if ($textLines[$i] -eq 'verdict=PASS') {
+                $textLines[$i] = 'verdict=FAIL'
+            }
+            elseif ($textLines[$i] -eq 'correctness_verdict=PASS') {
+                $textLines[$i] = 'correctness_verdict=FAIL'
+            }
+            elseif ($textLines[$i] -eq 'summary_json_failed=0') {
+                $textLines[$i] = 'summary_json_failed=1'
+            }
+            elseif ($textLines[$i] -like 'failure_count=*') {
+                $textLines[$i] = ("failure_count={0}" -f $failureLines.Count)
+            }
+            elseif ($textLines[$i] -like 'correctness_failure_count=*') {
+                $textLines[$i] = ("correctness_failure_count={0}" -f ($correctnessFailureLines.Count + 1))
+            }
+        }
+
+        $textLines += ("summary_json_failure_reason={0}" -f $diagnostics.summaryJsonFailureReason)
+        $textLines += ("summary_writer_failure={0}" -f $diagnostics.summaryJsonFailureReason)
+        $textLines | Set-Content -LiteralPath $summaryTxt -Encoding UTF8
+        $textLines | Set-Content -LiteralPath (Join-Path $RunRoot 'route-acceptance-summary.txt') -Encoding UTF8
+    }
+    finally {
+        $jsonStopwatch.Stop()
+        $diagnostics.jsonWriteMs = [long]$jsonStopwatch.ElapsedMilliseconds
+        $summaryStopwatch.Stop()
+        $diagnostics.finalVerdict = $verdict
+        $diagnostics.totalMs = [long]$summaryStopwatch.ElapsedMilliseconds
+        $diagText = @(
+            'Phase 5 Summary Writer Diagnostics',
+            ("acceptance_phase={0}" -f $AcceptancePhase),
+            ("summary_base_name={0}" -f $SummaryBaseName),
+            ("artifact_root={0}" -f $RunRoot),
+            ("requested_scenarios={0}" -f (Join-RouteAcceptanceTokenList -Values $RequestedScenarios)),
+            ("expected_run_count={0}" -f $ExpectedRunCount),
+            ("observed_run_count={0}" -f $script:RunResults.Count),
+            ("dto_build_ms={0}" -f $diagnostics.dtoBuildMs),
+            ("text_write_ms={0}" -f $diagnostics.textWriteMs),
+            ("variance_note_write_ms={0}" -f $diagnostics.varianceNoteWriteMs),
+            ("json_write_ms={0}" -f $diagnostics.jsonWriteMs),
+            ("total_ms={0}" -f $diagnostics.totalMs),
+            ("summary_json_failed={0}" -f ($(if ($diagnostics.summaryJsonFailed) { 1 } else { 0 }))),
+            ("summary_json_failure_reason={0}" -f ($(if ([string]::IsNullOrWhiteSpace([string]$diagnostics.summaryJsonFailureReason)) { '(none)' } else { [string]$diagnostics.summaryJsonFailureReason }))),
+            ("final_verdict={0}" -f $diagnostics.finalVerdict)
+        )
+        $diagText | Set-Content -LiteralPath (Join-Path $RunRoot 'phase5-summary-writer-diagnostics.txt') -Encoding UTF8
+        try {
+            $diagnostics | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $RunRoot 'phase5-summary-writer-diagnostics.json') -Encoding UTF8
+        }
+        catch {
+            # Text diagnostics are already durable; do not let diagnostics JSON reintroduce the wrapper hang.
+        }
+    }
     return $verdict
 }
 
@@ -5359,11 +5586,11 @@ try {
         }
 
         if ($acceptancePhase -eq 'phase5') {
-            $verdict = Write-Phase4RouteAcceptanceSummaryFiles -RunRoot $runRoot -BaselinePath ([string]$baseline.Path) -AcceptancePhase 'phase5' -SummaryBaseName 'phase5-analyzer-gui-acceptance' -SummaryTitle 'Phase 5 File Transfer Analyzer/GUI Acceptance' -ExpectedRunCount $scenarios.Count
+            $verdict = Write-Phase4RouteAcceptanceSummaryFiles -RunRoot $runRoot -BaselinePath ([string]$baseline.Path) -AcceptancePhase 'phase5' -SummaryBaseName 'phase5-analyzer-gui-acceptance' -SummaryTitle 'Phase 5 File Transfer Analyzer/GUI Acceptance' -ExpectedRunCount $scenarios.Count -RequestedScenarios $requestedScenarioNames
             Write-Host ("[FileTransfer Phase5 Analyzer/GUI Acceptance] verdict={0}; artifact_root={1}" -f $verdict, $runRoot) -ForegroundColor ($(if ($verdict -eq 'PASS') { 'Green' } else { 'Red' }))
         }
         else {
-            $verdict = Write-Phase4RouteAcceptanceSummaryFiles -RunRoot $runRoot -BaselinePath ([string]$baseline.Path) -ExpectedRunCount $scenarios.Count
+            $verdict = Write-Phase4RouteAcceptanceSummaryFiles -RunRoot $runRoot -BaselinePath ([string]$baseline.Path) -ExpectedRunCount $scenarios.Count -RequestedScenarios $requestedScenarioNames
             Write-Host ("[FileTransfer Phase4 A/B Acceptance] verdict={0}; artifact_root={1}" -f $verdict, $runRoot) -ForegroundColor ($(if ($verdict -eq 'PASS') { 'Green' } else { 'Red' }))
         }
         if ($verdict -ne 'PASS') {

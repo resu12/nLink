@@ -289,8 +289,46 @@ function Test-FileTransferRouteAwareEvent {
         return $false
     }
 
+    if (Test-FileTransferDiagnosticFallbackRouteEvent -Event $Event) {
+        return $false
+    }
+
     return $Event.EventName -eq 'filetransfer_route_selected' -or
         ($null -ne $Event.Fields -and $Event.Fields.ContainsKey('route'))
+}
+
+function Test-FileTransferDiagnosticFallbackRouteEvent {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    $reason = Get-FileTransferEventField -Event $Event -Name 'reason' -Default ''
+    $authorityReason = Get-FileTransferEventField -Event $Event -Name 'authority_reason' -Default ''
+    $kind = Get-FileTransferEventField -Event $Event -Name 'kind' -Default ''
+
+    if (($Event.EventName -eq 'filetransfer_control_plane_delivery_result' -or
+         $Event.EventName -eq 'filetransfer_control_plane_delivery_observed') -and
+        [string]::Equals($kind, 'receiver_state', [System.StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals($reason, 'chunk_batch_committed', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+
+    if ($Event.EventName -eq 'filetransfer_fallback_leg_authority_completed' -and
+        [string]::Equals($authorityReason, 'chunk_batch_committed', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+
+    switch ($Event.EventName) {
+        'filetransfer_fallback_stale_proof_ignored' { return $true }
+        'filetransfer_clean_fallback_stale_proof_ignored' { return $true }
+        'filetransfer_fallback_stale_proof_replay_suppressed' { return $true }
+        'filetransfer_fallback_checkpoint_reissue_suppressed' { return $true }
+        'filetransfer_fallback_checkpoint_exchange_retired' { return $true }
+        'filetransfer_control_plane_send_retired_stale_generation' { return $true }
+        'filetransfer_v6_post_tuna_fallback_control_coalesced' { return $true }
+        'filetransfer_post_tuna_fallback_control_plane_pressure_marked' { return $true }
+        'filetransfer_post_tuna_fallback_control_plane_pressure_cleared' { return $true }
+        'filetransfer_post_tuna_fallback_control_plane_pressure_stale_ignored' { return $true }
+        default { return $false }
+    }
 }
 
 function Test-FileTransferLegHistoryRouteEvent {
@@ -390,6 +428,8 @@ function Get-FileTransferSelectedRouteForEvent {
 
     $transferKey = Get-FileTransferRouteEventKey -Event $Event
     $direction = Get-FileTransferRouteEventDirection -Event $Event
+    $eventRoute = Get-FileTransferEventField -Event $Event -Name 'route' -Default ''
+    $eventLiveRouteEpoch = Get-FileTransferEventInt64Field -Event $Event -Name 'live_route_epoch' -Default 0
     $candidates = @(
         $RouteSelectedEvents |
             Where-Object {
@@ -398,6 +438,28 @@ function Get-FileTransferSelectedRouteForEvent {
             } |
             Sort-Object Sequence
     )
+
+    if (-not [string]::IsNullOrWhiteSpace($eventRoute) -and $eventLiveRouteEpoch -gt 0) {
+        $epochCandidates = @(
+            $candidates |
+                Where-Object {
+                    (Get-FileTransferEventInt64Field -Event $_ -Name 'live_route_epoch' -Default 0) -eq $eventLiveRouteEpoch -and
+                    [string]::Equals((Get-FileTransferEventField -Event $_ -Name 'route' -Default ''), $eventRoute, [System.StringComparison]::OrdinalIgnoreCase)
+                } |
+                Sort-Object Sequence
+        )
+        if ($epochCandidates.Count -gt 0) {
+            return $epochCandidates[-1]
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($eventRoute) -and $candidates.Count -gt 0) {
+        $latestCandidate = $candidates[-1]
+        $latestRoute = Get-FileTransferEventField -Event $latestCandidate -Name 'route' -Default ''
+        if ([string]::Equals($latestRoute, $eventRoute, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $latestCandidate
+        }
+    }
 
     if (-not [string]::IsNullOrWhiteSpace($direction)) {
         $directionCandidates = @(
@@ -498,6 +560,16 @@ function Test-FileTransferAllowedLiveFallbackRouteTransition {
         return $handoffKind -eq 'tuna_to_normal_fallback' -and
             $postTunaFallbackActive -eq '1' -and
             $fileTunaActive -eq '0'
+    }
+
+    if ($route -eq 'post_tuna_fallback_v6') {
+        $postTunaFallbackActive = Get-FileTransferEventField -Event $Selected -Name 'post_tuna_fallback_active' -Default '0'
+        $fileTunaActive = Get-FileTransferEventField -Event $Selected -Name 'file_tuna_active' -Default '1'
+        $liveRouteEpoch = Get-FileTransferEventInt64Field -Event $Selected -Name 'live_route_epoch' -Default 0
+        return $handoffKind -eq 'tuna_to_normal_fallback' -and
+            $postTunaFallbackActive -eq '1' -and
+            $fileTunaActive -eq '0' -and
+            $liveRouteEpoch -gt 0
     }
 
     if ($previousRoute -eq 'regular_nkn_v4_fast' -and $route -eq 'file_tuna_v4') {
