@@ -3149,6 +3149,32 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public async Task SessionRuntime_HelpeeHostReadyCancelled_QuietlyRehostsInsteadOfSurfacingFailure()
+    {
+        var created = new List<HostReadyCancellationTransport>();
+        var factory = new CountingTransportFactory(() =>
+        {
+            var index = created.Count + 1;
+            var transport = new HostReadyCancellationTransport(
+                $"helpee.host-ready-cancel.{index}",
+                cancelHostReady: index == 1);
+            created.Add(transport);
+            return transport;
+        });
+        using var runtime = new SessionRuntime(factory.Create);
+
+        await runtime.StartHelpeeAsync(CancellationToken.None);
+
+        await WaitUntilAsync(() => factory.CreateCount >= 2, TimeSpan.FromSeconds(2));
+        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting, TimeSpan.FromSeconds(2));
+
+        Assert.NotEqual(SessionRuntimeState.Failed, runtime.State);
+        Assert.NotEqual(SessionRuntimeState.Disconnected, runtime.State);
+        Assert.Equal("Waiting for helper…", runtime.StatusText);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public async Task SessionRuntime_IgnoresStaleTransportDisconnectedEvent_AfterResetAndRehost()
     {
         var first = new ScriptedSignalingTransport();
@@ -4237,6 +4263,56 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
             HelperTransport.Dispose();
             HelpeeTransport.Dispose();
             FakeNknClient.ResetNetwork();
+        }
+    }
+
+    private sealed class HostReadyCancellationTransport :
+        ISignalingTransport,
+        IAddressHostSignalingTransport,
+        IHostReadySignalingTransport,
+        ILocalPeerAddressSignalingTransport,
+        ISessionSecuritySignalingTransport
+    {
+        private readonly bool cancelHostReady;
+        private readonly TaskCompletionSource<bool> hostReadyTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private SessionSecurityState currentSessionSecurityState = SessionSecurityState.Empty;
+
+        public HostReadyCancellationTransport(string localPeerAddress, bool cancelHostReady)
+        {
+            LocalPeerAddress = localPeerAddress;
+            this.cancelHostReady = cancelHostReady;
+        }
+
+        public string LocalPeerAddress { get; }
+        public SessionSecurityState CurrentSessionSecurityState => currentSessionSecurityState;
+        public event EventHandler<IncomingJoinRequestEventArgs>? IncomingJoinRequest;
+        public event EventHandler<TransportSessionKeyReadyEventArgs>? SessionKeyReady;
+        public event EventHandler<TransportChatMessageEventArgs>? ChatMessageReceived;
+        public event EventHandler? Approved;
+        public event EventHandler? Rejected;
+        public event EventHandler? Disconnected;
+        public event EventHandler<TransportSessionSecurityStateChangedEventArgs>? SessionSecurityStateChanged;
+
+        public Task WaitUntilHostReadyAsync(CancellationToken ct) => hostReadyTcs.Task.WaitAsync(ct);
+
+        public Task HostByAddressAsync(CancellationToken ct)
+        {
+            currentSessionSecurityState = SessionSecurityState.CreateHelpeeWaiting(new PeerAddress(LocalPeerAddress));
+            SessionSecurityStateChanged?.Invoke(this, new TransportSessionSecurityStateChangedEventArgs(currentSessionSecurityState));
+            if (cancelHostReady)
+            {
+                hostReadyTcs.TrySetCanceled(ct.IsCancellationRequested ? ct : new CancellationToken(canceled: true));
+                return Task.FromCanceled(new CancellationToken(canceled: true));
+            }
+
+            hostReadyTcs.TrySetResult(true);
+            return Task.Delay(Timeout.Infinite, ct);
+        }
+
+        public Task SendChatMessageAsync(ReadOnlyMemory<byte> payload, CancellationToken ct) => Task.CompletedTask;
+
+        public void Dispose()
+        {
         }
     }
 

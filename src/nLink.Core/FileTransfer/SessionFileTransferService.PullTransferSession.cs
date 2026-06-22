@@ -2191,22 +2191,33 @@ public sealed partial class SessionFileTransferService
         => string.Equals(rejectionReason, "runtime_unlock_probe_missing", StringComparison.Ordinal) ||
            string.Equals(rejectionReason, "transaction_not_commit_ready", StringComparison.Ordinal);
 
-    private static bool IsFallbackSurvivalProofPending(FileTransferLeg? leg)
-        => IsCurrentPostTunaFallbackLeg(leg) &&
-           (!leg!.CanSendData ||
-            leg.State is FileTransferLegState.CheckpointPending or FileTransferLegState.BridgeRestartPending ||
-            !string.IsNullOrWhiteSpace(leg.CheckpointRequestId));
-
     private static bool IsFallbackSurvivalProofPending(OutboundTransferContext context)
-        => IsFallbackSurvivalProofPending(context.CurrentTransferLeg) ||
-           context.V6RegularNknFallbackCheckpointDeliveryRecoveryPending ||
-           context.V6RegularNknStateRefreshSendInFlight != 0 ||
-           context.V6RegularNknDeferredStateRefreshRequest is not null;
+    {
+        return !FileTransferCoordinator.CanAdmitRuntimeUnlockWhilePostTunaFallback(
+            context.RouteRuntime.UsesPostTunaFallbackV6Runtime,
+            context.CurrentTransferLeg,
+            context.V6RegularNknFallbackCheckpointDeliveryRecoveryPending,
+            context.V6RegularNknStateRefreshSendInFlight != 0,
+            context.V6RegularNknDeferredStateRefreshRequest is not null,
+            proofReplayPending: false,
+            out _);
+    }
 
     private static bool IsFallbackSurvivalProofPending(InboundTransferContext context)
-        => IsFallbackSurvivalProofPending(context.CurrentTransferLeg) ||
-           context.V6PostTunaFallbackProofReplayReceiverStatePending ||
-           context.V6PostTunaFallbackProofReplayFrontierRequestPending;
+    {
+        var proofReplayPending =
+            context.V6PostTunaFallbackProofReplayReceiverStatePending ||
+            context.V6PostTunaFallbackProofReplayFrontierRequestPending;
+
+        return !FileTransferCoordinator.CanAdmitRuntimeUnlockWhilePostTunaFallback(
+            context.RouteRuntime.UsesPostTunaFallbackV6Runtime,
+            context.CurrentTransferLeg,
+            checkpointDeliveryRecoveryPending: false,
+            stateRefreshSendInFlight: false,
+            deferredStateRefreshPending: false,
+            proofReplayPending,
+            out _);
+    }
 
     private bool TryStartOutboundRuntimeUnlockPreCommitProbeOrWaitForFallbackLocked(
         OutboundTransferContext context,
@@ -2330,6 +2341,11 @@ public sealed partial class SessionFileTransferService
         context.RuntimeUnlockActivationWindowGranted = true;
         context.RuntimeUnlockActivationWindowReason = reason;
         context.RuntimeUnlockActivationWindowGrantedUtc = DateTimeOffset.UtcNow;
+        if (IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg))
+        {
+            context.CurrentTransferLeg!.RuntimeUnlockProbeAllowedAfterTransportEpochAdoption = false;
+        }
+
         LogRuntimeUnlockActivationWindowGranted(
             FileTransferDirection.Outbound,
             context.TransferId,
@@ -2348,6 +2364,11 @@ public sealed partial class SessionFileTransferService
         context.RuntimeUnlockActivationWindowGranted = true;
         context.RuntimeUnlockActivationWindowReason = reason;
         context.RuntimeUnlockActivationWindowGrantedUtc = DateTimeOffset.UtcNow;
+        if (IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg))
+        {
+            context.CurrentTransferLeg!.RuntimeUnlockProbeAllowedAfterTransportEpochAdoption = false;
+        }
+
         LogRuntimeUnlockActivationWindowGranted(
             FileTransferDirection.Inbound,
             context.TransferId,

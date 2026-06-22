@@ -1832,12 +1832,26 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
                 hostReady = true;
                 SetState(SessionRuntimeState.Waiting, "Waiting for helper…");
             }
+            catch (OperationCanceledException ex) when (!uiCt.IsCancellationRequested)
+            {
+                if (TryRecoverHelpeeHostReadyStartFailure(ex, "host_start_cancelled_recovering"))
+                {
+                    return;
+                }
+
+                throw;
+            }
             catch (OperationCanceledException)
             {
                 throw;
             }
             catch (Exception ex)
             {
+                if (TryRecoverHelpeeHostReadyStartFailure(ex, "host_start_sync_failed_recovering"))
+                {
+                    return;
+                }
+
                 HandleSynchronousStartFailure(ex, "host_start_sync_failed");
                 throw;
             }

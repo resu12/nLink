@@ -215,6 +215,13 @@ public sealed partial class SessionFileTransferService
             chunksTransferred: context.ChunksTransferred,
             chunkCount: context.ChunkCount,
             routeSelection: context.RouteSelection);
+        LogLiveRouteEpochRecoveredBeforeTerminalIfCompleted(
+            FileTransferDirection.Outbound,
+            context.TransferId,
+            sessionId,
+            context.CurrentLiveRouteEpoch,
+            terminalState,
+            context.StatusMessage);
         LogLiveRouteEpochTerminal(
             FileTransferDirection.Outbound,
             context.TransferId,
@@ -418,6 +425,13 @@ public sealed partial class SessionFileTransferService
             chunkCount: context.ChunkCount,
             savedPath: context.SavedFilePath,
             routeSelection: context.RouteSelection);
+        LogLiveRouteEpochRecoveredBeforeTerminalIfCompleted(
+            FileTransferDirection.Inbound,
+            transferId,
+            sessionId,
+            context.CurrentLiveRouteEpoch,
+            terminalState,
+            statusMessage);
         LogLiveRouteEpochTerminal(
             FileTransferDirection.Inbound,
             transferId,

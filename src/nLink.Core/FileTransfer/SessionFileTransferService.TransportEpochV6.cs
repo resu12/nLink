@@ -475,6 +475,18 @@ public sealed partial class SessionFileTransferService
             return;
         }
 
+        var accepted = true;
+        var ackReason = "precommit_probe_received";
+        if (TryGetRuntimeUnlockPreCommitProbeAdmissionRejectionLocked(
+                direction,
+                sessionId,
+                transferId,
+                out var admissionRejectionReason))
+        {
+            accepted = false;
+            ackReason = admissionRejectionReason;
+        }
+
         var ack = new FileTransferRuntimeUnlockPreCommitProbeAckFrame
         {
             SessionId = sessionId,
@@ -488,8 +500,8 @@ public sealed partial class SessionFileTransferService
             TargetTransport = probe.TargetTransport,
             HandoffKind = probe.HandoffKind,
             SentUnixTimeMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-            Accepted = true,
-            Reason = "precommit_probe_received",
+            Accepted = accepted,
+            Reason = ackReason,
         };
 
         if (dataSession is IFileTransferRuntimeUnlockPreCommitProbeAckAuthorizer ackAuthorizer)
@@ -504,14 +516,80 @@ public sealed partial class SessionFileTransferService
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=runtime_unlock_precommit_probe_ack_sent; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={ack.TransactionGeneration}; offer_generation={ack.OfferGeneration}; tuna_path_lease_generation={ack.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(ack.ProbeId ?? "(none)")}; received_transport={FormatFileTransferTransportKind(receivedTransportKind)}");
+            if (!accepted)
+            {
+                LocalOperationalLog.Warn(
+                    "FileTransferService",
+                    $"event=runtime_unlock_precommit_probe_rejected_for_fallback_survival; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={ack.TransactionGeneration}; offer_generation={ack.OfferGeneration}; tuna_path_lease_generation={ack.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(ack.ProbeId ?? "(none)")}; received_transport={FormatFileTransferTransportKind(receivedTransportKind)}; reason={FormatProtocolLogValue(ackReason)}");
+                return;
+            }
+
+            if (transport is IRuntimeUnlockRouteCommitProofProvider proofProvider)
+            {
+                proofProvider.NotifyRuntimeUnlockPathProbeResult(
+                    sessionId,
+                    transferId,
+                    transportEpoch: 0,
+                    ack.ProbeId!,
+                    FileTransferTransportKind.Tuna,
+                    acked: true,
+                    "precommit_probe_ack_sent");
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=runtime_unlock_precommit_probe_acked; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={ack.TransactionGeneration}; offer_generation={ack.OfferGeneration}; tuna_path_lease_generation={ack.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(ack.ProbeId ?? "(none)")}; received_transport={FormatFileTransferTransportKind(receivedTransportKind)}; reason=precommit_probe_ack_sent");
+            }
+
             TryCommitRuntimeUnlockRouteAfterPreCommitProbeAck(direction, sessionId, transferId, "precommit_probe_ack_sent");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             LocalOperationalLog.Warn(
                 "FileTransferService",
-                $"event=runtime_unlock_precommit_probe_ack_failed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={ack.TransactionGeneration}; offer_generation={ack.OfferGeneration}; tuna_path_lease_generation={ack.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(ack.ProbeId ?? "(none)")}; error={FormatProtocolLogValue(ex.GetType().Name)}");
+            $"event=runtime_unlock_precommit_probe_ack_failed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={ack.TransactionGeneration}; offer_generation={ack.OfferGeneration}; tuna_path_lease_generation={ack.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(ack.ProbeId ?? "(none)")}; error={FormatProtocolLogValue(ex.GetType().Name)}");
         }
+    }
+
+    private bool TryGetRuntimeUnlockPreCommitProbeAdmissionRejectionLocked(
+        FileTransferDirection direction,
+        string sessionId,
+        string transferId,
+        out string rejectionReason)
+    {
+        rejectionReason = "none";
+        lock (gate)
+        {
+            if (direction == FileTransferDirection.Outbound &&
+                IsOutboundLifecycleMessageMatchLocked(sessionId, transferId) &&
+                outboundTransfer is { IsTerminal: false } outbound &&
+                outbound.RouteRuntime.UsesPostTunaFallbackV6Runtime &&
+                !outbound.RuntimeUnlockActivationWindowGranted &&
+                IsFallbackSurvivalProofPending(outbound))
+            {
+                rejectionReason = "fallback_survival_pending";
+                MarkOutboundRuntimeUnlockWaitingForFallbackSurvivalLocked(
+                    outbound,
+                    "precommit_probe_received",
+                    rejectionReason);
+                return true;
+            }
+
+            if (direction == FileTransferDirection.Inbound &&
+                IsInboundLifecycleMessageMatchLocked(sessionId, transferId) &&
+                inboundTransfer is { IsTerminal: false } inbound &&
+                inbound.RouteRuntime.UsesPostTunaFallbackV6Runtime &&
+                !inbound.RuntimeUnlockActivationWindowGranted &&
+                IsFallbackSurvivalProofPending(inbound))
+            {
+                rejectionReason = "fallback_survival_pending";
+                MarkInboundRuntimeUnlockWaitingForFallbackSurvivalLocked(
+                    inbound,
+                    "precommit_probe_received",
+                    rejectionReason);
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void HandleRuntimeUnlockPreCommitProbeAck(
@@ -2098,6 +2176,46 @@ public sealed partial class SessionFileTransferService
         ClearOutboundFallbackCheckpointDeliveryRecoveryPendingLocked(
             context,
             $"transport_epoch_completed_{reason}");
+        if (epoch.Kind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
+            epoch.TargetTransport == FileTransferTransportKind.RegularNkn &&
+            IsCurrentPostTunaFallbackLegCheckpointPending(context.CurrentTransferLeg))
+        {
+            var leg = context.CurrentTransferLeg!;
+            var checkpointRequestId = leg.CheckpointRequestId;
+            if (!string.IsNullOrWhiteSpace(checkpointRequestId))
+            {
+                RememberRetiredFallbackCheckpointRequest(
+                    context.RetiredFallbackCheckpointRequestKeys,
+                    leg,
+                    epoch.EpochId,
+                    checkpointRequestId);
+            }
+
+            ClearOutboundFallbackCheckpointRetryStateLocked(
+                context,
+                checkpointRequestId,
+                $"transport_epoch_completed_{reason}");
+            FileTransferCoordinator.MarkFallbackCheckpointAccepted(
+                leg,
+                epoch.EpochId,
+                Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, Math.Max(0, context.ChunkCount)),
+                observedHighestChunkIndex);
+            LogFileTransferFallbackCheckpointAccepted(
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                leg,
+                checkpointRequestId ?? "(none)",
+                $"transport_epoch_completed_{reason}");
+            LogFileTransferFallbackLegAuthorityCheckpointAccepted(
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                leg,
+                checkpointRequestId,
+                $"transport_epoch_completed_{reason}");
+        }
+
         context.PullTransportRebindGeneration = 0;
         context.PullTransportLastSafetyReplayGeneration = 0;
         context.PullTransportLastSafetyReplayFrontierChunkIndex = -1;
@@ -2186,6 +2304,42 @@ public sealed partial class SessionFileTransferService
         context.PullTransportGraceDeadlineUtc = null;
         context.PullTransportPauseReason = null;
         context.PullTransportResumeRequestPending = false;
+        if (epoch.Kind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
+            epoch.TargetTransport == FileTransferTransportKind.RegularNkn &&
+            IsCurrentPostTunaFallbackLegCheckpointPending(context.CurrentTransferLeg))
+        {
+            var leg = context.CurrentTransferLeg!;
+            var checkpointRequestId = leg.CheckpointRequestId;
+            if (!string.IsNullOrWhiteSpace(checkpointRequestId))
+            {
+                RememberRetiredFallbackCheckpointRequest(
+                    context.RetiredFallbackCheckpointRequestKeys,
+                    leg,
+                    epoch.EpochId,
+                    checkpointRequestId);
+            }
+
+            FileTransferCoordinator.MarkFallbackCheckpointAccepted(
+                leg,
+                epoch.EpochId,
+                Math.Clamp(context.NextChunkIndex, 0, Math.Max(0, context.ChunkCount)),
+                context.PullHighestReceivedChunkIndex);
+            LogFileTransferFallbackCheckpointAccepted(
+                FileTransferDirection.Inbound,
+                context.TransferId,
+                context.SessionId,
+                leg,
+                checkpointRequestId ?? "(none)",
+                $"transport_epoch_completed_{reason}");
+            LogFileTransferFallbackLegAuthorityCheckpointAccepted(
+                FileTransferDirection.Inbound,
+                context.TransferId,
+                context.SessionId,
+                leg,
+                checkpointRequestId,
+                $"transport_epoch_completed_{reason}");
+        }
+
         context.PullTransportRebindGeneration = 0;
         context.StatusMessage = GetInboundResumeStatusMessage(context.State);
         if (epoch.Kind == FileTransferTransportHandoffKind.TunaToNormalFallback &&

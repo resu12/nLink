@@ -134,6 +134,8 @@ internal sealed class FileTransferLeg
     public int BridgeRecoveryGeneration { get; set; }
 
     public bool CanSendData { get; set; } = true;
+
+    public bool RuntimeUnlockProbeAllowedAfterTransportEpochAdoption { get; set; }
 }
 
 internal static class FileTransferCoordinator
@@ -260,6 +262,75 @@ internal static class FileTransferCoordinator
            !string.IsNullOrWhiteSpace(leg.CheckpointRequestId) &&
            leg.State is FileTransferLegState.CheckpointPending or FileTransferLegState.BridgeRestartPending;
 
+    public static bool CanAdmitRuntimeUnlockWhilePostTunaFallback(
+        bool routeUsesPostTunaFallbackRuntime,
+        FileTransferLeg? leg,
+        bool checkpointDeliveryRecoveryPending,
+        bool stateRefreshSendInFlight,
+        bool deferredStateRefreshPending,
+        bool proofReplayPending,
+        out string rejectionReason)
+    {
+        if (!routeUsesPostTunaFallbackRuntime)
+        {
+            rejectionReason = "not_post_tuna_fallback";
+            return true;
+        }
+
+        if (!IsCurrentPostTunaFallbackLeg(leg))
+        {
+            rejectionReason = "fallback_leg_not_current";
+            return false;
+        }
+
+        if (!leg!.CanSendData)
+        {
+            rejectionReason = string.IsNullOrWhiteSpace(leg.CheckpointRequestId)
+                ? "fallback_checkpoint_ownerless_pending"
+                : "fallback_checkpoint_pending";
+            return false;
+        }
+
+        if (leg.State is FileTransferLegState.CheckpointPending or FileTransferLegState.BridgeRestartPending)
+        {
+            rejectionReason = FormatLegState(leg.State);
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(leg.CheckpointRequestId))
+        {
+            rejectionReason = "fallback_checkpoint_owner_active";
+            return false;
+        }
+
+        if (checkpointDeliveryRecoveryPending)
+        {
+            rejectionReason = "fallback_checkpoint_delivery_recovery_pending";
+            return false;
+        }
+
+        if (stateRefreshSendInFlight)
+        {
+            rejectionReason = "fallback_state_refresh_send_in_flight";
+            return false;
+        }
+
+        if (deferredStateRefreshPending)
+        {
+            rejectionReason = "fallback_deferred_state_refresh_pending";
+            return false;
+        }
+
+        if (proofReplayPending)
+        {
+            rejectionReason = "fallback_proof_replay_pending";
+            return false;
+        }
+
+        rejectionReason = "fallback_quiescent";
+        return true;
+    }
+
     public static bool TryValidateCurrentFallbackCheckpointProof(
         FileTransferLeg? leg,
         FileTransferRoute currentRoute,
@@ -365,6 +436,7 @@ internal static class FileTransferCoordinator
         leg.CheckpointRequestId = null;
         leg.CheckpointPriority = null;
         leg.CheckpointRequestedUtc = null;
+        leg.RuntimeUnlockProbeAllowedAfterTransportEpochAdoption = false;
     }
 
     public static void MarkFallbackCheckpointRequested(
@@ -381,6 +453,7 @@ internal static class FileTransferCoordinator
         leg.CheckpointRequestedUtc = requestedUtc ?? DateTimeOffset.UtcNow;
         leg.CheckpointGeneration++;
         leg.TransportEpochId = transportEpochId > 0 ? transportEpochId : leg.TransportEpochId;
+        leg.RuntimeUnlockProbeAllowedAfterTransportEpochAdoption = false;
     }
 
     public static void RetireFallbackCheckpointRequest(FileTransferLeg leg)
@@ -390,6 +463,7 @@ internal static class FileTransferCoordinator
         leg.CheckpointRequestedUtc = null;
         leg.State = FileTransferLegState.RecoveryActive;
         leg.CanSendData = true;
+        leg.RuntimeUnlockProbeAllowedAfterTransportEpochAdoption = false;
     }
 
     public static string FormatLegState(FileTransferLegState state)

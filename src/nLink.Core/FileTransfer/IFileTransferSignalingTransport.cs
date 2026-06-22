@@ -124,6 +124,8 @@ public sealed record FileTransferPostTunaFallbackControlPlanePressure(
 public interface IFileTransferPostTunaFallbackControlPlanePressureObserver
 {
     void ObservePostTunaFallbackControlPlanePressure(FileTransferPostTunaFallbackControlPlanePressure pressure);
+
+    void ClearPostTunaFallbackControlPlanePressure(string transferId, string reason);
 }
 
 public sealed record FileTransferRouteCompletedNotification(

@@ -907,6 +907,12 @@ public sealed partial class NknSignalingTransport
         var sentViaAcceleration = false;
         if (useBulkLane)
         {
+            var suppressUncommittedRuntimeUnlockAcceleration =
+                ShouldSuppressUncommittedRuntimeUnlockFileAcceleration(
+                    normalizedTransferId,
+                    frameType,
+                    requireAcceleratedBulk,
+                    runtimeUnlockPreCommitAckAuthority is not null);
             if (runtimeUnlockPreCommitAckAuthority is { } ackAuthority)
             {
                 sentViaAcceleration = await TrySendRuntimeUnlockPreCommitAckWithAuthorityAsync(
@@ -933,7 +939,7 @@ public sealed partial class NknSignalingTransport
                     envelope,
                     transportPayload,
                     ct,
-                    allowAcceleration: !forceRegularNknBulk,
+                    allowAcceleration: !forceRegularNknBulk && !suppressUncommittedRuntimeUnlockAcceleration,
                     allowAccelerationDuringRegularNknFallback: allowAccelerationDuringRegularNknFallback)
                     .ConfigureAwait(false);
             }
@@ -4862,7 +4868,17 @@ public sealed partial class NknSignalingTransport
         {
             if (fileTransferSessionSharedKey is null || fileTransferSessionSharedKey.Length == 0)
             {
-                throw new InvalidOperationException("File transfer session shared key is not available.");
+                if (controlSessionSharedKey is { Length: > 0 })
+                {
+                    fileTransferSessionSharedKey = SessionKeyDerivation.DeriveFileTransferKey(controlSessionSharedKey);
+                    LocalOperationalLog.Warn(
+                        "SessionSecurity",
+                        "event=filetransfer_session_key_rederived_from_control_key; reason=filetransfer_key_missing_control_key_current");
+                }
+                else
+                {
+                    throw new InvalidOperationException("File transfer session shared key is not available.");
+                }
             }
 
             return fileTransferSessionSharedKey.AsSpan().ToArray();

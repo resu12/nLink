@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Collections;
 using System.Diagnostics;
+using System.Globalization;
 using System.Security.Cryptography;
 using NLink.Core.Logging;
 
@@ -4632,6 +4633,7 @@ public sealed partial class SessionFileTransferService
             {
                 context.PullLastCommittedProgressUtc = progressUtc;
                 ResetInboundV6PostTunaFallbackFrontierRescueLocked(context);
+                ClearInboundV6ReceiverStateDeferredDiagnosticLocked(context);
             }
 
             context.PullReceiverWriteBatchCountRecent++;
@@ -4696,9 +4698,10 @@ public sealed partial class SessionFileTransferService
             }
             else
             {
-                LocalOperationalLog.Info(
-                    "FileTransferService",
-                    $"event=filetransfer_v6_receiver_state_deferred; transfer_id={context.TransferId}; session_id={context.SessionId}; reason=frontier_stalled; next_chunk_index={nextChunkIndexAfterCommit}; highest_received_chunk_index={highestReceivedChunkIndexAfterCommit}");
+                LogInboundV6ReceiverStateDeferredForFrontierStall(
+                    context,
+                    nextChunkIndexAfterCommit,
+                    highestReceivedChunkIndexAfterCommit);
             }
         }
 
@@ -4810,6 +4813,7 @@ public sealed partial class SessionFileTransferService
             {
                 context.PullLastCommittedProgressUtc = progressUtc;
                 ResetInboundV6PostTunaFallbackFrontierRescueLocked(context);
+                ClearInboundV6ReceiverStateDeferredDiagnosticLocked(context);
             }
 
             context.PullReceiverWriteBatchCountRecent++;
@@ -5219,6 +5223,80 @@ public sealed partial class SessionFileTransferService
                 $"event=filetransfer_v6_receiver_state_coalesced; transfer_id={context.TransferId}; session_id={context.SessionId}; reason=frontier_stalled_tail_window; current_committed_chunk_index={context.NextChunkIndex}; highest_received_chunk_index={context.PullHighestReceivedChunkIndex}; accept_window_end_chunk_index={context.V6SparseAcceptWindowEndExclusive}; tail_chunks_remaining={tailChunksRemaining}; elapsed_since_state_ms={(long)Math.Max(0, elapsedSinceState.TotalMilliseconds)}");
             return false;
         }
+    }
+
+    private void LogInboundV6ReceiverStateDeferredForFrontierStall(
+        InboundTransferContext context,
+        int nextChunkIndex,
+        int highestReceivedChunkIndex)
+    {
+        var now = DateTimeOffset.UtcNow;
+        string transferId;
+        string sessionId;
+        string route;
+        int protocolVersion;
+        int liveRouteEpoch;
+        int legGeneration;
+        long transportEpoch;
+        string checkpointRequestId;
+        int suppressedCount;
+        bool shouldLog;
+
+        lock (gate)
+        {
+            if (!ReferenceEquals(inboundTransfer, context) || context.IsTerminal)
+            {
+                return;
+            }
+
+            transferId = context.TransferId;
+            sessionId = context.SessionId;
+            route = context.RouteSelection.TelemetryToken;
+            protocolVersion = context.NegotiatedDataProtocolVersion;
+            liveRouteEpoch = context.CurrentLiveRouteEpoch?.EpochId ?? 0;
+            legGeneration = context.CurrentTransferLeg?.Generation ?? 0;
+            transportEpoch = context.CurrentTransferLeg?.TransportEpochId ?? context.V6ReceiverTransportEpoch;
+            checkpointRequestId = context.CurrentTransferLeg?.CheckpointRequestId ?? "(none)";
+            var tuple = string.Join(
+                "|",
+                sessionId,
+                transferId,
+                route,
+                protocolVersion.ToString(CultureInfo.InvariantCulture),
+                liveRouteEpoch.ToString(CultureInfo.InvariantCulture),
+                legGeneration.ToString(CultureInfo.InvariantCulture),
+                transportEpoch.ToString(CultureInfo.InvariantCulture),
+                checkpointRequestId,
+                nextChunkIndex.ToString(CultureInfo.InvariantCulture),
+                highestReceivedChunkIndex.ToString(CultureInfo.InvariantCulture));
+
+            shouldLog = !string.Equals(context.V6LastReceiverStateDeferredDiagnosticTuple, tuple, StringComparison.Ordinal) ||
+                        context.V6LastReceiverStateDeferredDiagnosticUtc is not { } lastLogged ||
+                        now - lastLogged >= TimeSpan.FromMilliseconds(V6ReceiverStateDeferredDiagnosticCoalesceMs);
+            if (shouldLog)
+            {
+                suppressedCount = context.V6ReceiverStateDeferredDiagnosticSuppressedCount;
+                context.V6LastReceiverStateDeferredDiagnosticTuple = tuple;
+                context.V6LastReceiverStateDeferredDiagnosticUtc = now;
+                context.V6ReceiverStateDeferredDiagnosticSuppressedCount = 0;
+            }
+            else
+            {
+                context.V6ReceiverStateDeferredDiagnosticSuppressedCount++;
+                return;
+            }
+        }
+
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_v6_receiver_state_deferred; transfer_id={transferId}; session_id={sessionId}; route={route}; protocol_version={protocolVersion}; live_route_epoch={liveRouteEpoch}; leg_generation={legGeneration}; transport_epoch={transportEpoch}; checkpoint_request_id={FormatProtocolLogValue(checkpointRequestId)}; reason=frontier_stalled; next_chunk_index={nextChunkIndex}; highest_received_chunk_index={highestReceivedChunkIndex}; suppressed_repeat_count={suppressedCount}");
+    }
+
+    private static void ClearInboundV6ReceiverStateDeferredDiagnosticLocked(InboundTransferContext context)
+    {
+        context.V6LastReceiverStateDeferredDiagnosticTuple = null;
+        context.V6LastReceiverStateDeferredDiagnosticUtc = null;
+        context.V6ReceiverStateDeferredDiagnosticSuppressedCount = 0;
     }
 
     private async Task<bool> SendInboundV6FrontierRequestAsync(

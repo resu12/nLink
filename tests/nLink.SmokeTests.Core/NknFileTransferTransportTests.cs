@@ -51,6 +51,88 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
     }
 
     [Fact]
+    public async Task FileTransferControlPlane_RederivesFileTransferKeyWhenControlKeyStillCurrent()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfer.control-plane.rederive.address");
+            var helperClient = new FakeNknClient("helper.filetransfer.control-plane.rederive.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-filetransfer-control-plane-rederive", hostClient.Address));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-filetransfer-control-plane-rederive", helperClient.Address));
+
+            var sessionId = await ApproveNknSessionAsync(
+                    host,
+                    helper,
+                    cts.Token,
+                    InviteCapabilities.Chat | InviteCapabilities.FileTransfer)
+                .ConfigureAwait(false);
+            const string transferId = "transfer_control_plane_rederive_key";
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token).ConfigureAwait(false);
+            _ = await helper.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token).ConfigureAwait(false);
+            Assert.NotNull(GetPrivateField(host, "controlSessionSharedKey"));
+            Assert.NotNull(GetPrivateField(host, "fileTransferSessionSharedKey"));
+
+            SetPrivateField(host, "fileTransferSessionSharedKey", null);
+            var logStart = GetOperationalLogLength();
+            var controlPlane = Assert.IsAssignableFrom<IFileTransferControlPlaneDeliveryTransport>(host);
+            var frame = new FileTransferReceiverStateFrameV6
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                Epoch = 1,
+                TransportEpoch = 2,
+                ContiguousCommittedChunkIndex = 7,
+                DurableReceivedHighestChunkIndex = 7,
+                CreditUntilChunkIndexExclusive = 16,
+                BytesCommitted = 7 * 1024L,
+                RecoveryMode = "regular_nkn_state_refresh",
+                Priority = "state_refresh",
+                RepairRequestId = "v6-regular-nkn-state-refresh:rederive",
+            };
+            var request = new FileTransferControlPlaneDeliveryRequest(
+                FileTransferControlPlaneKind.FallbackCheckpointProof,
+                frame,
+                "unit_test_rederive_filetransfer_key")
+            {
+                Direction = FileTransferDirection.Outbound,
+                RouteToken = FileTransferRouteResolver.PostTunaFallbackV6Token,
+                ProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                LiveRouteEpoch = 4,
+                TransferLegGeneration = 5,
+                BridgeRecoveryGeneration = 3,
+                TransportEpoch = 2,
+                CheckpointRequestId = frame.RepairRequestId,
+                PeerVisibleRequired = true,
+                PeerCopyAttempts = 1,
+            };
+
+            var result = await controlPlane.SendFileTransferControlPlaneFrameAsync(request, cts.Token)
+                .ConfigureAwait(false);
+
+            Assert.True(result.AcceptedAny);
+            Assert.True(result.PeerVisibleAny);
+            Assert.NotNull(GetPrivateField(host, "fileTransferSessionSharedKey"));
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=filetransfer_session_key_rederived_from_control_key;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_control_plane_delivery_result;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("File transfer session shared key is not available", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
     public async Task NknTransport_SessionHeartbeat_ControlAckRaisesLivenessProof()
     {
         FakeNknClient.ResetNetwork();

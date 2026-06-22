@@ -8010,6 +8010,28 @@ public sealed partial class SessionRuntime
             TransportFailureCategory.UserCancelled;
     }
 
+    private bool TryRecoverHelpeeHostReadyStartFailure(Exception ex, string reason)
+    {
+        var nknSnapshot = NknRuntimeDiagnostics.Snapshot();
+        var failure = TransportFailureMapper.FromException(
+            ex,
+            nknSnapshot.LastError,
+            nknSnapshot.LastDisconnectReason);
+        if (!ShouldQuietlyRecoverHelpeeHostStartFailure(failure))
+        {
+            return false;
+        }
+
+        var scheduled = TryScheduleQuietHelpeeRehost(reason);
+        if (!scheduled && Volatile.Read(ref quietHelpeeRehostInProgress) == 0)
+        {
+            return false;
+        }
+
+        LogTransportFailure(failure, reason);
+        return true;
+    }
+
     private bool TryScheduleQuietHelpeeRehost(string reason)
     {
         if (Interlocked.Exchange(ref quietHelpeeRehostInProgress, 1) != 0)
