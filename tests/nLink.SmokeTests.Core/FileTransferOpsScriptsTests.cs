@@ -107,6 +107,8 @@ public sealed class FileTransferOpsScriptsTests
         "coexistence-summary.txt",
         "external-transport-health-summary.txt",
         "stability-gates-summary.txt",
+        "phase0-invariant-ledger.txt",
+        "phase0-invariant-ledger.json",
         "v4-promotion-decision.txt",
         "v4-promotion-decision.json"
     ];
@@ -1075,6 +1077,15 @@ public sealed class FileTransferOpsScriptsTests
         var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
         Assert.Equal("legacy", route["route_consistency_verdict"]);
         Assert.Equal("0", route["route_mismatch_count"]);
+
+        var ledger = ReadArtifactReport(result.ArtifactDir, "phase0-invariant-ledger.txt");
+        Assert.Equal("unknown", ledger["final_route"]);
+        Assert.Equal("unknown", ledger["protocol_version"]);
+        Assert.Equal("unknown", ledger["runtime_family"]);
+        Assert.Equal("unknown", ledger["frame_family"]);
+        Assert.Equal("completed", ledger["terminal_winner"]);
+        Assert.Equal("1", ledger["sha_ok"]);
+        Assert.Equal("0", ledger["stale_route_mismatch_count"]);
     }
 
     [Fact]
@@ -1101,6 +1112,23 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Equal("pass", route["route_consistency_verdict"]);
         Assert.Equal("0", route["route_mismatch_count"]);
         Assert.Equal("regular_nkn_v4_fast", route["selected_routes"]);
+
+        var ledger = ReadArtifactReport(result.ArtifactDir, "phase0-invariant-ledger.txt");
+        Assert.Equal(transferId, ledger["transfer_id"]);
+        Assert.Equal("regular_nkn_v4_fast", ledger["final_route"]);
+        Assert.Equal("4", ledger["protocol_version"]);
+        Assert.Equal("regular_v4", ledger["runtime_family"]);
+        Assert.Equal("v4", ledger["frame_family"]);
+        Assert.Equal("regular_nkn_v4_fast", ledger["selected_route_changes"]);
+        Assert.Equal("regular_v4", ledger["current_runtime_owner"]);
+        Assert.Equal("none", ledger["fallback_owner_state"]);
+        Assert.Equal("none", ledger["runtime_unlock_transaction_owner_state"]);
+        Assert.Equal("completed", ledger["terminal_winner"]);
+        Assert.Equal("Completed", ledger["sender_terminal_state"]);
+        Assert.Equal("Completed", ledger["receiver_terminal_state"]);
+        Assert.Equal("1", ledger["sha_ok"]);
+        Assert.Equal("none", ledger["late_frame_classification"]);
+        Assert.Equal("0", ledger["stale_route_mismatch_count"]);
     }
 
     [Fact]
@@ -1489,6 +1517,11 @@ public sealed class FileTransferOpsScriptsTests
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("runtime_fallback_separation_violation", verdict["recovery_failure_class"]);
+
+        var ledger = ReadArtifactReport(result.ArtifactDir, "phase0-invariant-ledger.txt");
+        Assert.Equal("runtime_fallback_separation_violation", ledger["recovery_failure_class"]);
+        Assert.Equal("fail", ledger["runtime_fallback_separation_verdict"]);
+        Assert.True(int.Parse(ledger["stale_route_mismatch_count"], CultureInfo.InvariantCulture) >= 0);
     }
 
     [Fact]
