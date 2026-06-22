@@ -703,6 +703,43 @@ function Get-FileTransferInvariantFrameFamily {
     return 'unknown'
 }
 
+function Get-FileTransferInvariantObservedFrameFamily {
+    param([Parameter(Mandatory = $true)]$Summary)
+
+    $hasV4 = $false
+    $hasV6 = $false
+    foreach ($event in @($Summary.TransferEvents)) {
+        $eventName = [string]$event.EventName
+        $frameType = Get-FileTransferEventField -Event $event -Name 'frame_type' -Default ''
+        $protocol = Get-FileTransferEventField -Event $event -Name 'protocol_version' -Default ''
+        if ($eventName -like 'filetransfer_v4_*' -or
+            $frameType -like 'filetransfer.*.v4' -or
+            ($protocol -eq '4' -and ($eventName -eq 'filetransfer_runtime_started' -or $eventName -eq 'filetransfer_session_opened'))) {
+            $hasV4 = $true
+        }
+
+        if ($eventName -like 'filetransfer_v6_*' -or
+            $frameType -like 'filetransfer.*.v6' -or
+            ($protocol -eq '6' -and ($eventName -eq 'filetransfer_runtime_started' -or $eventName -eq 'filetransfer_session_opened'))) {
+            $hasV6 = $true
+        }
+    }
+
+    if ($hasV4 -and $hasV6) {
+        return 'mixed'
+    }
+
+    if ($hasV4) {
+        return 'v4'
+    }
+
+    if ($hasV6) {
+        return 'v6'
+    }
+
+    return 'unknown'
+}
+
 function Get-FileTransferInvariantLatestTerminalState {
     param([object[]]$Events)
 
@@ -753,26 +790,43 @@ function Get-FileTransferInvariantTerminalWinner {
         [string]$ShaOk
     )
 
-    $states = @($TerminalEvents | ForEach-Object { Get-FileTransferEventField -Event $_ -Name 'state' -Default '' })
-    $errors = @($TerminalEvents | ForEach-Object { Get-FileTransferEventField -Event $_ -Name 'error_code' -Default '' })
-    if (@($states | Where-Object { [string]::Equals([string]$_, 'Completed', [System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0 -and $ShaOk -ne '0') {
-        return 'completed'
-    }
-
-    if (@($errors | Where-Object { [string]::Equals([string]$_, 'peer_disconnected', [System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) {
-        return 'peer_disconnected'
-    }
-
-    if (@($states | Where-Object { [string]::Equals([string]$_, 'CanceledRemote', [System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) {
-        return 'remote_cancel'
-    }
-
-    if (@($states | Where-Object { [string]::Equals([string]$_, 'CanceledLocal', [System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) {
-        return 'local_cancel'
-    }
-
     if ($TerminalEvents.Count -eq 0) {
         return 'none'
+    }
+
+    foreach ($event in @($TerminalEvents | Sort-Object Sequence)) {
+        $state = Get-FileTransferEventField -Event $event -Name 'state' -Default ''
+        $error = Get-FileTransferEventField -Event $event -Name 'error_code' -Default ''
+        $statusMessage = Get-FileTransferEventField -Event $event -Name 'status_message' -Default ''
+        if ([string]::Equals($state, 'Completed', [System.StringComparison]::OrdinalIgnoreCase) -and $ShaOk -ne '0') {
+            return 'completed'
+        }
+
+        if ([string]::Equals($state, 'CanceledRemote', [System.StringComparison]::OrdinalIgnoreCase)) {
+            if ([string]::Equals($statusMessage, 'session_end', [System.StringComparison]::OrdinalIgnoreCase) -or
+                [string]::Equals($error, 'session_end', [System.StringComparison]::OrdinalIgnoreCase)) {
+                return 'remote_session_end'
+            }
+
+            return 'remote_cancel'
+        }
+
+        if ([string]::Equals($state, 'CanceledLocal', [System.StringComparison]::OrdinalIgnoreCase)) {
+            if ([string]::Equals($statusMessage, 'session_end', [System.StringComparison]::OrdinalIgnoreCase) -or
+                [string]::Equals($error, 'session_end', [System.StringComparison]::OrdinalIgnoreCase)) {
+                return 'local_session_end'
+            }
+
+            return 'local_cancel'
+        }
+
+        if ([string]::Equals($error, 'peer_disconnected', [System.StringComparison]::OrdinalIgnoreCase)) {
+            return 'peer_disconnected'
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($error) -and $error -ne '(none)') {
+            return 'failure'
+        }
     }
 
     return 'unknown'
@@ -839,6 +893,316 @@ function Get-FileTransferInvariantFallbackOwnerState {
     }
 
     return 'none'
+}
+
+function Get-FileTransferInvariantFirstTerminalByTransferId {
+    param([object[]]$TerminalEvents)
+
+    $result = @{}
+    foreach ($event in @($TerminalEvents | Sort-Object Sequence)) {
+        $transferId = [string]$event.TransferId
+        if ([string]::IsNullOrWhiteSpace($transferId) -or $result.ContainsKey($transferId)) {
+            continue
+        }
+
+        $result[$transferId] = $event
+    }
+
+    return $result
+}
+
+function Test-FileTransferInvariantLateFrameEvent {
+    param($Event)
+
+    if ($null -eq $Event) {
+        return $false
+    }
+
+    $eventName = [string]$Event.EventName
+    if ($eventName -eq 'filetransfer_data_frame_ignored' -or
+        $eventName -eq 'filetransfer_message_rejected' -or
+        $eventName -eq 'filetransfer_binary_frame_sent' -or
+        $eventName -eq 'filetransfer_binary_frame_received' -or
+        $eventName -eq 'filetransfer_data_frame_dispatched') {
+        return $true
+    }
+
+    return $false
+}
+
+function Get-FileTransferInvariantLateFrameClassification {
+    param(
+        [Parameter(Mandatory = $true)]$Summary,
+        [string]$TerminalWinner,
+        [string]$ShaOk
+    )
+
+    $terminalByTransferId = Get-FileTransferInvariantFirstTerminalByTransferId -TerminalEvents @($Summary.TerminalEvents)
+    $lateEvents = New-Object System.Collections.Generic.List[object]
+    foreach ($event in @($Summary.TransferEvents | Sort-Object Sequence)) {
+        if (-not (Test-FileTransferInvariantLateFrameEvent -Event $event)) {
+            continue
+        }
+
+        $transferId = [string]$event.TransferId
+        if ([string]::IsNullOrWhiteSpace($transferId) -or -not $terminalByTransferId.ContainsKey($transferId)) {
+            continue
+        }
+
+        if ($event.Sequence -gt [int]$terminalByTransferId[$transferId].Sequence) {
+            $lateEvents.Add($event) | Out-Null
+        }
+    }
+
+    $terminalStaleUpdateRejectedCount = 0
+    if ($Summary.PSObject.Properties.Name -contains 'TerminalStaleUpdateRejectedCount') {
+        $terminalStaleUpdateRejectedCount = [int]$Summary.TerminalStaleUpdateRejectedCount
+    }
+
+    if ($lateEvents.Count -le 0 -and $terminalStaleUpdateRejectedCount -le 0) {
+        return [pscustomobject]@{
+            Classification = 'none'
+            Count = 0
+            EvidenceEvents = @()
+        }
+    }
+
+    $classification = if ($TerminalWinner -eq 'completed' -and $ShaOk -eq '1') {
+        'benign_after_clean_completion'
+    }
+    else {
+        'non_benign_after_terminal'
+    }
+
+    return [pscustomobject]@{
+        Classification = $classification
+        Count = $lateEvents.Count + $terminalStaleUpdateRejectedCount
+        EvidenceEvents = @($lateEvents.ToArray() | Select-Object -First 10)
+    }
+}
+
+function Get-FileTransferInvariantRouteLawResult {
+    param([Parameter(Mandatory = $true)]$Summary)
+
+    $findings = New-Object System.Collections.Generic.List[string]
+    $evidence = New-Object System.Collections.Generic.List[object]
+    [object[]]$routeEvents = @($Summary.TransferEvents | Where-Object { $_.EventName -eq 'filetransfer_route_selected' })
+
+    foreach ($event in @($routeEvents | Sort-Object Sequence)) {
+        $route = Get-FileTransferEventField -Event $event -Name 'route' -Default ''
+        $protocol = Get-FileTransferEventField -Event $event -Name 'protocol_version' -Default ''
+        $runtimeProfile = Get-FileTransferEventField -Event $event -Name 'runtime_profile' -Default ''
+        $frameFamily = Get-FileTransferEventField -Event $event -Name 'frame_family' -Default ''
+        $diagnosticMarker = Get-FileTransferEventField -Event $event -Name 'diagnostic_regular_nkn_v6' -Default ''
+        $routeOk = $true
+
+        if ([string]::IsNullOrWhiteSpace($route) -or [string]::IsNullOrWhiteSpace($protocol)) {
+            $routeOk = $false
+            $findings.Add(("route law missing route/protocol metadata: {0}" -f (Format-FileTransferEvidenceLine -Event $event))) | Out-Null
+        }
+        elseif ($route -eq 'regular_nkn_v4_fast') {
+            $routeOk = $protocol -eq '4' -and
+                ($frameFamily -eq '' -or $frameFamily -eq '(none)' -or $frameFamily -eq 'v4') -and
+                ($runtimeProfile -like '*regular_nkn_v4*' -or $runtimeProfile -eq 'regular_nkn_v4_fast')
+            if (-not $routeOk) {
+                $findings.Add(("regular NKN route law mismatch: {0}" -f (Format-FileTransferEvidenceLine -Event $event))) | Out-Null
+            }
+        }
+        elseif ($route -eq 'file_tuna_v4') {
+            $routeOk = $protocol -eq '4' -and
+                ($frameFamily -eq '' -or $frameFamily -eq '(none)' -or $frameFamily -eq 'v4') -and
+                $runtimeProfile -like '*file_tuna_v4*'
+            if (-not $routeOk) {
+                $findings.Add(("active Tuna route law mismatch: {0}" -f (Format-FileTransferEvidenceLine -Event $event))) | Out-Null
+            }
+        }
+        elseif ($route -eq 'post_tuna_fallback_v6') {
+            $routeOk = $protocol -eq '6' -and
+                ($frameFamily -eq '' -or $frameFamily -eq '(none)' -or $frameFamily -eq 'v6')
+            if (-not $routeOk) {
+                $findings.Add(("post-Tuna fallback route law mismatch: {0}" -f (Format-FileTransferEvidenceLine -Event $event))) | Out-Null
+            }
+        }
+        elseif ($route -eq 'diagnostic_regular_nkn_v6') {
+            $routeOk = $protocol -eq '6' -and $diagnosticMarker -eq '1'
+            if (-not $routeOk) {
+                $findings.Add(("diagnostic regular NKN V6 route used without explicit opt-in: {0}" -f (Format-FileTransferEvidenceLine -Event $event))) | Out-Null
+            }
+        }
+        else {
+            $routeOk = $false
+            $findings.Add(("unknown or disallowed route selected: {0}" -f (Format-FileTransferEvidenceLine -Event $event))) | Out-Null
+        }
+
+        if (-not $routeOk) {
+            $evidence.Add($event) | Out-Null
+        }
+    }
+
+    foreach ($event in @($Summary.TransferEvents | Sort-Object Sequence)) {
+        $eventName = [string]$event.EventName
+        $route = Get-FileTransferEventField -Event $event -Name 'route' -Default ''
+        $protocol = Get-FileTransferEventField -Event $event -Name 'protocol_version' -Default ''
+        if ($eventName -like 'filetransfer_v5_*' -or $protocol -eq '5') {
+            $findings.Add(("obsolete V5 evidence: {0}" -f (Format-FileTransferEvidenceLine -Event $event))) | Out-Null
+            $evidence.Add($event) | Out-Null
+            continue
+        }
+
+        if ($route -eq 'file_tuna_v6') {
+            $findings.Add(("active file_tuna_v6 evidence: {0}" -f (Format-FileTransferEvidenceLine -Event $event))) | Out-Null
+            $evidence.Add($event) | Out-Null
+            continue
+        }
+
+        if (($eventName -eq 'filetransfer_runtime_started' -or $eventName -like 'filetransfer_v*_sender_started' -or $eventName -like 'filetransfer_v*_receiver_started') -and
+            -not [string]::IsNullOrWhiteSpace($route) -and
+            -not [string]::IsNullOrWhiteSpace($protocol)) {
+            if (($route -eq 'regular_nkn_v4_fast' -or $route -eq 'file_tuna_v4') -and $protocol -ne '4') {
+                $findings.Add(("V4 route entered non-V4 runtime: {0}" -f (Format-FileTransferEvidenceLine -Event $event))) | Out-Null
+                $evidence.Add($event) | Out-Null
+            }
+            elseif (($route -eq 'post_tuna_fallback_v6' -or $route -eq 'diagnostic_regular_nkn_v6') -and $protocol -ne '6') {
+                $findings.Add(("V6 route entered non-V6 runtime: {0}" -f (Format-FileTransferEvidenceLine -Event $event))) | Out-Null
+                $evidence.Add($event) | Out-Null
+            }
+        }
+    }
+
+    $verdict = if ($findings.Count -eq 0) { 'pass' } else { 'fail' }
+    if ($routeEvents.Count -eq 0 -and $findings.Count -eq 0) {
+        $verdict = 'legacy'
+    }
+
+    return [pscustomobject]@{
+        Verdict = $verdict
+        FailureClass = if ($findings.Count -gt 0) { 'route_runtime' } else { 'none' }
+        Findings = $findings
+        EvidenceEvents = @($evidence.ToArray() | Select-Object -First 20)
+    }
+}
+
+function Get-FileTransferInvariantTerminalLifecycleResult {
+    param(
+        [Parameter(Mandatory = $true)]$Summary,
+        [string]$LateFrameClassification
+    )
+
+    $findings = New-Object System.Collections.Generic.List[string]
+    $evidence = New-Object System.Collections.Generic.List[object]
+    if ($LateFrameClassification -eq 'non_benign_after_terminal') {
+        $findings.Add('late frame/control evidence after non-clean terminal state') | Out-Null
+        foreach ($event in @($Summary.TransferEvents | Where-Object { Test-FileTransferInvariantLateFrameEvent -Event $_ } | Select-Object -First 10)) {
+            $evidence.Add($event) | Out-Null
+        }
+    }
+
+    if ($Summary.TransferEvents.Count -gt 0 -and $Summary.TerminalEvents.Count -eq 0) {
+        $findings.Add('insufficient terminal evidence') | Out-Null
+    }
+
+    return [pscustomobject]@{
+        Verdict = if ($findings.Count -eq 0) { 'pass' } else { 'fail' }
+        FailureClass = if ($findings.Count -gt 0) { 'terminal_lifecycle' } else { 'none' }
+        Findings = $findings
+        EvidenceEvents = @($evidence.ToArray() | Select-Object -First 20)
+    }
+}
+
+function Get-FileTransferInvariantControlPriorityResult {
+    param([Parameter(Mandatory = $true)]$Summary)
+
+    [object[]]$events = @($Summary.GlobalEvents + $Summary.TransferEvents)
+    [object[]]$controlEvents = @(
+        $events |
+            Where-Object {
+                $_.EventName -eq 'session_end_redundant_sent' -or
+                $_.EventName -eq 'filetransfer_cancel_redundant_sent' -or
+                $_.EventName -eq 'filetransfer_control_priority_delivery_result' -or
+                ($_.EventName -eq 'filetransfer_control_plane_delivery_result' -and
+                    ((Get-FileTransferEventField -Event $_ -Name 'kind' -Default '') -eq 'cancel' -or
+                     (Get-FileTransferEventField -Event $_ -Name 'kind' -Default '') -eq 'session_end' -or
+                     (Get-FileTransferEventField -Event $_ -Name 'kind' -Default '') -eq 'pause' -or
+                     (Get-FileTransferEventField -Event $_ -Name 'kind' -Default '') -eq 'resume'))
+            }
+    )
+
+    $findings = New-Object System.Collections.Generic.List[string]
+    $evidence = New-Object System.Collections.Generic.List[object]
+    $peerVisibleCount = 0
+    $localOnlyCount = 0
+    foreach ($event in @($controlEvents | Sort-Object Sequence)) {
+        $peerVisible =
+            (Get-FileTransferEventInt64Field -Event $event -Name 'peer_visible_any' -Default 0) -gt 0 -or
+            (Get-FileTransferEventInt64Field -Event $event -Name 'delivered_any' -Default 0) -gt 0 -or
+            (Get-FileTransferEventInt64Field -Event $event -Name 'control_ack' -Default 0) -gt 0 -or
+            (Get-FileTransferEventInt64Field -Event $event -Name 'control_copy' -Default 0) -gt 0 -or
+            (Get-FileTransferEventInt64Field -Event $event -Name 'bulk_copy' -Default 0) -gt 0
+        $underBacklog =
+            (Get-FileTransferEventInt64Field -Event $event -Name 'data_backlog' -Default 0) -gt 0 -or
+            (Get-FileTransferEventInt64Field -Event $event -Name 'bulk_backlog' -Default 0) -gt 0 -or
+            (Get-FileTransferEventInt64Field -Event $event -Name 'under_data_backlog' -Default 0) -gt 0
+        $localOnly =
+            (Get-FileTransferEventInt64Field -Event $event -Name 'local_only_rejected' -Default 0) -gt 0 -or
+            (
+                (Get-FileTransferEventInt64Field -Event $event -Name 'control_queue' -Default 0) -gt 0 -and
+                -not $peerVisible
+            )
+
+        if ($peerVisible) {
+            $peerVisibleCount++
+        }
+
+        if ($localOnly) {
+            $localOnlyCount++
+            if ($underBacklog) {
+                $findings.Add(("control-priority lifecycle delivery was local-only under data backlog: {0}" -f (Format-FileTransferEvidenceLine -Event $event))) | Out-Null
+                $evidence.Add($event) | Out-Null
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        Verdict = if ($findings.Count -eq 0) { 'pass' } else { 'fail' }
+        FailureClass = if ($findings.Count -gt 0) { 'lifecycle_control_priority' } else { 'none' }
+        PeerVisibleCount = $peerVisibleCount
+        LocalOnlyCount = $localOnlyCount
+        Findings = $findings
+        EvidenceEvents = @($evidence.ToArray() | Select-Object -First 20)
+    }
+}
+
+function Get-FileTransferInvariantCombinedGateResult {
+    param(
+        [Parameter(Mandatory = $true)]$RouteLaw,
+        [Parameter(Mandatory = $true)]$TerminalLifecycle,
+        [Parameter(Mandatory = $true)]$ControlPriority
+    )
+
+    $findings = New-Object System.Collections.Generic.List[string]
+    $evidence = New-Object System.Collections.Generic.List[object]
+    $failureClass = 'none'
+    foreach ($result in @($RouteLaw, $TerminalLifecycle, $ControlPriority)) {
+        if ($result.Verdict -eq 'fail') {
+            if ($failureClass -eq 'none') {
+                $failureClass = $result.FailureClass
+            }
+
+            foreach ($finding in @($result.Findings)) {
+                $findings.Add($finding) | Out-Null
+            }
+            foreach ($event in @($result.EvidenceEvents)) {
+                $evidence.Add($event) | Out-Null
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        Verdict = if ($findings.Count -eq 0) { 'pass' } else { 'fail' }
+        FailureClass = $failureClass
+        Findings = $findings
+        EvidenceEvents = @($evidence.ToArray() | Select-Object -First 20)
+    }
 }
 
 function Get-FileTransferEventDoubleField {
@@ -5712,19 +6076,12 @@ function New-FileTransferInvariantLedgerObject {
 
     $shaOk = Get-FileTransferInvariantShaOk -TerminalEvents @($Summary.TerminalEvents) -GateVerdict $GateResult.Verdict
     $terminalWinner = Get-FileTransferInvariantTerminalWinner -TerminalEvents @($Summary.TerminalEvents) -ShaOk $shaOk
-    $terminalStaleUpdateRejectedCount = 0
-    if ($Summary.PSObject.Properties.Name -contains 'TerminalStaleUpdateRejectedCount') {
-        $terminalStaleUpdateRejectedCount = [int]$Summary.TerminalStaleUpdateRejectedCount
-    }
-    $lateFrameClassification = if ($terminalStaleUpdateRejectedCount -le 0) {
-        'none'
-    }
-    elseif ($terminalWinner -eq 'completed' -and $shaOk -eq '1') {
-        'benign_after_clean_completion'
-    }
-    else {
-        'non_benign_after_terminal'
-    }
+    $lateFrameProof = Get-FileTransferInvariantLateFrameClassification -Summary $Summary -TerminalWinner $terminalWinner -ShaOk $shaOk
+    $lateFrameClassification = $lateFrameProof.Classification
+    $routeLaw = Get-FileTransferInvariantRouteLawResult -Summary $Summary
+    $terminalLifecycle = Get-FileTransferInvariantTerminalLifecycleResult -Summary $Summary -LateFrameClassification $lateFrameClassification
+    $controlPriority = Get-FileTransferInvariantControlPriorityResult -Summary $Summary
+    $combinedInvariant = Get-FileTransferInvariantCombinedGateResult -RouteLaw $routeLaw -TerminalLifecycle $terminalLifecycle -ControlPriority $controlPriority
 
     $maxLiveEpoch = -1L
     foreach ($event in @($Summary.TransferEvents)) {
@@ -5751,6 +6108,12 @@ function New-FileTransferInvariantLedgerObject {
     }
 
     $runtimeFamily = Get-FileTransferInvariantRuntimeFamily -Route $finalRoute -RuntimeProfile $runtimeProfile -ProtocolVersion $protocolVersion
+    $observedFrameFamily = Get-FileTransferInvariantObservedFrameFamily -Summary $Summary
+    $derivedFrameFamily = Get-FileTransferInvariantFrameFamily -Route $finalRoute -ProtocolVersion $protocolVersion
+    $frameFamily = if ($observedFrameFamily -ne 'unknown') { $observedFrameFamily } else { $derivedFrameFamily }
+    $fallbackConsumed = if (($selectedRouteChanges -contains 'post_tuna_fallback_v6') -and
+        ($terminalWinner -eq 'completed' -or $fallbackAuthorityProof.CompletedCount -gt 0)) { '1' } else { '0' }
+    $staleRouteWorkerActivityCount = [string]([int]$routeFindings.Count + [int]$controlPlaneProof.ControlPlaneNonCurrentLegGenerationSendCount)
     [pscustomobject][ordered]@{
         transfer_id = Get-FileTransferInvariantText -Value $Summary.TransferId -Default 'unknown'
         scenario_name = Get-FileTransferInvariantText -Value (Split-Path -Leaf $sourceArtifactDir) -Default 'unknown'
@@ -5758,7 +6121,7 @@ function New-FileTransferInvariantLedgerObject {
         final_route = $finalRoute
         protocol_version = $protocolVersion
         runtime_family = $runtimeFamily
-        frame_family = Get-FileTransferInvariantFrameFamily -Route $finalRoute -ProtocolVersion $protocolVersion
+        frame_family = $frameFamily
         selected_route_changes = if ($selectedRouteChanges.Count -gt 0) { $selectedRouteChanges.ToArray() -join ',' } else { '(none)' }
         live_epoch_route_changes = if ($liveRouteProof.RouteChanges.Count -gt 0) { @($liveRouteProof.RouteChanges) -join ',' } else { '(none)' }
         route_epoch_owner_generation = $routeEpochOwnerGeneration
@@ -5771,9 +6134,16 @@ function New-FileTransferInvariantLedgerObject {
         sha_ok = $shaOk
         late_frame_classification = $lateFrameClassification
         stale_route_mismatch_count = [string]$routeFindings.Count
+        fallback_consumed = $fallbackConsumed
+        stale_route_worker_activity_count = $staleRouteWorkerActivityCount
+        control_plane_peer_visible_proof_count = [string]$controlPlaneProof.PeerVisibleCount
         runtime_fallback_separation_verdict = $fallbackRuntimeUnlockSeparationProof.Verdict
         control_plane_isolation_verdict = $controlPlaneProof.Verdict
         bridge_liveness_integration_verdict = $bridgeLivenessProof.Verdict
+        release_route_law_verdict = $routeLaw.Verdict
+        terminal_lifecycle_invariant_verdict = $terminalLifecycle.Verdict
+        control_priority_invariant_verdict = $controlPriority.Verdict
+        invariant_failure_class = $combinedInvariant.FailureClass
         goodput_bytes_per_second = $goodput
         recovery_failure_class = $recoveryClassification.Class
     }
@@ -5801,8 +6171,11 @@ function Write-FileTransferInvariantLedgerArtifacts {
     )
 
     $ledger = New-FileTransferInvariantLedgerObject -ArtifactDir $ArtifactDir -Summary $Summary -GateResult $GateResult -LiveRouteProofMode $LiveRouteProofMode
-    Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'phase0-invariant-ledger.txt' -Lines (New-FileTransferInvariantLedgerLines -Ledger $ledger) | Out-Null
+    $ledgerLines = New-FileTransferInvariantLedgerLines -Ledger $ledger
+    Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'phase0-invariant-ledger.txt' -Lines $ledgerLines | Out-Null
+    Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'filetransfer-invariant-summary.txt' -Lines $ledgerLines | Out-Null
     $ledger | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'phase0-invariant-ledger.json') -Encoding UTF8
+    $ledger | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-invariant-summary.json') -Encoding UTF8
     return $ledger
 }
 
@@ -5865,12 +6238,46 @@ function Write-FileTransferDiagnosticsArtifacts {
     $bridgeLivenessProof = Get-FileTransferBridgeLivenessIntegrationProof -Summary $Summary
     $controlPlaneProof = Get-FileTransferControlPlaneIsolationProof -Summary $Summary
     $fallbackRuntimeUnlockSeparationProof = Get-FileTransferFallbackRuntimeUnlockSeparationProof -Summary $Summary
+    $invariantLedger = New-FileTransferInvariantLedgerObject -ArtifactDir $ArtifactDir -Summary $Summary -GateResult $GateResult -LiveRouteProofMode $LiveRouteProofMode
+    $releaseRouteLaw = Get-FileTransferInvariantRouteLawResult -Summary $Summary
+    $terminalLifecycleInvariant = Get-FileTransferInvariantTerminalLifecycleResult -Summary $Summary -LateFrameClassification $invariantLedger.late_frame_classification
+    $controlPriorityInvariant = Get-FileTransferInvariantControlPriorityResult -Summary $Summary
+    $combinedInvariant = Get-FileTransferInvariantCombinedGateResult -RouteLaw $releaseRouteLaw -TerminalLifecycle $terminalLifecycleInvariant -ControlPriority $controlPriorityInvariant
+
+    $effectiveVerdict = $GateResult.Verdict
+    $effectiveGateStatus = $GateResult.GateStatus
+    $effectiveNextArtifact = $GateResult.NextArtifact
+    $effectiveHardFailures = New-Object System.Collections.Generic.List[string]
+    foreach ($failure in @($GateResult.HardFailures)) {
+        $effectiveHardFailures.Add([string]$failure) | Out-Null
+    }
+    [object[]]$effectiveEvidenceEvents = @($GateResult.EvidenceEvents)
+    $baseVerdictText = if ($null -eq $GateResult.Verdict) { '' } else { [string]$GateResult.Verdict }
+    $invariantMayOwnAcceptanceFailure = $combinedInvariant.Verdict -eq 'fail' -and -not $baseVerdictText.StartsWith('INCONCLUSIVE', [System.StringComparison]::OrdinalIgnoreCase)
+    if ($invariantMayOwnAcceptanceFailure -and $GateResult.GateStatus -ne 'fail') {
+        $effectiveVerdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
+        $effectiveGateStatus = 'fail'
+        $effectiveNextArtifact = 'filetransfer-invariant-summary.txt'
+        foreach ($finding in @($combinedInvariant.Findings)) {
+            $effectiveHardFailures.Add(("invariant: {0}" -f $finding)) | Out-Null
+        }
+        $effectiveEvidenceEvents = @($combinedInvariant.EvidenceEvents + $effectiveEvidenceEvents | Select-Object -First 30)
+    }
 
     $verdictLines = @(
-        ("verdict={0}" -f $GateResult.Verdict),
-        ("gate_status={0}" -f $GateResult.GateStatus),
+        ("verdict={0}" -f $effectiveVerdict),
+        ("gate_status={0}" -f $effectiveGateStatus),
         ("transfer_id={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.TransferId)) { '(none)' } else { $Summary.TransferId }))),
-        ("next_artifact={0}" -f $GateResult.NextArtifact),
+        ("next_artifact={0}" -f $effectiveNextArtifact),
+        ("acceptance_failure_class={0}" -f ($(if ($invariantMayOwnAcceptanceFailure) { $combinedInvariant.FailureClass } else { 'none' }))),
+        ("release_route_law_verdict={0}" -f $releaseRouteLaw.Verdict),
+        ("terminal_lifecycle_invariant_verdict={0}" -f $terminalLifecycleInvariant.Verdict),
+        ("control_priority_invariant_verdict={0}" -f $controlPriorityInvariant.Verdict),
+        ("invariant_failure_class={0}" -f $combinedInvariant.FailureClass),
+        ("fallback_consumed={0}" -f $invariantLedger.fallback_consumed),
+        ("stale_route_worker_activity_count={0}" -f $invariantLedger.stale_route_worker_activity_count),
+        ("control_plane_peer_visible_proof_count={0}" -f $invariantLedger.control_plane_peer_visible_proof_count),
+        ("late_frame_classification={0}" -f $invariantLedger.late_frame_classification),
         ("recovery_failure_class={0}" -f $recoveryClassification.Class),
         ("runtime_unlock_offer_not_observed_count={0}" -f $recoveryClassification.RuntimeUnlockOfferNotObservedCount),
         ("runtime_unlock_retry_scheduled_count={0}" -f $recoveryClassification.RuntimeUnlockRetryScheduledCount),
@@ -5973,7 +6380,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("observed_start_utc={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.FirstTimestamp)) { '(unknown)' } else { $Summary.FirstTimestamp }))),
         ("observed_end_utc={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.LastTimestamp)) { '(unknown)' } else { $Summary.LastTimestamp }))),
         ("analyzed_files={0}" -f $analyzedFiles),
-        ("hard_failure_count={0}" -f $GateResult.HardFailures.Count),
+        ("hard_failure_count={0}" -f $effectiveHardFailures.Count),
         ("warning_count={0}" -f $GateResult.Warnings.Count),
         ("warning_kinds={0}" -f ($(if ($warningKinds.Count -gt 0) { $warningKinds -join ',' } else { '(none)' }))),
         ("warning_cap_policy={0}" -f ($(if ($null -ne $warningCap) { $warningCap.Policy } else { 'strict_small' }))),
@@ -6054,13 +6461,13 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("live_route_epoch_transport_only_count={0}" -f $liveRouteProof.TransportOnlyCount),
         '',
         'hard_failures:'
-    ) + ($(if ($GateResult.HardFailures.Count -gt 0) { @($GateResult.HardFailures) } else { @('(none)') })) + @(
+    ) + ($(if ($effectiveHardFailures.Count -gt 0) { @($effectiveHardFailures.ToArray()) } else { @('(none)') })) + @(
         '',
         'warnings:'
     ) + ($(if ($GateResult.Warnings.Count -gt 0) { @($GateResult.Warnings) } else { @('(none)') })) + @(
         '',
         'top_evidence:'
-    ) + (Get-FileTransferArtifactEvidenceLines -Events $GateResult.EvidenceEvents -Limit 30)
+    ) + (Get-FileTransferArtifactEvidenceLines -Events $effectiveEvidenceEvents -Limit 30)
 
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'filetransfer-operator-verdict.txt' -Lines $verdictLines | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'transfer-terminal-summary.txt' -Lines (New-FileTransferTerminalSummaryLines -Summary $Summary -GateResult $GateResult) | Out-Null

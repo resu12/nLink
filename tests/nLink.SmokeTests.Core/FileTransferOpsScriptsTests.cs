@@ -109,6 +109,8 @@ public sealed class FileTransferOpsScriptsTests
         "stability-gates-summary.txt",
         "phase0-invariant-ledger.txt",
         "phase0-invariant-ledger.json",
+        "filetransfer-invariant-summary.txt",
+        "filetransfer-invariant-summary.json",
         "v4-promotion-decision.txt",
         "v4-promotion-decision.json"
     ];
@@ -1079,13 +1081,18 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Equal("0", route["route_mismatch_count"]);
 
         var ledger = ReadArtifactReport(result.ArtifactDir, "phase0-invariant-ledger.txt");
+        var invariant = ReadArtifactReport(result.ArtifactDir, "filetransfer-invariant-summary.txt");
         Assert.Equal("unknown", ledger["final_route"]);
         Assert.Equal("unknown", ledger["protocol_version"]);
         Assert.Equal("unknown", ledger["runtime_family"]);
-        Assert.Equal("unknown", ledger["frame_family"]);
+        Assert.Equal("v6", ledger["frame_family"]);
         Assert.Equal("completed", ledger["terminal_winner"]);
         Assert.Equal("1", ledger["sha_ok"]);
         Assert.Equal("0", ledger["stale_route_mismatch_count"]);
+        Assert.Equal("legacy", invariant["release_route_law_verdict"]);
+        Assert.Equal("pass", invariant["terminal_lifecycle_invariant_verdict"]);
+        Assert.Equal("pass", invariant["control_priority_invariant_verdict"]);
+        Assert.Equal("none", invariant["invariant_failure_class"]);
     }
 
     [Fact]
@@ -1114,6 +1121,7 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Equal("regular_nkn_v4_fast", route["selected_routes"]);
 
         var ledger = ReadArtifactReport(result.ArtifactDir, "phase0-invariant-ledger.txt");
+        var invariant = ReadArtifactReport(result.ArtifactDir, "filetransfer-invariant-summary.txt");
         Assert.Equal(transferId, ledger["transfer_id"]);
         Assert.Equal("regular_nkn_v4_fast", ledger["final_route"]);
         Assert.Equal("4", ledger["protocol_version"]);
@@ -1129,6 +1137,13 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Equal("1", ledger["sha_ok"]);
         Assert.Equal("none", ledger["late_frame_classification"]);
         Assert.Equal("0", ledger["stale_route_mismatch_count"]);
+        Assert.Equal("pass", invariant["release_route_law_verdict"]);
+        Assert.Equal("pass", invariant["terminal_lifecycle_invariant_verdict"]);
+        Assert.Equal("pass", invariant["control_priority_invariant_verdict"]);
+        Assert.Equal("none", invariant["invariant_failure_class"]);
+        Assert.Equal("0", invariant["fallback_consumed"]);
+        Assert.Equal("0", invariant["stale_route_worker_activity_count"]);
+        Assert.Equal("0", invariant["control_plane_peer_visible_proof_count"]);
     }
 
     [Fact]
@@ -1155,6 +1170,12 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Equal("pass", route["route_consistency_verdict"]);
         Assert.Equal("0", route["route_mismatch_count"]);
         Assert.Equal("file_tuna_v4", route["selected_routes"]);
+        var invariant = ReadArtifactReport(result.ArtifactDir, "filetransfer-invariant-summary.txt");
+        Assert.Equal("file_tuna_v4", invariant["final_route"]);
+        Assert.Equal("4", invariant["protocol_version"]);
+        Assert.Equal("file_tuna_v4", invariant["runtime_family"]);
+        Assert.Equal("v4", invariant["frame_family"]);
+        Assert.Equal("pass", invariant["release_route_law_verdict"]);
     }
 
     [Theory]
@@ -1186,6 +1207,12 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Equal("pass", route["route_consistency_verdict"]);
         Assert.Equal("0", route["route_mismatch_count"]);
         Assert.Equal(routeToken, route["selected_routes"]);
+        var invariant = ReadArtifactReport(result.ArtifactDir, "filetransfer-invariant-summary.txt");
+        Assert.Equal(routeToken, invariant["final_route"]);
+        Assert.Equal("6", invariant["protocol_version"]);
+        Assert.Equal(routeToken == "post_tuna_fallback_v6" ? "post_tuna_fallback_v6" : "diagnostic_v6", invariant["runtime_family"]);
+        Assert.Equal("v6", invariant["frame_family"]);
+        Assert.Equal("pass", invariant["release_route_law_verdict"]);
     }
 
     [Fact]
@@ -1270,6 +1297,34 @@ public sealed class FileTransferOpsScriptsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RouteSelectedMissingProtocol_FailsInvariantRouteLaw()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_route_missing_protocol";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; diagnostic_regular_nkn_v6=0"),
+            LogLine($"event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; bridge_recovery_policy=regular_nkn_v4_fast"),
+            LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=(none); integrity_ok=1"),
+            LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); integrity_ok=1")
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
+        var invariant = ReadArtifactReport(result.ArtifactDir, "filetransfer-invariant-summary.txt");
+        Assert.Equal("fail", invariant["release_route_law_verdict"]);
+        Assert.Equal("route_runtime", invariant["invariant_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_RegularRouteWithV6Runtime_ReturnsProtocolFailure()
     {
         if (!OperatingSystem.IsWindows())
@@ -1318,6 +1373,9 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
         var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
         Assert.Equal("fail", route["route_consistency_verdict"]);
+        var invariant = ReadArtifactReport(result.ArtifactDir, "filetransfer-invariant-summary.txt");
+        Assert.Equal("fail", invariant["release_route_law_verdict"]);
+        Assert.Equal("route_runtime", invariant["invariant_failure_class"]);
     }
 
     [Fact]
@@ -5008,6 +5066,9 @@ public sealed class FileTransferOpsScriptsTests
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("PASS", verdict["verdict"]);
+        var invariant = ReadArtifactReport(result.ArtifactDir, "filetransfer-invariant-summary.txt");
+        Assert.Equal("benign_after_clean_completion", invariant["late_frame_classification"]);
+        Assert.Equal("pass", invariant["terminal_lifecycle_invariant_verdict"]);
     }
 
     [Fact]
@@ -5031,6 +5092,109 @@ public sealed class FileTransferOpsScriptsTests
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("PASS", verdict["verdict"]);
+        var invariant = ReadArtifactReport(result.ArtifactDir, "filetransfer-invariant-summary.txt");
+        Assert.Equal("benign_after_clean_completion", invariant["late_frame_classification"]);
+        Assert.Equal("pass", invariant["terminal_lifecycle_invariant_verdict"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_LateDataAfterSessionEndCancel_FailsTerminalLifecycleInvariant()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_late_after_session_end";
+        var lines = BuildRouteAwareCompletedFixture(
+                transferId,
+                route: "regular_nkn_v4_fast",
+                protocolVersion: 4,
+                runtimeProfile: "regular_nkn_v4_fast",
+                bridgeRecoveryPolicy: "regular_nkn_v4_fast",
+                runtimeEventName: "filetransfer_v4_sender_started")
+            .Where(line => !line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal) &&
+                           !line.Contains("event=file_transfer_outbound_terminal", StringComparison.Ordinal))
+            .Concat(new[]
+            {
+                LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_a; transfer_id={transferId}; state=CanceledRemote; error_code=session_end; status_message=session_end; saved_path=(none)"),
+                LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_a; transfer_id={transferId}; state=CanceledLocal; error_code=session_end; status_message=session_end"),
+                LogLine($"event=filetransfer_data_frame_ignored; transport=nkn; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.chunk_batch.v4; chunk_index=0; reason=post_completion_late_sender_frame; source=nlink-helper-bulk.test; msg_id=late_frame_after_session_end")
+            })
+            .ToArray();
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("terminal_lifecycle", verdict["acceptance_failure_class"]);
+        var invariant = ReadArtifactReport(result.ArtifactDir, "filetransfer-invariant-summary.txt");
+        Assert.Equal("remote_session_end", invariant["terminal_winner"]);
+        Assert.Equal("non_benign_after_terminal", invariant["late_frame_classification"]);
+        Assert.Equal("fail", invariant["terminal_lifecycle_invariant_verdict"]);
+        Assert.Equal("terminal_lifecycle", invariant["invariant_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_ControlPriorityLocalOnlyUnderBacklog_FailsInvariant()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_control_priority_local_only";
+        var lines = BuildRouteAwareCompletedFixture(
+                transferId,
+                route: "regular_nkn_v4_fast",
+                protocolVersion: 4,
+                runtimeProfile: "regular_nkn_v4_fast",
+                bridgeRecoveryPolicy: "regular_nkn_v4_fast",
+                runtimeEventName: "filetransfer_v4_sender_started")
+            .Append(LogLine($"event=filetransfer_control_priority_delivery_result; kind=session_end; transfer_id={transferId}; session_id=sess_a; control_queue=1; control_copy=0; bulk_copy=0; peer_visible_any=0; accepted_any=1; local_only_rejected=1; data_backlog=1"))
+            .ToArray();
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("lifecycle_control_priority", verdict["acceptance_failure_class"]);
+        Assert.Equal("filetransfer-invariant-summary.txt", verdict["next_artifact"]);
+        var invariant = ReadArtifactReport(result.ArtifactDir, "filetransfer-invariant-summary.txt");
+        Assert.Equal("fail", invariant["control_priority_invariant_verdict"]);
+        Assert.Equal("lifecycle_control_priority", invariant["invariant_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_ControlPriorityPeerVisibleUnderBacklog_PassesInvariant()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_control_priority_peer_visible";
+        var lines = BuildRouteAwareCompletedFixture(
+                transferId,
+                route: "regular_nkn_v4_fast",
+                protocolVersion: 4,
+                runtimeProfile: "regular_nkn_v4_fast",
+                bridgeRecoveryPolicy: "regular_nkn_v4_fast",
+                runtimeEventName: "filetransfer_v4_sender_started")
+            .Append(LogLine($"event=filetransfer_control_priority_delivery_result; kind=session_end; transfer_id={transferId}; session_id=sess_a; control_queue=1; control_copy=1; bulk_copy=0; peer_visible_any=1; accepted_any=1; local_only_rejected=0; data_backlog=1"))
+            .ToArray();
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("PASS", verdict["verdict"]);
+        Assert.Equal("none", verdict["acceptance_failure_class"]);
+        var invariant = ReadArtifactReport(result.ArtifactDir, "filetransfer-invariant-summary.txt");
+        Assert.Equal("pass", invariant["control_priority_invariant_verdict"]);
+        Assert.Equal("none", invariant["invariant_failure_class"]);
     }
 
     [Fact]
