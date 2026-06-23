@@ -5199,6 +5199,70 @@ public sealed class FileTransferOpsScriptsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeOwnerStaleUpdateRejected_IsDiagnostic()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_owner_stale_rejected";
+        var lines = BuildRouteAwareCompletedFixture(
+                transferId,
+                route: "regular_nkn_v4_fast",
+                protocolVersion: 4,
+                runtimeProfile: "regular_nkn_v4_fast",
+                bridgeRecoveryPolicy: "regular_nkn_v4_fast",
+                runtimeEventName: "filetransfer_v4_sender_started")
+            .Append(LogLine($"event=filetransfer_runtime_owner_stale_update_rejected; direction=outbound; transfer_id={transferId}; session_id=sess_a; source=v4_peer_silence_safety_replay; attempted_action=defer_liveness; reason=runtime_generation_mismatch; runtime_generation=1; current_runtime_generation=2; terminal_generation=0; current_terminal_generation=0; route=regular_nkn_v4_fast; current_route=file_tuna_v4; protocol_version=4; current_protocol_version=4; live_route_epoch=0; current_live_route_epoch=1; runtime_family=regular_v4; current_runtime_family=file_tuna_v4"))
+            .ToArray();
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("PASS", verdict["verdict"]);
+        var invariant = ReadArtifactReport(result.ArtifactDir, "filetransfer-invariant-summary.txt");
+        Assert.Equal("pass", invariant["runtime_owner_invariant_verdict"]);
+        Assert.Equal("2", invariant["runtime_owner_generation"]);
+        Assert.Equal("1", invariant["runtime_owner_stale_update_rejected_count"]);
+        Assert.Equal("0", invariant["runtime_owner_forbidden_stale_effect_count"]);
+        Assert.Equal("none", invariant["invariant_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeOwnerForbiddenStaleEffect_FailsInvariant()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_owner_forbidden_effect";
+        var lines = BuildRouteAwareCompletedFixture(
+                transferId,
+                route: "regular_nkn_v4_fast",
+                protocolVersion: 4,
+                runtimeProfile: "regular_nkn_v4_fast",
+                bridgeRecoveryPolicy: "regular_nkn_v4_fast",
+                runtimeEventName: "filetransfer_v4_sender_started")
+            .Append(LogLine($"event=filetransfer_runtime_owner_forbidden_stale_effect; direction=outbound; transfer_id={transferId}; session_id=sess_a; source=v4_peer_silence_safety_replay; attempted_action=schedule_bridge_recovery; reason=stale_owner_mutated_state; runtime_generation=1; current_runtime_generation=2; terminal_generation=0; current_terminal_generation=0; route=regular_nkn_v4_fast; current_route=post_tuna_fallback_v6; protocol_version=4; current_protocol_version=6"))
+            .ToArray();
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("runtime_owner", verdict["acceptance_failure_class"]);
+        var invariant = ReadArtifactReport(result.ArtifactDir, "filetransfer-invariant-summary.txt");
+        Assert.Equal("fail", invariant["runtime_owner_invariant_verdict"]);
+        Assert.Equal("2", invariant["runtime_owner_generation"]);
+        Assert.Equal("1", invariant["runtime_owner_forbidden_stale_effect_count"]);
+        Assert.Equal("runtime_owner", invariant["invariant_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_PostTerminalUnknownTransferDataFrameReject_RemainsProtocolFailure()
     {
         if (!OperatingSystem.IsWindows())

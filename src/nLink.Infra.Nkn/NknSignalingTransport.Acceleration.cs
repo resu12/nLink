@@ -2196,6 +2196,17 @@ public sealed partial class NknSignalingTransport
         }
 
         var normalizedReason = SanitizeLogToken(reason);
+        if (IsFileTransferUsingRegularNknFallbackForCurrentSession())
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=filetransfer_runtime_unlock_waiting_for_fallback_owner; session_id={SanitizeLogToken(sessionId)}; reason={normalizedReason}; lanes={FormatAccelerationLanesForLog(lanes)}; source=tuna_activation_handoff");
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=runtime_unlock_fallback_unavailable_suppressed; session_id={SanitizeLogToken(sessionId)}; reason={normalizedReason}; lanes={FormatAccelerationLanesForLog(lanes)}; source=tuna_activation_handoff");
+            return;
+        }
+
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=tuna_activation_filetransfer_handoff_requested; session_id={SanitizeLogToken(sessionId)}; reason={normalizedReason}; lanes={FormatAccelerationLanesForLog(lanes)}");

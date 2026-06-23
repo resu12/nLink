@@ -7885,41 +7885,13 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             "tuna_reenabled",
             FileTransferTransportHandoffKind.NormalToTunaActivation,
             FileTransferTransportKind.Tuna);
-        var reenableRouteLog = string.Empty;
-        await WaitUntilAsync(
-            () =>
-            {
-                var outbound = sender.Snapshot.Outbound;
-                var inbound = receiver.Snapshot.Inbound;
-                if (outbound?.TransferId == transferId &&
-                    inbound?.TransferId == transferId &&
-                    string.Equals(outbound.RouteToken, FileTransferRouteResolver.FileTunaV4Token, StringComparison.Ordinal) &&
-                    string.Equals(inbound.RouteToken, FileTransferRouteResolver.FileTunaV4Token, StringComparison.Ordinal))
-                {
-                    reenableRouteLog = ReadV4SenderLogSnapshot(logStart);
-                    return true;
-                }
-
-                var tail = ReadOperationalLogTail(logStart);
-                if (tail.Contains(
-                        "previous_route=post_tuna_fallback_v6; new_route=file_tuna_v4",
-                        StringComparison.Ordinal))
-                {
-                    reenableRouteLog = tail;
-                    return true;
-                }
-
-                return false;
-            },
-            timeoutMs: 15000);
-
         await WaitUntilAsync(
             () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
                   receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
             timeoutMs: 25000);
 
         Assert.Equal(payload, destination.ToArray()[..payload.Length]);
-        var log = reenableRouteLog + Environment.NewLine + ReadV4SenderLogSnapshot(logStart);
+        var log = ReadV4SenderLogSnapshot(logStart);
         Assert.Single(senderTransport.SentOffers.Where(offer => offer.TransferId == transferId));
         Assert.Single(senderTransport.SentSessionOpens.Where(open => open.TransferId == transferId));
         Assert.Empty(senderTransport.SentCancels.Where(cancel => cancel.TransferId == transferId));
@@ -7927,11 +7899,11 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Contains("event=filetransfer_live_route_epoch_started; direction=outbound", log, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_live_route_epoch_started; direction=inbound", log, StringComparison.Ordinal);
         Assert.Contains("route=post_tuna_fallback_v6", log, StringComparison.Ordinal);
-        Assert.Contains("route=file_tuna_v4", log, StringComparison.Ordinal);
+        Assert.Contains("previous_route=post_tuna_fallback_v6; new_route=file_tuna_v4", log, StringComparison.Ordinal);
+        Assert.Contains("route=file_tuna_v4; protocol_version=4", log, StringComparison.Ordinal);
         Assert.Contains("handoff_kind=normal_to_tuna_activation", log, StringComparison.Ordinal);
-        Assert.Contains("target_transport=tuna", log, StringComparison.Ordinal);
-        Assert.DoesNotContain(
-            "handoff_kind=normal_to_tuna_activation; source_transport=regular_nkn; target_transport=tuna; reason=tuna_reenabled; state=target_proof_pending",
+        Assert.Contains(
+            "reason=tuna_reenabled; requires_resume_request=1; handoff_kind=normal_to_tuna_activation; target_transport=tuna",
             log,
             StringComparison.Ordinal);
         Assert.Contains("live_route_epoch=", log, StringComparison.Ordinal);

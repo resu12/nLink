@@ -24,6 +24,9 @@ internal sealed record FileTransferCoordinatorState(
     FileTransferLeg? CurrentLeg,
     int LastLiveRouteEpochId,
     int LastTransferLegGeneration,
+    int LastRuntimeOwnerGeneration,
+    int TerminalGeneration,
+    RuntimeOwnerToken? CurrentRuntimeOwner,
     IReadOnlyList<FileTransferLeg> LegHistory)
 {
     public FileTransferRouteRuntimeDescriptor RouteRuntime => RouteSelection.RuntimeDescriptor;
@@ -59,6 +62,22 @@ internal sealed record FileTransferCoordinatorDecision(
     string Reason,
     bool RuntimeUnlockCommitAccepted = false,
     string? RuntimeUnlockCommitRejectedReason = null);
+
+internal readonly record struct RuntimeOwnerToken(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    FileTransferRoute Route,
+    string RouteToken,
+    int ProtocolVersion,
+    int LiveRouteEpoch,
+    int RuntimeGeneration,
+    int TerminalGeneration,
+    string RuntimeFamily,
+    string CreatedReason)
+{
+    public bool IsDefault => RuntimeGeneration <= 0;
+}
 
 internal readonly record struct FileTransferLegStartRequest(
     FileTransferRouteSelection RouteSelection,
@@ -249,6 +268,108 @@ internal static class FileTransferCoordinator
             RouteSelection.Route: FileTransferRoute.PostTunaFallbackV6,
             ProtocolVersion: FileTransferProtocol.ProtocolVersionV6,
         };
+
+    public static RuntimeOwnerToken IssueRuntimeOwnerToken(
+        FileTransferCoordinatorState state,
+        FileTransferRouteSelection routeSelection,
+        int liveRouteEpoch,
+        int runtimeGeneration,
+        int terminalGeneration,
+        string reason)
+        => new(
+            state.SessionId,
+            state.TransferId,
+            state.Direction,
+            routeSelection.Route,
+            routeSelection.TelemetryToken,
+            routeSelection.ProtocolVersion,
+            liveRouteEpoch,
+            Math.Max(1, runtimeGeneration),
+            Math.Max(0, terminalGeneration),
+            ResolveRuntimeFamily(routeSelection.RuntimeDescriptor),
+            NormalizeReason(reason));
+
+    public static bool IsRuntimeOwnerCurrent(
+        FileTransferCoordinatorState state,
+        RuntimeOwnerToken token,
+        out string rejectionReason)
+    {
+        rejectionReason = "current";
+        if (token.IsDefault)
+        {
+            rejectionReason = "runtime_owner_missing";
+            return false;
+        }
+
+        if (!string.Equals(token.SessionId, state.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(token.TransferId, state.TransferId, StringComparison.Ordinal) ||
+            token.Direction != state.Direction)
+        {
+            rejectionReason = "session_transfer_or_direction_mismatch";
+            return false;
+        }
+
+        if (token.RuntimeGeneration != state.CurrentRuntimeOwner?.RuntimeGeneration ||
+            token.RuntimeGeneration != state.LastRuntimeOwnerGeneration)
+        {
+            rejectionReason = "runtime_generation_mismatch";
+            return false;
+        }
+
+        if (token.TerminalGeneration != state.TerminalGeneration)
+        {
+            rejectionReason = "terminal_generation_mismatch";
+            return false;
+        }
+
+        if (token.Route != state.RouteSelection.Route ||
+            token.ProtocolVersion != state.RouteSelection.ProtocolVersion ||
+            !string.Equals(token.RouteToken, state.RouteSelection.TelemetryToken, StringComparison.Ordinal))
+        {
+            rejectionReason = "route_or_protocol_mismatch";
+            return false;
+        }
+
+        var expectedLiveRouteEpoch = state.CurrentLiveRouteEpoch?.EpochId ?? 0;
+        if (token.LiveRouteEpoch != expectedLiveRouteEpoch)
+        {
+            rejectionReason = "live_route_epoch_mismatch";
+            return false;
+        }
+
+        if (state.IsTerminal)
+        {
+            rejectionReason = "transfer_terminal";
+            return false;
+        }
+
+        return true;
+    }
+
+    public static string ResolveRuntimeFamily(FileTransferRouteRuntimeDescriptor runtime)
+    {
+        if (runtime.UsesRegularNknV4FastRuntime)
+        {
+            return "regular_v4";
+        }
+
+        if (runtime.UsesFileTunaV4Runtime)
+        {
+            return "file_tuna_v4";
+        }
+
+        if (runtime.UsesPostTunaFallbackV6Runtime)
+        {
+            return "post_tuna_fallback_v6";
+        }
+
+        if (runtime.UsesV6SparsePump)
+        {
+            return "diagnostic_v6";
+        }
+
+        return "unknown";
+    }
 
     public static bool IsCurrentPostTunaFallbackLegCheckpointPending(FileTransferLeg? leg)
         => IsCurrentPostTunaFallbackLeg(leg) &&
@@ -496,12 +617,24 @@ internal static class FileTransferCoordinator
             coordinatorEvent.CanSendData,
             DateTimeOffset.UtcNow));
         legHistory.Add(leg);
+        var runtimeGeneration = Math.Max(1, state.LastRuntimeOwnerGeneration + 1);
         var nextState = state with
         {
             RouteSelection = coordinatorEvent.RouteSelection,
             CurrentLeg = leg,
             LastTransferLegGeneration = leg.Generation,
+            LastRuntimeOwnerGeneration = runtimeGeneration,
             LegHistory = legHistory,
+        };
+        nextState = nextState with
+        {
+            CurrentRuntimeOwner = IssueRuntimeOwnerToken(
+                nextState,
+                coordinatorEvent.RouteSelection,
+                nextState.CurrentLiveRouteEpoch?.EpochId ?? 0,
+                runtimeGeneration,
+                nextState.TerminalGeneration,
+                reason),
         };
         return Decision(nextState, reason, startedLeg: leg);
     }
@@ -537,6 +670,7 @@ internal static class FileTransferCoordinator
             coordinatorEvent.CanSendData,
             DateTimeOffset.UtcNow));
         legHistory.Add(leg);
+        var runtimeGeneration = Math.Max(1, state.LastRuntimeOwnerGeneration + 1);
 
         var nextState = state with
         {
@@ -545,7 +679,18 @@ internal static class FileTransferCoordinator
             CurrentLeg = leg,
             LastLiveRouteEpochId = epoch.EpochId,
             LastTransferLegGeneration = leg.Generation,
+            LastRuntimeOwnerGeneration = runtimeGeneration,
             LegHistory = legHistory,
+        };
+        nextState = nextState with
+        {
+            CurrentRuntimeOwner = IssueRuntimeOwnerToken(
+                nextState,
+                coordinatorEvent.RouteSelection,
+                epoch.EpochId,
+                runtimeGeneration,
+                nextState.TerminalGeneration,
+                reason),
         };
 
         return new FileTransferCoordinatorDecision(
@@ -652,7 +797,17 @@ internal static class FileTransferCoordinator
         string reason)
     {
         TerminalizeLeg(state.CurrentLeg);
-        return PassThrough(state with { IsTerminal = true }, reason);
+        var nextTerminalGeneration = Math.Max(1, state.TerminalGeneration + 1);
+        return PassThrough(
+            state with
+            {
+                IsTerminal = true,
+                TerminalGeneration = nextTerminalGeneration,
+                CurrentRuntimeOwner = state.CurrentRuntimeOwner is { } owner
+                    ? owner with { TerminalGeneration = nextTerminalGeneration }
+                    : null,
+            },
+            reason);
     }
 
     private static FileTransferCoordinatorDecision PassThrough(FileTransferCoordinatorState state, string reason)

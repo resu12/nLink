@@ -1953,6 +1953,7 @@ public sealed partial class SessionFileTransferService
     {
         FileTransferReceiveRecoveryRequest? recoveryRequest = null;
         long sendGeneration;
+        var reusedPendingCheckpointForSend = false;
         var deferredUntilResume = false;
         lock (gate)
         {
@@ -2029,6 +2030,12 @@ public sealed partial class SessionFileTransferService
             }
             else
             {
+                reusedPendingCheckpointForSend =
+                    IsCurrentPostTunaFallbackLegCheckpointPending(context.CurrentTransferLeg) &&
+                    !string.IsNullOrWhiteSpace(context.CurrentTransferLeg!.CheckpointRequestId) &&
+                    !string.IsNullOrWhiteSpace(request.RepairRequestId) &&
+                    string.Equals(context.CurrentTransferLeg.CheckpointRequestId, request.RepairRequestId, StringComparison.Ordinal);
+
                 if (!MarkOutboundFallbackCheckpointRequestedLocked(
                         context,
                         request,
@@ -2043,6 +2050,7 @@ public sealed partial class SessionFileTransferService
                 context.V6RegularNknStateRefreshActiveRequestId = request.RepairRequestId;
                 context.V6RegularNknStateRefreshActivePriority = request.Priority;
                 context.V6RegularNknStateRefreshActiveStartedUtc = DateTimeOffset.UtcNow;
+                context.V6RegularNknStateRefreshActiveReusedPendingCheckpoint = reusedPendingCheckpointForSend;
             }
         }
 
@@ -2058,7 +2066,7 @@ public sealed partial class SessionFileTransferService
 
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_v6_regular_nkn_state_refresh_send_queued; transfer_id={context.TransferId}; session_id={context.SessionId}; request_id={FormatProtocolLogValue(request.RepairRequestId)}; generation={sendGeneration}; priority={FormatProtocolLogValue(request.Priority)}; timeout_ms={V6RegularNknSparseRuntimeStateRefreshSendTimeoutMs}; source={FormatProtocolLogValue(source)}");
+            $"event=filetransfer_v6_regular_nkn_state_refresh_send_queued; transfer_id={context.TransferId}; session_id={context.SessionId}; request_id={FormatProtocolLogValue(request.RepairRequestId)}; generation={sendGeneration}; priority={FormatProtocolLogValue(request.Priority)}; timeout_ms={V6RegularNknSparseRuntimeStateRefreshSendTimeoutMs}; source={FormatProtocolLogValue(source)}; reused_pending_checkpoint={(reusedPendingCheckpointForSend ? 1 : 0)}");
         _ = SendOutboundV4SparseRuntimeStateRefreshAsync(context, dataSession, request, sendGeneration);
         if (recoveryRequest is not null)
         {
@@ -2431,9 +2439,20 @@ public sealed partial class SessionFileTransferService
             }
 
             LogPullBinaryFrameSent(context.TransferId, context.SessionId, request, payloadBytes: 0);
+            var reusedPendingCheckpoint = false;
+            lock (gate)
+            {
+                if (ReferenceEquals(outboundTransfer, context) &&
+                    context.V6RegularNknStateRefreshActiveSendGeneration == sendGeneration &&
+                    string.Equals(context.V6RegularNknStateRefreshActiveRequestId, request.RepairRequestId, StringComparison.Ordinal))
+                {
+                    reusedPendingCheckpoint = context.V6RegularNknStateRefreshActiveReusedPendingCheckpoint;
+                }
+            }
+
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_v6_regular_nkn_state_refresh_sent; transfer_id={context.TransferId}; session_id={context.SessionId}; request_id={FormatProtocolLogValue(request.RepairRequestId)}; generation={sendGeneration}; transport_epoch={request.TransportEpoch}; remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; credit_until_chunk_index_exclusive={context.RemoteGrantedUntilExclusive}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}");
+                $"event=filetransfer_v6_regular_nkn_state_refresh_sent; transfer_id={context.TransferId}; session_id={context.SessionId}; request_id={FormatProtocolLogValue(request.RepairRequestId)}; generation={sendGeneration}; reused_pending_checkpoint={(reusedPendingCheckpoint ? 1 : 0)}; transport_epoch={request.TransportEpoch}; remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; credit_until_chunk_index_exclusive={context.RemoteGrantedUntilExclusive}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}");
         }
         catch (OperationCanceledException) when (!context.LifetimeCts.IsCancellationRequested)
         {
@@ -2511,6 +2530,7 @@ public sealed partial class SessionFileTransferService
                         context.V6RegularNknStateRefreshActiveRequestId = null;
                         context.V6RegularNknStateRefreshActivePriority = null;
                         context.V6RegularNknStateRefreshActiveStartedUtc = null;
+                        context.V6RegularNknStateRefreshActiveReusedPendingCheckpoint = false;
                     }
                 }
                 else if (!retiredSendObserved &&
@@ -2585,6 +2605,7 @@ public sealed partial class SessionFileTransferService
         context.V6RegularNknStateRefreshActiveRequestId = null;
         context.V6RegularNknStateRefreshActivePriority = null;
         context.V6RegularNknStateRefreshActiveStartedUtc = null;
+        context.V6RegularNknStateRefreshActiveReusedPendingCheckpoint = false;
         context.PullTransportResumeRequestPending = true;
         context.SparseSenderPumpLastWakeReason = "post_tuna_fallback_stale_state_refresh_retired";
         context.V6SenderPumpLastWakeReason = "post_tuna_fallback_stale_state_refresh_retired";

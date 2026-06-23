@@ -82,6 +82,7 @@ public sealed partial class SessionFileTransferService
             context.StatusMessage = NormalizeReason(statusMessage) ?? statusMessage;
             ClearOutboundFallbackCheckpointRetryStateLocked(context, null, "transfer_terminal");
             FileTransferCoordinator.TerminalizeLeg(context.CurrentTransferLeg);
+            MarkRuntimeOwnerTerminalLocked(context, "transfer_terminal");
             context.UserPaused = false;
             context.UserPauseReason = null;
             context.UserPausedSinceUtc = null;
@@ -282,6 +283,7 @@ public sealed partial class SessionFileTransferService
             context.ErrorCode = NormalizeErrorCode(errorCode);
             context.StatusMessage = NormalizeReason(statusMessage) ?? statusMessage;
             FileTransferCoordinator.TerminalizeLeg(context.CurrentTransferLeg);
+            MarkRuntimeOwnerTerminalLocked(context, "transfer_terminal");
             context.AcceptInProgress = false;
             context.UserPaused = false;
             context.UserPauseReason = null;

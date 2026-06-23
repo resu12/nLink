@@ -1176,13 +1176,18 @@ function Get-FileTransferInvariantCombinedGateResult {
     param(
         [Parameter(Mandatory = $true)]$RouteLaw,
         [Parameter(Mandatory = $true)]$TerminalLifecycle,
-        [Parameter(Mandatory = $true)]$ControlPriority
+        [Parameter(Mandatory = $true)]$ControlPriority,
+        $RuntimeOwner = $null
     )
 
     $findings = New-Object System.Collections.Generic.List[string]
     $evidence = New-Object System.Collections.Generic.List[object]
     $failureClass = 'none'
-    foreach ($result in @($RouteLaw, $TerminalLifecycle, $ControlPriority)) {
+    foreach ($result in @($RouteLaw, $TerminalLifecycle, $ControlPriority, $RuntimeOwner)) {
+        if ($null -eq $result) {
+            continue
+        }
+
         if ($result.Verdict -eq 'fail') {
             if ($failureClass -eq 'none') {
                 $failureClass = $result.FailureClass
@@ -1202,6 +1207,49 @@ function Get-FileTransferInvariantCombinedGateResult {
         FailureClass = $failureClass
         Findings = $findings
         EvidenceEvents = @($evidence.ToArray() | Select-Object -First 20)
+    }
+}
+
+function Get-FileTransferInvariantRuntimeOwnerResult {
+    param([Parameter(Mandatory = $true)]$Summary)
+
+    $staleRejectedEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_runtime_owner_stale_update_rejected'))
+    $workerRetiredEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_runtime_owner_workers_retired'))
+    $forbiddenEffectEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_runtime_owner_forbidden_stale_effect'))
+
+    foreach ($event in @($staleRejectedEvents)) {
+        $forbidden = Get-FileTransferEventField -Event $event -Name 'forbidden_effect' -Default '0'
+        if ($forbidden -eq '1' -or $forbidden -eq 'true') {
+            $forbiddenEffectEvents += $event
+        }
+    }
+
+    $ownerEvents = @($staleRejectedEvents + $workerRetiredEvents + $forbiddenEffectEvents)
+    $runtimeOwnerGeneration = Get-FileTransferMaxField -Events $ownerEvents -FieldName 'current_runtime_generation'
+    if ($runtimeOwnerGeneration -le 0) {
+        $runtimeOwnerGeneration = Get-FileTransferMaxField -Events $ownerEvents -FieldName 'runtime_generation'
+    }
+
+    $terminalGeneration = Get-FileTransferMaxField -Events $ownerEvents -FieldName 'current_terminal_generation'
+    if ($terminalGeneration -le 0) {
+        $terminalGeneration = Get-FileTransferMaxField -Events $ownerEvents -FieldName 'terminal_generation'
+    }
+
+    $findings = New-Object System.Collections.Generic.List[string]
+    if ($forbiddenEffectEvents.Count -gt 0) {
+        $findings.Add(("runtime_owner_forbidden_stale_effect_count={0}" -f $forbiddenEffectEvents.Count)) | Out-Null
+    }
+
+    return [pscustomobject]@{
+        Verdict = if ($findings.Count -eq 0) { 'pass' } else { 'fail' }
+        FailureClass = if ($findings.Count -eq 0) { 'none' } else { 'runtime_owner' }
+        RuntimeOwnerGeneration = [int64]$runtimeOwnerGeneration
+        TerminalGeneration = [int64]$terminalGeneration
+        StaleUpdateRejectedCount = [int]$staleRejectedEvents.Count
+        ForbiddenStaleEffectCount = [int]$forbiddenEffectEvents.Count
+        WorkerRetiredCount = [int]$workerRetiredEvents.Count
+        Findings = $findings
+        EvidenceEvents = @($forbiddenEffectEvents | Select-Object -First 20)
     }
 }
 
@@ -6081,7 +6129,8 @@ function New-FileTransferInvariantLedgerObject {
     $routeLaw = Get-FileTransferInvariantRouteLawResult -Summary $Summary
     $terminalLifecycle = Get-FileTransferInvariantTerminalLifecycleResult -Summary $Summary -LateFrameClassification $lateFrameClassification
     $controlPriority = Get-FileTransferInvariantControlPriorityResult -Summary $Summary
-    $combinedInvariant = Get-FileTransferInvariantCombinedGateResult -RouteLaw $routeLaw -TerminalLifecycle $terminalLifecycle -ControlPriority $controlPriority
+    $runtimeOwner = Get-FileTransferInvariantRuntimeOwnerResult -Summary $Summary
+    $combinedInvariant = Get-FileTransferInvariantCombinedGateResult -RouteLaw $routeLaw -TerminalLifecycle $terminalLifecycle -ControlPriority $controlPriority -RuntimeOwner $runtimeOwner
 
     $maxLiveEpoch = -1L
     foreach ($event in @($Summary.TransferEvents)) {
@@ -6143,6 +6192,12 @@ function New-FileTransferInvariantLedgerObject {
         release_route_law_verdict = $routeLaw.Verdict
         terminal_lifecycle_invariant_verdict = $terminalLifecycle.Verdict
         control_priority_invariant_verdict = $controlPriority.Verdict
+        runtime_owner_invariant_verdict = $runtimeOwner.Verdict
+        runtime_owner_generation = [string]$runtimeOwner.RuntimeOwnerGeneration
+        terminal_generation = [string]$runtimeOwner.TerminalGeneration
+        runtime_owner_stale_update_rejected_count = [string]$runtimeOwner.StaleUpdateRejectedCount
+        runtime_owner_forbidden_stale_effect_count = [string]$runtimeOwner.ForbiddenStaleEffectCount
+        runtime_owner_worker_retired_count = [string]$runtimeOwner.WorkerRetiredCount
         invariant_failure_class = $combinedInvariant.FailureClass
         goodput_bytes_per_second = $goodput
         recovery_failure_class = $recoveryClassification.Class
@@ -6242,7 +6297,8 @@ function Write-FileTransferDiagnosticsArtifacts {
     $releaseRouteLaw = Get-FileTransferInvariantRouteLawResult -Summary $Summary
     $terminalLifecycleInvariant = Get-FileTransferInvariantTerminalLifecycleResult -Summary $Summary -LateFrameClassification $invariantLedger.late_frame_classification
     $controlPriorityInvariant = Get-FileTransferInvariantControlPriorityResult -Summary $Summary
-    $combinedInvariant = Get-FileTransferInvariantCombinedGateResult -RouteLaw $releaseRouteLaw -TerminalLifecycle $terminalLifecycleInvariant -ControlPriority $controlPriorityInvariant
+    $runtimeOwnerInvariant = Get-FileTransferInvariantRuntimeOwnerResult -Summary $Summary
+    $combinedInvariant = Get-FileTransferInvariantCombinedGateResult -RouteLaw $releaseRouteLaw -TerminalLifecycle $terminalLifecycleInvariant -ControlPriority $controlPriorityInvariant -RuntimeOwner $runtimeOwnerInvariant
 
     $effectiveVerdict = $GateResult.Verdict
     $effectiveGateStatus = $GateResult.GateStatus
@@ -6273,6 +6329,12 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("release_route_law_verdict={0}" -f $releaseRouteLaw.Verdict),
         ("terminal_lifecycle_invariant_verdict={0}" -f $terminalLifecycleInvariant.Verdict),
         ("control_priority_invariant_verdict={0}" -f $controlPriorityInvariant.Verdict),
+        ("runtime_owner_invariant_verdict={0}" -f $runtimeOwnerInvariant.Verdict),
+        ("runtime_owner_generation={0}" -f $runtimeOwnerInvariant.RuntimeOwnerGeneration),
+        ("terminal_generation={0}" -f $runtimeOwnerInvariant.TerminalGeneration),
+        ("runtime_owner_stale_update_rejected_count={0}" -f $runtimeOwnerInvariant.StaleUpdateRejectedCount),
+        ("runtime_owner_forbidden_stale_effect_count={0}" -f $runtimeOwnerInvariant.ForbiddenStaleEffectCount),
+        ("runtime_owner_worker_retired_count={0}" -f $runtimeOwnerInvariant.WorkerRetiredCount),
         ("invariant_failure_class={0}" -f $combinedInvariant.FailureClass),
         ("fallback_consumed={0}" -f $invariantLedger.fallback_consumed),
         ("stale_route_worker_activity_count={0}" -f $invariantLedger.stale_route_worker_activity_count),

@@ -29,6 +29,10 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(FileTransferLegState.Active, decision.State.CurrentLeg!.State);
         Assert.True(decision.State.CurrentLeg.CanSendData);
         Assert.Equal(1, decision.State.LastTransferLegGeneration);
+        Assert.Equal(1, decision.State.LastRuntimeOwnerGeneration);
+        Assert.NotNull(decision.State.CurrentRuntimeOwner);
+        Assert.Equal(FileTransferRoute.RegularNknV4Fast, decision.State.CurrentRuntimeOwner!.Value.Route);
+        Assert.Equal("regular_v4", decision.State.CurrentRuntimeOwner.Value.RuntimeFamily);
     }
 
     [Fact]
@@ -60,6 +64,54 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(FileTransferProtocol.ProtocolVersionV4, decision.State.CurrentLeg!.ProtocolVersion);
         Assert.True(decision.State.CurrentLeg.CanSendData);
         Assert.Equal(FileTransferLegState.Frozen, decision.FrozenLeg!.State);
+        Assert.Equal(2, decision.State.LastRuntimeOwnerGeneration);
+        Assert.NotEqual(started.State.CurrentRuntimeOwner, decision.State.CurrentRuntimeOwner);
+        Assert.Equal(FileTransferRoute.FileTunaV4, decision.State.CurrentRuntimeOwner!.Value.Route);
+    }
+
+    [Fact]
+    public void RuntimeOwnerToken_OldOwnerInvalidAfterRouteTransition()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var started = StartRegular(regular);
+        var oldOwner = started.State.CurrentRuntimeOwner!.Value;
+
+        var activated = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.TunaActivated,
+                tuna,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                "runtime_unlock",
+                FileTransferLegState.Active,
+                canSendData: true),
+            started.State);
+
+        Assert.False(FileTransferCoordinator.IsRuntimeOwnerCurrent(activated.State, oldOwner, out var reason));
+        Assert.Equal("runtime_generation_mismatch", reason);
+        Assert.True(FileTransferCoordinator.IsRuntimeOwnerCurrent(activated.State, activated.State.CurrentRuntimeOwner!.Value, out reason));
+        Assert.Equal("current", reason);
+    }
+
+    [Fact]
+    public void RuntimeOwnerToken_TerminalGenerationInvalidatesNonTerminalOwner()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var started = StartRegular(regular);
+        var owner = started.State.CurrentRuntimeOwner!.Value;
+
+        var terminal = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.Terminalized,
+                regular,
+                reason: "completed"),
+            started.State);
+
+        Assert.True(terminal.State.IsTerminal);
+        Assert.Equal(1, terminal.State.TerminalGeneration);
+        Assert.False(FileTransferCoordinator.IsRuntimeOwnerCurrent(terminal.State, owner, out var reason));
+        Assert.Equal("terminal_generation_mismatch", reason);
     }
 
     [Fact]
@@ -704,6 +756,9 @@ public sealed class FileTransferCoordinatorTests
             CurrentLeg: null,
             LastLiveRouteEpochId: 0,
             LastTransferLegGeneration: 0,
+            LastRuntimeOwnerGeneration: 0,
+            TerminalGeneration: 0,
+            CurrentRuntimeOwner: null,
             LegHistory: []);
 
     private static FileTransferCoordinatorEvent CoordinatorEvent(

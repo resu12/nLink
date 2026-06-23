@@ -211,6 +211,7 @@ public sealed partial class SessionFileTransferService
             context.TransferId,
             FileTransferDirection.Outbound,
             context.DataSession,
+            CaptureRuntimeOwnerLocked(context),
             context.LifetimeCts.Token,
             reason);
 
@@ -220,6 +221,7 @@ public sealed partial class SessionFileTransferService
             context.TransferId,
             FileTransferDirection.Inbound,
             context.DataSession,
+            CaptureRuntimeOwnerLocked(context),
             context.LifetimeCts.Token,
             reason);
 
@@ -228,9 +230,25 @@ public sealed partial class SessionFileTransferService
         string transferId,
         FileTransferDirection direction,
         IFileTransferDataSession? dataSession,
+        RuntimeOwnerToken runtimeOwner,
         CancellationToken ct,
         string reason)
     {
+        lock (gate)
+        {
+            if (!TryValidateRuntimeOwnerForDirectionLocked(
+                    direction,
+                    sessionId,
+                    transferId,
+                    runtimeOwner,
+                    "runtime_unlock_precommit_probe",
+                    "start_probe",
+                    out _))
+            {
+                return;
+            }
+        }
+
         if (transport is not IRuntimeUnlockRouteCommitProofProvider proofProvider ||
             dataSession is null ||
             !proofProvider.TryGetRuntimeUnlockRouteCommitProof(sessionId, transferId, out var snapshot))
@@ -311,6 +329,7 @@ public sealed partial class SessionFileTransferService
                 sessionId,
                 transferId,
                 direction,
+                runtimeOwner,
                 frame.TransactionGeneration,
                 frame.OfferGeneration,
                 frame.TunaPathLeaseGeneration,
@@ -349,6 +368,7 @@ public sealed partial class SessionFileTransferService
         string sessionId,
         string transferId,
         FileTransferDirection direction,
+        RuntimeOwnerToken runtimeOwner,
         long transactionGeneration,
         long offerGeneration,
         long leaseGeneration,
@@ -362,6 +382,21 @@ public sealed partial class SessionFileTransferService
         catch (OperationCanceledException)
         {
             return;
+        }
+
+        lock (gate)
+        {
+            if (!TryValidateRuntimeOwnerForDirectionLocked(
+                    direction,
+                    sessionId,
+                    transferId,
+                    runtimeOwner,
+                    "runtime_unlock_precommit_probe_timeout",
+                    "fail_probe",
+                    out _))
+            {
+                return;
+            }
         }
 
         if (!proofProvider.TryGetRuntimeUnlockRouteCommitProof(sessionId, transferId, out var snapshot) ||

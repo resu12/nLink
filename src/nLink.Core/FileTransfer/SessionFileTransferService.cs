@@ -4701,6 +4701,9 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.CurrentTransferLeg,
             context.LastLiveRouteEpochId,
             context.LastTransferLegGeneration,
+            context.LastRuntimeOwnerGeneration,
+            context.TerminalGeneration,
+            context.CurrentRuntimeOwner,
             context.TransferLegHistory);
 
     private static FileTransferCoordinatorState CreateCoordinatorStateLocked(InboundTransferContext context)
@@ -4714,7 +4717,271 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.CurrentTransferLeg,
             context.LastLiveRouteEpochId,
             context.LastTransferLegGeneration,
+            context.LastRuntimeOwnerGeneration,
+            context.TerminalGeneration,
+            context.CurrentRuntimeOwner,
             context.TransferLegHistory);
+
+    private static RuntimeOwnerToken CaptureRuntimeOwnerLocked(OutboundTransferContext context)
+        => context.CurrentRuntimeOwner ?? RuntimeOwnerTokenForCurrentContext(
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Outbound,
+            context.RouteSelection,
+            context.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            context.LastRuntimeOwnerGeneration,
+            context.TerminalGeneration,
+            "legacy_missing_owner");
+
+    private static RuntimeOwnerToken CaptureRuntimeOwnerLocked(InboundTransferContext context)
+        => context.CurrentRuntimeOwner ?? RuntimeOwnerTokenForCurrentContext(
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            context.RouteSelection,
+            context.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            context.LastRuntimeOwnerGeneration,
+            context.TerminalGeneration,
+            "legacy_missing_owner");
+
+    private static RuntimeOwnerToken RuntimeOwnerTokenForCurrentContext(
+        string sessionId,
+        string transferId,
+        FileTransferDirection direction,
+        FileTransferRouteSelection routeSelection,
+        int liveRouteEpoch,
+        int runtimeGeneration,
+        int terminalGeneration,
+        string reason)
+        => new(
+            sessionId,
+            transferId,
+            direction,
+            routeSelection.Route,
+            routeSelection.TelemetryToken,
+            routeSelection.ProtocolVersion,
+            liveRouteEpoch,
+            Math.Max(1, runtimeGeneration),
+            Math.Max(0, terminalGeneration),
+            FileTransferCoordinator.ResolveRuntimeFamily(routeSelection.RuntimeDescriptor),
+            reason);
+
+    private static bool TryValidateRuntimeOwnerLocked(
+        OutboundTransferContext context,
+        RuntimeOwnerToken token,
+        string source,
+        string attemptedAction,
+        out string rejectionReason)
+    {
+        var valid = FileTransferCoordinator.IsRuntimeOwnerCurrent(
+            CreateCoordinatorStateLocked(context),
+            token,
+            out rejectionReason);
+        if (!valid)
+        {
+            RejectStaleRuntimeOwnerUpdateLocked(
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentRuntimeOwner,
+                token,
+                source,
+                attemptedAction,
+                rejectionReason);
+        }
+
+        return valid;
+    }
+
+    private static bool TryValidateRuntimeOwnerLocked(
+        InboundTransferContext context,
+        RuntimeOwnerToken token,
+        string source,
+        string attemptedAction,
+        out string rejectionReason)
+    {
+        var valid = FileTransferCoordinator.IsRuntimeOwnerCurrent(
+            CreateCoordinatorStateLocked(context),
+            token,
+            out rejectionReason);
+        if (!valid)
+        {
+            RejectStaleRuntimeOwnerUpdateLocked(
+                FileTransferDirection.Inbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentRuntimeOwner,
+                token,
+                source,
+                attemptedAction,
+                rejectionReason);
+        }
+
+        return valid;
+    }
+
+    private bool TryValidateRuntimeOwnerForDirectionLocked(
+        FileTransferDirection direction,
+        string sessionId,
+        string transferId,
+        RuntimeOwnerToken token,
+        string source,
+        string attemptedAction,
+        out string rejectionReason)
+    {
+        rejectionReason = "transfer_not_current";
+        if (direction == FileTransferDirection.Outbound &&
+            IsOutboundLifecycleMessageMatchLocked(sessionId, transferId) &&
+            outboundTransfer is { } outbound)
+        {
+            return TryValidateRuntimeOwnerLocked(
+                outbound,
+                token,
+                source,
+                attemptedAction,
+                out rejectionReason);
+        }
+
+        if (direction == FileTransferDirection.Inbound &&
+            IsInboundLifecycleMessageMatchLocked(sessionId, transferId) &&
+            inboundTransfer is { } inbound)
+        {
+            return TryValidateRuntimeOwnerLocked(
+                inbound,
+                token,
+                source,
+                attemptedAction,
+                out rejectionReason);
+        }
+
+        RejectStaleRuntimeOwnerUpdateLocked(
+            direction,
+            transferId,
+            sessionId,
+            currentOwner: null,
+            token,
+            source,
+            attemptedAction,
+            rejectionReason);
+        return false;
+    }
+
+    private static void RejectStaleRuntimeOwnerUpdateLocked(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        RuntimeOwnerToken? currentOwner,
+        RuntimeOwnerToken attemptedOwner,
+        string source,
+        string attemptedAction,
+        string reason)
+        => LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_runtime_owner_stale_update_rejected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; source={FormatProtocolLogValue(source)}; attempted_action={FormatProtocolLogValue(attemptedAction)}; reason={FormatProtocolLogValue(reason)}; runtime_generation={attemptedOwner.RuntimeGeneration}; current_runtime_generation={currentOwner?.RuntimeGeneration ?? 0}; terminal_generation={attemptedOwner.TerminalGeneration}; current_terminal_generation={currentOwner?.TerminalGeneration ?? 0}; route={FormatProtocolLogValue(attemptedOwner.RouteToken)}; current_route={FormatProtocolLogValue(currentOwner?.RouteToken ?? "(none)")}; protocol_version={attemptedOwner.ProtocolVersion}; current_protocol_version={currentOwner?.ProtocolVersion ?? 0}; live_route_epoch={attemptedOwner.LiveRouteEpoch}; current_live_route_epoch={currentOwner?.LiveRouteEpoch ?? 0}; runtime_family={FormatProtocolLogValue(attemptedOwner.RuntimeFamily)}; current_runtime_family={FormatProtocolLogValue(currentOwner?.RuntimeFamily ?? "(none)")}");
+
+    private static void RetireRuntimeOwnedWorkersLocked(
+        OutboundTransferContext context,
+        RuntimeOwnerToken? retiredOwner,
+        string reason)
+    {
+        if (retiredOwner is null)
+        {
+            return;
+        }
+
+        ClearOutboundRuntimeUnlockFallbackSeparationStateLocked(context);
+        context.PullV4PeerSilenceDeferralUtc = null;
+        context.V6EpochLivenessDeferralUtc = null;
+        context.V6PeerLivenessRecoveryDeferredUtc = null;
+        context.V6LastReceiveRecoveryRequestedUtc = null;
+        context.V6LastFeedbackStallRecoverySuppressedUtc = null;
+        context.PullV4LastRegularNknControlFeedbackPressureObservedUtc = null;
+        context.PullRegularNknV4LastPeerSilenceSafetyReplayUtc = null;
+        context.PullRegularNknV4LastPeerSilenceSafetyReplayFrontierChunkIndex = -1;
+        context.PullRegularNknV4LastPeerSilenceSafetyReplayEndChunkIndex = -1;
+        context.PullRegularNknV4PeerSilenceSafetyReplayCount = 0;
+        context.PullTransportLastSafetyReplayGeneration = 0;
+        context.PullTransportLastSafetyReplayFrontierChunkIndex = -1;
+        context.PullTransportLastSafetyReplayEndChunkIndex = -1;
+        context.PullTransportLastSafetyReplayUtc = null;
+        context.PullTransportSafetyReplayRearmCount = 0;
+        context.PullTransportFrontierOnlyRepairActive = false;
+        context.PullTransportFrontierOnlyRepairStartChunkIndex = -1;
+        context.PullTransportResumeRequestPending = false;
+        context.V6RegularNknStateRefreshSendInFlight = 0;
+        context.V6RegularNknStateRefreshActiveSendGeneration = 0;
+        context.V6RegularNknStateRefreshActiveRequestId = null;
+        context.V6RegularNknStateRefreshActivePriority = null;
+        context.V6RegularNknStateRefreshActiveStartedUtc = null;
+        context.V6RegularNknStateRefreshActiveReusedPendingCheckpoint = false;
+        context.V6RegularNknCheckpointSyncSendInFlight = 0;
+        ClearOutboundV6RegularNknDeferredStateRefreshLocked(context);
+        ClearOutboundFallbackCheckpointRepairAuthorityLocked(context);
+        context.V6RegularNknFallbackCheckpointDeliveryRecoveryPending = false;
+        context.V6RegularNknFallbackCheckpointDeliveryRecoveryStartedUtc = null;
+        context.V6RegularNknFallbackCheckpointDeliveryRecoveryReason = null;
+        context.V6RegularNknFallbackCheckpointDeliveryRecoveryRequestId = null;
+        context.PullV4SenderPumpRepairQueue.Clear();
+        context.PullV4SenderPumpRepairQueuedChunkIndices.Clear();
+        foreach (var repairState in context.PullV4SenderPumpRepairRequests.Values)
+        {
+            repairState.Queued = false;
+            repairState.InFlight = false;
+        }
+
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_runtime_owner_workers_retired; direction=outbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; retired_runtime_generation={retiredOwner.Value.RuntimeGeneration}; current_runtime_generation={context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; retired_route={FormatProtocolLogValue(retiredOwner.Value.RouteToken)}; current_route={FormatProtocolLogValue(context.CurrentRuntimeOwner?.RouteToken ?? "(none)")}; reason={FormatProtocolLogValue(reason)}");
+    }
+
+    private static void RetireRuntimeOwnedWorkersLocked(
+        InboundTransferContext context,
+        RuntimeOwnerToken? retiredOwner,
+        string reason)
+    {
+        if (retiredOwner is null)
+        {
+            return;
+        }
+
+        ClearInboundRuntimeUnlockFallbackSeparationStateLocked(context);
+        context.V6EpochLivenessDeferralUtc = null;
+        context.PullTransportResumeRequestPending = false;
+        context.PullTransportRebindRecoveredLogged = false;
+        ClearInboundV6PostTunaFallbackProofReplayLocked(context);
+        context.V6PostTunaFallbackProofReplayReceiverStatePending = false;
+        context.V6PostTunaFallbackProofReplayFrontierRequestPending = false;
+        context.V6LastReceiverStateSentUtc = null;
+        context.V6LastFrontierRequestSentUtc = null;
+        context.V6LastFrontierRequestChunkIndex = -1;
+        context.V6LastFrontierRequestId = null;
+
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_runtime_owner_workers_retired; direction=inbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; retired_runtime_generation={retiredOwner.Value.RuntimeGeneration}; current_runtime_generation={context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; retired_route={FormatProtocolLogValue(retiredOwner.Value.RouteToken)}; current_route={FormatProtocolLogValue(context.CurrentRuntimeOwner?.RouteToken ?? "(none)")}; reason={FormatProtocolLogValue(reason)}");
+    }
+
+    private static void MarkRuntimeOwnerTerminalLocked(OutboundTransferContext context, string reason)
+    {
+        context.TerminalGeneration = Math.Max(1, context.TerminalGeneration + 1);
+        if (context.CurrentRuntimeOwner is { } owner)
+        {
+            context.CurrentRuntimeOwner = owner with { TerminalGeneration = context.TerminalGeneration };
+        }
+
+        RetireRuntimeOwnedWorkersLocked(context, context.CurrentRuntimeOwner, reason);
+    }
+
+    private static void MarkRuntimeOwnerTerminalLocked(InboundTransferContext context, string reason)
+    {
+        context.TerminalGeneration = Math.Max(1, context.TerminalGeneration + 1);
+        if (context.CurrentRuntimeOwner is { } owner)
+        {
+            context.CurrentRuntimeOwner = owner with { TerminalGeneration = context.TerminalGeneration };
+        }
+
+        RetireRuntimeOwnedWorkersLocked(context, context.CurrentRuntimeOwner, reason);
+    }
 
     private static FileTransferLeg StartOutboundTransferLegLocked(
         OutboundTransferContext context,
@@ -4739,6 +5006,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             ? ResolveOutboundFallbackCurrentTransportEpochLocked(context)
             : context.V6TransportEpoch?.EpochId ?? Math.Max(0, context.PullTransportRebindGeneration);
         var bridgeRecoveryGeneration = Math.Max(0, context.PullTransportRebindGeneration);
+        var retiredOwner = context.CurrentRuntimeOwner;
         var decision = FileTransferCoordinator.Apply(
             new FileTransferCoordinatorEvent(
                 FileTransferCoordinatorEventKind.StartTransfer,
@@ -4767,8 +5035,18 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.LastTransferLegGeneration = decision.StartedLeg is null
             ? leg.Generation
             : decision.State.LastTransferLegGeneration;
+        context.LastRuntimeOwnerGeneration = decision.State.LastRuntimeOwnerGeneration;
+        context.TerminalGeneration = decision.State.TerminalGeneration;
+        context.CurrentRuntimeOwner = decision.State.CurrentRuntimeOwner;
         context.CurrentTransferLeg = leg;
         context.TransferLegHistory.Add(leg);
+        if (retiredOwner is { } owner &&
+            context.CurrentRuntimeOwner is { } currentOwner &&
+            owner.RuntimeGeneration != currentOwner.RuntimeGeneration)
+        {
+            RetireRuntimeOwnedWorkersLocked(context, owner, reason);
+        }
+
         LogFileTransferLegStarted(FileTransferDirection.Outbound, context.TransferId, context.SessionId, leg, reason);
         return leg;
     }
@@ -4794,6 +5072,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         var committedChunk = Math.Clamp(context.NextChunkIndex, 0, Math.Max(0, context.ChunkCount));
         var transportEpoch = context.V6TransportEpoch?.EpochId ?? Math.Max(0, context.PullTransportRebindGeneration);
         var bridgeRecoveryGeneration = Math.Max(0, context.PullTransportRebindGeneration);
+        var retiredOwner = context.CurrentRuntimeOwner;
         var decision = FileTransferCoordinator.Apply(
             new FileTransferCoordinatorEvent(
                 FileTransferCoordinatorEventKind.StartTransfer,
@@ -4822,8 +5101,18 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.LastTransferLegGeneration = decision.StartedLeg is null
             ? leg.Generation
             : decision.State.LastTransferLegGeneration;
+        context.LastRuntimeOwnerGeneration = decision.State.LastRuntimeOwnerGeneration;
+        context.TerminalGeneration = decision.State.TerminalGeneration;
+        context.CurrentRuntimeOwner = decision.State.CurrentRuntimeOwner;
         context.CurrentTransferLeg = leg;
         context.TransferLegHistory.Add(leg);
+        if (retiredOwner is { } owner &&
+            context.CurrentRuntimeOwner is { } currentOwner &&
+            owner.RuntimeGeneration != currentOwner.RuntimeGeneration)
+        {
+            RetireRuntimeOwnedWorkersLocked(context, owner, reason);
+        }
+
         LogFileTransferLegStarted(FileTransferDirection.Inbound, context.TransferId, context.SessionId, leg, reason);
         return leg;
     }
@@ -5343,6 +5632,10 @@ public sealed partial class SessionFileTransferService : IDisposable
                     currentLeg,
                     reason,
                     context.RetiredFallbackControlPlaneSendKeys);
+                LogRuntimeOwnerRejectedForFallbackControlPlaneLocked(
+                    context,
+                    request,
+                    reason);
                 ClearPostTunaFallbackControlPlanePressure(context.TransferId, reason);
                 return false;
             }
@@ -5370,6 +5663,10 @@ public sealed partial class SessionFileTransferService : IDisposable
                     currentLeg,
                     reason,
                     context.RetiredFallbackControlPlaneSendKeys);
+                LogRuntimeOwnerRejectedForFallbackControlPlaneLocked(
+                    context,
+                    request,
+                    reason);
                 ClearPostTunaFallbackControlPlanePressure(context.TransferId, reason);
                 return false;
             }
@@ -5648,6 +5945,87 @@ public sealed partial class SessionFileTransferService : IDisposable
                 currentLeg?.CheckpointRequestId,
                 reason);
         }
+    }
+
+    private static void LogRuntimeOwnerRejectedForFallbackControlPlaneLocked(
+        OutboundTransferContext context,
+        FileTransferControlPlaneDeliveryRequest request,
+        string reason)
+    {
+        var attemptedOwner = RuntimeOwnerTokenForControlPlaneRequest(
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Outbound,
+            context.TerminalGeneration,
+            request);
+        RejectStaleRuntimeOwnerUpdateLocked(
+            FileTransferDirection.Outbound,
+            context.TransferId,
+            context.SessionId,
+            context.CurrentRuntimeOwner,
+            attemptedOwner,
+            "fallback_control_plane_send",
+            FormatFileTransferControlPlaneKind(request.Kind),
+            reason);
+    }
+
+    private static void LogRuntimeOwnerRejectedForFallbackControlPlaneLocked(
+        InboundTransferContext context,
+        FileTransferControlPlaneDeliveryRequest request,
+        string reason)
+    {
+        var attemptedOwner = RuntimeOwnerTokenForControlPlaneRequest(
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            context.TerminalGeneration,
+            request);
+        RejectStaleRuntimeOwnerUpdateLocked(
+            FileTransferDirection.Inbound,
+            context.TransferId,
+            context.SessionId,
+            context.CurrentRuntimeOwner,
+            attemptedOwner,
+            "fallback_control_plane_send",
+            FormatFileTransferControlPlaneKind(request.Kind),
+            reason);
+    }
+
+    private static RuntimeOwnerToken RuntimeOwnerTokenForControlPlaneRequest(
+        string sessionId,
+        string transferId,
+        FileTransferDirection direction,
+        int terminalGeneration,
+        FileTransferControlPlaneDeliveryRequest request)
+    {
+        var route = request.RouteToken switch
+        {
+            FileTransferRouteResolver.RegularNknV4FastToken => FileTransferRoute.RegularNknV4Fast,
+            FileTransferRouteResolver.FileTunaV4Token => FileTransferRoute.FileTunaV4,
+            FileTransferRouteResolver.PostTunaFallbackV6Token => FileTransferRoute.PostTunaFallbackV6,
+            _ => FileTransferRoute.RegularNknV4Fast,
+        };
+        var routeToken = string.IsNullOrWhiteSpace(request.RouteToken)
+            ? "(none)"
+            : request.RouteToken!;
+        return new RuntimeOwnerToken(
+            sessionId,
+            transferId,
+            direction,
+            route,
+            routeToken,
+            request.ProtocolVersion,
+            request.LiveRouteEpoch,
+            Math.Max(0, request.TransferLegGeneration),
+            terminalGeneration,
+            route switch
+            {
+                FileTransferRoute.RegularNknV4Fast => "regular_v4",
+                FileTransferRoute.FileTunaV4 => "file_tuna_v4",
+                FileTransferRoute.PostTunaFallbackV6 => "post_tuna_fallback_v6",
+                _ => "unknown",
+            },
+            "fallback_control_plane_request");
     }
 
     private FileTransferControlPlaneDeliveryRequest CreateOutboundControlPlaneDeliveryRequestLocked(
@@ -6286,6 +6664,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.V6RegularNknStateRefreshActiveRequestId = null;
             context.V6RegularNknStateRefreshActivePriority = null;
             context.V6RegularNknStateRefreshActiveStartedUtc = null;
+            context.V6RegularNknStateRefreshActiveReusedPendingCheckpoint = false;
         }
 
         if (ShouldClearCheckpointRequest(context.LastOutboundFallbackCheckpointRepairRequestId, requestId))
@@ -7948,6 +8327,12 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public int LastTransferLegGeneration { get; set; }
 
+        public int LastRuntimeOwnerGeneration { get; set; }
+
+        public int TerminalGeneration { get; set; }
+
+        public RuntimeOwnerToken? CurrentRuntimeOwner { get; set; }
+
         public bool RuntimeUnlockWaitingForFallbackSurvival { get; set; }
 
         public string? RuntimeUnlockWaitingForFallbackSurvivalReason { get; set; }
@@ -8074,6 +8459,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         public string? V6RegularNknStateRefreshActivePriority { get; set; }
 
         public DateTimeOffset? V6RegularNknStateRefreshActiveStartedUtc { get; set; }
+
+        public bool V6RegularNknStateRefreshActiveReusedPendingCheckpoint { get; set; }
 
         public long V6RegularNknStateRefreshRetiredSendGeneration { get; set; }
 
@@ -8719,6 +9106,12 @@ public sealed partial class SessionFileTransferService : IDisposable
         public List<FileTransferLeg> TransferLegHistory { get; } = [];
 
         public int LastTransferLegGeneration { get; set; }
+
+        public int LastRuntimeOwnerGeneration { get; set; }
+
+        public int TerminalGeneration { get; set; }
+
+        public RuntimeOwnerToken? CurrentRuntimeOwner { get; set; }
 
         public bool RuntimeUnlockWaitingForFallbackSurvival { get; set; }
 

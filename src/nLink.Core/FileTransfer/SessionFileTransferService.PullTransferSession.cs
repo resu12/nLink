@@ -193,10 +193,14 @@ public sealed partial class SessionFileTransferService
             return;
         }
 
-        _ = RunInboundTransportRebindRetriesAsync(context, reason, generation);
+        _ = RunInboundTransportRebindRetriesAsync(context, reason, generation, CaptureRuntimeOwnerLocked(context));
     }
 
-    private async Task RunInboundTransportRebindRetriesAsync(InboundTransferContext context, string reason, int generation)
+    private async Task RunInboundTransportRebindRetriesAsync(
+        InboundTransferContext context,
+        string reason,
+        int generation,
+        RuntimeOwnerToken runtimeOwner)
     {
         var transferId = context.TransferId;
         var sessionId = context.SessionId;
@@ -219,6 +223,16 @@ public sealed partial class SessionFileTransferService
                 int stableProgressSamples;
                 lock (gate)
                 {
+                    if (!TryValidateRuntimeOwnerLocked(
+                            context,
+                            runtimeOwner,
+                            "inbound_transport_rebind_retry",
+                            "retry_state_or_repair",
+                            out _))
+                    {
+                        return;
+                    }
+
                     var active =
                         ReferenceEquals(inboundTransfer, context) &&
                         !context.IsTerminal &&
@@ -3085,6 +3099,7 @@ public sealed partial class SessionFileTransferService
         context.V6RegularNknStateRefreshActiveRequestId = null;
         context.V6RegularNknStateRefreshActivePriority = null;
         context.V6RegularNknStateRefreshActiveStartedUtc = null;
+        context.V6RegularNknStateRefreshActiveReusedPendingCheckpoint = false;
         context.PostTunaFallbackLiveCheckpointStallCommittedChunkIndex = -1;
         context.PostTunaFallbackLiveCheckpointStallHighestObservedChunkIndex = -1;
         context.PostTunaFallbackLiveCheckpointStallCount = 0;
@@ -3647,6 +3662,7 @@ public sealed partial class SessionFileTransferService
         context.V6RegularNknStateRefreshActiveRequestId = null;
         context.V6RegularNknStateRefreshActivePriority = null;
         context.V6RegularNknStateRefreshActiveStartedUtc = null;
+        context.V6RegularNknStateRefreshActiveReusedPendingCheckpoint = false;
         context.V6RegularNknCheckpointSyncSendInFlight = 0;
         ClearOutboundV6RegularNknDeferredStateRefreshLocked(context);
         ClearOutboundFallbackCheckpointDeliveryRecoveryPendingLocked(
