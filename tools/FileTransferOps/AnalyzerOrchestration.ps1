@@ -900,6 +900,8 @@ function Write-FileTransferEfficiencySummaryArtifacts {
         (Get-FileTransferEfficiencyEventCount -Index $Index -Events $Events -Name 'session_liveness_timeout_deferred') +
         (Get-FileTransferEfficiencyEventCount -Index $Index -Events $Events -Name 'filetransfer_liveness_deferral_granted')
     $runtimeOwnerStaleRejectedCount = Get-FileTransferEfficiencyEventCount -Index $Index -Events $Events -Name 'filetransfer_runtime_owner_stale_update_rejected'
+    $fallbackTailRetiredOwnerSuppressedCount = Get-FileTransferEfficiencyEventCount -Index $Index -Events $Events -Name 'filetransfer_fallback_tail_retired_owner_update_suppressed'
+    $fallbackTailRecoveryOwnerRetiredCount = Get-FileTransferEfficiencyEventCount -Index $Index -Events $Events -Name 'filetransfer_fallback_tail_recovery_owner_retired_after_yield'
     $staleControlPlaneSendCount = Get-FileTransferEfficiencyEventCount -Index $Index -Events $Events -Name 'filetransfer_control_plane_send_retired_stale_generation'
 
     $firstYield = @(Get-FileTransferEfficiencyEventsByName -Index $Index -Events $Events -Names @('filetransfer_fallback_tail_quiescent_yield_granted') | Select-Object -First 1)
@@ -911,11 +913,15 @@ function Write-FileTransferEfficiencySummaryArtifacts {
     }
     $postYieldRecoveryActivityCount = 0
     $postYieldLivenessActivityCount = 0
-    $recoveryOwnerRetiredAfterYield = 0
+    $recoveryOwnerRetiredAfterYield = if ($fallbackTailRecoveryOwnerRetiredCount -gt 0) { 1 } else { 0 }
     foreach ($event in @($postYieldEvents)) {
         $name = [string]$event.EventName
         if ($name -like '*liveness*') {
             $postYieldLivenessActivityCount++
+        }
+
+        if ($name -eq 'filetransfer_fallback_tail_retired_owner_update_suppressed') {
+            continue
         }
 
         if ($name -like '*state_refresh*' -or
@@ -974,6 +980,8 @@ function Write-FileTransferEfficiencySummaryArtifacts {
         v6_frontier_request_count = $v6FrontierRequestCount
         liveness_deferral_count = $livenessDeferralCount
         runtime_owner_stale_rejected_count = $runtimeOwnerStaleRejectedCount
+        fallback_tail_retired_owner_update_suppressed_count = $fallbackTailRetiredOwnerSuppressedCount
+        fallback_tail_recovery_owner_retired_after_yield_count = $fallbackTailRecoveryOwnerRetiredCount
         stale_control_plane_send_count = $staleControlPlaneSendCount
         recovery_owner_retired_after_yield = $recoveryOwnerRetiredAfterYield
         post_yield_recovery_activity_count = $postYieldRecoveryActivityCount

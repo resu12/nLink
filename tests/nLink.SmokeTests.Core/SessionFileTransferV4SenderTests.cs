@@ -9226,6 +9226,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
     public void RuntimeUnlockDuringFallbackFrontierOnlyTailRepair_WaitsForFallbackSurvivalProof()
     {
         using var service = new SessionFileTransferService();
@@ -9269,6 +9270,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
     public void RepeatedFallbackFrontierOnlyTailRepair_EmitsDeterministicTailTimeout()
     {
         var serviceType = typeof(SessionFileTransferService);
@@ -9308,6 +9310,42 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
+    public void FallbackFrontierOnlyTailRepairAfterYield_IsSuppressedByRetiredOwnerGuard()
+    {
+        var serviceType = typeof(SessionFileTransferService);
+        const string transferId = "transfer_fallback_tail_retired_owner_guard";
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 11540,
+            chunksAcceptedForTransport: 11652,
+            remoteGrantedUntilExclusive: 11652,
+            chunkCount: 16384);
+        serviceType
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, "test_tail_retired_owner_guard"]);
+
+        var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
+        SetPrivateProperty(leg, "CheckpointRequestId", null);
+        SetPrivateProperty(leg, "CanSendData", true);
+        SetPrivateProperty(leg, "State", FileTransferLegState.Active);
+        serviceType
+            .GetMethod("ClearOutboundFallbackTailRecoveryOwnershipAfterYieldLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, leg, "test_tail_retired_owner_guard"]);
+
+        var logStart = GetOperationalLogLength();
+        serviceType
+            .GetMethod("ActivateOutboundV4PostRebindFrontierOnlyRepairLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, 11540, "post_yield_replay"]);
+
+        Assert.False(GetPrivateProperty<bool>(context, "PullTransportFrontierOnlyRepairActive"));
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_fallback_tail_retired_owner_update_suppressed; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_transport_rebind_frontier_only_started;", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
     public void RuntimeUnlockDuringFallbackFrontierOnlyTailRepair_ResumesOnlyAfterTailQuiescentProof()
     {
         using var service = new SessionFileTransferService();
@@ -9431,6 +9469,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
     public async Task PostTunaFallbackV6TailProgressWithoutControlPressure_GrantsQuiescentYield()
     {
         using var service = new SessionFileTransferService();
@@ -9573,6 +9612,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
     public void PostTunaFallbackV6MovingFrontierRepairProgress_YieldsAndResumesRuntimeUnlock()
     {
         using var service = new SessionFileTransferService();
@@ -9665,6 +9705,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
     public void PostTunaFallbackV6LateRepairAfterYield_DoesNotReopenControlOwner()
     {
         using var service = new SessionFileTransferService();
@@ -9773,6 +9814,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
     public async Task PostTunaFallbackV6TerminalReadyReceiverState_CompletesOutboundTransfer()
     {
         using var service = new SessionFileTransferService();

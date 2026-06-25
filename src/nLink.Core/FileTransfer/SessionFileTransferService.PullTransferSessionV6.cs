@@ -5187,9 +5187,38 @@ public sealed partial class SessionFileTransferService
                 return true;
             }
 
-            LocalOperationalLog.Info(
-                "FileTransferService",
-                $"event=filetransfer_v6_receiver_state_coalesced; transfer_id={context.TransferId}; session_id={context.SessionId}; previous_committed_chunk_index={previousCommittedChunkIndex}; current_committed_chunk_index={context.NextChunkIndex}; committed_delta={committedDelta}; last_sent_committed_chunk_index={context.V6LastReceiverStateCommittedChunkIndex}");
+            var shouldLogCoalesced = true;
+            var suppressedCoalescedCount = 0;
+            if (IsInboundV6PostTunaFallbackSurvivalPathLocked(context))
+            {
+                var leg = context.CurrentTransferLeg;
+                var frontierGapMissing = IsInboundPostFallbackFrontierGapMissingLocked(context);
+                var tuple = BuildFallbackChurnTuple(
+                    context.SessionId,
+                    context.TransferId,
+                    context.RouteSelection.TelemetryToken,
+                    context.NegotiatedDataProtocolVersion,
+                    context.CurrentLiveRouteEpoch?.EpochId ?? 0,
+                    leg?.Generation ?? 0,
+                    leg?.TransportEpochId ?? context.V6ReceiverTransportEpoch,
+                    context.NextChunkIndex,
+                    context.PullHighestReceivedChunkIndex,
+                    frontierGapMissing ? 1 : 0,
+                    frontierGapMissing ? 1 : 0,
+                    leg?.CheckpointRequestId);
+                shouldLogCoalesced = ShouldLogInboundV6ReceiverStateCoalescedDiagnosticLocked(
+                    context,
+                    tuple,
+                    DateTimeOffset.UtcNow,
+                    out suppressedCoalescedCount);
+            }
+
+            if (shouldLogCoalesced)
+            {
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=filetransfer_v6_receiver_state_coalesced; transfer_id={context.TransferId}; session_id={context.SessionId}; previous_committed_chunk_index={previousCommittedChunkIndex}; current_committed_chunk_index={context.NextChunkIndex}; committed_delta={committedDelta}; last_sent_committed_chunk_index={context.V6LastReceiverStateCommittedChunkIndex}; suppressed_repeat_count={suppressedCoalescedCount}");
+            }
             return false;
         }
     }
@@ -5217,9 +5246,74 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        LocalOperationalLog.Info(
-            "FileTransferService",
-            $"event=filetransfer_v6_post_tuna_fallback_frontier_progress_state_forced; transfer_id={context.TransferId}; session_id={context.SessionId}; previous_committed_chunk_index={previousCommittedChunkIndex}; current_committed_chunk_index={context.NextChunkIndex}; committed_delta={committedDelta}; last_sent_committed_chunk_index={context.V6LastReceiverStateCommittedChunkIndex}; highest_received_chunk_index={context.PullHighestReceivedChunkIndex}; frontier_gap_missing={(frontierGapMissing ? 1 : 0)}; terminal_frontier={(terminalFrontier ? 1 : 0)}; recovery_active={(context.PullPostTunaRecoveryActive ? 1 : 0)}; rebind_generation={context.PullTransportRebindGeneration}; frontier_repair_window_chunks={context.PullTransportRebindFrontierRepairWindowChunks}; frontier_repair_committed_chunks={context.PullTransportRebindFrontierRepairCommittedChunks}");
+        var leg = context.CurrentTransferLeg;
+        var tuple = BuildFallbackChurnTuple(
+            context.SessionId,
+            context.TransferId,
+            context.RouteSelection.TelemetryToken,
+            context.NegotiatedDataProtocolVersion,
+            context.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            leg?.Generation ?? 0,
+            leg?.TransportEpochId ?? context.V6ReceiverTransportEpoch,
+            context.NextChunkIndex,
+            context.PullHighestReceivedChunkIndex,
+            frontierGapMissing ? 1 : 0,
+            frontierGapMissing ? 1 : 0,
+            leg?.CheckpointRequestId);
+        if (ShouldLogInboundV6FrontierProgressForcedDiagnosticLocked(
+                context,
+                tuple,
+                DateTimeOffset.UtcNow,
+                out var suppressedCount))
+        {
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_v6_post_tuna_fallback_frontier_progress_state_forced; transfer_id={context.TransferId}; session_id={context.SessionId}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? 0}; leg_generation={leg?.Generation ?? 0}; transport_epoch={leg?.TransportEpochId ?? context.V6ReceiverTransportEpoch}; checkpoint_request_id={FormatProtocolLogValue(leg?.CheckpointRequestId ?? "(none)")}; previous_committed_chunk_index={previousCommittedChunkIndex}; current_committed_chunk_index={context.NextChunkIndex}; committed_delta={committedDelta}; last_sent_committed_chunk_index={context.V6LastReceiverStateCommittedChunkIndex}; highest_received_chunk_index={context.PullHighestReceivedChunkIndex}; frontier_gap_missing={(frontierGapMissing ? 1 : 0)}; terminal_frontier={(terminalFrontier ? 1 : 0)}; recovery_active={(context.PullPostTunaRecoveryActive ? 1 : 0)}; rebind_generation={context.PullTransportRebindGeneration}; frontier_repair_window_chunks={context.PullTransportRebindFrontierRepairWindowChunks}; frontier_repair_committed_chunks={context.PullTransportRebindFrontierRepairCommittedChunks}; suppressed_repeat_count={suppressedCount}");
+        }
+        return true;
+    }
+
+    private static bool ShouldLogInboundV6FrontierProgressForcedDiagnosticLocked(
+        InboundTransferContext context,
+        string tuple,
+        DateTimeOffset now,
+        out int suppressedCount)
+    {
+        if (string.Equals(context.V6LastFrontierProgressForcedDiagnosticTuple, tuple, StringComparison.Ordinal) &&
+            context.V6LastFrontierProgressForcedDiagnosticUtc is { } lastLogged &&
+            now - lastLogged < TimeSpan.FromMilliseconds(V6ReceiverStateDeferredDiagnosticCoalesceMs))
+        {
+            context.V6FrontierProgressForcedDiagnosticSuppressedCount++;
+            suppressedCount = 0;
+            return false;
+        }
+
+        suppressedCount = context.V6FrontierProgressForcedDiagnosticSuppressedCount;
+        context.V6LastFrontierProgressForcedDiagnosticTuple = tuple;
+        context.V6LastFrontierProgressForcedDiagnosticUtc = now;
+        context.V6FrontierProgressForcedDiagnosticSuppressedCount = 0;
+        return true;
+    }
+
+    private static bool ShouldLogInboundV6ReceiverStateCoalescedDiagnosticLocked(
+        InboundTransferContext context,
+        string tuple,
+        DateTimeOffset now,
+        out int suppressedCount)
+    {
+        if (string.Equals(context.V6LastReceiverStateCoalescedDiagnosticTuple, tuple, StringComparison.Ordinal) &&
+            context.V6LastReceiverStateCoalescedDiagnosticUtc is { } lastLogged &&
+            now - lastLogged < TimeSpan.FromMilliseconds(V6ReceiverStateDeferredDiagnosticCoalesceMs))
+        {
+            context.V6ReceiverStateCoalescedDiagnosticSuppressedCount++;
+            suppressedCount = 0;
+            return false;
+        }
+
+        suppressedCount = context.V6ReceiverStateCoalescedDiagnosticSuppressedCount;
+        context.V6LastReceiverStateCoalescedDiagnosticTuple = tuple;
+        context.V6LastReceiverStateCoalescedDiagnosticUtc = now;
+        context.V6ReceiverStateCoalescedDiagnosticSuppressedCount = 0;
         return true;
     }
 
@@ -5258,9 +5352,38 @@ public sealed partial class SessionFileTransferService
                 return true;
             }
 
-            LocalOperationalLog.Info(
-                "FileTransferService",
-                $"event=filetransfer_v6_receiver_state_coalesced; transfer_id={context.TransferId}; session_id={context.SessionId}; reason=frontier_stalled_tail_window; current_committed_chunk_index={context.NextChunkIndex}; highest_received_chunk_index={context.PullHighestReceivedChunkIndex}; accept_window_end_chunk_index={context.V6SparseAcceptWindowEndExclusive}; tail_chunks_remaining={tailChunksRemaining}; elapsed_since_state_ms={(long)Math.Max(0, elapsedSinceState.TotalMilliseconds)}");
+            var shouldLogCoalesced = true;
+            var suppressedCoalescedCount = 0;
+            if (IsInboundV6PostTunaFallbackSurvivalPathLocked(context))
+            {
+                var leg = context.CurrentTransferLeg;
+                var frontierGapMissing = IsInboundPostFallbackFrontierGapMissingLocked(context);
+                var tuple = BuildFallbackChurnTuple(
+                    context.SessionId,
+                    context.TransferId,
+                    context.RouteSelection.TelemetryToken,
+                    context.NegotiatedDataProtocolVersion,
+                    context.CurrentLiveRouteEpoch?.EpochId ?? 0,
+                    leg?.Generation ?? 0,
+                    leg?.TransportEpochId ?? context.V6ReceiverTransportEpoch,
+                    context.NextChunkIndex,
+                    context.PullHighestReceivedChunkIndex,
+                    frontierGapMissing ? 1 : 0,
+                    frontierGapMissing ? 1 : 0,
+                    leg?.CheckpointRequestId);
+                shouldLogCoalesced = ShouldLogInboundV6ReceiverStateCoalescedDiagnosticLocked(
+                    context,
+                    tuple,
+                    now,
+                    out suppressedCoalescedCount);
+            }
+
+            if (shouldLogCoalesced)
+            {
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=filetransfer_v6_receiver_state_coalesced; transfer_id={context.TransferId}; session_id={context.SessionId}; reason=frontier_stalled_tail_window; current_committed_chunk_index={context.NextChunkIndex}; highest_received_chunk_index={context.PullHighestReceivedChunkIndex}; accept_window_end_chunk_index={context.V6SparseAcceptWindowEndExclusive}; tail_chunks_remaining={tailChunksRemaining}; elapsed_since_state_ms={(long)Math.Max(0, elapsedSinceState.TotalMilliseconds)}; suppressed_repeat_count={suppressedCoalescedCount}");
+            }
             return false;
         }
     }
@@ -5297,18 +5420,20 @@ public sealed partial class SessionFileTransferService
             legGeneration = context.CurrentTransferLeg?.Generation ?? 0;
             transportEpoch = context.CurrentTransferLeg?.TransportEpochId ?? context.V6ReceiverTransportEpoch;
             checkpointRequestId = context.CurrentTransferLeg?.CheckpointRequestId ?? "(none)";
-            var tuple = string.Join(
-                "|",
+            var frontierGapMissing = IsInboundPostFallbackFrontierGapMissingLocked(context);
+            var tuple = BuildFallbackChurnTuple(
                 sessionId,
                 transferId,
                 route,
-                protocolVersion.ToString(CultureInfo.InvariantCulture),
-                liveRouteEpoch.ToString(CultureInfo.InvariantCulture),
-                legGeneration.ToString(CultureInfo.InvariantCulture),
-                transportEpoch.ToString(CultureInfo.InvariantCulture),
-                checkpointRequestId,
-                nextChunkIndex.ToString(CultureInfo.InvariantCulture),
-                highestReceivedChunkIndex.ToString(CultureInfo.InvariantCulture));
+                protocolVersion,
+                liveRouteEpoch,
+                legGeneration,
+                transportEpoch,
+                nextChunkIndex,
+                highestReceivedChunkIndex,
+                frontierGapMissing ? 1 : 0,
+                frontierGapMissing ? 1 : 0,
+                checkpointRequestId);
 
             shouldLog = !string.Equals(context.V6LastReceiverStateDeferredDiagnosticTuple, tuple, StringComparison.Ordinal) ||
                         context.V6LastReceiverStateDeferredDiagnosticUtc is not { } lastLogged ||
@@ -5337,6 +5462,12 @@ public sealed partial class SessionFileTransferService
         context.V6LastReceiverStateDeferredDiagnosticTuple = null;
         context.V6LastReceiverStateDeferredDiagnosticUtc = null;
         context.V6ReceiverStateDeferredDiagnosticSuppressedCount = 0;
+        context.V6LastReceiverStateCoalescedDiagnosticTuple = null;
+        context.V6LastReceiverStateCoalescedDiagnosticUtc = null;
+        context.V6ReceiverStateCoalescedDiagnosticSuppressedCount = 0;
+        context.V6LastFrontierProgressForcedDiagnosticTuple = null;
+        context.V6LastFrontierProgressForcedDiagnosticUtc = null;
+        context.V6FrontierProgressForcedDiagnosticSuppressedCount = 0;
     }
 
     private async Task<bool> SendInboundV6FrontierRequestAsync(

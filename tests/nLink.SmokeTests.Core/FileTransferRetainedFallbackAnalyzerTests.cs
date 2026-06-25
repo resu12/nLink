@@ -13,6 +13,7 @@ namespace NLink.SmokeTests;
 public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsScriptsTestBase
 {
     [Fact]
+    [Trait("RetainedFallbackSuite", "Efficiency")]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_EfficiencySummary_BoundedFallbackChurnIsWarning()
     {
@@ -43,6 +44,7 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
     }
 
     [Fact]
+    [Trait("RetainedFallbackSuite", "Efficiency")]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_EfficiencySummary_PostYieldFallbackChurnIsTreadmill()
     {
@@ -69,6 +71,38 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
         Assert.Equal("fail", efficiency["efficiency_verdict"]);
         Assert.Equal("fallback_tail_efficiency_treadmill", efficiency["efficiency_failure_class"]);
         Assert.Equal("1", efficiency["post_yield_recovery_activity_count"]);
+    }
+
+    [Fact]
+    [Trait("RetainedFallbackSuite", "Efficiency")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_EfficiencySummary_RetiredOwnerSuppressionIsDiagnostic()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_efficiency_fallback_retired_owner_suppressed";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6_repair; selection_reason=post_tuna_file_fallback_active; file_tuna_active=0; post_tuna_fallback_active=1; diagnostic_regular_nkn_v6=0; transport_profile=nkn; live_route_epoch=1", secondsOffset: 0),
+            LogLine($"event=filetransfer_fallback_tail_recovery_owner_retired_after_yield; direction=outbound; transfer_id={transferId}; session_id=sess_a; leg_id=leg:2; leg_generation=2; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=1; transport_epoch=3; previous_handoff_epoch=3; previous_handoff_state=backfill_repair; discarded_repair_frame_count=1; discarded_repair_chunk_count=1; reason=fallback_tail_quiescent", secondsOffset: 2),
+            LogLine($"event=filetransfer_fallback_tail_quiescent_yield_granted; direction=outbound; transfer_id={transferId}; session_id=sess_a; leg_id=leg:2; leg_generation=2; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=1; transport_epoch=3; bridge_recovery_generation=1; committed_chunk=128; highest_observed_chunk=129; state=active; can_send_data=1; reason=fallback_tail_quiescent", secondsOffset: 3),
+            LogLine($"event=filetransfer_fallback_tail_retired_owner_update_suppressed; direction=outbound; transfer_id={transferId}; session_id=sess_a; leg_id=leg:2; leg_generation=2; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=1; transport_epoch=3; bridge_recovery_generation=1; checkpoint_request_id=(none); source=v4_post_rebind_frontier_only_repair; attempted_action=activate_frontier_only_repair; owner_key=sess_a|{transferId}|post_tuna_fallback_v6|6|1|2|1|3|(none); reason=post_yield_replay", secondsOffset: 4),
+            LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=(none); integrity_ok=1", secondsOffset: 10),
+            LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); integrity_ok=1", secondsOffset: 10)
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var efficiency = ReadArtifactReport(result.ArtifactDir, "filetransfer-efficiency-summary.txt");
+        Assert.Equal("pass", efficiency["efficiency_verdict"]);
+        Assert.Equal("none", efficiency["efficiency_failure_class"]);
+        Assert.Equal("1", efficiency["fallback_tail_retired_owner_update_suppressed_count"]);
+        Assert.Equal("1", efficiency["fallback_tail_recovery_owner_retired_after_yield_count"]);
+        Assert.Equal("0", efficiency["post_yield_recovery_activity_count"]);
     }
 
     [Fact]

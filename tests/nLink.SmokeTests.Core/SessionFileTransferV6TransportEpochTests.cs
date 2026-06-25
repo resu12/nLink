@@ -2212,6 +2212,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
     }
 
     [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
     public void V6Epoch_PostTunaFallbackFrontierProgressForcesReceiverStateDuringFrontierRepair()
     {
         const string transferId = "transfer_v6_post_fallback_frontier_progress_forces_state";

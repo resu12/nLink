@@ -4998,6 +4998,16 @@ public sealed partial class SessionFileTransferService
             return;
         }
 
+        if (TrySuppressRetiredFallbackTailOwnerUpdateLocked(
+                context,
+                context.CurrentTransferLeg,
+                "v4_post_rebind_frontier_only_repair",
+                "activate_frontier_only_repair",
+                reason))
+        {
+            return;
+        }
+
         if (context.PullTransportFrontierOnlyRepairActive)
         {
             var activeStart = context.PullTransportFrontierOnlyRepairStartChunkIndex;

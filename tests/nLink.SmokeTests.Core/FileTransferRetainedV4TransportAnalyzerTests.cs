@@ -13,6 +13,7 @@ namespace NLink.SmokeTests;
 public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferOpsScriptsTestBase
 {
     [Fact]
+    [Trait("RetainedV4Suite", "Efficiency")]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_EfficiencySummary_CleanRegularV4ReportsPass()
     {
@@ -56,6 +57,7 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
     }
 
     [Fact]
+    [Trait("RetainedV4Suite", "Efficiency")]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_EfficiencySummary_CompactModeAlsoWritesArtifacts()
     {
@@ -88,6 +90,7 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
     }
 
     [Fact]
+    [Trait("RetainedV4Suite", "Efficiency")]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_EfficiencySummary_CorrectnessFailureDefersEfficiency()
     {
@@ -397,6 +400,7 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
 
     [Theory]
     [MemberData(nameof(ThroughputLimiterFixtures))]
+    [Trait("RetainedV4Suite", "ThroughputDecomposition")]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_ThroughputDecomposition_ClassifiesLimiter(string fixtureName, string expectedLimiter, string[] extraLines)
     {
