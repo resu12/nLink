@@ -11,6 +11,18 @@ namespace NLink.Core.FileTransfer;
 
 public sealed partial class SessionFileTransferService : IDisposable
 {
+    private readonly record struct FallbackControlPlaneExchangeOwnerSnapshot(
+        string SessionId,
+        string TransferId,
+        FileTransferDirection Direction,
+        string RouteToken,
+        int ProtocolVersion,
+        int LiveRouteEpoch,
+        int LegGeneration,
+        int BridgeRecoveryGeneration,
+        long TransportEpoch,
+        string? CheckpointRequestId);
+
     private const string BusyReason = FileTransferResultCodes.Busy;
     private const string DeclinedReason = FileTransferResultCodes.Declined;
     private const string CanceledReason = FileTransferResultCodes.CanceledLocal;
@@ -4996,13 +5008,14 @@ public sealed partial class SessionFileTransferService : IDisposable
         bool canSendData,
         bool freezeCurrent = true)
     {
+        var retiredLeg = context.CurrentTransferLeg;
         if (freezeCurrent)
         {
             FreezeTransferLegLocked(
                 FileTransferDirection.Outbound,
                 context.TransferId,
                 context.SessionId,
-                context.CurrentTransferLeg,
+                retiredLeg,
                 reason);
         }
 
@@ -5049,6 +5062,12 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.CurrentRuntimeOwner is { } currentOwner &&
             owner.RuntimeGeneration != currentOwner.RuntimeGeneration)
         {
+            RetireOutboundFallbackControlPlaneExchangeLocked(
+                context,
+                retiredLeg,
+                leg.Generation,
+                leg.CheckpointRequestId,
+                reason);
             RetireRuntimeOwnedWorkersLocked(context, owner, reason);
         }
 
@@ -5064,13 +5083,14 @@ public sealed partial class SessionFileTransferService : IDisposable
         bool canSendData,
         bool freezeCurrent = true)
     {
+        var retiredLeg = context.CurrentTransferLeg;
         if (freezeCurrent)
         {
             FreezeTransferLegLocked(
                 FileTransferDirection.Inbound,
                 context.TransferId,
                 context.SessionId,
-                context.CurrentTransferLeg,
+                retiredLeg,
                 reason);
         }
 
@@ -5115,6 +5135,12 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.CurrentRuntimeOwner is { } currentOwner &&
             owner.RuntimeGeneration != currentOwner.RuntimeGeneration)
         {
+            RetireInboundFallbackControlPlaneExchangeLocked(
+                context,
+                retiredLeg,
+                leg.Generation,
+                leg.CheckpointRequestId,
+                reason);
             RetireRuntimeOwnedWorkersLocked(context, owner, reason);
         }
 
@@ -5232,7 +5258,122 @@ public sealed partial class SessionFileTransferService : IDisposable
         string reason)
         => LocalOperationalLog.Warn(
             "FileTransferService",
-            $"event=filetransfer_fallback_checkpoint_exchange_retired; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; retired_leg_id={FormatProtocolLogValue(retiredLeg?.LegId ?? "(none)")}; retired_leg_generation={retiredLeg?.Generation ?? 0}; current_leg_generation={currentLegGeneration}; route={FormatProtocolLogValue(retiredLeg?.RouteSelection.TelemetryToken ?? "(none)")}; protocol_version={retiredLeg?.ProtocolVersion ?? 0}; live_route_epoch={retiredLeg?.LiveRouteEpochId ?? 0}; transport_epoch={retiredLeg?.TransportEpochId ?? 0}; retired_checkpoint_request_id={FormatProtocolLogValue(retiredRequestId ?? "(none)")}; current_checkpoint_request_id={FormatProtocolLogValue(currentCheckpointRequestId ?? "(none)")}; reason={FormatProtocolLogValue(reason)}");
+            $"event=filetransfer_fallback_checkpoint_exchange_retired; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; retired_leg_id={FormatProtocolLogValue(retiredLeg?.LegId ?? "(none)")}; retired_leg_generation={retiredLeg?.Generation ?? 0}; current_leg_generation={currentLegGeneration}; route={FormatProtocolLogValue(retiredLeg?.RouteSelection.TelemetryToken ?? "(none)")}; protocol_version={retiredLeg?.ProtocolVersion ?? 0}; live_route_epoch={retiredLeg?.LiveRouteEpochId ?? 0}; bridge_recovery_generation={retiredLeg?.BridgeRecoveryGeneration ?? 0}; transport_epoch={retiredLeg?.TransportEpochId ?? 0}; retired_checkpoint_request_id={FormatProtocolLogValue(retiredRequestId ?? "(none)")}; current_checkpoint_request_id={FormatProtocolLogValue(currentCheckpointRequestId ?? "(none)")}; reason={FormatProtocolLogValue(reason)}");
+
+    private static FallbackControlPlaneExchangeOwnerSnapshot? CaptureFallbackControlPlaneExchangeOwner(
+        FileTransferDirection direction,
+        string sessionId,
+        string transferId,
+        FileTransferLeg? leg)
+        => IsCurrentPostTunaFallbackLeg(leg)
+            ? new FallbackControlPlaneExchangeOwnerSnapshot(
+                sessionId,
+                transferId,
+                direction,
+                leg!.RouteSelection.TelemetryToken,
+                leg.ProtocolVersion,
+                leg.LiveRouteEpochId,
+                leg.Generation,
+                leg.BridgeRecoveryGeneration,
+                leg.TransportEpochId,
+                leg.CheckpointRequestId)
+            : null;
+
+    private static void RetireOutboundFallbackControlPlaneExchangeLocked(
+        OutboundTransferContext context,
+        FileTransferLeg? retiredLeg,
+        int currentLegGeneration,
+        string? currentCheckpointRequestId,
+        string reason)
+    {
+        var retiredOwner = CaptureFallbackControlPlaneExchangeOwner(
+            FileTransferDirection.Outbound,
+            context.SessionId,
+            context.TransferId,
+            retiredLeg);
+        if (retiredOwner is null)
+        {
+            return;
+        }
+
+        var retiredRequestId = retiredOwner.Value.CheckpointRequestId;
+        if (!string.IsNullOrWhiteSpace(retiredRequestId))
+        {
+            ClearOutboundFallbackCheckpointRetryStateLocked(context, retiredRequestId, reason);
+            RememberRetiredFallbackCheckpointRequest(
+                context.RetiredFallbackCheckpointRequestKeys,
+                retiredLeg!,
+                retiredOwner.Value.TransportEpoch,
+                retiredRequestId);
+            retiredLeg!.CheckpointRequestId = null;
+            retiredLeg.CheckpointPriority = null;
+            retiredLeg.CheckpointRequestedUtc = null;
+        }
+
+        ClearOutboundFallbackCheckpointDeliveryRecoveryPendingLocked(context, reason);
+        ClearOutboundFallbackCheckpointRepairAuthorityLocked(context);
+        context.FallbackTailQuiescenceTuple = null;
+        context.FallbackTailQuiescenceTupleRepeatCount = 0;
+        context.FallbackTailQuiescenceTupleFirstSeenUtc = null;
+        context.FallbackTailQuiescenceTimedOut = false;
+        LogFileTransferFallbackCheckpointExchangeRetired(
+            FileTransferDirection.Outbound,
+            context.TransferId,
+            context.SessionId,
+            retiredLeg,
+            retiredRequestId,
+            currentLegGeneration,
+            currentCheckpointRequestId,
+            reason);
+    }
+
+    private static void RetireInboundFallbackControlPlaneExchangeLocked(
+        InboundTransferContext context,
+        FileTransferLeg? retiredLeg,
+        int currentLegGeneration,
+        string? currentCheckpointRequestId,
+        string reason)
+    {
+        var retiredOwner = CaptureFallbackControlPlaneExchangeOwner(
+            FileTransferDirection.Inbound,
+            context.SessionId,
+            context.TransferId,
+            retiredLeg);
+        if (retiredOwner is null)
+        {
+            return;
+        }
+
+        var retiredRequestId = retiredOwner.Value.CheckpointRequestId;
+        if (!string.IsNullOrWhiteSpace(retiredRequestId))
+        {
+            RememberRetiredFallbackCheckpointRequest(
+                context.RetiredFallbackCheckpointRequestKeys,
+                retiredLeg!,
+                retiredOwner.Value.TransportEpoch,
+                retiredRequestId);
+            retiredLeg!.CheckpointRequestId = null;
+            retiredLeg.CheckpointPriority = null;
+            retiredLeg.CheckpointRequestedUtc = null;
+        }
+
+        ClearInboundV6PostTunaFallbackProofReplayLocked(context);
+        context.V6PostTunaFallbackProofReplayReceiverStatePending = false;
+        context.V6PostTunaFallbackProofReplayFrontierRequestPending = false;
+        context.V6LastReceiverStateSentUtc = null;
+        context.V6LastFrontierRequestSentUtc = null;
+        context.V6LastFrontierRequestChunkIndex = -1;
+        context.V6LastFrontierRequestId = null;
+        LogFileTransferFallbackCheckpointExchangeRetired(
+            FileTransferDirection.Inbound,
+            context.TransferId,
+            context.SessionId,
+            retiredLeg,
+            retiredRequestId,
+            currentLegGeneration,
+            currentCheckpointRequestId,
+            reason);
+    }
 
     private static void AdoptOutboundFallbackLegTransportEpochLocked(
         OutboundTransferContext context,
@@ -5248,28 +5389,22 @@ public sealed partial class SessionFileTransferService : IDisposable
         }
 
         var previousTransportEpoch = leg.TransportEpochId;
+        var previousBridgeRecoveryGeneration = leg.BridgeRecoveryGeneration;
+        var nextBridgeRecoveryGeneration = context.PullTransportRebindGeneration > 0
+            ? Math.Max(leg.BridgeRecoveryGeneration, context.PullTransportRebindGeneration)
+            : leg.BridgeRecoveryGeneration;
+        var bridgeRecoveryGenerationAdvances = nextBridgeRecoveryGeneration != previousBridgeRecoveryGeneration;
         var retiredRequestId = leg.CheckpointRequestId;
         if (!string.IsNullOrWhiteSpace(retiredRequestId))
         {
-            ClearOutboundFallbackCheckpointRetryStateLocked(context, retiredRequestId, "transport_epoch_adopted");
-            ClearOutboundFallbackCheckpointDeliveryRecoveryPendingLocked(context, "transport_epoch_adopted");
-            RememberRetiredFallbackCheckpointRequest(
-                context.RetiredFallbackCheckpointRequestKeys,
+            RetireOutboundFallbackControlPlaneExchangeLocked(
+                context,
                 leg,
-                previousTransportEpoch,
-                retiredRequestId);
-            leg.CheckpointRequestId = null;
-            leg.CheckpointPriority = null;
-            leg.CheckpointRequestedUtc = null;
-            LogFileTransferFallbackCheckpointExchangeRetired(
-                FileTransferDirection.Outbound,
-                context.TransferId,
-                context.SessionId,
-                leg,
-                retiredRequestId,
                 leg.Generation,
                 null,
-                "transport_epoch_adopted");
+                bridgeRecoveryGenerationAdvances
+                    ? "bridge_recovery_generation_advanced"
+                    : "transport_epoch_adopted");
         }
 
         leg.TransportEpochId = transportEpoch;
@@ -5278,10 +5413,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             leg.RuntimeUnlockProbeAllowedAfterTransportEpochAdoption = true;
         }
 
-        if (context.PullTransportRebindGeneration > 0)
-        {
-            leg.BridgeRecoveryGeneration = Math.Max(leg.BridgeRecoveryGeneration, context.PullTransportRebindGeneration);
-        }
+        leg.BridgeRecoveryGeneration = nextBridgeRecoveryGeneration;
 
         LogFileTransferFallbackLegTransportEpochAdopted(
             FileTransferDirection.Outbound,
@@ -5336,26 +5468,22 @@ public sealed partial class SessionFileTransferService : IDisposable
         }
 
         var previousTransportEpoch = leg.TransportEpochId;
+        var previousBridgeRecoveryGeneration = leg.BridgeRecoveryGeneration;
+        var nextBridgeRecoveryGeneration = context.PullTransportRebindGeneration > 0
+            ? Math.Max(leg.BridgeRecoveryGeneration, context.PullTransportRebindGeneration)
+            : leg.BridgeRecoveryGeneration;
+        var bridgeRecoveryGenerationAdvances = nextBridgeRecoveryGeneration != previousBridgeRecoveryGeneration;
         var retiredRequestId = leg.CheckpointRequestId;
         if (!string.IsNullOrWhiteSpace(retiredRequestId))
         {
-            RememberRetiredFallbackCheckpointRequest(
-                context.RetiredFallbackCheckpointRequestKeys,
+            RetireInboundFallbackControlPlaneExchangeLocked(
+                context,
                 leg,
-                previousTransportEpoch,
-                retiredRequestId);
-            leg.CheckpointRequestId = null;
-            leg.CheckpointPriority = null;
-            leg.CheckpointRequestedUtc = null;
-            LogFileTransferFallbackCheckpointExchangeRetired(
-                FileTransferDirection.Inbound,
-                context.TransferId,
-                context.SessionId,
-                leg,
-                retiredRequestId,
                 leg.Generation,
                 null,
-                "transport_epoch_adopted");
+                bridgeRecoveryGenerationAdvances
+                    ? "bridge_recovery_generation_advanced"
+                    : "transport_epoch_adopted");
         }
 
         leg.TransportEpochId = transportEpoch;
@@ -5364,10 +5492,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             leg.RuntimeUnlockProbeAllowedAfterTransportEpochAdoption = true;
         }
 
-        if (context.PullTransportRebindGeneration > 0)
-        {
-            leg.BridgeRecoveryGeneration = Math.Max(leg.BridgeRecoveryGeneration, context.PullTransportRebindGeneration);
-        }
+        leg.BridgeRecoveryGeneration = nextBridgeRecoveryGeneration;
 
         LogFileTransferFallbackLegTransportEpochAdopted(
             FileTransferDirection.Inbound,
@@ -6122,11 +6247,11 @@ public sealed partial class SessionFileTransferService : IDisposable
         var clearProgressPressure = IsInboundPostTunaFallbackProgressOnlyControlPlane(request);
         lock (gate)
         {
-            if (!ReferenceEquals(inboundTransfer, context) ||
-                context.IsTerminal ||
-                !context.RouteRuntime.UsesPostTunaFallbackV6Runtime ||
-                !IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg) ||
-                context.CurrentTransferLeg!.Generation != request.TransferLegGeneration)
+            if (!TryValidateInboundFallbackControlPlaneSendLocked(
+                    context,
+                    request,
+                    out _,
+                    out _))
             {
                 return;
             }
@@ -6278,6 +6403,12 @@ public sealed partial class SessionFileTransferService : IDisposable
             return false;
         }
 
+        if (request.BridgeRecoveryGeneration != leg.BridgeRecoveryGeneration)
+        {
+            reason = "bridge_recovery_generation_mismatch";
+            return false;
+        }
+
         var expectedLiveRouteEpoch = liveRouteEpoch?.EpochId ?? leg.LiveRouteEpochId;
         if (request.LiveRouteEpoch != expectedLiveRouteEpoch || request.LiveRouteEpoch != leg.LiveRouteEpochId)
         {
@@ -6338,7 +6469,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     {
         var key = string.Create(
             CultureInfo.InvariantCulture,
-            $"{direction}|{transferId}|{sessionId}|{FormatFileTransferControlPlaneKind(request.Kind)}|{request.TransferLegGeneration}|{request.TransportEpoch}|{request.CheckpointRequestId ?? "(none)"}|{reason}");
+            $"{direction}|{transferId}|{sessionId}|{FormatFileTransferControlPlaneKind(request.Kind)}|{request.TransferLegGeneration}|{request.BridgeRecoveryGeneration}|{request.TransportEpoch}|{request.CheckpointRequestId ?? "(none)"}|{reason}");
         if (!suppressionKeys.Add(key))
         {
             return;
@@ -7003,7 +7134,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         string? requestId)
         => string.Create(
             CultureInfo.InvariantCulture,
-            $"{leg.Generation}|{leg.LiveRouteEpochId}|{transportEpoch}|{requestId ?? "(none)"}");
+            $"{leg.Generation}|{leg.BridgeRecoveryGeneration}|{leg.LiveRouteEpochId}|{transportEpoch}|{requestId ?? "(none)"}");
 
     private static bool TryRetireOutboundFallbackCheckpointRequestLocked(
         OutboundTransferContext context,

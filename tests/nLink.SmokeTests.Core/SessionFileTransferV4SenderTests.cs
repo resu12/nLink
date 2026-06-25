@@ -12240,6 +12240,100 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
+    public async Task PostTunaFallbackV6ControlPlaneSend_SuppressesOldBridgeRecoveryGeneration()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            "transfer_post_tuna_fallback_v6_control_plane_old_bridge_generation");
+        SetPrivateProperty(context, "PullTransportRebindGeneration", 2);
+        serviceType
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        serviceType
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, "test_control_plane_old_bridge_generation"]);
+
+        var currentRequest = new FileTransferFrontierRequestFrameV6
+        {
+            SessionId = "session_transfer_post_tuna_fallback_v6_control_plane_old_bridge_generation",
+            TransferId = "transfer_post_tuna_fallback_v6_control_plane_old_bridge_generation",
+            TransportEpoch = 1,
+            RepairRequestId = "v6-regular-nkn-state-refresh:current",
+            MissingRanges =
+            [
+                new FileTransferRangeV4
+                {
+                    StartChunkIndex = 100,
+                    ChunkCount = 1,
+                },
+            ],
+            Priority = "state_refresh",
+            RecoveryMode = "regular_nkn_state_refresh",
+        };
+        serviceType
+            .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, currentRequest, "test_control_plane_old_bridge_generation"]);
+
+        var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
+        var currentLegGeneration = GetPrivateProperty<int>(leg, "Generation");
+        var liveRouteEpoch = GetPrivateProperty<int>(leg, "LiveRouteEpochId");
+        var bridgeRecoveryGeneration = GetPrivateProperty<int>(leg, "BridgeRecoveryGeneration");
+        var transportEpoch = GetPrivateProperty<long>(leg, "TransportEpochId");
+        var staleFrame = new FileTransferFrontierRequestFrameV6
+        {
+            SessionId = currentRequest.SessionId,
+            TransferId = currentRequest.TransferId,
+            TransportEpoch = transportEpoch,
+            RepairRequestId = currentRequest.RepairRequestId,
+            MissingRanges =
+            [
+                new FileTransferRangeV4
+                {
+                    StartChunkIndex = 100,
+                    ChunkCount = 1,
+                },
+            ],
+            Priority = "state_refresh",
+            RecoveryMode = "regular_nkn_state_refresh",
+        };
+        var staleRequest = new FileTransferControlPlaneDeliveryRequest(
+            FileTransferControlPlaneKind.FallbackCheckpointRequest,
+            staleFrame,
+            "test_old_bridge_generation")
+        {
+            RouteToken = FileTransferRouteResolver.PostTunaFallbackV6Token,
+            ProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+            LiveRouteEpoch = liveRouteEpoch,
+            TransferLegGeneration = currentLegGeneration,
+            BridgeRecoveryGeneration = Math.Max(0, bridgeRecoveryGeneration - 1),
+            TransportEpoch = transportEpoch,
+            CheckpointRequestId = staleFrame.RepairRequestId,
+            PeerVisibleRequired = true,
+        };
+
+        var logStart = GetOperationalLogLength();
+        var sendTask = (Task<bool>)serviceType
+            .GetMethod("SendOutboundFallbackControlPlaneOrDataSessionAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    context,
+                    new CompletingDataSession(staleFrame.SessionId, staleFrame.TransferId),
+                    staleRequest,
+                    CancellationToken.None,
+                ])!;
+        var sent = await sendTask;
+
+        Assert.False(sent);
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_control_plane_send_retired_stale_generation;", log, StringComparison.Ordinal);
+        Assert.Contains("reason=bridge_recovery_generation_mismatch", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_control_plane_delivery_unavailable;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_v6_regular_nkn_state_refresh_sent;", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void PostTunaFallbackV6CheckpointProof_ClearsOlderTransportEpochGuards()
     {
         using var service = new SessionFileTransferService();
