@@ -1340,6 +1340,19 @@ public sealed partial class NknSignalingTransport
 
         foreach (var session in sessions)
         {
+            if (ShouldSuppressUncommittedPostTunaFallbackHandoff(
+                    session.TransferId,
+                    session.SessionId,
+                    routeHint: null,
+                    effectiveHandoffKind,
+                    targetTransport,
+                    "availability_broadcast",
+                    reason,
+                    clearPending: false))
+            {
+                continue;
+            }
+
             if (ShouldSuppressImmediateRegularNknAvailabilityForActiveFileTunaRoute(
                     session,
                     reason,
@@ -1483,6 +1496,19 @@ public sealed partial class NknSignalingTransport
 
         foreach (var session in sessions)
         {
+            if (ShouldSuppressUncommittedPostTunaFallbackHandoff(
+                    session.TransferId,
+                    session.SessionId,
+                    routeHint: null,
+                    handoffKind,
+                    targetTransport,
+                    "handoff_broadcast",
+                    normalizedReason,
+                    clearPending: false))
+            {
+                continue;
+            }
+
             TrackFileTransferRouteHintForHandoff(
                 session.TransferId,
                 handoffKind,
@@ -1570,6 +1596,28 @@ public sealed partial class NknSignalingTransport
 
         if (ShouldSuppressPendingRegularNknHandoffForActiveFileTunaRoute(session, intent, routeHint, trigger))
         {
+            return false;
+        }
+
+        if (ShouldSuppressUncommittedPostTunaFallbackHandoff(
+                session.TransferId,
+                session.SessionId,
+                routeHint,
+                intent.HandoffKind,
+                intent.TargetTransport,
+                "pending_handoff_replay",
+                intent.Reason,
+                clearPending: true))
+        {
+            lock (gate)
+            {
+                if (pendingFileTransferV6HandoffsBySession.TryGetValue(session.SessionId, out var current) &&
+                    ReferenceEquals(current, intent))
+                {
+                    pendingFileTransferV6HandoffsBySession.Remove(session.SessionId);
+                }
+            }
+
             return false;
         }
 
@@ -1795,7 +1843,13 @@ public sealed partial class NknSignalingTransport
         string? transferId,
         string? routeToken,
         int protocolVersion,
-        string source)
+        string source,
+        bool runtimeUnlockAdmissionGranted = false,
+        string runtimeUnlockAdmissionReason = "unknown",
+        string fallbackLegState = "unknown",
+        bool fallbackLegCanSendData = false,
+        long fallbackLegGeneration = 0,
+        string? fallbackCheckpointRequestId = null)
     {
         if (string.IsNullOrWhiteSpace(transferId) ||
             string.IsNullOrWhiteSpace(routeToken) ||
@@ -1816,6 +1870,14 @@ public sealed partial class NknSignalingTransport
                 selection.TelemetryToken,
                 normalizedProtocolVersion,
                 source,
+                runtimeUnlockAdmissionGranted,
+                SanitizeLogToken(runtimeUnlockAdmissionReason),
+                SanitizeLogToken(fallbackLegState),
+                fallbackLegCanSendData,
+                fallbackLegGeneration,
+                string.IsNullOrWhiteSpace(fallbackCheckpointRequestId)
+                    ? null
+                    : SanitizeLogToken(fallbackCheckpointRequestId),
                 DateTimeOffset.UtcNow);
         }
 
@@ -1829,6 +1891,18 @@ public sealed partial class NknSignalingTransport
             {
                 realClient.ClearActiveFileTransferPostTunaFallbackRuntime(normalizedTransferId, source);
             }
+        }
+
+        if (route == FileTransferRoute.PostTunaFallbackV6 &&
+            normalizedProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
+            runtimeUnlockAdmissionGranted)
+        {
+            ConsumePostTunaFileFallbackRoute(
+                sessionId: null,
+                transferId: normalizedTransferId,
+                reason: string.IsNullOrWhiteSpace(runtimeUnlockAdmissionReason)
+                    ? "fallback_tail_quiescent"
+                    : runtimeUnlockAdmissionReason);
         }
 
         if (route != FileTransferRoute.PostTunaFallbackV6 ||
@@ -1860,7 +1934,13 @@ public sealed partial class NknSignalingTransport
             notification.ProtocolVersion,
             string.IsNullOrWhiteSpace(notification.Source)
                 ? "service_route_hint"
-                : notification.Source);
+                : notification.Source,
+            notification.RuntimeUnlockAdmissionGranted,
+            notification.RuntimeUnlockAdmissionReason,
+            notification.FallbackLegState,
+            notification.FallbackLegCanSendData,
+            notification.FallbackLegGeneration,
+            notification.FallbackCheckpointRequestId);
     }
 
     private void TrackFileTransferRouteHintForHandoff(
@@ -1871,6 +1951,19 @@ public sealed partial class NknSignalingTransport
         string? reason = null)
     {
         if (string.IsNullOrWhiteSpace(transferId))
+        {
+            return;
+        }
+
+        if (ShouldSuppressUncommittedPostTunaFallbackHandoff(
+                transferId,
+                sessionId: null,
+                routeHint: null,
+                handoffKind,
+                targetTransport,
+                source,
+                reason,
+                clearPending: false))
         {
             return;
         }
@@ -1899,6 +1992,58 @@ public sealed partial class NknSignalingTransport
                 "NKN.Tuna",
                 $"event=filetransfer_normal_to_tuna_handoff_route_hint_deferred; transfer_id={SanitizeLogToken(transferId)}; source={SanitizeLogToken(source)}; reason={SanitizeLogToken(reason ?? "none")}; route=file_tuna_v4; protocol_version={FileTransferProtocol.ProtocolVersionV4}");
         }
+    }
+
+    private bool ShouldSuppressUncommittedPostTunaFallbackHandoff(
+        string? transferId,
+        string? sessionId,
+        FileTransferRouteHint? routeHint,
+        FileTransferTransportHandoffKind handoffKind,
+        FileTransferTransportKind targetTransport,
+        string source,
+        string? reason,
+        bool clearPending)
+    {
+        if (string.IsNullOrWhiteSpace(transferId) ||
+            handoffKind != FileTransferTransportHandoffKind.TunaToNormalFallback ||
+            targetTransport != FileTransferTransportKind.RegularNkn)
+        {
+            return false;
+        }
+
+        var normalizedTransferId = transferId.Trim();
+        var normalizedSource = SanitizeLogToken(source);
+        var normalizedReason = SanitizeLogToken(reason ?? "none");
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId)
+            ? "none"
+            : sessionId.Trim();
+        FileTransferRouteHint? currentRouteHint = routeHint;
+
+        lock (gate)
+        {
+            if (!fileTransferDataSessions.TryGetValue(normalizedTransferId, out var session) ||
+                session.IsDisposed)
+            {
+                return false;
+            }
+
+            normalizedSessionId = session.SessionId;
+            if (!currentRouteHint.HasValue &&
+                fileTransferRouteHints.TryGetValue(normalizedTransferId, out var candidateRouteHint))
+            {
+                currentRouteHint = candidateRouteHint;
+            }
+        }
+
+        if (currentRouteHint?.Route is FileTransferRoute.FileTunaV4 or FileTransferRoute.PostTunaFallbackV6)
+        {
+            return false;
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=filetransfer_post_tuna_fallback_route_hint_suppressed_uncommitted_runtime_unlock; session_id={SanitizeLogToken(normalizedSessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; source={normalizedSource}; reason={normalizedReason}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(handoffKind)}; target_transport={FormatFileTransferTransportKindForLog(targetTransport)}; current_route={SanitizeLogToken(currentRouteHint?.Token ?? "none")}; current_protocol_version={(currentRouteHint?.ProtocolVersion ?? 0)}; route_hint_source={SanitizeLogToken(currentRouteHint?.Source ?? "none")}; pending_cleared={(clearPending ? 1 : 0)}");
+        return true;
     }
 
     private void ClearPendingFileTransferV6Handoffs(string reason, string? sessionId = null)

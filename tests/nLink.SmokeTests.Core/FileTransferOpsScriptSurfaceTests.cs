@@ -73,6 +73,24 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public void FileTransferOps_RetainedAnalysisBoundedArtifactsRemainStable()
+    {
+        var repoRoot = FindRepoRoot();
+        var orchestrationText = File.ReadAllText(Path.Combine(repoRoot, "tools", "FileTransferOps", "AnalyzerOrchestration.ps1"));
+        var tunaWrapperText = File.ReadAllText(Path.Combine(repoRoot, "tools", "Run-FileTransferTunaGuiSmoke.ps1"));
+        var routeWrapperText = File.ReadAllText(Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"));
+
+        Assert.Contains("FileTransferRetainedEventIndex", File.ReadAllText(Path.Combine(repoRoot, "tools", "FileTransferSoak", "LogParsing.ps1")), StringComparison.Ordinal);
+        Assert.Contains("filetransfer-retained-analysis-stage-diagnostics.json", orchestrationText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer-retained-analysis-stage-diagnostics.txt", orchestrationText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer-retained-compact-summary.json", orchestrationText, StringComparison.Ordinal);
+        Assert.Contains("retained_analysis_timeout", tunaWrapperText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer-retained-analysis-timeout-summary.json", tunaWrapperText, StringComparison.Ordinal);
+        Assert.Contains("retained_analysis_timeout", routeWrapperText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer-retained-analysis-timeout-summary.json", routeWrapperText, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void RunFileTransferNknSoak_PublicParameterSetAndArtifactNamesRemainStable()
     {
         var repoRoot = FindRepoRoot();

@@ -1,5 +1,8 @@
 Set-StrictMode -Version Latest
 
+$script:FileTransferRetainedEventIndex = $null
+$script:FileTransferRetainedEventQueryCache = @{}
+
 function Get-FileTransferDefaultLogDir {
     $localAppData = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::LocalApplicationData)
     return (Join-Path $localAppData 'nLink\logs')
@@ -170,6 +173,120 @@ function Read-FileTransferLogEvents {
     }
 
     return $events.ToArray()
+}
+
+function Get-FileTransferEventScopeKey {
+    param([object[]]$Events)
+
+    if ($null -eq $Events -or $Events.Count -le 0) {
+        return 'empty'
+    }
+
+    $first = $Events[0]
+    $last = $Events[$Events.Count - 1]
+    return ('{0}|{1}|{2}|{3}|{4}|{5}|{6}' -f
+        $Events.Count,
+        $first.Sequence,
+        $last.Sequence,
+        $first.EventName,
+        $last.EventName,
+        $first.TransferId,
+        $last.TransferId)
+}
+
+function Reset-FileTransferRetainedEventIndex {
+    $script:FileTransferRetainedEventIndex = $null
+    $script:FileTransferRetainedEventQueryCache = @{}
+}
+
+function New-FileTransferRetainedEventIndex {
+    param(
+        [object[]]$Events = @(),
+        [string[]]$LogFiles = @()
+    )
+
+    $eventsByName = @{}
+    $eventCounts = @{}
+    $firstByName = @{}
+    $lastByName = @{}
+    $transferIds = New-Object System.Collections.Generic.HashSet[string]
+    $sessionIds = New-Object System.Collections.Generic.HashSet[string]
+    $criticalMarkerNames = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($markerName in @(
+            'filetransfer_live_route_epoch_started',
+            'filetransfer_route_selected',
+            'file_transfer_inbound_terminal',
+            'file_transfer_outbound_terminal',
+            'transfer_terminal',
+            'runtime_unlock_precommit_probe_acked',
+            'runtime_unlock_paired_commit_confirmed',
+            'filetransfer_fallback_tail_quiescent_yield_granted',
+            'filetransfer_fallback_tail_terminal_proof_consumed',
+            'filetransfer_control_plane_send_retired_stale_generation',
+            'filetransfer_runtime_owner_stale_update_rejected',
+            'session_liveness_timeout')) {
+        $criticalMarkerNames.Add($markerName) | Out-Null
+    }
+    $criticalMarkerExcerpts = New-Object System.Collections.Generic.List[string]
+
+    foreach ($event in @($Events)) {
+        $name = [string]$event.EventName
+        if ([string]::IsNullOrWhiteSpace($name)) {
+            continue
+        }
+
+        if (-not $eventsByName.ContainsKey($name)) {
+            $eventsByName[$name] = New-Object System.Collections.Generic.List[object]
+            $eventCounts[$name] = 0
+            $firstByName[$name] = $event
+        }
+
+        $eventsByName[$name].Add($event) | Out-Null
+        $eventCounts[$name] = [int]$eventCounts[$name] + 1
+        $lastByName[$name] = $event
+
+        if (-not [string]::IsNullOrWhiteSpace([string]$event.TransferId)) {
+            $transferIds.Add([string]$event.TransferId) | Out-Null
+        }
+
+        $sessionId = Get-FileTransferEventField -Event $event -Name 'session_id' -Default ''
+        if (-not [string]::IsNullOrWhiteSpace($sessionId) -and
+            $sessionId -ne '(none)' -and
+            $sessionId -ne '(unknown)') {
+            $sessionIds.Add($sessionId) | Out-Null
+        }
+
+        if ($criticalMarkerNames.Contains($name) -and $criticalMarkerExcerpts.Count -lt 200) {
+            $criticalMarkerExcerpts.Add((Format-FileTransferEvidenceLine -Event $event)) | Out-Null
+        }
+
+    }
+
+    return [pscustomobject]@{
+        LogFiles = @($LogFiles)
+        AllEventsScopeKey = Get-FileTransferEventScopeKey -Events $Events
+        EventCount = @($Events).Count
+        EventsByName = $eventsByName
+        EventCounts = $eventCounts
+        FirstEventByName = $firstByName
+        LastEventByName = $lastByName
+        FieldMax = @{}
+        FieldSum = @{}
+        TransferIds = @($transferIds)
+        SessionIds = @($sessionIds)
+        CriticalMarkerExcerpts = @($criticalMarkerExcerpts)
+    }
+}
+
+function Initialize-FileTransferRetainedEventIndex {
+    param(
+        [object[]]$Events = @(),
+        [string[]]$LogFiles = @()
+    )
+
+    $script:FileTransferRetainedEventQueryCache = @{}
+    $script:FileTransferRetainedEventIndex = New-FileTransferRetainedEventIndex -Events $Events -LogFiles $LogFiles
+    return $script:FileTransferRetainedEventIndex
 }
 
 function Get-FileTransferEventField {

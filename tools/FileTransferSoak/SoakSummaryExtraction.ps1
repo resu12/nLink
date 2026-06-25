@@ -74,13 +74,146 @@ function Select-FileTransferIdForAnalysis {
     return ''
 }
 
+function Get-FileTransferScopedNameIndex {
+    param([object[]]$Events)
+
+    $scopeKey = Get-FileTransferEventScopeKey -Events $Events
+    $cacheKey = "scope-name-index|$scopeKey"
+    if ($script:FileTransferRetainedEventQueryCache.ContainsKey($cacheKey)) {
+        return $script:FileTransferRetainedEventQueryCache[$cacheKey]
+    }
+
+    $index = $script:FileTransferRetainedEventIndex
+    if ($null -ne $index -and $scopeKey -eq $index.AllEventsScopeKey) {
+        $scopeIndex = [pscustomobject]@{
+            EventsByName = $index.EventsByName
+            EventCounts = $index.EventCounts
+        }
+        $script:FileTransferRetainedEventQueryCache[$cacheKey] = $scopeIndex
+        return $scopeIndex
+    }
+
+    $eventsByName = @{}
+    $eventCounts = @{}
+    foreach ($event in @($Events)) {
+        $name = [string]$event.EventName
+        if ([string]::IsNullOrWhiteSpace($name)) {
+            continue
+        }
+
+        if (-not $eventsByName.ContainsKey($name)) {
+            $eventsByName[$name] = New-Object System.Collections.Generic.List[object]
+            $eventCounts[$name] = 0
+        }
+
+        $eventsByName[$name].Add($event) | Out-Null
+        $eventCounts[$name] = [int]$eventCounts[$name] + 1
+    }
+
+    $scopeIndex = [pscustomobject]@{
+        EventsByName = $eventsByName
+        EventCounts = $eventCounts
+    }
+    $script:FileTransferRetainedEventQueryCache[$cacheKey] = $scopeIndex
+    return $scopeIndex
+}
+
+function Get-FileTransferScopedFieldAggregateIndex {
+    param([object[]]$Events)
+
+    $scopeKey = Get-FileTransferEventScopeKey -Events $Events
+    $cacheKey = "scope-field-index|$scopeKey"
+    if ($script:FileTransferRetainedEventQueryCache.ContainsKey($cacheKey)) {
+        return $script:FileTransferRetainedEventQueryCache[$cacheKey]
+    }
+
+    $index = $script:FileTransferRetainedEventIndex
+    if ($null -ne $index -and $scopeKey -eq $index.AllEventsScopeKey) {
+        $scopeIndex = [pscustomobject]@{
+            FieldMax = $index.FieldMax
+            FieldSum = $index.FieldSum
+        }
+        $script:FileTransferRetainedEventQueryCache[$cacheKey] = $scopeIndex
+        return $scopeIndex
+    }
+
+    $fieldMax = @{}
+    $fieldSum = @{}
+    foreach ($event in @($Events)) {
+        if ($null -eq $event.Fields) {
+            continue
+        }
+
+        foreach ($key in @($event.Fields.Keys)) {
+            $value = 0L
+            if (-not [long]::TryParse([string]$event.Fields[$key], [ref]$value)) {
+                continue
+            }
+
+            if (-not $fieldMax.ContainsKey($key) -or $value -gt [long]$fieldMax[$key]) {
+                $fieldMax[$key] = $value
+            }
+
+            if (-not $fieldSum.ContainsKey($key)) {
+                $fieldSum[$key] = 0L
+            }
+
+            $fieldSum[$key] = [long]$fieldSum[$key] + $value
+        }
+    }
+
+    $scopeIndex = [pscustomobject]@{
+        FieldMax = $fieldMax
+        FieldSum = $fieldSum
+    }
+    $script:FileTransferRetainedEventQueryCache[$cacheKey] = $scopeIndex
+    return $scopeIndex
+}
+
 function Get-FileTransferEventsByName {
     param(
         [object[]]$Events,
         [string[]]$Names
     )
 
-    return @($Events | Where-Object { $Names -contains $_.EventName })
+    if ($null -eq $Events -or $Events.Count -le 0 -or $null -eq $Names -or $Names.Count -le 0) {
+        return @()
+    }
+
+    $normalizedNames = @($Names | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($normalizedNames.Count -le 0) {
+        return @()
+    }
+
+    $scopeKey = Get-FileTransferEventScopeKey -Events $Events
+    $namesKey = @($normalizedNames | Sort-Object) -join ','
+    $cacheKey = "by-name|$scopeKey|$namesKey"
+    if ($script:FileTransferRetainedEventQueryCache.ContainsKey($cacheKey)) {
+        return @($script:FileTransferRetainedEventQueryCache[$cacheKey])
+    }
+
+    $nameIndex = Get-FileTransferScopedNameIndex -Events $Events
+    $eventsByName = [System.Collections.IDictionary]$nameIndex.PSObject.Properties['EventsByName'].Value
+    $collected = New-Object System.Collections.Generic.List[object]
+    foreach ($name in $normalizedNames) {
+        $nameText = [string]$name
+        if ($eventsByName.ContainsKey($nameText)) {
+            $bucket = $eventsByName.Item($nameText)
+            foreach ($event in $bucket) {
+                $collected.Add($event) | Out-Null
+            }
+        }
+    }
+
+    if ($normalizedNames.Count -gt 1) {
+        $result = @($collected.ToArray() | Sort-Object Sequence)
+    }
+    else {
+        $result = @($collected.ToArray())
+    }
+
+    $script:FileTransferRetainedEventQueryCache[$cacheKey] = @($result)
+    return @($result)
 }
 
 function Get-FileTransferTerminalDirection {
@@ -170,7 +303,17 @@ function Get-FileTransferEventCount {
         [string]$Name
     )
 
-    return @($Events | Where-Object { $_.EventName -eq $Name }).Count
+    if ([string]::IsNullOrWhiteSpace($Name) -or $null -eq $Events -or $Events.Count -le 0) {
+        return 0
+    }
+
+    $nameIndex = Get-FileTransferScopedNameIndex -Events $Events
+    $eventCounts = [System.Collections.IDictionary]$nameIndex.PSObject.Properties['EventCounts'].Value
+    if ($eventCounts.ContainsKey($Name)) {
+        return [int]$eventCounts[$Name]
+    }
+
+    return 0
 }
 
 function Normalize-FileTransferRouteRuntimeProfile {
@@ -1251,14 +1394,39 @@ function Get-FileTransferMaxField {
         [string]$FieldName
     )
 
+    if ([string]::IsNullOrWhiteSpace($FieldName) -or $null -eq $Events -or $Events.Count -le 0) {
+        return 0L
+    }
+
+    $scopeKey = Get-FileTransferEventScopeKey -Events $Events
+    $cacheKey = "max-field|$scopeKey|$FieldName"
+    if ($script:FileTransferRetainedEventQueryCache.ContainsKey($cacheKey)) {
+        return [long]$script:FileTransferRetainedEventQueryCache[$cacheKey]
+    }
+
+    $index = $script:FileTransferRetainedEventIndex
+    if ($null -ne $index) {
+        $fieldMax = [System.Collections.IDictionary]$index.PSObject.Properties['FieldMax'].Value
+        if ($scopeKey -eq $index.AllEventsScopeKey -and $fieldMax.ContainsKey($FieldName)) {
+            $cachedAllMax = [long]$fieldMax[$FieldName]
+            $script:FileTransferRetainedEventQueryCache[$cacheKey] = $cachedAllMax
+            return $cachedAllMax
+        }
+    }
+
     $max = 0L
     foreach ($event in @($Events)) {
-        $value = Get-FileTransferEventInt64Field -Event $event -Name $FieldName -Default 0
-        if ($value -gt $max) {
+        if ($null -eq $event.Fields -or -not $event.Fields.ContainsKey($FieldName)) {
+            continue
+        }
+
+        $value = 0L
+        if ([long]::TryParse([string]$event.Fields[$FieldName], [ref]$value) -and $value -gt $max) {
             $max = $value
         }
     }
 
+    $script:FileTransferRetainedEventQueryCache[$cacheKey] = $max
     return $max
 }
 
@@ -1268,11 +1436,39 @@ function Get-FileTransferSumField {
         [string]$FieldName
     )
 
-    $sum = 0L
-    foreach ($event in @($Events)) {
-        $sum += Get-FileTransferEventInt64Field -Event $event -Name $FieldName -Default 0
+    if ([string]::IsNullOrWhiteSpace($FieldName) -or $null -eq $Events -or $Events.Count -le 0) {
+        return 0L
     }
 
+    $scopeKey = Get-FileTransferEventScopeKey -Events $Events
+    $cacheKey = "sum-field|$scopeKey|$FieldName"
+    if ($script:FileTransferRetainedEventQueryCache.ContainsKey($cacheKey)) {
+        return [long]$script:FileTransferRetainedEventQueryCache[$cacheKey]
+    }
+
+    $index = $script:FileTransferRetainedEventIndex
+    if ($null -ne $index) {
+        $fieldSum = [System.Collections.IDictionary]$index.PSObject.Properties['FieldSum'].Value
+        if ($scopeKey -eq $index.AllEventsScopeKey -and $fieldSum.ContainsKey($FieldName)) {
+            $cachedAllSum = [long]$fieldSum[$FieldName]
+            $script:FileTransferRetainedEventQueryCache[$cacheKey] = $cachedAllSum
+            return $cachedAllSum
+        }
+    }
+
+    $sum = 0L
+    foreach ($event in @($Events)) {
+        if ($null -eq $event.Fields -or -not $event.Fields.ContainsKey($FieldName)) {
+            continue
+        }
+
+        $value = 0L
+        if ([long]::TryParse([string]$event.Fields[$FieldName], [ref]$value)) {
+            $sum += $value
+        }
+    }
+
+    $script:FileTransferRetainedEventQueryCache[$cacheKey] = $sum
     return $sum
 }
 

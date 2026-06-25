@@ -2788,6 +2788,72 @@ function Write-RouteAcceptanceFakePhase4Run {
     }
 }
 
+function Write-RouteAcceptanceRetainedAnalysisTimeoutArtifacts {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)][string]$LogPath,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
+        [int]$ProcessId = 0,
+        [string]$StartedUtc = '',
+        [string]$LiveRouteProofMode = 'None'
+    )
+
+    New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
+
+    $guiSummaryPath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json'
+    $guiSummaryPresent = Test-Path -LiteralPath $guiSummaryPath -PathType Leaf
+    $guiCompleted = ''
+    $guiIntegrityOk = ''
+    $guiInboundTerminalState = ''
+    $guiOutboundTerminalState = ''
+    if ($guiSummaryPresent) {
+        try {
+            $summary = Get-Content -LiteralPath $guiSummaryPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $guiCompleted = [string]$summary.completed
+            $guiIntegrityOk = [string]$summary.integrityOk
+            $guiInboundTerminalState = [string]$summary.inboundTerminalState
+            $guiOutboundTerminalState = [string]$summary.outboundTerminalState
+        }
+        catch {
+            $guiCompleted = 'unreadable'
+            $guiIntegrityOk = 'unreadable'
+        }
+    }
+
+    $dto = [ordered]@{
+        failure_class = 'retained_analysis_timeout'
+        acceptance_failure_class = 'setup'
+        timed_out = 1
+        timeout_seconds = $TimeoutSeconds
+        process_id = $ProcessId
+        started_utc = $StartedUtc
+        ended_utc = [DateTimeOffset]::UtcNow.ToString('O')
+        artifact_dir = $ArtifactDir
+        log_path = $LogPath
+        live_route_proof_mode = $LiveRouteProofMode
+        gui_summary_present = if ($guiSummaryPresent) { 1 } else { 0 }
+        gui_completed = $guiCompleted
+        gui_integrity_ok = $guiIntegrityOk
+        gui_inbound_terminal_state = $guiInboundTerminalState
+        gui_outbound_terminal_state = $guiOutboundTerminalState
+    }
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($key in @($dto.Keys)) {
+        $lines.Add(('{0}={1}' -f $key, $dto[$key])) | Out-Null
+    }
+
+    Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-retained-analysis-timeout-summary.txt') -Value $lines.ToArray() -Encoding UTF8
+    $dto | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-retained-analysis-timeout-summary.json') -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-operator-verdict.txt') -Value @(
+        'verdict=INVALID_SETUP',
+        'acceptance_failure_class=setup',
+        'failure_class=retained_analysis_timeout',
+        ('timeout_seconds={0}' -f $TimeoutSeconds),
+        ('log_path={0}' -f $LogPath)
+    ) -Encoding UTF8
+}
+
 function Invoke-RouteAcceptanceRetainedAnalysis {
     param(
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
@@ -2862,6 +2928,13 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
                 live_route_proof_mode = $LiveRouteProofMode
             }
             $diagnostics | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $analysisDiagnosticsPath -Encoding UTF8
+            Write-RouteAcceptanceRetainedAnalysisTimeoutArtifacts `
+                -ArtifactDir $ArtifactDir `
+                -LogPath $logPath `
+                -TimeoutSeconds $analysisTimeoutSeconds `
+                -ProcessId $process.Id `
+                -StartedUtc $startedUtc.ToString('O') `
+                -LiveRouteProofMode $LiveRouteProofMode
             throw "FileTransfer-Ops retained analysis timed out after ${analysisTimeoutSeconds}s for $ArtifactDir"
         }
 

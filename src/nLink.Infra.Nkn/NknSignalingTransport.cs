@@ -45,6 +45,12 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         string Token,
         int ProtocolVersion,
         string Source,
+        bool RuntimeUnlockAdmissionGranted,
+        string RuntimeUnlockAdmissionReason,
+        string FallbackLegState,
+        bool FallbackLegCanSendData,
+        long FallbackLegGeneration,
+        string? FallbackCheckpointRequestId,
         DateTimeOffset RecordedUtc);
 
     private readonly record struct FileTransferPostTunaFallbackRepairProofHint(

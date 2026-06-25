@@ -144,7 +144,13 @@ public sealed record FileTransferRouteHintNotification(
     string TransferId,
     string RouteToken,
     int ProtocolVersion,
-    string Source);
+    string Source,
+    bool RuntimeUnlockAdmissionGranted = false,
+    string RuntimeUnlockAdmissionReason = "unknown",
+    string FallbackLegState = "unknown",
+    bool FallbackLegCanSendData = false,
+    long FallbackLegGeneration = 0,
+    string? FallbackCheckpointRequestId = null);
 
 public interface IFileTransferRouteHintObserver
 {

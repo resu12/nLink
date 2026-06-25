@@ -948,16 +948,39 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
-            _ = RunRuntimeUnlockPairedCommitTimeoutAsync(
-                proofProvider,
+            var initiatorCommitted = TryCommitRuntimeUnlockRouteAfterPreCommitProbeAck(
+                direction,
                 sessionId,
                 transferId,
-                direction,
                 ack.TransactionGeneration,
                 ack.OfferGeneration,
-                ack.TunaPathLeaseGeneration,
-                ack.ProbeId!,
-                RuntimeUnlockPreCommitProbeCommitConfirmedReplyReason);
+                RuntimeUnlockPreCommitProbeCommitConfirmedReason);
+            if (initiatorCommitted)
+            {
+                NotifyRuntimeUnlockPairedRouteCommitConfirmed(
+                    direction,
+                    sessionId,
+                    transferId,
+                    ack.TransactionGeneration,
+                    ack.OfferGeneration,
+                    RuntimeUnlockPreCommitProbeCommitConfirmedReason);
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=runtime_unlock_paired_commit_confirmed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={ack.TransactionGeneration}; offer_generation={ack.OfferGeneration}; tuna_path_lease_generation={ack.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(ack.ProbeId ?? "(none)")}; reason={FormatProtocolLogValue(RuntimeUnlockPreCommitProbeCommitConfirmedReason)}");
+            }
+            else
+            {
+                _ = RunRuntimeUnlockPairedCommitTimeoutAsync(
+                    proofProvider,
+                    sessionId,
+                    transferId,
+                    direction,
+                    ack.TransactionGeneration,
+                    ack.OfferGeneration,
+                    ack.TunaPathLeaseGeneration,
+                    ack.ProbeId!,
+                    RuntimeUnlockPreCommitProbeCommitConfirmedReplyReason);
+            }
             return;
         }
 
