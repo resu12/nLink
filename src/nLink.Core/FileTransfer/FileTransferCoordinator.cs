@@ -14,6 +14,22 @@ internal enum FileTransferCoordinatorEventKind
     Terminalized,
 }
 
+internal enum RuntimeUnlockAdmissionStatus
+{
+    Granted,
+    WaitingForFallbackOwner,
+    RejectedTerminal,
+    RejectedStaleOwner,
+    RejectedFailedTransaction,
+}
+
+internal readonly record struct RuntimeUnlockAdmissionDecision(
+    RuntimeUnlockAdmissionStatus Status,
+    string Reason)
+{
+    public bool Granted => Status == RuntimeUnlockAdmissionStatus.Granted;
+}
+
 internal sealed record FileTransferCoordinatorState(
     string SessionId,
     string TransferId,
@@ -392,64 +408,149 @@ internal static class FileTransferCoordinator
         bool proofReplayPending,
         out string rejectionReason)
     {
+        var decision = EvaluateRuntimeUnlockAdmission(
+            isTerminal: false,
+            runtimeOwnerCurrent: true,
+            routeUsesPostTunaFallbackRuntime,
+            leg,
+            checkpointDeliveryRecoveryPending,
+            stateRefreshSendInFlight,
+            deferredStateRefreshPending,
+            proofReplayPending,
+            bridgeRecoveryPending: false,
+            controlPlanePressurePending: false,
+            fallbackTailRepairPending: false,
+            transactionFailed: false);
+
+        rejectionReason = decision.Reason;
+        return decision.Granted;
+    }
+
+    public static RuntimeUnlockAdmissionDecision EvaluateRuntimeUnlockAdmission(
+        bool isTerminal,
+        bool runtimeOwnerCurrent,
+        bool routeUsesPostTunaFallbackRuntime,
+        FileTransferLeg? leg,
+        bool checkpointDeliveryRecoveryPending,
+        bool stateRefreshSendInFlight,
+        bool deferredStateRefreshPending,
+        bool proofReplayPending,
+        bool bridgeRecoveryPending,
+        bool controlPlanePressurePending,
+        bool fallbackTailRepairPending,
+        bool transactionFailed)
+    {
+        if (isTerminal)
+        {
+            return new RuntimeUnlockAdmissionDecision(
+                RuntimeUnlockAdmissionStatus.RejectedTerminal,
+                "transfer_terminal");
+        }
+
+        if (!runtimeOwnerCurrent)
+        {
+            return new RuntimeUnlockAdmissionDecision(
+                RuntimeUnlockAdmissionStatus.RejectedStaleOwner,
+                "runtime_owner_stale");
+        }
+
+        if (transactionFailed)
+        {
+            return new RuntimeUnlockAdmissionDecision(
+                RuntimeUnlockAdmissionStatus.RejectedFailedTransaction,
+                "runtime_unlock_transaction_failed");
+        }
+
         if (!routeUsesPostTunaFallbackRuntime)
         {
-            rejectionReason = "not_post_tuna_fallback";
-            return true;
+            return new RuntimeUnlockAdmissionDecision(
+                RuntimeUnlockAdmissionStatus.Granted,
+                "not_post_tuna_fallback");
         }
 
         if (!IsCurrentPostTunaFallbackLeg(leg))
         {
-            rejectionReason = "fallback_leg_not_current";
-            return false;
+            return new RuntimeUnlockAdmissionDecision(
+                RuntimeUnlockAdmissionStatus.WaitingForFallbackOwner,
+                "fallback_leg_not_current");
         }
 
         if (!leg!.CanSendData)
         {
-            rejectionReason = string.IsNullOrWhiteSpace(leg.CheckpointRequestId)
+            var reason = string.IsNullOrWhiteSpace(leg.CheckpointRequestId)
                 ? "fallback_checkpoint_ownerless_pending"
                 : "fallback_checkpoint_pending";
-            return false;
+            return new RuntimeUnlockAdmissionDecision(
+                RuntimeUnlockAdmissionStatus.WaitingForFallbackOwner,
+                reason);
         }
 
-        if (leg.State is FileTransferLegState.CheckpointPending or FileTransferLegState.BridgeRestartPending)
+        if (leg.State is FileTransferLegState.CheckpointPending or FileTransferLegState.RecoveryActive or FileTransferLegState.BridgeRestartPending)
         {
-            rejectionReason = FormatLegState(leg.State);
-            return false;
+            return new RuntimeUnlockAdmissionDecision(
+                RuntimeUnlockAdmissionStatus.WaitingForFallbackOwner,
+                FormatLegState(leg.State));
         }
 
         if (!string.IsNullOrWhiteSpace(leg.CheckpointRequestId))
         {
-            rejectionReason = "fallback_checkpoint_owner_active";
-            return false;
+            return new RuntimeUnlockAdmissionDecision(
+                RuntimeUnlockAdmissionStatus.WaitingForFallbackOwner,
+                "fallback_checkpoint_owner_active");
         }
 
         if (checkpointDeliveryRecoveryPending)
         {
-            rejectionReason = "fallback_checkpoint_delivery_recovery_pending";
-            return false;
+            return new RuntimeUnlockAdmissionDecision(
+                RuntimeUnlockAdmissionStatus.WaitingForFallbackOwner,
+                "fallback_checkpoint_delivery_recovery_pending");
         }
 
         if (stateRefreshSendInFlight)
         {
-            rejectionReason = "fallback_state_refresh_send_in_flight";
-            return false;
+            return new RuntimeUnlockAdmissionDecision(
+                RuntimeUnlockAdmissionStatus.WaitingForFallbackOwner,
+                "fallback_state_refresh_send_in_flight");
         }
 
         if (deferredStateRefreshPending)
         {
-            rejectionReason = "fallback_deferred_state_refresh_pending";
-            return false;
+            return new RuntimeUnlockAdmissionDecision(
+                RuntimeUnlockAdmissionStatus.WaitingForFallbackOwner,
+                "fallback_deferred_state_refresh_pending");
         }
 
         if (proofReplayPending)
         {
-            rejectionReason = "fallback_proof_replay_pending";
-            return false;
+            return new RuntimeUnlockAdmissionDecision(
+                RuntimeUnlockAdmissionStatus.WaitingForFallbackOwner,
+                "fallback_proof_replay_pending");
         }
 
-        rejectionReason = "fallback_quiescent";
-        return true;
+        if (bridgeRecoveryPending)
+        {
+            return new RuntimeUnlockAdmissionDecision(
+                RuntimeUnlockAdmissionStatus.WaitingForFallbackOwner,
+                "fallback_bridge_recovery_pending");
+        }
+
+        if (controlPlanePressurePending)
+        {
+            return new RuntimeUnlockAdmissionDecision(
+                RuntimeUnlockAdmissionStatus.WaitingForFallbackOwner,
+                "fallback_control_plane_pressure_pending");
+        }
+
+        if (fallbackTailRepairPending)
+        {
+            return new RuntimeUnlockAdmissionDecision(
+                RuntimeUnlockAdmissionStatus.WaitingForFallbackOwner,
+                "fallback_tail_repair_pending");
+        }
+
+        return new RuntimeUnlockAdmissionDecision(
+            RuntimeUnlockAdmissionStatus.Granted,
+            "fallback_quiescent");
     }
 
     public static bool TryValidateCurrentFallbackCheckpointProof(
@@ -557,6 +658,33 @@ internal static class FileTransferCoordinator
         leg.CheckpointRequestId = null;
         leg.CheckpointPriority = null;
         leg.CheckpointRequestedUtc = null;
+        leg.RuntimeUnlockProbeAllowedAfterTransportEpochAdoption = false;
+    }
+
+    public static void MarkFallbackTailQuiescent(
+        FileTransferLeg leg,
+        long transportEpochId,
+        int provenCommittedChunkIndex,
+        int provenHighestObservedChunkIndex)
+    {
+        leg.State = FileTransferLegState.Active;
+        leg.CanSendData = true;
+        leg.TransportEpochId = transportEpochId > 0 ? transportEpochId : leg.TransportEpochId;
+        leg.ProvenCommittedChunkIndex = Math.Max(0, provenCommittedChunkIndex);
+        leg.ProvenHighestObservedChunkIndex = Math.Max(-1, provenHighestObservedChunkIndex);
+        leg.CheckpointRequestId = null;
+        leg.CheckpointPriority = null;
+        leg.CheckpointRequestedUtc = null;
+        leg.RuntimeUnlockProbeAllowedAfterTransportEpochAdoption = false;
+    }
+
+    public static void MarkFallbackTailFailed(FileTransferLeg leg)
+    {
+        if (leg.State is not FileTransferLegState.Terminal and not FileTransferLegState.Frozen)
+        {
+            leg.State = FileTransferLegState.RecoveryActive;
+        }
+
         leg.RuntimeUnlockProbeAllowedAfterTransportEpochAdoption = false;
     }
 

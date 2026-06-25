@@ -53,6 +53,41 @@ public interface IHostReadySignalingTransport
     Task WaitUntilHostReadyAsync(CancellationToken ct);
 }
 
+public readonly record struct BridgeBootstrapReadinessSnapshot(
+    string Role,
+    long Generation,
+    string RunId,
+    bool ReadyEmitted,
+    bool ControlReady,
+    bool MediaReady,
+    bool BulkReady,
+    long LastReadyUtcMs,
+    long DeadlineUtcMs,
+    bool TerminalFailure,
+    string FailureReason,
+    string LastError)
+{
+    public static BridgeBootstrapReadinessSnapshot Unavailable(string role, string reason) =>
+        new(
+            string.IsNullOrWhiteSpace(role) ? "(unknown)" : role,
+            Generation: 0,
+            RunId: "(none)",
+            ReadyEmitted: false,
+            ControlReady: false,
+            MediaReady: false,
+            BulkReady: false,
+            LastReadyUtcMs: 0,
+            DeadlineUtcMs: 0,
+            TerminalFailure: !string.IsNullOrWhiteSpace(reason),
+            FailureReason: string.IsNullOrWhiteSpace(reason) ? "(none)" : reason,
+            LastError: "(none)");
+}
+
+public interface IBridgeBootstrapReadinessSignalingTransport
+{
+    BridgeBootstrapReadinessSnapshot GetBridgeBootstrapReadinessSnapshot();
+}
+
 public interface ILocalPeerAddressSignalingTransport
 {
     string LocalPeerAddress { get; }

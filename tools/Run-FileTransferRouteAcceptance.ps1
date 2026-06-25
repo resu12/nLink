@@ -1784,7 +1784,8 @@ function Assert-Phase4ScenarioRun {
     $retainedLogPath = Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log'
     if (Test-Path -LiteralPath $retainedLogPath -PathType Leaf) {
         $retainedText = Get-Content -LiteralPath $retainedLogPath -Raw
-        if ($retainedText.IndexOf('file_tuna_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        if (-not [string]::IsNullOrEmpty($retainedText) -and
+            $retainedText.IndexOf('file_tuna_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             Add-RouteAcceptanceFailure -Result $result -Message 'active file_tuna_v6 evidence was observed'
         }
     }
@@ -2799,9 +2800,95 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
         throw "Retained log slice missing: $logPath"
     }
 
-    & powershell -NoProfile -ExecutionPolicy Bypass -File ".\tools\FileTransfer-Ops.ps1" -Mode AnalyzeRetained -LogPath $logPath -ArtifactDir $ArtifactDir -TailMinutes 0 -LiveRouteProofMode $LiveRouteProofMode
-    if ($LASTEXITCODE -ne 0) {
-        throw "FileTransfer-Ops retained analysis failed for $ArtifactDir with exit code $LASTEXITCODE"
+    $analysisStdoutPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis.stdout.txt'
+    $analysisStderrPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis.stderr.txt'
+    $analysisDiagnosticsPath = Join-Path $ArtifactDir 'filetransfer-retained-analysis-diagnostics.json'
+    $analysisTimeoutSeconds = [Math]::Min([Math]::Max(30, [int]$script:TimeoutSeconds), 180)
+    $startedUtc = [DateTimeOffset]::UtcNow
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = 'powershell'
+    $analysisArguments = @(
+        '-NoProfile',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', '.\tools\FileTransfer-Ops.ps1',
+        '-Mode', 'AnalyzeRetained',
+        '-LogPath', $logPath,
+        '-ArtifactDir', $ArtifactDir,
+        '-TailMinutes', '0',
+        '-LiveRouteProofMode', $LiveRouteProofMode)
+    $startInfo.Arguments = ($analysisArguments | ForEach-Object {
+            $argument = [string]$_
+            if ($argument.Length -eq 0) {
+                '""'
+            }
+            elseif ($argument.IndexOfAny([char[]]@(' ', "`t", '"')) -lt 0) {
+                $argument
+            }
+            else {
+                '"' + ($argument -replace '"', '\"') + '"'
+            }
+        }) -join ' '
+    $startInfo.WorkingDirectory = (Get-Location).Path
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    $stdoutTask = $null
+    $stderrTask = $null
+    try {
+        if (-not $process.Start()) {
+            throw "Failed to start FileTransfer-Ops retained analysis for $ArtifactDir"
+        }
+
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($analysisTimeoutSeconds * 1000)) {
+            try {
+                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            } catch {
+            }
+
+            $diagnostics = [ordered]@{
+                timed_out = 1
+                timeout_seconds = $analysisTimeoutSeconds
+                process_id = $process.Id
+                started_utc = $startedUtc.ToString('O')
+                ended_utc = [DateTimeOffset]::UtcNow.ToString('O')
+                artifact_dir = $ArtifactDir
+                log_path = $logPath
+                live_route_proof_mode = $LiveRouteProofMode
+            }
+            $diagnostics | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $analysisDiagnosticsPath -Encoding UTF8
+            throw "FileTransfer-Ops retained analysis timed out after ${analysisTimeoutSeconds}s for $ArtifactDir"
+        }
+
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+        Set-Content -LiteralPath $analysisStdoutPath -Value $stdout -Encoding UTF8
+        Set-Content -LiteralPath $analysisStderrPath -Value $stderr -Encoding UTF8
+        $diagnostics = [ordered]@{
+            timed_out = 0
+            exit_code = $process.ExitCode
+            timeout_seconds = $analysisTimeoutSeconds
+            process_id = $process.Id
+            started_utc = $startedUtc.ToString('O')
+            ended_utc = [DateTimeOffset]::UtcNow.ToString('O')
+            artifact_dir = $ArtifactDir
+            log_path = $logPath
+            live_route_proof_mode = $LiveRouteProofMode
+        }
+        $diagnostics | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $analysisDiagnosticsPath -Encoding UTF8
+        if ($process.ExitCode -ne 0) {
+            throw "FileTransfer-Ops retained analysis failed for $ArtifactDir with exit code $($process.ExitCode)"
+        }
+    }
+    finally {
+        if ($process -is [System.IDisposable]) {
+            $process.Dispose()
+        }
     }
 }
 
@@ -3367,6 +3454,47 @@ function Get-Phase5BridgeReadinessPreflightFailureClass {
         return 'preflight_helper_bootstrap_window_ownership'
     }
 
+    $hasHelpeeInviteBootstrapFailure =
+        [string]::Equals($FailureReason, 'helpee_invite_connection_failed_before_ready', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($FailureReason, 'helpee_invite_readiness_timeout', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($FailureReason, 'helpee_request_flow_not_enabled_after_identity_paste', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($FailureReason, 'helper_incoming_request_not_observed', [System.StringComparison]::OrdinalIgnoreCase) -or
+        $OutputText.IndexOf('Helpee reached Connection failed before invite became ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $OutputText.IndexOf('Helpee reached Connection failed before request flow became ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $OutputText.IndexOf('helpee_request_flow_not_enabled_after_identity_paste', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $OutputText.IndexOf('helper_incoming_request_not_observed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $OutputText.IndexOf('Timed out waiting for helper incoming request acceptance UI', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $OutputText.IndexOf('Helpee hosting failed before invite readiness', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+    $hasLowLevelBridgeFailure =
+        $OutputText.IndexOf('HostByAddressAsync failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $OutputText.IndexOf('RPC call failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $OutputText.IndexOf('Connect failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $OutputText.IndexOf('connect EACCES', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $OutputText.IndexOf('BridgeStartFailure', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+
+    if ($hasHelpeeInviteBootstrapFailure -and -not $hasLowLevelBridgeFailure) {
+        return 'preflight_helpee_invite_bootstrap'
+    }
+
+    if ([string]::Equals($FailureReason, 'nkn_bridge_bootstrap_network_unready', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($FailureReason, 'nkn_bridge_bootstrap_not_ready', [System.StringComparison]::OrdinalIgnoreCase) -or
+        $OutputText.IndexOf('nkn_bridge_bootstrap_network_unready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $OutputText.IndexOf('nkn_bridge_bootstrap_not_ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return 'preflight_bridge_bootstrap'
+    }
+
+    if ([string]::Equals($FailureReason, 'helpee_invite_connection_failed_before_ready', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($FailureReason, 'helpee_request_flow_not_enabled_after_identity_paste', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($FailureReason, 'helper_incoming_request_not_observed', [System.StringComparison]::OrdinalIgnoreCase) -or
+        $OutputText.IndexOf('Helpee reached Connection failed before invite became ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $OutputText.IndexOf('Helpee reached Connection failed before request flow became ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $OutputText.IndexOf('helpee_request_flow_not_enabled_after_identity_paste', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $OutputText.IndexOf('helper_incoming_request_not_observed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $OutputText.IndexOf('Timed out waiting for helper incoming request acceptance UI', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $OutputText.IndexOf('Helpee hosting failed before invite readiness', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return 'preflight_helpee_invite_bootstrap'
+    }
+
     return 'preflight_bridge_bootstrap'
 }
 
@@ -3557,16 +3685,44 @@ function Invoke-Phase5BridgeReadinessPreflight {
             $joined.IndexOf('Please reinstall', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             $failureReason = 'nkn_bridge_start_failure'
         }
-        elseif ($joined.IndexOf('RPC call failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        elseif (($joined.IndexOf('Helpee reached Connection failed before invite became ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $joined.IndexOf('Helpee reached Connection failed before request flow became ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $joined.IndexOf('helpee_request_flow_not_enabled_after_identity_paste', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $joined.IndexOf('Helpee hosting failed before invite readiness', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -and
+            $joined.IndexOf('HostByAddressAsync failed', [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+            $joined.IndexOf('RPC call failed', [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+            $joined.IndexOf('Connect failed', [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+            $joined.IndexOf('connect EACCES', [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+            $joined.IndexOf('BridgeStartFailure', [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            $failureReason = if ($joined.IndexOf('helpee_request_flow_not_enabled_after_identity_paste', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                'helpee_request_flow_not_enabled_after_identity_paste'
+            } else {
+                'helpee_invite_connection_failed_before_ready'
+            }
+        }
+        elseif ($joined.IndexOf('nkn_bridge_bootstrap_network_unready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $joined.IndexOf('RPC call failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $joined.IndexOf('Connect failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $joined.IndexOf('connect EACCES', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $joined.IndexOf('HostByAddressAsync failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $joined.IndexOf('ready_emitted=0', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $joined.IndexOf('bridge_bootstrap_not_ready=1', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-            $failureReason = 'nkn_bridge_bootstrap_not_ready'
+            $failureReason = 'nkn_bridge_bootstrap_network_unready'
         }
         elseif ($joined.IndexOf('Timed out waiting for helpee invite to become ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-            $joined.IndexOf('Timed out waiting for helpee request flow to become ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $joined.IndexOf('Timed out waiting for helpee request flow to become ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $joined.IndexOf('Timed out waiting for helpee connection entry mode', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             $failureReason = 'helpee_invite_readiness_timeout'
+        }
+        elseif ($joined.IndexOf('Helpee reached Connection failed before invite became ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $joined.IndexOf('Helpee reached Connection failed before request flow became ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $joined.IndexOf('helpee_request_flow_not_enabled_after_identity_paste', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $joined.IndexOf('Helpee hosting failed before invite readiness', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $failureReason = if ($joined.IndexOf('helpee_request_flow_not_enabled_after_identity_paste', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                'helpee_request_flow_not_enabled_after_identity_paste'
+            } else {
+                'helpee_invite_connection_failed_before_ready'
+            }
         }
         else {
             $failureReason = 'nkn_direct_connect_preflight_failed'
@@ -3619,10 +3775,61 @@ function Test-Phase5BridgeReadinessPreflightRetryableFailure {
 
     $reason = [string]$PreflightResult.FailureReason
     return $reason -eq 'helpee_invite_readiness_timeout' -or
+        $reason -eq 'helpee_invite_connection_failed_before_ready' -or
+        $reason -eq 'helpee_request_flow_not_enabled_after_identity_paste' -or
         $reason -eq 'nkn_bridge_start_failure' -or
         $reason -eq 'nkn_bridge_bootstrap_not_ready' -or
+        $reason -eq 'nkn_bridge_bootstrap_network_unready' -or
         $reason -eq 'helper_bootstrap_window_ownership' -or
+        [string]$PreflightResult.FailureClass -eq 'preflight_helpee_invite_bootstrap' -or
         [string]$PreflightResult.FailureClass -eq 'preflight_helper_bootstrap_window_ownership'
+}
+
+function Test-Phase5BridgeReadinessPreflightQuarantinableFailure {
+    param(
+        [Parameter(Mandatory = $true)]$PreflightResult
+    )
+
+    if ($null -eq $PreflightResult -or $PreflightResult.Passed) {
+        return $false
+    }
+
+    $reason = [string]$PreflightResult.FailureReason
+    return $reason -eq 'helpee_invite_readiness_timeout' -or
+        $reason -eq 'helpee_invite_connection_failed_before_ready' -or
+        $reason -eq 'helpee_request_flow_not_enabled_after_identity_paste' -or
+        [string]$PreflightResult.FailureClass -eq 'preflight_helpee_invite_bootstrap'
+}
+
+function Write-Phase5BridgeReadinessPreflightQuarantineSummary {
+    param(
+        [Parameter(Mandatory = $true)][string]$RunRoot,
+        [Parameter(Mandatory = $true)]$PreflightResult,
+        [string]$Scope = 'filtered_scenario'
+    )
+
+    $lines = @(
+        'Phase 5 Bridge Readiness Preflight Quarantine',
+        'verdict=QUARANTINED',
+        ("scope={0}" -f $Scope),
+        ("failure_class={0}" -f $PreflightResult.FailureClass),
+        ("failure_reason={0}" -f $PreflightResult.FailureReason),
+        ("artifact_dir={0}" -f $PreflightResult.ArtifactDir),
+        ("exit_code={0}" -f $PreflightResult.ExitCode),
+        'classification=setup_preflight_only_not_route_evidence'
+    )
+    $lines | Set-Content -LiteralPath (Join-Path $RunRoot 'phase5-bridge-readiness-preflight-quarantine.txt') -Encoding UTF8
+
+    ([ordered]@{
+        event = 'phase5_bridge_readiness_preflight_quarantine'
+        verdict = 'QUARANTINED'
+        scope = $Scope
+        failureClass = $PreflightResult.FailureClass
+        failureReason = $PreflightResult.FailureReason
+        artifactDir = $PreflightResult.ArtifactDir
+        exitCode = $PreflightResult.ExitCode
+        classification = 'setup_preflight_only_not_route_evidence'
+    }) | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $RunRoot 'phase5-bridge-readiness-preflight-quarantine.json') -Encoding UTF8
 }
 
 function Write-Phase5BridgeReadinessPreflightAttemptSummary {
@@ -3756,11 +3963,12 @@ function Write-Phase5ScenarioIsolationSummary {
         [Parameter(Mandatory = $true)][bool]$Passed,
         [string]$FailureReason = '',
         [int]$ExitCode = 0,
-        [string]$SourceArtifactDir = ''
+        [string]$SourceArtifactDir = '',
+        [bool]$Quarantined = $false
     )
 
     New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
-    $verdict = if ($Passed) { 'PASS' } else { 'FAIL' }
+    $verdict = if ($Passed) { if ($Quarantined) { 'QUARANTINED' } else { 'PASS' } } else { 'FAIL' }
     $cleanWindow = if ($Passed) { 1 } else { 0 }
     $lines = @(
         'Phase 5 Scenario Isolation Preflight',
@@ -3768,6 +3976,7 @@ function Write-Phase5ScenarioIsolationSummary {
         ("scenario={0}" -f $ScenarioName),
         ("attempt_index={0}" -f $AttemptIndex),
         ("scenario_runtime_clean_window_passed={0}" -f $cleanWindow),
+        ("quarantined={0}" -f ($(if ($Quarantined) { 1 } else { 0 }))),
         ("failure_reason={0}" -f $FailureReason),
         ("source_artifact_dir={0}" -f $SourceArtifactDir),
         ("exit_code={0}" -f $ExitCode)
@@ -3779,6 +3988,7 @@ function Write-Phase5ScenarioIsolationSummary {
         scenario = $ScenarioName
         attemptIndex = $AttemptIndex
         scenarioRuntimeCleanWindowPassed = [bool]$Passed
+        quarantined = [bool]$Quarantined
         failureReason = $FailureReason
         sourceArtifactDir = $SourceArtifactDir
         exitCode = $ExitCode
@@ -3841,13 +4051,19 @@ function Invoke-Phase5ScenarioIsolationPreflight {
     if (-not $passed -and [string]::IsNullOrWhiteSpace($reason)) {
         $reason = 'scenario_runtime_clean_window_failed'
     }
+    $quarantined = $false
+    if (-not $passed -and (Test-Phase5BridgeReadinessPreflightQuarantinableFailure -PreflightResult $preflight)) {
+        $passed = $true
+        $quarantined = $true
+    }
 
-    Write-Phase5ScenarioIsolationSummary -ArtifactDir $artifactDir -ScenarioName $scenarioName -AttemptIndex $AttemptIndex -Passed:$passed -FailureReason $reason -ExitCode ([int]$preflight.ExitCode) -SourceArtifactDir $sourceDir
+    Write-Phase5ScenarioIsolationSummary -ArtifactDir $artifactDir -ScenarioName $scenarioName -AttemptIndex $AttemptIndex -Passed:$passed -FailureReason $reason -ExitCode ([int]$preflight.ExitCode) -SourceArtifactDir $sourceDir -Quarantined:$quarantined
     return [pscustomobject]@{
         Passed = $passed
         ArtifactDir = $artifactDir
         FailureReason = $reason
         ExitCode = [int]$preflight.ExitCode
+        Quarantined = $quarantined
     }
 }
 
@@ -4283,6 +4499,9 @@ function Test-Phase5RerunnableTransientSetupFailure {
         $combined.IndexOf('activation_offer_sent_waiting_answer', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('regular_v4_receive_recovery_unproven', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('helpee_invite_readiness_timeout', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('helpee_request_flow_not_enabled_after_identity_paste', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('helper_incoming_request_not_observed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('Timed out waiting for helper incoming request acceptance UI', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('nkn_bridge_bootstrap_not_ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('nkn_bridge_start_failure', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('listener_ready_unavailable_contradiction', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
@@ -4294,6 +4513,21 @@ function Test-Phase5RerunnableTransientSetupFailure {
         $combined.IndexOf('offer_received_accept_not_enabled', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('Timed out waiting for live file-transfer terminal evidence', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('receiver-committed Tuna file progress', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+}
+
+function Test-Phase5SingleScenarioSetupRerunAllowed {
+    param([Parameter(Mandatory = $true)]$Result)
+
+    $combined = ("{0} {1} {2}" -f `
+        ([string]$Result.setupFailurePhase),
+        ([string]$Result.setupFailureReason),
+        (Join-RouteAcceptanceTokenList -Values $Result.failures))
+
+    return $combined.IndexOf('terminal_before_accept', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('Timed out waiting for helpee Allow approval UI', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('The help request expired', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('Ack was not received', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('decision_send_failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
 }
 
 function Test-Phase4PerformanceFailureLine {
@@ -4503,6 +4737,7 @@ function Get-Phase5FailureClass {
             $line.IndexOf('scenario rerun setup failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $line.IndexOf('preflight', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $line.IndexOf('helpee_invite_readiness_timeout', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('helpee_request_flow_not_enabled_after_identity_paste', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $line.IndexOf('scenario execution failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $line.IndexOf('missing artifact', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             return 'setup'
@@ -4829,7 +5064,15 @@ function Invoke-Phase4RouteAcceptanceScenario {
         $phase5RegularStartupPeerDisconnect = Test-Phase5RegularNknStartupPeerDisconnect -Scenario $Scenario -Result $result
     }
 
-    if ((Test-Phase4RerunnableMeasurementFailure -Result $result) -or $phase5CanonicalReceiveRecoveryExhaustion -or $phase5TransientSetupFailure -or $phase5RegularStartupPeerDisconnect) {
+    $filteredSingleScenarioInvalidSetup =
+        $AcceptancePhase -eq 'phase5' -and
+        @($ScenarioName).Count -gt 0 -and
+        $phase5TransientSetupFailure -and
+        (Test-Phase4SetupInvalidAttempt -Result $result) -and
+        -not (Test-Phase5SingleScenarioSetupRerunAllowed -Result $result)
+
+    if (-not $filteredSingleScenarioInvalidSetup -and
+        ((Test-Phase4RerunnableMeasurementFailure -Result $result) -or $phase5CanonicalReceiveRecoveryExhaustion -or $phase5TransientSetupFailure -or $phase5RegularStartupPeerDisconnect)) {
         $firstAttemptResult = $result
         $firstFailureReason = if ($phase5CanonicalReceiveRecoveryExhaustion) {
             'environmental receive recovery exhaustion: live_transport_receive_recovery_exhausted_before_runtime_unlock'
@@ -5566,9 +5809,15 @@ try {
         if ($shouldRunPhase5Preflight) {
             $preflightResult = Invoke-Phase5BridgeReadinessPreflightWithRetry -RepoRoot $repoRoot -RunRoot $runRoot -ResolvedExePath $resolvedExePath
             if (-not $preflightResult.Passed) {
-                Write-Phase5PreflightFailureSummaryFiles -RunRoot $runRoot -BaselinePath ([string]$baseline.Path) -PreflightResult $preflightResult
-                Write-Host ("[FileTransfer Phase5 Analyzer/GUI Acceptance] verdict=FAIL; preflight_failure_class={0}; artifact_root={1}" -f $preflightResult.FailureClass, $runRoot) -ForegroundColor Red
-                exit 1
+                if ($requestedScenarioNames.Count -gt 0 -and (Test-Phase5BridgeReadinessPreflightQuarantinableFailure -PreflightResult $preflightResult)) {
+                    Write-Phase5BridgeReadinessPreflightQuarantineSummary -RunRoot $runRoot -PreflightResult $preflightResult -Scope 'filtered_scenario_global_preflight'
+                    Write-Host ("[FileTransfer Phase5 Preflight] quarantined setup-only failure {0}; continuing filtered scenario run. artifact_root={1}" -f $preflightResult.FailureReason, $runRoot) -ForegroundColor Yellow
+                }
+                else {
+                    Write-Phase5PreflightFailureSummaryFiles -RunRoot $runRoot -BaselinePath ([string]$baseline.Path) -PreflightResult $preflightResult
+                    Write-Host ("[FileTransfer Phase5 Analyzer/GUI Acceptance] verdict=FAIL; preflight_failure_class={0}; artifact_root={1}" -f $preflightResult.FailureClass, $runRoot) -ForegroundColor Red
+                    exit 1
+                }
             }
         }
 

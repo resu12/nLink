@@ -255,6 +255,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
 
     private CancellationTokenSource? sessionCts;
     private ISignalingTransport? transport;
+    private BridgeBootstrapReadinessSnapshot? lastBridgeBootstrapReadinessSnapshot;
     private IncomingJoinRequestEventArgs? pendingJoinRequest;
     private volatile SessionRuntimeRole role;
     private volatile SessionRuntimeState state = SessionRuntimeState.Idle;
@@ -767,6 +768,40 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
 
     public SessionRuntimeState State => state;
     public TransportState TransportLifecycleState => transportState;
+    public BridgeBootstrapReadinessSnapshot BridgeBootstrapReadiness
+    {
+        get
+        {
+            var currentTransport = transport;
+            var snapshot = CaptureBridgeBootstrapReadinessSnapshot(currentTransport);
+            if (snapshot.HasValue)
+            {
+                return snapshot.Value;
+            }
+
+            if (lastBridgeBootstrapReadinessSnapshot is { } lastSnapshot)
+            {
+                return lastSnapshot;
+            }
+
+            return BridgeBootstrapReadinessSnapshot.Unavailable(
+                role.ToString(),
+                currentTransport is null ? "transport_unavailable" : "transport_readiness_not_supported");
+        }
+    }
+
+    private BridgeBootstrapReadinessSnapshot? CaptureBridgeBootstrapReadinessSnapshot(ISignalingTransport? currentTransport)
+    {
+        if (currentTransport is not IBridgeBootstrapReadinessSignalingTransport readinessTransport)
+        {
+            return null;
+        }
+
+        var snapshot = readinessTransport.GetBridgeBootstrapReadinessSnapshot();
+        lastBridgeBootstrapReadinessSnapshot = snapshot;
+        return snapshot;
+    }
+
     public bool IsTransportAccelerationActive => transportAccelerationActive;
     public string TransportAccelerationStatusReason => transportAccelerationStatusReason;
 
@@ -1791,6 +1826,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
                 EnsureSessionSecurityTransport(nextTransport);
                 sessionCts = linkedCts;
                 transport = nextTransport;
+                CaptureBridgeBootstrapReadinessSnapshot(nextTransport);
                 role = SessionRuntimeRole.Helpee;
                 hostReady = false;
                 currentHelperTargetAddress = null;
@@ -2011,6 +2047,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
             EnsureSessionSecurityTransport(nextTransport);
             sessionCts = linkedCts;
             transport = nextTransport;
+            CaptureBridgeBootstrapReadinessSnapshot(nextTransport);
             role = SessionRuntimeRole.Helper;
             helperConnectOrigin = connectOrigin;
             helperShouldReturnToListenerWaiting =

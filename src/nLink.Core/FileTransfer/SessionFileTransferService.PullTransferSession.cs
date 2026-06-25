@@ -713,7 +713,7 @@ public sealed partial class SessionFileTransferService
         handoff.LastProofUtc = now;
     }
 
-    private static bool CompleteOutboundV6TransportHandoffLocked(
+    private bool CompleteOutboundV6TransportHandoffLocked(
         OutboundTransferContext context,
         string reason,
         int committedChunkIndex,
@@ -763,6 +763,7 @@ public sealed partial class SessionFileTransferService
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_v6_handoff_tail_unblocked; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={handoff.EpochId}; reason={FormatProtocolLogValue(reason)}; committed_chunk={committedChunkIndex}; highest_observed_chunk={highestObservedChunkIndex}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}; remote_credit_until_chunk_index_exclusive={context.RemoteGrantedUntilExclusive}; discarded_repair_frame_count={discardedRepairFrameCount}; discarded_repair_chunk_count={discardedRepairChunkCount}");
+        TryResumeOutboundRuntimeUnlockAfterFallbackSurvivalProofLocked(context, "fallback_tail_quiescent");
         return true;
     }
 
@@ -2206,32 +2207,74 @@ public sealed partial class SessionFileTransferService
            string.Equals(rejectionReason, "transaction_not_commit_ready", StringComparison.Ordinal);
 
     private static bool IsFallbackSurvivalProofPending(OutboundTransferContext context)
+        => !EvaluateRuntimeUnlockAdmissionLocked(context).Granted;
+
+    private static bool IsFallbackSurvivalProofPending(InboundTransferContext context)
+        => !EvaluateRuntimeUnlockAdmissionLocked(context).Granted;
+
+    private static RuntimeUnlockAdmissionDecision EvaluateRuntimeUnlockAdmissionLocked(OutboundTransferContext context)
     {
-        return !FileTransferCoordinator.CanAdmitRuntimeUnlockWhilePostTunaFallback(
+        var fallbackTailRepairPending =
+            context.RouteRuntime.UsesPostTunaFallbackV6Runtime &&
+            IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg) &&
+            (context.PullTransportFrontierOnlyRepairActive ||
+             IsV6TransportHandoffBlockingTail(context.V6TransportHandoff));
+        var ownerCurrent = context.CurrentRuntimeOwner is not { } owner ||
+            FileTransferCoordinator.IsRuntimeOwnerCurrent(
+                CreateCoordinatorStateLocked(context),
+                owner,
+                out _);
+
+        return FileTransferCoordinator.EvaluateRuntimeUnlockAdmission(
+            context.IsTerminal,
+            ownerCurrent,
             context.RouteRuntime.UsesPostTunaFallbackV6Runtime,
             context.CurrentTransferLeg,
             context.V6RegularNknFallbackCheckpointDeliveryRecoveryPending,
             context.V6RegularNknStateRefreshSendInFlight != 0,
             context.V6RegularNknDeferredStateRefreshRequest is not null,
             proofReplayPending: false,
-            out _);
+            bridgeRecoveryPending: context.PullPostTunaRecoveryActive,
+            controlPlanePressurePending: false,
+            fallbackTailRepairPending,
+            transactionFailed: false);
     }
 
-    private static bool IsFallbackSurvivalProofPending(InboundTransferContext context)
+    private static RuntimeUnlockAdmissionDecision EvaluateRuntimeUnlockAdmissionLocked(InboundTransferContext context)
     {
         var proofReplayPending =
             context.V6PostTunaFallbackProofReplayReceiverStatePending ||
             context.V6PostTunaFallbackProofReplayFrontierRequestPending;
+        var fallbackTailRepairPending =
+            context.RouteRuntime.UsesPostTunaFallbackV6Runtime &&
+            IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg) &&
+            IsV6TransportHandoffBlockingTail(context.V6TransportHandoff);
+        var ownerCurrent = context.CurrentRuntimeOwner is not { } owner ||
+            FileTransferCoordinator.IsRuntimeOwnerCurrent(
+                CreateCoordinatorStateLocked(context),
+                owner,
+                out _);
 
-        return !FileTransferCoordinator.CanAdmitRuntimeUnlockWhilePostTunaFallback(
+        return FileTransferCoordinator.EvaluateRuntimeUnlockAdmission(
+            context.IsTerminal,
+            ownerCurrent,
             context.RouteRuntime.UsesPostTunaFallbackV6Runtime,
             context.CurrentTransferLeg,
             checkpointDeliveryRecoveryPending: false,
             stateRefreshSendInFlight: false,
             deferredStateRefreshPending: false,
             proofReplayPending,
-            out _);
+            bridgeRecoveryPending: context.PullPostTunaRecoveryActive,
+            controlPlanePressurePending: false,
+            fallbackTailRepairPending,
+            transactionFailed: false);
     }
+
+    private static bool IsFallbackSurvivalOwnerPendingAfterAcceptedProof(OutboundTransferContext context)
+        => !EvaluateRuntimeUnlockAdmissionLocked(context).Granted;
+
+    private static bool IsFallbackSurvivalOwnerPendingAfterAcceptedProof(InboundTransferContext context)
+        => !EvaluateRuntimeUnlockAdmissionLocked(context).Granted;
 
     private bool TryStartOutboundRuntimeUnlockPreCommitProbeOrWaitForFallbackLocked(
         OutboundTransferContext context,
@@ -2244,10 +2287,10 @@ public sealed partial class SessionFileTransferService
             return true;
         }
 
-        if (!context.RuntimeUnlockActivationWindowGranted &&
-            IsFallbackSurvivalProofPending(context))
+        var admission = EvaluateRuntimeUnlockAdmissionLocked(context);
+        if (!admission.Granted)
         {
-            MarkOutboundRuntimeUnlockWaitingForFallbackSurvivalLocked(context, reason, rejectionReason);
+            MarkOutboundRuntimeUnlockWaitingForFallbackSurvivalLocked(context, reason, admission.Reason);
             return true;
         }
 
@@ -2263,19 +2306,31 @@ public sealed partial class SessionFileTransferService
     {
         if (!context.RouteRuntime.UsesPostTunaFallbackV6Runtime)
         {
-            StartInboundRuntimeUnlockPreCommitProbe(context, reason);
+            LogRuntimeUnlockPreCommitResponderWaitingForPeerProbe(
+                FileTransferDirection.Inbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentTransferLeg,
+                reason,
+                rejectionReason);
             return true;
         }
 
-        if (!context.RuntimeUnlockActivationWindowGranted &&
-            IsFallbackSurvivalProofPending(context))
+        var admission = EvaluateRuntimeUnlockAdmissionLocked(context);
+        if (!admission.Granted)
         {
-            MarkInboundRuntimeUnlockWaitingForFallbackSurvivalLocked(context, reason, rejectionReason);
+            MarkInboundRuntimeUnlockWaitingForFallbackSurvivalLocked(context, reason, admission.Reason);
             return true;
         }
 
         GrantInboundRuntimeUnlockActivationWindowLocked(context, reason);
-        StartInboundRuntimeUnlockPreCommitProbe(context, reason);
+        LogRuntimeUnlockPreCommitResponderWaitingForPeerProbe(
+            FileTransferDirection.Inbound,
+            context.TransferId,
+            context.SessionId,
+            context.CurrentTransferLeg,
+            reason,
+            rejectionReason);
         return true;
     }
 
@@ -2283,10 +2338,16 @@ public sealed partial class SessionFileTransferService
         OutboundTransferContext context,
         string reason)
     {
+        if (!IsFallbackTailQuiescentRuntimeUnlockResumeReason(reason))
+        {
+            return;
+        }
+
+        var admission = EvaluateRuntimeUnlockAdmissionLocked(context);
         if (!context.RuntimeUnlockWaitingForFallbackSurvival ||
             context.IsTerminal ||
             !context.RouteRuntime.UsesPostTunaFallbackV6Runtime ||
-            IsFallbackSurvivalProofPending(context))
+            !admission.Granted)
         {
             return;
         }
@@ -2299,17 +2360,35 @@ public sealed partial class SessionFileTransferService
         InboundTransferContext context,
         string reason)
     {
+        if (!IsFallbackTailQuiescentRuntimeUnlockResumeReason(reason))
+        {
+            return;
+        }
+
+        var admission = EvaluateRuntimeUnlockAdmissionLocked(context);
         if (!context.RuntimeUnlockWaitingForFallbackSurvival ||
             context.IsTerminal ||
             !context.RouteRuntime.UsesPostTunaFallbackV6Runtime ||
-            IsFallbackSurvivalProofPending(context))
+            !admission.Granted)
         {
             return;
         }
 
         GrantInboundRuntimeUnlockActivationWindowLocked(context, reason);
-        StartInboundRuntimeUnlockPreCommitProbe(context, reason);
+        LogRuntimeUnlockPreCommitResponderWaitingForPeerProbe(
+            FileTransferDirection.Inbound,
+            context.TransferId,
+            context.SessionId,
+            context.CurrentTransferLeg,
+            reason,
+            "fallback_tail_quiescent");
     }
+
+    private static bool IsFallbackTailQuiescentRuntimeUnlockResumeReason(string reason)
+        => string.Equals(
+            NormalizeReason(reason),
+            "fallback_tail_quiescent",
+            StringComparison.OrdinalIgnoreCase);
 
     private static void MarkOutboundRuntimeUnlockWaitingForFallbackSurvivalLocked(
         OutboundTransferContext context,
@@ -2319,6 +2398,9 @@ public sealed partial class SessionFileTransferService
         context.RuntimeUnlockWaitingForFallbackSurvival = true;
         context.RuntimeUnlockWaitingForFallbackSurvivalReason = reason;
         context.RuntimeUnlockWaitingForFallbackSurvivalUtc ??= DateTimeOffset.UtcNow;
+        context.RuntimeUnlockActivationWindowGranted = false;
+        context.RuntimeUnlockActivationWindowReason = null;
+        context.RuntimeUnlockActivationWindowGrantedUtc = null;
         LogRuntimeUnlockWaitingForFallbackSurvival(
             FileTransferDirection.Outbound,
             context.TransferId,
@@ -2336,6 +2418,9 @@ public sealed partial class SessionFileTransferService
         context.RuntimeUnlockWaitingForFallbackSurvival = true;
         context.RuntimeUnlockWaitingForFallbackSurvivalReason = reason;
         context.RuntimeUnlockWaitingForFallbackSurvivalUtc ??= DateTimeOffset.UtcNow;
+        context.RuntimeUnlockActivationWindowGranted = false;
+        context.RuntimeUnlockActivationWindowReason = null;
+        context.RuntimeUnlockActivationWindowGrantedUtc = null;
         LogRuntimeUnlockWaitingForFallbackSurvival(
             FileTransferDirection.Inbound,
             context.TransferId,
@@ -2431,6 +2516,17 @@ public sealed partial class SessionFileTransferService
         => LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_runtime_unlock_activation_window_granted; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; reason={FormatProtocolLogValue(reason)}; leg_id={FormatProtocolLogValue(leg?.LegId ?? "(none)")}; leg_generation={leg?.Generation ?? 0}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? "(none)")}; protocol_version={leg?.ProtocolVersion ?? 0}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(leg?.CheckpointRequestId ?? "(none)")}; state={FormatProtocolLogValue(leg is null ? "none" : FormatFileTransferLegState(leg.State))}; can_send_data={(leg?.CanSendData == true ? 1 : 0)}");
+
+    private static void LogRuntimeUnlockPreCommitResponderWaitingForPeerProbe(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        FileTransferLeg? leg,
+        string reason,
+        string rejectionReason)
+        => LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=runtime_unlock_precommit_responder_waiting_for_peer_probe; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; reason={FormatProtocolLogValue(reason)}; rejection_reason={FormatProtocolLogValue(rejectionReason)}; leg_id={FormatProtocolLogValue(leg?.LegId ?? "(none)")}; leg_generation={leg?.Generation ?? 0}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? "(none)")}; protocol_version={leg?.ProtocolVersion ?? 0}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(leg?.CheckpointRequestId ?? "(none)")}; state={FormatProtocolLogValue(leg is null ? "none" : FormatFileTransferLegState(leg.State))}; can_send_data={(leg?.CanSendData == true ? 1 : 0)}");
 
     private bool TryAcceptRuntimeUnlockRouteCommitLocked(
         OutboundTransferContext context,
@@ -2532,13 +2628,23 @@ public sealed partial class SessionFileTransferService
 
         if (decision.RuntimeUnlockCommitAccepted)
         {
-            proofProvider.NotifyRuntimeUnlockRouteCommitResult(
-                sessionId,
-                transferId,
-                snapshot.TransactionGeneration,
-                snapshot.OfferGeneration,
-                accepted: true,
-                reason);
+            if (ShouldPublishRuntimeUnlockRouteCommitResult(reason))
+            {
+                proofProvider.NotifyRuntimeUnlockRouteCommitResult(
+                    sessionId,
+                    transferId,
+                    snapshot.TransactionGeneration,
+                    snapshot.OfferGeneration,
+                    accepted: true,
+                    reason);
+            }
+            else
+            {
+                LocalOperationalLog.Info(
+                    "FileTransfer",
+                    $"event=filetransfer_runtime_unlock_route_commit_publication_deferred; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={snapshot.TransactionGeneration}; offer_generation={snapshot.OfferGeneration}; reason={FormatProtocolLogValue(reason)}");
+            }
+
             LogRuntimeUnlockRouteCommitAccepted(
                 direction,
                 transferId,
@@ -2568,6 +2674,14 @@ public sealed partial class SessionFileTransferService
             reason,
             rejectionReason);
         return false;
+    }
+
+    private static bool ShouldPublishRuntimeUnlockRouteCommitResult(string reason)
+    {
+        var normalized = NormalizeReason(reason);
+        return !string.Equals(normalized, RuntimeUnlockPreCommitProbeAcceptedReason, StringComparison.Ordinal) &&
+               !string.Equals(normalized, RuntimeUnlockPreCommitProbeCommitConfirmedReason, StringComparison.Ordinal) &&
+               !string.Equals(normalized, RuntimeUnlockPreCommitProbeCommitConfirmedReplyReason, StringComparison.Ordinal);
     }
 
     private static void LogRuntimeUnlockRouteCommitAccepted(

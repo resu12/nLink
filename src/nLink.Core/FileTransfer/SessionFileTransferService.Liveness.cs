@@ -35,6 +35,11 @@ public sealed partial class SessionFileTransferService
         lock (gate)
         {
             request = AttachActiveRouteRuntimeForReceiveRecoveryLocked(request);
+            if (TrySuppressReceiveRecoveryForSupersededRegularV4RuntimeLocked(request))
+            {
+                return false;
+            }
+
             controller = transport as IFileTransferReceiveRecoveryController;
             bridgeRecoveryPolicy = ResolveReceiveRecoveryPolicyForRequestLocked(request);
             regularV4ReplayArmed = TryQueueOutboundRegularNknV4ReceiveRecoveryReplayLocked(request);
@@ -100,6 +105,119 @@ public sealed partial class SessionFileTransferService
 
         return replayArmed;
     }
+
+    private bool TrySuppressReceiveRecoveryForSupersededRegularV4RuntimeLocked(
+        FileTransferReceiveRecoveryRequest request)
+    {
+        if (!string.Equals(
+                request.RouteToken,
+                FileTransferRouteResolver.RegularNknV4FastToken,
+                StringComparison.Ordinal) ||
+            request.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+            transport is not IFileTransferRouteStatus routeStatus ||
+            (!routeStatus.IsFileTunaActiveForRouteSelection &&
+             !routeStatus.IsPostTunaFileFallbackActiveForRouteSelection))
+        {
+            return false;
+        }
+
+        var currentSelection = FileTransferRouteResolver.Resolve(new FileTransferRouteResolverInput(
+            routeStatus.IsFileTunaActiveForRouteSelection,
+            routeStatus.IsPostTunaFileFallbackActiveForRouteSelection,
+            routeStatus.IsDiagnosticRegularNknV6RouteEnabled,
+            FileTransferTransportHandoffKind.None,
+            transport is IFileTransferTransportProfileProvider profile
+                ? profile.FileTransferTransportProfileKind
+                : FileTransferTransportProfileKind.Default));
+
+        if (request.Direction == FileTransferDirection.Outbound &&
+            outboundTransfer is { } outbound &&
+            string.Equals(outbound.TransferId, request.TransferId, StringComparison.Ordinal) &&
+            string.Equals(outbound.SessionId, request.SessionId, StringComparison.Ordinal))
+        {
+            RejectSupersededRegularV4ReceiveRecoveryLocked(outbound, request, currentSelection);
+            return true;
+        }
+
+        if (request.Direction == FileTransferDirection.Inbound &&
+            inboundTransfer is { } inbound &&
+            string.Equals(inbound.TransferId, request.TransferId, StringComparison.Ordinal) &&
+            string.Equals(inbound.SessionId, request.SessionId, StringComparison.Ordinal))
+        {
+            RejectSupersededRegularV4ReceiveRecoveryLocked(inbound, request, currentSelection);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static void RejectSupersededRegularV4ReceiveRecoveryLocked(
+        OutboundTransferContext context,
+        FileTransferReceiveRecoveryRequest request,
+        FileTransferRouteSelection currentSelection)
+    {
+        var attemptedOwner = CaptureRuntimeOwnerLocked(context);
+        var currentOwner = RuntimeOwnerTokenForCurrentContext(
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Outbound,
+            currentSelection,
+            Math.Max(request.LiveRouteEpoch, context.CurrentLiveRouteEpoch?.EpochId ?? 0),
+            Math.Max(attemptedOwner.RuntimeGeneration + 1, context.LastRuntimeOwnerGeneration + 1),
+            context.TerminalGeneration,
+            "transport_route_status");
+        RejectStaleRuntimeOwnerUpdateLocked(
+            FileTransferDirection.Outbound,
+            context.TransferId,
+            context.SessionId,
+            currentOwner,
+            attemptedOwner,
+            "regular_v4_receive_recovery",
+            "receive_recovery_request",
+            "transport_route_status_superseded_regular_v4");
+        LogSupersededRegularV4ReceiveRecoverySuppressed(
+            FileTransferDirection.Outbound,
+            request,
+            currentSelection);
+    }
+
+    private static void RejectSupersededRegularV4ReceiveRecoveryLocked(
+        InboundTransferContext context,
+        FileTransferReceiveRecoveryRequest request,
+        FileTransferRouteSelection currentSelection)
+    {
+        var attemptedOwner = CaptureRuntimeOwnerLocked(context);
+        var currentOwner = RuntimeOwnerTokenForCurrentContext(
+            context.SessionId,
+            context.TransferId,
+            FileTransferDirection.Inbound,
+            currentSelection,
+            Math.Max(request.LiveRouteEpoch, context.CurrentLiveRouteEpoch?.EpochId ?? 0),
+            Math.Max(attemptedOwner.RuntimeGeneration + 1, context.LastRuntimeOwnerGeneration + 1),
+            context.TerminalGeneration,
+            "transport_route_status");
+        RejectStaleRuntimeOwnerUpdateLocked(
+            FileTransferDirection.Inbound,
+            context.TransferId,
+            context.SessionId,
+            currentOwner,
+            attemptedOwner,
+            "regular_v4_receive_recovery",
+            "receive_recovery_request",
+            "transport_route_status_superseded_regular_v4");
+        LogSupersededRegularV4ReceiveRecoverySuppressed(
+            FileTransferDirection.Inbound,
+            request,
+            currentSelection);
+    }
+
+    private static void LogSupersededRegularV4ReceiveRecoverySuppressed(
+        FileTransferDirection direction,
+        FileTransferReceiveRecoveryRequest request,
+        FileTransferRouteSelection currentSelection)
+        => LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_regular_v4_receive_recovery_suppressed_by_current_route_owner; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(request.TransferId)}; session_id={FormatProtocolLogValue(request.SessionId)}; reason={FormatProtocolLogValue(request.Reason)}; suppression_reason=transport_route_status_superseded_regular_v4; attempted_route={FormatProtocolLogValue(request.RouteToken ?? "(none)")}; attempted_protocol_version={request.ProtocolVersion}; current_route={FormatProtocolLogValue(currentSelection.TelemetryToken)}; current_protocol_version={currentSelection.ProtocolVersion}; live_route_epoch={request.LiveRouteEpoch}; authority_reason={FormatProtocolLogValue(request.AuthorityReason ?? "(none)")}");
 
     private FileTransferReceiveRecoveryRequest AttachActiveRouteRuntimeForReceiveRecoveryLocked(
         FileTransferReceiveRecoveryRequest request)

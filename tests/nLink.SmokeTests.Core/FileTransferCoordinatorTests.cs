@@ -115,6 +115,76 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void FallbackCheckpointAccepted_RemainsNonYieldableUntilTailQuiescent()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        var started = StartRegular(regular);
+        var fallbackDecision = FallBack(started.State, fallback, committedChunk: 32, transportEpoch: 7);
+        var leg = fallbackDecision.State.CurrentLeg!;
+        FileTransferCoordinator.MarkFallbackCheckpointRequested(
+            leg,
+            "checkpoint:1",
+            "state_refresh_tail_reconciliation",
+            transportEpochId: 7);
+
+        FileTransferCoordinator.MarkFallbackCheckpointAccepted(
+            leg,
+            transportEpochId: 7,
+            provenCommittedChunkIndex: 64,
+            provenHighestObservedChunkIndex: 96);
+
+        Assert.Equal(FileTransferLegState.RecoveryActive, leg.State);
+        Assert.False(FileTransferCoordinator.CanAdmitRuntimeUnlockWhilePostTunaFallback(
+            routeUsesPostTunaFallbackRuntime: true,
+            leg,
+            checkpointDeliveryRecoveryPending: false,
+            stateRefreshSendInFlight: false,
+            deferredStateRefreshPending: false,
+            proofReplayPending: false,
+            out var rejectionReason));
+        Assert.Equal("recovery_active", rejectionReason);
+    }
+
+    [Fact]
+    public void FallbackTailQuiescent_MarksLegYieldableForRuntimeUnlock()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        var started = StartRegular(regular);
+        var fallbackDecision = FallBack(started.State, fallback, committedChunk: 32, transportEpoch: 7);
+        var leg = fallbackDecision.State.CurrentLeg!;
+        FileTransferCoordinator.MarkFallbackCheckpointRequested(
+            leg,
+            "checkpoint:1",
+            "state_refresh_tail_reconciliation",
+            transportEpochId: 7);
+        FileTransferCoordinator.MarkFallbackCheckpointAccepted(
+            leg,
+            transportEpochId: 7,
+            provenCommittedChunkIndex: 64,
+            provenHighestObservedChunkIndex: 96);
+
+        FileTransferCoordinator.MarkFallbackTailQuiescent(
+            leg,
+            transportEpochId: 7,
+            provenCommittedChunkIndex: 64,
+            provenHighestObservedChunkIndex: 96);
+
+        Assert.Equal(FileTransferLegState.Active, leg.State);
+        Assert.True(leg.CanSendData);
+        Assert.True(FileTransferCoordinator.CanAdmitRuntimeUnlockWhilePostTunaFallback(
+            routeUsesPostTunaFallbackRuntime: true,
+            leg,
+            checkpointDeliveryRecoveryPending: false,
+            stateRefreshSendInFlight: false,
+            deferredStateRefreshPending: false,
+            proofReplayPending: false,
+            out var rejectionReason));
+        Assert.Equal("fallback_quiescent", rejectionReason);
+    }
+
+    [Fact]
     public void RuntimeUnlockTransaction_LocalObservedSendCannotCommitRoute()
     {
         var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
@@ -671,6 +741,85 @@ public sealed class FileTransferCoordinatorTests
         Assert.All(
             secondOff.State.LegHistory,
             leg => Assert.NotEqual("file_tuna_v6", leg.RouteSelection.TelemetryToken));
+    }
+
+    [Fact]
+    public void PostTunaFallbackRecoveryActive_DeniesRuntimeUnlockAdmission()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+
+        var state = FallBack(
+            ActivateTuna(StartRegular(regular).State, tuna, committedChunk: 5).State,
+            fallback,
+            committedChunk: 5,
+            transportEpoch: 2).State;
+        state.CurrentLeg!.State = FileTransferLegState.RecoveryActive;
+        state.CurrentLeg.CanSendData = true;
+        state.CurrentLeg.CheckpointRequestId = null;
+
+        var admitted = FileTransferCoordinator.CanAdmitRuntimeUnlockWhilePostTunaFallback(
+            routeUsesPostTunaFallbackRuntime: true,
+            state.CurrentLeg,
+            checkpointDeliveryRecoveryPending: false,
+            stateRefreshSendInFlight: false,
+            deferredStateRefreshPending: false,
+            proofReplayPending: false,
+            out var rejectionReason);
+
+        Assert.False(admitted);
+        Assert.Equal("recovery_active", rejectionReason);
+    }
+
+    [Fact]
+    public void RuntimeUnlockAdmissionDecision_ReportsFallbackOwnerAndTerminalReasons()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+
+        var state = FallBack(
+            ActivateTuna(StartRegular(regular).State, tuna, committedChunk: 5).State,
+            fallback,
+            committedChunk: 5,
+            transportEpoch: 2).State;
+        state.CurrentLeg!.State = FileTransferLegState.Active;
+        state.CurrentLeg.CanSendData = true;
+
+        var blocked = FileTransferCoordinator.EvaluateRuntimeUnlockAdmission(
+            isTerminal: false,
+            runtimeOwnerCurrent: true,
+            routeUsesPostTunaFallbackRuntime: true,
+            state.CurrentLeg,
+            checkpointDeliveryRecoveryPending: false,
+            stateRefreshSendInFlight: false,
+            deferredStateRefreshPending: false,
+            proofReplayPending: false,
+            bridgeRecoveryPending: false,
+            controlPlanePressurePending: false,
+            fallbackTailRepairPending: true,
+            transactionFailed: false);
+
+        Assert.Equal(RuntimeUnlockAdmissionStatus.WaitingForFallbackOwner, blocked.Status);
+        Assert.Equal("fallback_tail_repair_pending", blocked.Reason);
+
+        var terminal = FileTransferCoordinator.EvaluateRuntimeUnlockAdmission(
+            isTerminal: true,
+            runtimeOwnerCurrent: true,
+            routeUsesPostTunaFallbackRuntime: true,
+            state.CurrentLeg,
+            checkpointDeliveryRecoveryPending: false,
+            stateRefreshSendInFlight: false,
+            deferredStateRefreshPending: false,
+            proofReplayPending: false,
+            bridgeRecoveryPending: false,
+            controlPlanePressurePending: false,
+            fallbackTailRepairPending: false,
+            transactionFailed: false);
+
+        Assert.Equal(RuntimeUnlockAdmissionStatus.RejectedTerminal, terminal.Status);
+        Assert.Equal("transfer_terminal", terminal.Reason);
     }
 
     [Fact]

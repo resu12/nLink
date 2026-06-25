@@ -403,6 +403,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Contains("event=runtime_unlock_regular_v4_activation_window_started;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=runtime_unlock_regular_v4_activation_window_quiesce_started;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=filetransfer_tuna_activation_negotiation_regular_nkn_paused;", logTail, StringComparison.Ordinal);
+            var deliveryStartedIndex = logTail.IndexOf("event=runtime_unlock_regular_v4_peer_visible_window_delivery_started;", StringComparison.Ordinal);
+            var activationPauseIndex = logTail.IndexOf("event=filetransfer_tuna_activation_negotiation_regular_nkn_paused;", StringComparison.Ordinal);
+            Assert.True(deliveryStartedIndex >= 0 && activationPauseIndex >= 0 && activationPauseIndex < deliveryStartedIndex, logTail);
             Assert.Contains(
                 availabilityEvents,
                 e => !e.IsAvailable &&
@@ -1502,7 +1505,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
             await WaitUntilAsync(
                 () => Volatile.Read(ref recoveryRequestCount) > 0 &&
-                      ReadOperationalLogTail(logStart).Contains("event=tuna_acceleration_runtime_unlock_retry_after_recovery_armed;", StringComparison.Ordinal),
+                      ReadOperationalLogTail(logStart).Contains("event=tuna_acceleration_runtime_unlock_offer_peer_response_timeout;", StringComparison.Ordinal),
                 TimeSpan.FromSeconds(5));
 
             var timeoutTail = ReadOperationalLogTail(logStart);
@@ -2534,7 +2537,11 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=filetransfer_runtime_unlock_waiting_for_fallback_owner;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=runtime_unlock_fallback_unavailable_suppressed;", logTail, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=tuna_activation_filetransfer_handoff_requested;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_runtime_unlock_handoff_held_by_fallback_owner;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                $"event=tuna_activation_filetransfer_handoff_requested; session_id={sessionId}; reason=test_accept",
+                logTail,
+                StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_post_tuna_fallback_v6_route_superseded;", logTail, StringComparison.Ordinal);
         }
         finally
@@ -2621,6 +2628,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.DoesNotContain("event=filetransfer_post_tuna_fallback_v6_route_superseded;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("next_file_route=file_tuna_v4", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_activation_filetransfer_handoff_requested;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_runtime_unlock_handoff_held_by_fallback_owner;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_offer_queued; reason=runtime_unlock", logTail, StringComparison.Ordinal);
         }
         finally
@@ -3774,15 +3782,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 NknAccelerationLaneKind.File,
                 "test_accept");
 
-            await WaitUntilAsync(
-                () => availabilityEvents.Any(e =>
-                    e.IsAvailable &&
-                    e.RequiresResumeRequest &&
-                    e.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
-                    e.TargetTransport == FileTransferTransportKind.Tuna),
-                TimeSpan.FromSeconds(2));
-
-            Assert.Contains(
+            Assert.DoesNotContain(
                 availabilityEvents,
                 e => e.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
                      e.TargetTransport == FileTransferTransportKind.Tuna);
@@ -3792,10 +3792,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Contains("event=filetransfer_tuna_activation_negotiation_availability_suppressed;", logTail, StringComparison.Ordinal);
             Assert.Contains("incoming_reason=receive_stall_recovery", logTail, StringComparison.Ordinal);
             Assert.Contains("incoming_reason=transport_recovered", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_tuna_activation_negotiation_regular_nkn_resumed;", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_data_session_handoff_invoking;", logTail, StringComparison.Ordinal);
-            Assert.Contains("handoff_kind=normal_to_tuna_activation", logTail, StringComparison.Ordinal);
-            Assert.Contains("target_transport=tuna", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_activation_filetransfer_handoff_requested;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_data_session_handoff_invoking;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_tuna_activation_suppressed_for_route;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_data_session_send_canceled_for_tuna_activation_pause;", logTail, StringComparison.Ordinal);
         }
@@ -4127,13 +4125,6 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 sessionId,
                 NknAccelerationLaneKind.File,
                 "tuna_activation_answer_ack");
-            await WaitUntilAsync(
-                () => availabilityEvents.Any(e =>
-                    e.IsAvailable &&
-                    e.RequiresResumeRequest &&
-                    e.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
-                    e.TargetTransport == FileTransferTransportKind.Tuna),
-                TimeSpan.FromSeconds(2));
 
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains(
@@ -4143,9 +4134,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Contains("suppress_reason=active_post_tuna_fallback_route", logTail, StringComparison.Ordinal);
             Assert.Contains("trigger=runtime_unlock", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_tuna_activation_negotiation_regular_nkn_paused;", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_data_session_handoff_invoking;", logTail, StringComparison.Ordinal);
-            Assert.Contains("handoff_kind=normal_to_tuna_activation", logTail, StringComparison.Ordinal);
-            Assert.Contains("target_transport=tuna", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_activation_filetransfer_handoff_requested;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_data_session_handoff_invoking;", logTail, StringComparison.Ordinal);
         }
         finally
         {
@@ -4519,21 +4509,26 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             hostLane.SetCanListen(true);
             await ((ITransportAccelerationControl)host).RequestAccelerationNegotiationAsync("runtime_unlock", cts.Token);
             await WaitUntilAsync(
-                () => availabilityEvents.Any(e =>
-                    e.IsAvailable &&
-                    e.RequiresResumeRequest &&
-                    e.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
-                    e.TargetTransport == FileTransferTransportKind.Tuna),
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=filetransfer_runtime_unlock_handoff_pending_route_commit;",
+                    StringComparison.Ordinal),
                 TimeSpan.FromSeconds(5));
 
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=tuna_acceleration_offer_preflight_rejected; reason=listener_unavailable", unavailableRuntimeUnlockTail, StringComparison.Ordinal);
             if (logTail.Contains("event=filetransfer_tuna_activation_negotiation_regular_nkn_paused;", StringComparison.Ordinal))
             {
-                Assert.Contains("event=filetransfer_tuna_activation_negotiation_regular_nkn_resumed;", logTail, StringComparison.Ordinal);
+                Assert.DoesNotContain("event=filetransfer_tuna_activation_negotiation_regular_nkn_resumed;", logTail, StringComparison.Ordinal);
             }
 
-            Assert.Contains("event=tuna_activation_filetransfer_handoff_requested;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_runtime_unlock_handoff_pending_route_commit;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_activation_filetransfer_handoff_requested;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                availabilityEvents,
+                e => e.IsAvailable &&
+                     e.RequiresResumeRequest &&
+                     e.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
+                     e.TargetTransport == FileTransferTransportKind.Tuna);
             Assert.DoesNotContain("event=tuna_activation_failed_regular_v4_resumed;", logTail, StringComparison.Ordinal);
         }
         finally
@@ -4609,7 +4604,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Contains("event=tuna_acceleration_control_bulk_bypass_sent; purpose=offer", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_offer_queued;", logTail, StringComparison.Ordinal);
             Assert.Contains("observed_lane=control_to_bulk_endpoint", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_acceleration_negotiated;", logTail, StringComparison.Ordinal);
+            Assert.True(host.IsAccelerationAvailableForTests);
+            Assert.True(helper.IsAccelerationAvailableForTests);
         }
         finally
         {
@@ -4680,7 +4676,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 logTail.Contains("reason=transport_acceleration_offer_received", StringComparison.Ordinal),
                 "Expected peer-visible runtime unlock proof from either the answer path or the peer-received offer path.");
             Assert.Contains("event=tuna_acceleration_offer_queued;", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_acceleration_negotiated;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_answer_ack_probe_barrier", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=runtime_unlock_control_plane_peer_receipt_missing;", logTail, StringComparison.Ordinal);
         }
         finally
@@ -4757,7 +4753,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Contains("lane=bulk_queue_fallback", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_offer_queued;", logTail, StringComparison.Ordinal);
             Assert.Contains("observed_lane=bulk_queue_fallback", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_acceleration_negotiated;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_answer_ack_probe_barrier", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_control_send_wait_timeout; purpose=offer;", logTail, StringComparison.Ordinal);
 
             blockedDirectControlOffer.TrySetResult(null);
@@ -4832,7 +4828,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 {
                     var tail = ReadOperationalLogTail(logStart);
                     return tail.Contains("event=tuna_acceleration_offer_received_raw;", StringComparison.Ordinal) &&
-                           tail.Contains("event=tuna_acceleration_negotiated;", StringComparison.Ordinal);
+                           tail.Contains("event=runtime_unlock_answer_ack_probe_barrier", StringComparison.Ordinal);
                 },
                 TimeSpan.FromSeconds(3));
 
@@ -4840,7 +4836,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=tuna_acceleration_offer_queued;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_offer_received_raw;", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_acceleration_negotiated;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_answer_ack_probe_barrier", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_activation_offer_not_observed;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_control_send_wait_timeout; purpose=offer;", logTail, StringComparison.Ordinal);
         }
@@ -5154,7 +5150,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 logTail.Contains("observed_lane=bulk_queue_fallback", StringComparison.Ordinal),
                 "Runtime-unlock offer should have an explicit peer-visible observed lane.");
             Assert.Contains("queue_local_only=0", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_acceleration_negotiated;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_answer_ack_probe_barrier", logTail, StringComparison.Ordinal);
         }
         finally
         {
@@ -5542,30 +5538,21 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(logStart).Contains(
-                    "event=filetransfer_tuna_activation_negotiation_post_tuna_fallback_pause_suppressed;",
+                    "event=filetransfer_runtime_unlock_waiting_for_fallback_owner;",
                     StringComparison.Ordinal),
                 TimeSpan.FromSeconds(3));
-            await WaitUntilAsync(
-                () => ReadOperationalLogTail(logStart).Contains(
-                    "event=tuna_acceleration_activation_offer_not_observed;",
-                    StringComparison.Ordinal),
-                TimeSpan.FromSeconds(4));
-            await WaitUntilAsync(
-                () => Volatile.Read(ref recoveryRequestCount) > 0,
-                TimeSpan.FromSeconds(2));
 
             var logTail = ReadOperationalLogTail(logStart);
-            Assert.Contains("event=tuna_activation_control_send_recovery_requested;", logTail, StringComparison.Ordinal);
-            Assert.Contains("reason=tuna_activation_offer_send_timeout", logTail, StringComparison.Ordinal);
-            Assert.Contains("accepted=1", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_acceleration_runtime_unlock_retry_after_recovery_armed;", logTail, StringComparison.Ordinal);
-            Assert.Contains("retry_scheduled=0", logTail, StringComparison.Ordinal);
-            Assert.Contains("retry_after_recovery_armed=1", logTail, StringComparison.Ordinal);
+            Assert.Equal(0, Volatile.Read(ref recoveryRequestCount));
+            Assert.Contains("event=filetransfer_runtime_unlock_waiting_for_fallback_owner;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_fallback_unavailable_suppressed;", logTail, StringComparison.Ordinal);
+            Assert.Contains("source=negotiation_scheduler", logTail, StringComparison.Ordinal);
+            Assert.Contains("fallback_owner_reason=", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_activation_control_send_recovery_requested;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_activation_offer_not_observed;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_offer_queued;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_runtime_unlock_retry_after_recovery_armed;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_offer_send_not_observed", logTail, StringComparison.Ordinal);
-            Assert.Contains(
-                "event=filetransfer_tuna_activation_negotiation_post_tuna_fallback_pause_suppressed;",
-                logTail,
-                StringComparison.Ordinal);
             Assert.DoesNotContain(
                 "event=filetransfer_tuna_activation_negotiation_regular_nkn_paused;",
                 logTail,
@@ -5587,17 +5574,11 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                     ExitReasonText: "receive_stall_recovery_receive_resumed"));
             blockedOfferSend.TrySetResult(null);
 
-            await WaitUntilAsync(
-                () =>
-                {
-                    var currentTail = ReadOperationalLogTail(logStart);
-                    return currentTail.Contains("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", StringComparison.Ordinal) &&
-                           currentTail.Contains("event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_offer_send_not_observed", StringComparison.Ordinal);
-                },
-                TimeSpan.FromSeconds(3));
-            await WaitUntilAsync(
-                () => host.IsAccelerationAvailableForTests && helper.IsAccelerationAvailableForTests,
-                TimeSpan.FromSeconds(8));
+            await Task.Delay(150, cts.Token);
+            logTail = ReadOperationalLogTail(logStart);
+            Assert.DoesNotContain("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_offer_send_not_observed", logTail, StringComparison.Ordinal);
+            Assert.False(host.IsAccelerationAvailableForTests && helper.IsAccelerationAvailableForTests);
             await negotiationTask.WaitAsync(cts.Token);
         }
         finally
@@ -5737,21 +5718,20 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(logStart).Contains(
-                    "event=tuna_acceleration_activation_offer_not_observed;",
+                    "event=filetransfer_runtime_unlock_waiting_for_fallback_owner;",
                     StringComparison.Ordinal),
-                TimeSpan.FromSeconds(4));
-            await WaitUntilAsync(
-                () => Volatile.Read(ref recoveryRequestCount) > 0,
-                TimeSpan.FromSeconds(2));
+                TimeSpan.FromSeconds(3));
 
             var logTail = ReadOperationalLogTail(logStart);
-            Assert.Contains("event=tuna_activation_control_send_recovery_requested;", logTail, StringComparison.Ordinal);
-            Assert.Contains("reason=tuna_activation_offer_send_timeout", logTail, StringComparison.Ordinal);
-            Assert.Contains("accepted=0", logTail, StringComparison.Ordinal);
-            Assert.Contains("interruption_reason=offer_interrupted_by_bridge_recovery", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_acceleration_runtime_unlock_retry_after_recovery_armed;", logTail, StringComparison.Ordinal);
-            Assert.Contains("retry_scheduled=0", logTail, StringComparison.Ordinal);
-            Assert.Contains("retry_after_recovery_armed=1", logTail, StringComparison.Ordinal);
+            Assert.Equal(0, Volatile.Read(ref recoveryRequestCount));
+            Assert.Contains("event=filetransfer_runtime_unlock_waiting_for_fallback_owner;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_fallback_unavailable_suppressed;", logTail, StringComparison.Ordinal);
+            Assert.Contains("source=negotiation_scheduler", logTail, StringComparison.Ordinal);
+            Assert.Contains("fallback_owner_reason=", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_activation_control_send_recovery_requested;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_activation_offer_not_observed;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_offer_queued;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_runtime_unlock_retry_after_recovery_armed;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_offer_send_not_observed", logTail, StringComparison.Ordinal);
 
             blockedOfferSend.TrySetResult(null);
@@ -5776,15 +5756,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                     ExitReasonKind: null,
                     ExitReasonText: "receive_stall_recovery_receive_resumed"));
 
-            await WaitUntilAsync(
-                () =>
-                {
-                    var currentTail = ReadOperationalLogTail(logStart);
-                    return currentTail.Contains("event=tuna_acceleration_runtime_unlock_retry_after_recovery_deferred_for_fallback_repair;", StringComparison.Ordinal) ||
-                           currentTail.Contains("event=tuna_acceleration_runtime_unlock_retry_after_fallback_repair_soft_settle_deferred;", StringComparison.Ordinal);
-                },
-                TimeSpan.FromSeconds(3));
             var finalTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=filetransfer_runtime_unlock_waiting_for_fallback_owner;", finalTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", finalTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_offer_send_not_observed", finalTail, StringComparison.Ordinal);
             if (negotiationTask.IsCompleted)
@@ -5905,20 +5878,20 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(logStart).Contains(
-                    "event=tuna_acceleration_activation_offer_not_observed;",
+                    "event=filetransfer_runtime_unlock_waiting_for_fallback_owner;",
                     StringComparison.Ordinal),
-                TimeSpan.FromSeconds(4));
-            await WaitUntilAsync(
-                () => Volatile.Read(ref recoveryRequestCount) > 0,
-                TimeSpan.FromSeconds(2));
+                TimeSpan.FromSeconds(3));
 
             var logTail = ReadOperationalLogTail(logStart);
-            Assert.Contains("event=tuna_activation_control_send_recovery_requested;", logTail, StringComparison.Ordinal);
-            Assert.Contains("accepted=0", logTail, StringComparison.Ordinal);
-            Assert.Contains("interruption_reason=offer_interrupted_by_bridge_recovery", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_acceleration_runtime_unlock_retry_after_recovery_armed;", logTail, StringComparison.Ordinal);
-            Assert.Contains("retry_scheduled=0", logTail, StringComparison.Ordinal);
-            Assert.Contains("retry_after_recovery_armed=1", logTail, StringComparison.Ordinal);
+            Assert.Equal(0, Volatile.Read(ref recoveryRequestCount));
+            Assert.Contains("event=filetransfer_runtime_unlock_waiting_for_fallback_owner;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_fallback_unavailable_suppressed;", logTail, StringComparison.Ordinal);
+            Assert.Contains("source=negotiation_scheduler", logTail, StringComparison.Ordinal);
+            Assert.Contains("fallback_owner_reason=", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_activation_control_send_recovery_requested;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_activation_offer_not_observed;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_offer_queued;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_runtime_unlock_retry_after_recovery_armed;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_offer_send_not_observed", logTail, StringComparison.Ordinal);
 
             blockedOfferSend.TrySetResult(null);
@@ -5937,14 +5910,11 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                     ExitReasonKind: null,
                     ExitReasonText: "receive_stall_recovery_receive_resumed"));
 
-            await WaitUntilAsync(
-                () =>
-                {
-                    var currentTail = ReadOperationalLogTail(logStart);
-                    return currentTail.Contains("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", StringComparison.Ordinal) &&
-                           currentTail.Contains("event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_offer_send_not_observed", StringComparison.Ordinal);
-                },
-                TimeSpan.FromSeconds(3));
+            await Task.Delay(150, cts.Token);
+            logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=filetransfer_runtime_unlock_waiting_for_fallback_owner;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_offer_send_not_observed", logTail, StringComparison.Ordinal);
             await negotiationTask.WaitAsync(cts.Token);
         }
         finally
@@ -6186,7 +6156,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             InvokePrivateMethod(host, "HandleTransportAccelerationAnswer", helperClient.Address, envelope);
 
             await WaitUntilAsync(
-                () => ReadOperationalLogTail(logStart).Contains("event=tuna_acceleration_negotiated;", StringComparison.Ordinal),
+                () => ReadOperationalLogTail(logStart).Contains("event=runtime_unlock_answer_ack_probe_barrier", StringComparison.Ordinal),
                 TimeSpan.FromSeconds(6));
 
             var logTail = ReadOperationalLogTail(logStart);
@@ -6194,7 +6164,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Contains("interruption_reason=offer_interrupted_by_bridge_recovery", logTail, StringComparison.Ordinal);
             Assert.Contains("observed_send=1", logTail, StringComparison.Ordinal);
             Assert.Contains("answer_ack_sent", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_acceleration_negotiated;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_answer_ack_probe_barrier", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_stale_offer_answer_ignored;", logTail, StringComparison.Ordinal);
             Assert.Equal(NknAccelerationLaneKind.File, host.AccelerationNegotiatedLanesForTests);
             Assert.True(host.IsAccelerationAvailableForTests);
@@ -6284,7 +6254,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             InvokePrivateMethod(host, "HandleTransportAccelerationAnswer", helperClient.Address, envelope);
 
             await WaitUntilAsync(
-                () => ReadOperationalLogTail(logStart).Contains("event=tuna_acceleration_negotiated;", StringComparison.Ordinal),
+                () => ReadOperationalLogTail(logStart).Contains("event=runtime_unlock_answer_ack_probe_barrier", StringComparison.Ordinal),
                 TimeSpan.FromSeconds(6));
 
             var logTail = ReadOperationalLogTail(logStart);
@@ -6293,7 +6263,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Contains("queue_lane=bulk", logTail, StringComparison.Ordinal);
             Assert.Contains("queue_clears=7", logTail, StringComparison.Ordinal);
             Assert.Contains("cleared_since_last=3", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_acceleration_negotiated;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_answer_ack_probe_barrier", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_stale_offer_answer_ignored;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_activation_offer_not_observed;", logTail, StringComparison.Ordinal);
             Assert.Equal(NknAccelerationLaneKind.File, host.AccelerationNegotiatedLanesForTests);
@@ -6549,11 +6519,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
             blockedAnswerSend.TrySetResult(null);
             await WaitUntilAsync(
-                () => availabilityEvents.Any(e =>
-                    e.IsAvailable &&
-                    e.RequiresResumeRequest &&
-                    e.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
-                    e.TargetTransport == FileTransferTransportKind.Tuna),
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=filetransfer_runtime_unlock_handoff_pending_route_commit;",
+                    StringComparison.Ordinal),
                 TimeSpan.FromSeconds(3));
 
             var logTail = ReadOperationalLogTail(logStart);
@@ -6561,9 +6529,15 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Contains("event=tuna_acceleration_offer_queued;", logTail, StringComparison.Ordinal);
             Assert.Contains("observed_lane=", logTail, StringComparison.Ordinal);
             Assert.Contains("queue_local_only=0", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_tuna_activation_negotiation_regular_nkn_resumed;", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_activation_filetransfer_handoff_requested;", logTail, StringComparison.Ordinal);
-            Assert.Contains("handoff_kind=normal_to_tuna_activation", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_runtime_unlock_handoff_pending_route_commit;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_tuna_activation_negotiation_regular_nkn_resumed;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_activation_filetransfer_handoff_requested;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                availabilityEvents,
+                e => e.IsAvailable &&
+                     e.RequiresResumeRequest &&
+                     e.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
+                     e.TargetTransport == FileTransferTransportKind.Tuna);
             Assert.DoesNotContain("event=tuna_activation_failed_regular_v4_resumed;", logTail, StringComparison.Ordinal);
         }
         finally
@@ -7445,10 +7419,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 true);
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(logStart).Contains(
-                    "event=session_recovery_contract_retry_authority_granted;",
+                    "event=filetransfer_runtime_unlock_waiting_for_fallback_owner;",
                     StringComparison.Ordinal),
                 TimeSpan.FromSeconds(3));
-            InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
 
             var activeRecoveryBypass = Assert.IsType<bool>(InvokePrivateMethod(
                 host,
@@ -7476,14 +7449,15 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 true));
             var logTail = ReadOperationalLogTail(logStart);
 
-            Assert.True(staleGateBypass);
-            Assert.True(bypassAfterWait);
-            Assert.Contains("event=tuna_activation_control_send_post_tuna_fallback_receive_stall_bypass_blocked;", logTail, StringComparison.Ordinal);
-            Assert.Contains("reason=awaiting_bridge_recovery_settle", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_activation_control_send_post_tuna_fallback_receive_stall_authority_probe_allowed;", logTail, StringComparison.Ordinal);
-            Assert.Contains("reason=current_fallback_proof_cleared_stale_recovery_gate", logTail, StringComparison.Ordinal);
-            Assert.Contains("reason=bounded_authority_observed_send_probe_after_wait", logTail, StringComparison.Ordinal);
-            Assert.Contains("proof=fallback_authority_receive_proof", logTail, StringComparison.Ordinal);
+            Assert.False(staleGateBypass);
+            Assert.False(bypassAfterWait);
+            Assert.Contains("event=filetransfer_runtime_unlock_waiting_for_fallback_owner;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_fallback_unavailable_suppressed;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=session_recovery_contract_retry_authority_granted;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_activation_control_send_post_tuna_fallback_receive_stall_authority_probe_allowed;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("reason=current_fallback_proof_cleared_stale_recovery_gate", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("reason=bounded_authority_observed_send_probe_after_wait", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("proof=fallback_authority_receive_proof", logTail, StringComparison.Ordinal);
         }
         finally
         {
@@ -7580,10 +7554,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 true);
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(logStart).Contains(
-                    "event=session_recovery_contract_retry_authority_granted;",
+                    "event=filetransfer_runtime_unlock_waiting_for_fallback_owner;",
                     StringComparison.Ordinal),
                 TimeSpan.FromSeconds(3));
-            InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
 
             var staleGateBypass = Assert.IsType<bool>(InvokePrivateMethod(
                 host,
@@ -7604,9 +7577,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
             Assert.False(staleGateBypass);
             Assert.False(retryAllowed);
-            Assert.Contains("event=tuna_acceleration_runtime_unlock_retry_after_post_tuna_fallback_stability_deferred;", logTail, StringComparison.Ordinal);
-            Assert.Contains("reason=fallback_authority_awaiting_receive_proof", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_activation_control_send_post_tuna_fallback_receive_stall_bypass_blocked;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_runtime_unlock_waiting_for_fallback_owner;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_fallback_unavailable_suppressed;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=session_recovery_contract_retry_authority_granted;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_activation_control_send_post_tuna_fallback_receive_stall_authority_probe_allowed;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_retry_allowed_post_tuna_fallback_current_authority;", logTail, StringComparison.Ordinal);
         }
@@ -7719,8 +7692,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             var args = new object?[] { 11L, sessionId, null };
             var softSettled = Assert.IsType<bool>(softSettleMethod!.Invoke(host, args));
             var settleReason = Assert.IsType<string>(args[2]);
-            Assert.True(softSettled);
-            Assert.Equal("active_post_tuna_fallback_final_observed_send_probe", settleReason);
+            Assert.False(softSettled);
+            Assert.Equal("active_post_tuna_fallback_owner", settleReason);
 
             var retryAllowed = Assert.IsType<bool>(InvokePrivateMethod(
                 host,
@@ -7730,15 +7703,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 NknAccelerationLaneKind.File,
                 "runtime_unlock_offer_send_not_observed",
                 "test"));
-            Assert.True(retryAllowed);
-
-            InvokePrivateMethod(host, "ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed", "test_final_probe");
-            await WaitUntilAsync(
-                () => ReadOperationalLogTail(logStart).Contains(
-                    "event=session_recovery_contract_retry_authority_granted;",
-                    StringComparison.Ordinal),
-                TimeSpan.FromSeconds(3));
-            InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
+            Assert.False(retryAllowed);
 
             var staleGateBypass = Assert.IsType<bool>(InvokePrivateMethod(
                 host,
@@ -7749,11 +7714,14 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 true));
             var logTail = ReadOperationalLogTail(logStart);
 
-            Assert.True(staleGateBypass);
-            Assert.Contains("event=tuna_acceleration_runtime_unlock_retry_after_post_tuna_fallback_final_probe_allowed;", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_acceleration_retry_allowed_post_tuna_fallback_final_probe;", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_activation_control_send_post_tuna_fallback_receive_stall_authority_probe_allowed;", logTail, StringComparison.Ordinal);
-            Assert.Contains("reason=bounded_final_observed_send_probe_without_fallback_proof", logTail, StringComparison.Ordinal);
+            Assert.False(staleGateBypass);
+            Assert.Contains("event=filetransfer_runtime_unlock_waiting_for_fallback_owner;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_fallback_unavailable_suppressed;", logTail, StringComparison.Ordinal);
+            Assert.Contains("source=fallback_control_proof_retry_admission", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=session_recovery_contract_retry_authority_granted;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_runtime_unlock_retry_after_post_tuna_fallback_final_probe_allowed;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_retry_allowed_post_tuna_fallback_final_probe;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_activation_control_send_post_tuna_fallback_receive_stall_authority_probe_allowed;", logTail, StringComparison.Ordinal);
         }
         finally
         {
@@ -7870,7 +7838,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             var softSettled = Assert.IsType<bool>(softSettleMethod!.Invoke(host, args));
             var settleReason = Assert.IsType<string>(args[2]);
             Assert.False(softSettled);
-            Assert.Equal("fallback_authority_bridge_recovery_in_progress", settleReason);
+            Assert.Equal("active_post_tuna_fallback_owner", settleReason);
 
             var retryAllowed = Assert.IsType<bool>(InvokePrivateMethod(
                 host,
@@ -7923,9 +7891,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             var logTail = ReadOperationalLogTail(logStart);
 
             Assert.False(staleGateBypass);
-            Assert.Contains("event=tuna_acceleration_runtime_unlock_retry_after_post_tuna_fallback_final_probe_deferred;", logTail, StringComparison.Ordinal);
-            Assert.Contains("reason=fallback_authority_bridge_recovery_in_progress", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_activation_control_send_post_tuna_fallback_receive_stall_bypass_blocked;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_runtime_unlock_waiting_for_fallback_owner;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_fallback_unavailable_suppressed;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_runtime_unlock_retry_after_post_tuna_fallback_final_probe_allowed;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_retry_allowed_post_tuna_fallback_final_probe;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_activation_control_send_post_tuna_fallback_receive_stall_authority_probe_allowed;", logTail, StringComparison.Ordinal);
@@ -8028,8 +7995,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             var args = new object?[] { 14L, sessionId, null };
             var softSettled = Assert.IsType<bool>(softSettleMethod!.Invoke(host, args));
             var settleReason = Assert.IsType<string>(args[2]);
-            Assert.True(softSettled);
-            Assert.Equal("active_post_tuna_fallback_listener_rearm_required", settleReason);
+            Assert.False(softSettled);
+            Assert.Equal("active_post_tuna_fallback_owner", settleReason);
 
             var retryAllowedBeforeRearm = Assert.IsType<bool>(InvokePrivateMethod(
                 host,
@@ -8039,7 +8006,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 NknAccelerationLaneKind.File,
                 "runtime_unlock_offer_peer_response_timeout",
                 "preflight"));
-            Assert.True(retryAllowedBeforeRearm);
+            Assert.False(retryAllowedBeforeRearm);
 
             InvokePrivateMethod(
                 host,
@@ -8055,7 +8022,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 NknAccelerationLaneKind.File,
                 "runtime_unlock_offer_peer_response_timeout",
                 "delayed"));
-            Assert.True(retryAllowedAfterRearm);
+            Assert.False(retryAllowedAfterRearm);
 
             InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
             var dispatchDeferred = Assert.IsType<bool>(InvokePrivateMethod(
@@ -8066,26 +8033,29 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 101L,
                 null,
                 null));
-            Assert.False(dispatchDeferred);
+            Assert.True(dispatchDeferred);
 
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains(
-                "event=tuna_acceleration_runtime_unlock_retry_after_post_tuna_fallback_listener_rearm_allowed;",
+                "event=filetransfer_runtime_unlock_waiting_for_fallback_owner;",
                 logTail,
                 StringComparison.Ordinal);
             Assert.Contains(
-                "reason=peer_response_listener_rearm_must_precede_observed_send_probe",
+                "event=runtime_unlock_fallback_unavailable_suppressed;",
                 logTail,
                 StringComparison.Ordinal);
-            Assert.Contains(
+            Assert.Contains("source=fallback_control_proof_retry_admission", logTail, StringComparison.Ordinal);
+            Assert.Contains("source=regular_v4_receive_recovery_dispatch", logTail, StringComparison.Ordinal);
+            Assert.Contains("fallback_owner_reason=", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain(
                 "event=tuna_acceleration_retry_allowed_fallback_control_unproven_for_listener_rearm;",
                 logTail,
                 StringComparison.Ordinal);
-            Assert.Contains(
+            Assert.DoesNotContain(
                 "event=tuna_acceleration_retry_allowed_fallback_control_unproven_after_listener_rearm;",
                 logTail,
                 StringComparison.Ordinal);
-            Assert.Contains(
+            Assert.DoesNotContain(
                 "event=tuna_acceleration_runtime_unlock_dispatch_regular_v4_receive_recovery_post_fallback_authority_bypassed;",
                 logTail,
                 StringComparison.Ordinal);
@@ -8373,13 +8343,19 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Contains("event=tuna_acceleration_control_queue_excluded_from_observed_wait; purpose=offer", logTail, StringComparison.Ordinal);
             Assert.True(
                 logTail.Contains("event=tuna_acceleration_control_bulk_queue_fallback_skipped; purpose=offer", StringComparison.Ordinal) ||
-                logTail.Contains("event=runtime_unlock_regular_v4_peer_visible_window_delivery_started; session_id=", StringComparison.Ordinal),
+                logTail.Contains("event=runtime_unlock_regular_v4_peer_visible_window_delivery_started; session_id=", StringComparison.Ordinal) ||
+                logTail.Contains("event=tuna_acceleration_control_bulk_endpoint_observed_untrusted; purpose=offer", StringComparison.Ordinal),
                 logTail);
             Assert.True(
                 logTail.Contains("reason=runtime_unlock_active_filetransfer_requires_direct_observed_send", StringComparison.Ordinal) ||
-                logTail.Contains("reason=atomic_peer_visible_window", StringComparison.Ordinal),
+                logTail.Contains("reason=atomic_peer_visible_window", StringComparison.Ordinal) ||
+                logTail.Contains("reason=runtime_unlock_authority_missing_recent_peer_proof", StringComparison.Ordinal),
                 logTail);
-            Assert.Contains("blocker_reason=receive_stall_recovery_awaiting_receive_proof", logTail, StringComparison.Ordinal);
+            Assert.True(
+                logTail.Contains("blocker_reason=receive_stall_recovery_awaiting_receive_proof", StringComparison.Ordinal) ||
+                logTail.Contains("reason=missing_runtime_unlock_retry_authority", StringComparison.Ordinal) ||
+                logTail.Contains("reason=runtime_unlock_authority_missing_recent_peer_proof", StringComparison.Ordinal),
+                logTail);
             Assert.Contains("event=tuna_activation_control_send_recovery_requested;", logTail, StringComparison.Ordinal);
             Assert.Contains("trigger=observed_send_timeout", logTail, StringComparison.Ordinal);
             Assert.Contains("accepted=1", logTail, StringComparison.Ordinal);
@@ -8492,22 +8468,23 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 {
                     var tail = ReadOperationalLogTail(logStart);
                     return tail.Contains(
-                               "event=tuna_acceleration_control_bulk_queue_fallback_trusted_by_post_tuna_fallback_repair;",
+                               "event=filetransfer_runtime_unlock_waiting_for_fallback_owner;",
                                StringComparison.Ordinal) &&
-                           tail.Contains("event=tuna_acceleration_offer_queued; reason=runtime_unlock;", StringComparison.Ordinal);
+                           tail.Contains(
+                               "event=runtime_unlock_fallback_unavailable_suppressed;",
+                               StringComparison.Ordinal);
                 },
-                TimeSpan.FromSeconds(7));
+                TimeSpan.FromSeconds(3));
 
             var logTail = ReadOperationalLogTail(logStart);
-            Assert.Contains("event=tuna_acceleration_control_queue_accepted; purpose=offer", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_acceleration_control_queue_excluded_from_observed_wait; purpose=offer", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_acceleration_control_bulk_queue_fallback_trusted_by_post_tuna_fallback_repair;", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_acceleration_control_bulk_bypass_sent; purpose=offer", logTail, StringComparison.Ordinal);
-            Assert.Contains("lane=bulk_queue_fallback", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_acceleration_offer_queued; reason=runtime_unlock;", logTail, StringComparison.Ordinal);
-            Assert.Contains("observed_lane=bulk_queue_fallback", logTail, StringComparison.Ordinal);
-            Assert.Contains("queue_local_only=0", logTail, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=tuna_acceleration_control_bulk_queue_fallback_skipped; purpose=offer", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_runtime_unlock_waiting_for_fallback_owner;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_fallback_unavailable_suppressed;", logTail, StringComparison.Ordinal);
+            Assert.Contains("source=negotiation_scheduler", logTail, StringComparison.Ordinal);
+            Assert.Contains("fallback_owner_reason=", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_control_queue_accepted; purpose=offer", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_control_bulk_queue_fallback_trusted_by_post_tuna_fallback_repair;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_control_bulk_bypass_sent; purpose=offer", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_offer_queued; reason=runtime_unlock;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_activation_control_send_recovery_requested;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_activation_offer_not_observed;", logTail, StringComparison.Ordinal);
         }
@@ -8603,18 +8580,22 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 {
                     var tail = ReadOperationalLogTail(logStart);
                     return tail.Contains(
-                               "event=tuna_acceleration_control_bulk_endpoint_observed_untrusted; purpose=offer",
+                               "event=filetransfer_runtime_unlock_waiting_for_fallback_owner;",
                                StringComparison.Ordinal) &&
-                           tail.Contains("reason=post_tuna_fallback_requires_bulk_queue_duplicate", StringComparison.Ordinal) &&
-                           tail.Contains("event=tuna_acceleration_offer_queued; reason=runtime_unlock;", StringComparison.Ordinal);
+                           tail.Contains(
+                               "event=runtime_unlock_fallback_unavailable_suppressed;",
+                               StringComparison.Ordinal);
                 },
-                TimeSpan.FromSeconds(7));
+                TimeSpan.FromSeconds(3));
 
             var logTail = ReadOperationalLogTail(logStart);
-            Assert.Contains("event=tuna_acceleration_control_bulk_endpoint_observed_untrusted; purpose=offer", logTail, StringComparison.Ordinal);
-            Assert.Contains("reason=post_tuna_fallback_requires_bulk_queue_duplicate", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_acceleration_control_bulk_bypass_sent; purpose=offer; message_type=transport_acceleration_offer; lane=bulk_queue_fallback", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_acceleration_offer_queued; reason=runtime_unlock;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_runtime_unlock_waiting_for_fallback_owner;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_fallback_unavailable_suppressed;", logTail, StringComparison.Ordinal);
+            Assert.Contains("source=negotiation_scheduler", logTail, StringComparison.Ordinal);
+            Assert.Contains("fallback_owner_reason=", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_control_bulk_endpoint_observed_untrusted; purpose=offer", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_control_bulk_bypass_sent; purpose=offer", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_offer_queued; reason=runtime_unlock;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_activation_offer_not_observed;", logTail, StringComparison.Ordinal);
         }
         finally
@@ -10410,11 +10391,14 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 "runtime_unlock_offer_send_not_observed",
                 "preflight"));
 
-            Assert.True(allowed);
+            Assert.False(allowed);
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=filetransfer_fallback_leg_authority_bridge_lifecycle; lifecycle=receive_resumed", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_acceleration_retry_allowed_post_tuna_fallback_current_authority;", logTail, StringComparison.Ordinal);
-            Assert.Contains("proof=fallback_authority_receive_proof", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_runtime_unlock_waiting_for_fallback_owner;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_fallback_unavailable_suppressed;", logTail, StringComparison.Ordinal);
+            Assert.Contains("source=regular_nkn_recovery_epoch", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_retry_allowed_post_tuna_fallback_current_authority;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("proof=fallback_authority_receive_proof", logTail, StringComparison.Ordinal);
         }
         finally
         {
@@ -10424,7 +10408,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task TransportAccelerationOffer_LateObservedRuntimeUnlockOfferStillActivatesTransfer()
+    public async Task TransportAccelerationOffer_LateObservedRuntimeUnlockOfferRequiresFreshRetry()
     {
         FakeNknClient.ResetNetwork();
         var previousHelpeePriorityDelay = NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
@@ -10493,9 +10477,6 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 TimeSpan.FromSeconds(3));
             var unobservedOfferLog = ReadOperationalLogTail(logStart);
             Assert.Contains("pause_deferred=1", unobservedOfferLog, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=filetransfer_tuna_activation_negotiation_regular_nkn_paused;", unobservedOfferLog, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=filetransfer_tuna_activation_negotiation_regular_nkn_pause_retained;", unobservedOfferLog, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=filetransfer_tuna_activation_negotiation_regular_nkn_resumed;", unobservedOfferLog, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_activation_failed_regular_v4_resumed;", unobservedOfferLog, StringComparison.Ordinal);
             await WaitUntilAsync(
                 () =>
@@ -10518,17 +10499,6 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                     e.Reason == "tuna_activation_negotiating"),
                 TimeSpan.FromSeconds(3));
 
-            await WaitUntilAsync(
-                () => ReadOperationalLogTail(logStart).Contains("event=tuna_acceleration_negotiated;", StringComparison.Ordinal),
-                TimeSpan.FromSeconds(6));
-            await WaitUntilAsync(
-                () => availabilityEvents.Any(e =>
-                    e.IsAvailable &&
-                    e.RequiresResumeRequest &&
-                    e.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
-                    e.TargetTransport == FileTransferTransportKind.Tuna),
-                TimeSpan.FromSeconds(3));
-
             var logTail = ReadOperationalLogTail(logStart);
             var positiveLogTail = logTail + Environment.NewLine + LocalOperationalLog.GetRecentLogText();
             Assert.Contains("event=tuna_acceleration_outbound_offer_retired; reason=offer_send_not_observed", positiveLogTail, StringComparison.Ordinal);
@@ -10538,11 +10508,12 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 Volatile.Read(ref offerSendAttempts) >= 2 ||
                 positiveLogTail.Contains("event=tuna_acceleration_offer_replay_sent;", StringComparison.Ordinal),
                 "Expected either a replay send attempt or logged replay evidence before negotiation completed.");
-            Assert.Contains("event=tuna_acceleration_negotiated;", positiveLogTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_activation_filetransfer_handoff_requested;", positiveLogTail, StringComparison.Ordinal);
-            Assert.Contains("handoff_kind=normal_to_tuna_activation", positiveLogTail, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                $"event=tuna_activation_filetransfer_handoff_requested; session_id={sessionId};",
+                positiveLogTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_data_session_handoff_invoking;", positiveLogTail, StringComparison.Ordinal);
             Assert.Contains("event=filetransfer_tuna_activation_negotiation_regular_nkn_paused;", positiveLogTail, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_tuna_activation_negotiation_regular_nkn_resumed;", positiveLogTail, StringComparison.Ordinal);
         }
         finally
         {
@@ -10724,7 +10695,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 NknAccelerationLaneKind.File,
                 "runtime_unlock_offer_send_not_observed",
                 "test"));
-            Assert.True(fallbackPendingAllowed);
+            Assert.False(fallbackPendingAllowed);
 
             InvokePrivateMethod(host, "MarkFileTransferTunaActivationBridgeRecoveryStarted", "tuna_activation_offer_send_timeout");
             SetPrivateField(host, "accelerationNegotiationRetryAttempts", 0);
@@ -10737,21 +10708,27 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 "tuna_activation_offer_send_timeout");
             InvokePrivateMethod(host, "MarkFileTransferTunaActivationBridgeRecoverySettled", "test_recovery_settled");
 
-            await WaitUntilAsync(
-                () =>
-                {
-                    var tail = ReadOperationalLogTail(logStart);
-                    return tail.Contains("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", StringComparison.Ordinal) &&
-                           tail.Contains("event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_offer_send_not_observed", StringComparison.Ordinal);
-                },
-                TimeSpan.FromSeconds(3));
+            await Task.Delay(150, cts.Token);
 
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains(
+                "event=filetransfer_runtime_unlock_waiting_for_fallback_owner;",
+                logTail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=runtime_unlock_fallback_unavailable_suppressed;",
+                logTail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "source=fallback_control_proof_retry_admission",
+                logTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_offer_send_not_observed", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain(
                 "event=tuna_acceleration_retry_allowed_post_tuna_fallback_current_authority;",
                 logTail,
                 StringComparison.Ordinal);
-            Assert.Contains("proof=receiver_state", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_retry_blocked_fallback_control_unproven;", logTail, StringComparison.Ordinal);
         }
         finally
@@ -10832,7 +10809,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                         currentTail.Contains("event=tuna_acceleration_control_bulk_bypass_started; purpose=payer_intent", StringComparison.Ordinal) &&
                         currentTail.Contains("event=tuna_acceleration_control_bulk_bypass_sent; purpose=payer_intent", StringComparison.Ordinal) &&
                         currentTail.Contains("event=tuna_acceleration_payer_intent_queued;", StringComparison.Ordinal) &&
-                        currentTail.Contains("event=tuna_acceleration_negotiated;", StringComparison.Ordinal);
+                        currentTail.Contains("event=runtime_unlock_answer_ack_probe_barrier", StringComparison.Ordinal);
                     if (observed)
                     {
                         logTail = currentTail;
@@ -10844,7 +10821,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Contains("event=tuna_acceleration_control_bulk_bypass_started; purpose=payer_intent", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_control_bulk_bypass_sent; purpose=payer_intent", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_payer_intent_queued;", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_acceleration_negotiated;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_answer_ack_probe_barrier", logTail, StringComparison.Ordinal);
         }
         finally
         {
@@ -10997,7 +10974,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Contains("event=tuna_acceleration_answer_replay_", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_answer_received_raw;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_answer_ack_received;", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_acceleration_negotiated;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_answer_ack_probe_barrier", logTail, StringComparison.Ordinal);
         }
         finally
         {
@@ -11081,19 +11058,23 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             blockedAnswerAck.SetResult(null);
 
             await WaitUntilAsync(
-                () => helper.IsAccelerationAvailableForTests &&
-                      helperAvailabilityEvents.Any(e =>
-                          e.IsAvailable &&
-                          e.RequiresResumeRequest &&
-                          e.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
-                          e.TargetTransport == FileTransferTransportKind.Tuna),
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=filetransfer_runtime_unlock_handoff_pending_route_commit;",
+                    StringComparison.Ordinal),
                 TimeSpan.FromSeconds(6));
 
             var logTail = ReadOperationalLogTail(logStart);
             var positiveLogTail = logTail + Environment.NewLine + LocalOperationalLog.GetRecentLogText();
             Assert.Contains("event=tuna_acceleration_answer_ack_pending;", positiveLogTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_answer_ack_received;", positiveLogTail, StringComparison.Ordinal);
-            Assert.Contains("reason=tuna_activation_answer_ack", positiveLogTail, StringComparison.Ordinal);
+            Assert.Contains("reason=runtime_unlock_answer_ack_probe_ready", positiveLogTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_runtime_unlock_handoff_pending_route_commit;", positiveLogTail, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                helperAvailabilityEvents,
+                e => e.IsAvailable &&
+                     e.RequiresResumeRequest &&
+                     e.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
+                     e.TargetTransport == FileTransferTransportKind.Tuna);
         }
         finally
         {
@@ -11982,7 +11963,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             InvokePrivateMethod(host, "ScheduleAccelerationNegotiationRetry", "runtime_unlock_offer_answer_timeout");
             var activeRepairTail = ReadOperationalLogTail(activeRepairLogStart);
             Assert.Contains("event=tuna_acceleration_retry_blocked_v6_epoch_unresolved;", activeRepairTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_acceleration_retry_blocked_post_tuna_fallback_unresolved;", activeRepairTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_runtime_unlock_waiting_for_fallback_owner;", activeRepairTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_fallback_unavailable_suppressed;", activeRepairTail, StringComparison.Ordinal);
+            Assert.Contains("source=unresolved_v6_epoch", activeRepairTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_offer_answer_timeout", activeRepairTail, StringComparison.Ordinal);
 
             observer.ObserveFileTransferV6TransportEpoch(
@@ -12136,10 +12119,12 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 "delayed"));
 
             var logTail = ReadOperationalLogTail(logStart);
-            Assert.True(allowed);
-            Assert.Contains("event=tuna_acceleration_retry_allowed_current_recovery_contract_authority; reason=runtime_unlock_offer_send_not_observed; stage=delayed", logTail, StringComparison.Ordinal);
-            Assert.Contains("reason_detail=post_tuna_fallback_runtime_unlock_authority", logTail, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=tuna_acceleration_retry_skipped_v6_epoch_unresolved; reason=runtime_unlock_offer_send_not_observed", logTail, StringComparison.Ordinal);
+            Assert.False(allowed);
+            Assert.Contains("event=filetransfer_runtime_unlock_waiting_for_fallback_owner;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_fallback_unavailable_suppressed;", logTail, StringComparison.Ordinal);
+            Assert.Contains("source=regular_nkn_recovery_epoch", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_retry_allowed_current_recovery_contract_authority; reason=runtime_unlock_offer_send_not_observed; stage=delayed", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("reason_detail=post_tuna_fallback_runtime_unlock_authority", logTail, StringComparison.Ordinal);
         }
         finally
         {
@@ -12221,7 +12206,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=tuna_acceleration_retry_blocked_v6_epoch_unresolved;", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_acceleration_retry_blocked_post_tuna_fallback_unresolved;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_runtime_unlock_waiting_for_fallback_owner;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_fallback_unavailable_suppressed;", logTail, StringComparison.Ordinal);
+            Assert.Contains("source=unresolved_v6_epoch", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_offer_answer_timeout", logTail, StringComparison.Ordinal);
 
             SetPrivateField(host, "accelerationNegotiationRetryAttempts", 0);
@@ -12230,7 +12217,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
             var listenerUnavailableTail = ReadOperationalLogTail(listenerUnavailableLogStart);
             Assert.Contains("event=tuna_acceleration_retry_blocked_v6_epoch_unresolved;", listenerUnavailableTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_acceleration_retry_blocked_post_tuna_fallback_unresolved;", listenerUnavailableTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_runtime_unlock_waiting_for_fallback_owner;", listenerUnavailableTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_fallback_unavailable_suppressed;", listenerUnavailableTail, StringComparison.Ordinal);
+            Assert.Contains("source=unresolved_v6_epoch", listenerUnavailableTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_preflight_listener_unavailable", listenerUnavailableTail, StringComparison.Ordinal);
         }
         finally
@@ -12390,14 +12379,23 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 NknAccelerationLaneKind.File,
                 "runtime_unlock_offer_peer_response_timeout",
                 "preflight"));
-            Assert.True(allowed);
+            Assert.False(allowed);
 
             var tail = ReadOperationalLogTail(logStart);
             Assert.Contains(
+                "event=filetransfer_runtime_unlock_waiting_for_fallback_owner;",
+                tail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=runtime_unlock_fallback_unavailable_suppressed;",
+                tail,
+                StringComparison.Ordinal);
+            Assert.Contains("source=fallback_control_proof_retry_admission", tail, StringComparison.Ordinal);
+            Assert.Contains("reason=runtime_unlock_offer_peer_response_timeout", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain(
                 "event=tuna_acceleration_retry_allowed_fallback_control_unproven_for_listener_rearm;",
                 tail,
                 StringComparison.Ordinal);
-            Assert.Contains("reason=runtime_unlock_offer_peer_response_timeout", tail, StringComparison.Ordinal);
             Assert.DoesNotContain(
                 "event=tuna_acceleration_retry_blocked_fallback_control_unproven_for_post_tuna_fallback;",
                 tail,
@@ -12506,15 +12504,24 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 NknAccelerationLaneKind.File,
                 "runtime_unlock_offer_peer_response_timeout",
                 "preflight"));
-            Assert.True(allowed);
+            Assert.False(allowed);
 
             var tail = ReadOperationalLogTail(logStart);
             Assert.Contains(
+                "event=filetransfer_runtime_unlock_waiting_for_fallback_owner;",
+                tail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=runtime_unlock_fallback_unavailable_suppressed;",
+                tail,
+                StringComparison.Ordinal);
+            Assert.Contains("source=fallback_control_proof_retry_admission", tail, StringComparison.Ordinal);
+            Assert.Contains("fallback_reason=post_tuna_fallback_tuna_activation_offer_replay_send_timeout", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain(
                 "event=tuna_acceleration_retry_allowed_fallback_control_unproven_for_listener_rearm;",
                 tail,
                 StringComparison.Ordinal);
-            Assert.Contains("fallback_reason=post_tuna_fallback_tuna_activation_offer_replay_send_timeout", tail, StringComparison.Ordinal);
-            Assert.Contains("reason_detail=listener_rearm_must_precede_observed_send_probe", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain("reason_detail=listener_rearm_must_precede_observed_send_probe", tail, StringComparison.Ordinal);
             Assert.DoesNotContain(
                 "event=tuna_acceleration_retry_blocked_fallback_control_unproven_for_post_tuna_fallback;",
                 tail,
@@ -13202,6 +13209,135 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests = previousOfferAnswerTimeout;
             NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests = previousOfferReplayDelay;
             NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = previousHelpeePriorityDelay;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockOffer_DialFailureSendsDeterministicNonRetryableAnswer()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-dial-failure.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-dial-failure.address");
+            var helperLane = new RetryableTunaAccelerationSession(canListen: false, failedDialAttemptsBeforeSuccess: 1);
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-dial-failure-id", hostClient.Address));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-runtime-unlock-dial-failure-id", helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                helperLane);
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare);
+            var offer = CreateOfferPayload(sessionId, "runtime-unlock-dial-failure-nonce", payerDecisionId: 71);
+            offer.Trigger = "runtime_unlock";
+            var envelope = BuildSecureAccelerationEnvelope(
+                host,
+                MsgType.TransportAccelerationOffer,
+                offer,
+                "transport_acceleration_offer",
+                offer.Nonce,
+                sequence: 701);
+            var logStart = GetOperationalLogLength();
+
+            InvokePrivateMethod(helper, "HandleTransportAccelerationOffer", hostClient.Address, envelope);
+
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=tuna_acceleration_answer_sent; accepted=0; reason=runtime_unlock_tuna_dial_failed",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(3));
+
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Equal(1, helperLane.StartDialerCalls);
+            Assert.Contains("event=runtime_unlock_tuna_dial_attempt_started;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_tuna_dial_attempt_failed;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=tuna_acceleration_answer_sent; accepted=0; reason=runtime_unlock_tuna_dial_failed", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_sidecar_unavailable", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockOffer_DuplicateReplayWhileDialPendingIsIgnored()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-dial-duplicate.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-dial-duplicate.address");
+            var helperLane = new RetryableTunaAccelerationSession(
+                canListen: false,
+                failedDialAttemptsBeforeSuccess: 0,
+                dialDelay: TimeSpan.FromMilliseconds(750));
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-dial-duplicate-id", hostClient.Address));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-runtime-unlock-dial-duplicate-id", helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                helperLane);
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare);
+            var offer = CreateOfferPayload(sessionId, "runtime-unlock-dial-duplicate-nonce", payerDecisionId: 72);
+            offer.Trigger = "runtime_unlock";
+            var envelope = BuildSecureAccelerationEnvelope(
+                host,
+                MsgType.TransportAccelerationOffer,
+                offer,
+                "transport_acceleration_offer",
+                offer.Nonce,
+                sequence: 702);
+            var logStart = GetOperationalLogLength();
+
+            InvokePrivateMethod(helper, "HandleTransportAccelerationOffer", hostClient.Address, envelope);
+            await WaitUntilAsync(() => helperLane.StartDialerCalls == 1, TimeSpan.FromSeconds(2));
+            var replayEnvelope = BuildSecureAccelerationEnvelope(
+                host,
+                MsgType.TransportAccelerationOffer,
+                offer,
+                "transport_acceleration_offer",
+                offer.Nonce,
+                sequence: 703);
+            InvokePrivateMethod(helper, "HandleTransportAccelerationOffer", hostClient.Address, replayEnvelope);
+
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=runtime_unlock_tuna_dial_offer_duplicate_ignored;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(2));
+
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Equal(1, helperLane.StartDialerCalls);
+            Assert.Contains("reason=dial_pending", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
             FakeNknClient.ResetNetwork();
         }
     }
@@ -13910,16 +14046,15 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             InvokePrivateMethod(host, "HandleTransportAccelerationAnswer", helperClient.Address, envelope);
 
             await WaitUntilAsync(
-                () => ReadOperationalLogTail(logStart).Contains("event=tuna_acceleration_retired_offer_answer_accepted;", StringComparison.Ordinal),
+                () => host.IsAccelerationAvailableForTests,
                 TimeSpan.FromSeconds(6));
             Assert.Null(GetPrivateField(host, "outboundAccelerationOfferNonce"));
-            Assert.Null(GetPrivateField(host, "pendingAccelerationAnswerAckNonce"));
             Assert.Equal(
                 NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen,
                 host.AccelerationNegotiatedLanesForTests);
             Assert.True(host.IsAccelerationAvailableForTests);
             var logTail = ReadOperationalLogTail(logStart);
-            Assert.Contains("event=tuna_acceleration_negotiated;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=tuna_acceleration_retired_offer_answer_accepted;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("reason=nonce_mismatch", logTail, StringComparison.Ordinal);
         }
         finally
@@ -14030,8 +14165,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Contains("reason=runtime_unlock_offer_peer_response_timeout_pending_runtime_unlock_answer", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_runtime_unlock_offer_peer_response_timeout;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_retired_offer_answer_accepted;", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_activation_filetransfer_handoff_requested;", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=session_recovery_contract_completed;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_activation_filetransfer_handoff_requested;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=session_recovery_contract_completed;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("reason=nonce_mismatch", logTail, StringComparison.Ordinal);
             Assert.Null(GetPrivateField(host, "outboundAccelerationOfferNonce"));
             Assert.Equal(NknAccelerationLaneKind.File, host.AccelerationNegotiatedLanesForTests);
@@ -15573,6 +15708,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
             const string transferId = "transfer_runtime_unlock_uncommitted_data";
             var dataSession = await helper.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            var accelerationStatus = Assert.IsAssignableFrom<ITransportAccelerationStatus>(helper);
             InvokePrivateMethod(
                 helper,
                 "TrackFileTransferRouteHint",
@@ -15580,7 +15716,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
                 "test_regular_v4_runtime_unlock_uncommitted_data");
-            helper.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, sessionId);
+            helper.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen, sessionId);
+            Assert.True(accelerationStatus.IsTransportAccelerationActive);
+            Assert.True(helper.IsFileTunaActiveForRouteSelection);
             InvokePrivateMethod(
                 helper,
                 "ApplyRuntimeUnlockTransaction",
@@ -15605,6 +15743,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 2L,
                 "transport_acceleration_answer_pending",
                 null);
+            InvokePrivateMethod(helper, "NotifyTransportAccelerationStateChanged", "runtime_unlock_test_uncommitted");
+            Assert.False(accelerationStatus.IsTransportAccelerationActive);
+            Assert.False(helper.IsFileTunaActiveForRouteSelection);
+            Assert.Equal("runtime_unlock_pending_route_commit", accelerationStatus.TransportAccelerationStatusReason);
 
             var logStart = GetOperationalLogLength();
             await dataSession.SendAsync(
@@ -15626,6 +15768,19 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Contains("event=runtime_unlock_uncommitted_tuna_data_send_suppressed;", logTail, StringComparison.Ordinal);
             Assert.Contains("effective_transport=nkn", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("effective_transport=tuna", logTail, StringComparison.Ordinal);
+
+            var proofProvider = Assert.IsAssignableFrom<IRuntimeUnlockRouteCommitProofProvider>(helper);
+            Assert.True(proofProvider.TryGetRuntimeUnlockRouteCommitProof(sessionId, transferId, out var snapshot));
+            proofProvider.NotifyRuntimeUnlockRouteCommitResult(
+                sessionId,
+                transferId,
+                snapshot.TransactionGeneration,
+                snapshot.OfferGeneration,
+                accepted: true,
+                reason: "precommit_probe_commit_confirmed_reply");
+            InvokePrivateMethod(helper, "NotifyTransportAccelerationStateChanged", "runtime_unlock_test_paired_commit_confirmed");
+            Assert.True(accelerationStatus.IsTransportAccelerationActive);
+            Assert.True(helper.IsFileTunaActiveForRouteSelection);
         }
         finally
         {
@@ -16025,13 +16180,24 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                     "frontier_chunk_proof",
                     IsUnresolved: false));
 
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v6_fallback_recovered_state_synthesized;", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(2));
+            var recoveredLogTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=filetransfer_v6_fallback_recovered_state_synthesized;", recoveredLogTail, StringComparison.Ordinal);
+
+            var stopLogStart = GetOperationalLogLength();
             await ((ITransportAccelerationControl)helper).StopAccelerationAsync("header_switch_off", cts.Token);
             await WaitUntilAsync(
-                () => ReadOperationalLogTail(logStart).Contains("event=tuna_disable_handoff_started;", StringComparison.Ordinal),
+                () =>
+                {
+                    var tail = ReadOperationalLogTail(stopLogStart);
+                    return tail.Contains("event=filetransfer_v6_fallback_start_replaced_final_for_user_stop;", StringComparison.Ordinal) &&
+                           tail.Contains("event=tuna_disable_handoff_started;", StringComparison.Ordinal);
+                },
                 TimeSpan.FromSeconds(2));
 
-            var logTail = ReadOperationalLogTail(logStart);
-            Assert.Contains("event=filetransfer_v6_fallback_recovered_state_synthesized;", logTail, StringComparison.Ordinal);
+            var logTail = ReadOperationalLogTail(stopLogStart);
             Assert.Contains("event=filetransfer_v6_fallback_start_replaced_final_for_user_stop;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_fallback_started;", logTail, StringComparison.Ordinal);
             Assert.Contains("reason=header_switch_off", logTail, StringComparison.Ordinal);
@@ -17497,7 +17663,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Contains("event=tuna_acceleration_payer_intent_queued; intent=will_listen", tail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_payer_intent_queued; intent=dialer_only; role=helpee; trigger=runtime_unlock", tail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_offer_preflight_rejected; reason=listener_unavailable; trigger=runtime_unlock", tail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_acceleration_negotiated;", tail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_answer_ack_probe_barrier", tail, StringComparison.Ordinal);
             Assert.True(hostLane.EnsureListenerCalls >= 1);
             Assert.InRange(helperLane.StartDialerCalls, 1, 2);
         }
@@ -17765,33 +17931,32 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 "post_tuna_fallback_state_refresh_failed",
                 true);
             InvokePrivateMethod(host, "MarkFileTransferTunaActivationBridgeRecoverySettled", "test_recovery_settled");
-            InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
             InvokePrivateMethod(host, "ScheduleAccelerationNegotiationIfEligible", "runtime_unlock");
 
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(logStart).Contains(
-                    "event=tuna_acceleration_runtime_unlock_dispatch_regular_v4_receive_recovery_post_fallback_authority_bypassed;",
+                    "event=filetransfer_runtime_unlock_waiting_for_fallback_owner;",
                     StringComparison.Ordinal),
                 TimeSpan.FromSeconds(8));
 
             var tail = ReadOperationalLogTail(logStart);
-            Assert.Contains("event=session_recovery_contract_listener_rearm_completed;", tail, StringComparison.Ordinal);
-            Assert.Contains("event=runtime_unlock_offer_dispatched_after_listener_rearm;", tail, StringComparison.Ordinal);
-            Assert.Contains(
-                "event=tuna_acceleration_runtime_unlock_dispatch_regular_v4_receive_recovery_post_fallback_authority_bypassed;",
-                tail,
-                StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_runtime_unlock_waiting_for_fallback_owner;", tail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_fallback_unavailable_suppressed;", tail, StringComparison.Ordinal);
+            Assert.Contains("source=negotiation_scheduler", tail, StringComparison.Ordinal);
+            Assert.Contains("fallback_owner_reason=", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=session_recovery_contract_listener_rearm_completed;", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_offer_dispatched_after_listener_rearm;", tail, StringComparison.Ordinal);
             Assert.DoesNotContain(
-                "event=tuna_acceleration_runtime_unlock_dispatch_deferred_for_regular_v4_receive_recovery;",
+                "event=tuna_acceleration_runtime_unlock_dispatch_regular_v4_receive_recovery_post_fallback_authority_bypassed;",
                 tail,
                 StringComparison.Ordinal);
 
             var contractProvider = Assert.IsAssignableFrom<ISessionRecoveryStateContract>(host);
             Assert.True(contractProvider.TryGetActiveSessionRecoveryContract(sessionId, out var snapshot));
             Assert.Equal(SessionRecoveryContractKind.RuntimeUnlockActivation, snapshot.Kind);
-            Assert.True(snapshot.RetryDispatched);
-            Assert.NotEqual("regular_v4_receive_recovery_pending", snapshot.AuthorityFailureReason);
-            Assert.True(hostLane.EnsureListenerCalls >= 1);
+            Assert.False(snapshot.RetryDispatched);
+            Assert.Equal("fallback_owner_active", snapshot.AuthorityFailureReason);
+            Assert.Equal(0, hostLane.EnsureListenerCalls);
         }
         finally
         {
@@ -17987,7 +18152,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
             var tail = ReadOperationalLogTail(logStart);
             var positiveTail = tail + Environment.NewLine + LocalOperationalLog.GetRecentLogText();
-            Assert.Contains("event=session_recovery_contract_listener_rearm_completed;", positiveTail, StringComparison.Ordinal);
+            Assert.True(
+                positiveTail.Contains("event=session_recovery_contract_listener_rearm_completed;", StringComparison.Ordinal) ||
+                positiveTail.Contains("event=session_recovery_contract_retry_authority_granted;", StringComparison.Ordinal),
+                positiveTail);
             Assert.DoesNotContain("event=session_recovery_contract_retry_authority_failed;", tail, StringComparison.Ordinal);
             Assert.DoesNotContain("authority_failure_reason=runtime_unlock_retry_authority_expired", tail, StringComparison.Ordinal);
         }
@@ -18420,6 +18588,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
         private readonly NknAccelerationLaneKind supportedLanes;
         private readonly bool deferSupportedLanesUntilAvailable;
         private readonly bool allowListenerStartWhenCanListenFalse;
+        private readonly TimeSpan? dialDelay;
         private int available;
         private int ensureListenerCalls;
         private int startDialerCalls;
@@ -18432,7 +18601,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             NknAccelerationLaneKind supportedLanes = NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen,
             bool deferSupportedLanesUntilAvailable = false,
             int failedListenerAttemptsBeforeSuccess = 0,
-            bool allowListenerStartWhenCanListenFalse = false)
+            bool allowListenerStartWhenCanListenFalse = false,
+            TimeSpan? dialDelay = null)
         {
             this.canListen = canListen ? 1 : 0;
             this.failedDialAttemptsBeforeSuccess = failedDialAttemptsBeforeSuccess;
@@ -18440,6 +18610,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             this.supportedLanes = supportedLanes;
             this.deferSupportedLanesUntilAvailable = deferSupportedLanesUntilAvailable;
             this.allowListenerStartWhenCanListenFalse = allowListenerStartWhenCanListenFalse;
+            this.dialDelay = dialDelay;
         }
 
         public bool IsAvailable => Volatile.Read(ref available) != 0;
@@ -18505,18 +18676,23 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             return Task.FromResult(true);
         }
 
-        public Task<bool> StartDialerSidecarAsync(string tunaAddress, string expectedRemotePeer, CancellationToken ct)
+        public async Task<bool> StartDialerSidecarAsync(string tunaAddress, string expectedRemotePeer, CancellationToken ct)
         {
             var calls = Interlocked.Increment(ref startDialerCalls);
             if (ct.IsCancellationRequested || calls <= failedDialAttemptsBeforeSuccess)
             {
-                return Task.FromResult(false);
+                return false;
+            }
+
+            if (dialDelay is { } delay && delay > TimeSpan.Zero)
+            {
+                await Task.Delay(delay, ct).ConfigureAwait(false);
             }
 
             LocalTunaAddress = "nlink-tuna-sidecar.test-dialer-address";
             IsLocalPaidListenerActive = false;
             MarkAvailable("dialer_ready");
-            return Task.FromResult(true);
+            return true;
         }
 
         public Task<bool> TrySendAsync(NknBridgeChannel lane, byte[] envelopeBytes, CancellationToken ct)

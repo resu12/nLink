@@ -237,6 +237,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         public required string AuthorityReason { get; init; }
 
         public bool EscalationUsed { get; set; }
+
+        public bool Completed { get; set; }
     }
 
     private sealed class PostTunaFallbackControlPlanePressureState
@@ -593,6 +595,53 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             $"session_id={SanitizeLogToken(normalizedSessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; leg_generation={legGeneration}; route={SanitizeLogToken(routeToken)}; protocol_version={protocolVersion}; live_route_epoch={liveRouteEpoch}; transport_epoch={transportEpoch}; bridge_recovery_generation={bridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(checkpointRequestId ?? "none")}; authority_reason={normalizedReason}");
     }
 
+    internal void MarkPostTunaFallbackLegAuthorityCompleted(
+        string transferId,
+        string sessionId,
+        int legGeneration,
+        int liveRouteEpoch,
+        long transportEpoch,
+        int bridgeRecoveryGeneration,
+        string? checkpointRequestId,
+        string reason)
+    {
+        if (legGeneration <= 0)
+        {
+            return;
+        }
+
+        var normalizedTransferId = string.IsNullOrWhiteSpace(transferId) ? "(unknown)" : transferId.Trim();
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? "none" : sessionId.Trim();
+        var normalizedCheckpointRequestId = string.IsNullOrWhiteSpace(checkpointRequestId) ? null : checkpointRequestId.Trim();
+        var completed = false;
+        lock (gate)
+        {
+            if (postTunaFallbackLegAuthority is { } authority &&
+                string.Equals(authority.SessionId, normalizedSessionId, StringComparison.Ordinal) &&
+                string.Equals(authority.TransferId, normalizedTransferId, StringComparison.Ordinal) &&
+                authority.LegGeneration == legGeneration &&
+                authority.LiveRouteEpoch == liveRouteEpoch &&
+                authority.TransportEpoch == transportEpoch &&
+                authority.BridgeRecoveryGeneration == bridgeRecoveryGeneration &&
+                (authority.CheckpointRequestId is null ||
+                 normalizedCheckpointRequestId is null ||
+                 string.Equals(authority.CheckpointRequestId, normalizedCheckpointRequestId, StringComparison.Ordinal)))
+            {
+                authority.Completed = true;
+                completed = true;
+            }
+        }
+
+        if (!completed)
+        {
+            return;
+        }
+
+        Log(
+            "event=filetransfer_fallback_leg_authority_bridge_completed; " +
+            $"session_id={SanitizeLogToken(normalizedSessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; leg_generation={legGeneration}; route=post_tuna_fallback_v6; protocol_version={FileTransferProtocol.ProtocolVersionV6}; live_route_epoch={liveRouteEpoch}; transport_epoch={transportEpoch}; bridge_recovery_generation={bridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(normalizedCheckpointRequestId ?? "none")}; reason={SanitizeLogToken(reason)}");
+    }
+
     internal void ClearActiveFileTransferPostTunaFallbackRuntime(string transferId, string reason)
     {
         var normalizedTransferId = string.IsNullOrWhiteSpace(transferId) ? "(unknown)" : transferId.Trim();
@@ -706,17 +755,13 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 (authority.CheckpointRequestId is null ||
                  normalizedCheckpointRequestId is null ||
                  string.Equals(authority.CheckpointRequestId, normalizedCheckpointRequestId, StringComparison.Ordinal));
-            var hasCurrentRuntime =
-                activePostTunaFallbackRuntimeTransfers.ContainsKey(normalizedTransferId) &&
-                Volatile.Read(ref activeFileTransferDataSessions) > 0;
-
-            if (hasExactAuthority)
+            if (hasExactAuthority && !authority.Completed)
             {
                 authoritySource = "bridge_authority";
             }
-            else if (hasCurrentRuntime && !authorityMatchesSessionTransfer)
+            else if (hasExactAuthority && authority.Completed)
             {
-                authoritySource = "active_runtime";
+                staleReason = "authority_completed";
             }
             else
             {

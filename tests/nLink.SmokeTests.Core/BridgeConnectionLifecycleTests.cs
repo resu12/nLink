@@ -3094,7 +3094,102 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public void Bridge_PostTunaFallbackControlPlanePressureAcceptsActiveRuntimeReceiverProofWithoutBridgeAuthority()
+    public void Bridge_PostTunaFallbackControlPlanePressureRejectsCompletedBridgeAuthority()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-post-tuna-completed-pressure", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "post-tuna-completed-pressure");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "post-tuna-completed-pressure");
+            var identity = new NknIdentity("post-tuna-completed-pressure", "post-tuna-completed-pressure.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var transferId = $"transfer-post-tuna-completed-pressure-{Guid.NewGuid():N}";
+            var sessionId = $"session-post-tuna-completed-pressure-{Guid.NewGuid():N}";
+
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.MarkActiveFileTransferPostTunaFallbackRuntime(transferId, "test_completed_authority");
+            adapter.MarkActiveFileTransferPostTunaFallbackLegAuthority(
+                transferId,
+                sessionId,
+                legGeneration: 3,
+                routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 2,
+                transportEpoch: 5,
+                bridgeRecoveryGeneration: 1,
+                checkpointRequestId: null,
+                authorityReason: "test_authority");
+            adapter.ReportPostTunaFallbackControlPlanePressure(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 2,
+                legGeneration: 3,
+                bridgeRecoveryGeneration: 1,
+                transportEpoch: 5,
+                checkpointRequestId: null,
+                kind: "frontier_request",
+                reason: "frontier_stall_repair_due");
+
+            var secondStart = GetOperationalLogLength();
+            adapter.MarkPostTunaFallbackLegAuthorityCompleted(
+                transferId,
+                sessionId,
+                legGeneration: 3,
+                liveRouteEpoch: 2,
+                transportEpoch: 5,
+                bridgeRecoveryGeneration: 1,
+                checkpointRequestId: null,
+                reason: "test_authority_completed");
+            adapter.ClearPostTunaFallbackControlPlanePressure(
+                transferId,
+                "fallback_authority_completed");
+            adapter.ReportPostTunaFallbackControlPlanePressure(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 2,
+                legGeneration: 3,
+                bridgeRecoveryGeneration: 1,
+                transportEpoch: 5,
+                checkpointRequestId: null,
+                kind: "frontier_request",
+                reason: "frontier_stall_repair_due");
+
+            var logText = ReadOperationalLogTail(secondStart);
+            Assert.Contains("event=filetransfer_fallback_leg_authority_bridge_completed;", logText, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_post_tuna_fallback_control_plane_pressure_cleared;", logText, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_post_tuna_fallback_control_plane_pressure_stale_ignored;", logText, StringComparison.Ordinal);
+            Assert.Contains("reason=authority_completed", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_marked;",
+                logText,
+                StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void Bridge_PostTunaFallbackControlPlanePressureRejectsActiveRuntimeWithoutBridgeAuthority()
     {
         var tempDir = Path.Combine(Path.GetTempPath(), "nlink-post-tuna-runtime-pressure", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempDir);
@@ -3129,12 +3224,12 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
             var logText = ReadOperationalLogTail(logStart);
             Assert.Contains(
-                "event=filetransfer_post_tuna_fallback_control_plane_pressure_marked;",
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_stale_ignored;",
                 logText,
                 StringComparison.Ordinal);
-            Assert.Contains("authority_source=active_runtime", logText, StringComparison.Ordinal);
+            Assert.Contains("reason=authority_mismatch", logText, StringComparison.Ordinal);
             Assert.DoesNotContain(
-                "event=filetransfer_post_tuna_fallback_control_plane_pressure_stale_ignored;",
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_marked;",
                 logText,
                 StringComparison.Ordinal);
 

@@ -916,6 +916,79 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
     }
 
     [Fact]
+    public void FileTransferRecoveryLiveness_StaleRegularV4SnapshotAfterTunaRouteIsNotCurrent()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var scripted = new ScriptedSignalingTransport();
+        using var runtime = new SessionRuntime(() => scripted, SessionRuntimeWatchdogOptions.Default, nowProvider: () => now);
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        var securityState = CreateApprovedSecurityState(
+            new PeerAddress(scripted.LocalPeerAddress),
+            new PeerAddress("scripted.helpee.stale-regular-v4-liveness"));
+        var sessionId = securityState.SessionId!.Value.Value;
+        scripted.SetSessionSecurityStateForTests(securityState);
+        var activeTunaTransfer = new FileTransferTransferSnapshot(
+            sessionId,
+            "ft_runtime_owner_route_mismatch",
+            FileTransferDirection.Inbound,
+            FileTransferTransferState.Receiving,
+            "route-moved-to-tuna.bin",
+            64L * 1024L * 1024L,
+            Sha256Base64: null,
+            BytesTransferred: 0,
+            ChunksTransferred: 0,
+            ChunkCount: 3121,
+            ChunkSizeBytes: 21_504,
+            ErrorCode: null,
+            StatusMessage: "Receiving...",
+            RouteToken: "file_tuna_v4",
+            ProtocolVersion: FileTransferProtocol.ProtocolVersionV4);
+        SetLatestFileTransferSnapshot(runtime, activeTunaTransfer);
+        var staleRegularV4Snapshot = new FileTransferRecoveryLivenessSnapshot(
+            sessionId,
+            "ft_runtime_owner_route_mismatch",
+            "regular_nkn_v4_fast",
+            FileTransferProtocol.ProtocolVersionV4,
+            LiveRouteEpoch: 0,
+            TransferLegGeneration: 1,
+            BridgeRecoveryGeneration: 1,
+            TransportEpoch: 0,
+            CheckpointRequestId: null,
+            AuthorityReason: "session_liveness_timeout_pending",
+            State: FileTransferRecoveryLivenessState.BridgeRecoveryCompletedAwaitingProof,
+            CreatedUtc: now,
+            LivenessDeferralDeadlineUtc: now.AddSeconds(80),
+            BridgeRecoveryRequested: true,
+            BridgeRecoveryStarted: true,
+            BridgeRecoveryCompleted: true,
+            ReceiveProofObserved: false,
+            RecoveryExhausted: false,
+            AuthorityCompleted: false,
+            TerminalRecommended: false);
+
+        var method = typeof(SessionRuntime).GetMethod(
+            "IsCurrentFileTransferRecoveryLivenessSnapshot",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        object?[] args =
+        [
+            sessionId,
+            staleRegularV4Snapshot,
+            null,
+            null,
+            null,
+        ];
+        var isCurrent = Assert.IsType<bool>(method!.Invoke(runtime, args));
+
+        Assert.False(isCurrent);
+        Assert.Equal("active_transfer_route_mismatch", Assert.IsType<string>(args[2]));
+        Assert.Equal("file_tuna_v4", Assert.IsType<string>(args[3]));
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV4, Assert.IsType<int>(args[4]));
+    }
+
+    [Fact]
     public async Task FileTransferRecoveryLiveness_ExpiredRegularV4BridgeRecoveryStartedGetsBoundedGrace()
     {
         var delay = new ControlledDelayScheduler();

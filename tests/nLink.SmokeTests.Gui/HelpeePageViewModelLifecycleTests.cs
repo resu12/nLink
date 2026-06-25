@@ -596,6 +596,43 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task HelpeePageViewModel_HostReadyTimeout_ReplacesPreparingInviteStatus()
+    {
+        using var runtime = new SessionRuntime(() => new NeverReadyHelpeeHostTransport("helpee.never.ready"));
+        using var helpee = new HelpeePageViewModel(
+            cancelAction: static () => { },
+            CreateDevLocalTestConfig(),
+            runtime,
+            inviteBootstrapTimeout: TimeSpan.FromMilliseconds(75));
+        var helperIdentity = new PeerAddress("nlink-helper.bootstrap.timeout");
+
+        helpee.SetVerifiedInviteHelperIdentity(
+            helperIdentity,
+            helperTargetAddress: helperIdentity,
+            refreshInvite: true,
+            normalizedInputOverride: helperIdentity.Value);
+
+        try
+        {
+            await WaitUntilAsync(
+                () => runtime.State == SessionRuntimeState.Failed &&
+                      string.Equals(helpee.ShareInviteStatusText, "Could not prepare invite. Refresh invite and try again.", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(3));
+        }
+        catch (TimeoutException ex)
+        {
+            throw new TimeoutException(
+                $"state={runtime.State}; transport_state={runtime.TransportLifecycleState}; status={runtime.StatusText}; invite_status={helpee.ShareInviteStatusText}; has_invite={helpee.HasShareInvite}; connection_state={helpee.ConnectionState}",
+                ex);
+        }
+
+        Assert.False(helpee.HasShareInvite);
+        Assert.False(helpee.RequestHelpCommand.CanExecute(null));
+        Assert.Equal("Failed", helpee.ConnectionState);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public void HelpeePageViewModel_IncomingApproval_ClearsStalePeerEndedHeaderNotice()
     {
         using var runtime = new SessionRuntime(() => new DevLocalTransport());
@@ -838,6 +875,52 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
             emojiSequence,
             fallbackCode,
             SessionVerificationCodeDerivation.SourceHandshakeTranscriptV1);
+    }
+
+    private sealed class NeverReadyHelpeeHostTransport :
+        ISignalingTransport,
+        IAddressHostSignalingTransport,
+        IHostReadySignalingTransport,
+        IBridgeBootstrapReadinessSignalingTransport,
+        ILocalPeerAddressSignalingTransport
+    {
+        public NeverReadyHelpeeHostTransport(string localPeerAddress)
+        {
+            LocalPeerAddress = localPeerAddress;
+        }
+
+        public string LocalPeerAddress { get; }
+        public event EventHandler<IncomingJoinRequestEventArgs>? IncomingJoinRequest;
+        public event EventHandler<TransportSessionKeyReadyEventArgs>? SessionKeyReady;
+        public event EventHandler<TransportChatMessageEventArgs>? ChatMessageReceived;
+        public event EventHandler? Approved;
+        public event EventHandler? Rejected;
+        public event EventHandler? Disconnected;
+
+        public Task HostByAddressAsync(CancellationToken ct) => Task.Delay(Timeout.Infinite, ct);
+
+        public Task WaitUntilHostReadyAsync(CancellationToken ct) => Task.Delay(Timeout.Infinite, ct);
+
+        public BridgeBootstrapReadinessSnapshot GetBridgeBootstrapReadinessSnapshot()
+            => new(
+                Role: "helpee_test_host",
+                Generation: 1,
+                RunId: "helpee-never-ready-test",
+                ReadyEmitted: false,
+                ControlReady: false,
+                MediaReady: false,
+                BulkReady: false,
+                LastReadyUtcMs: 0,
+                DeadlineUtcMs: 0,
+                TerminalFailure: true,
+                FailureReason: "bridge_never_ready",
+                LastError: "(none)");
+
+        public Task SendChatMessageAsync(ReadOnlyMemory<byte> payload, CancellationToken ct) => Task.CompletedTask;
+
+        public void Dispose()
+        {
+        }
     }
 
     private sealed class AuthoritativeAddressSuppressedHelpeeTransport :

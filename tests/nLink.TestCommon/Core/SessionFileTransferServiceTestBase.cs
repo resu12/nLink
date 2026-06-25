@@ -166,7 +166,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         return builder.ToString();
     }
 
-    protected sealed class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRouteCompletionObserver, ITransportAccelerationStatus, IFileTransferSessionContextProvider
+    protected sealed class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRouteCompletionObserver, ITransportAccelerationStatus, IFileTransferSessionContextProvider, IRuntimeUnlockRouteCommitProofProvider
     {
         private readonly string sessionId;
         private readonly ConcurrentDictionary<string, LoopbackDataSession> dataSessions = new(StringComparer.Ordinal);
@@ -238,6 +238,43 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         public ConcurrentQueue<FileTransferReceiveRecoveryRequest> ReceiveRecoveryRequests { get; } = [];
         public ConcurrentQueue<FileTransferRegularV4ControlFeedbackPressure> RegularV4ControlFeedbackPressures { get; } = [];
         public ConcurrentQueue<FileTransferRouteCompletedNotification> RouteCompletionNotifications { get; } = [];
+        public ConcurrentQueue<string> RuntimeUnlockProbeEvents { get; } = [];
+        public ConcurrentQueue<string> RuntimeUnlockRouteCommitResults { get; } = [];
+        internal RuntimeUnlockRouteCommitSnapshot? RuntimeUnlockRouteCommitSnapshot { get; set; }
+
+        internal void SeedRuntimeUnlockRouteCommitProofForTests(
+            string transferId,
+            string reason,
+            long transactionGeneration = 1,
+            long offerGeneration = 1,
+            long leaseGeneration = 1)
+        {
+            var normalizedTransferId = string.IsNullOrWhiteSpace(transferId) ? "loopback-transfer" : transferId.Trim();
+            var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "loopback_runtime_unlock_route_commit" : reason.Trim();
+            var probeId = $"loopback-precommit:{transactionGeneration}:{offerGeneration}:{leaseGeneration}:{normalizedTransferId}";
+            RuntimeUnlockRouteCommitSnapshot = new RuntimeUnlockRouteCommitSnapshot(
+                SessionId: sessionId,
+                TransferId: normalizedTransferId,
+                TransactionGeneration: transactionGeneration,
+                OfferGeneration: offerGeneration,
+                PeerVisibleProof: true,
+                PeerReceived: true,
+                AnswerReceived: true,
+                TargetRoute: FileTransferRoute.FileTunaV4,
+                ProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
+                HandoffKind: FileTransferTransportHandoffKind.NormalToTunaActivation,
+                TargetTransport: FileTransferTransportKind.Tuna,
+                TransactionState: RuntimeUnlockTransactionState.RouteCommitPending.ToString(),
+                Reason: normalizedReason,
+                PathProbeId: probeId,
+                PathProbeState: RuntimeUnlockPathProbeState.Acked.ToString(),
+                PathProbeTransport: FileTransferTransportKind.Tuna,
+                PathProbeAckedUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                TunaPathLeaseRequired: true,
+                TunaPathLeaseGeneration: leaseGeneration,
+                TunaPathLeaseState: RuntimeUnlockTunaPathLeaseState.ListenerReady.ToString(),
+                TunaPathLeaseCurrent: true);
+        }
 
         public event EventHandler<IncomingJoinRequestEventArgs>? IncomingJoinRequest;
         public event EventHandler<TransportSessionKeyReadyEventArgs>? SessionKeyReady;
@@ -287,6 +324,83 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                 notification.ProtocolVersion == FileTransferProtocol.ProtocolVersionV6)
             {
                 IsPostTunaFileFallbackActiveForRouteSelection = false;
+            }
+        }
+
+        void IRuntimeUnlockRouteCommitProofProvider.NotifyRuntimeUnlockPathProbeStarted(
+            string sessionId,
+            string transferId,
+            long transportEpoch,
+            string probeId,
+            FileTransferTransportKind targetTransport,
+            string reason)
+        {
+            RuntimeUnlockProbeEvents.Enqueue($"started:{probeId}:{reason}");
+            if (RuntimeUnlockRouteCommitSnapshot is { } snapshot)
+            {
+                RuntimeUnlockRouteCommitSnapshot = snapshot with
+                {
+                    PathProbeId = probeId,
+                    PathProbeState = RuntimeUnlockPathProbeState.Started.ToString(),
+                    PathProbeTransport = targetTransport,
+                    PathProbeAckedUtcMs = 0,
+                    PathProbeFailureReason = null,
+                };
+            }
+        }
+
+        void IRuntimeUnlockRouteCommitProofProvider.NotifyRuntimeUnlockPathProbeResult(
+            string sessionId,
+            string transferId,
+            long transportEpoch,
+            string probeId,
+            FileTransferTransportKind targetTransport,
+            bool acked,
+            string reason)
+        {
+            RuntimeUnlockProbeEvents.Enqueue($"{(acked ? "acked" : "failed")}:{probeId}:{reason}");
+            if (RuntimeUnlockRouteCommitSnapshot is { } snapshot)
+            {
+                RuntimeUnlockRouteCommitSnapshot = snapshot with
+                {
+                    PathProbeId = probeId,
+                    PathProbeState = acked
+                        ? RuntimeUnlockPathProbeState.Acked.ToString()
+                        : RuntimeUnlockPathProbeState.Failed.ToString(),
+                    PathProbeTransport = targetTransport,
+                    PathProbeAckedUtcMs = acked ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() : 0,
+                    PathProbeFailureReason = acked ? null : reason,
+                    TransactionState = acked
+                        ? RuntimeUnlockTransactionState.RouteCommitPending.ToString()
+                        : RuntimeUnlockTransactionState.Failed.ToString(),
+                };
+            }
+        }
+
+        bool IRuntimeUnlockRouteCommitProofProvider.TryGetRuntimeUnlockRouteCommitProof(
+            string sessionId,
+            string transferId,
+            out RuntimeUnlockRouteCommitSnapshot snapshot)
+        {
+            snapshot = RuntimeUnlockRouteCommitSnapshot!;
+            return RuntimeUnlockRouteCommitSnapshot is not null;
+        }
+
+        void IRuntimeUnlockRouteCommitProofProvider.NotifyRuntimeUnlockRouteCommitResult(
+            string sessionId,
+            string transferId,
+            long transactionGeneration,
+            long offerGeneration,
+            bool accepted,
+            string reason)
+        {
+            RuntimeUnlockRouteCommitResults.Enqueue($"{(accepted ? "accepted" : "rejected")}:{transactionGeneration}:{offerGeneration}:{reason}");
+            if (RuntimeUnlockRouteCommitSnapshot is { } snapshot && accepted)
+            {
+                RuntimeUnlockRouteCommitSnapshot = snapshot with
+                {
+                    TransactionState = RuntimeUnlockTransactionState.Committed.ToString(),
+                };
             }
         }
 
@@ -553,6 +667,12 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                 : targetTransport;
             foreach (var session in dataSessions.Values)
             {
+                if (handoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
+                    targetTransport == FileTransferTransportKind.Tuna)
+                {
+                    SeedRuntimeUnlockRouteCommitProofForTests(session.TransferId, reason);
+                }
+
                 session.RequestHandoff(reason, handoffKind, targetTransport);
             }
         }
@@ -643,7 +763,9 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         private static bool IsV4FallbackRecoveryFrame(FileTransferDataFrame frame)
             => frame is FileTransferStateFrameV4 or FileTransferChunkBatchFrameV4;
 
-        protected sealed class LoopbackDataSession : IFileTransferDataSession
+        protected sealed class LoopbackDataSession :
+            IFileTransferDataSession,
+            IFileTransferRuntimeUnlockTunaProbeSender
         {
             private readonly LoopbackFileTransferTransport owner;
             private readonly Channel<FileTransferReceivedDataFrame> frames = Channel.CreateUnbounded<FileTransferReceivedDataFrame>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false, AllowSynchronousContinuations = false, });
@@ -689,6 +811,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                 ObjectDisposedException.ThrowIf(disposed != 0, this);
                 var availabilityBypass =
                     frame is FileTransferTransportProbeFrameV6 ||
+                    frame is FileTransferRuntimeUnlockPreCommitProbeFrameBase ||
                     IsV6RecoveryFeedbackFrame(frame) ||
                     (owner.AllowUnavailableV4FallbackRecoveryFramesForTests && IsV4FallbackRecoveryFrame(frame));
                 if (owner.ThrowWhenUnavailableDataSessionSend &&
@@ -699,6 +822,22 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                 }
 
                 return owner.DeliverDataFrameToPeerAsync(frame, frame is FileTransferChunkBatchFrameV4, ct);
+            }
+
+            public Task SendRuntimeUnlockTunaPreCommitProbeAsync(
+                FileTransferRuntimeUnlockPreCommitProbeFrame probe,
+                CancellationToken ct)
+            {
+                owner.NextDataFrameTransportKind = FileTransferTransportKind.Tuna;
+                return SendAsync(probe, ct);
+            }
+
+            public Task SendRuntimeUnlockTunaPreCommitProbeAckAsync(
+                FileTransferRuntimeUnlockPreCommitProbeAckFrame ack,
+                CancellationToken ct)
+            {
+                owner.NextDataFrameTransportKind = FileTransferTransportKind.Tuna;
+                return SendAsync(ack, ct);
             }
 
             public void Deliver(FileTransferDataFrame frame)

@@ -204,7 +204,7 @@ public sealed partial class SessionFileTransferService
                 switch (frame)
                 {
                     case FileTransferReceiverStateFrameV6 state:
-                        ApplyOutboundV6ReceiverState(context, state, received.TransportKind);
+                        await ApplyOutboundV6ReceiverState(context, state, received.TransportKind).ConfigureAwait(false);
                         SignalOutboundSparseSenderPump(context);
                         break;
                     case FileTransferFrontierRequestFrameV6 frontierRequest:
@@ -316,12 +316,13 @@ public sealed partial class SessionFileTransferService
             $"event=filetransfer_v6_post_tuna_fallback_survival_policy_enabled; direction={direction.ToString().ToLowerInvariant()}; transfer_id={context.TransferId}; session_id={context.SessionId}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.RouteSelection.ProtocolVersion}; runtime_profile={FormatFileTransferRouteRuntimeProfile(context.RouteSelection.RuntimeProfile)}; bridge_recovery_policy={FormatFileTransferRouteBridgeRecoveryPolicy(context.RouteSelection.BridgeRecoveryPolicy)}; frontier_chunk_index={Math.Clamp(context.NextChunkIndex, 0, Math.Max(0, context.ChunkCount - 1))}; destination_mode={FormatV6DestinationMode(context.V6DestinationMode)}");
     }
 
-    private void ApplyOutboundV6ReceiverState(
+    private async Task ApplyOutboundV6ReceiverState(
         OutboundTransferContext context,
         FileTransferReceiverStateFrameV6 state,
         FileTransferTransportKind receivedTransportKind)
     {
         SessionFileTransferSnapshot? snapshot = null;
+        bool completeFromFallbackTerminalReady = false;
         lock (gate)
         {
             if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
@@ -345,6 +346,13 @@ public sealed partial class SessionFileTransferService
                 state.TransportEpoch,
                 receivedTransportKind,
                 "receiver_state_control_proof");
+            if (recoveredFromReceiverStateProof)
+            {
+                TryResumeOutboundRuntimeUnlockAfterFallbackSurvivalProofLocked(
+                    context,
+                    "fallback_handoff_recovered");
+            }
+
             if (state.Epoch <= context.V6LastReceiverStateEpoch)
             {
                 LocalOperationalLog.Info(
@@ -508,6 +516,25 @@ public sealed partial class SessionFileTransferService
                     context.V6SenderPumpLastWakeReason = "receiver_state_control_proof";
                 }
 
+                var fallbackTailYielded = TryMarkOutboundFallbackTailQuiescentOrTerminalLocked(
+                    context,
+                    state,
+                    stateRequestsFrontierGap,
+                    "receiver_state_progress",
+                    out var fallbackTerminalProofConsumed);
+                if (fallbackTerminalProofConsumed)
+                {
+                    completeFromFallbackTerminalReady = true;
+                    context.State = FileTransferTransferState.AwaitingCompletion;
+                    context.StatusMessage = "Waiting for receiver verification.";
+                }
+                else if (fallbackTailYielded)
+                {
+                    TryResumeOutboundRuntimeUnlockAfterFallbackSurvivalProofLocked(
+                        context,
+                        "fallback_tail_quiescent");
+                }
+
                 snapshot = CreateSnapshotLocked();
 
                 LocalOperationalLog.Info(
@@ -520,6 +547,19 @@ public sealed partial class SessionFileTransferService
         {
             RaiseTransferChanged(snapshot);
             MaybeLogProgressMilestone(context, FileTransferDirection.Outbound);
+        }
+
+        if (completeFromFallbackTerminalReady)
+        {
+            await TransitionOutboundToTerminalAsync(
+                    context,
+                    FileTransferTransferState.Completed,
+                    errorCode: null,
+                    statusMessage: "Transfer complete.",
+                    notifyPeer: false,
+                    cancelReason: null,
+                    ct: CancellationToken.None)
+                .ConfigureAwait(false);
         }
     }
 

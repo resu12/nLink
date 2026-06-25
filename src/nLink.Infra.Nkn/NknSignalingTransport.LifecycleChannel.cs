@@ -19,7 +19,7 @@ public sealed partial class NknSignalingTransport
     public async Task HostByAddressAsync(CancellationToken ct)
     {
         ThrowIfDisposed();
-        ResetHostReady();
+        ResetHostReady("helpee_address_native_host");
 
         ResetSessionTracking();
 
@@ -30,20 +30,54 @@ public sealed partial class NknSignalingTransport
         {
             SetAdapterReliabilityModeHint("Helpee");
             SessionReliabilityLog.RecordStandalone("Helpee", "NKN", SessionReliabilityStage.DiscoveryStarted);
+            LocalOperationalLog.Info(
+                "SessionSecurity",
+                $"event=nkn_host_ready_connect_started; role=helpee; transport=nkn; identity_len={identity.Address.Length}; identifier={SanitizeLogToken(identity.Identifier)}");
             await client.ConnectAsync(ct);
+            var connectedAddress = LocalPeerAddress.Trim();
+            var authoritativeAddressResolved =
+                client is IAuthoritativeConnectedAddressSource authoritativeConnectedAddressSource &&
+                authoritativeConnectedAddressSource.HasAuthoritativeConnectedAddress;
+            LocalOperationalLog.Info(
+                "SessionSecurity",
+                $"event=nkn_host_ready_connect_completed; role=helpee; transport=nkn; address_len={connectedAddress.Length}; authoritative={(authoritativeAddressResolved ? 1 : 0)}");
+            if (string.IsNullOrWhiteSpace(connectedAddress) ||
+                !PeerAddress.TryParse(connectedAddress, out var helpeeAddress))
+            {
+                NknRuntimeDiagnostics.SetLastError("nkn_host_authoritative_address_unavailable");
+                LocalOperationalLog.Warn(
+                    "SessionSecurity",
+                    $"event=nkn_host_ready_connect_failed; reason=authoritative_address_unavailable; role=helpee; transport=nkn; address_len={connectedAddress.Length}; authoritative={(authoritativeAddressResolved ? 1 : 0)}");
+                throw new InvalidOperationException("NKN host-ready completed without a usable authoritative helpee address.");
+            }
+
             NknRuntimeDiagnostics.SetIdentity(
-                address: string.IsNullOrWhiteSpace(client.Address) ? identity.Address : client.Address,
+                address: connectedAddress,
                 identifier: identity.Identifier,
                 keyPath: options.KeyPath,
                 seedRpc: options.SeedRpc);
-            UpdateSessionSecurityState(SessionSecurityState.CreateHelpeeWaiting(new PeerAddress(LocalPeerAddress)));
+            NknRuntimeDiagnostics.SetAuthoritativeConnectedAddressResolved(authoritativeAddressResolved);
+            UpdateSessionSecurityState(SessionSecurityState.CreateHelpeeWaiting(helpeeAddress));
             TrySetHostReady();
             Log("HostByAddressAsync ready (address-native)");
         }
+        catch (OperationCanceledException ex) when (ct.IsCancellationRequested)
+        {
+            TryFailHostReady(ex, "cancelled_before_ready");
+            NknRuntimeDiagnostics.SetLastError("nkn_host_ready_connect_cancelled_before_ready");
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                "event=nkn_host_ready_connect_failed; reason=cancelled_before_ready; role=helpee; transport=nkn");
+            Log("HostByAddressAsync failed (OperationCanceledException)");
+            throw;
+        }
         catch (Exception ex)
         {
-            TryFailHostReady(ex);
+            TryFailHostReady(ex, "host_ready_connect_failed");
             NknRuntimeDiagnostics.SetLastError(ex);
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=nkn_host_ready_connect_failed; reason={SanitizeLogToken(ex.GetType().Name)}; role=helpee; transport=nkn");
             Log($"HostByAddressAsync failed ({ex.GetType().Name})");
             throw;
         }

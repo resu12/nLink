@@ -289,6 +289,8 @@ public sealed record FileTransferControlPlaneDeliveryRequest(
     public int PeerCopyAttempts { get; init; } = 1;
 
     public TimeSpan? CopyTimeout { get; init; }
+
+    public Func<bool>? PreTransportDeliveryValidator { get; init; }
 }
 
 public sealed record FileTransferControlPlaneDeliveryResult(
@@ -342,6 +344,21 @@ public interface IFileTransferRuntimeUnlockPreCommitProbeAckAuthorizer
     void AuthorizeRuntimeUnlockPreCommitProbeAck(
         FileTransferRuntimeUnlockPreCommitProbeFrame probe,
         FileTransferTransportKind receivedTransportKind);
+
+    void AuthorizeRuntimeUnlockPreCommitProbeAck(
+        FileTransferRuntimeUnlockPreCommitProbeAckFrame ack,
+        FileTransferTransportKind receivedTransportKind);
+}
+
+public interface IFileTransferRuntimeUnlockTunaProbeSender
+{
+    Task SendRuntimeUnlockTunaPreCommitProbeAsync(
+        FileTransferRuntimeUnlockPreCommitProbeFrame probe,
+        CancellationToken ct);
+
+    Task SendRuntimeUnlockTunaPreCommitProbeAckAsync(
+        FileTransferRuntimeUnlockPreCommitProbeAckFrame ack,
+        CancellationToken ct);
 }
 
 public sealed class FileTransferDataSessionAvailabilityChangedEventArgs : EventArgs

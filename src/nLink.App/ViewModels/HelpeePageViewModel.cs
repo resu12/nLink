@@ -46,6 +46,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private static readonly TimeSpan DefaultIncomingRequestTimeout = SessionApprovalTimeouts.DefaultHumanDecisionTimeout;
     private static readonly TimeSpan RecoveryTransientThrottle = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DefaultInviteLifetime = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan DefaultInviteBootstrapTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan PeerEndedNoticeDuration = TimeSpan.FromSeconds(4);
     private static readonly TimeSpan TransportScreenShareRetryDelay = TimeSpan.FromMilliseconds(300);
     private const int FileTransferUiRefreshMinIntervalMs = 125;
@@ -139,6 +140,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private readonly DispatcherTimer peerEndedNoticeTimer;
     private CancellationTokenSource? incomingRequestTimeoutCts;
     private readonly TimeSpan incomingRequestTimeout;
+    private readonly TimeSpan inviteBootstrapTimeout;
     private bool startupBlocked;
     private bool startupFailureBlocksAutoRestart;
     private bool autoRegeneratingAfterDisconnect;
@@ -185,6 +187,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private bool remoteControlDebugPanelExpanded;
     private bool disposed;
     private int windowCloseDisconnectStarted;
+    private long inviteBootstrapGeneration;
 #if DEBUG
     private Timer? previewSnapshotTimer;
     private int previewSnapshotTickInFlight;
@@ -203,7 +206,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         Action? backAction = null,
         IScreenCaptureSourceFactory? screenCaptureSourceFactory = null,
         IInviteShareService? inviteShareService = null,
-        IQrCodeService? qrCodeService = null)
+        IQrCodeService? qrCodeService = null,
+        TimeSpan? inviteBootstrapTimeout = null)
         : this(
             cancelAction,
             transportConfig,
@@ -218,7 +222,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             screenCaptureSourceFactory,
             decodeFrame: null,
             inviteShareService: inviteShareService,
-            qrCodeService: qrCodeService)
+            qrCodeService: qrCodeService,
+            inviteBootstrapTimeout: inviteBootstrapTimeout)
     {
     }
 
@@ -236,7 +241,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         IScreenCaptureSourceFactory? screenCaptureSourceFactory,
         Func<byte[], Bitmap>? decodeFrame,
         IInviteShareService? inviteShareService = null,
-        IQrCodeService? qrCodeService = null)
+        IQrCodeService? qrCodeService = null,
+        TimeSpan? inviteBootstrapTimeout = null)
     {
         this.cancelAction = cancelAction;
         this.backAction = backAction ?? cancelAction;
@@ -251,6 +257,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         RefreshAutomaticIdentityRecoveryWarning();
         inviteTokenFactory = ConnectInputResolverFactory.CreateInviteTokenFactory();
         this.incomingRequestTimeout = incomingRequestTimeout ?? DefaultIncomingRequestTimeout;
+        this.inviteBootstrapTimeout = inviteBootstrapTimeout ?? DefaultInviteBootstrapTimeout;
         this.uiStateStore = uiStateStore;
         shareInviteExpiryTimer = new DispatcherTimer
         {
@@ -2308,24 +2315,85 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         LogReliability(SessionReliabilityStage.DiscoveryStarted);
 
         AppLog.Info($"Helpee hosting using {transportConfig.Key} with address-native mode");
+        StartInviteBootstrapReadinessWatchdog(Interlocked.Increment(ref inviteBootstrapGeneration));
         _ = StartHostingAsync();
+    }
+
+    private void StartInviteBootstrapReadinessWatchdog(long generation)
+    {
+        if (inviteBootstrapTimeout <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(inviteBootstrapTimeout).ConfigureAwait(false);
+            }
+            catch
+            {
+                return;
+            }
+
+            if (disposed || generation != Volatile.Read(ref inviteBootstrapGeneration))
+            {
+                return;
+            }
+
+            var shouldFail = false;
+            await UiThreadDispatch.RunAsync(() =>
+            {
+                shouldFail =
+                    !disposed &&
+                    generation == Volatile.Read(ref inviteBootstrapGeneration) &&
+                    !HasShareInvite &&
+                    !HasIncomingRequest &&
+                    !IsRequestAllowed &&
+                    IsInvitePreparationStatus(ShareInviteStatusText);
+            }).ConfigureAwait(false);
+
+            if (!shouldFail)
+            {
+                return;
+            }
+
+            await SurfaceInviteBootstrapFailureAsync(
+                "Helpee invite bootstrap watchdog expired before a local address became ready.",
+                "helpee_invite_bootstrap_watchdog_expired").ConfigureAwait(false);
+        });
     }
 
     private async Task StartHostingAsync()
     {
+        using var bootstrapCts = inviteBootstrapTimeout > TimeSpan.Zero
+            ? new CancellationTokenSource(inviteBootstrapTimeout)
+            : new CancellationTokenSource();
         try
         {
             await sessionRuntime.ResetAsync();
-            await sessionRuntime.StartHelpeeAsync(CancellationToken.None);
+            await sessionRuntime.StartHelpeeAsync(bootstrapCts.Token);
             await UiThreadDispatch.RunAsync(() =>
             {
                 RefreshAutomaticIdentityRecoveryWarning();
                 EnsureInviteSnapshot(forceNewToken: false);
             });
         }
+        catch (OperationCanceledException) when (bootstrapCts.IsCancellationRequested)
+        {
+            await SurfaceInviteBootstrapFailureAsync(
+                "Helpee invite bootstrap timed out before a local address became ready.",
+                "helpee_invite_bootstrap_timeout_after_helper_identity");
+        }
         catch (OperationCanceledException)
         {
-            // No-op.
+            if (!disposed && !HasShareInvite)
+            {
+                await SurfaceInviteBootstrapFailureAsync(
+                    "Helpee invite bootstrap was cancelled before a local address became ready.",
+                    "helpee_invite_bootstrap_cancelled_before_ready");
+            }
         }
         catch
         {
@@ -2360,6 +2428,48 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
     }
 
+    private async Task SurfaceInviteBootstrapFailureAsync(string message, string reason)
+    {
+        Interlocked.Increment(ref inviteBootstrapGeneration);
+        startupFailureBlocksAutoRestart = true;
+        autoRegeneratingAfterDisconnect = false;
+        var bridgeReadiness = sessionRuntime.BridgeBootstrapReadiness;
+        var bridgeNotReady = !bridgeReadiness.ReadyEmitted;
+        var eventName = bridgeNotReady ? "nkn_bridge_bootstrap_not_ready" : reason;
+        var subreason = bridgeNotReady
+            ? "helpee_invite_host_before_bridge_ready"
+            : reason;
+
+        try
+        {
+            await sessionRuntime.FailAsync("Could not prepare invite. Refresh invite and try again.").ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+            return;
+        }
+
+        await UiThreadDispatch.RunAsync(() =>
+        {
+            RefreshAutomaticIdentityRecoveryWarning();
+            UpdateShareAddressText(string.Empty);
+            UpdateShareInviteText(string.Empty);
+            UpdateShareInviteRawTokenText(string.Empty);
+            UpdateShareInviteStatusText("Could not prepare invite. Refresh invite and try again.");
+            shareInviteExpiresAtUtc = DateTimeOffset.MinValue;
+            shareInviteAutoRefreshTriggered = false;
+            UpdateShareInviteExpiryText(string.Empty);
+            RefreshShareQrBitmaps();
+            ConnectionStatus = "Could not prepare invite. Refresh invite and try again.";
+            ConnectionState = "Failed";
+            AppLog.Warn(
+                $"event={eventName}; subreason={subreason}; message={message}; verified_helper={(HasVerifiedInviteHelperIdentity ? 1 : 0)}; runtime_state={sessionRuntime.State}; transport_state={sessionRuntime.TransportLifecycleState}; invite_status={ShareInviteStatusText}; " +
+                $"ready_emitted={(bridgeReadiness.ReadyEmitted ? 1 : 0)}; control_ready={(bridgeReadiness.ControlReady ? 1 : 0)}; media_ready={(bridgeReadiness.MediaReady ? 1 : 0)}; bulk_ready={(bridgeReadiness.BulkReady ? 1 : 0)}; " +
+                $"bootstrap_role={bridgeReadiness.Role}; bootstrap_generation={bridgeReadiness.Generation}; terminal_failure={(bridgeReadiness.TerminalFailure ? 1 : 0)}; failure_reason={bridgeReadiness.FailureReason}; last_error={bridgeReadiness.LastError}");
+            RefreshCommandStates();
+        });
+    }
+
     private void EnsureInviteSnapshot(bool forceNewToken)
     {
         var candidateAddress = ResolveInviteAddress();
@@ -2370,7 +2480,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             UpdateShareAddressText(string.Empty);
             UpdateShareInviteText(string.Empty);
             UpdateShareInviteRawTokenText(string.Empty);
-            UpdateShareInviteStatusText(startupFailureBlocksAutoRestart && IsProtectedSeedStorageReadFailure(sessionRuntime.StatusText)
+            UpdateShareInviteStatusText(startupFailureBlocksAutoRestart && !string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
                 ? sessionRuntime.StatusText
                 : "Preparing invite…");
             shareInviteExpiresAtUtc = DateTimeOffset.MinValue;

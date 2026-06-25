@@ -2279,6 +2279,21 @@ function rotateCandidates(candidates) {
   return [...candidates.slice(offset), ...candidates.slice(0, offset)];
 }
 
+function resolveConnectFallbackDelayMs(command) {
+  const preflightDelay = command && command.preflightRpcEnabled
+    ? Number(command.preflightTimeoutMs)
+    : NaN;
+  const requestedDelay = Number.isFinite(Number(command && command.fallbackDelayMs))
+    ? Number(command.fallbackDelayMs)
+    : preflightDelay;
+
+  return clampNumber(
+    requestedDelay,
+    DEFAULT_CONNECT_READY_TIMEOUT_MS,
+    MIN_CONNECT_FALLBACK_DELAY_MS,
+    MAX_CONNECT_FALLBACK_DELAY_MS);
+}
+
 function toBufferFromBase64(payloadBase64) {
   if (typeof payloadBase64 !== 'string' || payloadBase64.length === 0) {
     throw new Error('payloadBase64 is required.');
@@ -2748,11 +2763,7 @@ async function handleConnect(command) {
   if (rpcCandidates.length > 1) {
     const connectAttemptId = Date.now() + Math.random();
     state.connectAttemptId = connectAttemptId;
-    const fallbackDelayMs = clampNumber(
-      command.fallbackDelayMs,
-      DEFAULT_CONNECT_READY_TIMEOUT_MS,
-      MIN_CONNECT_FALLBACK_DELAY_MS,
-      MAX_CONNECT_FALLBACK_DELAY_MS);
+    const fallbackDelayMs = resolveConnectFallbackDelayMs(command);
     tryFallbackRpcCandidates(connectAttemptId, command, rpcCandidates.slice(1), fallbackDelayMs);
   }
 }

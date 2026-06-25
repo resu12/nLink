@@ -164,9 +164,96 @@ function Invoke-TunaGuiRetainedAnalysis {
     }
 
     New-Item -ItemType Directory -Force -Path $AnalysisDir | Out-Null
-    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RepoRoot 'tools\FileTransfer-Ops.ps1') -Mode AnalyzeRetained -LogPath $LogPath -ArtifactDir $AnalysisDir -TailMinutes 0 -LiveRouteProofMode $LiveRouteProofMode
-    if ($LASTEXITCODE -ne 0) {
-        throw "Retained analysis failed with exit code $LASTEXITCODE. Artifacts: $AnalysisDir"
+
+    $stdoutPath = Join-Path $AnalysisDir 'filetransfer-retained-analysis.stdout.txt'
+    $stderrPath = Join-Path $AnalysisDir 'filetransfer-retained-analysis.stderr.txt'
+    $diagnosticsPath = Join-Path $AnalysisDir 'filetransfer-retained-analysis-diagnostics.json'
+    $analysisTimeoutSeconds = 180
+    $startedUtc = [DateTimeOffset]::UtcNow
+    $arguments = @(
+        '-NoProfile',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', (Join-Path $RepoRoot 'tools\FileTransfer-Ops.ps1'),
+        '-Mode', 'AnalyzeRetained',
+        '-LogPath', $LogPath,
+        '-ArtifactDir', $AnalysisDir,
+        '-TailMinutes', '0',
+        '-LiveRouteProofMode', $LiveRouteProofMode)
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = 'powershell'
+    $startInfo.Arguments = ($arguments | ForEach-Object {
+            $argument = [string]$_
+            if ($argument.Length -eq 0) {
+                '""'
+            }
+            elseif ($argument.IndexOfAny([char[]]@(' ', "`t", '"')) -lt 0) {
+                $argument
+            }
+            else {
+                '"' + ($argument -replace '"', '\"') + '"'
+            }
+        }) -join ' '
+    $startInfo.WorkingDirectory = $RepoRoot
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) {
+            throw "Failed to start retained analysis. Artifacts: $AnalysisDir"
+        }
+
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($analysisTimeoutSeconds * 1000)) {
+            try {
+                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            } catch {
+            }
+
+            $diagnostics = [ordered]@{
+                timed_out = 1
+                timeout_seconds = $analysisTimeoutSeconds
+                process_id = $process.Id
+                started_utc = $startedUtc.ToString('O')
+                ended_utc = [DateTimeOffset]::UtcNow.ToString('O')
+                artifact_dir = $AnalysisDir
+                log_path = $LogPath
+                live_route_proof_mode = $LiveRouteProofMode
+            }
+            $diagnostics | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $diagnosticsPath -Encoding UTF8
+            throw "Retained analysis timed out after ${analysisTimeoutSeconds}s. Artifacts: $AnalysisDir"
+        }
+
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+        Set-Content -LiteralPath $stdoutPath -Value $stdout -Encoding UTF8
+        Set-Content -LiteralPath $stderrPath -Value $stderr -Encoding UTF8
+
+        $diagnostics = [ordered]@{
+            timed_out = 0
+            exit_code = $process.ExitCode
+            timeout_seconds = $analysisTimeoutSeconds
+            process_id = $process.Id
+            started_utc = $startedUtc.ToString('O')
+            ended_utc = [DateTimeOffset]::UtcNow.ToString('O')
+            artifact_dir = $AnalysisDir
+            log_path = $LogPath
+            live_route_proof_mode = $LiveRouteProofMode
+        }
+        $diagnostics | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $diagnosticsPath -Encoding UTF8
+
+        if ($process.ExitCode -ne 0) {
+            throw "Retained analysis failed with exit code $($process.ExitCode). Artifacts: $AnalysisDir"
+        }
+    }
+    finally {
+        if ($process -is [System.IDisposable]) {
+            $process.Dispose()
+        }
     }
 }
 

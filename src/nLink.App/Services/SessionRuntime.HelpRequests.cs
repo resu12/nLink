@@ -46,6 +46,7 @@ public sealed partial class SessionRuntime
             EnsureSessionSecurityTransport(nextTransport);
             sessionCts = linkedCts;
             transport = nextTransport;
+            CaptureBridgeBootstrapReadinessSnapshot(nextTransport);
             role = SessionRuntimeRole.Helper;
             helperConnectOrigin = HelperConnectOrigin.Listener;
             helperShouldReturnToListenerWaiting = true;

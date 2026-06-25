@@ -367,6 +367,23 @@ function Test-FileTransferRouteEventSupersededBySelectedRoute {
         [AllowEmptyString()][string]$ExpectedProtocol = ''
     )
 
+    if ($Event.EventName -eq 'filetransfer_runtime_owner_stale_update_rejected') {
+        $currentRoute = Get-FileTransferEventField -Event $Event -Name 'current_route' -Default ''
+        if ([string]::IsNullOrWhiteSpace($currentRoute) -or
+            -not [string]::Equals($currentRoute, $SelectedRoute, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+
+        $currentProtocol = Get-FileTransferEventField -Event $Event -Name 'current_protocol_version' -Default ''
+        if (-not [string]::IsNullOrWhiteSpace($currentProtocol) -and
+            -not [string]::IsNullOrWhiteSpace($ExpectedProtocol) -and
+            $currentProtocol -ne $ExpectedProtocol) {
+            return $false
+        }
+
+        return $true
+    }
+
     $supersededByRoute = Get-FileTransferEventField -Event $Event -Name 'superseded_by_route' -Default ''
     if ([string]::IsNullOrWhiteSpace($supersededByRoute) -or
         -not [string]::Equals($supersededByRoute, $SelectedRoute, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -1124,8 +1141,17 @@ function Get-FileTransferLiveRouteEpochProof {
         $expectedRoutes = @('post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6')
     }
     elseif ($Mode -eq 'RegularActivationCycle') {
-        $expectedRoutes = @('file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6')
-        $expectedSelectedRouteChanges = @('regular_nkn_v4_fast', 'file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6')
+        $terminalFallbackBeforeReactivation = @(
+            Get-FileTransferEventsByName -Events $TransferEvents -Names @('filetransfer_tuna_gui_live_reactivation_first_transfer_terminal_before_activation')
+        ).Count -gt 0
+        if ($terminalFallbackBeforeReactivation) {
+            $expectedRoutes = @('file_tuna_v4', 'post_tuna_fallback_v6')
+            $expectedSelectedRouteChanges = @('regular_nkn_v4_fast', 'file_tuna_v4', 'post_tuna_fallback_v6')
+        }
+        else {
+            $expectedRoutes = @('file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6')
+            $expectedSelectedRouteChanges = @('regular_nkn_v4_fast', 'file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6')
+        }
         $actualSelectedRouteChanges = $selectedRouteChanges.ToArray()
         if (($actualSelectedRouteChanges -join ',') -ne ($expectedSelectedRouteChanges -join ',')) {
             $findings.Add(("selected route changes mismatch: mode={0}; expected={1}; actual={2}" -f $Mode, ($expectedSelectedRouteChanges -join ','), ($(if ($actualSelectedRouteChanges.Count -gt 0) { $actualSelectedRouteChanges -join ',' } else { '(none)' })))) | Out-Null

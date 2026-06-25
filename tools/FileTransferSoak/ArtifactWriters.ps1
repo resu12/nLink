@@ -2447,10 +2447,18 @@ function Get-FileTransferFallbackTailReconciliationProof {
                 (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6'
             }
     )
+    $hasPostTunaFallbackEvidence = $postTunaRouteSelected.Count -gt 0 -or
+        @($events | Where-Object { (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' }).Count -gt 0
     [object[]]$zeroCreditBreakerEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_tail_zero_credit_breaker' })
     [object[]]$staleFrontierRetiredEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_tail_stale_frontier_retired' })
     [object[]]$requestedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_tail_reconciliation_requested' })
     [object[]]$acceptedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_tail_reconciliation_accepted' })
+    [object[]]$progressForcedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_v6_post_tuna_fallback_frontier_progress_state_forced' })
+    [object[]]$progressCoalescedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_tail_progress_coalesced' })
+    [object[]]$terminalProofConsumedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_tail_terminal_proof_consumed' })
+    [object[]]$quiescentYieldEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_tail_quiescent_yield_granted' })
+    [object[]]$quiescenceTimeoutEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_tail_quiescence_timeout' })
+    [object[]]$runtimeUnlockWaitingForFallbackEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_runtime_unlock_waiting_for_fallback_survival' })
     [object[]]$sendSlotRetiredEvents = @(
         $events |
             Where-Object {
@@ -2559,10 +2567,53 @@ function Get-FileTransferFallbackTailReconciliationProof {
         $verdict = 'none'
     }
 
+    $quiescenceFindings = New-Object System.Collections.Generic.List[string]
+    $quiescenceEvidence = New-Object System.Collections.Generic.List[object]
+    $hasTailActivity = $tailReconciliationStarted -or
+        $progressForcedEvents.Count -gt 0 -or
+        $runtimeUnlockWaitingForFallbackEvents.Count -gt 0
+    $hasTailOutcome = $terminalProofConsumedEvents.Count -gt 0 -or
+        $quiescentYieldEvents.Count -gt 0
+
+    if ($quiescenceTimeoutEvents.Count -gt 0) {
+        $quiescenceFindings.Add('fallback tail reached deterministic quiescence timeout') | Out-Null
+        foreach ($event in @($quiescenceTimeoutEvents | Select-Object -First 5)) {
+            $quiescenceEvidence.Add($event) | Out-Null
+        }
+    }
+
+    if ($hasPostTunaFallbackEvidence -and
+        $runtimeUnlockWaitingForFallbackEvents.Count -gt 0 -and
+        $progressForcedEvents.Count -gt 0 -and
+        -not $hasTailOutcome -and
+        $failureEvents.Count -gt 0) {
+        $quiescenceFindings.Add('fallback tail progressed while runtime unlock waited, but no terminal proof or explicit quiescent yield was recorded') | Out-Null
+        foreach ($event in @($runtimeUnlockWaitingForFallbackEvents + $progressForcedEvents + $failureEvents | Select-Object -First 10)) {
+            $quiescenceEvidence.Add($event) | Out-Null
+        }
+    }
+
+    $quiescenceVerdict = 'none'
+    if ($hasTailOutcome) {
+        $quiescenceVerdict = 'pass'
+    }
+    elseif ($quiescenceFindings.Count -gt 0) {
+        $quiescenceVerdict = 'fail'
+    }
+    elseif ($hasTailActivity) {
+        $quiescenceVerdict = 'pending'
+    }
+
     return [pscustomobject]@{
         Verdict = $verdict
+        QuiescenceVerdict = $quiescenceVerdict
         RequestedCount = $requestedEvents.Count
         AcceptedCount = $acceptedEvents.Count
+        ProgressForcedCount = $progressForcedEvents.Count
+        ProgressCoalescedCount = $progressCoalescedEvents.Count
+        TerminalProofConsumedCount = $terminalProofConsumedEvents.Count
+        QuiescentYieldGrantedCount = $quiescentYieldEvents.Count
+        QuiescenceTimeoutCount = $quiescenceTimeoutEvents.Count
         ZeroCreditBreakerCount = $zeroCreditBreakerEvents.Count
         StaleFrontierRetiredCount = $staleFrontierRetiredEvents.Count
         SendSlotRetiredCount = $sendSlotRetiredEvents.Count
@@ -2570,7 +2621,9 @@ function Get-FileTransferFallbackTailReconciliationProof {
         NormalZeroCreditTailStateRefreshCount = $normalZeroCreditTailStateRefreshEvents.Count
         MetadataMissingCount = $metadataMissing.Count
         Findings = $findings
+        QuiescenceFindings = $quiescenceFindings
         EvidenceEvents = @(@($evidence.ToArray()) + @($zeroCreditBreakerEvents + $requestedEvents + $acceptedEvents + $normalZeroCreditTailStateRefreshEvents) | Select-Object -First 20)
+        QuiescenceEvidenceEvents = @(@($quiescenceEvidence.ToArray()) + @($terminalProofConsumedEvents + $quiescentYieldEvents + $quiescenceTimeoutEvents + $progressForcedEvents) | Select-Object -First 20)
     }
 }
 
@@ -2951,6 +3004,14 @@ function Get-FileTransferControlPlaneIsolationProof {
         $checkpointId = Get-FileTransferEventField -Event $event -Name 'checkpoint_request_id' -Default ''
         $requiresCheckpointId = $kind -eq 'fallback_checkpoint_request' -or
             $kind -eq 'fallback_checkpoint_proof'
+        $isRegularV4ControlPlaneProof =
+            $route -eq 'regular_nkn_v4_fast' -and
+            $protocol -eq 4 -and
+            ($kind -eq 'receiver_state' -or $kind -eq 'frontier_request')
+        if ($isRegularV4ControlPlaneProof) {
+            continue
+        }
+
         if ($route -ne 'post_tuna_fallback_v6' -or
             $protocol -ne 6 -or
             $legGeneration -le 0 -or
@@ -3117,8 +3178,11 @@ function Get-FileTransferFallbackRuntimeUnlockSeparationProof {
     $fallbackUnavailableMarkEvents = @($events | Where-Object {
         $_.EventName -eq 'filetransfer_runtime_unlock_marked_fallback_unavailable' -or
         (
-            (Get-FileTransferEventField -Event $_ -Name 'trigger' -Default '') -eq 'post_tuna_fallback_offer_send_prepare' -or
-            (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'post_tuna_fallback_offer_send_prepare'
+            $_.EventName -ne 'runtime_unlock_fallback_unavailable_suppressed' -and
+            (
+                (Get-FileTransferEventField -Event $_ -Name 'trigger' -Default '') -eq 'post_tuna_fallback_offer_send_prepare' -or
+                (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'post_tuna_fallback_offer_send_prepare'
+            )
         )
     })
     $fallbackUnavailableSuppressedEvents = @($events | Where-Object {
@@ -3280,8 +3344,14 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("fallback_leg_authority_stale_proof_ignored_count={0}" -f $fallbackAuthorityProof.StaleProofIgnoredCount)) | Out-Null
     $lines.Add(("fallback_leg_authority_metadata_missing_count={0}" -f $fallbackAuthorityProof.MetadataMissingCount)) | Out-Null
     $lines.Add(("fallback_tail_reconciliation_verdict={0}" -f $fallbackTailProof.Verdict)) | Out-Null
+    $lines.Add(("fallback_tail_quiescence_verdict={0}" -f $fallbackTailProof.QuiescenceVerdict)) | Out-Null
     $lines.Add(("fallback_tail_reconciliation_requested_count={0}" -f $fallbackTailProof.RequestedCount)) | Out-Null
     $lines.Add(("fallback_tail_reconciliation_accepted_count={0}" -f $fallbackTailProof.AcceptedCount)) | Out-Null
+    $lines.Add(("fallback_tail_progress_forced_count={0}" -f $fallbackTailProof.ProgressForcedCount)) | Out-Null
+    $lines.Add(("fallback_tail_progress_coalesced_count={0}" -f $fallbackTailProof.ProgressCoalescedCount)) | Out-Null
+    $lines.Add(("fallback_tail_terminal_proof_consumed_count={0}" -f $fallbackTailProof.TerminalProofConsumedCount)) | Out-Null
+    $lines.Add(("fallback_tail_quiescent_yield_granted_count={0}" -f $fallbackTailProof.QuiescentYieldGrantedCount)) | Out-Null
+    $lines.Add(("fallback_tail_quiescence_timeout_count={0}" -f $fallbackTailProof.QuiescenceTimeoutCount)) | Out-Null
     $lines.Add(("fallback_tail_zero_credit_breaker_count={0}" -f $fallbackTailProof.ZeroCreditBreakerCount)) | Out-Null
     $lines.Add(("fallback_tail_stale_frontier_retired_count={0}" -f $fallbackTailProof.StaleFrontierRetiredCount)) | Out-Null
     $lines.Add(("fallback_tail_state_refresh_send_slot_retired_count={0}" -f $fallbackTailProof.SendSlotRetiredCount)) | Out-Null
@@ -3325,6 +3395,7 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("fallback_control_plane_non_current_leg_generation_send_count={0}" -f $controlPlaneProof.ControlPlaneNonCurrentLegGenerationSendCount)) | Out-Null
     $lines.Add(("fallback_runtime_unlock_separation_verdict={0}" -f $fallbackRuntimeUnlockSeparationProof.Verdict)) | Out-Null
     $lines.Add(("runtime_fallback_separation_verdict={0}" -f $fallbackRuntimeUnlockSeparationProof.Verdict)) | Out-Null
+    $lines.Add(("runtime_fallback_arbitration_verdict={0}" -f $fallbackRuntimeUnlockSeparationProof.Verdict)) | Out-Null
     $lines.Add(("fallback_runtime_unlock_waiting_count={0}" -f $fallbackRuntimeUnlockSeparationProof.WaitingForFallbackSurvivalCount)) | Out-Null
     $lines.Add(("runtime_unlock_activation_window_granted_count={0}" -f $fallbackRuntimeUnlockSeparationProof.ActivationWindowGrantedCount)) | Out-Null
     $lines.Add(("runtime_unlock_probe_failed_fallback_resumed_count={0}" -f $fallbackRuntimeUnlockSeparationProof.ProbeFailedFallbackResumedCount)) | Out-Null
@@ -3391,6 +3462,19 @@ function New-FileTransferRouteConsistencySummaryLines {
         foreach ($finding in @($fallbackTailProof.Findings)) {
             $tailIndex++
             $lines.Add(("tail.{0}={1}" -f $tailIndex, $finding)) | Out-Null
+        }
+    }
+    else {
+        $lines.Add('(none)') | Out-Null
+    }
+
+    $lines.Add('') | Out-Null
+    $lines.Add('fallback_tail_quiescence_findings:') | Out-Null
+    if ($fallbackTailProof.QuiescenceFindings.Count -gt 0) {
+        $tailQuiescenceIndex = 0
+        foreach ($finding in @($fallbackTailProof.QuiescenceFindings)) {
+            $tailQuiescenceIndex++
+            $lines.Add(("tail_quiescence.{0}={1}" -f $tailQuiescenceIndex, $finding)) | Out-Null
         }
     }
     else {
@@ -4920,6 +5004,15 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_precommit_probe_acked_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckedCount),
         ("runtime_unlock_precommit_probe_failed_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeFailedCount),
         ("runtime_unlock_precommit_probe_protocol_mismatch_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeProtocolMismatchCount),
+        ("runtime_unlock_tuna_probe_sent_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSentCount),
+        ("runtime_unlock_tuna_probe_received_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeReceivedCount),
+        ("runtime_unlock_tuna_probe_ack_sent_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeAckSentCount),
+        ("runtime_unlock_tuna_probe_ack_received_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeAckReceivedCount),
+        ("runtime_unlock_tuna_probe_sidecar_failure_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSidecarFailureCount),
+        ("runtime_unlock_paired_commit_started_count={0}" -f $recoveryClassification.RuntimeUnlockPairedCommitStartedCount),
+        ("runtime_unlock_paired_commit_confirmed_count={0}" -f $recoveryClassification.RuntimeUnlockPairedCommitConfirmedCount),
+        ("runtime_unlock_paired_commit_aborted_count={0}" -f $recoveryClassification.RuntimeUnlockPairedCommitAbortedCount),
+        ("runtime_unlock_probe_commit_verdict={0}" -f $recoveryClassification.RuntimeUnlockProbeCommitVerdict),
         ("runtime_unlock_make_before_break_verdict={0}" -f $recoveryClassification.RuntimeUnlockMakeBeforeBreakVerdict),
         ("runtime_unlock_transaction_commit_pending_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionCommitPendingCount),
         ("runtime_unlock_transaction_committed_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionCommittedCount),
@@ -4966,6 +5059,12 @@ function New-FileTransferStabilityGateSummaryLines {
         ("classification_fallback_tail_reconciliation_requested_count={0}" -f $recoveryClassification.FallbackTailReconciliationRequestedCount),
         ("classification_fallback_tail_reconciliation_accepted_count={0}" -f $recoveryClassification.FallbackTailReconciliationAcceptedCount),
         ("classification_fallback_tail_normal_zero_credit_state_refresh_count={0}" -f $recoveryClassification.FallbackTailNormalZeroCreditStateRefreshCount),
+        ("classification_fallback_tail_quiescence_verdict={0}" -f $recoveryClassification.FallbackTailQuiescenceVerdict),
+        ("classification_fallback_tail_progress_forced_count={0}" -f $recoveryClassification.FallbackTailProgressForcedCount),
+        ("classification_fallback_tail_progress_coalesced_count={0}" -f $recoveryClassification.FallbackTailProgressCoalescedCount),
+        ("classification_fallback_tail_terminal_proof_consumed_count={0}" -f $recoveryClassification.FallbackTailTerminalProofConsumedCount),
+        ("classification_fallback_tail_quiescent_yield_granted_count={0}" -f $recoveryClassification.FallbackTailQuiescentYieldGrantedCount),
+        ("classification_fallback_tail_quiescence_timeout_count={0}" -f $recoveryClassification.FallbackTailQuiescenceTimeoutCount),
         ("classification_control_plane_isolation_verdict={0}" -f $recoveryClassification.ControlPlaneIsolationVerdict),
         ("classification_control_plane_peer_visible_count={0}" -f $recoveryClassification.ControlPlanePeerVisibleCount),
         ("classification_control_plane_local_only_rejected_count={0}" -f $recoveryClassification.ControlPlaneLocalOnlyRejectedCount),
@@ -5019,8 +5118,14 @@ function New-FileTransferStabilityGateSummaryLines {
         ("fallback_leg_authority_stale_proof_ignored_count={0}" -f $fallbackAuthorityProof.StaleProofIgnoredCount),
         ("fallback_leg_authority_metadata_missing_count={0}" -f $fallbackAuthorityProof.MetadataMissingCount),
         ("fallback_tail_reconciliation_verdict={0}" -f $fallbackTailProof.Verdict),
+        ("fallback_tail_quiescence_verdict={0}" -f $fallbackTailProof.QuiescenceVerdict),
         ("fallback_tail_reconciliation_requested_count={0}" -f $fallbackTailProof.RequestedCount),
         ("fallback_tail_reconciliation_accepted_count={0}" -f $fallbackTailProof.AcceptedCount),
+        ("fallback_tail_progress_forced_count={0}" -f $fallbackTailProof.ProgressForcedCount),
+        ("fallback_tail_progress_coalesced_count={0}" -f $fallbackTailProof.ProgressCoalescedCount),
+        ("fallback_tail_terminal_proof_consumed_count={0}" -f $fallbackTailProof.TerminalProofConsumedCount),
+        ("fallback_tail_quiescent_yield_granted_count={0}" -f $fallbackTailProof.QuiescentYieldGrantedCount),
+        ("fallback_tail_quiescence_timeout_count={0}" -f $fallbackTailProof.QuiescenceTimeoutCount),
         ("fallback_tail_zero_credit_breaker_count={0}" -f $fallbackTailProof.ZeroCreditBreakerCount),
         ("fallback_tail_stale_frontier_retired_count={0}" -f $fallbackTailProof.StaleFrontierRetiredCount),
         ("fallback_tail_state_refresh_send_slot_retired_count={0}" -f $fallbackTailProof.SendSlotRetiredCount),
@@ -5600,19 +5705,48 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockPreCommitProbeAckedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_precommit_probe_acked'
     })
+    $runtimeUnlockTunaProbeSentEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_tuna_probe_sent'
+    })
+    $runtimeUnlockTunaProbeReceivedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_tuna_probe_received'
+    })
+    $runtimeUnlockTunaProbeAckSentEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_tuna_probe_ack_sent'
+    })
+    $runtimeUnlockTunaProbeAckReceivedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_tuna_probe_ack_received'
+    })
+    $runtimeUnlockTunaProbeSidecarFailureEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_tuna_probe_sidecar_failure'
+    })
     $runtimeUnlockPreCommitRouteEpochProofEvents = @($events | Where-Object {
         ($_.EventName -eq 'filetransfer_live_route_epoch_started' -or $_.EventName -eq 'filetransfer_live_route_epoch_recovered') -and
         (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'file_tuna_v4' -and
         (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -eq '4' -and
         (Get-FileTransferEventField -Event $_ -Name 'handoff_kind' -Default '') -eq 'normal_to_tuna_activation' -and
         (Get-FileTransferEventField -Event $_ -Name 'target_transport' -Default '') -eq 'tuna' -and
-        (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'precommit_probe_ack'
+        (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -in @(
+            'precommit_probe_ack',
+            'precommit_probe_commit_confirmed',
+            'precommit_probe_commit_confirmed_reply',
+            'precommit_probe_commit_confirmed_reply_sent')
     })
     $runtimeUnlockPreCommitRouteEpochRecoveredEvents = @($runtimeUnlockPreCommitRouteEpochProofEvents | Where-Object {
         $_.EventName -eq 'filetransfer_live_route_epoch_recovered'
     })
     $runtimeUnlockPreCommitProbeFailedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_precommit_probe_failed'
+    })
+    $runtimeUnlockPairedCommitStartedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_paired_commit_started'
+    })
+    $runtimeUnlockPairedCommitConfirmedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_paired_commit_confirmed' -or
+        $_.EventName -eq 'runtime_unlock_precommit_probe_paired_commit_confirmed'
+    })
+    $runtimeUnlockPairedCommitAbortedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_paired_commit_aborted'
     })
     $runtimeUnlockTransactionCommitPendingEvents = @($events | Where-Object {
         ($_.EventName -like 'runtime_unlock_transaction_*') -and
@@ -5708,6 +5842,10 @@ function Get-FileTransferRecoveryFailureClassification {
     if ($fileTunaV6Events.Count -gt 0) {
         $class = 'active_file_tuna_v6_evidence'
     }
+    elseif ($fallbackTailProof.QuiescenceVerdict -eq 'fail' -and
+        $hasPostTunaFallbackEvidence) {
+        $class = 'fallback_tail_quiescence_missing'
+    }
     elseif ($fallbackRuntimeUnlockSeparationProof.Verdict -eq 'fail' -and
         $hasPostTunaFallbackEvidence) {
         $class = 'runtime_fallback_separation_violation'
@@ -5757,6 +5895,16 @@ function Get-FileTransferRecoveryFailureClassification {
         $runtimeUnlockPreCommitProbeProtocolMismatchEvents.Count -gt 0 -and
         $runtimeUnlockProbeAckedEvents.Count -eq 0) {
         $class = 'runtime_unlock_precommit_probe_protocol_mismatch'
+    }
+    elseif ($runtimeUnlockTransactionPeerProofEvents.Count -gt 0 -and
+        $runtimeUnlockPreCommitProbeStartedEvents.Count -gt 0 -and
+        $runtimeUnlockTunaProbeSentEvents.Count -gt 0 -and
+        $runtimeUnlockTunaProbeReceivedEvents.Count -eq 0 -and
+        $runtimeUnlockTunaProbeAckReceivedEvents.Count -eq 0 -and
+        ($runtimeUnlockTunaProbeSidecarFailureEvents.Count -gt 0 -or
+         $runtimeUnlockPreCommitProbeFailedEvents.Count -gt 0 -or
+         $runtimeUnlockProbeFailedEvents.Count -gt 0)) {
+        $class = 'runtime_unlock_tuna_probe_path_not_established'
     }
     elseif ($runtimeUnlockTransactionPeerProofEvents.Count -gt 0 -and
         $runtimeUnlockProbeAckedEvents.Count -eq 0 -and
@@ -5912,6 +6060,16 @@ function Get-FileTransferRecoveryFailureClassification {
         $runtimeUnlockProbeMissingRejectedEvents.Count -gt 0 -or
         $runtimeUnlockProbeFailedEvents.Count -gt 0 -or
         $runtimeUnlockPreCommitProbeFailedEvents.Count -gt 0
+    $runtimeUnlockProbeCommitVerdict = if ($runtimeUnlockPreCommitProbeStartedEvents.Count -eq 0 -and
+        $runtimeUnlockPairedCommitStartedEvents.Count -eq 0) {
+        'none'
+    } elseif ($runtimeUnlockPairedCommitConfirmedEvents.Count -gt 0 -and
+        $runtimeUnlockPreCommitRouteEpochRecoveredEvents.Count -gt 0 -and
+        $runtimeUnlockPairedCommitAbortedEvents.Count -eq 0) {
+        'pass'
+    } else {
+        'fail'
+    }
 
     $runtimeUnlockRegularV4RecoveryArbitrationVerdict = if ($runtimeUnlockRegularV4ActivationWindowStartedEvents.Count -eq 0 -and
         $runtimeUnlockDispatchDeferredForRegularV4RecoveryEvents.Count -eq 0) {
@@ -5955,6 +6113,15 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockPreCommitProbeAckedCount = ($runtimeUnlockPreCommitProbeAckedEvents.Count + $runtimeUnlockPreCommitRouteEpochRecoveredEvents.Count)
         RuntimeUnlockPreCommitProbeFailedCount = $runtimeUnlockPreCommitProbeFailedEvents.Count
         RuntimeUnlockPreCommitProbeProtocolMismatchCount = $runtimeUnlockPreCommitProbeProtocolMismatchEvents.Count
+        RuntimeUnlockTunaProbeSentCount = $runtimeUnlockTunaProbeSentEvents.Count
+        RuntimeUnlockTunaProbeReceivedCount = $runtimeUnlockTunaProbeReceivedEvents.Count
+        RuntimeUnlockTunaProbeAckSentCount = $runtimeUnlockTunaProbeAckSentEvents.Count
+        RuntimeUnlockTunaProbeAckReceivedCount = $runtimeUnlockTunaProbeAckReceivedEvents.Count
+        RuntimeUnlockTunaProbeSidecarFailureCount = $runtimeUnlockTunaProbeSidecarFailureEvents.Count
+        RuntimeUnlockPairedCommitStartedCount = $runtimeUnlockPairedCommitStartedEvents.Count
+        RuntimeUnlockPairedCommitConfirmedCount = $runtimeUnlockPairedCommitConfirmedEvents.Count
+        RuntimeUnlockPairedCommitAbortedCount = $runtimeUnlockPairedCommitAbortedEvents.Count
+        RuntimeUnlockProbeCommitVerdict = $runtimeUnlockProbeCommitVerdict
         RuntimeUnlockMakeBeforeBreakVerdict = if (-not $runtimeUnlockHasMakeBeforeBreakEvidence) {
             'none'
         } elseif ($runtimeUnlockTransactionCommittedEvents.Count -gt 0 -and
@@ -6029,6 +6196,12 @@ function Get-FileTransferRecoveryFailureClassification {
         FallbackTailReconciliationRequestedCount = $fallbackTailProof.RequestedCount
         FallbackTailReconciliationAcceptedCount = $fallbackTailProof.AcceptedCount
         FallbackTailNormalZeroCreditStateRefreshCount = $fallbackTailProof.NormalZeroCreditTailStateRefreshCount
+        FallbackTailQuiescenceVerdict = $fallbackTailProof.QuiescenceVerdict
+        FallbackTailProgressForcedCount = $fallbackTailProof.ProgressForcedCount
+        FallbackTailProgressCoalescedCount = $fallbackTailProof.ProgressCoalescedCount
+        FallbackTailTerminalProofConsumedCount = $fallbackTailProof.TerminalProofConsumedCount
+        FallbackTailQuiescentYieldGrantedCount = $fallbackTailProof.QuiescentYieldGrantedCount
+        FallbackTailQuiescenceTimeoutCount = $fallbackTailProof.QuiescenceTimeoutCount
         ControlPlaneIsolationVerdict = $controlPlaneProof.Verdict
         ControlPlanePeerVisibleCount = $controlPlaneProof.PeerVisibleCount
         ControlPlaneLocalOnlyRejectedCount = $controlPlaneProof.LocalOnlyRejectedCount
@@ -6187,6 +6360,7 @@ function New-FileTransferInvariantLedgerObject {
         stale_route_worker_activity_count = $staleRouteWorkerActivityCount
         control_plane_peer_visible_proof_count = [string]$controlPlaneProof.PeerVisibleCount
         runtime_fallback_separation_verdict = $fallbackRuntimeUnlockSeparationProof.Verdict
+        runtime_fallback_arbitration_verdict = $fallbackRuntimeUnlockSeparationProof.Verdict
         control_plane_isolation_verdict = $controlPlaneProof.Verdict
         bridge_liveness_integration_verdict = $bridgeLivenessProof.Verdict
         release_route_law_verdict = $routeLaw.Verdict
@@ -6365,9 +6539,19 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_precommit_probe_acked_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckedCount),
         ("runtime_unlock_precommit_probe_failed_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeFailedCount),
         ("runtime_unlock_precommit_probe_protocol_mismatch_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeProtocolMismatchCount),
+        ("runtime_unlock_tuna_probe_sent_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSentCount),
+        ("runtime_unlock_tuna_probe_received_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeReceivedCount),
+        ("runtime_unlock_tuna_probe_ack_sent_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeAckSentCount),
+        ("runtime_unlock_tuna_probe_ack_received_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeAckReceivedCount),
+        ("runtime_unlock_tuna_probe_sidecar_failure_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSidecarFailureCount),
+        ("runtime_unlock_paired_commit_started_count={0}" -f $recoveryClassification.RuntimeUnlockPairedCommitStartedCount),
+        ("runtime_unlock_paired_commit_confirmed_count={0}" -f $recoveryClassification.RuntimeUnlockPairedCommitConfirmedCount),
+        ("runtime_unlock_paired_commit_aborted_count={0}" -f $recoveryClassification.RuntimeUnlockPairedCommitAbortedCount),
+        ("runtime_unlock_probe_commit_verdict={0}" -f $recoveryClassification.RuntimeUnlockProbeCommitVerdict),
         ("runtime_unlock_make_before_break_verdict={0}" -f $recoveryClassification.RuntimeUnlockMakeBeforeBreakVerdict),
         ("fallback_runtime_unlock_separation_verdict={0}" -f $fallbackRuntimeUnlockSeparationProof.Verdict),
         ("runtime_fallback_separation_verdict={0}" -f $fallbackRuntimeUnlockSeparationProof.Verdict),
+        ("runtime_fallback_arbitration_verdict={0}" -f $fallbackRuntimeUnlockSeparationProof.Verdict),
         ("fallback_runtime_unlock_waiting_count={0}" -f $fallbackRuntimeUnlockSeparationProof.WaitingForFallbackSurvivalCount),
         ("runtime_unlock_activation_window_granted_count={0}" -f $fallbackRuntimeUnlockSeparationProof.ActivationWindowGrantedCount),
         ("runtime_unlock_probe_failed_fallback_resumed_count={0}" -f $fallbackRuntimeUnlockSeparationProof.ProbeFailedFallbackResumedCount),
@@ -6477,8 +6661,14 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("fallback_leg_authority_stale_proof_ignored_count={0}" -f $fallbackAuthorityProof.StaleProofIgnoredCount),
         ("fallback_leg_authority_metadata_missing_count={0}" -f $fallbackAuthorityProof.MetadataMissingCount),
         ("fallback_tail_reconciliation_verdict={0}" -f $fallbackTailProof.Verdict),
+        ("fallback_tail_quiescence_verdict={0}" -f $fallbackTailProof.QuiescenceVerdict),
         ("fallback_tail_reconciliation_requested_count={0}" -f $fallbackTailProof.RequestedCount),
         ("fallback_tail_reconciliation_accepted_count={0}" -f $fallbackTailProof.AcceptedCount),
+        ("fallback_tail_progress_forced_count={0}" -f $fallbackTailProof.ProgressForcedCount),
+        ("fallback_tail_progress_coalesced_count={0}" -f $fallbackTailProof.ProgressCoalescedCount),
+        ("fallback_tail_terminal_proof_consumed_count={0}" -f $fallbackTailProof.TerminalProofConsumedCount),
+        ("fallback_tail_quiescent_yield_granted_count={0}" -f $fallbackTailProof.QuiescentYieldGrantedCount),
+        ("fallback_tail_quiescence_timeout_count={0}" -f $fallbackTailProof.QuiescenceTimeoutCount),
         ("fallback_tail_zero_credit_breaker_count={0}" -f $fallbackTailProof.ZeroCreditBreakerCount),
         ("fallback_tail_stale_frontier_retired_count={0}" -f $fallbackTailProof.StaleFrontierRetiredCount),
         ("fallback_tail_state_refresh_send_slot_retired_count={0}" -f $fallbackTailProof.SendSlotRetiredCount),

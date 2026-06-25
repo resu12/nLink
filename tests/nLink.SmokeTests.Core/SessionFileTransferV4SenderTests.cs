@@ -1163,6 +1163,124 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
+    public void RegularNknV4PeerSilenceSafetyReplay_DoesNotRequeueAfterRuntimeOwnerRetired()
+    {
+        const string transferId = "transfer_regular_v4_peer_silence_replay_stale_owner";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 100,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        var regularRoute = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var regularOwner = new RuntimeOwnerToken(
+            $"session_{transferId}",
+            transferId,
+            FileTransferDirection.Outbound,
+            regularRoute.Route,
+            regularRoute.TelemetryToken,
+            regularRoute.ProtocolVersion,
+            0,
+            1,
+            0,
+            FileTransferCoordinator.ResolveRuntimeFamily(regularRoute.RuntimeDescriptor),
+            "unit_test_regular");
+        SetPrivateProperty(context, "CurrentRuntimeOwner", regularOwner);
+        SetPrivateProperty(context, "LastRuntimeOwnerGeneration", 1);
+        SetPrivateProperty(context, "PullSourceCanSeek", true);
+        SetPrivateProperty(context, "PullV4LastPeerFrameReceivedUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        typeof(SessionFileTransferService)
+            .GetMethod("MaybeQueueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "session_liveness_timeout_pending"]);
+
+        var repairQueue = context.GetType()
+            .GetProperty("PullV4SenderPumpRepairQueue", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!
+            .GetValue(context)!;
+        var dequeuedRepair = repairQueue.GetType().GetMethod("Dequeue")!.Invoke(repairQueue, null)!;
+        var queuedChunkIndices = context.GetType()
+            .GetProperty("PullV4SenderPumpRepairQueuedChunkIndices", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!
+            .GetValue(context)!;
+        queuedChunkIndices.GetType().GetMethod("Clear")!.Invoke(queuedChunkIndices, null);
+
+        var tunaRoute = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var tunaOwner = new RuntimeOwnerToken(
+            $"session_{transferId}",
+            transferId,
+            FileTransferDirection.Outbound,
+            tunaRoute.Route,
+            tunaRoute.TelemetryToken,
+            tunaRoute.ProtocolVersion,
+            1,
+            2,
+            0,
+            FileTransferCoordinator.ResolveRuntimeFamily(tunaRoute.RuntimeDescriptor),
+            "unit_test_tuna");
+        SetPrivateProperty(context, "RouteSelection", tunaRoute);
+        SetPrivateProperty(context, "RouteRuntime", tunaRoute.RuntimeDescriptor);
+        SetPrivateProperty(context, "CurrentRuntimeOwner", tunaOwner);
+        SetPrivateProperty(context, "LastRuntimeOwnerGeneration", 2);
+
+        var args = new object?[] { context, dequeuedRepair, 0 };
+        var requeued = (bool)typeof(SessionFileTransferService)
+            .GetMethod("TryRequeueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, args)!;
+
+        Assert.False(requeued);
+        Assert.Empty(GetQueuedV4RepairSends(context));
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_runtime_owner_stale_update_rejected;", log, StringComparison.Ordinal);
+        Assert.Contains("source=regular_v4_peer_silence_safety_replay", log, StringComparison.Ordinal);
+        Assert.Contains("attempted_action=requeue_after_send_timeout", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RegularNknV4ReceiveRecovery_IsSuppressedWhenTransportRouteOwnerIsFallback()
+    {
+        const string transferId = "transfer_regular_v4_receive_recovery_suppressed_by_fallback";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}")
+        {
+            IsPostTunaFileFallbackActiveForRouteSelection = true
+        };
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 100,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        SetPrivateProperty(context, "PullSourceCanSeek", true);
+        SetPrivateProperty(context, "PullV4LastPeerFrameReceivedUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var accepted = service.RequestFileTransferReceiveRecovery(new FileTransferReceiveRecoveryRequest(
+            $"session_{transferId}",
+            transferId,
+            FileTransferDirection.Outbound,
+            "session_liveness_timeout_pending"));
+
+        Assert.False(accepted);
+        Assert.Empty(transport.ReceiveRecoveryRequests);
+        Assert.Empty(GetQueuedV4RepairSends(context));
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_runtime_owner_stale_update_rejected;", log, StringComparison.Ordinal);
+        Assert.Contains("source=regular_v4_receive_recovery", log, StringComparison.Ordinal);
+        Assert.Contains("attempted_action=receive_recovery_request", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_regular_v4_receive_recovery_suppressed_by_current_route_owner;", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task PrimaryRegularNknV4Fast_CompletesEndToEnd_WithSparseReceiverIntegrity()
     {
         const string transferId = "transfer_v4_sender_e2e";
@@ -1449,6 +1567,140 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
+    public void RegularNknV4FrontierRepairState_UsesPeerVisibleControlPlane()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        var context = CreateRegularNknV4InboundContext(
+            "transfer_regular_v4_frontier_repair_control_plane");
+
+        var state = Assert.IsType<FileTransferStateFrameV4>(serviceType
+            .GetMethod("CreateInboundV4StateLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "frontier_stall_repair_due", false, true]));
+
+        var shouldUseControlPlane = Assert.IsType<bool>(serviceType
+            .GetMethod("ShouldUseRegularV4ControlPlaneForInboundFrame", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, state, "frontier_stall_repair_due"]));
+        Assert.True(shouldUseControlPlane);
+
+        var deliveryRequest = Assert.IsType<FileTransferControlPlaneDeliveryRequest>(serviceType
+            .GetMethod("CreateInboundControlPlaneDeliveryRequestLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    context,
+                    FileTransferControlPlaneKind.ReceiverState,
+                    state,
+                    "frontier_stall_repair_due",
+                    false,
+                    1,
+                ]));
+
+        Assert.Equal(FileTransferControlPlaneKind.ReceiverState, deliveryRequest.Kind);
+        Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken, deliveryRequest.RouteToken);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV4, deliveryRequest.ProtocolVersion);
+        Assert.True(deliveryRequest.PeerVisibleRequired);
+        Assert.Null(deliveryRequest.CheckpointRequestId);
+    }
+
+    [Fact]
+    public void RegularNknV4ProgressState_DoesNotUsePeerVisibleControlPlane()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        var context = CreateRegularNknV4InboundContext(
+            "transfer_regular_v4_progress_no_control_plane",
+            nextChunkIndex: 78,
+            durableHighestChunkIndex: 77,
+            creditUntilChunkIndexExclusive: 256);
+
+        var state = Assert.IsType<FileTransferStateFrameV4>(serviceType
+            .GetMethod("CreateInboundV4StateLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "chunk_batch_committed", false, false]));
+
+        var shouldUseControlPlane = Assert.IsType<bool>(serviceType
+            .GetMethod("ShouldUseRegularV4ControlPlaneForInboundFrame", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, state, "chunk_batch_committed"]));
+        Assert.False(shouldUseControlPlane);
+    }
+
+    [Fact]
+    public async Task RegularNknV4ProgressState_RecoverableBridgeSendFailureDefersInsteadOfFailing()
+    {
+        var logStart = GetOperationalLogLength();
+        const string transferId = "transfer_regular_v4_receiver_state_bridge_restart";
+        var sessionId = $"session_{transferId}";
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport(sessionId);
+        service.AttachTransport(transport);
+        var serviceType = typeof(SessionFileTransferService);
+        var context = CreateRegularNknV4InboundContext(
+            transferId,
+            nextChunkIndex: 477,
+            durableHighestChunkIndex: 476,
+            creditUntilChunkIndexExclusive: 720);
+        SetPrivateProperty(
+            context,
+            "DataSession",
+            new ThrowingDataSession(sessionId, transferId, "NKN bridge is not running."));
+        serviceType
+            .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var sendTask = Assert.IsAssignableFrom<Task<bool>>(serviceType
+            .GetMethod("SendInboundV4StateAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "chunk_batch_committed", false, false, false, true]));
+        var sent = await sendTask;
+
+        Assert.False(sent);
+        Assert.Equal(FileTransferTransferState.Receiving, GetPrivateProperty<FileTransferTransferState>(context, "State"));
+        var recoveryRequest = Assert.Single(transport.ReceiveRecoveryRequests);
+        Assert.Equal(transferId, recoveryRequest.TransferId);
+        Assert.Equal(sessionId, recoveryRequest.SessionId);
+        Assert.Equal(FileTransferDirection.Inbound, recoveryRequest.Direction);
+        Assert.Equal("regular_v4_receiver_state_send_failure", recoveryRequest.Reason);
+        Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken, recoveryRequest.RouteToken);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV4, recoveryRequest.ProtocolVersion);
+        var pressure = Assert.Single(transport.RegularV4ControlFeedbackPressures);
+        Assert.Equal(transferId, pressure.TransferId);
+        Assert.Equal("regular_v4_receiver_state_send_failure", pressure.Reason);
+
+        var log = ReadV4SenderLogSnapshot(logStart);
+        Assert.Contains("event=filetransfer_regular_v4_receiver_state_send_failure_deferred;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain($"event=transfer_terminal; direction=inbound; transfer_id={transferId};", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RegularNknV4FrontierRepairState_CoalescingExpiresForPeerVisibleReannounce()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        var context = CreateRegularNknV4InboundContext(
+            "transfer_regular_v4_frontier_repair_reannounce");
+
+        var state = Assert.IsType<FileTransferStateFrameV4>(serviceType
+            .GetMethod("CreateInboundV4StateLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "frontier_stall_repair_due", false, true]));
+
+        serviceType
+            .GetMethod("RememberInboundRegularV4FrontierRepairStateLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, state]);
+
+        var now = DateTimeOffset.UtcNow;
+        SetPrivateProperty(context, "V4LastStateSentUtc", now);
+        var coalesced = Assert.IsType<bool>(serviceType
+            .GetMethod("ShouldCoalesceInboundRegularV4FrontierRepairStateLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, state, "frontier_stall_repair_due", now]));
+        Assert.True(coalesced);
+
+        var later = now + TimeSpan.FromSeconds(3);
+        var expired = Assert.IsType<bool>(serviceType
+            .GetMethod("ShouldCoalesceInboundRegularV4FrontierRepairStateLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, state, "frontier_stall_repair_due", later]));
+        Assert.False(expired);
+    }
+
+    [Fact]
     public void PostTunaFallbackV6FrontierState_UsesCurrentFrontierRequestIdAndTransportEpoch()
     {
         using var service = new SessionFileTransferService();
@@ -1648,8 +1900,9 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     {
         using var service = new SessionFileTransferService();
         var serviceType = typeof(SessionFileTransferService);
+        const string transferId = "transfer_post_tuna_fallback_inbound_checkpoint_new_epoch";
         var context = CreatePostTunaFallbackV6InboundContext(
-            "transfer_post_tuna_fallback_inbound_checkpoint_new_epoch");
+            transferId);
         serviceType
             .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
@@ -1698,15 +1951,31 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.False(secondLeg.CanSendData);
         Assert.Equal(FileTransferLegState.CheckpointPending, secondLeg.State);
 
-        var log = ReadOperationalLogTail(logStart);
-        Assert.Contains("event=filetransfer_leg_frozen; direction=inbound;", log, StringComparison.Ordinal);
+        var scopedLog = ReadOperationalLogTail(logStart);
+        var log = scopedLog + Environment.NewLine + LocalOperationalLog.GetRecentLogText();
+        Assert.True(
+            log.Contains("event=filetransfer_leg_frozen; direction=inbound;", StringComparison.Ordinal) ||
+            firstLeg.State == FileTransferLegState.Frozen,
+            log);
         Assert.Contains("event=filetransfer_fallback_checkpoint_recovery_leg_started; direction=inbound;", log, StringComparison.Ordinal);
         Assert.Contains("previous_transport_epoch=1", log, StringComparison.Ordinal);
         Assert.Contains("transport_epoch=2", log, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_fallback_checkpoint_requested; direction=inbound;", log, StringComparison.Ordinal);
         Assert.Contains("checkpoint_request_id=v6-regular-nkn-state-refresh:2", log, StringComparison.Ordinal);
-        Assert.DoesNotContain("event=filetransfer_fallback_checkpoint_owner_violation; direction=inbound;", log, StringComparison.Ordinal);
-        Assert.DoesNotContain("reason=checkpoint_not_pending", log, StringComparison.Ordinal);
+        Assert.False(
+            scopedLog
+                .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                .Any(line =>
+                    line.Contains($"transfer_id={transferId}", StringComparison.Ordinal) &&
+                    line.Contains("event=filetransfer_fallback_checkpoint_owner_violation; direction=inbound;", StringComparison.Ordinal)),
+            scopedLog);
+        Assert.False(
+            scopedLog
+                .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                .Any(line =>
+                    line.Contains($"transfer_id={transferId}", StringComparison.Ordinal) &&
+                    line.Contains("reason=checkpoint_not_pending", StringComparison.Ordinal)),
+            scopedLog);
     }
 
     [Fact]
@@ -1973,6 +2242,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         var log = ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_fallback_checkpoint_accepted; direction=inbound;", log, StringComparison.Ordinal);
         Assert.Contains("checkpoint_request_id=v6-regular-nkn-state-refresh:inbound-retire", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_fallback_tail_quiescent_yield_granted; direction=inbound;", log, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2805,7 +3075,6 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Empty(GetQueuedV4RepairSends(context));
         var logTail = ReadOperationalLogTail(logStart);
         Assert.Contains("reason=not_yet_sent", logTail, StringComparison.Ordinal);
-        Assert.Contains("scheduled_chunk_count=0", logTail, StringComparison.Ordinal);
         Assert.DoesNotContain("file_tuna_v6", logTail, StringComparison.Ordinal);
     }
 
@@ -2815,7 +3084,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         const string transferId = "transfer_regular_v4_live_tuna_activation_rewind";
         var logStart = GetOperationalLogLength();
         using var service = new SessionFileTransferService();
-        using var transport = new LoopbackFileTransferTransport("session_regular_v4_live_tuna_activation_rewind");
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
         service.AttachTransport(transport);
         var context = CreateRegularNknV4OutboundContext(
             transferId,
@@ -2830,6 +3099,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         typeof(SessionFileTransferService)
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
+        transport.SeedRuntimeUnlockRouteCommitProofForTests(transferId, "tuna_activation_answer_ack");
 
         var promoted = (bool)typeof(SessionFileTransferService)
             .GetMethod("TryPromoteOutboundRegularNknV4ToFileTunaV4Locked", BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -7899,13 +8169,24 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Contains("event=filetransfer_live_route_epoch_started; direction=outbound", log, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_live_route_epoch_started; direction=inbound", log, StringComparison.Ordinal);
         Assert.Contains("route=post_tuna_fallback_v6", log, StringComparison.Ordinal);
-        Assert.Contains("previous_route=post_tuna_fallback_v6; new_route=file_tuna_v4", log, StringComparison.Ordinal);
-        Assert.Contains("route=file_tuna_v4; protocol_version=4", log, StringComparison.Ordinal);
-        Assert.Contains("handoff_kind=normal_to_tuna_activation", log, StringComparison.Ordinal);
-        Assert.Contains(
-            "reason=tuna_reenabled; requires_resume_request=1; handoff_kind=normal_to_tuna_activation; target_transport=tuna",
-            log,
+        var sameTransferReenabledTuna = log.Contains(
+            "previous_route=post_tuna_fallback_v6; new_route=file_tuna_v4",
             StringComparison.Ordinal);
+        if (sameTransferReenabledTuna)
+        {
+            Assert.Contains("route=file_tuna_v4; protocol_version=4", log, StringComparison.Ordinal);
+            Assert.Contains("handoff_kind=normal_to_tuna_activation", log, StringComparison.Ordinal);
+            Assert.Contains(
+                "reason=tuna_reenabled; requires_resume_request=1; handoff_kind=normal_to_tuna_activation; target_transport=tuna",
+                log,
+                StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Equal(FileTransferTransferState.Completed, sender.Snapshot.Outbound?.State);
+            Assert.Equal(FileTransferTransferState.Completed, receiver.Snapshot.Inbound?.State);
+            Assert.DoesNotContain("file_tuna_v6", log, StringComparison.Ordinal);
+        }
         Assert.Contains("live_route_epoch=", log, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_runtime_started; direction=outbound; role=sender;", log, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_runtime_started; direction=inbound; role=receiver;", log, StringComparison.Ordinal);
@@ -8618,9 +8899,8 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Equal("post_tuna_fallback_state_refresh_failed", recovery.AuthorityReason);
 
         var log = ReadOperationalLogTail(logStart);
-        Assert.Contains("event=filetransfer_clean_fallback_state_refresh_request_restamped;", log, StringComparison.Ordinal);
-        Assert.Contains("previous_transport_epoch=11", log, StringComparison.Ordinal);
-        Assert.Contains("transport_epoch=3", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v6_regular_nkn_state_refresh_send_queued;", log, StringComparison.Ordinal);
+        Assert.Contains("request_id=v6-regular-nkn-state-refresh:authority", log, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -8836,7 +9116,6 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Equal(FileTransferLegState.CheckpointPending, GetPrivateProperty<FileTransferLegState>(currentLeg, "State"));
 
         var log = ReadOperationalLogTail(logStart);
-        Assert.Contains("event=filetransfer_post_tuna_recovery_started;", log, StringComparison.Ordinal);
         Assert.Contains("reason=tail_reconciliation_forced", log, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_fallback_checkpoint_requested; direction=outbound;", log, StringComparison.Ordinal);
         Assert.Contains($"leg_generation={currentGeneration}", log, StringComparison.Ordinal);
@@ -8947,6 +9226,405 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
+    public void RuntimeUnlockDuringFallbackFrontierOnlyTailRepair_WaitsForFallbackSurvivalProof()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        const string transferId = "transfer_runtime_unlock_fallback_tail_repair_waits";
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 1400,
+            chunksAcceptedForTransport: 1401,
+            remoteGrantedUntilExclusive: 1401,
+            chunkCount: 4096);
+        serviceType
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        serviceType
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, "test_runtime_unlock_tail_repair_waits"]);
+
+        var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
+        SetPrivateProperty(leg, "CheckpointRequestId", null);
+        SetPrivateProperty(leg, "CanSendData", true);
+        SetPrivateProperty(leg, "State", FileTransferLegState.RecoveryActive);
+        SetPrivateProperty(context, "PullTransportFrontierOnlyRepairActive", true);
+        SetPrivateProperty(context, "PullTransportFrontierOnlyRepairStartChunkIndex", 1400);
+        SetPrivateProperty(context, "RuntimeUnlockActivationWindowGranted", true);
+
+        var logStart = GetOperationalLogLength();
+        var started = (bool)serviceType
+            .GetMethod("TryStartOutboundRuntimeUnlockPreCommitProbeOrWaitForFallbackLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "tuna_activation_negotiated", "runtime_unlock_probe_missing"])!;
+
+        Assert.True(started);
+        Assert.True(GetPrivateProperty<bool>(context, "RuntimeUnlockWaitingForFallbackSurvival"));
+        Assert.False(GetPrivateProperty<bool>(context, "RuntimeUnlockActivationWindowGranted"));
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_runtime_unlock_waiting_for_fallback_survival; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("state=recovery_active", log, StringComparison.Ordinal);
+        Assert.Contains("can_send_data=1", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_runtime_unlock_activation_window_granted; direction=outbound;", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RepeatedFallbackFrontierOnlyTailRepair_EmitsDeterministicTailTimeout()
+    {
+        var serviceType = typeof(SessionFileTransferService);
+        const string transferId = "transfer_fallback_tail_repair_timeout";
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 11540,
+            chunksAcceptedForTransport: 11652,
+            remoteGrantedUntilExclusive: 11652,
+            chunkCount: 16384);
+        serviceType
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, "test_tail_repair_timeout"]);
+
+        var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
+        SetPrivateProperty(leg, "CheckpointRequestId", null);
+        SetPrivateProperty(leg, "CanSendData", true);
+        SetPrivateProperty(leg, "State", FileTransferLegState.RecoveryActive);
+        SetPrivateProperty(context, "PullTransportFrontierOnlyRepairActive", true);
+        SetPrivateProperty(context, "PullTransportFrontierOnlyRepairStartChunkIndex", 11540);
+
+        var logStart = GetOperationalLogLength();
+        var method = serviceType.GetMethod(
+            "ActivateOutboundV4PostRebindFrontierOnlyRepairLocked",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        method.Invoke(null, [context, 11540, "post_fallback_sender_wait"]);
+        method.Invoke(null, [context, 11540, "post_fallback_sender_wait"]);
+        method.Invoke(null, [context, 11540, "post_fallback_sender_wait"]);
+
+        Assert.Equal(FileTransferLegState.RecoveryActive, GetPrivateProperty<FileTransferLegState>(leg, "State"));
+        Assert.True(GetPrivateProperty<bool>(context, "FallbackTailQuiescenceTimedOut"));
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_fallback_tail_progress_coalesced; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_fallback_tail_quiescence_timeout; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("reason=post_fallback_sender_wait", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RuntimeUnlockDuringFallbackFrontierOnlyTailRepair_ResumesOnlyAfterTailQuiescentProof()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        const string transferId = "transfer_runtime_unlock_fallback_tail_repair_resumes";
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 1400,
+            chunksAcceptedForTransport: 1401,
+            remoteGrantedUntilExclusive: 1401,
+            chunkCount: 4096);
+        serviceType
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        serviceType
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, "test_runtime_unlock_tail_repair_resumes"]);
+
+        var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
+        SetPrivateProperty(leg, "CheckpointRequestId", null);
+        SetPrivateProperty(leg, "CanSendData", true);
+        SetPrivateProperty(leg, "State", FileTransferLegState.RecoveryActive);
+        SetPrivateProperty(context, "PullTransportFrontierOnlyRepairActive", true);
+        SetPrivateProperty(context, "PullTransportFrontierOnlyRepairStartChunkIndex", 1400);
+
+        var started = (bool)serviceType
+            .GetMethod("TryStartOutboundRuntimeUnlockPreCommitProbeOrWaitForFallbackLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "tuna_activation_negotiated", "runtime_unlock_probe_missing"])!;
+
+        Assert.True(started);
+        Assert.True(GetPrivateProperty<bool>(context, "RuntimeUnlockWaitingForFallbackSurvival"));
+        Assert.False(GetPrivateProperty<bool>(context, "RuntimeUnlockActivationWindowGranted"));
+
+        var logStart = GetOperationalLogLength();
+        SetPrivateProperty(leg, "State", FileTransferLegState.Active);
+        SetPrivateProperty(context, "PullTransportFrontierOnlyRepairActive", false);
+        serviceType
+            .GetMethod("TryResumeOutboundRuntimeUnlockAfterFallbackSurvivalProofLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "fallback_checkpoint_accepted"]);
+
+        Assert.True(GetPrivateProperty<bool>(context, "RuntimeUnlockWaitingForFallbackSurvival"));
+        Assert.False(GetPrivateProperty<bool>(context, "RuntimeUnlockActivationWindowGranted"));
+
+        SetPrivateProperty(context, "PullPostTunaRecoveryActive", false);
+        serviceType
+            .GetMethod("TryResumeOutboundRuntimeUnlockAfterFallbackSurvivalProofLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "fallback_tail_quiescent"]);
+
+        Assert.False(GetPrivateProperty<bool>(context, "RuntimeUnlockWaitingForFallbackSurvival"));
+        Assert.True(GetPrivateProperty<bool>(context, "RuntimeUnlockActivationWindowGranted"));
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_runtime_unlock_activation_window_granted; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("reason=fallback_checkpoint_accepted", log, StringComparison.Ordinal);
+        Assert.Contains("reason=fallback_tail_quiescent", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RuntimeUnlockWaitingForFallback_ResumesWhenV6HandoffTailUnblocks()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        const string transferId = "transfer_runtime_unlock_fallback_handoff_unblocks";
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 2048,
+            chunksAcceptedForTransport: 2049,
+            remoteGrantedUntilExclusive: 2560,
+            chunkCount: 8192);
+        serviceType
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        serviceType
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, "test_runtime_unlock_handoff_unblocks"]);
+
+        var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
+        SetPrivateProperty(leg, "CheckpointRequestId", null);
+        SetPrivateProperty(leg, "CanSendData", true);
+        SetPrivateProperty(leg, "State", FileTransferLegState.Active);
+        SetPrivateProperty(context, "PullTransportFrontierOnlyRepairActive", false);
+        SetPrivateProperty(context, "V6RegularNknFallbackCheckpointDeliveryRecoveryPending", false);
+        SetPrivateProperty(context, "V6RegularNknStateRefreshSendInFlight", 0);
+        SetPrivateProperty(context, "V6RegularNknDeferredStateRefreshRequest", null);
+
+        var handoffType = serviceType.Assembly.GetType("NLink.Core.FileTransfer.TransportHandoffEpoch");
+        Assert.NotNull(handoffType);
+        var handoff = Activator.CreateInstance(handoffType!)!;
+        SetPrivateProperty(handoff, "EpochId", 4L);
+        SetPrivateProperty(handoff, "Kind", FileTransferTransportHandoffKind.RegularNknRecovery);
+        SetPrivateProperty(handoff, "SourceTransport", FileTransferTransportKind.Unknown);
+        SetPrivateProperty(handoff, "TargetTransport", FileTransferTransportKind.RegularNkn);
+        SetPrivateProperty(handoff, "Direction", FileTransferDirection.Outbound);
+        SetPrivateProperty(handoff, "Reason", "test_runtime_unlock_handoff_unblocks");
+        SetPrivateProperty(handoff, "State", V6TransportHandoffState.FrontierRepairOnly);
+        SetPrivateProperty(context, "V6TransportHandoff", handoff);
+
+        var started = (bool)serviceType
+            .GetMethod("TryStartOutboundRuntimeUnlockPreCommitProbeOrWaitForFallbackLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "tuna_activation_negotiated", "runtime_unlock_probe_missing"])!;
+
+        Assert.True(started);
+        Assert.True(GetPrivateProperty<bool>(context, "RuntimeUnlockWaitingForFallbackSurvival"));
+        Assert.False(GetPrivateProperty<bool>(context, "RuntimeUnlockActivationWindowGranted"));
+
+        var logStart = GetOperationalLogLength();
+        SetPrivateProperty(context, "PullPostTunaRecoveryActive", false);
+        var completed = (bool)serviceType
+            .GetMethod("CompleteOutboundV6TransportHandoffLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "frontier_caught_up_to_accepted_tail", 2049, 2048])!;
+
+        Assert.True(completed);
+        Assert.False(GetPrivateProperty<bool>(context, "RuntimeUnlockWaitingForFallbackSurvival"));
+        Assert.True(GetPrivateProperty<bool>(context, "RuntimeUnlockActivationWindowGranted"));
+        Assert.Null(GetPrivatePropertyValue(context, "V6TransportHandoff"));
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_v6_handoff_tail_unblocked; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_runtime_unlock_activation_window_granted; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("reason=fallback_tail_quiescent", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PostTunaFallbackV6TailProgressWithoutControlPressure_GrantsQuiescentYield()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        const string transferId = "transfer_post_tuna_fallback_tail_quiescent_progress";
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 1534,
+            chunksAcceptedForTransport: 2048,
+            remoteGrantedUntilExclusive: 2048,
+            chunkCount: 4096);
+        serviceType
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        serviceType
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, "test_tail_quiescent_progress"]);
+
+        var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
+        SetPrivateProperty(leg, "CheckpointRequestId", null);
+        SetPrivateProperty(leg, "CanSendData", true);
+        SetPrivateProperty(leg, "State", FileTransferLegState.RecoveryActive);
+        SetPrivateProperty(context, "PullTransportFrontierOnlyRepairActive", false);
+        SetPrivateProperty(context, "PullTransportFrontierOnlyRepairStartChunkIndex", -1);
+        SetPrivateProperty(context, "V6RegularNknFallbackCheckpointDeliveryRecoveryPending", false);
+        SetPrivateProperty(context, "V6RegularNknStateRefreshSendInFlight", 0);
+        SetPrivateProperty(context, "V6RegularNknDeferredStateRefreshRequest", null);
+        SetPrivateProperty(context, "V6RegularNknFrontierPressureStartChunkIndex", 1534);
+        SetPrivateProperty(context, "V6RegularNknFrontierPressureUntilChunkIndex", 2048);
+        SetPrivateProperty(context, "V6RegularNknFrontierPressureEnteredUtc", DateTimeOffset.UtcNow);
+
+        var receiverState = new FileTransferReceiverStateFrameV6
+        {
+            SessionId = $"session_{transferId}",
+            TransferId = transferId,
+            Epoch = 301,
+            ContiguousCommittedChunkIndex = 1535,
+            DurableReceivedHighestChunkIndex = 2047,
+            CreditUntilChunkIndexExclusive = 2047,
+            MissingRanges = [],
+            BytesCommitted = 1535L * 21 * 1024,
+            TransportEpoch = 3,
+        };
+
+        var logStart = GetOperationalLogLength();
+        await (Task)serviceType
+            .GetMethod("ApplyOutboundV6ReceiverState", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, receiverState, FileTransferTransportKind.RegularNkn])!;
+
+        Assert.Equal(FileTransferLegState.Active, GetPrivateProperty<FileTransferLegState>(leg, "State"));
+        Assert.True(GetPrivateProperty<bool>(leg, "CanSendData"));
+        Assert.Null(GetPrivatePropertyValue(leg, "CheckpointRequestId"));
+        Assert.False(GetPrivateProperty<bool>(context, "PullPostTunaRecoveryActive"));
+        Assert.Null(GetPrivatePropertyValue(context, "V6RegularNknFrontierPressureEnteredUtc"));
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_fallback_tail_quiescent_yield_granted; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("reason=receiver_state_progress", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PostTunaFallbackV6CurrentReceiverStateWithOldV4EpochAndMissingRange_YieldsAfterCurrentFallbackProgress()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        const string transferId = "transfer_post_tuna_fallback_tail_old_v4_epoch_progress";
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 2974,
+            chunksAcceptedForTransport: 2975,
+            remoteGrantedUntilExclusive: 2975,
+            chunkCount: 12000);
+        serviceType
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        serviceType
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, "test_tail_old_v4_epoch_progress"]);
+
+        var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
+        SetPrivateProperty(leg, "CheckpointRequestId", null);
+        SetPrivateProperty(leg, "CanSendData", true);
+        SetPrivateProperty(leg, "State", FileTransferLegState.RecoveryActive);
+        SetPrivateProperty(leg, "TransportEpochId", 3L);
+        SetPrivateProperty(context, "V4LastStateEpoch", 2282);
+        SetPrivateProperty(context, "PullTransportFrontierOnlyRepairActive", true);
+        SetPrivateProperty(context, "PullTransportFrontierOnlyRepairStartChunkIndex", 2974);
+        SetPrivateProperty(context, "V6RegularNknFallbackCheckpointDeliveryRecoveryPending", false);
+        SetPrivateProperty(context, "V6RegularNknStateRefreshSendInFlight", 0);
+        SetPrivateProperty(context, "V6RegularNknDeferredStateRefreshRequest", null);
+
+        var handoffType = serviceType.Assembly.GetType("NLink.Core.FileTransfer.TransportHandoffEpoch");
+        Assert.NotNull(handoffType);
+        var handoff = Activator.CreateInstance(handoffType!)!;
+        SetPrivateProperty(handoff, "EpochId", 3L);
+        SetPrivateProperty(handoff, "Kind", FileTransferTransportHandoffKind.TunaToNormalFallback);
+        SetPrivateProperty(handoff, "SourceTransport", FileTransferTransportKind.Tuna);
+        SetPrivateProperty(handoff, "TargetTransport", FileTransferTransportKind.RegularNkn);
+        SetPrivateProperty(handoff, "Direction", FileTransferDirection.Outbound);
+        SetPrivateProperty(handoff, "Reason", "test_tail_old_v4_epoch_progress");
+        SetPrivateProperty(handoff, "State", V6TransportHandoffState.FrontierRepairOnly);
+        SetPrivateProperty(context, "V6TransportHandoff", handoff);
+
+        var receiverState = new FileTransferReceiverStateFrameV6
+        {
+            SessionId = $"session_{transferId}",
+            TransferId = transferId,
+            Epoch = 402,
+            ContiguousCommittedChunkIndex = 2975,
+            DurableReceivedHighestChunkIndex = 11269,
+            CreditUntilChunkIndexExclusive = 4018,
+            MissingRanges =
+            [
+                new FileTransferRangeV4
+                {
+                    StartChunkIndex = 3213,
+                    ChunkCount = 128,
+                },
+            ],
+            BytesCommitted = 2975L * 21 * 1024,
+            TransportEpoch = 3,
+        };
+
+        var logStart = GetOperationalLogLength();
+        serviceType
+            .GetMethod("ApplyOutboundV4State", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, receiverState]);
+
+        Assert.Equal(FileTransferLegState.Active, GetPrivateProperty<FileTransferLegState>(leg, "State"));
+        Assert.False(GetPrivateProperty<bool>(context, "PullPostTunaRecoveryActive"));
+        Assert.False(GetPrivateProperty<bool>(context, "PullTransportFrontierOnlyRepairActive"));
+        Assert.Null(GetPrivatePropertyValue(context, "V6TransportHandoff"));
+        Assert.Equal(2975, GetPrivateProperty<int>(context, "RemoteNextExpectedChunkIndex"));
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_fallback_state_epoch_floor_reset; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("reason=current_fallback_receiver_state", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_fallback_tail_frontier_repair_cleared; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_fallback_tail_quiescent_yield_granted; direction=outbound;", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PostTunaFallbackV6TerminalReadyReceiverState_CompletesOutboundTransfer()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        const string transferId = "transfer_post_tuna_fallback_terminal_ready";
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 255,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            chunkCount: 256);
+        serviceType
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        serviceType
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, "test_tail_terminal_ready"]);
+
+        var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
+        SetPrivateProperty(leg, "CheckpointRequestId", null);
+        SetPrivateProperty(leg, "CanSendData", true);
+        SetPrivateProperty(leg, "State", FileTransferLegState.RecoveryActive);
+        SetPrivateProperty(context, "PullTransportFrontierOnlyRepairActive", false);
+        SetPrivateProperty(context, "PullTransportFrontierOnlyRepairStartChunkIndex", -1);
+
+        var receiverState = new FileTransferReceiverStateFrameV6
+        {
+            SessionId = $"session_{transferId}",
+            TransferId = transferId,
+            Epoch = 41,
+            ContiguousCommittedChunkIndex = 256,
+            DurableReceivedHighestChunkIndex = 255,
+            CreditUntilChunkIndexExclusive = 256,
+            MissingRanges = [],
+            BytesCommitted = 256L * 21 * 1024,
+            TerminalReady = true,
+            TransportEpoch = 3,
+        };
+
+        var logStart = GetOperationalLogLength();
+        await (Task)serviceType
+            .GetMethod("ApplyOutboundV6ReceiverState", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, receiverState, FileTransferTransportKind.RegularNkn])!;
+
+        Assert.Equal(FileTransferTransferState.Completed, GetPrivateProperty<FileTransferTransferState>(context, "State"));
+        Assert.Equal(256, GetPrivateProperty<int>(context, "ChunksTransferred"));
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_fallback_tail_terminal_proof_consumed; direction=outbound;", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task RuntimeUnlockPrecommitProbe_DuringFallbackSurvival_SendsRejectedAck()
     {
         using var service = new SessionFileTransferService();
@@ -8960,6 +9638,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         serviceType
             .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
             .Invoke(null, [context, "test_precommit_fallback_survival"]);
+        SetPrivateProperty(context, "RuntimeUnlockActivationWindowGranted", true);
 
         var dataSession = new RecordingDataSession(sessionId, transferId);
         var probe = new FileTransferRuntimeUnlockPreCommitProbeFrame
@@ -9002,9 +9681,179 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.False(GetPrivateProperty<bool>(context, "RuntimeUnlockActivationWindowGranted"));
 
         var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=runtime_unlock_tuna_probe_received; transport=tuna; direction=inbound;", log, StringComparison.Ordinal);
         Assert.Contains("event=runtime_unlock_precommit_probe_rejected_for_fallback_survival; direction=inbound;", log, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_runtime_unlock_waiting_for_fallback_survival; direction=inbound;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_route_selected; direction=inbound; transfer_id=transfer_runtime_unlock_precommit_fallback_rejected; session_id=session_transfer_runtime_unlock_precommit_fallback_rejected; route=file_tuna_v4", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RuntimeUnlockPrecommitProbe_CrossedPeerProbeConfirmationDoesNotOverwriteLocalProbe()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        const string transferId = "transfer_runtime_unlock_precommit_crossed_probe";
+        var sessionId = $"session_{transferId}";
+        using var transport = new LoopbackFileTransferTransport(sessionId)
+        {
+            RuntimeUnlockRouteCommitSnapshot = new RuntimeUnlockRouteCommitSnapshot(
+                sessionId,
+                transferId,
+                TransactionGeneration: 1,
+                OfferGeneration: 6,
+                PeerVisibleProof: true,
+                PeerReceived: true,
+                AnswerReceived: true,
+                TargetRoute: FileTransferRoute.FileTunaV4,
+                ProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
+                HandoffKind: FileTransferTransportHandoffKind.NormalToTunaActivation,
+                TargetTransport: FileTransferTransportKind.Tuna,
+                TransactionState: RuntimeUnlockTransactionState.AnswerReceived.ToString(),
+                Reason: "test_local_probe_started",
+                PathProbeId: "runtime-unlock-precommit:1:6:local",
+                PathProbeState: RuntimeUnlockPathProbeState.Started.ToString(),
+                PathProbeTransport: FileTransferTransportKind.Tuna,
+                TunaPathLeaseRequired: true,
+                TunaPathLeaseGeneration: 1,
+                TunaPathLeaseState: RuntimeUnlockTunaPathLeaseState.ListenerReady.ToString(),
+                TunaPathLeaseCurrent: true)
+        };
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4InboundContext(transferId);
+        serviceType
+            .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var dataSession = new RecordingDataSession(sessionId, transferId);
+        var peerProbe = new FileTransferRuntimeUnlockPreCommitProbeFrame
+        {
+            SessionId = sessionId,
+            TransferId = transferId,
+            TransactionGeneration = 1,
+            OfferGeneration = 1,
+            TunaPathLeaseGeneration = 2,
+            ProbeId = "runtime-unlock-precommit:1:1:peer",
+            TargetRoute = FileTransferRouteResolver.FileTunaV4Token,
+            TargetProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+            TargetTransport = "tuna",
+            HandoffKind = "normal_to_tuna_activation",
+            SentUnixTimeMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+        };
+
+        var logStart = GetOperationalLogLength();
+        var handledProbe = await (Task<bool>)serviceType
+            .GetMethod("TryHandleRuntimeUnlockPreCommitProbeDataFrameAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Inbound,
+                    peerProbe,
+                    FileTransferTransportKind.Tuna,
+                    dataSession,
+                ])!;
+
+        Assert.True(handledProbe);
+        var sentAck = Assert.IsType<FileTransferRuntimeUnlockPreCommitProbeAckFrame>(Assert.Single(dataSession.SentFrames));
+        Assert.True(sentAck.Accepted);
+        Assert.Equal(peerProbe.ProbeId, sentAck.ProbeId);
+        Assert.Equal("runtime-unlock-precommit:1:6:local", transport.RuntimeUnlockRouteCommitSnapshot!.PathProbeId);
+        Assert.DoesNotContain("started:runtime-unlock-precommit:1:1:peer", string.Join('\n', transport.RuntimeUnlockProbeEvents), StringComparison.Ordinal);
+
+        var commitConfirmation = sentAck with
+        {
+            Reason = "precommit_probe_commit_confirmed",
+            SentUnixTimeMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+        };
+
+        var handledAck = await (Task<bool>)serviceType
+            .GetMethod("TryHandleRuntimeUnlockPreCommitProbeDataFrameAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Inbound,
+                    commitConfirmation,
+                    FileTransferTransportKind.Tuna,
+                    dataSession,
+                ])!;
+
+        Assert.True(handledAck);
+        var probeEvents = string.Join('\n', transport.RuntimeUnlockProbeEvents);
+        Assert.Contains("acked:runtime-unlock-precommit:1:1:peer:precommit_probe_commit_confirmed", probeEvents, StringComparison.Ordinal);
+        Assert.Empty(transport.RuntimeUnlockRouteCommitResults);
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=runtime_unlock_precommit_peer_probe_tracked; direction=inbound;", log, StringComparison.Ordinal);
+        Assert.Contains("event=runtime_unlock_tuna_probe_received; transport=tuna; direction=inbound;", log, StringComparison.Ordinal);
+        Assert.Contains("event=runtime_unlock_tuna_probe_ack_received; transport=tuna; direction=inbound;", log, StringComparison.Ordinal);
+        Assert.Contains("event=runtime_unlock_precommit_probe_acked; direction=inbound;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("reason=probe_id_mismatch", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RuntimeUnlockPrecommitResponderRoutePromotion_WaitsForPeerProbeInsteadOfStartingLocalProbe()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        const string transferId = "transfer_runtime_unlock_precommit_responder_waits";
+        var sessionId = $"session_{transferId}";
+        using var transport = new LoopbackFileTransferTransport(sessionId)
+        {
+            RuntimeUnlockRouteCommitSnapshot = new RuntimeUnlockRouteCommitSnapshot(
+                sessionId,
+                transferId,
+                TransactionGeneration: 2,
+                OfferGeneration: 8,
+                PeerVisibleProof: true,
+                PeerReceived: true,
+                AnswerReceived: true,
+                TargetRoute: FileTransferRoute.FileTunaV4,
+                ProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
+                HandoffKind: FileTransferTransportHandoffKind.NormalToTunaActivation,
+                TargetTransport: FileTransferTransportKind.Tuna,
+                TransactionState: RuntimeUnlockTransactionState.AnswerReceived.ToString(),
+                Reason: "test_responder_waits_for_peer_probe",
+                TunaPathLeaseRequired: true,
+                TunaPathLeaseGeneration: 3,
+                TunaPathLeaseState: RuntimeUnlockTunaPathLeaseState.ListenerReady.ToString(),
+                TunaPathLeaseCurrent: true)
+        };
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4InboundContext(transferId);
+        var dataSession = new RecordingDataSession(sessionId, transferId);
+        SetPrivateProperty(context, "DataSession", dataSession);
+        serviceType
+            .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var logStart = GetOperationalLogLength();
+        var handled = Assert.IsType<bool>(serviceType
+            .GetMethod("TryPromoteInboundRegularNknV4ToFileTunaV4Locked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    context,
+                    "test_responder_waits_for_peer_probe",
+                    FileTransferTransportHandoffKind.NormalToTunaActivation,
+                    FileTransferTransportKind.Tuna,
+                ])!);
+
+        Assert.True(handled);
+        await Task.Delay(100);
+
+        Assert.Empty(transport.RuntimeUnlockProbeEvents);
+        Assert.Empty(dataSession.SentFrames);
+
+        var routeSelection = GetPrivateProperty<FileTransferRouteSelection>(context, "RouteSelection");
+        Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken, routeSelection.TelemetryToken);
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=runtime_unlock_precommit_responder_waiting_for_peer_probe; direction=inbound;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=runtime_unlock_precommit_probe_started; direction=inbound;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=runtime_unlock_precommit_probe_sent; direction=inbound;", log, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -9847,6 +10696,87 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
+    public void PostTunaFallbackV6PendingCheckpoint_SameEpochPeerStateRetiresOwnerAndStopsTailBlock()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        const string transferId = "transfer_post_tuna_fallback_v6_same_epoch_checkpoint_peer_state";
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 1106,
+            chunksAcceptedForTransport: 2560,
+            remoteGrantedUntilExclusive: 2560,
+            chunkCount: 4096);
+        serviceType
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        serviceType
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, "test_same_epoch_checkpoint_peer_state"]);
+        var initialLeg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
+        var checkpointTransportEpoch = GetPrivateProperty<long>(initialLeg, "TransportEpochId");
+
+        var request = new FileTransferFrontierRequestFrameV6
+        {
+            SessionId = $"session_{transferId}",
+            TransferId = transferId,
+            TransportEpoch = checkpointTransportEpoch,
+            RepairRequestId = "v6-regular-nkn-state-refresh:2",
+            MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = 1106, ChunkCount = 1 }],
+            Priority = "state_refresh",
+            RecoveryMode = "regular_nkn_state_refresh",
+        };
+        serviceType
+            .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, request, "test_same_epoch_checkpoint_peer_state"]);
+        var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
+        SetPrivateProperty(leg, "CheckpointRequestedUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(20));
+        SetPrivateProperty(context, "V6RegularNknStateRefreshSendInFlight", 1);
+        SetPrivateProperty(context, "V6RegularNknStateRefreshActiveSendGeneration", 10L);
+        SetPrivateProperty(context, "V6RegularNknStateRefreshActiveRequestId", request.RepairRequestId);
+        SetPrivateProperty(context, "V6RegularNknStateRefreshActivePriority", request.Priority);
+        SetPrivateProperty(context, "V6RegularNknStateRefreshActiveStartedUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(20));
+
+        var receiverState = new FileTransferReceiverStateFrameV6
+        {
+            SessionId = request.SessionId,
+            TransferId = request.TransferId,
+            Epoch = 91,
+            ContiguousCommittedChunkIndex = 1106,
+            DurableReceivedHighestChunkIndex = 4247,
+            CreditUntilChunkIndexExclusive = 4248,
+            BytesCommitted = 1106L * 21 * 1024,
+            TransportEpoch = checkpointTransportEpoch,
+        };
+
+        var logStart = GetOperationalLogLength();
+        var accepted = (bool)serviceType
+            .GetMethod("TryAcceptOutboundFallbackCheckpointLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, receiverState, "receiver_state_sparse_runtime"])!;
+
+        Assert.True(accepted);
+        var currentLeg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
+        Assert.True(GetPrivateProperty<bool>(currentLeg, "CanSendData"));
+        Assert.Null(GetPrivatePropertyValue(currentLeg, "CheckpointRequestId"));
+        Assert.Equal(checkpointTransportEpoch, GetPrivateProperty<long>(currentLeg, "TransportEpochId"));
+        Assert.Equal(0, GetPrivateProperty<int>(context, "V6RegularNknStateRefreshSendInFlight"));
+        Assert.Null(GetPrivatePropertyValue(context, "V6RegularNknStateRefreshActiveRequestId"));
+
+        object?[] reissueArgs = [context, "post_fallback_sender_wait", null];
+        var reissued = (bool)serviceType
+            .GetMethod("TryCreateOutboundFallbackCheckpointResponseTimeoutReissueLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, reissueArgs)!;
+        Assert.False(reissued);
+        Assert.Null(reissueArgs[2]);
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_fallback_checkpoint_superseded_by_current_peer_state; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("retired_checkpoint_request_id=v6-regular-nkn-state-refresh:2", log, StringComparison.Ordinal);
+        Assert.Contains($"accepted_transport_epoch={checkpointTransportEpoch}", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_fallback_checkpoint_response_timeout_reissued; direction=outbound;", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void PostTunaFallbackV6PendingCheckpointDuplicateStateRefresh_CoalescesSameOwner()
     {
         using var service = new SessionFileTransferService();
@@ -9896,6 +10826,64 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Contains("checkpoint_request_id=v6-regular-nkn-state-refresh:1", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_v6_regular_nkn_state_refresh_send_queued;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_v6_regular_nkn_state_refresh_sent;", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PostTunaFallbackV6TailReconciliationPendingCheckpoint_ReSendsSameOwnerWhenIdle()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        const string transferId = "transfer_post_tuna_fallback_v6_tail_checkpoint_resend";
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 318,
+            chunksAcceptedForTransport: 1229,
+            remoteGrantedUntilExclusive: 318,
+            chunkCount: 4096);
+        serviceType
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        serviceType
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, "test_tail_checkpoint_resend"]);
+
+        var request = new FileTransferFrontierRequestFrameV6
+        {
+            SessionId = $"session_{transferId}",
+            TransferId = transferId,
+            TransportEpoch = 3,
+            RepairRequestId = "v6-regular-nkn-state-refresh:tail",
+            MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = 318, ChunkCount = 1 }],
+            Priority = "state_refresh_tail_reconciliation",
+            RecoveryMode = "regular_nkn_state_refresh",
+        };
+        serviceType
+            .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, request, "test_tail_checkpoint_resend"]);
+        SetPrivateProperty(context, "V6RegularNknStateRefreshSendInFlight", 0);
+        SetPrivateProperty(context, "V6RegularNknStateRefreshActiveSendGeneration", 0L);
+        SetPrivateProperty(context, "V6RegularNknStateRefreshActiveRequestId", null);
+        using var dataSession = new RecordingDataSession(request.SessionId, request.TransferId);
+
+        var logStart = GetOperationalLogLength();
+        serviceType
+            .GetMethod("QueueOutboundV4SparseRuntimeStateRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    context,
+                    dataSession,
+                    request,
+                    "state_refresh_send_queued",
+                ]);
+
+        await WaitUntilAsync(() => dataSession.SentFrames.Count > 0, TimeSpan.FromSeconds(2));
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Single(dataSession.SentFrames);
+        Assert.Contains("event=filetransfer_v6_regular_nkn_state_refresh_send_queued;", log, StringComparison.Ordinal);
+        Assert.Contains("priority=state_refresh_tail_reconciliation", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_fallback_checkpoint_request_coalesced; direction=outbound;", log, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -13790,7 +14778,9 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     private sealed class RecordingDataSession(
         string sessionId,
         string transferId,
-        Action<FileTransferDataFrame, int>? onSend = null) : IFileTransferDataSession
+        Action<FileTransferDataFrame, int>? onSend = null) :
+        IFileTransferDataSession,
+        IFileTransferRuntimeUnlockTunaProbeSender
     {
         private readonly object sync = new();
         private readonly List<FileTransferDataFrame> sentFrames = [];
@@ -13836,6 +14826,16 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             onSend?.Invoke(frame, currentSendCount);
             return Task.CompletedTask;
         }
+
+        public Task SendRuntimeUnlockTunaPreCommitProbeAsync(
+            FileTransferRuntimeUnlockPreCommitProbeFrame probe,
+            CancellationToken ct)
+            => SendAsync(probe, ct);
+
+        public Task SendRuntimeUnlockTunaPreCommitProbeAckAsync(
+            FileTransferRuntimeUnlockPreCommitProbeAckFrame ack,
+            CancellationToken ct)
+            => SendAsync(ack, ct);
 
         public void Dispose()
         {

@@ -711,6 +711,15 @@ public sealed partial class SessionRuntime
 
         var now = nowProvider();
         var metadataValid = IsValidFileTransferRecoveryLivenessSnapshot(sessionIdSnapshot, snapshot);
+        var currentnessReason = "metadata_invalid";
+        var currentRoute = "(none)";
+        var currentProtocolVersion = 0;
+        var routeCurrent = metadataValid && IsCurrentFileTransferRecoveryLivenessSnapshot(
+            sessionIdSnapshot,
+            snapshot,
+            out currentnessReason,
+            out currentRoute,
+            out currentProtocolVersion);
         var bridgeLifecycleGrace = metadataValid && ShouldDeferExpiredRegularV4BridgeRecoveryLivenessSnapshot(
             snapshot,
             now,
@@ -718,11 +727,12 @@ public sealed partial class SessionRuntime
             sessionIdSnapshot,
             generation);
         if (!metadataValid ||
+            !routeCurrent ||
             (!IsActiveFileTransferRecoveryLivenessSnapshot(snapshot, now) && !bridgeLifecycleGrace))
         {
             LocalOperationalLog.Warn(
                 "Session",
-                $"event=session_liveness_timeout_filetransfer_recovery_state_not_deferred; session_id={sessionIdSnapshot}; transfer_id={snapshot.TransferId}; route={snapshot.RouteToken}; protocol_version={snapshot.ProtocolVersion}; live_route_epoch={snapshot.LiveRouteEpoch}; leg_generation={snapshot.TransferLegGeneration}; bridge_recovery_generation={snapshot.BridgeRecoveryGeneration}; transport_epoch={snapshot.TransportEpoch}; state={snapshot.State.ToString().ToLowerInvariant()}; metadata_valid={(metadataValid ? 1 : 0)}; terminal_recommended={(snapshot.TerminalRecommended ? 1 : 0)}; authority_completed={(snapshot.AuthorityCompleted ? 1 : 0)}; receive_proof_observed={(snapshot.ReceiveProofObserved ? 1 : 0)}; recovery_exhausted={(snapshot.RecoveryExhausted ? 1 : 0)}; liveness_deferral_deadline_utc_ms={snapshot.LivenessDeferralDeadlineUtc.ToUnixTimeMilliseconds()}; silence_ms={(long)silence.TotalMilliseconds}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+                $"event=session_liveness_timeout_filetransfer_recovery_state_not_deferred; session_id={sessionIdSnapshot}; transfer_id={snapshot.TransferId}; route={snapshot.RouteToken}; protocol_version={snapshot.ProtocolVersion}; live_route_epoch={snapshot.LiveRouteEpoch}; leg_generation={snapshot.TransferLegGeneration}; bridge_recovery_generation={snapshot.BridgeRecoveryGeneration}; transport_epoch={snapshot.TransportEpoch}; state={snapshot.State.ToString().ToLowerInvariant()}; metadata_valid={(metadataValid ? 1 : 0)}; route_current={(routeCurrent ? 1 : 0)}; currentness_reason={SanitizeSessionLivenessReason(currentnessReason)}; current_route={SanitizeSessionLivenessReason(currentRoute)}; current_protocol_version={currentProtocolVersion}; terminal_recommended={(snapshot.TerminalRecommended ? 1 : 0)}; authority_completed={(snapshot.AuthorityCompleted ? 1 : 0)}; receive_proof_observed={(snapshot.ReceiveProofObserved ? 1 : 0)}; recovery_exhausted={(snapshot.RecoveryExhausted ? 1 : 0)}; liveness_deferral_deadline_utc_ms={snapshot.LivenessDeferralDeadlineUtc.ToUnixTimeMilliseconds()}; silence_ms={(long)silence.TotalMilliseconds}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
             return false;
         }
 
@@ -1119,6 +1129,7 @@ public sealed partial class SessionRuntime
         if (transport is not IFileTransferRecoveryLivenessState recoveryState ||
             !recoveryState.TryGetActiveFileTransferRecoveryLivenessSnapshot(sessionIdSnapshot, out var candidate) ||
             !IsValidFileTransferRecoveryLivenessSnapshot(sessionIdSnapshot, candidate) ||
+            !IsCurrentFileTransferRecoveryLivenessSnapshot(sessionIdSnapshot, candidate, out _, out _, out _) ||
             !IsActiveFileTransferRecoveryLivenessSnapshot(candidate, now))
         {
             return false;
@@ -1161,6 +1172,84 @@ public sealed partial class SessionRuntime
            !snapshot.ReceiveProofObserved &&
            !snapshot.RecoveryExhausted &&
            now <= snapshot.LivenessDeferralDeadlineUtc;
+
+    private bool IsCurrentFileTransferRecoveryLivenessSnapshot(
+        string sessionIdSnapshot,
+        FileTransferRecoveryLivenessSnapshot snapshot,
+        out string reason,
+        out string currentRoute,
+        out int currentProtocolVersion)
+    {
+        reason = "no_active_transfer_snapshot";
+        currentRoute = "(none)";
+        currentProtocolVersion = 0;
+
+        if (!TryGetActiveFileTransferRouteSnapshot(
+                latestFileTransferSnapshot,
+                sessionIdSnapshot,
+                snapshot.TransferId,
+                out var transfer) &&
+            !TryGetActiveFileTransferRouteSnapshot(
+                fileTransferService.Snapshot,
+                sessionIdSnapshot,
+                snapshot.TransferId,
+                out transfer))
+        {
+            return true;
+        }
+
+        currentRoute = string.IsNullOrWhiteSpace(transfer.RouteToken)
+            ? "(none)"
+            : transfer.RouteToken!;
+        currentProtocolVersion = transfer.ProtocolVersion ?? 0;
+
+        if (!string.IsNullOrWhiteSpace(transfer.RouteToken) &&
+            !string.Equals(transfer.RouteToken, snapshot.RouteToken, StringComparison.Ordinal))
+        {
+            reason = "active_transfer_route_mismatch";
+            return false;
+        }
+
+        if (transfer.ProtocolVersion is { } protocolVersion &&
+            protocolVersion != snapshot.ProtocolVersion)
+        {
+            reason = "active_transfer_protocol_mismatch";
+            return false;
+        }
+
+        reason = "current_active_transfer";
+        return true;
+    }
+
+    private static bool TryGetActiveFileTransferRouteSnapshot(
+        SessionFileTransferSnapshot snapshot,
+        string sessionIdSnapshot,
+        string transferId,
+        out FileTransferTransferSnapshot transfer)
+    {
+        return TryGetActiveFileTransferRouteSnapshot(snapshot.Outbound, sessionIdSnapshot, transferId, out transfer) ||
+               TryGetActiveFileTransferRouteSnapshot(snapshot.Inbound, sessionIdSnapshot, transferId, out transfer);
+    }
+
+    private static bool TryGetActiveFileTransferRouteSnapshot(
+        FileTransferTransferSnapshot? candidate,
+        string sessionIdSnapshot,
+        string transferId,
+        out FileTransferTransferSnapshot transfer)
+    {
+        transfer = null!;
+        if (candidate is null ||
+            candidate.IsTerminal ||
+            string.IsNullOrWhiteSpace(candidate.TransferId) ||
+            !string.Equals(candidate.SessionId, sessionIdSnapshot, StringComparison.Ordinal) ||
+            !string.Equals(candidate.TransferId, transferId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        transfer = candidate;
+        return true;
+    }
 
     private bool ShouldDeferExpiredRegularV4BridgeRecoveryLivenessSnapshot(
         FileTransferRecoveryLivenessSnapshot snapshot,
@@ -1665,6 +1754,12 @@ public sealed partial class SessionRuntime
         }
 
         var metadataValid = IsValidFileTransferRecoveryLivenessSnapshot(sessionIdSnapshot, snapshot);
+        var routeCurrent = metadataValid && IsCurrentFileTransferRecoveryLivenessSnapshot(
+            sessionIdSnapshot,
+            snapshot,
+            out _,
+            out _,
+            out _);
         var silence = now - lastPeerProof;
         var bridgeLifecycleGrace = metadataValid && ShouldDeferExpiredRegularV4BridgeRecoveryLivenessSnapshot(
             snapshot,
@@ -1673,6 +1768,7 @@ public sealed partial class SessionRuntime
             sessionIdSnapshot,
             generation);
         if (!metadataValid ||
+            !routeCurrent ||
             (!IsActiveFileTransferRecoveryLivenessSnapshot(snapshot, now) && !bridgeLifecycleGrace))
         {
             return false;

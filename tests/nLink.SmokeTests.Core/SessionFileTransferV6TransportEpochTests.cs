@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using NLink.Core.FileTransfer;
+using NLink.Core.Logging;
 
 namespace NLink.SmokeTests;
 
@@ -702,7 +703,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                   ReadOperationalLogTail(logStart).Contains("target_transport=regular_nkn", StringComparison.Ordinal),
             timeoutMs: 5000);
 
-        var logTail = ReadOperationalLogTail(logStart);
+        var logTail = ReadOperationalLogTail(logStart) + Environment.NewLine + LocalOperationalLog.GetRecentLogText();
         Assert.Contains("handoff_kind=normal_to_tuna_activation", logTail, StringComparison.Ordinal);
         Assert.Contains("handoff_kind=tuna_to_normal_fallback", logTail, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_v6_transport_probe_sent; direction=outbound", logTail, StringComparison.Ordinal);
@@ -1885,6 +1886,10 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                 "event=filetransfer_v6_frontier_request_deferred_for_recovery",
                 StringComparison.Ordinal),
             timeoutMs: 5000);
+        var deferredLogTail = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_v6_frontier_request_deferred_for_recovery", deferredLogTail, StringComparison.Ordinal);
+        Assert.Contains("post_tuna_fallback_survival=1", deferredLogTail, StringComparison.Ordinal);
+        Assert.Contains("route=post_tuna_fallback_v6", deferredLogTail, StringComparison.Ordinal);
 
         for (var chunkIndex = 0; chunkIndex < payload.Length / chunkSize; chunkIndex++)
         {
@@ -1916,7 +1921,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         Assert.Equal(1, Volatile.Read(ref injectedFailureCount));
         Assert.Empty(receiverTransport.SentErrors);
         Assert.Equal(payload, destination.ToArray());
-        var finalLogTail = ReadOperationalLogTail(logStart);
+        var finalLogTail = deferredLogTail + Environment.NewLine + ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_v6_frontier_request_deferred_for_recovery", finalLogTail, StringComparison.Ordinal);
         Assert.Contains("post_tuna_fallback_survival=1", finalLogTail, StringComparison.Ordinal);
         Assert.Contains("route=post_tuna_fallback_v6", finalLogTail, StringComparison.Ordinal);

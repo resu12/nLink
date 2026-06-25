@@ -324,6 +324,14 @@ public sealed partial class NknSignalingTransport
             throw new InvalidOperationException("Remote endpoint is not known yet.");
         }
 
+        if (request.PreTransportDeliveryValidator is not null && !request.PreTransportDeliveryValidator())
+        {
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=filetransfer_control_plane_delivery_pre_send_validation_failed; transport=nkn; direction={FormatFileTransferDirection(request.Direction)}; kind={FormatFileTransferControlPlaneKind(request.Kind)}; transfer_id={normalizedTransferId}; session_id={SanitizeLogToken(frame.SessionId)}; route={SanitizeLogToken(request.RouteToken ?? "(none)")}; protocol_version={request.ProtocolVersion}; live_route_epoch={request.LiveRouteEpoch}; leg_generation={request.TransferLegGeneration}; bridge_recovery_generation={request.BridgeRecoveryGeneration}; transport_epoch={request.TransportEpoch}; checkpoint_request_id={SanitizeLogToken(request.CheckpointRequestId ?? "(none)")}; reason={SanitizeLogToken(request.Reason)}; frame_type={SanitizeLogToken(frame.Type)}");
+            return CreateFileTransferControlPlanePreSendValidationFailureResult(request, normalizedTransferId, frame.SessionId);
+        }
+
         var serializedFrame = SerializeFileTransferDataFrameForWire(frame);
         var controlPayload = CreateSecureFileTransferPayload(
             MsgType.FileTransferDataFrame,
@@ -358,10 +366,30 @@ public sealed partial class NknSignalingTransport
                     UseControlAckRetry: false,
                     PeerCopyAttempts: Math.Max(1, request.PeerCopyAttempts),
                     ThrowOnFailure: false,
-                    CopyTimeout: request.CopyTimeout),
+                    CopyTimeout: request.CopyTimeout,
+                    PreSendValidator: request.PreTransportDeliveryValidator),
                 new LifecycleEnvelopeSet(controlEnvelope, bulkEnvelope),
                 ct)
             .ConfigureAwait(false);
+
+        if (IsLifecyclePreSendValidationFailure(result))
+        {
+            return new FileTransferControlPlaneDeliveryResult(
+                request.Kind,
+                normalizedTransferId,
+                frame.SessionId,
+                result.MessageId,
+                result.ControlQueue,
+                result.ControlAck,
+                result.ControlCopy,
+                result.BulkCopy,
+                result.PeerVisibleAny,
+                result.AcceptedAny,
+                result.ControlQueueErrorName,
+                result.ControlAckErrorName,
+                result.ControlCopyErrorName,
+                result.BulkCopyErrorName);
+        }
 
         if (result.AcceptedAny)
         {
@@ -390,6 +418,33 @@ public sealed partial class NknSignalingTransport
             result.ControlCopyErrorName,
             result.BulkCopyErrorName);
     }
+
+    private static FileTransferControlPlaneDeliveryResult CreateFileTransferControlPlanePreSendValidationFailureResult(
+        FileTransferControlPlaneDeliveryRequest request,
+        string transferId,
+        string sessionId)
+        => new(
+            request.Kind,
+            transferId,
+            sessionId,
+            "(none)",
+            ControlQueue: false,
+            ControlAck: false,
+            ControlCopy: false,
+            BulkCopy: false,
+            PeerVisibleAny: false,
+            AcceptedAny: false,
+            ControlQueueErrorName: nameof(LifecyclePreSendValidationException),
+            ControlAckErrorName: nameof(LifecyclePreSendValidationException),
+            ControlCopyErrorName: nameof(LifecyclePreSendValidationException),
+            BulkCopyErrorName: nameof(LifecyclePreSendValidationException));
+
+    private static bool IsLifecyclePreSendValidationFailure(LifecycleDeliveryResult result)
+        => !result.AcceptedAny &&
+           (string.Equals(result.ControlQueueErrorName, nameof(LifecyclePreSendValidationException), StringComparison.Ordinal) ||
+            string.Equals(result.ControlAckErrorName, nameof(LifecyclePreSendValidationException), StringComparison.Ordinal) ||
+            string.Equals(result.ControlCopyErrorName, nameof(LifecyclePreSendValidationException), StringComparison.Ordinal) ||
+            string.Equals(result.BulkCopyErrorName, nameof(LifecyclePreSendValidationException), StringComparison.Ordinal));
 
     public Task<IFileTransferDataSession> OpenFileTransferDataSessionAsync(string sessionId, string transferId, CancellationToken ct)
     {
@@ -6270,7 +6325,8 @@ public sealed partial class NknSignalingTransport
 
     private sealed class TransportFileTransferDataSession :
         IFileTransferDataSession,
-        IFileTransferRuntimeUnlockPreCommitProbeAckAuthorizer
+        IFileTransferRuntimeUnlockPreCommitProbeAckAuthorizer,
+        IFileTransferRuntimeUnlockTunaProbeSender
     {
         private const long QueuedControlFrameEstimatedBytes = 1024L;
         private static readonly TimeSpan RuntimeUnlockPreCommitAckAuthorityTtl = TimeSpan.FromSeconds(10);
@@ -6347,13 +6403,54 @@ public sealed partial class NknSignalingTransport
                 return;
             }
 
-            var authority = new RuntimeUnlockPreCommitAckSendAuthority(
+            GrantRuntimeUnlockPreCommitAckAuthority(
                 probe.SessionId,
                 probe.TransferId,
                 probe.TransactionGeneration,
                 probe.OfferGeneration,
                 probe.TunaPathLeaseGeneration,
-                probe.ProbeId ?? string.Empty,
+                probe.ProbeId ?? string.Empty);
+        }
+
+        public void AuthorizeRuntimeUnlockPreCommitProbeAck(
+            FileTransferRuntimeUnlockPreCommitProbeAckFrame ack,
+            FileTransferTransportKind receivedTransportKind)
+        {
+            ArgumentNullException.ThrowIfNull(ack);
+
+            if (receivedTransportKind != FileTransferTransportKind.Tuna ||
+                !string.Equals(ack.TargetTransport, "tuna", StringComparison.OrdinalIgnoreCase))
+            {
+                LocalOperationalLog.Warn(
+                    "NKN.Tuna",
+                    $"event=runtime_unlock_precommit_ack_authority_failed; session_id={SanitizeLogToken(ack.SessionId)}; transfer_id={SanitizeLogToken(ack.TransferId)}; transaction_generation={ack.TransactionGeneration}; offer_generation={ack.OfferGeneration}; tuna_path_lease_generation={ack.TunaPathLeaseGeneration}; probe_id={SanitizeLogToken(ack.ProbeId ?? string.Empty)}; reason=ack_not_received_on_tuna; received_transport={FormatFileTransferTransportKindForLog(receivedTransportKind)}; target_transport={SanitizeLogToken(ack.TargetTransport)}");
+                return;
+            }
+
+            GrantRuntimeUnlockPreCommitAckAuthority(
+                ack.SessionId,
+                ack.TransferId,
+                ack.TransactionGeneration,
+                ack.OfferGeneration,
+                ack.TunaPathLeaseGeneration,
+                ack.ProbeId ?? string.Empty);
+        }
+
+        private void GrantRuntimeUnlockPreCommitAckAuthority(
+            string sessionId,
+            string transferId,
+            long transactionGeneration,
+            long offerGeneration,
+            long tunaPathLeaseGeneration,
+            string probeId)
+        {
+            var authority = new RuntimeUnlockPreCommitAckSendAuthority(
+                sessionId,
+                transferId,
+                transactionGeneration,
+                offerGeneration,
+                tunaPathLeaseGeneration,
+                probeId,
                 DateTimeOffset.UtcNow.Add(RuntimeUnlockPreCommitAckAuthorityTtl).UtcDateTime.Ticks);
             lock (preCommitAckAuthorityGate)
             {
@@ -6363,6 +6460,38 @@ public sealed partial class NknSignalingTransport
             LocalOperationalLog.Info(
                 "NKN.Tuna",
                 $"event=runtime_unlock_precommit_ack_authority_granted; session_id={SanitizeLogToken(authority.SessionId)}; transfer_id={SanitizeLogToken(authority.TransferId)}; transaction_generation={authority.TransactionGeneration}; offer_generation={authority.OfferGeneration}; tuna_path_lease_generation={authority.TunaPathLeaseGeneration}; probe_id={SanitizeLogToken(authority.ProbeId)}; received_transport=tuna; expires_utc_ticks={authority.ExpiresUtcTicks}");
+        }
+
+        public async Task SendRuntimeUnlockTunaPreCommitProbeAsync(
+            FileTransferRuntimeUnlockPreCommitProbeFrame probe,
+            CancellationToken ct)
+        {
+            ArgumentNullException.ThrowIfNull(probe);
+            if (!string.Equals(probe.TargetTransport, "tuna", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("Runtime-unlock precommit probe target is not Tuna.");
+            }
+
+            await SendAsync(probe, ct).ConfigureAwait(false);
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=runtime_unlock_tuna_probe_sent; transport=tuna; session_id={SanitizeLogToken(probe.SessionId)}; transfer_id={SanitizeLogToken(probe.TransferId)}; transaction_generation={probe.TransactionGeneration}; offer_generation={probe.OfferGeneration}; tuna_path_lease_generation={probe.TunaPathLeaseGeneration}; probe_id={SanitizeLogToken(probe.ProbeId ?? string.Empty)}; target_transport={SanitizeLogToken(probe.TargetTransport)}");
+        }
+
+        public async Task SendRuntimeUnlockTunaPreCommitProbeAckAsync(
+            FileTransferRuntimeUnlockPreCommitProbeAckFrame ack,
+            CancellationToken ct)
+        {
+            ArgumentNullException.ThrowIfNull(ack);
+            if (!string.Equals(ack.TargetTransport, "tuna", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("Runtime-unlock precommit probe ACK target is not Tuna.");
+            }
+
+            await SendAsync(ack, ct).ConfigureAwait(false);
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=runtime_unlock_tuna_probe_ack_sent; transport=tuna; session_id={SanitizeLogToken(ack.SessionId)}; transfer_id={SanitizeLogToken(ack.TransferId)}; transaction_generation={ack.TransactionGeneration}; offer_generation={ack.OfferGeneration}; tuna_path_lease_generation={ack.TunaPathLeaseGeneration}; probe_id={SanitizeLogToken(ack.ProbeId ?? string.Empty)}; reason={SanitizeLogToken(ack.Reason ?? string.Empty)}; accepted={(ack.Accepted ? 1 : 0)}");
         }
 
         public event EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? AvailabilityChanged

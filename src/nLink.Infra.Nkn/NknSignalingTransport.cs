@@ -16,7 +16,7 @@ using NLink.Core.SessionSecurity;
 namespace NLink.Infra.Nkn;
 
 #pragma warning disable CS0067
-public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, ISessionLivenessSignalingTransport, ISessionRecoveryStateContract, ITransportAccelerationStatus, ITransportAccelerationControl, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IScreenShareTransportBackpressureProbe, IScreenShareTransportPolicyController, IFileTransferSignalingTransport, IFileTransferSessionContextProvider, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferControlPlaneDeliveryTransport, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferRecoveryLivenessState, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferPostTunaFallbackControlPlanePressureObserver, IFileTransferRouteCompletionObserver, IFileTransferRouteHintObserver, IRuntimeUnlockRouteCommitProofProvider, IAuthoritativeConnectedAddressSource
+public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, IBridgeBootstrapReadinessSignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, ISessionLivenessSignalingTransport, ISessionRecoveryStateContract, ITransportAccelerationStatus, ITransportAccelerationControl, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IScreenShareTransportBackpressureProbe, IScreenShareTransportPolicyController, IFileTransferSignalingTransport, IFileTransferSessionContextProvider, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferControlPlaneDeliveryTransport, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferRecoveryLivenessState, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferPostTunaFallbackControlPlanePressureObserver, IFileTransferRouteCompletionObserver, IFileTransferRouteHintObserver, IRuntimeUnlockRouteCommitProofProvider, IAuthoritativeConnectedAddressSource
 {
     private readonly record struct FileTransferV6TransportEpochKey(
         string SessionId,
@@ -276,6 +276,14 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private bool inboundFileTransferControlDispatchActive;
     private Task inboundFileTransferLifecycleDispatchTail = Task.CompletedTask;
     private TaskCompletionSource<bool> hostReadyTcs = CreateHostReadyTcs();
+    private long hostReadyGeneration;
+    private string hostReadyRole = "(none)";
+    private string hostReadyFailureReason = "(none)";
+    private string hostReadyLastError = "(none)";
+    private long hostReadyLastReadyUtcMs;
+    private long hostReadyDeadlineUtcMs;
+    private int hostReadyTerminalFailure;
+    private int hostReadyEmitted;
     private readonly IBridgeScreenShareQueueCapability? bridgeScreenShareQueueCapability;
     private long screenShareBridgePolicyGeneration;
     private long screenShareBridgePolicyNextGeneration;
@@ -442,9 +450,9 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         authoritativeConnectedAddressSource.HasAuthoritativeConnectedAddress;
     public SessionSecurityState CurrentSessionSecurityState => currentSessionSecurityState;
     public string? CurrentFileTransferSessionId => currentSessionSecurityState.SessionId?.Value;
-    public bool IsTransportAccelerationActive => IsAccelerationNegotiatedAndHealthy();
+    public bool IsTransportAccelerationActive => IsTransportAccelerationPublishedActive();
     public bool ShouldUseFileTransferV6ForAcceleration => ShouldUseFileTransferV6ForAccelerationCore();
-    public bool IsFileTunaActiveForRouteSelection => IsFileTransferAccelerationNegotiatedAndHealthy();
+    public bool IsFileTunaActiveForRouteSelection => IsFileTransferAccelerationPublishedAndHealthy();
     public bool IsPostTunaFileFallbackActiveForRouteSelection => IsFileTransferUsingRegularNknFallbackForCurrentSession();
     public bool IsDiagnosticRegularNknV6RouteEnabled => IsDiagnosticRegularNknV6RouteEnabledCore();
     public string TransportAccelerationStatusReason
@@ -689,6 +697,30 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         return readyTask.WaitAsync(ct);
     }
 
+    public BridgeBootstrapReadinessSnapshot GetBridgeBootstrapReadinessSnapshot()
+    {
+        lock (hostReadyGate)
+        {
+            var generation = hostReadyGeneration;
+            var role = string.IsNullOrWhiteSpace(hostReadyRole) ? "(none)" : hostReadyRole;
+            var failureReason = string.IsNullOrWhiteSpace(hostReadyFailureReason) ? "(none)" : hostReadyFailureReason;
+            var lastError = string.IsNullOrWhiteSpace(hostReadyLastError) ? "(none)" : hostReadyLastError;
+            return new BridgeBootstrapReadinessSnapshot(
+                Role: role,
+                Generation: generation,
+                RunId: identity.Identifier,
+                ReadyEmitted: hostReadyEmitted != 0,
+                ControlReady: hostReadyEmitted != 0,
+                MediaReady: hostReadyEmitted != 0,
+                BulkReady: hostReadyEmitted != 0,
+                LastReadyUtcMs: hostReadyLastReadyUtcMs,
+                DeadlineUtcMs: hostReadyDeadlineUtcMs,
+                TerminalFailure: hostReadyTerminalFailure != 0,
+                FailureReason: failureReason,
+                LastError: lastError);
+        }
+    }
+
     private enum ControlOutboundLane
     {
         High = 0,
@@ -741,10 +773,20 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         return new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
-    private void ResetHostReady()
+    private void ResetHostReady(string role = "address_native_host", TimeSpan? deadline = null)
     {
         lock (hostReadyGate)
         {
+            hostReadyGeneration++;
+            hostReadyRole = string.IsNullOrWhiteSpace(role) ? "address_native_host" : role;
+            hostReadyFailureReason = "(none)";
+            hostReadyLastError = "(none)";
+            hostReadyLastReadyUtcMs = 0;
+            hostReadyDeadlineUtcMs = deadline.HasValue && deadline.Value > TimeSpan.Zero
+                ? DateTimeOffset.UtcNow.Add(deadline.Value).ToUnixTimeMilliseconds()
+                : 0;
+            hostReadyTerminalFailure = 0;
+            hostReadyEmitted = 0;
             hostReadyTcs = CreateHostReadyTcs();
         }
     }
@@ -753,6 +795,11 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     {
         lock (hostReadyGate)
         {
+            hostReadyEmitted = 1;
+            hostReadyTerminalFailure = 0;
+            hostReadyFailureReason = "(none)";
+            hostReadyLastError = "(none)";
+            hostReadyLastReadyUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             hostReadyTcs.TrySetResult(true);
         }
     }
@@ -761,14 +808,24 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     {
         lock (hostReadyGate)
         {
+            if (hostReadyEmitted == 0)
+            {
+                hostReadyTerminalFailure = 1;
+                hostReadyFailureReason = "cancelled_before_ready";
+                hostReadyLastError = "OperationCanceledException";
+            }
+
             hostReadyTcs.TrySetCanceled();
         }
     }
 
-    private void TryFailHostReady(Exception ex)
+    private void TryFailHostReady(Exception ex, string reason = "host_ready_failed")
     {
         lock (hostReadyGate)
         {
+            hostReadyTerminalFailure = 1;
+            hostReadyFailureReason = string.IsNullOrWhiteSpace(reason) ? "host_ready_failed" : reason;
+            hostReadyLastError = ex.GetType().Name + ": " + SanitizeLogToken(ex.Message);
             hostReadyTcs.TrySetException(ex);
         }
     }
@@ -2320,6 +2377,11 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         Envelope envelope,
         CancellationToken ct)
     {
+        if (TryCreateLifecyclePreSendValidationFailure(options, "control_queue") is { } validationFailure)
+        {
+            return validationFailure;
+        }
+
         try
         {
             var queued = await QueueControlEnvelopeAsync(options.ControlDestination, envelope, ControlOutboundLane.High, ct).ConfigureAwait(false);
@@ -2339,6 +2401,11 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         Envelope envelope,
         CancellationToken ct)
     {
+        if (TryCreateLifecyclePreSendValidationFailure(options, "control_ack") is { } validationFailure)
+        {
+            return validationFailure;
+        }
+
         try
         {
             await SendEnvelopeWithAckRetryAsync(options.ControlDestination, envelope, ct).ConfigureAwait(false);
@@ -2391,6 +2458,11 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         LifecycleDeliveryOptions options,
         CancellationToken ct)
     {
+        if (TryCreateLifecyclePreSendValidationFailure(options, lane) is { } validationFailure)
+        {
+            return validationFailure;
+        }
+
         try
         {
             var copyTimeout = ResolveLifecycleCopyTimeout(options);
@@ -2415,6 +2487,36 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
                 $"event={options.LogEvent}_{lane}_failed; transport=nkn; message_type={MapControlPlaneLifecycleMessageType(options.MessageType)}; error={ex.GetType().Name}");
             return new LifecycleCopySendResult(lane, false, ex);
         }
+    }
+
+    private LifecycleCopySendResult? TryCreateLifecyclePreSendValidationFailure(
+        LifecycleDeliveryOptions options,
+        string lane)
+    {
+        if (options.PreSendValidator is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            if (options.PreSendValidator())
+            {
+                return null;
+            }
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Warn(
+                options.LogCategory,
+                $"event={options.LogEvent}_{lane}_pre_send_validation_exception; transport=nkn; message_type={MapControlPlaneLifecycleMessageType(options.MessageType)}; error={ex.GetType().Name}");
+            return new LifecycleCopySendResult(lane, false, ex);
+        }
+
+        LocalOperationalLog.Warn(
+            options.LogCategory,
+            $"event={options.LogEvent}_{lane}_pre_send_validation_failed; transport=nkn; message_type={MapControlPlaneLifecycleMessageType(options.MessageType)}");
+        return new LifecycleCopySendResult(lane, false, new LifecyclePreSendValidationException());
     }
 
     private static TimeSpan ResolveLifecycleCopyTimeout(LifecycleDeliveryOptions options)
@@ -2478,7 +2580,16 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         bool UseControlAckRetry,
         int PeerCopyAttempts,
         bool ThrowOnFailure,
-        TimeSpan? CopyTimeout = null);
+        TimeSpan? CopyTimeout = null,
+        Func<bool>? PreSendValidator = null);
+
+    private sealed class LifecyclePreSendValidationException : Exception
+    {
+        public LifecyclePreSendValidationException()
+            : base("pre_send_validation_failed")
+        {
+        }
+    }
 
     private readonly record struct LifecycleEnvelopeSet(
         Envelope ControlEnvelope,

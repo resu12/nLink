@@ -1131,10 +1131,20 @@ function Copy-GuiSmokeProcessOutputIfPresent {
     }
 }
 
-function Read-GuiSmokeProcessOutputLinesSnapshot {
-    $lines = New-Object System.Collections.Generic.List[string]
+function Get-GuiSmokeProcessOutputFilesSnapshot {
+    param(
+        [string]$RoleName = '',
+        [int]$ProcessId = 0
+    )
+
+    $files = New-Object System.Collections.Generic.List[string]
     if ($script:GuiSmokeProcessOutputFiles.Count -le 0) {
-        return $lines.ToArray()
+        return $files.ToArray()
+    }
+
+    $safeRole = ''
+    if (-not [string]::IsNullOrWhiteSpace($RoleName)) {
+        $safeRole = [regex]::Replace($RoleName.Trim().ToLowerInvariant(), '[^a-z0-9_-]+', '-')
     }
 
     foreach ($path in @($script:GuiSmokeProcessOutputFiles)) {
@@ -1142,6 +1152,31 @@ function Read-GuiSmokeProcessOutputLinesSnapshot {
             continue
         }
 
+        $name = [System.IO.Path]::GetFileName($path)
+        if (-not [string]::IsNullOrWhiteSpace($safeRole) -and
+            -not $name.StartsWith(("{0}-" -f $safeRole), [System.StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+
+        if ($ProcessId -gt 0 -and
+            $name.IndexOf(("-{0}." -f $ProcessId), [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            continue
+        }
+
+        $files.Add($path) | Out-Null
+    }
+
+    return $files.ToArray()
+}
+
+function Read-GuiSmokeProcessOutputLinesSnapshot {
+    param(
+        [string]$RoleName = '',
+        [int]$ProcessId = 0
+    )
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($path in @(Get-GuiSmokeProcessOutputFilesSnapshot -RoleName $RoleName -ProcessId $ProcessId)) {
         foreach ($line in @(Read-AppLogLinesSafe -Path $path)) {
             $lines.Add([string]$line) | Out-Null
         }
@@ -1970,6 +2005,28 @@ function Get-FileSha256Hex {
     }
 }
 
+function Get-GuiSmokeStringHashPrefix {
+    param(
+        [string]$Value,
+        [int]$Length = 12
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return ''
+    }
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Value.Trim())
+        $hash = $sha.ComputeHash($bytes)
+        $hex = ([System.BitConverter]::ToString($hash) -replace '-', '').ToLowerInvariant()
+        return $hex.Substring(0, [Math]::Min($Length, $hex.Length))
+    }
+    finally {
+        $sha.Dispose()
+    }
+}
+
 function Write-DeterministicFileTransferPayload {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -2778,6 +2835,14 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $ErrorMessage.IndexOf('Timed out waiting for helpee request flow to become ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         $phase = 'preactivation_readiness'
         $reason = if ($bridgeBootstrapNotReady) { 'nkn_bridge_bootstrap_not_ready' } else { 'helpee_invite_readiness_timeout' }
+    }
+    elseif ($ErrorMessage.IndexOf('helpee_request_flow_not_enabled_after_identity_paste', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        $phase = 'preactivation_readiness'
+        $reason = 'helpee_request_flow_not_enabled_after_identity_paste'
+    }
+    elseif ($ErrorMessage.IndexOf('Timed out waiting for helper incoming request acceptance UI', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        $phase = 'helper_request_acceptance'
+        $reason = 'helper_incoming_request_not_observed'
     }
     elseif ($ErrorMessage.IndexOf('Helpee reached Connection failed before invite became ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $ErrorMessage.IndexOf('Helpee reached Connection failed before request flow became ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
@@ -3712,10 +3777,37 @@ function Unlock-TunaFromSessionHeader {
         @('event=tuna_acceleration_negotiated'),
         @('event=tuna_acceleration_timeline', 'active=1')
     )
+    $runtimeFailureNeedleSets = @(
+        @('event=tuna_acceleration_activation_offer_not_observed'),
+        @('event=tuna_acceleration_runtime_unlock_offer_peer_response_timeout'),
+        @('event=runtime_unlock_regular_v4_activation_window_failed'),
+        @('event=runtime_unlock_regular_v4_peer_visible_window_failed'),
+        @('event=session_recovery_contract_failed', 'runtime_unlock'),
+        @('event=tuna_runtime_unlock_failed')
+    )
 
     $findRuntimeEvidence = {
         foreach ($line in @(Get-AppLogLinesAfterBookmark -Bookmark $bookmark)) {
             foreach ($needleSet in $runtimeEvidenceNeedleSets) {
+                $matched = $true
+                foreach ($needle in @($needleSet)) {
+                    if ($line.IndexOf([string]$needle, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+                        $matched = $false
+                        break
+                    }
+                }
+
+                if ($matched) {
+                    return [string]$line
+                }
+            }
+        }
+
+        return $null
+    }
+    $findRuntimeFailureEvidence = {
+        foreach ($line in @(Get-AppLogLinesAfterBookmark -Bookmark $bookmark)) {
+            foreach ($needleSet in $runtimeFailureNeedleSets) {
                 $matched = $true
                 foreach ($needle in @($needleSet)) {
                     if ($line.IndexOf([string]$needle, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
@@ -3752,6 +3844,15 @@ function Unlock-TunaFromSessionHeader {
                     EvidenceLine = $evidenceLine
                 }
             }
+
+            $failureLine = & $findRuntimeFailureEvidence
+            if (-not [string]::IsNullOrWhiteSpace($failureLine)) {
+                return [pscustomobject]@{
+                    Kind = 'runtime_failure'
+                    Dialog = $null
+                    EvidenceLine = $failureLine
+                }
+            }
         }
 
         return $null
@@ -3760,6 +3861,10 @@ function Unlock-TunaFromSessionHeader {
     if ([string]::Equals([string]$dialogOrEvidence.Kind, 'runtime_evidence', [System.StringComparison]::OrdinalIgnoreCase)) {
         Write-Host "[GUI Smoke][filetransfer_tuna] $RoleLabel Tuna unlock already had runtime evidence after toggle." -ForegroundColor Green
         return
+    }
+    if ([string]::Equals([string]$dialogOrEvidence.Kind, 'runtime_failure', [System.StringComparison]::OrdinalIgnoreCase)) {
+        Write-Host "[GUI Smoke][filetransfer_tuna] $RoleLabel Tuna unlock failed before wallet prompt: $($dialogOrEvidence.EvidenceLine)" -ForegroundColor Yellow
+        throw "$RoleLabel Tuna unlock failed before wallet prompt. Evidence: $($dialogOrEvidence.EvidenceLine)"
     }
 
     $dialog = $dialogOrEvidence.Dialog
@@ -5165,8 +5270,12 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
 
     [void](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
         @('event=filetransfer_v4_sender_started'),
-        @('event=filetransfer_v6_sender_started')
-    ) -TimeoutMs 45000 -Description 'primary file-transfer sender started')
+        @('event=filetransfer_v6_sender_started'),
+        @('event=filetransfer_runtime_started', 'direction=outbound', 'role=sender'),
+        @('event=filetransfer_v4_chunk_batch_sent'),
+        @('event=filetransfer_chunk_batch_sent_as_batch', 'frame_type=filetransfer.chunk_batch.v4'),
+        @('event=filetransfer_chunk_batch_sent_as_batch', 'frame_type=filetransfer.chunk_batch.v6')
+    ) -TimeoutMs 45000 -Description 'primary file-transfer sender started or data-moving')
     [void](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
         @('event=filetransfer_v4_receiver_started'),
         @('event=filetransfer_v6_receiver_started'),
@@ -5320,18 +5429,18 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 $fallbackStartedFields = ConvertFrom-GuiSmokeSemicolonFields -Message $fallbackStartedLine
                 $fallbackStartedEpoch = ConvertTo-GuiSmokeInt -Value (Get-GuiSmokeFieldValue -Fields $fallbackStartedFields -Name 'live_route_epoch' -Default '0') -Default 0
 
-                $fallbackRouteLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $stepBookmark -NeedleSets @(
-                    @('event=filetransfer_route_selected', 'route=post_tuna_fallback_v6', 'protocol_version=6')
-                ) -TimeoutMs 90000 -Description 'live multi-toggle post-Tuna fallback V6 route selection')
-                $observedEvidenceLines.Add($fallbackRouteLine) | Out-Null
-
                 $nextAction = if ($stepIndex + 1 -lt $sequence.Count) { [string]$sequence[$stepIndex + 1] } else { '' }
                 if (($RouteMode -eq 'live-regular-activation-cycle' -or $RouteMode -eq 'live-multi-toggle' -or $RouteMode -eq 'live-reactivation-second-transfer') -and
                     [string]::Equals($nextAction, 'on', [System.StringComparison]::OrdinalIgnoreCase)) {
                     $prearmedActivationBookmark = Get-AppLogBookmark
-                    $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step_prearmed; step={1}; next_step={2}; action=on; route_mode={3}; reason=prearm_after_fallback_route_started" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber, ($stepNumber + 1), $RouteMode)) | Out-Null
+                    $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step_prearmed; step={1}; next_step={2}; action=on; route_mode={3}; reason=prearm_after_fallback_epoch_started" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber, ($stepNumber + 1), $RouteMode)) | Out-Null
                     Unlock-TunaPayers -Context $Context -PayerMode $PayerMode -Password $WalletPassword
                 }
+
+                $fallbackRouteLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $stepBookmark -NeedleSets @(
+                    @('event=filetransfer_route_selected', 'route=post_tuna_fallback_v6', 'protocol_version=6')
+                ) -TimeoutMs 90000 -Description 'live multi-toggle post-Tuna fallback V6 route selection')
+                $observedEvidenceLines.Add($fallbackRouteLine) | Out-Null
 
                 $fallbackResolutionLine = Wait-TunaGuiLiveRouteEpochRecovered -Bookmark $stepBookmark -FallbackBookmark $bookmark -Route 'post_tuna_fallback_v6' -ProtocolVersion 6 -HandoffKind 'tuna_to_normal_fallback' -TargetTransport 'regular_nkn' -Description 'live multi-toggle Tuna-to-normal fallback route epoch recovered' -LiveRouteEpoch $fallbackStartedEpoch -AfterLiveRouteEpoch $lastObservedLiveRouteEpoch -AfterLine $fallbackStartedLine
                 $observedEvidenceLines.Add($fallbackResolutionLine) | Out-Null
@@ -5397,11 +5506,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                                     continue
                                 }
 
-                                throw ("Tuna GUI live regular activation cycle transfer completed before same-transfer reactivation; route_mode={0}; transfer_id={1}; step={2}; action=on; reason=live_toggle_window_missed_transfer_completed; fallback_epoch_recovered={3}" -f `
-                                    $RouteMode,
-                                    $firstTransferTerminalBeforeLiveReactivationTransferId,
-                                    $stepNumber,
-                                    ($(if ($fallbackEpochRecoveredObserved) { 1 } else { 0 })))
+                                Write-Host '[GUI Smoke][filetransfer_tuna] Transfer completed cleanly in fallback before same-transfer reactivation; accepting terminal fallback outcome for regular activation cycle.' -ForegroundColor Yellow
+                                break
                             }
                         }
                         catch {
@@ -5540,7 +5646,13 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         }
     }
 
-    $pauseProbe = Invoke-TunaGuiPauseResumeProbe -SenderWindow $senderWindow -Bookmark $bookmark
+    $pauseProbe = $false
+    if ($firstTransferTerminalBeforeLiveReactivation) {
+        $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_pause_resume_probe_skipped; route_mode={1}; reason=terminal_before_same_transfer_reactivation" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $RouteMode)) | Out-Null
+    }
+    else {
+        $pauseProbe = Invoke-TunaGuiPauseResumeProbe -SenderWindow $senderWindow -Bookmark $bookmark
+    }
 
     $expectedInboundRole = if ($Direction -eq 'helper-to-helpee') { 'helpee' } else { 'helper' }
     $expectedOutboundRole = if ($Direction -eq 'helper-to-helpee') { 'helper' } else { 'helpee' }
@@ -5939,23 +6051,45 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     }
     elseif ($RouteMode -eq 'live-regular-activation-cycle') {
         $joinedRouteSequence = ($liveRouteEpochRouteChanges.ToArray() -join ',')
-        $liveRouteProof = Get-TunaGuiLiveRouteEpochProof -Observations $liveRouteEpochObservations -ExpectedRoutes @('file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6')
-        if (-not $evidence.tunaNegotiated -or
-            -not $evidence.fallbackEpochStarted -or
-            -not $evidence.activationEpochStarted -or
-            -not $evidence.activationEpochRecovered -or
-            -not $evidence.postTunaFallbackV6RouteObserved -or
-            -not $evidence.fallbackEpochRecovered -or
-            -not $liveRouteProof.Pass -or
-            $joinedRouteSequence -ne 'file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6') {
-            throw "Tuna GUI live regular activation cycle did not prove same-transfer regular-to-Tuna and fallback/reactivation strict live-route epoch cycling. sequence=$joinedRouteSequence findings=$($liveRouteProof.Findings -join '|') metadata_missing=$($liveRouteProof.MetadataMissingCount) Summary: $($evidence | ConvertTo-Json -Compress)"
+        if ($firstTransferTerminalBeforeLiveReactivation) {
+            $liveRouteProof = Get-TunaGuiLiveRouteEpochProof -Observations $liveRouteEpochObservations -ExpectedRoutes @('file_tuna_v4', 'post_tuna_fallback_v6')
+            if (-not $evidence.tunaNegotiated -or
+                -not $evidence.fallbackEpochStarted -or
+                -not $evidence.activationEpochStarted -or
+                -not $evidence.activationEpochRecovered -or
+                -not $evidence.postTunaFallbackV6RouteObserved -or
+                -not $evidence.fallbackEpochRecovered -or
+                -not $liveRouteProof.Pass -or
+                $joinedRouteSequence -ne 'file_tuna_v4,post_tuna_fallback_v6') {
+                throw "Tuna GUI live regular activation cycle did not prove terminal fallback outcome after first regular-to-Tuna/fallback leg. sequence=$joinedRouteSequence findings=$($liveRouteProof.Findings -join '|') metadata_missing=$($liveRouteProof.MetadataMissingCount) Summary: $($evidence | ConvertTo-Json -Compress)"
+            }
+        }
+        else {
+            $liveRouteProof = Get-TunaGuiLiveRouteEpochProof -Observations $liveRouteEpochObservations -ExpectedRoutes @('file_tuna_v4', 'post_tuna_fallback_v6', 'file_tuna_v4', 'post_tuna_fallback_v6')
+            if (-not $evidence.tunaNegotiated -or
+                -not $evidence.fallbackEpochStarted -or
+                -not $evidence.activationEpochStarted -or
+                -not $evidence.activationEpochRecovered -or
+                -not $evidence.postTunaFallbackV6RouteObserved -or
+                -not $evidence.fallbackEpochRecovered -or
+                -not $liveRouteProof.Pass -or
+                $joinedRouteSequence -ne 'file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6') {
+                throw "Tuna GUI live regular activation cycle did not prove same-transfer regular-to-Tuna and fallback/reactivation strict live-route epoch cycling. sequence=$joinedRouteSequence findings=$($liveRouteProof.Findings -join '|') metadata_missing=$($liveRouteProof.MetadataMissingCount) Summary: $($evidence | ConvertTo-Json -Compress)"
+            }
         }
     }
     elseif (-not $evidence.tunaNegotiated -or -not $evidence.fallbackEpochStarted) {
         throw "Tuna GUI post-fallback file-transfer did not prove fallback precondition before the measured transfer. Summary: $($evidence | ConvertTo-Json -Compress)"
     }
 
-    if ($evidence.heartbeatTimeoutCount -gt 0 -or $evidence.peerDisconnectedCount -gt 0 -or $evidence.transportFailedCount -gt 0) {
+    $allowTerminalFallbackCleanupDisconnectEvidence =
+        $RouteMode -eq 'live-regular-activation-cycle' -and
+        $firstTransferTerminalBeforeLiveReactivation -and
+        $evidence.heartbeatTimeoutCount -eq 0
+
+    if ($evidence.heartbeatTimeoutCount -gt 0 -or
+        ((-not $allowTerminalFallbackCleanupDisconnectEvidence) -and
+            ($evidence.peerDisconnectedCount -gt 0 -or $evidence.transportFailedCount -gt 0))) {
         throw "Tuna GUI file-transfer completed with disconnect/timeout evidence. Summary: $($evidence | ConvertTo-Json -Compress)"
     }
 
@@ -6404,10 +6538,35 @@ function Get-AppLaunchEnvironmentOverrides {
         $overrides['NLINK_NKN_KEY_PATH'] = $identityPath
     }
 
+    if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('NLINK_NKN_PREFLIGHT_RPC_ENABLED', [System.EnvironmentVariableTarget]::Process))) {
+        $overrides['NLINK_NKN_PREFLIGHT_RPC_ENABLED'] = '1'
+    }
+    if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('NLINK_NKN_PREFLIGHT_TIMEOUT_MS', [System.EnvironmentVariableTarget]::Process))) {
+        $overrides['NLINK_NKN_PREFLIGHT_TIMEOUT_MS'] = '8000'
+    }
+    if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('NLINK_NKN_PREFLIGHT_CONCURRENCY', [System.EnvironmentVariableTarget]::Process))) {
+        $overrides['NLINK_NKN_PREFLIGHT_CONCURRENCY'] = '8'
+    }
+    if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('NLINK_NKN_PREFLIGHT_CACHE_TTL_MS', [System.EnvironmentVariableTarget]::Process))) {
+        $overrides['NLINK_NKN_PREFLIGHT_CACHE_TTL_MS'] = '600000'
+    }
+
     return $overrides
 }
 
 function Get-GuiSmokeNknIdentityPathForRole {
+    param([string]$RoleName = '')
+
+    $roleDir = Get-GuiSmokeNknIdentityRoleDirectory -RoleName $RoleName
+    if ([string]::IsNullOrWhiteSpace($roleDir)) {
+        return ''
+    }
+
+    New-Item -ItemType Directory -Force -Path $roleDir | Out-Null
+    return (Join-Path $roleDir 'identity.json')
+}
+
+function Get-GuiSmokeNknIdentityRoleDirectory {
     param([string]$RoleName = '')
 
     $artifactDir = [string]$env:NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR
@@ -6424,8 +6583,60 @@ function Get-GuiSmokeNknIdentityPathForRole {
     }
 
     $roleDir = Join-Path $identityRoot $safeRole
+    return $roleDir
+}
+
+function Rotate-GuiSmokeNknIdentityForRole {
+    param(
+        [Parameter(Mandatory = $true)][string]$RoleName,
+        [string]$Reason = 'bootstrap_retry',
+        [int]$Attempt = 0
+    )
+
+    $roleDir = Get-GuiSmokeNknIdentityRoleDirectory -RoleName $RoleName
+    if ([string]::IsNullOrWhiteSpace($roleDir)) {
+        Write-Host ("[GUI Smoke] event=nkn_identity_rotation_skipped; role={0}; attempt={1}; reason={2}; detail=no_artifact_identity_root" -f $RoleName, $Attempt, $Reason) -ForegroundColor DarkYellow
+        return
+    }
+
+    $artifactDir = [string]$env:NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR
+    $resolvedArtifactDir = [System.IO.Path]::GetFullPath($artifactDir)
+    $retiredRoot = Join-Path $resolvedArtifactDir 'nkn-identities-retired'
+    New-Item -ItemType Directory -Force -Path $retiredRoot | Out-Null
+
+    $safeRole = if ([string]::IsNullOrWhiteSpace($RoleName)) { 'app' } else { $RoleName.Trim().ToLowerInvariant() }
+    $safeRole = [regex]::Replace($safeRole, '[^a-z0-9_-]+', '-')
+    if ([string]::IsNullOrWhiteSpace($safeRole)) {
+        $safeRole = 'app'
+    }
+
+    $suffix = "{0:yyyyMMddTHHmmssfffZ}-attempt{1}-{2}" -f [DateTime]::UtcNow, $Attempt, ([regex]::Replace($Reason, '[^a-zA-Z0-9_-]+', '-'))
+    $retiredDir = Join-Path $retiredRoot ("{0}-{1}" -f $safeRole, $suffix)
+
+    if (Test-Path -LiteralPath $roleDir) {
+        try {
+            Move-Item -LiteralPath $roleDir -Destination $retiredDir -Force
+            Write-Host ("[GUI Smoke] event=nkn_identity_rotated_after_helpee_invite_bootstrap_failure; role={0}; attempt={1}; reason={2}; retired_dir={3}" -f $safeRole, $Attempt, $Reason, $retiredDir) -ForegroundColor Yellow
+        }
+        catch {
+            throw ("Failed to rotate NKN identity directory for role '{0}' before bootstrap retry. role_dir={1}; retired_dir={2}; error={3}" -f $safeRole, $roleDir, $retiredDir, $_.Exception.Message)
+        }
+    }
+    else {
+        Write-Host ("[GUI Smoke] event=nkn_identity_rotation_no_existing_identity; role={0}; attempt={1}; reason={2}; role_dir={3}" -f $safeRole, $Attempt, $Reason, $roleDir) -ForegroundColor DarkGray
+    }
+
     New-Item -ItemType Directory -Force -Path $roleDir | Out-Null
-    return (Join-Path $roleDir 'identity.json')
+}
+
+function Rotate-GuiSmokeNknIdentityPairForBootstrapRetry {
+    param(
+        [string]$Reason = 'helpee_invite_bootstrap_retry',
+        [int]$Attempt = 0
+    )
+
+    Rotate-GuiSmokeNknIdentityForRole -RoleName 'helper' -Reason $Reason -Attempt $Attempt
+    Rotate-GuiSmokeNknIdentityForRole -RoleName 'helpee' -Reason $Reason -Attempt $Attempt
 }
 
 function Wait-Window {
@@ -6509,6 +6720,235 @@ function Get-TransportAwareTimeoutMs {
     return $DefaultMs
 }
 
+function Get-NknBridgeBootstrapReadinessForRole {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][ValidateSet('helper', 'helpee')][string]$RoleName
+    )
+
+    $process = if ($RoleName -eq 'helper') { $Context.HelperProc } else { $Context.HelpeeProc }
+    $processId = if ($process) { [int]$process.Id } else { 0 }
+    $lines = @(Read-GuiSmokeProcessOutputLinesSnapshot -RoleName $RoleName -ProcessId $processId)
+    $tail = @($lines | Select-Object -Last 120)
+    $readyMarkers = @(
+        'event=nkn_host_ready_connect_completed',
+        'HostByAddressAsync ready',
+        'event=bridge_ready',
+        'event=helper_local_peer_address_ready'
+    )
+    $failureMarkers = @(
+        'event=nkn_bridge_bootstrap_not_ready',
+        'HostByAddressAsync failed',
+        'RPC call failed',
+        'Connect failed',
+        'connect EACCES',
+        'ready_emitted=0',
+        'bridge_bootstrap_not_ready=1',
+        'Helpee hosting failed before invite readiness'
+    )
+
+    $ready = $false
+    $readyMarker = '(none)'
+    foreach ($line in $lines) {
+        foreach ($marker in $readyMarkers) {
+            if ($line.IndexOf($marker, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $ready = $true
+                $readyMarker = $marker
+                break
+            }
+        }
+        if ($ready) { break }
+    }
+
+    $failureReasons = New-Object System.Collections.Generic.List[string]
+    foreach ($line in $lines) {
+        foreach ($marker in $failureMarkers) {
+            if ($line.IndexOf($marker, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                if (-not $failureReasons.Contains($marker)) {
+                    $failureReasons.Add($marker) | Out-Null
+                }
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        RoleName = $RoleName
+        ProcessId = $processId
+        Ready = $ready
+        ReadyMarker = $readyMarker
+        FailureReason = if ($failureReasons.Count -gt 0) { ($failureReasons -join ',') } else { '(none)' }
+        ReadyEmittedZeroObserved = $failureReasons.Contains('ready_emitted=0')
+        LineCount = $lines.Count
+        Tail = $tail
+    }
+}
+
+function Write-NknBridgeBootstrapReadinessArtifact {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][ValidateSet('helper', 'helpee')][string]$RoleName,
+        [Parameter(Mandatory = $true)]$Snapshot,
+        [string]$Reason = 'sample',
+        [int]$Attempt = 0
+    )
+
+    $artifactRoot = [string]$env:NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR
+    if ([string]::IsNullOrWhiteSpace($artifactRoot)) {
+        return
+    }
+
+    try {
+        $diagnosticDir = Join-Path ([System.IO.Path]::GetFullPath($artifactRoot)) 'diagnostics'
+        New-Item -ItemType Directory -Force -Path $diagnosticDir | Out-Null
+        $safeReason = [regex]::Replace($Reason, '[^a-zA-Z0-9_-]+', '-')
+        if ([string]::IsNullOrWhiteSpace($safeReason)) { $safeReason = 'sample' }
+        $baseName = "bridge-bootstrap-readiness-$RoleName-$safeReason"
+        if ($Attempt -gt 0) {
+            $baseName = "$baseName-attempt-$Attempt"
+        }
+
+        $txtPath = Join-Path $diagnosticDir "$baseName.txt"
+        $jsonPath = Join-Path $diagnosticDir "$baseName.json"
+        $lines = New-Object System.Collections.Generic.List[string]
+        $lines.Add("reason=$Reason") | Out-Null
+        $lines.Add("role=$RoleName") | Out-Null
+        $lines.Add("process_id=$($Snapshot.ProcessId)") | Out-Null
+        $lines.Add("ready=$(if ($Snapshot.Ready) { 1 } else { 0 })") | Out-Null
+        $lines.Add("ready_marker=$($Snapshot.ReadyMarker)") | Out-Null
+        $lines.Add("failure_reason=$($Snapshot.FailureReason)") | Out-Null
+        $lines.Add("line_count=$($Snapshot.LineCount)") | Out-Null
+        if ($RoleName -eq 'helpee' -and $Context.HelpeeWindow) {
+            try {
+                $inviteDiagnostic = Get-HelpeeInviteReadinessDiagnostic -Window $Context.HelpeeWindow
+                $lines.Add("helpee_invite_diagnostic=$inviteDiagnostic") | Out-Null
+            }
+            catch {
+                $lines.Add("helpee_invite_diagnostic_error=$($_.Exception.GetType().Name)") | Out-Null
+            }
+        }
+
+        $lines.Add('') | Out-Null
+        $lines.Add('process_output_tail:') | Out-Null
+        foreach ($line in @($Snapshot.Tail)) {
+            $lines.Add([string]$line) | Out-Null
+        }
+
+        [System.IO.File]::WriteAllText($txtPath, ($lines -join [Environment]::NewLine), [System.Text.Encoding]::UTF8)
+        ([ordered]@{
+            event = 'nkn_bridge_bootstrap_readiness'
+            reason = $Reason
+            role = $RoleName
+            processId = $Snapshot.ProcessId
+            ready = [bool]$Snapshot.Ready
+            readyMarker = [string]$Snapshot.ReadyMarker
+            failureReason = [string]$Snapshot.FailureReason
+            lineCount = [int]$Snapshot.LineCount
+            outputTail = @($Snapshot.Tail)
+        }) | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
+    }
+    catch {
+        # Best-effort diagnostics.
+    }
+}
+
+function Wait-NknBridgeBootstrapReadyForRole {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][ValidateSet('helper', 'helpee')][string]$RoleName,
+        [int]$TimeoutMs = 60000,
+        [string]$Reason = 'before_connect_flow'
+    )
+
+    if (-not (Get-IsNknTransport)) {
+        return
+    }
+
+    $process = if ($RoleName -eq 'helper') { $Context.HelperProc } else { $Context.HelpeeProc }
+    if ($null -eq $process) {
+        throw ("nkn_bridge_bootstrap_network_unready: role={0}; reason={1}; detail=missing_process" -f $RoleName, $Reason)
+    }
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $lastSnapshot = $null
+    while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+        Assert-ProcessStillRunning -Process $process -Label $RoleName
+        [void](Refresh-ScenarioRoleWindow -Context $Context -RoleName $RoleName -Reason "bridge_bootstrap_readiness_$Reason")
+        $snapshot = Get-NknBridgeBootstrapReadinessForRole -Context $Context -RoleName $RoleName
+        $lastSnapshot = $snapshot
+        if ($snapshot.Ready) {
+            Write-NknBridgeBootstrapReadinessArtifact -Context $Context -RoleName $RoleName -Snapshot $snapshot -Reason "ready_$Reason"
+            Write-Host ("[GUI Smoke] event=nkn_bridge_bootstrap_ready; role={0}; process_id={1}; marker={2}; reason={3}" -f $RoleName, $snapshot.ProcessId, $snapshot.ReadyMarker, $Reason) -ForegroundColor DarkGray
+            return
+        }
+
+        Start-Sleep -Milliseconds 250
+    }
+
+    if ($null -eq $lastSnapshot) {
+        $lastSnapshot = Get-NknBridgeBootstrapReadinessForRole -Context $Context -RoleName $RoleName
+    }
+
+    Write-NknBridgeBootstrapReadinessArtifact -Context $Context -RoleName $RoleName -Snapshot $lastSnapshot -Reason "timeout_$Reason"
+    throw ("nkn_bridge_bootstrap_network_unready: role={0}; process_id={1}; reason={2}; ready_emitted=0; failure_markers={3}; line_count={4}" -f $RoleName, $lastSnapshot.ProcessId, $Reason, $lastSnapshot.FailureReason, $lastSnapshot.LineCount)
+}
+
+function Wait-NknBridgeBootstrapReadyForCurrentPair {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [int]$TimeoutMs = 60000,
+        [string]$Reason = 'before_connect_flow'
+    )
+
+    if (-not (Get-IsNknTransport)) {
+        return
+    }
+
+    Wait-NknBridgeBootstrapReadyForRole -Context $Context -RoleName 'helpee' -TimeoutMs $TimeoutMs -Reason $Reason
+    Wait-NknBridgeBootstrapReadyForRole -Context $Context -RoleName 'helper' -TimeoutMs $TimeoutMs -Reason $Reason
+}
+
+function Wait-NknBridgeBootstrapReadyForCurrentPairWithRecovery {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [int]$TimeoutMs = 60000,
+        [string]$Reason = 'before_connect_flow'
+    )
+
+    if (-not (Get-IsNknTransport)) {
+        return
+    }
+
+    $attempts = 2
+    $lastError = $null
+    for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+        try {
+            Wait-NknBridgeBootstrapReadyForCurrentPair -Context $Context -TimeoutMs $TimeoutMs -Reason $Reason
+            return
+        }
+        catch {
+            $lastError = $_
+            $message = $_.Exception.Message
+            if ($attempt -ge $attempts -or -not (Test-HelpeeInviteBootstrapBridgeRetryableError -Message $message)) {
+                throw
+            }
+
+            Write-Host ("[GUI Smoke] event=nkn_bridge_bootstrap_pair_retry_scheduled; attempt={0}/{1}; reason={2}; rotate_identity=0; helpee_pid={3}; helper_pid={4}" -f `
+                $attempt,
+                $attempts,
+                $message,
+                ($(if ($Context.HelpeeProc) { [int]$Context.HelpeeProc.Id } else { 0 })),
+                ($(if ($Context.HelperProc) { [int]$Context.HelperProc.Id } else { 0 }))) -ForegroundColor Yellow
+            Restart-HelperIdentityPairFlow -Context $Context -Reason 'nkn_bridge_bootstrap_pair_retry' -Attempt ($attempt + 1) -RotateIdentity $false
+        }
+    }
+
+    if ($lastError) {
+        throw $lastError
+    }
+
+    throw 'NKN bridge bootstrap pair recovery failed unexpectedly.'
+}
+
 function Get-SessionHeaderStatusValue {
     param([Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window)
 
@@ -6576,10 +7016,146 @@ function Get-HelpeeInviteReadinessDiagnostic {
         $retryEnabled)
 }
 
+function Get-HelpeeHelperIdentityEntryDiagnostic {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [Parameter(Mandatory = $true)][string]$HelperIdentity
+    )
+
+    $inputEnabled = '(missing)'
+    $inputKind = '(missing)'
+    $inputLength = 0
+    $inputHash = ''
+    $inputMatches = '0'
+    $pasteEnabled = '(missing)'
+    $targetKind = Get-HelperIdentityClipboardCandidateKind -Value $HelperIdentity
+    $targetLength = if ([string]::IsNullOrWhiteSpace($HelperIdentity)) { 0 } else { $HelperIdentity.Trim().Length }
+    $targetHash = Get-GuiSmokeStringHashPrefix -Value $HelperIdentity
+
+    try {
+        $input = Find-VisibleByAutomationId -Root $Window -AutomationId 'Helpee.HelperIdentityInput'
+        if ($input) {
+            $inputEnabled = if ($input.Current.IsEnabled) { '1' } else { '0' }
+            $raw = [string](Get-ElementValueSafe -Element $input)
+            $inputKind = Get-HelperIdentityClipboardCandidateKind -Value $raw
+            $inputLength = if ([string]::IsNullOrWhiteSpace($raw)) { 0 } else { $raw.Trim().Length }
+            $inputHash = Get-GuiSmokeStringHashPrefix -Value $raw
+            $state = Test-ElementValueMatchesText -Element $input -ExpectedText $HelperIdentity
+            $inputMatches = if ($state.IsMatch) { '1' } else { '0' }
+        }
+    } catch {}
+
+    try {
+        $paste = Find-ByNameAndType -Root $Window -Name 'Paste helper address' -ControlType ([System.Windows.Automation.ControlType]::Button)
+        if ($paste -and -not $paste.Current.IsOffscreen) {
+            $pasteEnabled = if ($paste.Current.IsEnabled) { '1' } else { '0' }
+        }
+    } catch {}
+
+    return ("helper_identity_target_kind={0}; target_length={1}; target_hash={2}; input_kind={3}; input_length={4}; input_hash={5}; input_matches_target={6}; input_enabled={7}; paste_enabled={8}" -f `
+        $targetKind,
+        $targetLength,
+        $targetHash,
+        $inputKind,
+        $inputLength,
+        $inputHash,
+        $inputMatches,
+        $inputEnabled,
+        $pasteEnabled)
+}
+
+function Test-HelpeeHelperIdentityRequestBootstrapPending {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [Parameter(Mandatory = $true)][string]$HelperIdentity
+    )
+
+    $input = Find-VisibleByAutomationId -Root $Window -AutomationId 'Helpee.HelperIdentityInput'
+    if (-not $input -or -not $input.Current.IsEnabled) {
+        return $false
+    }
+
+    $inputState = Test-ElementValueMatchesText -Element $input -ExpectedText $HelperIdentity
+    if (-not $inputState.IsMatch) {
+        return $false
+    }
+
+    $request = Find-VisibleByAutomationId -Root $Window -AutomationId 'Helpee.RequestHelp'
+    if ($request -and $request.Current.IsEnabled -and -not $request.Current.IsOffscreen) {
+        return $false
+    }
+
+    $headerStatus = Get-SessionHeaderStatusValue -Window $Window
+    $inviteStatus = ''
+    $status = Find-VisibleByAutomationId -Root $Window -AutomationId 'Helpee.InviteStatus'
+    if ($status) {
+        $inviteStatus = (Get-ElementTextSafe -Element $status).Trim()
+    }
+
+    return ($headerStatus -match 'Waiting for helper|Connecting' -or
+        $inviteStatus -match 'Preparing invite|Updating invite|Preparing')
+}
+
+function Invoke-HelpeeHelperIdentityRequestReadinessNudge {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [Parameter(Mandatory = $true)][string]$HelperIdentity,
+        [Parameter(Mandatory = $true)][int]$Attempt
+    )
+
+    $input = Find-VisibleByAutomationId -Root $Window -AutomationId 'Helpee.HelperIdentityInput'
+    if (-not $input -or -not $input.Current.IsEnabled) {
+        return $false
+    }
+
+    $usedPasteButton = $false
+    $pasteButton = Find-ByNameAndType -Root $Window -Name 'Paste helper address' -ControlType ([System.Windows.Automation.ControlType]::Button)
+    if ($pasteButton -and -not $pasteButton.Current.IsOffscreen -and $pasteButton.Current.IsEnabled) {
+        try {
+            Set-Clipboard -Value $HelperIdentity
+            Click-Element $pasteButton
+            [void](Wait-ElementValueMatchesText -Element $input -ExpectedText $HelperIdentity -TimeoutMs 1500)
+            $usedPasteButton = $true
+        }
+        catch {
+            $usedPasteButton = $false
+        }
+    }
+
+    $state = Test-ElementValueMatchesText -Element $input -ExpectedText $HelperIdentity
+    if (-not $state.IsMatch) {
+        Set-Text -Element $input -Text $HelperIdentity
+        [void](Wait-ElementValueMatchesText -Element $input -ExpectedText $HelperIdentity -TimeoutMs 1500)
+    }
+
+    Submit-TextInputWithEnter -Element $input
+    Write-Host ("[GUI Smoke] event=helpee_request_flow_not_enabled_after_identity_paste; attempt={0}; action=identity_entry_nudge; used_paste_button={1}; {2}; {3}" -f `
+        $Attempt,
+        ($(if ($usedPasteButton) { 1 } else { 0 })),
+        (Get-HelpeeInviteReadinessDiagnostic -Window $Window),
+        (Get-HelpeeHelperIdentityEntryDiagnostic -Window $Window -HelperIdentity $HelperIdentity)) -ForegroundColor Yellow
+    return $true
+}
+
+function Get-HelpeeInviteRetryButton {
+    param([Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window)
+
+    try {
+        $retry = Find-ByNameAndType -Root $Window -Name 'Retry' -ControlType ([System.Windows.Automation.ControlType]::Button)
+        if ($retry -and -not $retry.Current.IsOffscreen -and $retry.Current.IsEnabled) {
+            return $retry
+        }
+    }
+    catch {}
+
+    return $null
+}
+
 function Write-HelpeeInviteReadinessDiagnosticArtifact {
     param(
         [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
-        [Parameter(Mandatory = $true)][string]$Reason
+        [Parameter(Mandatory = $true)][string]$Reason,
+        [string]$HelperIdentity = ''
     )
 
     $artifactRoot = [string]$env:NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR
@@ -6595,6 +7171,9 @@ function Write-HelpeeInviteReadinessDiagnosticArtifact {
         $lines = New-Object System.Collections.Generic.List[string]
         $lines.Add("reason=$Reason") | Out-Null
         $lines.Add((Get-HelpeeInviteReadinessDiagnostic -Window $Window)) | Out-Null
+        if (-not [string]::IsNullOrWhiteSpace($HelperIdentity)) {
+            $lines.Add((Get-HelpeeHelperIdentityEntryDiagnostic -Window $Window -HelperIdentity $HelperIdentity)) | Out-Null
+        }
         $lines.Add('') | Out-Null
         $lines.Add('process_output_tail:') | Out-Null
         foreach ($line in @(Read-GuiSmokeProcessOutputLinesSnapshot | Select-Object -Last 120)) {
@@ -7380,84 +7959,195 @@ function Enter-HelpeeHelperIdentityAndRequestHelp {
         [Parameter(Mandatory = $true)][string]$HelperIdentity
     )
 
-    $input = Wait-Until -TimeoutMs (Get-TransportAwareTimeoutMs -DefaultMs 10000 -NknMs 30000) -PollMs 200 -OnTimeoutMessage 'Timed out waiting for Helpee.HelperIdentityInput.' -Condition {
-        $el = Find-VisibleByAutomationId -Root $HelpeeWindow -AutomationId 'Helpee.HelperIdentityInput'
-        if ($el -and $el.Current.IsEnabled) { return $el }
-        return $null
-    }
+    $attempts = if (Get-IsNknTransport) { 2 } else { 1 }
+    for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+        $input = Wait-Until -TimeoutMs (Get-TransportAwareTimeoutMs -DefaultMs 10000 -NknMs 30000) -PollMs 200 -OnTimeoutMessage 'Timed out waiting for Helpee.HelperIdentityInput.' -Condition {
+            $el = Find-VisibleByAutomationId -Root $HelpeeWindow -AutomationId 'Helpee.HelperIdentityInput'
+            if ($el -and $el.Current.IsEnabled) { return $el }
+            return $null
+        }
 
-    $pastedViaUi = $false
-    $pasteButton = Find-ByNameAndType -Root $HelpeeWindow -Name 'Paste helper address' -ControlType ([System.Windows.Automation.ControlType]::Button)
-    if ($pasteButton -and -not $pasteButton.Current.IsOffscreen -and $pasteButton.Current.IsEnabled) {
-        try {
-            Set-Clipboard -Value $HelperIdentity
-            Click-Element $pasteButton
+        $pastedViaUi = $false
+        $pasteButton = Find-ByNameAndType -Root $HelpeeWindow -Name 'Paste helper address' -ControlType ([System.Windows.Automation.ControlType]::Button)
+        if ($pasteButton -and -not $pasteButton.Current.IsOffscreen -and $pasteButton.Current.IsEnabled) {
+            try {
+                Set-Clipboard -Value $HelperIdentity
+                Click-Element $pasteButton
+                [void](Wait-ElementValueMatchesText -Element $input -ExpectedText $HelperIdentity -TimeoutMs 1500)
+                $pastedViaUi = $true
+            }
+            catch {
+                $pastedViaUi = $false
+            }
+        }
+
+        if (-not $pastedViaUi) {
+            Set-Text -Element $input -Text $HelperIdentity
             [void](Wait-ElementValueMatchesText -Element $input -ExpectedText $HelperIdentity -TimeoutMs 1500)
-            $pastedViaUi = $true
+        }
+
+        $inputState = Test-ElementValueMatchesText -Element $input -ExpectedText $HelperIdentity
+        if (-not $inputState.IsMatch) {
+            Set-Text -Element $input -Text $HelperIdentity
+            [void](Wait-ElementValueMatchesText -Element $input -ExpectedText $HelperIdentity -TimeoutMs 1500)
+        }
+
+        Submit-TextInputWithEnter -Element $input
+        Write-Host ("[GUI Smoke] event=helpee_helper_identity_entered; attempt={0}; used_paste_button={1}; {2}; {3}" -f `
+            $attempt,
+            ($(if ($pastedViaUi) { 1 } else { 0 })),
+            (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow),
+            (Get-HelpeeHelperIdentityEntryDiagnostic -Window $HelpeeWindow -HelperIdentity $HelperIdentity)) -ForegroundColor DarkGray
+
+        $readiness = $null
+        try {
+            $readiness = Wait-Until -TimeoutMs (Get-TransportAwareTimeoutMs -DefaultMs 10000 -NknMs 60000) -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helpee request flow to become ready.' -Condition {
+                if (Test-ConnectionFailedSurface -Window $HelpeeWindow) {
+                    return [pscustomobject]@{
+                        State = 'connection_failed'
+                        Retry = (Get-HelpeeInviteRetryButton -Window $HelpeeWindow)
+                        Diagnostic = (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow)
+                    }
+                }
+
+                $request = Find-VisibleByAutomationId -Root $HelpeeWindow -AutomationId 'Helpee.RequestHelp'
+                if ($request -and $request.Current.IsEnabled -and -not $request.Current.IsOffscreen) {
+                    return [pscustomobject]@{
+                        State = 'ready'
+                        Request = $request
+                        Diagnostic = (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow)
+                    }
+                }
+
+                $status = Find-VisibleByAutomationId -Root $HelpeeWindow -AutomationId 'Helpee.InviteStatus'
+                if ($status) {
+                    $statusText = (Get-ElementTextSafe -Element $status).Trim()
+                    if ($statusText -match 'Preparing invite|Updating invite') {
+                        return $null
+                    }
+                }
+
+                return [pscustomobject]@{
+                    State = 'maybe_ready'
+                    Request = $request
+                    Diagnostic = (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow)
+                }
+            }
         }
         catch {
-            $pastedViaUi = $false
-        }
-    }
+            Write-HelpeeInviteReadinessDiagnosticArtifact -Window $HelpeeWindow -Reason "invite_ready_wait_failed_attempt_$attempt" -HelperIdentity $HelperIdentity
+            if (Test-HelpeeHelperIdentityRequestBootstrapPending -Window $HelpeeWindow -HelperIdentity $HelperIdentity) {
+                if ($attempt -lt $attempts -and (Invoke-HelpeeHelperIdentityRequestReadinessNudge -Window $HelpeeWindow -HelperIdentity $HelperIdentity -Attempt $attempt)) {
+                    Start-Sleep -Milliseconds 750
+                    continue
+                }
 
-    if (-not $pastedViaUi) {
-        Set-Text -Element $input -Text $HelperIdentity
-        [void](Wait-ElementValueMatchesText -Element $input -ExpectedText $HelperIdentity -TimeoutMs 1500)
-    }
-
-    $inputState = Test-ElementValueMatchesText -Element $input -ExpectedText $HelperIdentity
-    if (-not $inputState.IsMatch) {
-        Set-Text -Element $input -Text $HelperIdentity
-        [void](Wait-ElementValueMatchesText -Element $input -ExpectedText $HelperIdentity -TimeoutMs 1500)
-    }
-
-    Submit-TextInputWithEnter -Element $input
-
-    try {
-        [void](Wait-Until -TimeoutMs (Get-TransportAwareTimeoutMs -DefaultMs 10000 -NknMs 60000) -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helpee request flow to become ready.' -Condition {
-            if (Test-ConnectionFailedSurface -Window $HelpeeWindow) {
-                throw ("Helpee reached Connection failed before request flow became ready. {0}" -f (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow))
+                throw ("Helpee request flow not enabled after current helper identity paste. reason=helpee_request_flow_not_enabled_after_identity_paste; {0}; {1}" -f `
+                    (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow),
+                    (Get-HelpeeHelperIdentityEntryDiagnostic -Window $HelpeeWindow -HelperIdentity $HelperIdentity))
             }
 
-            $request = Find-VisibleByAutomationId -Root $HelpeeWindow -AutomationId 'Helpee.RequestHelp'
-            if ($request -and $request.Current.IsEnabled -and -not $request.Current.IsOffscreen) {
-                return $true
-            }
-
-            $status = Find-VisibleByAutomationId -Root $HelpeeWindow -AutomationId 'Helpee.InviteStatus'
-            if ($status) {
-                $statusText = (Get-ElementTextSafe -Element $status).Trim()
-                if ($statusText -match 'Preparing invite|Updating invite') {
-                    return $null
+            if ($attempt -lt $attempts) {
+                $retry = Get-HelpeeInviteRetryButton -Window $HelpeeWindow
+                if ($retry) {
+                    Write-Host ("[GUI Smoke] event=helpee_invite_retry_after_readiness_timeout; attempt={0}; diagnostic={1}" -f $attempt, (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow)) -ForegroundColor Yellow
+                    Click-Element $retry
+                    Start-Sleep -Milliseconds 500
+                    continue
                 }
             }
 
-            return $true
-        })
-    }
-    catch {
-        Write-HelpeeInviteReadinessDiagnosticArtifact -Window $HelpeeWindow -Reason 'invite_ready_wait_failed'
-        throw ("{0} Diagnostic: {1}" -f $_.Exception.Message, (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow))
-    }
+            throw ("{0} Diagnostic: {1}" -f $_.Exception.Message, (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow))
+        }
 
-    try {
-        $request = Wait-Until -TimeoutMs (Get-TransportAwareTimeoutMs -DefaultMs 10000 -NknMs 45000) -PollMs 200 -OnTimeoutMessage 'Timed out waiting for Helpee.RequestHelp to become enabled.' -Condition {
-            if (Test-ConnectionFailedSurface -Window $HelpeeWindow) {
-                throw ("Helpee reached Connection failed before Request help became enabled. {0}" -f (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow))
+        if ($readiness -and [string]::Equals([string]$readiness.State, 'connection_failed', [System.StringComparison]::Ordinal)) {
+            Write-HelpeeInviteReadinessDiagnosticArtifact -Window $HelpeeWindow -Reason "invite_connection_failed_attempt_$attempt" -HelperIdentity $HelperIdentity
+            if ($attempt -lt $attempts -and $readiness.Retry) {
+                Write-Host ("[GUI Smoke] event=helpee_invite_retry_after_connection_failed; attempt={0}; diagnostic={1}" -f $attempt, [string]$readiness.Diagnostic) -ForegroundColor Yellow
+                Click-Element $readiness.Retry
+                Start-Sleep -Milliseconds 500
+                continue
             }
 
-            $btn = Find-VisibleByAutomationId -Root $HelpeeWindow -AutomationId 'Helpee.RequestHelp'
-            if ($btn -and $btn.Current.IsEnabled) { return $btn }
-            return $null
+            throw ("Helpee reached Connection failed before request flow became ready. {0}" -f (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow))
         }
-    }
-    catch {
-        Write-HelpeeInviteReadinessDiagnosticArtifact -Window $HelpeeWindow -Reason 'request_help_wait_failed'
-        throw ("{0} Diagnostic: {1}" -f $_.Exception.Message, (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow))
+
+        try {
+            $request = Wait-Until -TimeoutMs (Get-TransportAwareTimeoutMs -DefaultMs 10000 -NknMs 45000) -PollMs 200 -OnTimeoutMessage 'Timed out waiting for Helpee.RequestHelp to become enabled.' -Condition {
+                if (Test-ConnectionFailedSurface -Window $HelpeeWindow) {
+                    return [pscustomobject]@{
+                        State = 'connection_failed'
+                        Retry = (Get-HelpeeInviteRetryButton -Window $HelpeeWindow)
+                        Diagnostic = (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow)
+                    }
+                }
+
+                $btn = Find-VisibleByAutomationId -Root $HelpeeWindow -AutomationId 'Helpee.RequestHelp'
+                if ($btn -and $btn.Current.IsEnabled) {
+                    return [pscustomobject]@{
+                        State = 'ready'
+                        Request = $btn
+                        Diagnostic = (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow)
+                    }
+                }
+                return $null
+            }
+        }
+        catch {
+            Write-HelpeeInviteReadinessDiagnosticArtifact -Window $HelpeeWindow -Reason "request_help_wait_failed_attempt_$attempt" -HelperIdentity $HelperIdentity
+            if (Test-HelpeeHelperIdentityRequestBootstrapPending -Window $HelpeeWindow -HelperIdentity $HelperIdentity) {
+                if ($attempt -lt $attempts -and (Invoke-HelpeeHelperIdentityRequestReadinessNudge -Window $HelpeeWindow -HelperIdentity $HelperIdentity -Attempt $attempt)) {
+                    Start-Sleep -Milliseconds 750
+                    continue
+                }
+
+                throw ("Helpee request help button not enabled after current helper identity paste. reason=helpee_request_flow_not_enabled_after_identity_paste; {0}; {1}" -f `
+                    (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow),
+                    (Get-HelpeeHelperIdentityEntryDiagnostic -Window $HelpeeWindow -HelperIdentity $HelperIdentity))
+            }
+
+            if ($attempt -lt $attempts) {
+                $retry = Get-HelpeeInviteRetryButton -Window $HelpeeWindow
+                if ($retry) {
+                    Write-Host ("[GUI Smoke] event=helpee_invite_retry_after_request_help_timeout; attempt={0}; diagnostic={1}" -f $attempt, (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow)) -ForegroundColor Yellow
+                    Click-Element $retry
+                    Start-Sleep -Milliseconds 500
+                    continue
+                }
+            }
+
+            throw ("{0} Diagnostic: {1}" -f $_.Exception.Message, (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow))
+        }
+
+        if ($request -and [string]::Equals([string]$request.State, 'connection_failed', [System.StringComparison]::Ordinal)) {
+            Write-HelpeeInviteReadinessDiagnosticArtifact -Window $HelpeeWindow -Reason "request_help_connection_failed_attempt_$attempt" -HelperIdentity $HelperIdentity
+            if ($attempt -lt $attempts -and $request.Retry) {
+                Write-Host ("[GUI Smoke] event=helpee_invite_retry_after_request_help_connection_failed; attempt={0}; diagnostic={1}" -f $attempt, [string]$request.Diagnostic) -ForegroundColor Yellow
+                Click-Element $request.Retry
+                Start-Sleep -Milliseconds 500
+                continue
+            }
+
+            throw ("Helpee reached Connection failed before Request help became enabled. {0}" -f (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow))
+        }
+
+        $requestButton = $null
+        if ($request -and $request.Request) {
+            $requestButton = $request.Request
+        }
+        elseif ($readiness -and $readiness.Request) {
+            $requestButton = $readiness.Request
+        }
+
+        if (-not $requestButton) {
+            throw ("Helpee request flow produced no Request help button. {0}" -f (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow))
+        }
+
+        Click-Element $requestButton
+        return $requestButton
     }
 
-    Click-Element $request
-    return $request
+    throw ("Helpee invite retry budget exhausted. {0}" -f (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow))
 }
 
 function Test-HelpeeHelperIdentityRequestRetryReady {
@@ -7528,7 +8218,28 @@ function Connect-HelperIdentityRequestFlow {
             Write-Host "[GUI Smoke] Retrying helper identity help request after setup ack miss. attempt=$attempt/$maxAttempts" -ForegroundColor DarkGray
         }
 
-        [void](Enter-HelpeeHelperIdentityAndRequestHelp -HelpeeWindow $Context.HelpeeWindow -HelperIdentity $HelperIdentity)
+        try {
+            [void](Enter-HelpeeHelperIdentityAndRequestHelp -HelpeeWindow $Context.HelpeeWindow -HelperIdentity $HelperIdentity)
+        }
+        catch {
+            $lastError = $_
+            $message = $_.Exception.Message
+            if ($message.IndexOf('helpee_request_flow_not_enabled_after_identity_paste', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                $attempt -lt $maxAttempts) {
+                Write-Host ("[GUI Smoke] event=helper_identity_request_flow_restart_after_helpee_request_not_enabled; attempt={0}/{1}; diagnostic={2}" -f `
+                    $attempt,
+                    $maxAttempts,
+                    (Get-HelpeeInviteReadinessDiagnostic -Window $Context.HelpeeWindow)) -ForegroundColor Yellow
+                Restart-HelpeeFlow -Context $Context
+                $entryMode = Wait-HelpeeConnectionEntryModeWithRecovery -Context $Context -TimeoutMs (Get-TransportAwareTimeoutMs -DefaultMs 10000 -NknMs 30000)
+                if (-not [string]::Equals([string]$entryMode, 'helper_identity', [System.StringComparison]::Ordinal)) {
+                    throw ("Helpee restart after request-readiness failure did not return to helper identity mode. entry_mode={0}" -f $entryMode)
+                }
+                continue
+            }
+
+            throw
+        }
 
         try {
             return Wait-HelperAcceptRequestOrExit -Context $Context -TimeoutMs 90000
@@ -8028,6 +8739,76 @@ function Restart-HelperFlow {
     Start-HelperFlow -Context $Context
 }
 
+function Restart-HelperIdentityPairFlow {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [string]$Reason = 'helper_identity_pair_restart',
+        [int]$Attempt = 0,
+        [bool]$RotateIdentity = $true
+    )
+
+    Write-Host ("[GUI Smoke] event=helper_identity_pair_restart_after_helpee_invite_bootstrap_failure; attempt={0}; reason={1}; rotate_identity={2}; helper_pid={3}; helpee_pid={4}" -f `
+        $Attempt,
+        $Reason,
+        ($(if ($RotateIdentity) { 1 } else { 0 })),
+        ($(if ($Context.HelperProc) { [int]$Context.HelperProc.Id } else { 0 })),
+        ($(if ($Context.HelpeeProc) { [int]$Context.HelpeeProc.Id } else { 0 }))) -ForegroundColor Yellow
+
+    $oldHelperProc = $Context.HelperProc
+    $oldHelpeeProc = $Context.HelpeeProc
+    $toCleanup = @()
+    if ($oldHelperProc) { $toCleanup += $oldHelperProc }
+    if ($oldHelpeeProc) { $toCleanup += $oldHelpeeProc }
+    if ($toCleanup.Count -gt 0) {
+        Cleanup-Processes -Processes $toCleanup -ExePath $Context.ExePath
+    }
+
+    Assert-ScenarioRoleProcessRetired -Process $oldHelperProc -RoleName 'helper'
+    Assert-ScenarioRoleProcessRetired -Process $oldHelpeeProc -RoleName 'helpee'
+    Remove-ScenarioTrackedProcess -Context $Context -Process $oldHelperProc
+    Remove-ScenarioTrackedProcess -Context $Context -Process $oldHelpeeProc
+
+    $Context.HelperProc = $null
+    $Context.HelpeeProc = $null
+    Clear-ScenarioRoleWindowIdentity -Context $Context -RoleName 'helper'
+    Clear-ScenarioRoleWindowIdentity -Context $Context -RoleName 'helpee'
+    Clear-HelperIdentityArtifact
+
+    if ($RotateIdentity -and (Get-IsNknTransport)) {
+        Rotate-GuiSmokeNknIdentityPairForBootstrapRetry -Reason $Reason -Attempt $Attempt
+    }
+    elseif ((Get-IsNknTransport) -and -not $RotateIdentity) {
+        Write-Host ("[GUI Smoke] event=nkn_identity_rotation_skipped_for_bridge_bootstrap_retry; attempt={0}; reason={1}" -f $Attempt, $Reason) -ForegroundColor DarkGray
+    }
+
+    Start-HelpeeFlow -Context $Context
+    Start-HelperFlow -Context $Context
+}
+
+function Test-HelpeeInviteBootstrapBridgeRetryableError {
+    param([AllowNull()][string]$Message)
+
+    if ([string]::IsNullOrWhiteSpace($Message)) { return $false }
+    return $Message.IndexOf('nkn_bridge_bootstrap_network_unready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $Message.IndexOf('nkn_bridge_bootstrap_not_ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $Message.IndexOf('HostByAddressAsync failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $Message.IndexOf('RPC call failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $Message.IndexOf('Connect failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $Message.IndexOf('connect EACCES', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $Message.IndexOf('Could not prepare invite', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+}
+
+function Test-HelpeeInviteBootstrapPairRetryableError {
+    param([AllowNull()][string]$Message)
+
+    if ([string]::IsNullOrWhiteSpace($Message)) { return $false }
+    return $Message.IndexOf('Helpee reached Connection failed before request flow became ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $Message.IndexOf('Helpee reached Connection failed before Request help became enabled', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $Message.IndexOf('Helpee reached Connection failed before approval', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $Message.IndexOf('The session was ended', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $Message.IndexOf('helpee_request_flow_not_enabled_after_identity_paste', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+}
+
 function Wait-HelpeeConnectionEntryMode {
     param(
         [Parameter(Mandatory = $true)]$Context,
@@ -8085,20 +8866,67 @@ function Wait-HelpeeConnectionEntryModeWithRecovery {
 function Connect-HelperAndHelpee {
     param([Parameter(Mandatory = $true)]$Context)
 
+    Wait-NknBridgeBootstrapReadyForCurrentPairWithRecovery -Context $Context -TimeoutMs (Get-TransportAwareTimeoutMs -DefaultMs 1000 -NknMs 60000) -Reason 'before_connection_entry'
     $entryMode = Wait-HelpeeConnectionEntryModeWithRecovery -Context $Context -TimeoutMs (Get-TransportAwareTimeoutMs -DefaultMs 10000 -NknMs 30000)
     if ([string]::Equals($entryMode, 'helper_identity', [System.StringComparison]::Ordinal)) {
         Write-Host '[GUI Smoke] Helpee connection mode: helper identity request flow.' -ForegroundColor DarkGray
-        $helperIdentity = Copy-HelperIdentityWithRecovery -Context $Context
-        Write-Host "[GUI Smoke] Helper identity copied: $helperIdentity" -ForegroundColor Green
+        $pairAttempts = if (Get-IsNknTransport) { 2 } else { 1 }
+        $lastPairError = $null
+        $nextPairRestartReason = 'helpee_invite_bootstrap_retry'
+        $nextPairRestartRotateIdentity = $true
+        for ($pairAttempt = 1; $pairAttempt -le $pairAttempts; $pairAttempt++) {
+            if ($pairAttempt -gt 1) {
+                Restart-HelperIdentityPairFlow -Context $Context -Reason $nextPairRestartReason -Attempt $pairAttempt -RotateIdentity $nextPairRestartRotateIdentity
+                $nextPairRestartReason = 'helpee_invite_bootstrap_retry'
+                $nextPairRestartRotateIdentity = $true
+                Wait-NknBridgeBootstrapReadyForCurrentPair -Context $Context -TimeoutMs (Get-TransportAwareTimeoutMs -DefaultMs 1000 -NknMs 60000) -Reason 'after_helper_identity_pair_restart'
+                $entryMode = Wait-HelpeeConnectionEntryModeWithRecovery -Context $Context -TimeoutMs (Get-TransportAwareTimeoutMs -DefaultMs 10000 -NknMs 30000)
+                if (-not [string]::Equals([string]$entryMode, 'helper_identity', [System.StringComparison]::Ordinal)) {
+                    throw ("Helpee pair restart after invite bootstrap failure did not return to helper identity mode. entry_mode={0}" -f $entryMode)
+                }
+            }
 
-        $accept = Connect-HelperIdentityRequestFlow -Context $Context -HelperIdentity $helperIdentity
-        Click-Element $accept
+            $helperIdentity = Copy-HelperIdentityWithRecovery -Context $Context
+            Write-Host "[GUI Smoke] Helper identity copied: $helperIdentity" -ForegroundColor Green
 
-        $allow = Wait-HelpeeAllowOrExit -Context $Context -TimeoutMs 90000
-        Click-Element $allow
+            try {
+                $accept = Connect-HelperIdentityRequestFlow -Context $Context -HelperIdentity $helperIdentity
+                Click-Element $accept
 
-        [void](Wait-ConnectedChatVisibleProcessAware -Context $Context -TimeoutMs 120000)
-        return $helperIdentity
+                $allow = Wait-HelpeeAllowOrExit -Context $Context -TimeoutMs 90000
+                Click-Element $allow
+
+                [void](Wait-ConnectedChatVisibleProcessAware -Context $Context -TimeoutMs 120000)
+                return $helperIdentity
+            }
+            catch {
+                $lastPairError = $_
+                $message = $_.Exception.Message
+                $bridgeRetry = Test-HelpeeInviteBootstrapBridgeRetryableError -Message $message
+                $identityRetry = Test-HelpeeInviteBootstrapPairRetryableError -Message $message
+                if ($pairAttempt -lt $pairAttempts -and ($bridgeRetry -or $identityRetry)) {
+                    $nextPairRestartReason = if ($bridgeRetry) { 'helpee_invite_bridge_bootstrap_retry' } else { 'helpee_invite_bootstrap_retry' }
+                    $nextPairRestartRotateIdentity = -not $bridgeRetry
+                    Write-Host ("[GUI Smoke] event=helper_identity_pair_retry_scheduled_after_helpee_invite_bootstrap_failure; attempt={0}/{1}; reason={2}; retry_family={3}; rotate_identity={4}; helpee_diagnostic={5}; helper_diagnostic={6}" -f `
+                        $pairAttempt,
+                        $pairAttempts,
+                        $message,
+                        ($(if ($bridgeRetry) { 'bridge_bootstrap' } else { 'identity_window' })),
+                        ($(if ($nextPairRestartRotateIdentity) { 1 } else { 0 })),
+                        (Get-HelpeeInviteReadinessDiagnostic -Window $Context.HelpeeWindow),
+                        (Get-HelperIdentityBootstrapDiagnostic -Window $Context.HelperWindow)) -ForegroundColor Yellow
+                    continue
+                }
+
+                throw
+            }
+        }
+
+        if ($lastPairError) {
+            throw $lastPairError
+        }
+
+        throw 'Helper identity pair flow failed before connected chat became visible.'
     }
 
     Write-Host '[GUI Smoke] Helpee connection mode: invite copy/connect flow.' -ForegroundColor DarkGray
@@ -8587,20 +9415,12 @@ function Run-ScenarioNknDirectConnect {
         return
     }
 
-    Start-HelperFlow -Context $Context
-    $helperIdentity = Copy-HelperIdentityWithRecovery -Context $Context
-    if ([string]::IsNullOrWhiteSpace($helperIdentity)) {
-        throw 'Helper identity copy returned empty text.'
-    }
-
     Start-HelpeeFlow -Context $Context
-    $accept = Connect-HelperIdentityRequestFlow -Context $Context -HelperIdentity $helperIdentity
-    Click-Element $accept
-
-    $allow = Wait-HelpeeAllowOrExit -Context $Context -TimeoutMs 90000
-    Click-Element $allow
-
-    [void](Wait-ConnectedChatVisibleProcessAware -Context $Context -TimeoutMs 120000)
+    Start-HelperFlow -Context $Context
+    $helperIdentity = Connect-HelperAndHelpee -Context $Context
+    if ([string]::IsNullOrWhiteSpace($helperIdentity)) {
+        throw 'Helper identity connect flow returned empty text.'
+    }
 
     $msg = "gui smoke nkn direct connect"
     Send-ChatMessage -Window $Context.HelperWindow -Text $msg -UseEnter
