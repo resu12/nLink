@@ -386,7 +386,7 @@ switch ($Mode) {
             "-c",
             $Configuration,
             "--filter",
-            "OpsSuite=ScriptSurface|OpsSuite=GuiHarness|OpsSuite=RetainedRouteLaw|OpsSuite=RetainedFallback|OpsSuite=RetainedRuntimeUnlock|OpsSuite=RetainedV4Transport|OpsSuite=AcceptancePhase4|OpsSuite=AcceptancePhase5|OpsSuite=NknSoakAndBaseline|FullyQualifiedName~FileTransferSoakRunnerTests"
+            "OpsSuite=ScriptSurface|OpsSuite=GuiHarness|OpsSuite=RetainedRouteLaw|OpsSuite=RetainedFallback|OpsSuite=RetainedRuntimeUnlock|OpsSuite=RetainedV4Transport|OpsSuite=AcceptancePhase4|OpsSuite=AcceptancePhase5Fast|OpsSuite=NknSoakAndBaseline|FullyQualifiedName~FileTransferSoakRunnerTests"
         )
         exit (Invoke-ExternalCommand -Command "dotnet" -Arguments $arguments)
     }

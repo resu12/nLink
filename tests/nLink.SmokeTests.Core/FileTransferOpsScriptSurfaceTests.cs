@@ -68,7 +68,8 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
         {
             Assert.Contains(artifactName, scriptText, StringComparison.Ordinal);
         }
-        Assert.Contains("OpsSuite=ScriptSurface|OpsSuite=GuiHarness|OpsSuite=RetainedRouteLaw|OpsSuite=RetainedFallback|OpsSuite=RetainedRuntimeUnlock|OpsSuite=RetainedV4Transport|OpsSuite=AcceptancePhase4|OpsSuite=AcceptancePhase5|OpsSuite=NknSoakAndBaseline|FullyQualifiedName~FileTransferSoakRunnerTests", scriptText, StringComparison.Ordinal);
+        Assert.Contains("OpsSuite=ScriptSurface|OpsSuite=GuiHarness|OpsSuite=RetainedRouteLaw|OpsSuite=RetainedFallback|OpsSuite=RetainedRuntimeUnlock|OpsSuite=RetainedV4Transport|OpsSuite=AcceptancePhase4|OpsSuite=AcceptancePhase5Fast|OpsSuite=NknSoakAndBaseline|FullyQualifiedName~FileTransferSoakRunnerTests", scriptText, StringComparison.Ordinal);
+        Assert.DoesNotContain("OpsSuite=AcceptancePhase5|", scriptText, StringComparison.Ordinal);
     }
 
     [Fact]
