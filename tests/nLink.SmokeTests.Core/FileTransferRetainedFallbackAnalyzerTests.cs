@@ -14,6 +14,65 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
 {
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_EfficiencySummary_BoundedFallbackChurnIsWarning()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_efficiency_fallback_warning";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6_repair; selection_reason=post_tuna_file_fallback_active; file_tuna_active=0; post_tuna_fallback_active=1; diagnostic_regular_nkn_v6=0; transport_profile=nkn; live_route_epoch=1", secondsOffset: 0),
+            LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6_repair; selection_reason=post_tuna_file_fallback_active; file_tuna_active=0; post_tuna_fallback_active=1; diagnostic_regular_nkn_v6=0; transport_profile=nkn; live_route_epoch=1", secondsOffset: 0),
+            LogLine($"event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; bridge_recovery_policy=post_tuna_fallback_strict; live_route_epoch=1", secondsOffset: 1),
+            LogLine($"event=filetransfer_v6_receiver_state_coalesced; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=1; leg_generation=2; transport_epoch=3; checkpoint_request_id=v6-regular-nkn-state-refresh:1; contiguous_committed_chunk_index=100; durable_received_highest_chunk_index=128; missing_range_count=1", secondsOffset: 2),
+            LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=(none); integrity_ok=1", secondsOffset: 10),
+            LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); integrity_ok=1", secondsOffset: 10)
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var efficiency = ReadArtifactReport(result.ArtifactDir, "filetransfer-efficiency-summary.txt");
+        Assert.Equal("warning", efficiency["efficiency_verdict"]);
+        Assert.Equal("efficiency_warning", efficiency["efficiency_failure_class"]);
+        Assert.Equal("1", efficiency["v6_receiver_state_coalesced_count"]);
+        Assert.Equal("post_tuna_fallback_v6", efficiency["route_epoch.0.route"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_EfficiencySummary_PostYieldFallbackChurnIsTreadmill()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_efficiency_fallback_treadmill";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6_repair; selection_reason=post_tuna_file_fallback_active; file_tuna_active=0; post_tuna_fallback_active=1; diagnostic_regular_nkn_v6=0; transport_profile=nkn; live_route_epoch=1", secondsOffset: 0),
+            LogLine($"event=filetransfer_fallback_tail_quiescent_yield_granted; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=1; leg_generation=2; transport_epoch=3; checkpoint_request_id=(none); reason=tail_clean", secondsOffset: 3),
+            LogLine($"event=filetransfer_v6_receiver_state_coalesced; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=1; leg_generation=2; transport_epoch=3; checkpoint_request_id=(none); contiguous_committed_chunk_index=100; durable_received_highest_chunk_index=128; missing_range_count=1", secondsOffset: 4),
+            LogLine($"event=filetransfer_post_tuna_fallback_control_plane_pressure_marked; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=1; leg_generation=2; transport_epoch=3; checkpoint_request_id=(none); reason=frontier_stalled", secondsOffset: 5),
+            LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=(none); integrity_ok=1", secondsOffset: 10),
+            LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); integrity_ok=1", secondsOffset: 10)
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var efficiency = ReadArtifactReport(result.ArtifactDir, "filetransfer-efficiency-summary.txt");
+        Assert.Equal("fail", efficiency["efficiency_verdict"]);
+        Assert.Equal("fallback_tail_efficiency_treadmill", efficiency["efficiency_failure_class"]);
+        Assert.Equal("1", efficiency["post_yield_recovery_activity_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_PostTunaFallbackV6RouteWithV4Runtime_ReturnsProtocolFailure()
     {
         if (!OperatingSystem.IsWindows())

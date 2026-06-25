@@ -209,6 +209,8 @@ function New-FileTransferRetainedEventIndex {
     $eventCounts = @{}
     $firstByName = @{}
     $lastByName = @{}
+    $fieldMax = @{}
+    $fieldSum = @{}
     $transferIds = New-Object System.Collections.Generic.HashSet[string]
     $sessionIds = New-Object System.Collections.Generic.HashSet[string]
     $criticalMarkerNames = New-Object System.Collections.Generic.HashSet[string]
@@ -245,6 +247,25 @@ function New-FileTransferRetainedEventIndex {
         $eventCounts[$name] = [int]$eventCounts[$name] + 1
         $lastByName[$name] = $event
 
+        if ($null -ne $event.Fields) {
+            foreach ($fieldName in @($event.Fields.Keys)) {
+                $numericValue = 0L
+                if (-not [long]::TryParse([string]$event.Fields[$fieldName], [ref]$numericValue)) {
+                    continue
+                }
+
+                if (-not $fieldMax.ContainsKey($fieldName) -or $numericValue -gt [long]$fieldMax[$fieldName]) {
+                    $fieldMax[$fieldName] = $numericValue
+                }
+
+                if (-not $fieldSum.ContainsKey($fieldName)) {
+                    $fieldSum[$fieldName] = 0L
+                }
+
+                $fieldSum[$fieldName] = [long]$fieldSum[$fieldName] + $numericValue
+            }
+        }
+
         if (-not [string]::IsNullOrWhiteSpace([string]$event.TransferId)) {
             $transferIds.Add([string]$event.TransferId) | Out-Null
         }
@@ -270,8 +291,8 @@ function New-FileTransferRetainedEventIndex {
         EventCounts = $eventCounts
         FirstEventByName = $firstByName
         LastEventByName = $lastByName
-        FieldMax = @{}
-        FieldSum = @{}
+        FieldMax = $fieldMax
+        FieldSum = $fieldSum
         TransferIds = @($transferIds)
         SessionIds = @($sessionIds)
         CriticalMarkerExcerpts = @($criticalMarkerExcerpts)

@@ -14,6 +14,106 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
 {
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_EfficiencySummary_CleanRegularV4ReportsPass()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_efficiency_regular_v4";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4; file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=nkn", secondsOffset: 0),
+            LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4; file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=nkn", secondsOffset: 0),
+            LogLine($"event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; bridge_recovery_policy=regular_nkn_v4_fast; live_route_epoch=0", secondsOffset: 1),
+            LogLine($"event=filetransfer_v4_state_sent; transfer_id={transferId}; session_id=sess_a; epoch=1; contiguous_committed_chunk_index=0; durable_received_highest_chunk_index=-1; credit_until_chunk_index_exclusive=3; missing_range_count=0; bytes_committed=0", secondsOffset: 2),
+            LogLine($"event=filetransfer_v4_state_received; transfer_id={transferId}; session_id=sess_a; epoch=1; contiguous_committed_chunk_index=3; durable_received_highest_chunk_index=2; credit_until_chunk_index_exclusive=3; missing_range_count=0", secondsOffset: 3),
+            LogLine($"event=filetransfer_v4_sender_throughput_summary; transfer_id={transferId}; session_id=sess_a; sample_window_ms=2000; raw_bytes_sent=64512; raw_bytes_per_second=32256; chunk_count_sent=3", secondsOffset: 4),
+            LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=(none); integrity_ok=1", secondsOffset: 10),
+            LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); integrity_ok=1", secondsOffset: 10)
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var efficiency = ReadArtifactReport(result.ArtifactDir, "filetransfer-efficiency-summary.txt");
+        Assert.Equal("pass", efficiency["efficiency_verdict"]);
+        Assert.Equal("none", efficiency["efficiency_failure_class"]);
+        Assert.Equal(transferId, efficiency["transfer_id"]);
+        Assert.Equal("regular_nkn_v4_fast", efficiency["route_sequence"]);
+        Assert.Equal("(none)", efficiency["live_epoch_sequence"]);
+        Assert.Equal("Completed", efficiency["terminal_state_inbound"]);
+        Assert.Equal("Completed", efficiency["terminal_state_outbound"]);
+        Assert.Equal("1", efficiency["sha_ok"]);
+        Assert.Equal("1", efficiency["v4_state_sent_count"]);
+        Assert.Equal("1", efficiency["v4_state_received_count"]);
+        Assert.Equal("1", efficiency["route_epoch_count"]);
+        Assert.Equal("regular_nkn_v4_fast", efficiency["route_epoch.0.route"]);
+        Assert.Equal("4", efficiency["route_epoch.0.protocol_version"]);
+        Assert.Equal("regular_v4", efficiency["route_epoch.0.runtime_family"]);
+        Assert.Equal("available", efficiency["route_epoch.0.bytes_attribution_status"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_EfficiencySummary_CompactModeAlsoWritesArtifacts()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_efficiency_compact";
+        var lines = BuildRouteAwareCompletedFixture(
+            transferId,
+            route: "regular_nkn_v4_fast",
+            protocolVersion: 4,
+            runtimeProfile: "regular_nkn_v4_fast",
+            bridgeRecoveryPolicy: "regular_nkn_v4_fast",
+            runtimeEventName: "filetransfer_v4_sender_started");
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: new Dictionary<string, string>
+            {
+                ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+            });
+
+        Assert.Equal(0, result.Script.ExitCode);
+        Assert.True(File.Exists(Path.Combine(result.ArtifactDir, "filetransfer-efficiency-summary.json")));
+        var efficiency = ReadArtifactReport(result.ArtifactDir, "filetransfer-efficiency-summary.txt");
+        Assert.Equal("pass", efficiency["efficiency_verdict"]);
+        Assert.Equal("regular_nkn_v4_fast", efficiency["route_sequence"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_EfficiencySummary_CorrectnessFailureDefersEfficiency()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_efficiency_file_tuna_v6";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=file_tuna_v6; protocol_version=6; runtime_profile=file_tuna_v6_fast; frame_family=v6; handoff_kind=none; bridge_recovery_policy=tuna_strict; liveness_terminal_policy=file_tuna_v6; selection_reason=test; file_tuna_active=1; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=nkn"),
+            LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=(none); integrity_ok=1"),
+            LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); integrity_ok=1")
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var efficiency = ReadArtifactReport(result.ArtifactDir, "filetransfer-efficiency-summary.txt");
+        Assert.Equal("not_evaluated_due_correctness_failure", efficiency["efficiency_verdict"]);
+        Assert.Equal("none", efficiency["efficiency_failure_class"]);
+        Assert.Contains("file_tuna_v6", efficiency["correctness_blockers"], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_CleanCompletedV4Transfer_ReturnsPassAndWritesArtifacts()
     {
         if (!OperatingSystem.IsWindows())

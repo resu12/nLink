@@ -112,6 +112,8 @@ public abstract class FileTransferOpsScriptsTestBase
         "phase0-invariant-ledger.json",
         "filetransfer-invariant-summary.txt",
         "filetransfer-invariant-summary.json",
+        "filetransfer-efficiency-summary.txt",
+        "filetransfer-efficiency-summary.json",
         "v4-promotion-decision.txt",
         "v4-promotion-decision.json"
     ];

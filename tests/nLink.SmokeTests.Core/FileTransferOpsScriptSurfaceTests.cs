@@ -84,6 +84,9 @@ public sealed class FileTransferOpsScriptSurfaceTests : FileTransferOpsScriptsTe
         Assert.Contains("filetransfer-retained-analysis-stage-diagnostics.json", orchestrationText, StringComparison.Ordinal);
         Assert.Contains("filetransfer-retained-analysis-stage-diagnostics.txt", orchestrationText, StringComparison.Ordinal);
         Assert.Contains("filetransfer-retained-compact-summary.json", orchestrationText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer-efficiency-summary.json", orchestrationText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer-efficiency-summary.txt", orchestrationText, StringComparison.Ordinal);
+        Assert.Contains("Write-FileTransferEfficiencySummaryArtifacts", orchestrationText, StringComparison.Ordinal);
         Assert.Contains("retained_analysis_timeout", tunaWrapperText, StringComparison.Ordinal);
         Assert.Contains("filetransfer-retained-analysis-timeout-summary.json", tunaWrapperText, StringComparison.Ordinal);
         Assert.Contains("retained_analysis_timeout", routeWrapperText, StringComparison.Ordinal);
