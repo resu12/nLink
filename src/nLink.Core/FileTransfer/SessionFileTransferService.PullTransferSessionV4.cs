@@ -4598,15 +4598,23 @@ public sealed partial class SessionFileTransferService
                 {
                     if (ShouldEnqueueRepairOnlyForRebindStateLocked(context, state, staleCommitted))
                     {
-                        shouldEnqueueRepairs = true;
-                        ActivateOutboundV4PostRebindFrontierOnlyRepairLocked(
-                            context,
-                            context.RemoteNextExpectedChunkIndex,
-                            "stale_frontier_rebind");
-                        QueueOutboundV4TransportRebindSafetyReplayLocked(context, "stale_frontier_rebind", allowRepeatForSameGeneration: true);
-                        LocalOperationalLog.Info(
-                            "FileTransferService",
-                            $"event=filetransfer_rebind_duplicate_state_repair_enqueued; transfer_id={context.TransferId}; session_id={context.SessionId}; state_kind=stale; epoch={state.Epoch}; previous_epoch={previousEpoch}; stale_contiguous_committed_chunk_index={state.ContiguousCommittedChunkIndex}; current_remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; missing_range_count={state.MissingRanges.Count}");
+                        if (!TrySuppressRetiredFallbackTailOwnerUpdateLocked(
+                                context,
+                                context.CurrentTransferLeg,
+                                "v4_receiver_state",
+                                "enqueue_stale_frontier_repair",
+                                "stale_frontier_rebind"))
+                        {
+                            shouldEnqueueRepairs = true;
+                            ActivateOutboundV4PostRebindFrontierOnlyRepairLocked(
+                                context,
+                                context.RemoteNextExpectedChunkIndex,
+                                "stale_frontier_rebind");
+                            QueueOutboundV4TransportRebindSafetyReplayLocked(context, "stale_frontier_rebind", allowRepeatForSameGeneration: true);
+                            LocalOperationalLog.Info(
+                                "FileTransferService",
+                                $"event=filetransfer_rebind_duplicate_state_repair_enqueued; transfer_id={context.TransferId}; session_id={context.SessionId}; state_kind=stale; epoch={state.Epoch}; previous_epoch={previousEpoch}; stale_contiguous_committed_chunk_index={state.ContiguousCommittedChunkIndex}; current_remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; missing_range_count={state.MissingRanges.Count}");
+                        }
                     }
                     else
                     {
@@ -4651,15 +4659,23 @@ public sealed partial class SessionFileTransferService
                         $"event=filetransfer_v4_state_received; transfer_id={context.TransferId}; session_id={context.SessionId}; epoch={state.Epoch}; previous_epoch={previousEpoch}; duplicate=1; applied=0; contiguous_committed_chunk_index={state.ContiguousCommittedChunkIndex}; durable_received_highest_chunk_index={state.DurableReceivedHighestChunkIndex}; credit_until_chunk_index_exclusive={state.CreditUntilChunkIndexExclusive}; missing_range_count={state.MissingRanges.Count}; terminal_ready={(state.TerminalReady ? 1 : 0)}");
                     if (ShouldEnqueueRepairOnlyForRebindStateLocked(context, state, normalizedCommitted))
                     {
-                        ActivateOutboundV4PostRebindFrontierOnlyRepairLocked(
-                            context,
-                            context.RemoteNextExpectedChunkIndex,
-                            "duplicate_frontier_rebind");
-                        QueueOutboundV4TransportRebindSafetyReplayLocked(context, "duplicate_frontier_rebind", allowRepeatForSameGeneration: true);
-                        LocalOperationalLog.Info(
-                            "FileTransferService",
-                            $"event=filetransfer_rebind_duplicate_state_repair_enqueued; transfer_id={context.TransferId}; session_id={context.SessionId}; state_kind=duplicate; epoch={state.Epoch}; previous_epoch={previousEpoch}; contiguous_committed_chunk_index={state.ContiguousCommittedChunkIndex}; current_remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; missing_range_count={state.MissingRanges.Count}");
-                        EnqueueV4RepairsFromState(context, state);
+                        if (!TrySuppressRetiredFallbackTailOwnerUpdateLocked(
+                                context,
+                                context.CurrentTransferLeg,
+                                "v4_receiver_state",
+                                "enqueue_duplicate_frontier_repair",
+                                "duplicate_frontier_rebind"))
+                        {
+                            ActivateOutboundV4PostRebindFrontierOnlyRepairLocked(
+                                context,
+                                context.RemoteNextExpectedChunkIndex,
+                                "duplicate_frontier_rebind");
+                            QueueOutboundV4TransportRebindSafetyReplayLocked(context, "duplicate_frontier_rebind", allowRepeatForSameGeneration: true);
+                            LocalOperationalLog.Info(
+                                "FileTransferService",
+                                $"event=filetransfer_rebind_duplicate_state_repair_enqueued; transfer_id={context.TransferId}; session_id={context.SessionId}; state_kind=duplicate; epoch={state.Epoch}; previous_epoch={previousEpoch}; contiguous_committed_chunk_index={state.ContiguousCommittedChunkIndex}; current_remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; missing_range_count={state.MissingRanges.Count}");
+                            EnqueueV4RepairsFromState(context, state);
+                        }
                     }
                     else if (TryRebindOutboundRegularNknV4AcceptedFrontierFromRecoveryStateLocked(
                                  context,
@@ -6098,6 +6114,17 @@ public sealed partial class SessionFileTransferService
             normalizedInputRanges.Any(range =>
                 range.StartChunkIndex <= state.ContiguousCommittedChunkIndex &&
                 state.ContiguousCommittedChunkIndex < range.StartChunkIndex + range.ChunkCount);
+        if (postRebindFrontierRepair &&
+            TrySuppressRetiredFallbackTailOwnerUpdateLocked(
+                context,
+                context.CurrentTransferLeg,
+                "v4_receiver_state_repair",
+                "enqueue_frontier_repair",
+                "post_yield_receiver_state"))
+        {
+            return;
+        }
+
         var normalizedRanges = SelectV4RepairRangesForSend(
             normalizedInputRanges,
             state.ContiguousCommittedChunkIndex,
@@ -11778,6 +11805,17 @@ public sealed partial class SessionFileTransferService
                 context.ReceiverSparseWriteActive &&
                 ShouldSendInboundV4FrontierStallStateLocked(context, DateTimeOffset.UtcNow))
             {
+                if (ShouldUsePostTunaFallbackV6FeedbackEnvelope(context) &&
+                    TrySuppressRetiredFallbackTailOwnerUpdateLocked(
+                        context,
+                        context.CurrentTransferLeg,
+                        "inbound_frontier_stall",
+                        "send_receiver_state",
+                        "frontier_stall_repair_due"))
+                {
+                    return;
+                }
+
                 shouldSend = true;
             }
         }

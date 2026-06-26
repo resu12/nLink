@@ -9700,6 +9700,112 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
     [Fact]
     [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
+    public void OutboundPostYieldReceiverStateRepair_IsSuppressedBeforeQueueing()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        const string transferId = "transfer_fallback_tail_retired_owner_repair_enqueue";
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 11540,
+            chunksAcceptedForTransport: 11652,
+            remoteGrantedUntilExclusive: 11652,
+            chunkCount: 16384);
+        serviceType
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, "test_tail_retired_owner_repair_enqueue"]);
+
+        var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
+        SetPrivateProperty(leg, "CheckpointRequestId", null);
+        SetPrivateProperty(leg, "CanSendData", true);
+        SetPrivateProperty(leg, "State", FileTransferLegState.Active);
+        SetPrivateProperty(leg, "TransportEpochId", 1L);
+        serviceType
+            .GetMethod("ClearOutboundFallbackTailRecoveryOwnershipAfterYieldLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, leg, "test_tail_retired_owner_repair_enqueue"]);
+        SetPrivateProperty(context, "PullTransportRebindGeneration", 3);
+
+        var state = new FileTransferReceiverStateFrameV6
+        {
+            SessionId = $"session_{transferId}",
+            TransferId = transferId,
+            Epoch = 7,
+            TransportEpoch = 1,
+            ContiguousCommittedChunkIndex = 11540,
+            DurableReceivedHighestChunkIndex = 11651,
+            CreditUntilChunkIndexExclusive = 11652,
+            MissingRanges =
+            [
+                new FileTransferRangeV4
+                {
+                    StartChunkIndex = 11540,
+                    ChunkCount = 16,
+                },
+            ],
+            BytesCommitted = 11540 * 21L * 1024L,
+        };
+
+        var logStart = GetOperationalLogLength();
+        serviceType
+            .GetMethod("EnqueueV4RepairsFromState", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, state]);
+
+        var repairQueue = (System.Collections.ICollection)GetPrivatePropertyValue(context, "PullV4SenderPumpRepairQueue")!;
+        Assert.Equal(0, repairQueue.Count);
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_fallback_tail_retired_owner_update_suppressed; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("attempted_action=enqueue_frontier_repair", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_v6_exact_frontier_repair_enqueued;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_v4_repair_scheduled;", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
+    public async Task InboundPostYieldFrontierStallState_IsSuppressedBeforeControlSend()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        const string transferId = "transfer_fallback_tail_retired_owner_frontier_stall";
+        var context = CreatePostTunaFallbackV6InboundContext(transferId);
+        serviceType
+            .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        serviceType
+            .GetMethod("StartInboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, "test_tail_retired_owner_frontier_stall"]);
+
+        var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
+        SetPrivateProperty(leg, "CheckpointRequestId", null);
+        SetPrivateProperty(leg, "CanSendData", true);
+        SetPrivateProperty(leg, "State", FileTransferLegState.Active);
+        SetPrivateProperty(leg, "TransportEpochId", 1L);
+        serviceType
+            .GetMethod("ClearInboundFallbackTailRecoveryOwnershipAfterYieldLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, leg, "test_tail_retired_owner_frontier_stall"]);
+
+        SetPrivateProperty(context, "NextChunkIndex", 100);
+        SetPrivateProperty(context, "ChunkCount", 256);
+        SetPrivateProperty(context, "PullHighestReceivedChunkIndex", 160);
+        SetPrivateProperty(context, "V4CreditUntilChunkIndexExclusive", 180);
+        SetPrivateProperty(context, "V4FrontierStallStartedUtc", DateTimeOffset.UtcNow.AddSeconds(-5));
+        SetPrivateProperty(context, "V4FrontierStallChunkIndex", 100);
+
+        var logStart = GetOperationalLogLength();
+        await (Task)serviceType
+            .GetMethod("MaybeSendInboundSparseCreditFrontierStallStateAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context])!;
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_fallback_tail_retired_owner_update_suppressed; direction=inbound;", log, StringComparison.Ordinal);
+        Assert.Contains("attempted_action=send_receiver_state", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_v6_receiver_state_sent;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_v6_frontier_request_sent;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_control_plane_delivery_observed; direction=inbound; kind=receiver_state;", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
     public void OutboundPostTunaFallbackRecoveryRestartAfterYield_DoesNotReopenOwner()
     {
         using var service = new SessionFileTransferService();

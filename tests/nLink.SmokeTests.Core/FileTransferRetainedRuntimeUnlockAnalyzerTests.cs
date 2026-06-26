@@ -599,7 +599,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task AnalyzeRetained_RuntimeUnlockTunaProbePathNotEstablished_ClassifiesProbePathFailure()
+    public async Task AnalyzeRetained_RuntimeUnlockTunaProbeSidecarClosedRegularTerminal_ClassifiesProbePathFailure()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -611,15 +611,17 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             ["-LiveRouteProofMode", "RegularActivationCycle"]);
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
-        Assert.Equal("runtime_unlock_tuna_probe_path_not_established", verdict["recovery_failure_class"]);
+        Assert.Equal("runtime_unlock_tuna_probe_sidecar_closed_regular_v4_terminal", verdict["recovery_failure_class"]);
         Assert.Equal("1", verdict["runtime_unlock_tuna_probe_sent_count"]);
         Assert.Equal("0", verdict["runtime_unlock_tuna_probe_received_count"]);
         Assert.Equal("0", verdict["runtime_unlock_tuna_probe_ack_received_count"]);
         Assert.Equal("1", verdict["runtime_unlock_tuna_probe_sidecar_failure_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_tuna_probe_sidecar_fresh_transaction_scheduled_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_tuna_listener_rearm_after_probe_close_failed_count"]);
         Assert.Equal("fail", verdict["runtime_unlock_probe_commit_verdict"]);
 
         var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
-        Assert.Equal("runtime_unlock_tuna_probe_path_not_established", stability["recovery_failure_class"]);
+        Assert.Equal("runtime_unlock_tuna_probe_sidecar_closed_regular_v4_terminal", stability["recovery_failure_class"]);
         Assert.Equal("1", stability["runtime_unlock_tuna_probe_sent_count"]);
         Assert.Equal("0", stability["runtime_unlock_tuna_probe_ack_received_count"]);
     }

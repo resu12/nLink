@@ -5709,21 +5709,75 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                                 $terminalProbeOutboundError -eq '(none)') {
                                 $firstTransferTerminalBeforeLiveReactivation = $true
                                 $firstTransferTerminalBeforeLiveReactivationTransferId = [string]$terminalProbe.TransferId
-                                $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_reactivation_first_transfer_terminal_before_activation; route_mode={1}; transfer_id={2}; step={3}; action=on; reason=terminal_before_same_transfer_reactivation; fallback_epoch_recovered={4}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $RouteMode, $firstTransferTerminalBeforeLiveReactivationTransferId, $stepNumber, ($(if ($fallbackEpochRecoveredObserved) { 1 } else { 0 })))) | Out-Null
+                                $terminalRouteSequence = ($liveRouteEpochRouteChanges.ToArray() -join ',')
+                                $terminalFallbackPrefixObserved = $fallbackEpochRecoveredObserved -or $terminalRouteSequence.StartsWith('file_tuna_v4,post_tuna_fallback_v6', [System.StringComparison]::Ordinal)
+                                $terminalBeforeActivationEvent = if ($terminalFallbackPrefixObserved) {
+                                    'filetransfer_tuna_gui_live_reactivation_first_transfer_terminal_before_activation'
+                                }
+                                else {
+                                    'filetransfer_tuna_gui_regular_v4_terminal_before_tuna_activation_commit'
+                                }
+                                $terminalBeforeActivationReason = if ($terminalFallbackPrefixObserved) {
+                                    'terminal_before_same_transfer_reactivation'
+                                }
+                                else {
+                                    'regular_v4_terminal_before_tuna_activation_commit'
+                                }
+                                $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event={1}; route_mode={2}; transfer_id={3}; step={4}; action=on; reason={5}; fallback_epoch_recovered={6}; route_sequence={7}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $terminalBeforeActivationEvent, $RouteMode, $firstTransferTerminalBeforeLiveReactivationTransferId, $stepNumber, $terminalBeforeActivationReason, ($(if ($fallbackEpochRecoveredObserved) { 1 } else { 0 })), $terminalRouteSequence)) | Out-Null
                                 Write-TunaGuiMilestoneEvidence -ArtifactDir $ArtifactDir -ObservedEvidenceLines $observedEvidenceLines
                                 Copy-FileTransferLiveLogSlice -ArtifactDir $ArtifactDir -Bookmark $bookmark
                                 if ($RouteMode -eq 'live-reactivation-second-transfer') {
+                                    if (-not $terminalFallbackPrefixObserved) {
+                                        throw "Tuna GUI live reactivation first transfer completed on regular V4 before Tuna activation commit. failure_class=regular_v4_terminal_before_tuna_activation_commit sequence=$terminalRouteSequence Summary: $($terminalProbe | ConvertTo-Json -Compress)"
+                                    }
+
                                     Write-Host '[GUI Smoke][filetransfer_tuna] First transfer completed cleanly in fallback before same-transfer reactivation; continuing to second-transfer Tuna proof.' -ForegroundColor Yellow
                                     continue
                                 }
 
-                                Write-Host '[GUI Smoke][filetransfer_tuna] Transfer completed cleanly in fallback before same-transfer reactivation; accepting terminal fallback outcome for regular activation cycle.' -ForegroundColor Yellow
+                                if ($terminalFallbackPrefixObserved) {
+                                    Write-Host '[GUI Smoke][filetransfer_tuna] Transfer completed cleanly in fallback before same-transfer reactivation; accepting terminal fallback outcome for regular activation cycle.' -ForegroundColor Yellow
+                                }
+                                else {
+                                    Write-Host '[GUI Smoke][filetransfer_tuna] Transfer completed cleanly on regular V4 before Tuna activation commit; preserving terminal/SHA evidence and failing route proof deterministically.' -ForegroundColor Yellow
+                                }
+
                                 break
                             }
                         }
                         catch {
                             if ($_.Exception.Message.IndexOf('live_toggle_window_missed_transfer_completed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
                                 throw
+                            }
+
+                            if ($RouteMode -eq 'live-regular-activation-cycle' -and
+                                (Test-TunaGuiTransferTerminalAfterBookmark -Bookmark $bookmark)) {
+                                $firstTransferTerminalBeforeLiveReactivation = $true
+                                $firstTransferTerminalBeforeLiveReactivationTransferId = '(terminal-log)'
+                                $terminalRouteSequence = ($liveRouteEpochRouteChanges.ToArray() -join ',')
+                                $terminalFallbackPrefixObserved = $fallbackEpochRecoveredObserved -or $terminalRouteSequence.StartsWith('file_tuna_v4,post_tuna_fallback_v6', [System.StringComparison]::Ordinal)
+                                $terminalBeforeActivationEvent = if ($terminalFallbackPrefixObserved) {
+                                    'filetransfer_tuna_gui_live_reactivation_first_transfer_terminal_before_activation'
+                                }
+                                else {
+                                    'filetransfer_tuna_gui_regular_v4_terminal_before_tuna_activation_commit'
+                                }
+                                $terminalBeforeActivationReason = if ($terminalFallbackPrefixObserved) {
+                                    'terminal_before_same_transfer_reactivation_log_probe'
+                                }
+                                else {
+                                    'regular_v4_terminal_before_tuna_activation_commit_log_probe'
+                                }
+                                $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event={1}; route_mode={2}; transfer_id={3}; step={4}; action=on; reason={5}; fallback_epoch_recovered={6}; route_sequence={7}; terminal_probe_error={8}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $terminalBeforeActivationEvent, $RouteMode, $firstTransferTerminalBeforeLiveReactivationTransferId, $stepNumber, $terminalBeforeActivationReason, ($(if ($fallbackEpochRecoveredObserved) { 1 } else { 0 })), $terminalRouteSequence, ($_.Exception.Message -replace ';', ','))) | Out-Null
+                                Write-TunaGuiMilestoneEvidence -ArtifactDir $ArtifactDir -ObservedEvidenceLines $observedEvidenceLines
+                                Copy-FileTransferLiveLogSlice -ArtifactDir $ArtifactDir -Bookmark $bookmark
+
+                                if ($terminalFallbackPrefixObserved) {
+                                    Write-Host '[GUI Smoke][filetransfer_tuna] Transfer terminalized in fallback before same-transfer reactivation; accepting terminal fallback outcome from retained terminal log evidence.' -ForegroundColor Yellow
+                                    break
+                                }
+
+                                throw "Tuna GUI live regular activation cycle completed before fallback/Tuna route proof. failure_class=regular_v4_terminal_before_tuna_activation_commit sequence=$terminalRouteSequence terminal_probe_error=$($_.Exception.Message)"
                             }
                         }
 
@@ -6285,7 +6339,13 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 -not $evidence.fallbackEpochRecovered -or
                 -not $liveRouteProof.Pass -or
                 $joinedRouteSequence -ne 'file_tuna_v4,post_tuna_fallback_v6') {
-                throw "Tuna GUI live regular activation cycle did not prove terminal fallback outcome after first regular-to-Tuna/fallback leg. sequence=$joinedRouteSequence findings=$($liveRouteProof.Findings -join '|') metadata_missing=$($liveRouteProof.MetadataMissingCount) Summary: $($evidence | ConvertTo-Json -Compress)"
+                $terminalFailureClass = if ([string]::IsNullOrWhiteSpace($joinedRouteSequence) -or $joinedRouteSequence -eq 'regular_nkn_v4_fast') {
+                    'regular_v4_terminal_before_tuna_activation_commit'
+                }
+                else {
+                    'terminal_fallback_prefix_missing'
+                }
+                throw "Tuna GUI live regular activation cycle did not prove terminal fallback outcome after first regular-to-Tuna/fallback leg. failure_class=$terminalFailureClass sequence=$joinedRouteSequence findings=$($liveRouteProof.Findings -join '|') metadata_missing=$($liveRouteProof.MetadataMissingCount) Summary: $($evidence | ConvertTo-Json -Compress)"
             }
         }
         else {

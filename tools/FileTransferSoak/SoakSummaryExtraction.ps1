@@ -1689,6 +1689,36 @@ function New-FileTransferRetainedSummary {
     }
 
     $terminalEvents = @(Get-FileTransferTerminalEvents -Events $transferEvents)
+    if ($terminalEvents.Count -eq 0 -and $transferEvents.Count -gt 0) {
+        [object[]]$terminalFallbackSessionIds = @(
+            $transferEvents |
+                ForEach-Object { Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '' } |
+                Where-Object {
+                    -not [string]::IsNullOrWhiteSpace($_) -and
+                    $_ -ne '(none)' -and
+                    $_ -ne '(unknown)'
+                } |
+                Select-Object -Unique
+        )
+        if ($terminalFallbackSessionIds.Count -gt 0) {
+            [object[]]$sameSessionTerminalCandidates = @(
+                $allEvents |
+                    Where-Object {
+                        (Test-FileTransferTerminalEvent -Event $_) -and
+                        ($terminalFallbackSessionIds -contains (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default ''))
+                    }
+            )
+            if ($sameSessionTerminalCandidates.Count -gt 0) {
+                $terminalEvents = @(Get-FileTransferTerminalEvents -Events $sameSessionTerminalCandidates)
+            }
+        }
+    }
+    if ($terminalEvents.Count -eq 0) {
+        [object[]]$allTerminalCandidates = @(Get-FileTransferTerminalEvents -Events $allEvents)
+        if ($allTerminalCandidates.Count -gt 0) {
+            $terminalEvents = @($allTerminalCandidates)
+        }
+    }
     $inboundTerminalEvents = @($terminalEvents | Where-Object { (Get-FileTransferTerminalDirection -Event $_) -eq 'inbound' })
     $outboundTerminalEvents = @($terminalEvents | Where-Object { (Get-FileTransferTerminalDirection -Event $_) -eq 'outbound' })
     $timestampedTransferEvents = @($transferEvents | Where-Object { $null -ne $_.TimestampUtc })

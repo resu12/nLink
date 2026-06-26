@@ -5089,6 +5089,10 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_tuna_probe_ack_sent_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeAckSentCount),
         ("runtime_unlock_tuna_probe_ack_received_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeAckReceivedCount),
         ("runtime_unlock_tuna_probe_sidecar_failure_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSidecarFailureCount),
+        ("runtime_unlock_tuna_probe_sidecar_fresh_transaction_scheduled_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSidecarFreshTransactionScheduledCount),
+        ("runtime_unlock_tuna_probe_sidecar_fresh_transaction_started_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSidecarFreshTransactionStartedCount),
+        ("runtime_unlock_tuna_listener_rearm_after_probe_close_failed_count={0}" -f $recoveryClassification.RuntimeUnlockListenerRearmAfterProbeCloseFailedCount),
+        ("regular_v4_terminal_before_tuna_activation_commit_count={0}" -f $recoveryClassification.RegularV4TerminalBeforeTunaActivationCommitCount),
         ("runtime_unlock_paired_commit_started_count={0}" -f $recoveryClassification.RuntimeUnlockPairedCommitStartedCount),
         ("runtime_unlock_paired_commit_confirmed_count={0}" -f $recoveryClassification.RuntimeUnlockPairedCommitConfirmedCount),
         ("runtime_unlock_paired_commit_aborted_count={0}" -f $recoveryClassification.RuntimeUnlockPairedCommitAbortedCount),
@@ -5820,6 +5824,19 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockTunaProbeSidecarFailureEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_tuna_probe_sidecar_failure'
     })
+    $runtimeUnlockTunaProbeSidecarFreshTransactionScheduledEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_tuna_probe_sidecar_closed_fresh_transaction_scheduled'
+    })
+    $runtimeUnlockTunaProbeSidecarFreshTransactionStartedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_tuna_probe_sidecar_closed_fresh_transaction_started'
+    })
+    $runtimeUnlockListenerRearmAfterProbeCloseFailedEvents = @($events | Where-Object {
+        $_.EventName -eq 'session_recovery_contract_listener_rearm_failed' -and
+        (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'runtime_unlock_tuna_listener_rearm_after_probe_close_failed'
+    })
+    $regularV4TerminalBeforeActivationEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_tuna_gui_regular_v4_terminal_before_tuna_activation_commit'
+    })
     $runtimeUnlockPreCommitRouteEpochProofEvents = @($events | Where-Object {
         ($_.EventName -eq 'filetransfer_live_route_epoch_started' -or $_.EventName -eq 'filetransfer_live_route_epoch_recovered') -and
         (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'file_tuna_v4' -and
@@ -5908,6 +5925,16 @@ function Get-FileTransferRecoveryFailureClassification {
          $_.EventName -eq 'file_transfer_inbound_terminal' -or
          $_.EventName -eq 'transfer_terminal') -and
         (Get-FileTransferEventField -Event $_ -Name 'error_code' -Default '') -eq 'peer_disconnected'
+    })
+    $cleanRegularV4TerminalEvents = @($events | Where-Object {
+        ($_.EventName -eq 'file_transfer_outbound_terminal' -or
+         $_.EventName -eq 'file_transfer_inbound_terminal' -or
+         $_.EventName -eq 'transfer_terminal') -and
+        (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'regular_nkn_v4_fast' -and
+        (
+            (Get-FileTransferEventField -Event $_ -Name 'error_code' -Default '(none)') -in @('', '(none)', 'none') -or
+            (Get-FileTransferEventField -Event $_ -Name 'state' -Default '') -eq 'Completed'
+        )
     })
     $fileTunaV6Events = @($events | Where-Object {
         (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'file_tuna_v6'
@@ -6009,6 +6036,23 @@ function Get-FileTransferRecoveryFailureClassification {
         $runtimeUnlockPreCommitProbeProtocolMismatchEvents.Count -gt 0 -and
         $runtimeUnlockProbeAckedEvents.Count -eq 0) {
         $class = 'runtime_unlock_precommit_probe_protocol_mismatch'
+    }
+    elseif ($runtimeUnlockTransactionPeerProofEvents.Count -gt 0 -and
+        $runtimeUnlockPreCommitProbeStartedEvents.Count -gt 0 -and
+        $runtimeUnlockTunaProbeSentEvents.Count -gt 0 -and
+        $runtimeUnlockTunaProbeReceivedEvents.Count -eq 0 -and
+        $runtimeUnlockTunaProbeAckReceivedEvents.Count -eq 0 -and
+        $runtimeUnlockTunaProbeSidecarFailureEvents.Count -gt 0 -and
+        $routeChanges.Count -eq 1 -and
+        $routeChanges[0] -eq 'regular_nkn_v4_fast' -and
+        $runtimeUnlockTransactionCommittedEvents.Count -eq 0 -and
+        ($cleanRegularV4TerminalEvents.Count -gt 0 -or
+         $regularV4TerminalBeforeActivationEvents.Count -gt 0)) {
+        $class = 'runtime_unlock_tuna_probe_sidecar_closed_regular_v4_terminal'
+    }
+    elseif ($runtimeUnlockListenerRearmAfterProbeCloseFailedEvents.Count -gt 0 -and
+        $runtimeUnlockTunaProbeSidecarFailureEvents.Count -gt 0) {
+        $class = 'runtime_unlock_tuna_listener_unavailable_after_probe_close'
     }
     elseif ($runtimeUnlockTransactionPeerProofEvents.Count -gt 0 -and
         $runtimeUnlockPreCommitProbeStartedEvents.Count -gt 0 -and
@@ -6232,6 +6276,10 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockTunaProbeAckSentCount = $runtimeUnlockTunaProbeAckSentEvents.Count
         RuntimeUnlockTunaProbeAckReceivedCount = $runtimeUnlockTunaProbeAckReceivedEvents.Count
         RuntimeUnlockTunaProbeSidecarFailureCount = $runtimeUnlockTunaProbeSidecarFailureEvents.Count
+        RuntimeUnlockTunaProbeSidecarFreshTransactionScheduledCount = $runtimeUnlockTunaProbeSidecarFreshTransactionScheduledEvents.Count
+        RuntimeUnlockTunaProbeSidecarFreshTransactionStartedCount = $runtimeUnlockTunaProbeSidecarFreshTransactionStartedEvents.Count
+        RuntimeUnlockListenerRearmAfterProbeCloseFailedCount = $runtimeUnlockListenerRearmAfterProbeCloseFailedEvents.Count
+        RegularV4TerminalBeforeTunaActivationCommitCount = $regularV4TerminalBeforeActivationEvents.Count
         RuntimeUnlockPairedCommitStartedCount = $runtimeUnlockPairedCommitStartedEvents.Count
         RuntimeUnlockPairedCommitConfirmedCount = $runtimeUnlockPairedCommitConfirmedEvents.Count
         RuntimeUnlockPairedCommitAbortedCount = $runtimeUnlockPairedCommitAbortedEvents.Count
@@ -6668,6 +6716,10 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_tuna_probe_ack_sent_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeAckSentCount),
         ("runtime_unlock_tuna_probe_ack_received_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeAckReceivedCount),
         ("runtime_unlock_tuna_probe_sidecar_failure_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSidecarFailureCount),
+        ("runtime_unlock_tuna_probe_sidecar_fresh_transaction_scheduled_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSidecarFreshTransactionScheduledCount),
+        ("runtime_unlock_tuna_probe_sidecar_fresh_transaction_started_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSidecarFreshTransactionStartedCount),
+        ("runtime_unlock_tuna_listener_rearm_after_probe_close_failed_count={0}" -f $recoveryClassification.RuntimeUnlockListenerRearmAfterProbeCloseFailedCount),
+        ("regular_v4_terminal_before_tuna_activation_commit_count={0}" -f $recoveryClassification.RegularV4TerminalBeforeTunaActivationCommitCount),
         ("runtime_unlock_paired_commit_started_count={0}" -f $recoveryClassification.RuntimeUnlockPairedCommitStartedCount),
         ("runtime_unlock_paired_commit_confirmed_count={0}" -f $recoveryClassification.RuntimeUnlockPairedCommitConfirmedCount),
         ("runtime_unlock_paired_commit_aborted_count={0}" -f $recoveryClassification.RuntimeUnlockPairedCommitAbortedCount),

@@ -1645,18 +1645,20 @@ function Assert-Phase4RouteSummary {
 function Test-RouteAcceptanceTerminalFallbackPrefixOutcome {
     param(
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
-        [Parameter(Mandatory = $true)][string[]]$ActualRouteChanges,
-        [Parameter(Mandatory = $true)][string[]]$ExpectedRouteChanges
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ActualRouteChanges,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ExpectedRouteChanges
     )
 
-    if ($ActualRouteChanges.Count -le 0 -or
-        $ExpectedRouteChanges.Count -le $ActualRouteChanges.Count -or
-        [string]$ActualRouteChanges[$ActualRouteChanges.Count - 1] -ne 'post_tuna_fallback_v6') {
+    $actualChanges = @($ActualRouteChanges)
+    $expectedChanges = @($ExpectedRouteChanges)
+    if ($actualChanges.Count -le 0 -or
+        $expectedChanges.Count -le $actualChanges.Count -or
+        [string]$actualChanges[$actualChanges.Count - 1] -ne 'post_tuna_fallback_v6') {
         return $false
     }
 
-    for ($i = 0; $i -lt $ActualRouteChanges.Count; $i++) {
-        if ([string]$ActualRouteChanges[$i] -ne [string]$ExpectedRouteChanges[$i]) {
+    for ($i = 0; $i -lt $actualChanges.Count; $i++) {
+        if ([string]$actualChanges[$i] -ne [string]$expectedChanges[$i]) {
             return $false
         }
     }

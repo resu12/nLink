@@ -65,6 +65,8 @@ public sealed partial class NknSignalingTransport
     private static readonly TimeSpan RuntimeUnlockUncommittedFallbackFalloutSuppressionTtl = TimeSpan.FromSeconds(10);
     private const string RuntimeUnlockCutThroughRetryReason = "runtime_unlock_offer_peer_response_timeout";
     private const string RuntimeUnlockCutThroughRecoveryReason = "tuna_activation_offer_peer_response_timeout";
+    private const string RuntimeUnlockProbeSidecarClosedRetryReason = "runtime_unlock_tuna_probe_sidecar_closed";
+    private const string RuntimeUnlockProbeSidecarClosedListenerRearmFailedReason = "runtime_unlock_tuna_listener_rearm_after_probe_close_failed";
     private const int RuntimeUnlockCutThroughMaxAttempts = 2;
     private const int RuntimeUnlockBrokenStateMaxFreshRetries = 1;
     private const string RuntimeUnlockPostTunaFallbackFinalProbeReason = "post_tuna_fallback_checkpoint_pending_final_probe";
@@ -7243,6 +7245,18 @@ public sealed partial class NknSignalingTransport
         }
 
         var normalizedSessionId = sessionId.Trim();
+        lock (accelerationGate)
+        {
+            var transaction = runtimeUnlockTransactionState;
+            if (transaction.PathProbeState == RuntimeUnlockPathProbeState.Started &&
+                !string.IsNullOrWhiteSpace(transaction.PathProbeId) &&
+                string.Equals(transaction.SessionId, normalizedSessionId, StringComparison.Ordinal))
+            {
+                retryReason = RuntimeUnlockProbeSidecarClosedRetryReason;
+                recoveryReason = RuntimeUnlockProbeSidecarClosedRetryReason;
+            }
+        }
+
         return HasActiveRegularV4FileTransferRouteHint(normalizedSessionId) ||
                HasActivePostTunaFallbackFileTransferRouteHint(normalizedSessionId) ||
                HasActiveFileTransferDataSessionForSession(normalizedSessionId);
@@ -7282,6 +7296,13 @@ public sealed partial class NknSignalingTransport
         LocalOperationalLog.Warn(
             "NKN.Tuna",
             $"event=tuna_acceleration_runtime_unlock_listener_rearm_after_sidecar_drop; session_id={SanitizeLogToken(normalizedSessionId)}; retry_reason={SanitizeLogToken(retryReason)}; recovery_reason={SanitizeLogToken(recoveryReason)}; trigger={SanitizeLogToken(trigger)}");
+        if (string.Equals(SanitizeLogToken(retryReason), RuntimeUnlockProbeSidecarClosedRetryReason, StringComparison.Ordinal))
+        {
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=runtime_unlock_tuna_probe_sidecar_closed_fresh_transaction_scheduled; session_id={SanitizeLogToken(normalizedSessionId)}; retry_reason={SanitizeLogToken(retryReason)}; recovery_reason={SanitizeLogToken(recoveryReason)}; trigger={SanitizeLogToken(trigger)}");
+        }
+
         RetirePendingAccelerationAnswerAckForRuntimeUnlockListenerRearm(
             normalizedSessionId,
             recoveryReason,
@@ -7671,7 +7692,7 @@ public sealed partial class NknSignalingTransport
 
             ResumeActivationPauseIfNeeded("tuna_activation_failed_regular_v4_resumed", "listener_sidecar_unavailable");
             var listenerRetryReason = requiresContractLocalListenerRetry
-                ? "runtime_unlock_listener_rearm_failed"
+                ? ResolveRuntimeUnlockListenerRearmFailedReason(sessionId)
                 : "listener_sidecar_unavailable";
             if (requiresContractLocalListenerRetry)
             {
@@ -10152,6 +10173,7 @@ public sealed partial class NknSignalingTransport
             "runtime_unlock_sidecar_unavailable" or
             "runtime_unlock_listener_sidecar_unavailable" or
             "runtime_unlock_tuna_dial_failed" or
+            RuntimeUnlockProbeSidecarClosedRetryReason or
             "runtime_unlock_sidecar_remote_closed" or
             "runtime_unlock_remote_sidecar_remote_closed";
 
@@ -10161,6 +10183,7 @@ public sealed partial class NknSignalingTransport
             "runtime_unlock_sidecar_unavailable" or
             "runtime_unlock_listener_sidecar_unavailable" or
             "runtime_unlock_tuna_dial_failed" or
+            RuntimeUnlockProbeSidecarClosedRetryReason or
             "runtime_unlock_sidecar_remote_closed" or
             "runtime_unlock_remote_sidecar_remote_closed" => "listener_or_dialer_unavailable",
             "runtime_unlock_offer_answer_timeout" or
@@ -15605,6 +15628,13 @@ public sealed partial class NknSignalingTransport
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=tuna_acceleration_retry_scheduled; reason={normalizedReason}; attempt={attempt}; max_attempts={maxAttempts}; delay_ms={(int)delay.TotalMilliseconds}; listener_ready_reuse={(useListenerReadyFastRetry ? 1 : 0)}");
+        if (string.Equals(normalizedReason, RuntimeUnlockProbeSidecarClosedRetryReason, StringComparison.Ordinal))
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=runtime_unlock_tuna_probe_sidecar_closed_fresh_transaction_scheduled; session_id={SanitizeLogToken(currentSessionSecurityState.SessionId?.Value ?? "none")}; retry_reason={normalizedReason}; trigger=schedule_retry; listener_ready_reuse={(useListenerReadyFastRetry ? 1 : 0)}");
+        }
+
         _ = Task.Run(
             async () =>
             {
@@ -15668,6 +15698,13 @@ public sealed partial class NknSignalingTransport
                     LocalOperationalLog.Info(
                         "NKN.Tuna",
                         $"event=tuna_acceleration_retry_fired; reason={normalizedReason}; listener_ready_reuse={(useListenerReadyFastRetry ? 1 : 0)}");
+                    if (string.Equals(normalizedReason, RuntimeUnlockProbeSidecarClosedRetryReason, StringComparison.Ordinal))
+                    {
+                        LocalOperationalLog.Info(
+                            "NKN.Tuna",
+                            $"event=runtime_unlock_tuna_probe_sidecar_closed_fresh_transaction_started; session_id={SanitizeLogToken(currentSessionSecurityState.SessionId?.Value ?? "none")}; retry_reason={normalizedReason}; listener_ready_reuse={(useListenerReadyFastRetry ? 1 : 0)}");
+                    }
+
                     ScheduleAccelerationNegotiationIfEligible(
                         isRuntimeUnlockActivationRetry ||
                         string.Equals(normalizedReason, "peer_user_stopped_tuna", StringComparison.Ordinal)
@@ -16455,20 +16492,38 @@ public sealed partial class NknSignalingTransport
                !string.IsNullOrWhiteSpace(tunaSession.LocalTunaAddress);
     }
 
+    private string ResolveRuntimeUnlockListenerRearmFailedReason(string sessionId)
+    {
+        if (!string.IsNullOrWhiteSpace(sessionId))
+        {
+            var normalizedSessionId = sessionId.Trim();
+            lock (accelerationGate)
+            {
+                if (runtimeUnlockRecoveryRetryState is { } state &&
+                    string.Equals(state.SessionId, normalizedSessionId, StringComparison.Ordinal) &&
+                    string.Equals(state.RetryReason, RuntimeUnlockProbeSidecarClosedRetryReason, StringComparison.Ordinal))
+                {
+                    return RuntimeUnlockProbeSidecarClosedListenerRearmFailedReason;
+                }
+            }
+        }
+
+        return "runtime_unlock_listener_rearm_failed";
+    }
+
     private static bool IsRuntimeUnlockListenerRearmRequiredRetryReason(string? reason)
     {
         var normalized = SanitizeLogToken(reason);
         return normalized is "runtime_unlock_sidecar_unavailable" or
             "runtime_unlock_listener_sidecar_unavailable" or
+            RuntimeUnlockProbeSidecarClosedRetryReason or
             "runtime_unlock_offer_answer_timeout" or
             "runtime_unlock_answer_ack_timeout";
     }
 
     private static bool IsRuntimeUnlockSidecarDropListenerRearmRetryReason(string? reason)
-        => string.Equals(
-            SanitizeLogToken(reason),
-            "runtime_unlock_listener_sidecar_unavailable",
-            StringComparison.Ordinal);
+        => SanitizeLogToken(reason) is "runtime_unlock_listener_sidecar_unavailable" or
+            RuntimeUnlockProbeSidecarClosedRetryReason;
 
     private static bool ShouldNotifyRemoteAccelerationDown(string? reason)
     {

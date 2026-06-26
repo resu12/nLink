@@ -343,6 +343,53 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             $outboundTerminalState = 'Completed'
         }
     }
+    else {
+        [object[]]$compactTerminalEvents = @(
+            Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'transfer_terminal'
+            Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_inbound_terminal'
+            Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_outbound_terminal'
+        )
+        [object[]]$compactInboundTerminalEvents = @(
+            $compactTerminalEvents |
+                Where-Object {
+                    $_.EventName -eq 'file_transfer_inbound_terminal' -or
+                    [string]::Equals((Get-FileTransferEventField -Event $_ -Name 'direction' -Default ''), 'inbound', [System.StringComparison]::OrdinalIgnoreCase)
+                }
+        )
+        [object[]]$compactOutboundTerminalEvents = @(
+            $compactTerminalEvents |
+                Where-Object {
+                    $_.EventName -eq 'file_transfer_outbound_terminal' -or
+                    [string]::Equals((Get-FileTransferEventField -Event $_ -Name 'direction' -Default ''), 'outbound', [System.StringComparison]::OrdinalIgnoreCase)
+                }
+        )
+        $compactInboundCompleted = @(
+            $compactInboundTerminalEvents |
+                Where-Object {
+                    $state = Get-FileTransferEventField -Event $_ -Name 'state' -Default ''
+                    $errorCode = Get-FileTransferEventField -Event $_ -Name 'error_code' -Default '(none)'
+                    ([string]::Equals($state, 'Completed', [System.StringComparison]::OrdinalIgnoreCase) -or
+                     ([string]::IsNullOrWhiteSpace($state) -and [string]::Equals($errorCode, '(none)', [System.StringComparison]::OrdinalIgnoreCase))) -and
+                    [string]::Equals($errorCode, '(none)', [System.StringComparison]::OrdinalIgnoreCase)
+                }
+        ).Count -gt 0
+        $compactOutboundCompleted = @(
+            $compactOutboundTerminalEvents |
+                Where-Object {
+                    $state = Get-FileTransferEventField -Event $_ -Name 'state' -Default ''
+                    $errorCode = Get-FileTransferEventField -Event $_ -Name 'error_code' -Default '(none)'
+                    ([string]::Equals($state, 'Completed', [System.StringComparison]::OrdinalIgnoreCase) -or
+                     ([string]::IsNullOrWhiteSpace($state) -and [string]::Equals($errorCode, '(none)', [System.StringComparison]::OrdinalIgnoreCase))) -and
+                    [string]::Equals($errorCode, '(none)', [System.StringComparison]::OrdinalIgnoreCase)
+                }
+        ).Count -gt 0
+        if ($compactInboundCompleted -and $compactOutboundCompleted) {
+            $guiCompleted = $true
+            $guiIntegrityOk = $true
+            $inboundTerminalState = 'Completed'
+            $outboundTerminalState = 'Completed'
+        }
+    }
 
     $routeEvents = @(
         Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_selected'
