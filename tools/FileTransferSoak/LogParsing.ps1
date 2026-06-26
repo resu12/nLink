@@ -231,6 +231,7 @@ function New-FileTransferRetainedEventIndex {
             'filetransfer_fallback_tail_terminal_proof_consumed',
             'filetransfer_control_plane_send_retired_stale_generation',
             'filetransfer_runtime_owner_stale_update_rejected',
+            'filetransfer_coordinator_leg_mutation_rejected',
             'session_liveness_timeout')) {
         $criticalMarkerNames.Add($markerName) | Out-Null
     }
