@@ -193,7 +193,17 @@ public sealed partial class SessionFileTransferService
             return;
         }
 
-        _ = RunInboundTransportRebindRetriesAsync(context, reason, generation, CaptureRuntimeOwnerLocked(context));
+        if (!TryCaptureRuntimeOwnerLocked(
+                context,
+                FileTransferCoordinatorActionKind.RepairReplay,
+                "inbound_transport_rebind_retry",
+                "schedule_retry",
+                out var runtimeOwner))
+        {
+            return;
+        }
+
+        _ = RunInboundTransportRebindRetriesAsync(context, reason, generation, runtimeOwner);
     }
 
     private async Task RunInboundTransportRebindRetriesAsync(
@@ -223,9 +233,10 @@ public sealed partial class SessionFileTransferService
                 int stableProgressSamples;
                 lock (gate)
                 {
-                    if (!TryValidateRuntimeOwnerLocked(
+                    if (!TryAuthorizeRuntimeOwnerActionLocked(
                             context,
                             runtimeOwner,
+                            FileTransferCoordinatorActionKind.RepairReplay,
                             "inbound_transport_rebind_retry",
                             "retry_state_or_repair",
                             out _))
@@ -2240,10 +2251,13 @@ public sealed partial class SessionFileTransferService
             (context.PullTransportFrontierOnlyRepairActive ||
              IsV6TransportHandoffBlockingTail(context.V6TransportHandoff));
         var ownerCurrent = context.CurrentRuntimeOwner is not { } owner ||
-            FileTransferCoordinator.IsRuntimeOwnerCurrent(
+            FileTransferCoordinator.AuthorizeAction(
                 CreateCoordinatorStateLocked(context),
-                owner,
-                out _);
+                new FileTransferCoordinatorActionRequest(
+                    FileTransferCoordinatorActionKind.RuntimeOwnerValidation,
+                    "runtime_unlock_admission",
+                    "evaluate_admission",
+                    RuntimeOwner: owner)).Accepted;
 
         return FileTransferCoordinator.EvaluateRuntimeUnlockAdmission(
             context.IsTerminal,
@@ -2271,10 +2285,13 @@ public sealed partial class SessionFileTransferService
             IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg) &&
             IsV6TransportHandoffBlockingTail(context.V6TransportHandoff);
         var ownerCurrent = context.CurrentRuntimeOwner is not { } owner ||
-            FileTransferCoordinator.IsRuntimeOwnerCurrent(
+            FileTransferCoordinator.AuthorizeAction(
                 CreateCoordinatorStateLocked(context),
-                owner,
-                out _);
+                new FileTransferCoordinatorActionRequest(
+                    FileTransferCoordinatorActionKind.RuntimeOwnerValidation,
+                    "runtime_unlock_admission",
+                    "evaluate_admission",
+                    RuntimeOwner: owner)).Accepted;
 
         return FileTransferCoordinator.EvaluateRuntimeUnlockAdmission(
             context.IsTerminal,

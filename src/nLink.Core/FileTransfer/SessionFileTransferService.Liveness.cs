@@ -156,25 +156,24 @@ public sealed partial class SessionFileTransferService
         FileTransferReceiveRecoveryRequest request,
         FileTransferRouteSelection currentSelection)
     {
-        var attemptedOwner = CaptureRuntimeOwnerLocked(context);
-        var currentOwner = RuntimeOwnerTokenForCurrentContext(
-            context.SessionId,
-            context.TransferId,
-            FileTransferDirection.Outbound,
-            currentSelection,
-            Math.Max(request.LiveRouteEpoch, context.CurrentLiveRouteEpoch?.EpochId ?? 0),
-            Math.Max(attemptedOwner.RuntimeGeneration + 1, context.LastRuntimeOwnerGeneration + 1),
-            context.TerminalGeneration,
-            "transport_route_status");
-        RejectStaleRuntimeOwnerUpdateLocked(
-            FileTransferDirection.Outbound,
-            context.TransferId,
-            context.SessionId,
-            currentOwner,
-            attemptedOwner,
-            "regular_v4_receive_recovery",
-            "receive_recovery_request",
-            "transport_route_status_superseded_regular_v4");
+        if (TryCaptureRuntimeOwnerLocked(
+                context,
+                FileTransferCoordinatorActionKind.RuntimeOwnerValidation,
+                "regular_v4_receive_recovery",
+                "receive_recovery_request",
+                out var attemptedOwner))
+        {
+            RejectStaleRuntimeOwnerUpdateLocked(
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentRuntimeOwner,
+                attemptedOwner,
+                "regular_v4_receive_recovery",
+                "receive_recovery_request",
+                "transport_route_status_superseded_regular_v4");
+        }
+
         LogSupersededRegularV4ReceiveRecoverySuppressed(
             FileTransferDirection.Outbound,
             request,
@@ -186,25 +185,24 @@ public sealed partial class SessionFileTransferService
         FileTransferReceiveRecoveryRequest request,
         FileTransferRouteSelection currentSelection)
     {
-        var attemptedOwner = CaptureRuntimeOwnerLocked(context);
-        var currentOwner = RuntimeOwnerTokenForCurrentContext(
-            context.SessionId,
-            context.TransferId,
-            FileTransferDirection.Inbound,
-            currentSelection,
-            Math.Max(request.LiveRouteEpoch, context.CurrentLiveRouteEpoch?.EpochId ?? 0),
-            Math.Max(attemptedOwner.RuntimeGeneration + 1, context.LastRuntimeOwnerGeneration + 1),
-            context.TerminalGeneration,
-            "transport_route_status");
-        RejectStaleRuntimeOwnerUpdateLocked(
-            FileTransferDirection.Inbound,
-            context.TransferId,
-            context.SessionId,
-            currentOwner,
-            attemptedOwner,
-            "regular_v4_receive_recovery",
-            "receive_recovery_request",
-            "transport_route_status_superseded_regular_v4");
+        if (TryCaptureRuntimeOwnerLocked(
+                context,
+                FileTransferCoordinatorActionKind.RuntimeOwnerValidation,
+                "regular_v4_receive_recovery",
+                "receive_recovery_request",
+                out var attemptedOwner))
+        {
+            RejectStaleRuntimeOwnerUpdateLocked(
+                FileTransferDirection.Inbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentRuntimeOwner,
+                attemptedOwner,
+                "regular_v4_receive_recovery",
+                "receive_recovery_request",
+                "transport_route_status_superseded_regular_v4");
+        }
+
         LogSupersededRegularV4ReceiveRecoverySuppressed(
             FileTransferDirection.Inbound,
             request,

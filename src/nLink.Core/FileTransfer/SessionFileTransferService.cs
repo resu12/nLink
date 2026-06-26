@@ -4738,109 +4738,162 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.CurrentRuntimeOwner,
             context.TransferLegHistory);
 
-    private static RuntimeOwnerToken CaptureRuntimeOwnerLocked(OutboundTransferContext context)
-        => context.CurrentRuntimeOwner ?? RuntimeOwnerTokenForCurrentContext(
-            context.SessionId,
-            context.TransferId,
-            FileTransferDirection.Outbound,
-            context.RouteSelection,
-            context.CurrentLiveRouteEpoch?.EpochId ?? 0,
-            context.LastRuntimeOwnerGeneration,
-            context.TerminalGeneration,
-            "legacy_missing_owner");
-
-    private static RuntimeOwnerToken CaptureRuntimeOwnerLocked(InboundTransferContext context)
-        => context.CurrentRuntimeOwner ?? RuntimeOwnerTokenForCurrentContext(
-            context.SessionId,
-            context.TransferId,
-            FileTransferDirection.Inbound,
-            context.RouteSelection,
-            context.CurrentLiveRouteEpoch?.EpochId ?? 0,
-            context.LastRuntimeOwnerGeneration,
-            context.TerminalGeneration,
-            "legacy_missing_owner");
-
-    private static RuntimeOwnerToken RuntimeOwnerTokenForCurrentContext(
-        string sessionId,
-        string transferId,
-        FileTransferDirection direction,
-        FileTransferRouteSelection routeSelection,
-        int liveRouteEpoch,
-        int runtimeGeneration,
-        int terminalGeneration,
-        string reason)
-        => new(
-            sessionId,
-            transferId,
-            direction,
-            routeSelection.Route,
-            routeSelection.TelemetryToken,
-            routeSelection.ProtocolVersion,
-            liveRouteEpoch,
-            Math.Max(1, runtimeGeneration),
-            Math.Max(0, terminalGeneration),
-            FileTransferCoordinator.ResolveRuntimeFamily(routeSelection.RuntimeDescriptor),
-            reason);
-
-    private static bool TryValidateRuntimeOwnerLocked(
+    private static bool TryCaptureRuntimeOwnerLocked(
         OutboundTransferContext context,
-        RuntimeOwnerToken token,
+        FileTransferCoordinatorActionKind actionKind,
+        string source,
+        string attemptedAction,
+        out RuntimeOwnerToken runtimeOwner)
+    {
+        if (context.CurrentRuntimeOwner is not { } owner)
+        {
+            runtimeOwner = default;
+            RejectMissingRuntimeOwnerActionLocked(
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentRuntimeOwner,
+                source,
+                attemptedAction);
+            return false;
+        }
+
+        runtimeOwner = owner;
+        return TryAuthorizeRuntimeOwnerActionLocked(
+            context,
+            owner,
+            actionKind,
+            source,
+            attemptedAction,
+            out _);
+    }
+
+    private static bool TryCaptureRuntimeOwnerLocked(
+        InboundTransferContext context,
+        FileTransferCoordinatorActionKind actionKind,
+        string source,
+        string attemptedAction,
+        out RuntimeOwnerToken runtimeOwner)
+    {
+        if (context.CurrentRuntimeOwner is not { } owner)
+        {
+            runtimeOwner = default;
+            RejectMissingRuntimeOwnerActionLocked(
+                FileTransferDirection.Inbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentRuntimeOwner,
+                source,
+                attemptedAction);
+            return false;
+        }
+
+        runtimeOwner = owner;
+        return TryAuthorizeRuntimeOwnerActionLocked(
+            context,
+            owner,
+            actionKind,
+            source,
+            attemptedAction,
+            out _);
+    }
+
+    private static bool TryAuthorizeRuntimeOwnerActionLocked(
+        OutboundTransferContext context,
+        RuntimeOwnerToken? token,
+        FileTransferCoordinatorActionKind actionKind,
         string source,
         string attemptedAction,
         out string rejectionReason)
     {
-        var valid = FileTransferCoordinator.IsRuntimeOwnerCurrent(
+        if (token is not { } owner)
+        {
+            rejectionReason = "runtime_owner_missing";
+            RejectMissingRuntimeOwnerActionLocked(
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentRuntimeOwner,
+                source,
+                attemptedAction);
+            return false;
+        }
+
+        var decision = FileTransferCoordinator.AuthorizeAction(
             CreateCoordinatorStateLocked(context),
-            token,
-            out rejectionReason);
-        if (!valid)
+            new FileTransferCoordinatorActionRequest(
+                actionKind,
+                source,
+                attemptedAction,
+                RuntimeOwner: owner));
+        rejectionReason = decision.Accepted ? "current" : decision.RejectionReason;
+        if (!decision.Accepted)
         {
             RejectStaleRuntimeOwnerUpdateLocked(
                 FileTransferDirection.Outbound,
                 context.TransferId,
                 context.SessionId,
                 context.CurrentRuntimeOwner,
-                token,
+                owner,
                 source,
                 attemptedAction,
-                rejectionReason);
+                decision.RejectionReason);
         }
 
-        return valid;
+        return decision.Accepted;
     }
 
-    private static bool TryValidateRuntimeOwnerLocked(
+    private static bool TryAuthorizeRuntimeOwnerActionLocked(
         InboundTransferContext context,
-        RuntimeOwnerToken token,
+        RuntimeOwnerToken? token,
+        FileTransferCoordinatorActionKind actionKind,
         string source,
         string attemptedAction,
         out string rejectionReason)
     {
-        var valid = FileTransferCoordinator.IsRuntimeOwnerCurrent(
+        if (token is not { } owner)
+        {
+            rejectionReason = "runtime_owner_missing";
+            RejectMissingRuntimeOwnerActionLocked(
+                FileTransferDirection.Inbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentRuntimeOwner,
+                source,
+                attemptedAction);
+            return false;
+        }
+
+        var decision = FileTransferCoordinator.AuthorizeAction(
             CreateCoordinatorStateLocked(context),
-            token,
-            out rejectionReason);
-        if (!valid)
+            new FileTransferCoordinatorActionRequest(
+                actionKind,
+                source,
+                attemptedAction,
+                RuntimeOwner: owner));
+        rejectionReason = decision.Accepted ? "current" : decision.RejectionReason;
+        if (!decision.Accepted)
         {
             RejectStaleRuntimeOwnerUpdateLocked(
                 FileTransferDirection.Inbound,
                 context.TransferId,
                 context.SessionId,
                 context.CurrentRuntimeOwner,
-                token,
+                owner,
                 source,
                 attemptedAction,
-                rejectionReason);
+                decision.RejectionReason);
         }
 
-        return valid;
+        return decision.Accepted;
     }
 
-    private bool TryValidateRuntimeOwnerForDirectionLocked(
+    private bool TryAuthorizeRuntimeOwnerActionForDirectionLocked(
         FileTransferDirection direction,
         string sessionId,
         string transferId,
         RuntimeOwnerToken token,
+        FileTransferCoordinatorActionKind actionKind,
         string source,
         string attemptedAction,
         out string rejectionReason)
@@ -4850,9 +4903,10 @@ public sealed partial class SessionFileTransferService : IDisposable
             IsOutboundLifecycleMessageMatchLocked(sessionId, transferId) &&
             outboundTransfer is { } outbound)
         {
-            return TryValidateRuntimeOwnerLocked(
+            return TryAuthorizeRuntimeOwnerActionLocked(
                 outbound,
                 token,
+                actionKind,
                 source,
                 attemptedAction,
                 out rejectionReason);
@@ -4862,9 +4916,10 @@ public sealed partial class SessionFileTransferService : IDisposable
             IsInboundLifecycleMessageMatchLocked(sessionId, transferId) &&
             inboundTransfer is { } inbound)
         {
-            return TryValidateRuntimeOwnerLocked(
+            return TryAuthorizeRuntimeOwnerActionLocked(
                 inbound,
                 token,
+                actionKind,
                 source,
                 attemptedAction,
                 out rejectionReason);
@@ -4882,18 +4937,35 @@ public sealed partial class SessionFileTransferService : IDisposable
         return false;
     }
 
+    private static void RejectMissingRuntimeOwnerActionLocked(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        RuntimeOwnerToken? currentOwner,
+        string source,
+        string attemptedAction)
+        => RejectStaleRuntimeOwnerUpdateLocked(
+            direction,
+            transferId,
+            sessionId,
+            currentOwner,
+            attemptedOwner: null,
+            source,
+            attemptedAction,
+            "runtime_owner_missing");
+
     private static void RejectStaleRuntimeOwnerUpdateLocked(
         FileTransferDirection direction,
         string transferId,
         string sessionId,
         RuntimeOwnerToken? currentOwner,
-        RuntimeOwnerToken attemptedOwner,
+        RuntimeOwnerToken? attemptedOwner,
         string source,
         string attemptedAction,
         string reason)
         => LocalOperationalLog.Warn(
             "FileTransferService",
-            $"event=filetransfer_runtime_owner_stale_update_rejected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; source={FormatProtocolLogValue(source)}; attempted_action={FormatProtocolLogValue(attemptedAction)}; reason={FormatProtocolLogValue(reason)}; runtime_generation={attemptedOwner.RuntimeGeneration}; current_runtime_generation={currentOwner?.RuntimeGeneration ?? 0}; terminal_generation={attemptedOwner.TerminalGeneration}; current_terminal_generation={currentOwner?.TerminalGeneration ?? 0}; route={FormatProtocolLogValue(attemptedOwner.RouteToken)}; current_route={FormatProtocolLogValue(currentOwner?.RouteToken ?? "(none)")}; protocol_version={attemptedOwner.ProtocolVersion}; current_protocol_version={currentOwner?.ProtocolVersion ?? 0}; live_route_epoch={attemptedOwner.LiveRouteEpoch}; current_live_route_epoch={currentOwner?.LiveRouteEpoch ?? 0}; runtime_family={FormatProtocolLogValue(attemptedOwner.RuntimeFamily)}; current_runtime_family={FormatProtocolLogValue(currentOwner?.RuntimeFamily ?? "(none)")}");
+            $"event=filetransfer_runtime_owner_stale_update_rejected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; source={FormatProtocolLogValue(source)}; attempted_action={FormatProtocolLogValue(attemptedAction)}; reason={FormatProtocolLogValue(reason)}; runtime_generation={attemptedOwner?.RuntimeGeneration ?? 0}; current_runtime_generation={currentOwner?.RuntimeGeneration ?? 0}; terminal_generation={attemptedOwner?.TerminalGeneration ?? 0}; current_terminal_generation={currentOwner?.TerminalGeneration ?? 0}; route={FormatProtocolLogValue(attemptedOwner?.RouteToken ?? "(none)")}; current_route={FormatProtocolLogValue(currentOwner?.RouteToken ?? "(none)")}; protocol_version={attemptedOwner?.ProtocolVersion ?? 0}; current_protocol_version={currentOwner?.ProtocolVersion ?? 0}; live_route_epoch={attemptedOwner?.LiveRouteEpoch ?? 0}; current_live_route_epoch={currentOwner?.LiveRouteEpoch ?? 0}; runtime_family={FormatProtocolLogValue(attemptedOwner?.RuntimeFamily ?? "(none)")}; current_runtime_family={FormatProtocolLogValue(currentOwner?.RuntimeFamily ?? "(none)")}");
 
     private static void RetireRuntimeOwnedWorkersLocked(
         OutboundTransferContext context,

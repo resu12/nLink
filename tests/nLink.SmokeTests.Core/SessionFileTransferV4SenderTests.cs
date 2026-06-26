@@ -492,6 +492,15 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             chunksAcceptedForTransport: 256,
             remoteGrantedUntilExclusive: 256,
             lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        var regularRoute = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        SetPrivateProperty(context, "CurrentRuntimeOwner", CreateRuntimeOwner(
+            $"session_{transferId}",
+            transferId,
+            regularRoute,
+            liveRouteEpoch: 0,
+            runtimeGeneration: 1,
+            "unit_test_regular"));
+        SetPrivateProperty(context, "LastRuntimeOwnerGeneration", 1);
         SetPrivateProperty(context, "PullSourceCanSeek", true);
         SetPrivateProperty(context, "PullV4LastPeerFrameReceivedUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
         typeof(SessionFileTransferService)
@@ -1130,6 +1139,15 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             chunksAcceptedForTransport: 256,
             remoteGrantedUntilExclusive: 256,
             lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        var regularRoute = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        SetPrivateProperty(context, "CurrentRuntimeOwner", CreateRuntimeOwner(
+            $"session_{transferId}",
+            transferId,
+            regularRoute,
+            liveRouteEpoch: 0,
+            runtimeGeneration: 1,
+            "unit_test_regular"));
+        SetPrivateProperty(context, "LastRuntimeOwnerGeneration", 1);
         SetPrivateProperty(context, "PullSourceCanSeek", true);
         SetPrivateProperty(context, "PullV4LastPeerFrameReceivedUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
         typeof(SessionFileTransferService)
@@ -1242,6 +1260,53 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
+    public void RegularNknV4PeerSilenceSafetyReplay_DoesNotRequeueWithoutRuntimeOwner()
+    {
+        const string transferId = "transfer_regular_v4_peer_silence_replay_missing_owner";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 100,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        SetPrivateProperty(context, "PullSourceCanSeek", true);
+        SetPrivateProperty(context, "PullV4LastPeerFrameReceivedUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        typeof(SessionFileTransferService)
+            .GetMethod("MaybeQueueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "session_liveness_timeout_pending"]);
+
+        var repairQueue = context.GetType()
+            .GetProperty("PullV4SenderPumpRepairQueue", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!
+            .GetValue(context)!;
+        var dequeuedRepair = repairQueue.GetType().GetMethod("Dequeue")!.Invoke(repairQueue, null)!;
+        var queuedChunkIndices = context.GetType()
+            .GetProperty("PullV4SenderPumpRepairQueuedChunkIndices", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!
+            .GetValue(context)!;
+        queuedChunkIndices.GetType().GetMethod("Clear")!.Invoke(queuedChunkIndices, null);
+
+        var args = new object?[] { context, dequeuedRepair, 0 };
+        var requeued = (bool)typeof(SessionFileTransferService)
+            .GetMethod("TryRequeueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, args)!;
+
+        Assert.False(requeued);
+        Assert.Empty(GetQueuedV4RepairSends(context));
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_runtime_owner_stale_update_rejected;", log, StringComparison.Ordinal);
+        Assert.Contains("source=regular_v4_peer_silence_safety_replay", log, StringComparison.Ordinal);
+        Assert.Contains("attempted_action=requeue_after_send_timeout", log, StringComparison.Ordinal);
+        Assert.Contains("reason=runtime_owner_missing", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task RegularNknV4SenderFailure_DoesNotTerminalizeAfterRuntimeOwnerRetired()
     {
         const string transferId = "transfer_regular_v4_sender_failure_stale_owner";
@@ -1319,6 +1384,50 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
+    public async Task RegularNknV4SenderFailure_DoesNotTerminalizeWithoutRuntimeOwner()
+    {
+        const string transferId = "transfer_regular_v4_sender_failure_missing_owner";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 100,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var failTask = (Task)typeof(SessionFileTransferService)
+            .GetMethod("FailOutboundV4Async", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    context,
+                    null,
+                    null,
+                    FileTransferResultCodes.PeerDisconnected,
+                    "Peer disconnected.",
+                    true,
+                ])!;
+        await failTask.ConfigureAwait(false);
+
+        Assert.Equal(FileTransferTransferState.Sending, GetPrivateProperty<FileTransferTransferState>(context, "State"));
+        Assert.False(GetPrivateProperty<bool>(context, "IsTerminal"));
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_runtime_owner_stale_update_rejected;", log, StringComparison.Ordinal);
+        Assert.Contains("source=v4_sender_failed", log, StringComparison.Ordinal);
+        Assert.Contains("attempted_action=peer_disconnected", log, StringComparison.Ordinal);
+        Assert.Contains("reason=runtime_owner_missing", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_v4_sender_failed;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=transfer_terminal; direction=outbound; transfer_id=transfer_regular_v4_sender_failure_missing_owner", log, StringComparison.Ordinal);
+        Assert.Empty(transport.SentErrors);
+    }
+
+    [Fact]
     public void RegularNknV4ReceiveRecovery_IsSuppressedWhenTransportRouteOwnerIsFallback()
     {
         const string transferId = "transfer_regular_v4_receive_recovery_suppressed_by_fallback";
@@ -1354,7 +1463,39 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Contains("event=filetransfer_runtime_owner_stale_update_rejected;", log, StringComparison.Ordinal);
         Assert.Contains("source=regular_v4_receive_recovery", log, StringComparison.Ordinal);
         Assert.Contains("attempted_action=receive_recovery_request", log, StringComparison.Ordinal);
+        Assert.Contains("reason=runtime_owner_missing", log, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_regular_v4_receive_recovery_suppressed_by_current_route_owner;", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RuntimeUnlockPreCommitProbe_DoesNotStartWithoutRuntimeOwner()
+    {
+        const string transferId = "transfer_runtime_unlock_precommit_missing_owner";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 100,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        typeof(SessionFileTransferService)
+            .GetMethod("StartOutboundRuntimeUnlockPreCommitProbe", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "unit_test_missing_owner"]);
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_runtime_owner_stale_update_rejected;", log, StringComparison.Ordinal);
+        Assert.Contains("source=runtime_unlock_precommit_probe", log, StringComparison.Ordinal);
+        Assert.Contains("attempted_action=start_probe", log, StringComparison.Ordinal);
+        Assert.Contains("reason=runtime_owner_missing", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=runtime_unlock_precommit_probe_started; direction=outbound; transfer_id=transfer_runtime_unlock_precommit_missing_owner", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=runtime_unlock_precommit_probe_sent; direction=outbound; transfer_id=transfer_runtime_unlock_precommit_missing_owner", log, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1414,6 +1555,27 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Contains("raw_batch_bytes_received_total=", transferLog, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_primary_regular_nkn_bulk_v6_selected", transferLog, StringComparison.Ordinal);
     }
+
+    private static RuntimeOwnerToken CreateRuntimeOwner(
+        string sessionId,
+        string transferId,
+        FileTransferRouteSelection routeSelection,
+        int liveRouteEpoch,
+        int runtimeGeneration,
+        string reason,
+        FileTransferDirection direction = FileTransferDirection.Outbound)
+        => new(
+            sessionId,
+            transferId,
+            direction,
+            routeSelection.Route,
+            routeSelection.TelemetryToken,
+            routeSelection.ProtocolVersion,
+            liveRouteEpoch,
+            runtimeGeneration,
+            0,
+            FileTransferCoordinator.ResolveRuntimeFamily(routeSelection.RuntimeDescriptor),
+            reason);
 
     private static object CreateRegularNknV4OutboundContext(
         string transferId,

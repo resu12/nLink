@@ -14,6 +14,25 @@ internal enum FileTransferCoordinatorEventKind
     Terminalized,
 }
 
+internal enum FileTransferCoordinatorActionKind
+{
+    RuntimeOwnerValidation,
+    StartTransferLeg,
+    FallbackCheckpointBegin,
+    FallbackCheckpointAccept,
+    FallbackCheckpointReissue,
+    FallbackCheckpointRetire,
+    ControlPlaneSend,
+    FallbackTailQuiescent,
+    FallbackTailFailed,
+    RepairReplay,
+    BridgeRecovery,
+    LivenessDeferral,
+    ProgressMutation,
+    RouteMismatchMark,
+    RoutePublication,
+}
+
 internal enum RuntimeUnlockAdmissionStatus
 {
     Granted,
@@ -65,6 +84,31 @@ internal readonly record struct FileTransferCoordinatorEvent(
     int CheckpointGeneration = 0,
     RuntimeUnlockRouteCommitProof? RuntimeUnlockCommitProof = null);
 
+internal readonly record struct FileTransferCoordinatorActionRequest(
+    FileTransferCoordinatorActionKind Kind,
+    string Source,
+    string Reason,
+    RuntimeOwnerToken? RuntimeOwner = null,
+    FileTransferRoute? Route = null,
+    int? ProtocolVersion = null,
+    int? LiveRouteEpoch = null,
+    int? LegGeneration = null,
+    long? TransportEpochId = null,
+    int? BridgeRecoveryGeneration = null,
+    string? CheckpointRequestId = null);
+
+internal readonly record struct FileTransferCoordinatorActionDecision(
+    FileTransferCoordinatorActionKind Kind,
+    bool Accepted,
+    string RejectionReason,
+    bool TerminalMutationRejected,
+    FileTransferRoute CurrentRoute,
+    int CurrentProtocolVersion,
+    int CurrentLiveRouteEpoch,
+    int CurrentRuntimeGeneration,
+    int CurrentTerminalGeneration,
+    int CurrentLegGeneration);
+
 internal sealed record FileTransferCoordinatorDecision(
     FileTransferCoordinatorState State,
     bool RouteChanged,
@@ -77,7 +121,8 @@ internal sealed record FileTransferCoordinatorDecision(
     bool FallbackCheckpointRequired,
     string Reason,
     bool RuntimeUnlockCommitAccepted = false,
-    string? RuntimeUnlockCommitRejectedReason = null);
+    string? RuntimeUnlockCommitRejectedReason = null,
+    string? MutationRejectedReason = null);
 
 internal readonly record struct RuntimeOwnerToken(
     string SessionId,
@@ -180,19 +225,9 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorState state)
     {
         var reason = NormalizeReason(coordinatorEvent.Reason);
-        if (state.IsTerminal && coordinatorEvent.Kind != FileTransferCoordinatorEventKind.Terminalized)
+        if (state.IsTerminal)
         {
-            return new FileTransferCoordinatorDecision(
-                state,
-                RouteChanged: false,
-                TerminalMutationRejected: true,
-                StartedLiveRouteEpoch: null,
-                RecoveredLiveRouteEpoch: null,
-                StartedLeg: null,
-                FrozenLeg: null,
-                AcceptedCheckpointLeg: null,
-                FallbackCheckpointRequired: false,
-                reason);
+            return MutationRejected(state, reason, "terminal_state");
         }
 
         return coordinatorEvent.Kind switch
@@ -209,6 +244,119 @@ internal static class FileTransferCoordinator
             FileTransferCoordinatorEventKind.Terminalized => Terminalize(state, reason),
             _ => PassThrough(state, reason),
         };
+    }
+
+    public static FileTransferCoordinatorActionDecision AuthorizeAction(
+        FileTransferCoordinatorState state,
+        FileTransferCoordinatorActionRequest request)
+    {
+        if (state.IsTerminal)
+        {
+            return ActionDecision(
+                state,
+                request.Kind,
+                accepted: false,
+                rejectionReason: "terminal_state",
+                terminalMutationRejected: true);
+        }
+
+        if (request.RuntimeOwner is { } runtimeOwner)
+        {
+            if (!IsRuntimeOwnerCurrent(state, runtimeOwner, out var ownerRejectionReason))
+            {
+                return ActionDecision(
+                    state,
+                    request.Kind,
+                    accepted: false,
+                    ownerRejectionReason);
+            }
+        }
+        else if (RequiresRuntimeOwner(request.Kind))
+        {
+            return ActionDecision(
+                state,
+                request.Kind,
+                accepted: false,
+                rejectionReason: "runtime_owner_missing");
+        }
+
+        if (request.Route is { } route && route != state.RouteSelection.Route)
+        {
+            return ActionDecision(
+                state,
+                request.Kind,
+                accepted: false,
+                rejectionReason: "route_or_protocol_mismatch");
+        }
+
+        if (request.ProtocolVersion is { } protocolVersion &&
+            protocolVersion != state.RouteSelection.ProtocolVersion)
+        {
+            return ActionDecision(
+                state,
+                request.Kind,
+                accepted: false,
+                rejectionReason: "route_or_protocol_mismatch");
+        }
+
+        var currentLiveRouteEpoch = state.CurrentLiveRouteEpoch?.EpochId ?? 0;
+        if (request.LiveRouteEpoch is { } liveRouteEpoch &&
+            liveRouteEpoch != currentLiveRouteEpoch)
+        {
+            return ActionDecision(
+                state,
+                request.Kind,
+                accepted: false,
+                rejectionReason: "live_route_epoch_mismatch");
+        }
+
+        var currentLegGeneration = state.CurrentLeg?.Generation ?? 0;
+        if (request.LegGeneration is { } legGeneration &&
+            legGeneration != currentLegGeneration)
+        {
+            return ActionDecision(
+                state,
+                request.Kind,
+                accepted: false,
+                rejectionReason: "leg_generation_mismatch");
+        }
+
+        if (request.TransportEpochId is { } transportEpochId &&
+            (state.CurrentLeg is null || transportEpochId != state.CurrentLeg.TransportEpochId))
+        {
+            return ActionDecision(
+                state,
+                request.Kind,
+                accepted: false,
+                rejectionReason: state.CurrentLeg is null ? "leg_missing" : "transport_epoch_mismatch");
+        }
+
+        if (request.BridgeRecoveryGeneration is { } bridgeRecoveryGeneration &&
+            (state.CurrentLeg is null || bridgeRecoveryGeneration != state.CurrentLeg.BridgeRecoveryGeneration))
+        {
+            return ActionDecision(
+                state,
+                request.Kind,
+                accepted: false,
+                rejectionReason: state.CurrentLeg is null ? "leg_missing" : "bridge_recovery_generation_mismatch");
+        }
+
+        if (request.CheckpointRequestId is { } checkpointRequestId &&
+            (state.CurrentLeg is null ||
+             !string.Equals(checkpointRequestId, state.CurrentLeg.CheckpointRequestId, StringComparison.Ordinal)))
+        {
+            return ActionDecision(
+                state,
+                request.Kind,
+                accepted: false,
+                rejectionReason: state.CurrentLeg is null ? "leg_missing" : "checkpoint_request_mismatch");
+        }
+
+        return ActionDecision(
+            state,
+            request.Kind,
+            accepted: true,
+            rejectionReason: "accepted");
     }
 
     public static LiveRouteEpoch StartLiveRouteEpoch(
@@ -949,6 +1097,16 @@ internal static class FileTransferCoordinator
     private static FileTransferCoordinatorDecision PassThrough(FileTransferCoordinatorState state, string reason)
         => Decision(state, reason);
 
+    private static FileTransferCoordinatorDecision MutationRejected(
+        FileTransferCoordinatorState state,
+        string reason,
+        string rejectionReason)
+        => Decision(state, reason) with
+        {
+            TerminalMutationRejected = true,
+            MutationRejectedReason = rejectionReason,
+        };
+
     private static FileTransferCoordinatorDecision Decision(
         FileTransferCoordinatorState state,
         string reason,
@@ -966,6 +1124,27 @@ internal static class FileTransferCoordinator
             AcceptedCheckpointLeg: acceptedCheckpointLeg,
             FallbackCheckpointRequired: fallbackCheckpointRequired,
             reason);
+
+    private static FileTransferCoordinatorActionDecision ActionDecision(
+        FileTransferCoordinatorState state,
+        FileTransferCoordinatorActionKind kind,
+        bool accepted,
+        string rejectionReason,
+        bool terminalMutationRejected = false)
+        => new(
+            kind,
+            accepted,
+            rejectionReason,
+            terminalMutationRejected,
+            state.RouteSelection.Route,
+            state.RouteSelection.ProtocolVersion,
+            state.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            state.CurrentRuntimeOwner?.RuntimeGeneration ?? 0,
+            state.TerminalGeneration,
+            state.CurrentLeg?.Generation ?? 0);
+
+    private static bool RequiresRuntimeOwner(FileTransferCoordinatorActionKind kind)
+        => kind != FileTransferCoordinatorActionKind.StartTransferLeg;
 
     private static string NormalizeReason(string? reason)
         => string.IsNullOrWhiteSpace(reason)

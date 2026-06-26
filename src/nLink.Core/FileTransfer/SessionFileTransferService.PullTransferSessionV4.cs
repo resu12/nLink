@@ -433,7 +433,18 @@ public sealed partial class SessionFileTransferService
                 context.PullV4SenderPumpRepairRequests.Clear();
                 context.PullSentChunkCache.Clear();
                 context.PullSentChunkCacheBytes = 0;
-                senderRuntimeOwner = CaptureRuntimeOwnerLocked(context);
+                if (!TryCaptureRuntimeOwnerLocked(
+                        context,
+                        FileTransferCoordinatorActionKind.RuntimeOwnerValidation,
+                        "v4_sender_start",
+                        "capture_runtime_owner",
+                        out var capturedOwner))
+                {
+                    dataSession.Dispose();
+                    return;
+                }
+
+                senderRuntimeOwner = capturedOwner;
             }
 
             LocalOperationalLog.Info(
@@ -3967,10 +3978,10 @@ public sealed partial class SessionFileTransferService
                     {
                         if (ReferenceEquals(outboundTransfer, context))
                         {
-                            if (repairSend.RuntimeOwner is { } runtimeOwner &&
-                                !TryValidateRuntimeOwnerLocked(
+                            if (!TryAuthorizeRuntimeOwnerActionLocked(
                                     context,
-                                    runtimeOwner,
+                                    repairSend.RuntimeOwner,
+                                    FileTransferCoordinatorActionKind.RepairReplay,
                                     "v4_repair_send",
                                     repairSend.DeliveryEscalationReason,
                                     out _))
@@ -4437,10 +4448,10 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        if (repairSend.RuntimeOwner is { } runtimeOwner &&
-            !TryValidateRuntimeOwnerLocked(
+        if (!TryAuthorizeRuntimeOwnerActionLocked(
                 context,
-                runtimeOwner,
+                repairSend.RuntimeOwner,
+                FileTransferCoordinatorActionKind.RepairReplay,
                 "regular_v4_peer_silence_safety_replay",
                 "requeue_after_send_timeout",
                 out _))
@@ -8347,10 +8358,10 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
-            if (runtimeOwner is { } owner &&
-                !TryValidateRuntimeOwnerLocked(
+            if (!TryAuthorizeRuntimeOwnerActionLocked(
                     context,
-                    owner,
+                    runtimeOwner,
+                    FileTransferCoordinatorActionKind.ProgressMutation,
                     "v4_sender_failed",
                     errorCode,
                     out _))

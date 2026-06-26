@@ -115,6 +115,145 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void AuthorizeAction_AcceptsCurrentRuntimeOwner()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var started = StartRegular(regular);
+        var owner = started.State.CurrentRuntimeOwner!.Value;
+
+        var decision = FileTransferCoordinator.AuthorizeAction(
+            started.State,
+            ActionRequest(
+                FileTransferCoordinatorActionKind.RuntimeOwnerValidation,
+                owner,
+                route: owner.Route,
+                protocolVersion: owner.ProtocolVersion,
+                liveRouteEpoch: owner.LiveRouteEpoch,
+                legGeneration: started.State.CurrentLeg!.Generation));
+
+        Assert.True(decision.Accepted);
+        Assert.False(decision.TerminalMutationRejected);
+        Assert.Equal("accepted", decision.RejectionReason);
+        Assert.Equal(FileTransferRoute.RegularNknV4Fast, decision.CurrentRoute);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV4, decision.CurrentProtocolVersion);
+        Assert.Equal(owner.RuntimeGeneration, decision.CurrentRuntimeGeneration);
+        Assert.Equal(started.State.CurrentLeg.Generation, decision.CurrentLegGeneration);
+    }
+
+    [Fact]
+    public void AuthorizeAction_RejectsMissingRuntimeOwner()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+
+        var decision = FileTransferCoordinator.AuthorizeAction(
+            EmptyState(regular),
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RuntimeOwnerValidation,
+                Source: "test",
+                Reason: "missing_owner"));
+
+        Assert.False(decision.Accepted);
+        Assert.False(decision.TerminalMutationRejected);
+        Assert.Equal("runtime_owner_missing", decision.RejectionReason);
+    }
+
+    [Fact]
+    public void AuthorizeAction_RejectsOldOwnerAfterRouteTransition()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var started = StartRegular(regular);
+        var oldOwner = started.State.CurrentRuntimeOwner!.Value;
+        var activated = ActivateTuna(started.State, tuna, committedChunk: 4);
+
+        var decision = FileTransferCoordinator.AuthorizeAction(
+            activated.State,
+            ActionRequest(FileTransferCoordinatorActionKind.LivenessDeferral, oldOwner));
+
+        Assert.False(decision.Accepted);
+        Assert.False(decision.TerminalMutationRejected);
+        Assert.Equal("runtime_generation_mismatch", decision.RejectionReason);
+        Assert.Equal(activated.State.CurrentRuntimeOwner!.Value.RuntimeGeneration, decision.CurrentRuntimeGeneration);
+    }
+
+    [Fact]
+    public void AuthorizeAction_RejectsOwnerAfterTerminalGenerationChanges()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var started = StartRegular(regular);
+        var owner = started.State.CurrentRuntimeOwner!.Value;
+        var terminal = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.Terminalized,
+                regular,
+                reason: "completed"),
+            started.State);
+
+        var decision = FileTransferCoordinator.AuthorizeAction(
+            terminal.State,
+            ActionRequest(FileTransferCoordinatorActionKind.RepairReplay, owner));
+
+        Assert.False(decision.Accepted);
+        Assert.True(decision.TerminalMutationRejected);
+        Assert.Equal("terminal_state", decision.RejectionReason);
+        Assert.Equal(terminal.State.TerminalGeneration, decision.CurrentTerminalGeneration);
+    }
+
+    [Fact]
+    public void AuthorizeAction_RejectsRouteProtocolAndLiveEpochMismatch()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var started = StartRegular(regular);
+        var owner = started.State.CurrentRuntimeOwner!.Value;
+
+        var routeMismatch = FileTransferCoordinator.AuthorizeAction(
+            started.State,
+            ActionRequest(
+                FileTransferCoordinatorActionKind.RoutePublication,
+                owner,
+                route: FileTransferRoute.FileTunaV4));
+        Assert.False(routeMismatch.Accepted);
+        Assert.Equal("route_or_protocol_mismatch", routeMismatch.RejectionReason);
+
+        var protocolMismatch = FileTransferCoordinator.AuthorizeAction(
+            started.State,
+            ActionRequest(
+                FileTransferCoordinatorActionKind.ControlPlaneSend,
+                owner,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6));
+        Assert.False(protocolMismatch.Accepted);
+        Assert.Equal("route_or_protocol_mismatch", protocolMismatch.RejectionReason);
+
+        var liveEpochMismatch = FileTransferCoordinator.AuthorizeAction(
+            started.State,
+            ActionRequest(
+                FileTransferCoordinatorActionKind.ProgressMutation,
+                owner,
+                liveRouteEpoch: owner.LiveRouteEpoch + 1));
+        Assert.False(liveEpochMismatch.Accepted);
+        Assert.Equal("live_route_epoch_mismatch", liveEpochMismatch.RejectionReason);
+    }
+
+    [Fact]
+    public void AuthorizeAction_RejectsLegGenerationMismatch()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var started = StartRegular(regular);
+        var owner = started.State.CurrentRuntimeOwner!.Value;
+
+        var decision = FileTransferCoordinator.AuthorizeAction(
+            started.State,
+            ActionRequest(
+                FileTransferCoordinatorActionKind.FallbackCheckpointBegin,
+                owner,
+                legGeneration: started.State.CurrentLeg!.Generation + 1));
+
+        Assert.False(decision.Accepted);
+        Assert.Equal("leg_generation_mismatch", decision.RejectionReason);
+        Assert.Equal(started.State.CurrentLeg.Generation, decision.CurrentLegGeneration);
+    }
+
+    [Fact]
     public void FallbackCheckpointAccepted_RemainsNonYieldableUntilTailQuiescent()
     {
         var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
@@ -878,9 +1017,92 @@ public sealed class FileTransferCoordinatorTests
             terminal.State);
 
         Assert.True(rejected.TerminalMutationRejected);
+        Assert.Equal("terminal_state", rejected.MutationRejectedReason);
         Assert.True(rejected.State.IsTerminal);
         Assert.Equal(FileTransferRoute.RegularNknV4Fast, rejected.State.RouteSelection.Route);
         Assert.Equal(FileTransferLegState.Terminal, rejected.State.CurrentLeg!.State);
+    }
+
+    [Fact]
+    public void Apply_Terminalized_IsFirstValidTerminalWins()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var started = StartRegular(regular);
+
+        var first = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.Terminalized,
+                regular,
+                reason: "completed"),
+            started.State);
+        var second = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.Terminalized,
+                regular,
+                reason: "late_failed"),
+            first.State);
+
+        Assert.False(first.TerminalMutationRejected);
+        Assert.True(first.State.IsTerminal);
+        Assert.Equal(1, first.State.TerminalGeneration);
+        Assert.Equal(FileTransferLegState.Terminal, first.State.CurrentLeg!.State);
+        Assert.True(second.TerminalMutationRejected);
+        Assert.Equal("terminal_state", second.MutationRejectedReason);
+        Assert.Equal(1, second.State.TerminalGeneration);
+        Assert.Equal(FileTransferLegState.Terminal, second.State.CurrentLeg!.State);
+    }
+
+    [Fact]
+    public void Apply_StartTransferAfterTerminal_DoesNotStartLeg()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var terminal = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.Terminalized,
+                regular,
+                reason: "completed"),
+            StartRegular(regular).State);
+        var previousLegGeneration = terminal.State.LastTransferLegGeneration;
+        var previousHistoryCount = terminal.State.LegHistory.Count;
+
+        var rejected = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.StartTransfer,
+                regular,
+                reason: "late_start",
+                state: FileTransferLegState.Active,
+                canSendData: true),
+            terminal.State);
+
+        Assert.True(rejected.TerminalMutationRejected);
+        Assert.Equal("terminal_state", rejected.MutationRejectedReason);
+        Assert.Null(rejected.StartedLeg);
+        Assert.Equal(previousLegGeneration, rejected.State.LastTransferLegGeneration);
+        Assert.Equal(previousHistoryCount, rejected.State.LegHistory.Count);
+    }
+
+    [Fact]
+    public void Apply_SecondTerminalizedAfterTerminal_DoesNotIncrementTerminalGeneration()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var first = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.Terminalized,
+                regular,
+                reason: "completed"),
+            StartRegular(regular).State);
+
+        var second = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.Terminalized,
+                regular,
+                reason: "late_failed"),
+            first.State);
+
+        Assert.True(second.TerminalMutationRejected);
+        Assert.Equal("terminal_state", second.MutationRejectedReason);
+        Assert.Equal(first.State.TerminalGeneration, second.State.TerminalGeneration);
+        Assert.Equal(1, second.State.TerminalGeneration);
     }
 
     private static FileTransferCoordinatorDecision StartRegular(FileTransferRouteSelection regular)
@@ -944,6 +1166,29 @@ public sealed class FileTransferCoordinatorTests
             TerminalGeneration: 0,
             CurrentRuntimeOwner: null,
             LegHistory: []);
+
+    private static FileTransferCoordinatorActionRequest ActionRequest(
+        FileTransferCoordinatorActionKind kind,
+        RuntimeOwnerToken owner,
+        FileTransferRoute? route = null,
+        int? protocolVersion = null,
+        int? liveRouteEpoch = null,
+        int? legGeneration = null,
+        long? transportEpoch = null,
+        int? bridgeRecoveryGeneration = null,
+        string? checkpointRequestId = null)
+        => new(
+            kind,
+            Source: "test",
+            Reason: "test",
+            RuntimeOwner: owner,
+            Route: route,
+            ProtocolVersion: protocolVersion,
+            LiveRouteEpoch: liveRouteEpoch,
+            LegGeneration: legGeneration,
+            TransportEpochId: transportEpoch,
+            BridgeRecoveryGeneration: bridgeRecoveryGeneration,
+            CheckpointRequestId: checkpointRequestId);
 
     private static FileTransferCoordinatorEvent CoordinatorEvent(
         FileTransferCoordinatorEventKind kind,

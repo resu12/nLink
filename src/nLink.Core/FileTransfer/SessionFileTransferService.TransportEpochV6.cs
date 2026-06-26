@@ -212,24 +212,48 @@ public sealed partial class SessionFileTransferService
     }
 
     private void StartOutboundRuntimeUnlockPreCommitProbe(OutboundTransferContext context, string reason)
-        => _ = RunRuntimeUnlockPreCommitProbeAsync(
+    {
+        if (!TryCaptureRuntimeOwnerLocked(
+                context,
+                FileTransferCoordinatorActionKind.RuntimeOwnerValidation,
+                "runtime_unlock_precommit_probe",
+                "start_probe",
+                out var runtimeOwner))
+        {
+            return;
+        }
+
+        _ = RunRuntimeUnlockPreCommitProbeAsync(
             context.SessionId,
             context.TransferId,
             FileTransferDirection.Outbound,
             context.DataSession,
-            CaptureRuntimeOwnerLocked(context),
+            runtimeOwner,
             context.LifetimeCts.Token,
             reason);
+    }
 
     private void StartInboundRuntimeUnlockPreCommitProbe(InboundTransferContext context, string reason)
-        => _ = RunRuntimeUnlockPreCommitProbeAsync(
+    {
+        if (!TryCaptureRuntimeOwnerLocked(
+                context,
+                FileTransferCoordinatorActionKind.RuntimeOwnerValidation,
+                "runtime_unlock_precommit_probe",
+                "start_probe",
+                out var runtimeOwner))
+        {
+            return;
+        }
+
+        _ = RunRuntimeUnlockPreCommitProbeAsync(
             context.SessionId,
             context.TransferId,
             FileTransferDirection.Inbound,
             context.DataSession,
-            CaptureRuntimeOwnerLocked(context),
+            runtimeOwner,
             context.LifetimeCts.Token,
             reason);
+    }
 
     private async Task RunRuntimeUnlockPreCommitProbeAsync(
         string sessionId,
@@ -242,11 +266,12 @@ public sealed partial class SessionFileTransferService
     {
         lock (gate)
         {
-            if (!TryValidateRuntimeOwnerForDirectionLocked(
+            if (!TryAuthorizeRuntimeOwnerActionForDirectionLocked(
                     direction,
                     sessionId,
                     transferId,
                     runtimeOwner,
+                    FileTransferCoordinatorActionKind.RuntimeOwnerValidation,
                     "runtime_unlock_precommit_probe",
                     "start_probe",
                     out _))
@@ -395,11 +420,12 @@ public sealed partial class SessionFileTransferService
 
         lock (gate)
         {
-            if (!TryValidateRuntimeOwnerForDirectionLocked(
+            if (!TryAuthorizeRuntimeOwnerActionForDirectionLocked(
                     direction,
                     sessionId,
                     transferId,
                     runtimeOwner,
+                    FileTransferCoordinatorActionKind.RuntimeOwnerValidation,
                     "runtime_unlock_precommit_probe_timeout",
                     "fail_probe",
                     out _))
