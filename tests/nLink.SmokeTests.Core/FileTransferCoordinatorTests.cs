@@ -260,18 +260,9 @@ public sealed class FileTransferCoordinatorTests
         var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
         var started = StartRegular(regular);
         var fallbackDecision = FallBack(started.State, fallback, committedChunk: 32, transportEpoch: 7);
-        var leg = fallbackDecision.State.CurrentLeg!;
-        FileTransferCoordinator.MarkFallbackCheckpointRequested(
-            leg,
-            "checkpoint:1",
-            "state_refresh_tail_reconciliation",
-            transportEpochId: 7);
-
-        FileTransferCoordinator.MarkFallbackCheckpointAccepted(
-            leg,
-            transportEpochId: 7,
-            provenCommittedChunkIndex: 64,
-            provenHighestObservedChunkIndex: 96);
+        var requested = RequestFallbackCheckpoint(fallbackDecision.State, fallback, "checkpoint:1", 7);
+        var accepted = AcceptFallbackCheckpoint(requested.State, fallback, "checkpoint:1", 7, 64, 96);
+        var leg = accepted.State.CurrentLeg!;
 
         Assert.Equal(FileTransferLegState.RecoveryActive, leg.State);
         Assert.False(FileTransferCoordinator.CanAdmitRuntimeUnlockWhilePostTunaFallback(
@@ -292,23 +283,10 @@ public sealed class FileTransferCoordinatorTests
         var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
         var started = StartRegular(regular);
         var fallbackDecision = FallBack(started.State, fallback, committedChunk: 32, transportEpoch: 7);
-        var leg = fallbackDecision.State.CurrentLeg!;
-        FileTransferCoordinator.MarkFallbackCheckpointRequested(
-            leg,
-            "checkpoint:1",
-            "state_refresh_tail_reconciliation",
-            transportEpochId: 7);
-        FileTransferCoordinator.MarkFallbackCheckpointAccepted(
-            leg,
-            transportEpochId: 7,
-            provenCommittedChunkIndex: 64,
-            provenHighestObservedChunkIndex: 96);
-
-        FileTransferCoordinator.MarkFallbackTailQuiescent(
-            leg,
-            transportEpochId: 7,
-            provenCommittedChunkIndex: 64,
-            provenHighestObservedChunkIndex: 96);
+        var requested = RequestFallbackCheckpoint(fallbackDecision.State, fallback, "checkpoint:1", 7);
+        var accepted = AcceptFallbackCheckpoint(requested.State, fallback, "checkpoint:1", 7, 64, 96);
+        var quiescent = MarkFallbackTailQuiescent(accepted.State, fallback, 7, 64, 96);
+        var leg = quiescent.State.CurrentLeg!;
 
         Assert.Equal(FileTransferLegState.Active, leg.State);
         Assert.True(leg.CanSendData);
@@ -1105,6 +1083,132 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(1, second.State.TerminalGeneration);
     }
 
+    [Fact]
+    public void Apply_StartTransfer_FreezesPriorLegOnlyWhenAccepted()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var started = StartRegular(regular);
+        var previousLeg = started.State.CurrentLeg!;
+
+        var next = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.StartTransfer,
+                regular,
+                reason: "restart_leg",
+                state: FileTransferLegState.Active,
+                canSendData: true),
+            started.State);
+
+        Assert.NotNull(next.StartedLeg);
+        Assert.Same(previousLeg, next.FrozenLeg);
+        Assert.Equal(FileTransferLegState.Frozen, previousLeg.State);
+        Assert.False(previousLeg.CanSendData);
+        Assert.Equal(2, next.State.LegHistory.Count);
+        Assert.Equal(2, next.State.LastTransferLegGeneration);
+    }
+
+    [Fact]
+    public void Apply_FallbackCheckpointRequested_RejectedWhenLegNotCurrent()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var started = StartRegular(regular);
+
+        var rejected = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.FallbackCheckpointRequested,
+                regular,
+                reason: "late_checkpoint",
+                state: FileTransferLegState.CheckpointPending,
+                canSendData: false,
+                transportEpoch: 1,
+                checkpointRequestId: "checkpoint:late"),
+            started.State);
+
+        Assert.False(rejected.TerminalMutationRejected);
+        Assert.Equal("fallback_leg_not_current", rejected.MutationRejectedReason);
+        Assert.Null(rejected.MutatedLeg);
+        Assert.Equal(FileTransferLegState.Active, rejected.State.CurrentLeg!.State);
+    }
+
+    [Fact]
+    public void Apply_FallbackCheckpointAccepted_RejectedWhenCheckpointMismatches()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        var fallbackDecision = FallBack(StartRegular(regular).State, fallback, committedChunk: 8, transportEpoch: 4);
+        var requested = RequestFallbackCheckpoint(fallbackDecision.State, fallback, "checkpoint:4", 4);
+
+        var rejected = AcceptFallbackCheckpoint(requested.State, fallback, "checkpoint:old", 4, 12, 18);
+
+        Assert.False(rejected.TerminalMutationRejected);
+        Assert.Equal("checkpoint_request_mismatch", rejected.MutationRejectedReason);
+        Assert.Null(rejected.AcceptedCheckpointLeg);
+        Assert.Equal("checkpoint:4", rejected.State.CurrentLeg!.CheckpointRequestId);
+        Assert.False(rejected.State.CurrentLeg.CanSendData);
+    }
+
+    [Fact]
+    public void Apply_FallbackCheckpointRetired_MutatesOnlyCurrentFallbackLeg()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        var fallbackDecision = FallBack(StartRegular(regular).State, fallback, committedChunk: 8, transportEpoch: 4);
+        var requested = RequestFallbackCheckpoint(fallbackDecision.State, fallback, "checkpoint:4", 4);
+
+        var retired = RetireFallbackCheckpoint(requested.State, fallback, "checkpoint:4", 4);
+
+        Assert.Null(retired.MutationRejectedReason);
+        Assert.Same(retired.State.CurrentLeg, retired.MutatedLeg);
+        Assert.Null(retired.State.CurrentLeg!.CheckpointRequestId);
+        Assert.True(retired.State.CurrentLeg.CanSendData);
+        Assert.Equal(FileTransferLegState.RecoveryActive, retired.State.CurrentLeg.State);
+    }
+
+    [Fact]
+    public void Apply_FallbackTailFailed_MutatesOnlyCurrentFallbackLeg()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        var fallbackDecision = FallBack(StartRegular(regular).State, fallback, committedChunk: 8, transportEpoch: 4);
+        var requested = RequestFallbackCheckpoint(fallbackDecision.State, fallback, "checkpoint:4", 4);
+        var accepted = AcceptFallbackCheckpoint(requested.State, fallback, "checkpoint:4", 4, 12, 18);
+
+        var failed = MarkFallbackTailFailed(accepted.State, fallback, 4);
+
+        Assert.Null(failed.MutationRejectedReason);
+        Assert.Same(failed.State.CurrentLeg, failed.MutatedLeg);
+        Assert.Equal(FileTransferLegState.RecoveryActive, failed.State.CurrentLeg!.State);
+        Assert.True(failed.State.CurrentLeg.CanSendData);
+    }
+
+    [Fact]
+    public void Apply_TerminalStateRejectsFallbackLegMutations()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        var fallbackDecision = FallBack(StartRegular(regular).State, fallback, committedChunk: 8, transportEpoch: 4);
+        var terminal = FileTransferCoordinator.Apply(
+            CoordinatorEvent(FileTransferCoordinatorEventKind.Terminalized, fallback, reason: "completed"),
+            fallbackDecision.State);
+
+        var rejected = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.FallbackTailQuiescent,
+                fallback,
+                reason: "late_tail",
+                state: FileTransferLegState.Active,
+                canSendData: true,
+                committedChunk: 12,
+                highestObservedChunk: 18,
+                transportEpoch: 4),
+            terminal.State);
+
+        Assert.True(rejected.TerminalMutationRejected);
+        Assert.Equal("terminal_state", rejected.MutationRejectedReason);
+        Assert.Equal(terminal.State.TerminalGeneration, rejected.State.TerminalGeneration);
+        Assert.Equal(FileTransferLegState.Terminal, rejected.State.CurrentLeg!.State);
+    }
+
     private static FileTransferCoordinatorDecision StartRegular(FileTransferRouteSelection regular)
         => FileTransferCoordinator.Apply(
             CoordinatorEvent(
@@ -1149,6 +1253,91 @@ public sealed class FileTransferCoordinatorTests
                 highestObservedChunk: committedChunk,
                 transportEpoch: transportEpoch,
                 bridgeRecoveryGeneration: (int)transportEpoch),
+            state);
+
+    private static FileTransferCoordinatorDecision RequestFallbackCheckpoint(
+        FileTransferCoordinatorState state,
+        FileTransferRouteSelection fallback,
+        string checkpointRequestId,
+        long transportEpoch)
+        => FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.FallbackCheckpointRequested,
+                fallback,
+                reason: "checkpoint_requested",
+                state: FileTransferLegState.CheckpointPending,
+                canSendData: false,
+                transportEpoch: transportEpoch,
+                checkpointRequestId: checkpointRequestId,
+                checkpointPriority: "state_refresh_tail_reconciliation"),
+            state);
+
+    private static FileTransferCoordinatorDecision AcceptFallbackCheckpoint(
+        FileTransferCoordinatorState state,
+        FileTransferRouteSelection fallback,
+        string checkpointRequestId,
+        long transportEpoch,
+        int committedChunk,
+        int highestObservedChunk)
+        => FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.FallbackCheckpointAccepted,
+                fallback,
+                reason: "checkpoint_accepted",
+                state: FileTransferLegState.RecoveryActive,
+                canSendData: true,
+                committedChunk: committedChunk,
+                highestObservedChunk: highestObservedChunk,
+                transportEpoch: transportEpoch,
+                checkpointRequestId: checkpointRequestId),
+            state);
+
+    private static FileTransferCoordinatorDecision MarkFallbackTailQuiescent(
+        FileTransferCoordinatorState state,
+        FileTransferRouteSelection fallback,
+        long transportEpoch,
+        int committedChunk,
+        int highestObservedChunk)
+        => FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.FallbackTailQuiescent,
+                fallback,
+                reason: "fallback_tail_quiescent",
+                state: FileTransferLegState.Active,
+                canSendData: true,
+                committedChunk: committedChunk,
+                highestObservedChunk: highestObservedChunk,
+                transportEpoch: transportEpoch),
+            state);
+
+    private static FileTransferCoordinatorDecision RetireFallbackCheckpoint(
+        FileTransferCoordinatorState state,
+        FileTransferRouteSelection fallback,
+        string checkpointRequestId,
+        long transportEpoch)
+        => FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.FallbackCheckpointRetired,
+                fallback,
+                reason: "checkpoint_retired",
+                state: FileTransferLegState.RecoveryActive,
+                canSendData: true,
+                transportEpoch: transportEpoch,
+                checkpointRequestId: checkpointRequestId),
+            state);
+
+    private static FileTransferCoordinatorDecision MarkFallbackTailFailed(
+        FileTransferCoordinatorState state,
+        FileTransferRouteSelection fallback,
+        long transportEpoch)
+        => FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.FallbackTailFailed,
+                fallback,
+                reason: "fallback_tail_failed",
+                state: FileTransferLegState.RecoveryActive,
+                canSendData: false,
+                transportEpoch: transportEpoch),
             state);
 
     private static FileTransferCoordinatorState EmptyState(FileTransferRouteSelection routeSelection)

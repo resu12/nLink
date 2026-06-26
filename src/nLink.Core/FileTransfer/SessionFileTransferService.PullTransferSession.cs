@@ -3617,14 +3617,20 @@ public sealed partial class SessionFileTransferService
 
         RetireOutboundFallbackCheckpointExchangeLocked(context, null, reason);
 
+        var transportEpoch = ResolveOutboundFallbackCurrentTransportEpochLocked(context, generation);
         var leg = StartOutboundTransferLegLocked(
             context,
             context.RouteSelection,
             reason,
             FileTransferLegState.CheckpointPending,
-            canSendData: false);
-        leg.BridgeRecoveryGeneration = generation;
-        leg.TransportEpochId = ResolveOutboundFallbackCurrentTransportEpochLocked(context, generation);
+            canSendData: false,
+            transportEpochOverride: transportEpoch,
+            bridgeRecoveryGenerationOverride: generation);
+        if (leg is null)
+        {
+            return;
+        }
+
         ResetOutboundPostTunaFallbackLegOwnedStateLocked(context, reason, generation, frontier);
         context.PullPostTunaRecoveryActive = true;
         context.PullPostTunaRecoveryGeneration = generation;
@@ -3774,7 +3780,43 @@ public sealed partial class SessionFileTransferService
             : null;
         if (!string.IsNullOrWhiteSpace(retiredCheckpointRequestId))
         {
-            FileTransferCoordinator.RetireFallbackCheckpointRequest(previousInboundLeg!);
+            if (!TryAuthorizeRuntimeOwnerLegActionLocked(
+                    context,
+                    FileTransferCoordinatorActionKind.FallbackCheckpointRetire,
+                    "post_tuna_recovery_restart",
+                    "retire_fallback_checkpoint",
+                    previousInboundLeg,
+                    retiredCheckpointRequestId,
+                    out _))
+            {
+                return;
+            }
+
+            if (!TryApplyInboundCoordinatorLegMutationLocked(
+                    context,
+                    new FileTransferCoordinatorEvent(
+                        FileTransferCoordinatorEventKind.FallbackCheckpointRetired,
+                        context.RouteSelection,
+                        FileTransferTransportHandoffKind.None,
+                        FileTransferTransportKind.Unknown,
+                        reason,
+                        FileTransferLegState.RecoveryActive,
+                        CanSendData: true,
+                        Math.Clamp(context.NextChunkIndex, 0, Math.Max(0, context.ChunkCount)),
+                        context.PullHighestReceivedChunkIndex,
+                        previousInboundLeg!.TransportEpochId,
+                        previousInboundLeg.BridgeRecoveryGeneration,
+                        CheckpointRequestId: retiredCheckpointRequestId),
+                    FileTransferCoordinatorActionKind.FallbackCheckpointRetire,
+                    "retire_fallback_checkpoint",
+                    previousInboundLeg,
+                    retiredCheckpointRequestId,
+                    previousInboundLeg.TransportEpochId,
+                    out _))
+            {
+                return;
+            }
+
             LogFileTransferFallbackCheckpointRetired(
                 FileTransferDirection.Inbound,
                 context.TransferId,
@@ -3784,14 +3826,20 @@ public sealed partial class SessionFileTransferService
                 reason);
         }
 
+        var transportEpoch = context.V6TransportEpoch?.EpochId ?? generation;
         var leg = StartInboundTransferLegLocked(
             context,
             context.RouteSelection,
             reason,
             FileTransferLegState.CheckpointPending,
-            canSendData: false);
-        leg.BridgeRecoveryGeneration = generation;
-        leg.TransportEpochId = context.V6TransportEpoch?.EpochId ?? generation;
+            canSendData: false,
+            transportEpochOverride: transportEpoch,
+            bridgeRecoveryGenerationOverride: generation);
+        if (leg is null)
+        {
+            return;
+        }
+
         ResetInboundPostTunaFallbackLegOwnedStateLocked(context, reason, generation, frontier);
         context.PullPostTunaRecoveryActive = true;
         context.PullPostTunaRecoveryGeneration = generation;

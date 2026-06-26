@@ -1777,6 +1777,40 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         return property!.GetValue(target);
     }
 
+    private static void AcceptInboundFallbackCheckpointForTest(
+        object context,
+        FileTransferLeg leg,
+        long transportEpoch,
+        int committed,
+        int highestObserved,
+        string? checkpointRequestId,
+        string reason)
+    {
+        var method = typeof(SessionFileTransferService)
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(static candidate =>
+                candidate.Name == "TryAcceptInboundFallbackCheckpointWithCoordinatorLocked" &&
+                candidate.GetParameters()[0].ParameterType.Name.Contains("InboundTransferContext", StringComparison.Ordinal));
+        Assert.True((bool)method.Invoke(null, [context, leg, transportEpoch, committed, highestObserved, checkpointRequestId, reason])!);
+    }
+
+    private static void AcceptOutboundFallbackCheckpointForTest(
+        object context,
+        FileTransferLeg leg,
+        long transportEpoch,
+        int committed,
+        int highestObserved,
+        string? checkpointRequestId,
+        string reason)
+    {
+        var method = typeof(SessionFileTransferService)
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(static candidate =>
+                candidate.Name == "TryAcceptOutboundFallbackCheckpointWithCoordinatorLocked" &&
+                candidate.GetParameters()[0].ParameterType.Name.Contains("OutboundTransferContext", StringComparison.Ordinal));
+        Assert.True((bool)method.Invoke(null, [context, leg, transportEpoch, committed, highestObserved, checkpointRequestId, reason])!);
+    }
+
     [Fact]
     public void RegularNknV4FrontierRepairState_ClampsCreditToRepairWindow()
     {
@@ -2165,11 +2199,14 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
         var firstLeg = Assert.IsType<FileTransferLeg>(GetPrivatePropertyValue(context, "CurrentTransferLeg"));
         Assert.Equal("v6-regular-nkn-state-refresh:1", firstLeg.CheckpointRequestId);
-        FileTransferCoordinator.MarkFallbackCheckpointAccepted(
+        AcceptInboundFallbackCheckpointForTest(
+            context,
             firstLeg,
-            transportEpochId: 1,
-            provenCommittedChunkIndex: 303,
-            provenHighestObservedChunkIndex: 306);
+            transportEpoch: 1,
+            committed: 303,
+            highestObserved: 306,
+            checkpointRequestId: "v6-regular-nkn-state-refresh:1",
+            reason: "test_first_checkpoint_accepted");
         Assert.Null(firstLeg.CheckpointRequestId);
         Assert.Equal(1, firstLeg.TransportEpochId);
 
@@ -14430,7 +14467,14 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
             .Invoke(null, [context, "test_sparse_progress_yields"]);
         var initialLeg = (FileTransferLeg)GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
-        FileTransferCoordinator.MarkFallbackCheckpointAccepted(initialLeg, 3, 100, 180);
+        AcceptOutboundFallbackCheckpointForTest(
+            context,
+            initialLeg,
+            transportEpoch: 3,
+            committed: 100,
+            highestObserved: 180,
+            checkpointRequestId: initialLeg.CheckpointRequestId,
+            reason: "test_sparse_progress_checkpoint_accepted");
 
         var state = new FileTransferReceiverStateFrameV6
         {

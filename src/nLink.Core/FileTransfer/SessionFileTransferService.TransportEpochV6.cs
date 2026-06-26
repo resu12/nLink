@@ -2814,29 +2814,35 @@ public sealed partial class SessionFileTransferService
                     checkpointRequestId);
             }
 
-            ClearOutboundFallbackCheckpointRetryStateLocked(
-                context,
-                checkpointRequestId,
-                $"transport_epoch_completed_{reason}");
-            FileTransferCoordinator.MarkFallbackCheckpointAccepted(
-                leg,
-                epoch.EpochId,
-                Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, Math.Max(0, context.ChunkCount)),
-                observedHighestChunkIndex);
-            LogFileTransferFallbackCheckpointAccepted(
-                FileTransferDirection.Outbound,
-                context.TransferId,
-                context.SessionId,
-                leg,
-                checkpointRequestId ?? "(none)",
-                $"transport_epoch_completed_{reason}");
-            LogFileTransferFallbackLegAuthorityCheckpointAccepted(
-                FileTransferDirection.Outbound,
-                context.TransferId,
-                context.SessionId,
-                leg,
-                checkpointRequestId,
-                $"transport_epoch_completed_{reason}");
+            var acceptedReason = $"transport_epoch_completed_{reason}";
+            if (TryAcceptOutboundFallbackCheckpointWithCoordinatorLocked(
+                    context,
+                    leg,
+                    epoch.EpochId,
+                    Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, Math.Max(0, context.ChunkCount)),
+                    observedHighestChunkIndex,
+                    checkpointRequestId,
+                    acceptedReason))
+            {
+                ClearOutboundFallbackCheckpointRetryStateLocked(
+                    context,
+                    checkpointRequestId,
+                    acceptedReason);
+                LogFileTransferFallbackCheckpointAccepted(
+                    FileTransferDirection.Outbound,
+                    context.TransferId,
+                    context.SessionId,
+                    leg,
+                    checkpointRequestId ?? "(none)",
+                    acceptedReason);
+                LogFileTransferFallbackLegAuthorityCheckpointAccepted(
+                    FileTransferDirection.Outbound,
+                    context.TransferId,
+                    context.SessionId,
+                    leg,
+                    checkpointRequestId,
+                    acceptedReason);
+            }
         }
 
         context.PullTransportRebindGeneration = 0;
@@ -2942,25 +2948,31 @@ public sealed partial class SessionFileTransferService
                     checkpointRequestId);
             }
 
-            FileTransferCoordinator.MarkFallbackCheckpointAccepted(
-                leg,
-                epoch.EpochId,
-                Math.Clamp(context.NextChunkIndex, 0, Math.Max(0, context.ChunkCount)),
-                context.PullHighestReceivedChunkIndex);
-            LogFileTransferFallbackCheckpointAccepted(
-                FileTransferDirection.Inbound,
-                context.TransferId,
-                context.SessionId,
-                leg,
-                checkpointRequestId ?? "(none)",
-                $"transport_epoch_completed_{reason}");
-            LogFileTransferFallbackLegAuthorityCheckpointAccepted(
-                FileTransferDirection.Inbound,
-                context.TransferId,
-                context.SessionId,
-                leg,
-                checkpointRequestId,
-                $"transport_epoch_completed_{reason}");
+            var acceptedReason = $"transport_epoch_completed_{reason}";
+            if (TryAcceptInboundFallbackCheckpointWithCoordinatorLocked(
+                    context,
+                    leg,
+                    epoch.EpochId,
+                    Math.Clamp(context.NextChunkIndex, 0, Math.Max(0, context.ChunkCount)),
+                    context.PullHighestReceivedChunkIndex,
+                    checkpointRequestId,
+                    acceptedReason))
+            {
+                LogFileTransferFallbackCheckpointAccepted(
+                    FileTransferDirection.Inbound,
+                    context.TransferId,
+                    context.SessionId,
+                    leg,
+                    checkpointRequestId ?? "(none)",
+                    acceptedReason);
+                LogFileTransferFallbackLegAuthorityCheckpointAccepted(
+                    FileTransferDirection.Inbound,
+                    context.TransferId,
+                    context.SessionId,
+                    leg,
+                    checkpointRequestId,
+                    acceptedReason);
+            }
         }
 
         context.PullTransportRebindGeneration = 0;

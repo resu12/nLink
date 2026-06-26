@@ -413,10 +413,9 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             },
             CancellationToken.None);
 
+        var expectedCommittedChunks = firstChunk + 1;
         await WaitUntilAsync(
-            () => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Any(frame =>
-                frame.TransferId == transferId &&
-                frame.ContiguousCommittedChunkIndex > firstChunk),
+            () => receiver.Snapshot.Inbound?.ChunksTransferred >= expectedCommittedChunks,
             timeoutMs: 5000);
 
         var logTail = ReadOperationalLogTail(logStart);
@@ -2384,6 +2383,8 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                     FileTransferLegState.CheckpointPending,
                     false,
                     false,
+                    null,
+                    null,
                 ])!;
         var legTransportEpochProperty = leg.GetType()
             .GetProperty("TransportEpochId", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)!;

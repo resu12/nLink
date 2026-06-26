@@ -78,12 +78,44 @@ public sealed partial class SessionFileTransferService
 
             context.CancelLifetime();
             ConsumeOutboundFallbackTailTerminalProofBeforeTerminalLocked(context, terminalState, "transfer_terminal");
+            var terminalDecision = FileTransferCoordinator.Apply(
+                new FileTransferCoordinatorEvent(
+                    FileTransferCoordinatorEventKind.Terminalized,
+                    context.RouteSelection,
+                    FileTransferTransportHandoffKind.None,
+                    FileTransferTransportKind.Unknown,
+                    "transfer_terminal",
+                    context.CurrentTransferLeg?.State ?? FileTransferLegState.Terminal,
+                    CanSendData: false,
+                    Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, Math.Max(0, context.ChunkCount)),
+                    Math.Max(-1, context.ChunksAcceptedForTransport - 1),
+                    context.V6TransportEpoch?.EpochId ?? context.LastRecoveredV6TransportEpoch,
+                    Math.Max(0, context.PullTransportRebindGeneration)),
+                CreateCoordinatorStateLocked(context));
+            if (string.IsNullOrWhiteSpace(terminalDecision.MutationRejectedReason))
+            {
+                ApplyCoordinatorDecisionToContextLocked(context, terminalDecision);
+                RetireRuntimeOwnedWorkersLocked(context, context.CurrentRuntimeOwner, "transfer_terminal");
+            }
+            else
+            {
+                LogFileTransferCoordinatorLegMutationRejected(
+                    FileTransferDirection.Outbound,
+                    context.TransferId,
+                    context.SessionId,
+                    FileTransferCoordinatorActionKind.ProgressMutation,
+                    "terminalize_transfer",
+                    terminalDecision,
+                    context.CurrentTransferLeg,
+                    context.CurrentTransferLeg?.CheckpointRequestId,
+                    context.CurrentTransferLeg?.TransportEpochId ?? 0,
+                    "transfer_terminal");
+            }
+
             context.State = terminalState;
             context.ErrorCode = NormalizeErrorCode(errorCode);
             context.StatusMessage = NormalizeReason(statusMessage) ?? statusMessage;
             ClearOutboundFallbackCheckpointRetryStateLocked(context, null, "transfer_terminal");
-            FileTransferCoordinator.TerminalizeLeg(context.CurrentTransferLeg);
-            MarkRuntimeOwnerTerminalLocked(context, "transfer_terminal");
             context.UserPaused = false;
             context.UserPauseReason = null;
             context.UserPausedSinceUtc = null;
@@ -281,11 +313,43 @@ public sealed partial class SessionFileTransferService
 
             context.CancelLifetime();
             ConsumeInboundFallbackTailTerminalProofBeforeTerminalLocked(context, terminalState, "transfer_terminal");
+            var terminalDecision = FileTransferCoordinator.Apply(
+                new FileTransferCoordinatorEvent(
+                    FileTransferCoordinatorEventKind.Terminalized,
+                    context.RouteSelection,
+                    FileTransferTransportHandoffKind.None,
+                    FileTransferTransportKind.Unknown,
+                    "transfer_terminal",
+                    context.CurrentTransferLeg?.State ?? FileTransferLegState.Terminal,
+                    CanSendData: false,
+                    Math.Clamp(context.NextChunkIndex, 0, Math.Max(0, context.ChunkCount)),
+                    Math.Max(-1, context.PullHighestReceivedChunkIndex),
+                    context.V6TransportEpoch?.EpochId ?? context.V6ReceiverTransportEpoch,
+                    Math.Max(0, context.PullTransportRebindGeneration)),
+                CreateCoordinatorStateLocked(context));
+            if (string.IsNullOrWhiteSpace(terminalDecision.MutationRejectedReason))
+            {
+                ApplyCoordinatorDecisionToContextLocked(context, terminalDecision);
+                RetireRuntimeOwnedWorkersLocked(context, context.CurrentRuntimeOwner, "transfer_terminal");
+            }
+            else
+            {
+                LogFileTransferCoordinatorLegMutationRejected(
+                    FileTransferDirection.Inbound,
+                    context.TransferId,
+                    context.SessionId,
+                    FileTransferCoordinatorActionKind.ProgressMutation,
+                    "terminalize_transfer",
+                    terminalDecision,
+                    context.CurrentTransferLeg,
+                    context.CurrentTransferLeg?.CheckpointRequestId,
+                    context.CurrentTransferLeg?.TransportEpochId ?? 0,
+                    "transfer_terminal");
+            }
+
             context.State = terminalState;
             context.ErrorCode = NormalizeErrorCode(errorCode);
             context.StatusMessage = NormalizeReason(statusMessage) ?? statusMessage;
-            FileTransferCoordinator.TerminalizeLeg(context.CurrentTransferLeg);
-            MarkRuntimeOwnerTerminalLocked(context, "transfer_terminal");
             context.AcceptInProgress = false;
             context.UserPaused = false;
             context.UserPauseReason = null;

@@ -7,6 +7,9 @@ internal enum FileTransferCoordinatorEventKind
     TunaLost,
     FallbackCheckpointRequested,
     FallbackCheckpointAccepted,
+    FallbackCheckpointRetired,
+    FallbackTailQuiescent,
+    FallbackTailFailed,
     BridgeRecoveryStarted,
     BridgeRecoveryCompleted,
     BridgeRecoveryExhausted,
@@ -82,7 +85,8 @@ internal readonly record struct FileTransferCoordinatorEvent(
     string? CheckpointRequestId = null,
     string? CheckpointPriority = null,
     int CheckpointGeneration = 0,
-    RuntimeUnlockRouteCommitProof? RuntimeUnlockCommitProof = null);
+    RuntimeUnlockRouteCommitProof? RuntimeUnlockCommitProof = null,
+    bool FreezeCurrentLeg = true);
 
 internal readonly record struct FileTransferCoordinatorActionRequest(
     FileTransferCoordinatorActionKind Kind,
@@ -122,7 +126,8 @@ internal sealed record FileTransferCoordinatorDecision(
     string Reason,
     bool RuntimeUnlockCommitAccepted = false,
     string? RuntimeUnlockCommitRejectedReason = null,
-    string? MutationRejectedReason = null);
+    string? MutationRejectedReason = null,
+    FileTransferLeg? MutatedLeg = null);
 
 internal readonly record struct RuntimeOwnerToken(
     string SessionId,
@@ -227,7 +232,7 @@ internal static class FileTransferCoordinator
         var reason = NormalizeReason(coordinatorEvent.Reason);
         if (state.IsTerminal)
         {
-            return MutationRejected(state, reason, "terminal_state");
+            return MutationRejected(state, reason, "terminal_state", terminalMutationRejected: true);
         }
 
         return coordinatorEvent.Kind switch
@@ -237,6 +242,9 @@ internal static class FileTransferCoordinator
             FileTransferCoordinatorEventKind.TunaLost => TransitionToRoute(coordinatorEvent, state, reason, recoverEpoch: false),
             FileTransferCoordinatorEventKind.FallbackCheckpointRequested => MarkFallbackCheckpointRequested(coordinatorEvent, state, reason),
             FileTransferCoordinatorEventKind.FallbackCheckpointAccepted => MarkFallbackCheckpointAccepted(coordinatorEvent, state, reason),
+            FileTransferCoordinatorEventKind.FallbackCheckpointRetired => RetireFallbackCheckpointRequest(coordinatorEvent, state, reason),
+            FileTransferCoordinatorEventKind.FallbackTailQuiescent => MarkFallbackTailQuiescent(coordinatorEvent, state, reason),
+            FileTransferCoordinatorEventKind.FallbackTailFailed => MarkFallbackTailFailed(coordinatorEvent, state, reason),
             FileTransferCoordinatorEventKind.BridgeRecoveryStarted => MarkCurrentFallbackLegState(state, FileTransferLegState.RecoveryActive, reason),
             FileTransferCoordinatorEventKind.BridgeRecoveryCompleted => PassThrough(state, reason),
             FileTransferCoordinatorEventKind.BridgeRecoveryExhausted => MarkCurrentFallbackLegState(state, FileTransferLegState.BridgeRestartPending, reason),
@@ -375,7 +383,7 @@ internal static class FileTransferCoordinator
             State = "started",
         };
 
-    public static FileTransferLeg StartLeg(FileTransferLegStartRequest request)
+    private static FileTransferLeg StartLeg(FileTransferLegStartRequest request)
     {
         var generation = Math.Max(
             request.LastTransferLegGeneration + 1,
@@ -399,7 +407,7 @@ internal static class FileTransferCoordinator
         };
     }
 
-    public static FileTransferLeg? FreezeLeg(FileTransferLeg? leg, DateTimeOffset frozenUtc)
+    private static FileTransferLeg? FreezeLeg(FileTransferLeg? leg, DateTimeOffset frozenUtc)
     {
         if (leg is null || leg.State is FileTransferLegState.Frozen or FileTransferLegState.Terminal)
         {
@@ -412,7 +420,7 @@ internal static class FileTransferCoordinator
         return leg;
     }
 
-    public static void TerminalizeLeg(FileTransferLeg? leg)
+    private static void TerminalizeLeg(FileTransferLeg? leg)
     {
         if (leg is null)
         {
@@ -800,7 +808,7 @@ internal static class FileTransferCoordinator
             _ => false,
         };
 
-    public static void MarkFallbackCheckpointAccepted(
+    private static void MarkFallbackCheckpointAccepted(
         FileTransferLeg leg,
         long transportEpochId,
         int provenCommittedChunkIndex,
@@ -817,7 +825,7 @@ internal static class FileTransferCoordinator
         leg.RuntimeUnlockProbeAllowedAfterTransportEpochAdoption = false;
     }
 
-    public static void MarkFallbackTailQuiescent(
+    private static void MarkFallbackTailQuiescent(
         FileTransferLeg leg,
         long transportEpochId,
         int provenCommittedChunkIndex,
@@ -834,7 +842,7 @@ internal static class FileTransferCoordinator
         leg.RuntimeUnlockProbeAllowedAfterTransportEpochAdoption = false;
     }
 
-    public static void MarkFallbackTailFailed(FileTransferLeg leg)
+    private static void MarkFallbackTailFailed(FileTransferLeg leg)
     {
         if (leg.State is not FileTransferLegState.Terminal and not FileTransferLegState.Frozen)
         {
@@ -844,7 +852,7 @@ internal static class FileTransferCoordinator
         leg.RuntimeUnlockProbeAllowedAfterTransportEpochAdoption = false;
     }
 
-    public static void MarkFallbackCheckpointRequested(
+    private static void MarkFallbackCheckpointRequested(
         FileTransferLeg leg,
         string? checkpointRequestId,
         string? checkpointPriority,
@@ -861,7 +869,7 @@ internal static class FileTransferCoordinator
         leg.RuntimeUnlockProbeAllowedAfterTransportEpochAdoption = false;
     }
 
-    public static void RetireFallbackCheckpointRequest(FileTransferLeg leg)
+    private static void RetireFallbackCheckpointRequest(FileTransferLeg leg)
     {
         leg.CheckpointRequestId = null;
         leg.CheckpointPriority = null;
@@ -888,6 +896,9 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorState state,
         string reason)
     {
+        var frozenLeg = coordinatorEvent.FreezeCurrentLeg
+            ? FreezeLeg(state.CurrentLeg, DateTimeOffset.UtcNow)
+            : null;
         var legHistory = state.LegHistory.ToList();
         var leg = StartLeg(new FileTransferLegStartRequest(
             coordinatorEvent.RouteSelection,
@@ -920,7 +931,7 @@ internal static class FileTransferCoordinator
                 nextState.TerminalGeneration,
                 reason),
         };
-        return Decision(nextState, reason, startedLeg: leg);
+        return Decision(nextState, reason, startedLeg: leg, frozenLeg: frozenLeg);
     }
 
     private static FileTransferCoordinatorDecision TransitionToRoute(
@@ -1000,21 +1011,32 @@ internal static class FileTransferCoordinator
         var leg = state.CurrentLeg;
         if (!IsCurrentPostTunaFallbackLeg(leg))
         {
-            return PassThrough(state, reason);
+            return MutationRejected(state, reason, leg is null ? "leg_missing" : "fallback_leg_not_current");
         }
 
-        var currentLeg = leg!;
+        if (string.IsNullOrWhiteSpace(coordinatorEvent.CheckpointRequestId))
+        {
+            return MutationRejected(state, reason, "checkpoint_request_missing");
+        }
+
+        if (leg!.TransportEpochId > 0 &&
+            coordinatorEvent.TransportEpochId > 0 &&
+            leg.TransportEpochId != coordinatorEvent.TransportEpochId)
+        {
+            return MutationRejected(state, reason, "transport_epoch_mismatch");
+        }
+
         MarkFallbackCheckpointRequested(
-            currentLeg,
+            leg,
             coordinatorEvent.CheckpointRequestId,
             coordinatorEvent.CheckpointPriority,
             coordinatorEvent.TransportEpochId);
         if (coordinatorEvent.CheckpointGeneration > 0)
         {
-            currentLeg.CheckpointGeneration = coordinatorEvent.CheckpointGeneration;
+            leg.CheckpointGeneration = coordinatorEvent.CheckpointGeneration;
         }
 
-        return Decision(state, reason, startedLeg: null, fallbackCheckpointRequired: true);
+        return Decision(state, reason, mutatedLeg: leg, fallbackCheckpointRequired: true);
     }
 
     private static FileTransferCoordinatorDecision MarkFallbackCheckpointAccepted(
@@ -1025,15 +1047,91 @@ internal static class FileTransferCoordinator
         var leg = state.CurrentLeg;
         if (!IsCurrentPostTunaFallbackLeg(leg))
         {
-            return PassThrough(state, reason);
+            return MutationRejected(state, reason, leg is null ? "leg_missing" : "fallback_leg_not_current");
+        }
+
+        if (leg!.TransportEpochId > 0 &&
+            coordinatorEvent.TransportEpochId > 0 &&
+            coordinatorEvent.TransportEpochId < leg.TransportEpochId)
+        {
+            return MutationRejected(state, reason, "transport_epoch_mismatch");
+        }
+
+        if (!string.IsNullOrWhiteSpace(coordinatorEvent.CheckpointRequestId) &&
+            !string.IsNullOrWhiteSpace(leg.CheckpointRequestId) &&
+            !string.Equals(leg.CheckpointRequestId, coordinatorEvent.CheckpointRequestId, StringComparison.Ordinal))
+        {
+            return MutationRejected(state, reason, "checkpoint_request_mismatch");
         }
 
         MarkFallbackCheckpointAccepted(
-            leg!,
+            leg,
             coordinatorEvent.TransportEpochId,
             coordinatorEvent.CommittedChunkIndex,
             coordinatorEvent.HighestObservedChunkIndex);
-        return Decision(state, reason, acceptedCheckpointLeg: leg);
+        return Decision(state, reason, acceptedCheckpointLeg: leg, mutatedLeg: leg);
+    }
+
+    private static FileTransferCoordinatorDecision RetireFallbackCheckpointRequest(
+        FileTransferCoordinatorEvent coordinatorEvent,
+        FileTransferCoordinatorState state,
+        string reason)
+    {
+        var leg = state.CurrentLeg;
+        if (!IsCurrentPostTunaFallbackLeg(leg))
+        {
+            return MutationRejected(state, reason, leg is null ? "leg_missing" : "fallback_leg_not_current");
+        }
+
+        if (!string.IsNullOrWhiteSpace(coordinatorEvent.CheckpointRequestId) &&
+            !string.Equals(leg!.CheckpointRequestId, coordinatorEvent.CheckpointRequestId, StringComparison.Ordinal))
+        {
+            return MutationRejected(state, reason, "checkpoint_request_mismatch");
+        }
+
+        RetireFallbackCheckpointRequest(leg!);
+        return Decision(state, reason, mutatedLeg: leg);
+    }
+
+    private static FileTransferCoordinatorDecision MarkFallbackTailQuiescent(
+        FileTransferCoordinatorEvent coordinatorEvent,
+        FileTransferCoordinatorState state,
+        string reason)
+    {
+        var leg = state.CurrentLeg;
+        if (!IsCurrentPostTunaFallbackLeg(leg))
+        {
+            return MutationRejected(state, reason, leg is null ? "leg_missing" : "fallback_leg_not_current");
+        }
+
+        if (leg!.TransportEpochId > 0 &&
+            coordinatorEvent.TransportEpochId > 0 &&
+            coordinatorEvent.TransportEpochId < leg.TransportEpochId)
+        {
+            return MutationRejected(state, reason, "transport_epoch_mismatch");
+        }
+
+        MarkFallbackTailQuiescent(
+            leg,
+            coordinatorEvent.TransportEpochId,
+            coordinatorEvent.CommittedChunkIndex,
+            coordinatorEvent.HighestObservedChunkIndex);
+        return Decision(state, reason, mutatedLeg: leg);
+    }
+
+    private static FileTransferCoordinatorDecision MarkFallbackTailFailed(
+        FileTransferCoordinatorEvent coordinatorEvent,
+        FileTransferCoordinatorState state,
+        string reason)
+    {
+        var leg = state.CurrentLeg;
+        if (!IsCurrentPostTunaFallbackLeg(leg))
+        {
+            return MutationRejected(state, reason, leg is null ? "leg_missing" : "fallback_leg_not_current");
+        }
+
+        MarkFallbackTailFailed(leg!);
+        return Decision(state, reason, mutatedLeg: leg);
     }
 
     private static FileTransferCoordinatorDecision MarkCurrentFallbackLegState(
@@ -1044,6 +1142,7 @@ internal static class FileTransferCoordinator
         if (IsCurrentPostTunaFallbackLeg(state.CurrentLeg))
         {
             state.CurrentLeg!.State = legState;
+            return Decision(state, reason, mutatedLeg: state.CurrentLeg);
         }
 
         return PassThrough(state, reason);
@@ -1080,9 +1179,10 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorState state,
         string reason)
     {
-        TerminalizeLeg(state.CurrentLeg);
+        var leg = state.CurrentLeg;
+        TerminalizeLeg(leg);
         var nextTerminalGeneration = Math.Max(1, state.TerminalGeneration + 1);
-        return PassThrough(
+        return Decision(
             state with
             {
                 IsTerminal = true,
@@ -1091,7 +1191,8 @@ internal static class FileTransferCoordinator
                     ? owner with { TerminalGeneration = nextTerminalGeneration }
                     : null,
             },
-            reason);
+            reason,
+            mutatedLeg: leg);
     }
 
     private static FileTransferCoordinatorDecision PassThrough(FileTransferCoordinatorState state, string reason)
@@ -1100,10 +1201,11 @@ internal static class FileTransferCoordinator
     private static FileTransferCoordinatorDecision MutationRejected(
         FileTransferCoordinatorState state,
         string reason,
-        string rejectionReason)
+        string rejectionReason,
+        bool terminalMutationRejected = false)
         => Decision(state, reason) with
         {
-            TerminalMutationRejected = true,
+            TerminalMutationRejected = terminalMutationRejected,
             MutationRejectedReason = rejectionReason,
         };
 
@@ -1111,7 +1213,9 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorState state,
         string reason,
         FileTransferLeg? startedLeg = null,
+        FileTransferLeg? frozenLeg = null,
         FileTransferLeg? acceptedCheckpointLeg = null,
+        FileTransferLeg? mutatedLeg = null,
         bool fallbackCheckpointRequired = false)
         => new(
             state,
@@ -1120,10 +1224,11 @@ internal static class FileTransferCoordinator
             StartedLiveRouteEpoch: null,
             RecoveredLiveRouteEpoch: null,
             StartedLeg: startedLeg,
-            FrozenLeg: null,
+            FrozenLeg: frozenLeg,
             AcceptedCheckpointLeg: acceptedCheckpointLeg,
             FallbackCheckpointRequired: fallbackCheckpointRequired,
-            reason);
+            reason,
+            MutatedLeg: mutatedLeg);
 
     private static FileTransferCoordinatorActionDecision ActionDecision(
         FileTransferCoordinatorState state,

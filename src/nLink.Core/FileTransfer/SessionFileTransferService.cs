@@ -4688,7 +4688,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     private static string FormatFileTransferLegState(FileTransferLegState state)
         => FileTransferCoordinator.FormatLegState(state);
 
-    private static FileTransferLeg EnsureOutboundTransferLegLocked(OutboundTransferContext context, string reason)
+    private static FileTransferLeg? EnsureOutboundTransferLegLocked(OutboundTransferContext context, string reason)
         => context.CurrentTransferLeg ?? StartOutboundTransferLegLocked(
             context,
             context.RouteSelection,
@@ -4697,7 +4697,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             canSendData: true,
             freezeCurrent: false);
 
-    private static FileTransferLeg EnsureInboundTransferLegLocked(InboundTransferContext context, string reason)
+    private static FileTransferLeg? EnsureInboundTransferLegLocked(InboundTransferContext context, string reason)
         => context.CurrentTransferLeg ?? StartInboundTransferLegLocked(
             context,
             context.RouteSelection,
@@ -4721,6 +4721,34 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.TerminalGeneration,
             context.CurrentRuntimeOwner,
             context.TransferLegHistory);
+
+    private static void ApplyCoordinatorDecisionToContextLocked(
+        OutboundTransferContext context,
+        FileTransferCoordinatorDecision decision)
+    {
+        context.CurrentTransferLeg = decision.State.CurrentLeg;
+        context.LastTransferLegGeneration = decision.State.LastTransferLegGeneration;
+        context.LastRuntimeOwnerGeneration = decision.State.LastRuntimeOwnerGeneration;
+        context.TerminalGeneration = decision.State.TerminalGeneration;
+        context.CurrentRuntimeOwner = decision.State.CurrentRuntimeOwner;
+        var legHistory = decision.State.LegHistory.ToList();
+        context.TransferLegHistory.Clear();
+        context.TransferLegHistory.AddRange(legHistory);
+    }
+
+    private static void ApplyCoordinatorDecisionToContextLocked(
+        InboundTransferContext context,
+        FileTransferCoordinatorDecision decision)
+    {
+        context.CurrentTransferLeg = decision.State.CurrentLeg;
+        context.LastTransferLegGeneration = decision.State.LastTransferLegGeneration;
+        context.LastRuntimeOwnerGeneration = decision.State.LastRuntimeOwnerGeneration;
+        context.TerminalGeneration = decision.State.TerminalGeneration;
+        context.CurrentRuntimeOwner = decision.State.CurrentRuntimeOwner;
+        var legHistory = decision.State.LegHistory.ToList();
+        context.TransferLegHistory.Clear();
+        context.TransferLegHistory.AddRange(legHistory);
+    }
 
     private static FileTransferCoordinatorState CreateCoordinatorStateLocked(InboundTransferContext context)
         => new(
@@ -4888,6 +4916,170 @@ public sealed partial class SessionFileTransferService : IDisposable
         return decision.Accepted;
     }
 
+    private static bool TryAuthorizeRuntimeOwnerLegActionLocked(
+        OutboundTransferContext context,
+        FileTransferCoordinatorActionKind actionKind,
+        string source,
+        string attemptedAction,
+        FileTransferLeg? leg,
+        string? checkpointRequestId,
+        out string rejectionReason)
+    {
+        if (context.CurrentRuntimeOwner is not { } owner)
+        {
+            rejectionReason = "runtime_owner_missing";
+            RejectMissingRuntimeOwnerActionLocked(
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentRuntimeOwner,
+                source,
+                attemptedAction);
+            return false;
+        }
+
+        var decision = FileTransferCoordinator.AuthorizeAction(
+            CreateCoordinatorStateLocked(context),
+            new FileTransferCoordinatorActionRequest(
+                actionKind,
+                source,
+                attemptedAction,
+                RuntimeOwner: owner,
+                Route: leg?.RouteSelection.Route,
+                ProtocolVersion: leg?.ProtocolVersion,
+                LiveRouteEpoch: leg?.LiveRouteEpochId,
+                LegGeneration: leg?.Generation,
+                CheckpointRequestId: checkpointRequestId));
+        rejectionReason = decision.Accepted ? "current" : decision.RejectionReason;
+        if (!decision.Accepted)
+        {
+            RejectStaleRuntimeOwnerUpdateLocked(
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentRuntimeOwner,
+                owner,
+                source,
+                attemptedAction,
+                decision.RejectionReason);
+        }
+
+        return decision.Accepted;
+    }
+
+    private static bool TryAuthorizeRuntimeOwnerLegActionLocked(
+        InboundTransferContext context,
+        FileTransferCoordinatorActionKind actionKind,
+        string source,
+        string attemptedAction,
+        FileTransferLeg? leg,
+        string? checkpointRequestId,
+        out string rejectionReason)
+    {
+        if (context.CurrentRuntimeOwner is not { } owner)
+        {
+            rejectionReason = "runtime_owner_missing";
+            RejectMissingRuntimeOwnerActionLocked(
+                FileTransferDirection.Inbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentRuntimeOwner,
+                source,
+                attemptedAction);
+            return false;
+        }
+
+        var decision = FileTransferCoordinator.AuthorizeAction(
+            CreateCoordinatorStateLocked(context),
+            new FileTransferCoordinatorActionRequest(
+                actionKind,
+                source,
+                attemptedAction,
+                RuntimeOwner: owner,
+                Route: leg?.RouteSelection.Route,
+                ProtocolVersion: leg?.ProtocolVersion,
+                LiveRouteEpoch: leg?.LiveRouteEpochId,
+                LegGeneration: leg?.Generation,
+                CheckpointRequestId: checkpointRequestId));
+        rejectionReason = decision.Accepted ? "current" : decision.RejectionReason;
+        if (!decision.Accepted)
+        {
+            RejectStaleRuntimeOwnerUpdateLocked(
+                FileTransferDirection.Inbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentRuntimeOwner,
+                owner,
+                source,
+                attemptedAction,
+                decision.RejectionReason);
+        }
+
+        return decision.Accepted;
+    }
+
+    private static bool TryApplyOutboundCoordinatorLegMutationLocked(
+        OutboundTransferContext context,
+        FileTransferCoordinatorEvent coordinatorEvent,
+        FileTransferCoordinatorActionKind actionKind,
+        string attemptedAction,
+        FileTransferLeg? attemptedLeg,
+        string? checkpointRequestId,
+        long transportEpoch,
+        out FileTransferCoordinatorDecision decision)
+    {
+        decision = FileTransferCoordinator.Apply(coordinatorEvent, CreateCoordinatorStateLocked(context));
+        if (!string.IsNullOrWhiteSpace(decision.MutationRejectedReason))
+        {
+            LogFileTransferCoordinatorLegMutationRejected(
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                actionKind,
+                attemptedAction,
+                decision,
+                attemptedLeg,
+                checkpointRequestId,
+                transportEpoch,
+                coordinatorEvent.Reason);
+            return false;
+        }
+
+        ApplyCoordinatorDecisionToContextLocked(context, decision);
+        return true;
+    }
+
+    private static bool TryApplyInboundCoordinatorLegMutationLocked(
+        InboundTransferContext context,
+        FileTransferCoordinatorEvent coordinatorEvent,
+        FileTransferCoordinatorActionKind actionKind,
+        string attemptedAction,
+        FileTransferLeg? attemptedLeg,
+        string? checkpointRequestId,
+        long transportEpoch,
+        out FileTransferCoordinatorDecision decision)
+    {
+        decision = FileTransferCoordinator.Apply(coordinatorEvent, CreateCoordinatorStateLocked(context));
+        if (!string.IsNullOrWhiteSpace(decision.MutationRejectedReason))
+        {
+            LogFileTransferCoordinatorLegMutationRejected(
+                FileTransferDirection.Inbound,
+                context.TransferId,
+                context.SessionId,
+                actionKind,
+                attemptedAction,
+                decision,
+                attemptedLeg,
+                checkpointRequestId,
+                transportEpoch,
+                coordinatorEvent.Reason);
+            return false;
+        }
+
+        ApplyCoordinatorDecisionToContextLocked(context, decision);
+        return true;
+    }
+
     private bool TryAuthorizeRuntimeOwnerActionForDirectionLocked(
         FileTransferDirection direction,
         string sessionId,
@@ -4966,6 +5158,21 @@ public sealed partial class SessionFileTransferService : IDisposable
         => LocalOperationalLog.Warn(
             "FileTransferService",
             $"event=filetransfer_runtime_owner_stale_update_rejected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; source={FormatProtocolLogValue(source)}; attempted_action={FormatProtocolLogValue(attemptedAction)}; reason={FormatProtocolLogValue(reason)}; runtime_generation={attemptedOwner?.RuntimeGeneration ?? 0}; current_runtime_generation={currentOwner?.RuntimeGeneration ?? 0}; terminal_generation={attemptedOwner?.TerminalGeneration ?? 0}; current_terminal_generation={currentOwner?.TerminalGeneration ?? 0}; route={FormatProtocolLogValue(attemptedOwner?.RouteToken ?? "(none)")}; current_route={FormatProtocolLogValue(currentOwner?.RouteToken ?? "(none)")}; protocol_version={attemptedOwner?.ProtocolVersion ?? 0}; current_protocol_version={currentOwner?.ProtocolVersion ?? 0}; live_route_epoch={attemptedOwner?.LiveRouteEpoch ?? 0}; current_live_route_epoch={currentOwner?.LiveRouteEpoch ?? 0}; runtime_family={FormatProtocolLogValue(attemptedOwner?.RuntimeFamily ?? "(none)")}; current_runtime_family={FormatProtocolLogValue(currentOwner?.RuntimeFamily ?? "(none)")}");
+
+    private static void LogFileTransferCoordinatorLegMutationRejected(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        FileTransferCoordinatorActionKind actionKind,
+        string attemptedAction,
+        FileTransferCoordinatorDecision decision,
+        FileTransferLeg? attemptedLeg,
+        string? checkpointRequestId,
+        long transportEpoch,
+        string reason)
+        => LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_coordinator_leg_mutation_rejected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; action_kind={FormatProtocolLogValue(actionKind.ToString())}; attempted_action={FormatProtocolLogValue(attemptedAction)}; rejection_reason={FormatProtocolLogValue(decision.MutationRejectedReason ?? "mutation_rejected")}; current_route={FormatProtocolLogValue(decision.State.RouteSelection.TelemetryToken)}; current_protocol_version={decision.State.RouteSelection.ProtocolVersion}; current_live_route_epoch={decision.State.CurrentLiveRouteEpoch?.EpochId ?? 0}; current_runtime_generation={decision.State.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; current_terminal_generation={decision.State.TerminalGeneration}; current_leg_generation={decision.State.CurrentLeg?.Generation ?? 0}; attempted_route={FormatProtocolLogValue(attemptedLeg?.RouteSelection.TelemetryToken ?? "(none)")}; attempted_protocol_version={attemptedLeg?.ProtocolVersion ?? 0}; attempted_live_route_epoch={attemptedLeg?.LiveRouteEpochId ?? 0}; attempted_leg_generation={attemptedLeg?.Generation ?? 0}; attempted_transport_epoch={transportEpoch}; attempted_checkpoint_request_id={FormatProtocolLogValue(checkpointRequestId ?? "(none)")}; reason={FormatProtocolLogValue(reason)}");
 
     private static void RetireRuntimeOwnedWorkersLocked(
         OutboundTransferContext context,
@@ -5051,52 +5258,22 @@ public sealed partial class SessionFileTransferService : IDisposable
             $"event=filetransfer_runtime_owner_workers_retired; direction=inbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; retired_runtime_generation={retiredOwner.Value.RuntimeGeneration}; current_runtime_generation={context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; retired_route={FormatProtocolLogValue(retiredOwner.Value.RouteToken)}; current_route={FormatProtocolLogValue(context.CurrentRuntimeOwner?.RouteToken ?? "(none)")}; reason={FormatProtocolLogValue(reason)}");
     }
 
-    private static void MarkRuntimeOwnerTerminalLocked(OutboundTransferContext context, string reason)
-    {
-        context.TerminalGeneration = Math.Max(1, context.TerminalGeneration + 1);
-        if (context.CurrentRuntimeOwner is { } owner)
-        {
-            context.CurrentRuntimeOwner = owner with { TerminalGeneration = context.TerminalGeneration };
-        }
-
-        RetireRuntimeOwnedWorkersLocked(context, context.CurrentRuntimeOwner, reason);
-    }
-
-    private static void MarkRuntimeOwnerTerminalLocked(InboundTransferContext context, string reason)
-    {
-        context.TerminalGeneration = Math.Max(1, context.TerminalGeneration + 1);
-        if (context.CurrentRuntimeOwner is { } owner)
-        {
-            context.CurrentRuntimeOwner = owner with { TerminalGeneration = context.TerminalGeneration };
-        }
-
-        RetireRuntimeOwnedWorkersLocked(context, context.CurrentRuntimeOwner, reason);
-    }
-
-    private static FileTransferLeg StartOutboundTransferLegLocked(
+    private static FileTransferLeg? StartOutboundTransferLegLocked(
         OutboundTransferContext context,
         FileTransferRouteSelection routeSelection,
         string reason,
         FileTransferLegState state,
         bool canSendData,
-        bool freezeCurrent = true)
+        bool freezeCurrent = true,
+        long? transportEpochOverride = null,
+        int? bridgeRecoveryGenerationOverride = null)
     {
         var retiredLeg = context.CurrentTransferLeg;
-        if (freezeCurrent)
-        {
-            FreezeTransferLegLocked(
-                FileTransferDirection.Outbound,
-                context.TransferId,
-                context.SessionId,
-                retiredLeg,
-                reason);
-        }
-
         var committedChunk = Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, Math.Max(0, context.ChunkCount));
-        var transportEpoch = routeSelection.Route == FileTransferRoute.PostTunaFallbackV6
+        var transportEpoch = transportEpochOverride ?? (routeSelection.Route == FileTransferRoute.PostTunaFallbackV6
             ? ResolveOutboundFallbackCurrentTransportEpochLocked(context)
-            : context.V6TransportEpoch?.EpochId ?? Math.Max(0, context.PullTransportRebindGeneration);
-        var bridgeRecoveryGeneration = Math.Max(0, context.PullTransportRebindGeneration);
+            : context.V6TransportEpoch?.EpochId ?? Math.Max(0, context.PullTransportRebindGeneration));
+        var bridgeRecoveryGeneration = bridgeRecoveryGenerationOverride ?? Math.Max(0, context.PullTransportRebindGeneration);
         var retiredOwner = context.CurrentRuntimeOwner;
         var decision = FileTransferCoordinator.Apply(
             new FileTransferCoordinatorEvent(
@@ -5110,27 +5287,32 @@ public sealed partial class SessionFileTransferService : IDisposable
                 committedChunk,
                 Math.Max(-1, context.ChunksAcceptedForTransport - 1),
                 transportEpoch,
-                bridgeRecoveryGeneration),
+                bridgeRecoveryGeneration,
+                FreezeCurrentLeg: freezeCurrent),
             CreateCoordinatorStateLocked(context));
-        var leg = decision.StartedLeg ?? FileTransferCoordinator.StartLeg(new FileTransferLegStartRequest(
-            routeSelection,
-            context.LastTransferLegGeneration,
-            context.CurrentLiveRouteEpoch?.EpochId ?? 0,
-            transportEpoch,
-            bridgeRecoveryGeneration,
-            committedChunk,
-            Math.Max(-1, context.ChunksAcceptedForTransport - 1),
-            state,
-            canSendData,
-            DateTimeOffset.UtcNow));
-        context.LastTransferLegGeneration = decision.StartedLeg is null
-            ? leg.Generation
-            : decision.State.LastTransferLegGeneration;
-        context.LastRuntimeOwnerGeneration = decision.State.LastRuntimeOwnerGeneration;
-        context.TerminalGeneration = decision.State.TerminalGeneration;
-        context.CurrentRuntimeOwner = decision.State.CurrentRuntimeOwner;
-        context.CurrentTransferLeg = leg;
-        context.TransferLegHistory.Add(leg);
+        if (decision.StartedLeg is not { } leg)
+        {
+            LogFileTransferCoordinatorLegMutationRejected(
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                FileTransferCoordinatorActionKind.StartTransferLeg,
+                "start_transfer_leg",
+                decision,
+                retiredLeg,
+                null,
+                transportEpoch,
+                reason);
+            return null;
+        }
+
+        ApplyCoordinatorDecisionToContextLocked(context, decision);
+        LogTransferLegFrozenLocked(
+            FileTransferDirection.Outbound,
+            context.TransferId,
+            context.SessionId,
+            decision.FrozenLeg,
+            reason);
         if (retiredOwner is { } owner &&
             context.CurrentRuntimeOwner is { } currentOwner &&
             owner.RuntimeGeneration != currentOwner.RuntimeGeneration)
@@ -5148,28 +5330,20 @@ public sealed partial class SessionFileTransferService : IDisposable
         return leg;
     }
 
-    private static FileTransferLeg StartInboundTransferLegLocked(
+    private static FileTransferLeg? StartInboundTransferLegLocked(
         InboundTransferContext context,
         FileTransferRouteSelection routeSelection,
         string reason,
         FileTransferLegState state,
         bool canSendData,
-        bool freezeCurrent = true)
+        bool freezeCurrent = true,
+        long? transportEpochOverride = null,
+        int? bridgeRecoveryGenerationOverride = null)
     {
         var retiredLeg = context.CurrentTransferLeg;
-        if (freezeCurrent)
-        {
-            FreezeTransferLegLocked(
-                FileTransferDirection.Inbound,
-                context.TransferId,
-                context.SessionId,
-                retiredLeg,
-                reason);
-        }
-
         var committedChunk = Math.Clamp(context.NextChunkIndex, 0, Math.Max(0, context.ChunkCount));
-        var transportEpoch = context.V6TransportEpoch?.EpochId ?? Math.Max(0, context.PullTransportRebindGeneration);
-        var bridgeRecoveryGeneration = Math.Max(0, context.PullTransportRebindGeneration);
+        var transportEpoch = transportEpochOverride ?? context.V6TransportEpoch?.EpochId ?? Math.Max(0, context.PullTransportRebindGeneration);
+        var bridgeRecoveryGeneration = bridgeRecoveryGenerationOverride ?? Math.Max(0, context.PullTransportRebindGeneration);
         var retiredOwner = context.CurrentRuntimeOwner;
         var decision = FileTransferCoordinator.Apply(
             new FileTransferCoordinatorEvent(
@@ -5183,27 +5357,32 @@ public sealed partial class SessionFileTransferService : IDisposable
                 committedChunk,
                 context.PullHighestReceivedChunkIndex,
                 transportEpoch,
-                bridgeRecoveryGeneration),
+                bridgeRecoveryGeneration,
+                FreezeCurrentLeg: freezeCurrent),
             CreateCoordinatorStateLocked(context));
-        var leg = decision.StartedLeg ?? FileTransferCoordinator.StartLeg(new FileTransferLegStartRequest(
-            routeSelection,
-            context.LastTransferLegGeneration,
-            context.CurrentLiveRouteEpoch?.EpochId ?? 0,
-            transportEpoch,
-            bridgeRecoveryGeneration,
-            committedChunk,
-            context.PullHighestReceivedChunkIndex,
-            state,
-            canSendData,
-            DateTimeOffset.UtcNow));
-        context.LastTransferLegGeneration = decision.StartedLeg is null
-            ? leg.Generation
-            : decision.State.LastTransferLegGeneration;
-        context.LastRuntimeOwnerGeneration = decision.State.LastRuntimeOwnerGeneration;
-        context.TerminalGeneration = decision.State.TerminalGeneration;
-        context.CurrentRuntimeOwner = decision.State.CurrentRuntimeOwner;
-        context.CurrentTransferLeg = leg;
-        context.TransferLegHistory.Add(leg);
+        if (decision.StartedLeg is not { } leg)
+        {
+            LogFileTransferCoordinatorLegMutationRejected(
+                FileTransferDirection.Inbound,
+                context.TransferId,
+                context.SessionId,
+                FileTransferCoordinatorActionKind.StartTransferLeg,
+                "start_transfer_leg",
+                decision,
+                retiredLeg,
+                null,
+                transportEpoch,
+                reason);
+            return null;
+        }
+
+        ApplyCoordinatorDecisionToContextLocked(context, decision);
+        LogTransferLegFrozenLocked(
+            FileTransferDirection.Inbound,
+            context.TransferId,
+            context.SessionId,
+            decision.FrozenLeg,
+            reason);
         if (retiredOwner is { } owner &&
             context.CurrentRuntimeOwner is { } currentOwner &&
             owner.RuntimeGeneration != currentOwner.RuntimeGeneration)
@@ -5221,14 +5400,13 @@ public sealed partial class SessionFileTransferService : IDisposable
         return leg;
     }
 
-    private static void FreezeTransferLegLocked(
+    private static void LogTransferLegFrozenLocked(
         FileTransferDirection direction,
         string transferId,
         string sessionId,
-        FileTransferLeg? leg,
+        FileTransferLeg? frozenLeg,
         string reason)
     {
-        var frozenLeg = FileTransferCoordinator.FreezeLeg(leg, DateTimeOffset.UtcNow);
         if (frozenLeg is null)
         {
             return;
@@ -6981,6 +7159,217 @@ public sealed partial class SessionFileTransferService : IDisposable
     private static bool IsCurrentPostTunaFallbackLeg(FileTransferLeg? leg)
         => FileTransferCoordinator.IsCurrentPostTunaFallbackLeg(leg);
 
+    private static bool TryAcceptOutboundFallbackCheckpointWithCoordinatorLocked(
+        OutboundTransferContext context,
+        FileTransferLeg leg,
+        long transportEpoch,
+        int committed,
+        int highestObserved,
+        string? checkpointRequestId,
+        string reason)
+    {
+        if (!TryAuthorizeRuntimeOwnerLegActionLocked(
+                context,
+                FileTransferCoordinatorActionKind.FallbackCheckpointAccept,
+                reason,
+                "fallback_checkpoint_accept",
+                leg,
+                checkpointRequestId,
+                out _))
+        {
+            return false;
+        }
+
+        return TryApplyOutboundCoordinatorLegMutationLocked(
+            context,
+            new FileTransferCoordinatorEvent(
+                FileTransferCoordinatorEventKind.FallbackCheckpointAccepted,
+                context.RouteSelection,
+                FileTransferTransportHandoffKind.None,
+                FileTransferTransportKind.Unknown,
+                reason,
+                FileTransferLegState.RecoveryActive,
+                CanSendData: true,
+                committed,
+                highestObserved,
+                transportEpoch,
+                leg.BridgeRecoveryGeneration,
+                CheckpointRequestId: checkpointRequestId),
+            FileTransferCoordinatorActionKind.FallbackCheckpointAccept,
+            "fallback_checkpoint_accept",
+            leg,
+            checkpointRequestId,
+            transportEpoch,
+            out _);
+    }
+
+    private static bool TryAcceptInboundFallbackCheckpointWithCoordinatorLocked(
+        InboundTransferContext context,
+        FileTransferLeg leg,
+        long transportEpoch,
+        int committed,
+        int highestObserved,
+        string? checkpointRequestId,
+        string reason)
+    {
+        if (!TryAuthorizeRuntimeOwnerLegActionLocked(
+                context,
+                FileTransferCoordinatorActionKind.FallbackCheckpointAccept,
+                reason,
+                "fallback_checkpoint_accept",
+                leg,
+                checkpointRequestId,
+                out _))
+        {
+            return false;
+        }
+
+        return TryApplyInboundCoordinatorLegMutationLocked(
+            context,
+            new FileTransferCoordinatorEvent(
+                FileTransferCoordinatorEventKind.FallbackCheckpointAccepted,
+                context.RouteSelection,
+                FileTransferTransportHandoffKind.None,
+                FileTransferTransportKind.Unknown,
+                reason,
+                FileTransferLegState.RecoveryActive,
+                CanSendData: true,
+                committed,
+                highestObserved,
+                transportEpoch,
+                leg.BridgeRecoveryGeneration,
+                CheckpointRequestId: checkpointRequestId),
+            FileTransferCoordinatorActionKind.FallbackCheckpointAccept,
+            "fallback_checkpoint_accept",
+            leg,
+            checkpointRequestId,
+            transportEpoch,
+            out _);
+    }
+
+    private static bool TryMarkOutboundFallbackTailQuiescentWithCoordinatorLocked(
+        OutboundTransferContext context,
+        FileTransferLeg leg,
+        long transportEpoch,
+        int committed,
+        int highestObserved,
+        string reason)
+    {
+        if (!TryAuthorizeRuntimeOwnerLegActionLocked(
+                context,
+                FileTransferCoordinatorActionKind.FallbackTailQuiescent,
+                reason,
+                "fallback_tail_quiescent",
+                leg,
+                null,
+                out _))
+        {
+            return false;
+        }
+
+        return TryApplyOutboundCoordinatorLegMutationLocked(
+            context,
+            new FileTransferCoordinatorEvent(
+                FileTransferCoordinatorEventKind.FallbackTailQuiescent,
+                context.RouteSelection,
+                FileTransferTransportHandoffKind.None,
+                FileTransferTransportKind.Unknown,
+                reason,
+                FileTransferLegState.Active,
+                CanSendData: true,
+                committed,
+                highestObserved,
+                transportEpoch,
+                leg.BridgeRecoveryGeneration),
+            FileTransferCoordinatorActionKind.FallbackTailQuiescent,
+            "fallback_tail_quiescent",
+            leg,
+            null,
+            transportEpoch,
+            out _);
+    }
+
+    private static bool TryMarkInboundFallbackTailQuiescentWithCoordinatorLocked(
+        InboundTransferContext context,
+        FileTransferLeg leg,
+        long transportEpoch,
+        int committed,
+        int highestObserved,
+        string reason)
+    {
+        if (!TryAuthorizeRuntimeOwnerLegActionLocked(
+                context,
+                FileTransferCoordinatorActionKind.FallbackTailQuiescent,
+                reason,
+                "fallback_tail_quiescent",
+                leg,
+                null,
+                out _))
+        {
+            return false;
+        }
+
+        return TryApplyInboundCoordinatorLegMutationLocked(
+            context,
+            new FileTransferCoordinatorEvent(
+                FileTransferCoordinatorEventKind.FallbackTailQuiescent,
+                context.RouteSelection,
+                FileTransferTransportHandoffKind.None,
+                FileTransferTransportKind.Unknown,
+                reason,
+                FileTransferLegState.Active,
+                CanSendData: true,
+                committed,
+                highestObserved,
+                transportEpoch,
+                leg.BridgeRecoveryGeneration),
+            FileTransferCoordinatorActionKind.FallbackTailQuiescent,
+            "fallback_tail_quiescent",
+            leg,
+            null,
+            transportEpoch,
+            out _);
+    }
+
+    private static bool TryMarkOutboundFallbackTailFailedWithCoordinatorLocked(
+        OutboundTransferContext context,
+        FileTransferLeg leg,
+        string reason)
+    {
+        if (!TryAuthorizeRuntimeOwnerLegActionLocked(
+                context,
+                FileTransferCoordinatorActionKind.FallbackTailFailed,
+                reason,
+                "fallback_tail_failed",
+                leg,
+                null,
+                out _))
+        {
+            return false;
+        }
+
+        return TryApplyOutboundCoordinatorLegMutationLocked(
+            context,
+            new FileTransferCoordinatorEvent(
+                FileTransferCoordinatorEventKind.FallbackTailFailed,
+                context.RouteSelection,
+                FileTransferTransportHandoffKind.None,
+                FileTransferTransportKind.Unknown,
+                reason,
+                FileTransferLegState.RecoveryActive,
+                CanSendData: false,
+                Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, Math.Max(0, context.ChunkCount)),
+                Math.Max(-1, context.ChunksAcceptedForTransport - 1),
+                leg.TransportEpochId,
+                leg.BridgeRecoveryGeneration),
+            FileTransferCoordinatorActionKind.FallbackTailFailed,
+            "fallback_tail_failed",
+            leg,
+            null,
+            leg.TransportEpochId,
+            out _);
+    }
+
     private static bool TryAcceptInboundOwnerlessFallbackCheckpointFromCurrentProgressLocked(
         InboundTransferContext context,
         FileTransferLeg leg,
@@ -7010,11 +7399,18 @@ public sealed partial class SessionFileTransferService : IDisposable
         }
 
         const string acceptedReason = "ownerless_current_fallback_progress";
-        FileTransferCoordinator.MarkFallbackCheckpointAccepted(
-            leg,
-            effectiveTransportEpoch,
-            committed,
-            highestObserved);
+        if (!TryAcceptInboundFallbackCheckpointWithCoordinatorLocked(
+                context,
+                leg,
+                effectiveTransportEpoch,
+                committed,
+                highestObserved,
+                null,
+                acceptedReason))
+        {
+            return false;
+        }
+
         ClearStaleInboundFallbackTransportEpochAfterCheckpointLocked(context, leg, effectiveTransportEpoch, reason);
         LogFileTransferFallbackCheckpointAccepted(
             FileTransferDirection.Inbound,
@@ -7163,8 +7559,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         {
             if (context.FallbackTailQuiescenceTupleRepeatCount >= V6PostTunaFallbackTailQuiescenceRepeatLimit)
             {
-                FileTransferCoordinator.MarkFallbackTailFailed(leg);
-                if (!context.FallbackTailQuiescenceTimedOut)
+                if (TryMarkOutboundFallbackTailFailedWithCoordinatorLocked(context, leg, reason) &&
+                    !context.FallbackTailQuiescenceTimedOut)
                 {
                     context.FallbackTailQuiescenceTimedOut = true;
                     LogFileTransferFallbackTailQuiescenceTimeout(
@@ -7180,7 +7576,17 @@ public sealed partial class SessionFileTransferService : IDisposable
             return false;
         }
 
-        FileTransferCoordinator.MarkFallbackTailQuiescent(leg, state.TransportEpoch, committed, highestObserved);
+        if (!TryMarkOutboundFallbackTailQuiescentWithCoordinatorLocked(
+                context,
+                leg,
+                state.TransportEpoch,
+                committed,
+                highestObserved,
+                reason))
+        {
+            return false;
+        }
+
         ClearOutboundFallbackTailRecoveryOwnershipAfterYieldLocked(
             context,
             leg,
@@ -7266,7 +7672,11 @@ public sealed partial class SessionFileTransferService : IDisposable
             return context.FallbackTailQuiescenceTimedOut;
         }
 
-        FileTransferCoordinator.MarkFallbackTailFailed(leg);
+        if (!TryMarkOutboundFallbackTailFailedWithCoordinatorLocked(context, leg, reason))
+        {
+            return false;
+        }
+
         context.FallbackTailQuiescenceTimedOut = true;
         LogFileTransferFallbackTailQuiescenceTimeout(
             context.TransferId,
@@ -7368,11 +7778,17 @@ public sealed partial class SessionFileTransferService : IDisposable
             return false;
         }
 
-        FileTransferCoordinator.MarkFallbackTailQuiescent(
-            currentLeg,
-            transportEpoch,
-            committed,
-            highestObserved);
+        if (!TryMarkInboundFallbackTailQuiescentWithCoordinatorLocked(
+                context,
+                currentLeg,
+                transportEpoch,
+                committed,
+                highestObserved,
+                reason))
+        {
+            return false;
+        }
+
         ClearInboundFallbackTailRecoveryOwnershipAfterYieldLocked(
             context,
             currentLeg,
@@ -8343,15 +8759,21 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.PullPostTunaRecoveryActive)
         {
             var generation = Math.Max(1, context.PullTransportRebindGeneration);
+            var transportEpoch = ResolveOutboundFallbackCurrentTransportEpochLocked(context, generation);
             var leg = StartOutboundTransferLegLocked(
                 context,
                 context.RouteSelection,
                 reason,
                 FileTransferLegState.CheckpointPending,
                 canSendData: false,
-                freezeCurrent: false);
-            leg.BridgeRecoveryGeneration = generation;
-            leg.TransportEpochId = ResolveOutboundFallbackCurrentTransportEpochLocked(context, generation);
+                freezeCurrent: false,
+                transportEpochOverride: transportEpoch,
+                bridgeRecoveryGenerationOverride: generation);
+            if (leg is null)
+            {
+                return false;
+            }
+
             context.PullPostTunaRecoveryGeneration = Math.Max(context.PullPostTunaRecoveryGeneration, generation);
             context.PullPostTunaRecoveryFrontierChunkIndex = Math.Clamp(
                 context.RemoteNextExpectedChunkIndex,
@@ -8482,9 +8904,14 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.RouteSelection,
             reason,
             FileTransferLegState.CheckpointPending,
-            canSendData: false);
-        leg.TransportEpochId = request.TransportEpoch;
-        leg.BridgeRecoveryGeneration = recoveryGeneration;
+            canSendData: false,
+            transportEpochOverride: request.TransportEpoch,
+            bridgeRecoveryGenerationOverride: recoveryGeneration);
+        if (leg is null)
+        {
+            return;
+        }
+
         context.V6ReceiverTransportEpoch = request.TransportEpoch;
         ResetInboundPostTunaFallbackLegOwnedStateLocked(context, reason, recoveryGeneration, frontier);
         context.PullPostTunaRecoveryActive = true;
@@ -8522,12 +8949,45 @@ public sealed partial class SessionFileTransferService : IDisposable
             return true;
         }
 
+        if (!TryAuthorizeRuntimeOwnerLegActionLocked(
+                context,
+                FileTransferCoordinatorActionKind.FallbackCheckpointBegin,
+                source,
+                "fallback_checkpoint_begin",
+                leg,
+                null,
+                out _))
+        {
+            return false;
+        }
+
+        if (!TryApplyOutboundCoordinatorLegMutationLocked(
+                context,
+                new FileTransferCoordinatorEvent(
+                    FileTransferCoordinatorEventKind.FallbackCheckpointRequested,
+                    context.RouteSelection,
+                    FileTransferTransportHandoffKind.None,
+                    FileTransferTransportKind.Unknown,
+                    source,
+                    FileTransferLegState.CheckpointPending,
+                    CanSendData: false,
+                    Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, Math.Max(0, context.ChunkCount)),
+                    Math.Max(-1, context.ChunksAcceptedForTransport - 1),
+                    request.TransportEpoch,
+                    leg!.BridgeRecoveryGeneration,
+                    CheckpointRequestId: request.RepairRequestId,
+                    CheckpointPriority: request.Priority),
+                FileTransferCoordinatorActionKind.FallbackCheckpointBegin,
+                "fallback_checkpoint_begin",
+                leg,
+                request.RepairRequestId,
+                request.TransportEpoch,
+                out _))
+        {
+            return false;
+        }
+
         ClearOutboundFallbackCheckpointRepairAuthorityLocked(context);
-        FileTransferCoordinator.MarkFallbackCheckpointRequested(
-            leg!,
-            request.RepairRequestId,
-            request.Priority,
-            request.TransportEpoch);
         return true;
     }
 
@@ -8562,11 +9022,44 @@ public sealed partial class SessionFileTransferService : IDisposable
             return true;
         }
 
-        FileTransferCoordinator.MarkFallbackCheckpointRequested(
-            leg!,
-            request.RepairRequestId,
-            request.Priority,
-            request.TransportEpoch);
+        if (!TryAuthorizeRuntimeOwnerLegActionLocked(
+                context,
+                FileTransferCoordinatorActionKind.FallbackCheckpointBegin,
+                source,
+                "fallback_checkpoint_begin",
+                leg,
+                null,
+                out _))
+        {
+            return false;
+        }
+
+        if (!TryApplyInboundCoordinatorLegMutationLocked(
+                context,
+                new FileTransferCoordinatorEvent(
+                    FileTransferCoordinatorEventKind.FallbackCheckpointRequested,
+                    context.RouteSelection,
+                    FileTransferTransportHandoffKind.None,
+                    FileTransferTransportKind.Unknown,
+                    source,
+                    FileTransferLegState.CheckpointPending,
+                    CanSendData: false,
+                    Math.Clamp(context.NextChunkIndex, 0, Math.Max(0, context.ChunkCount)),
+                    Math.Max(-1, context.PullHighestReceivedChunkIndex),
+                    request.TransportEpoch,
+                    leg!.BridgeRecoveryGeneration,
+                    CheckpointRequestId: request.RepairRequestId,
+                    CheckpointPriority: request.Priority),
+                FileTransferCoordinatorActionKind.FallbackCheckpointBegin,
+                "fallback_checkpoint_begin",
+                leg,
+                request.RepairRequestId,
+                request.TransportEpoch,
+                out _))
+        {
+            return false;
+        }
+
         return true;
     }
 
@@ -8737,9 +9230,46 @@ public sealed partial class SessionFileTransferService : IDisposable
         }
 
         var retiredRequestId = leg.CheckpointRequestId;
+        var retiredTransportEpoch = leg.TransportEpochId;
+        if (!TryAuthorizeRuntimeOwnerLegActionLocked(
+                context,
+                FileTransferCoordinatorActionKind.FallbackCheckpointRetire,
+                reason,
+                "fallback_checkpoint_retire",
+                leg,
+                retiredRequestId,
+                out _))
+        {
+            return false;
+        }
+
+        if (!TryApplyOutboundCoordinatorLegMutationLocked(
+                context,
+                new FileTransferCoordinatorEvent(
+                    FileTransferCoordinatorEventKind.FallbackCheckpointRetired,
+                    context.RouteSelection,
+                    FileTransferTransportHandoffKind.None,
+                    FileTransferTransportKind.Unknown,
+                    reason,
+                    FileTransferLegState.RecoveryActive,
+                    CanSendData: true,
+                    Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, Math.Max(0, context.ChunkCount)),
+                    Math.Max(-1, context.ChunksAcceptedForTransport - 1),
+                    retiredTransportEpoch,
+                    leg.BridgeRecoveryGeneration,
+                    CheckpointRequestId: retiredRequestId),
+                FileTransferCoordinatorActionKind.FallbackCheckpointRetire,
+                "fallback_checkpoint_retire",
+                leg,
+                retiredRequestId,
+                retiredTransportEpoch,
+                out _))
+        {
+            return false;
+        }
+
         ClearOutboundFallbackCheckpointRetryStateLocked(context, retiredRequestId, reason);
-        RememberRetiredFallbackCheckpointRequest(context.RetiredFallbackCheckpointRequestKeys, leg, leg.TransportEpochId, retiredRequestId);
-        FileTransferCoordinator.RetireFallbackCheckpointRequest(leg);
+        RememberRetiredFallbackCheckpointRequest(context.RetiredFallbackCheckpointRequestKeys, leg, retiredTransportEpoch, retiredRequestId);
         LogFileTransferFallbackCheckpointRetired(
             FileTransferDirection.Outbound,
             context.TransferId,
@@ -9107,11 +9637,19 @@ public sealed partial class SessionFileTransferService : IDisposable
             IsPostTunaFallbackTailReconciliationStateRefresh(state) ||
             string.Equals(currentLeg.CheckpointPriority, V6RegularNknStateRefreshTailReconciliationPriority, StringComparison.Ordinal);
 
-        FileTransferCoordinator.MarkFallbackCheckpointAccepted(
-            currentLeg,
-            state.TransportEpoch,
-            Math.Clamp(state.ContiguousCommittedChunkIndex, 0, Math.Max(0, context.ChunkCount)),
-            state.DurableReceivedHighestChunkIndex);
+        var acceptedCommitted = Math.Clamp(state.ContiguousCommittedChunkIndex, 0, Math.Max(0, context.ChunkCount));
+        if (!TryAcceptOutboundFallbackCheckpointWithCoordinatorLocked(
+                context,
+                currentLeg,
+                state.TransportEpoch,
+                acceptedCommitted,
+                state.DurableReceivedHighestChunkIndex,
+                acceptedCheckpointRequestId,
+                acceptedReason))
+        {
+            return false;
+        }
+
         RememberRetiredFallbackCheckpointRequest(context.RetiredFallbackCheckpointRequestKeys, currentLeg, state.TransportEpoch, acceptedCheckpointRequestId);
         ClearOutboundFallbackCheckpointRetryStateLocked(context, acceptedCheckpointRequestId, "checkpoint_accepted");
         ClearOutboundFallbackCheckpointDeliveryRecoveryPendingLocked(context, "checkpoint_accepted");
@@ -9201,7 +9739,17 @@ public sealed partial class SessionFileTransferService : IDisposable
             return false;
         }
 
-        FileTransferCoordinator.MarkFallbackTailQuiescent(leg, state.TransportEpoch, committed, highestObserved);
+        if (!TryMarkOutboundFallbackTailQuiescentWithCoordinatorLocked(
+                context,
+                leg,
+                state.TransportEpoch,
+                committed,
+                highestObserved,
+                reason))
+        {
+            return false;
+        }
+
         ClearOutboundFallbackTailRecoveryOwnershipAfterYieldLocked(
             context,
             leg,
@@ -9303,11 +9851,18 @@ public sealed partial class SessionFileTransferService : IDisposable
         var retiredCheckpointRequestId = leg.CheckpointRequestId;
         var retiredTransportEpoch = leg.TransportEpochId;
         const string acceptedReason = "peer_current_state_superseded_checkpoint";
-        FileTransferCoordinator.MarkFallbackCheckpointAccepted(
-            leg,
-            state.TransportEpoch,
-            committed,
-            state.DurableReceivedHighestChunkIndex);
+        if (!TryAcceptOutboundFallbackCheckpointWithCoordinatorLocked(
+                context,
+                leg,
+                state.TransportEpoch,
+                committed,
+                state.DurableReceivedHighestChunkIndex,
+                retiredCheckpointRequestId,
+                acceptedReason))
+        {
+            return false;
+        }
+
         RememberRetiredFallbackCheckpointRequest(
             context.RetiredFallbackCheckpointRequestKeys,
             leg,
@@ -9630,11 +10185,18 @@ public sealed partial class SessionFileTransferService : IDisposable
         }
 
         var currentLeg = leg!;
-        FileTransferCoordinator.MarkFallbackCheckpointAccepted(
-            currentLeg,
-            transportEpoch,
-            Math.Clamp(context.NextChunkIndex, 0, Math.Max(0, context.ChunkCount)),
-            context.PullHighestReceivedChunkIndex);
+        if (!TryAcceptInboundFallbackCheckpointWithCoordinatorLocked(
+                context,
+                currentLeg,
+                transportEpoch,
+                Math.Clamp(context.NextChunkIndex, 0, Math.Max(0, context.ChunkCount)),
+                context.PullHighestReceivedChunkIndex,
+                requestId,
+                reason))
+        {
+            return;
+        }
+
         RememberRetiredFallbackCheckpointRequest(context.RetiredFallbackCheckpointRequestKeys, currentLeg, transportEpoch, requestId);
         ClearStaleInboundFallbackTransportEpochAfterCheckpointLocked(context, currentLeg, transportEpoch, reason);
         LogFileTransferFallbackCheckpointAccepted(
