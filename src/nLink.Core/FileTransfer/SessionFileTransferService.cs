@@ -4723,12 +4723,19 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.TransferLegHistory,
             context.RuntimeUnlockFallbackSurvivalState,
             context.RuntimeUnlockAdmissionToken,
-            context.LastRuntimeUnlockAdmissionGeneration);
+            context.LastRuntimeUnlockAdmissionGeneration,
+            context.RuntimeUnlockRouteCommitToken,
+            context.LastRuntimeUnlockRouteCommitGeneration);
 
     private static void ApplyCoordinatorDecisionToContextLocked(
         OutboundTransferContext context,
         FileTransferCoordinatorDecision decision)
     {
+        context.RouteSelection = decision.State.RouteSelection;
+        context.RouteRuntime = decision.State.RouteRuntime;
+        context.NegotiatedDataProtocolVersion = decision.State.RouteSelection.ProtocolVersion;
+        context.CurrentLiveRouteEpoch = decision.State.CurrentLiveRouteEpoch;
+        context.LastLiveRouteEpochId = decision.State.LastLiveRouteEpochId;
         context.CurrentTransferLeg = decision.State.CurrentLeg;
         context.LastTransferLegGeneration = decision.State.LastTransferLegGeneration;
         context.LastRuntimeOwnerGeneration = decision.State.LastRuntimeOwnerGeneration;
@@ -4737,6 +4744,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.RuntimeUnlockFallbackSurvivalState = decision.State.RuntimeUnlockFallbackSurvivalState;
         context.RuntimeUnlockAdmissionToken = decision.State.CurrentRuntimeUnlockAdmission;
         context.LastRuntimeUnlockAdmissionGeneration = decision.State.LastRuntimeUnlockAdmissionGeneration;
+        context.RuntimeUnlockRouteCommitToken = decision.State.CurrentRouteCommit;
+        context.LastRuntimeUnlockRouteCommitGeneration = decision.State.LastRouteCommitGeneration;
         var legHistory = decision.State.LegHistory.ToList();
         context.TransferLegHistory.Clear();
         context.TransferLegHistory.AddRange(legHistory);
@@ -4746,6 +4755,11 @@ public sealed partial class SessionFileTransferService : IDisposable
         InboundTransferContext context,
         FileTransferCoordinatorDecision decision)
     {
+        context.RouteSelection = decision.State.RouteSelection;
+        context.RouteRuntime = decision.State.RouteRuntime;
+        context.NegotiatedDataProtocolVersion = decision.State.RouteSelection.ProtocolVersion;
+        context.CurrentLiveRouteEpoch = decision.State.CurrentLiveRouteEpoch;
+        context.LastLiveRouteEpochId = decision.State.LastLiveRouteEpochId;
         context.CurrentTransferLeg = decision.State.CurrentLeg;
         context.LastTransferLegGeneration = decision.State.LastTransferLegGeneration;
         context.LastRuntimeOwnerGeneration = decision.State.LastRuntimeOwnerGeneration;
@@ -4754,6 +4768,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.RuntimeUnlockFallbackSurvivalState = decision.State.RuntimeUnlockFallbackSurvivalState;
         context.RuntimeUnlockAdmissionToken = decision.State.CurrentRuntimeUnlockAdmission;
         context.LastRuntimeUnlockAdmissionGeneration = decision.State.LastRuntimeUnlockAdmissionGeneration;
+        context.RuntimeUnlockRouteCommitToken = decision.State.CurrentRouteCommit;
+        context.LastRuntimeUnlockRouteCommitGeneration = decision.State.LastRouteCommitGeneration;
         var legHistory = decision.State.LegHistory.ToList();
         context.TransferLegHistory.Clear();
         context.TransferLegHistory.AddRange(legHistory);
@@ -4776,7 +4792,9 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.TransferLegHistory,
             context.RuntimeUnlockFallbackSurvivalState,
             context.RuntimeUnlockAdmissionToken,
-            context.LastRuntimeUnlockAdmissionGeneration);
+            context.LastRuntimeUnlockAdmissionGeneration,
+            context.RuntimeUnlockRouteCommitToken,
+            context.LastRuntimeUnlockRouteCommitGeneration);
 
     private static bool TryCaptureRuntimeOwnerLocked(
         OutboundTransferContext context,
@@ -11171,6 +11189,10 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public int LastRuntimeUnlockAdmissionGeneration { get; set; }
 
+        public RouteCommitToken? RuntimeUnlockRouteCommitToken { get; set; }
+
+        public int LastRuntimeUnlockRouteCommitGeneration { get; set; }
+
         public bool RuntimeUnlockWaitingForFallbackSurvival { get; set; }
 
         public string? RuntimeUnlockWaitingForFallbackSurvivalReason { get; set; }
@@ -11997,6 +12019,10 @@ public sealed partial class SessionFileTransferService : IDisposable
         public RuntimeUnlockAdmissionToken? RuntimeUnlockAdmissionToken { get; set; }
 
         public int LastRuntimeUnlockAdmissionGeneration { get; set; }
+
+        public RouteCommitToken? RuntimeUnlockRouteCommitToken { get; set; }
+
+        public int LastRuntimeUnlockRouteCommitGeneration { get; set; }
 
         public bool RuntimeUnlockWaitingForFallbackSurvival { get; set; }
 

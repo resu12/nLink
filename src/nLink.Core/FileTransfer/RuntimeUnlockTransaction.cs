@@ -332,7 +332,9 @@ internal readonly record struct RuntimeUnlockRouteCommitProof(
     RuntimeUnlockTunaPathLeaseState TunaPathLeaseState = RuntimeUnlockTunaPathLeaseState.None,
     string? TunaPathLeaseListenerRunId = null,
     bool TunaPathLeaseCurrent = false,
-    string? TunaPathLeaseFailureReason = null);
+    string? TunaPathLeaseFailureReason = null,
+    RuntimeUnlockAdmissionToken? AdmissionToken = null,
+    string? SamePathTunaProbeAckId = null);
 
 internal static class RuntimeUnlockTransaction
 {
@@ -516,7 +518,8 @@ internal static class RuntimeUnlockTransaction
 
     public static RuntimeUnlockRouteCommitProof CreateRouteCommitProof(
         RuntimeUnlockTransactionSnapshot state,
-        string reason)
+        string reason,
+        RuntimeUnlockAdmissionToken? admissionToken = null)
         => new(
             state.SessionId,
             state.TransferId,
@@ -541,10 +544,15 @@ internal static class RuntimeUnlockTransaction
             state.TunaPathLeaseState,
             state.TunaPathLeaseListenerRunId,
             state.TunaPathLeaseCurrent,
-            state.TunaPathLeaseFailureReason);
+            state.TunaPathLeaseFailureReason,
+            admissionToken,
+            state.PathProbeState == RuntimeUnlockPathProbeState.Acked
+                ? state.PathProbeId
+                : null);
 
     public static RuntimeUnlockRouteCommitProof CreateRouteCommitProof(
-        RuntimeUnlockRouteCommitSnapshot snapshot)
+        RuntimeUnlockRouteCommitSnapshot snapshot,
+        RuntimeUnlockAdmissionToken? admissionToken = null)
         => new(
             snapshot.SessionId,
             snapshot.TransferId,
@@ -584,7 +592,11 @@ internal static class RuntimeUnlockTransaction
                 : RuntimeUnlockTunaPathLeaseState.None,
             snapshot.TunaPathLeaseListenerRunId,
             snapshot.TunaPathLeaseCurrent,
-            snapshot.TunaPathLeaseFailureReason);
+            snapshot.TunaPathLeaseFailureReason,
+            admissionToken,
+            string.Equals(snapshot.PathProbeState, RuntimeUnlockPathProbeState.Acked.ToString(), StringComparison.OrdinalIgnoreCase)
+                ? snapshot.PathProbeId
+                : null);
 
     public static bool CanCommitRoute(
         RuntimeUnlockRouteCommitProof proof,
@@ -617,38 +629,49 @@ internal static class RuntimeUnlockTransaction
             return false;
         }
 
+        if (proof.AdmissionToken is not { } admissionToken)
+        {
+            rejectionReason = "runtime_unlock_admission_missing";
+            return false;
+        }
+
+        if (!FileTransferCoordinator.IsRuntimeUnlockAdmissionTokenCurrent(
+                coordinatorState,
+                admissionToken,
+                out rejectionReason))
+        {
+            return false;
+        }
+
         if (!proof.PeerVisibleProof || (!proof.PeerReceived && !proof.AnswerReceived))
         {
             rejectionReason = "peer_visible_proof_missing";
             return false;
         }
 
-        if (proof.TunaPathLeaseRequired)
+        if (proof.TunaPathLeaseGeneration <= 0)
         {
-            if (proof.TunaPathLeaseGeneration <= 0)
-            {
-                rejectionReason = "tuna_path_lease_generation_missing";
-                return false;
-            }
+            rejectionReason = "tuna_path_lease_generation_missing";
+            return false;
+        }
 
-            if (proof.TunaPathLeaseState == RuntimeUnlockTunaPathLeaseState.Failed)
-            {
-                rejectionReason = "tuna_path_lease_failed";
-                return false;
-            }
+        if (proof.TunaPathLeaseState == RuntimeUnlockTunaPathLeaseState.Failed)
+        {
+            rejectionReason = "tuna_path_lease_failed";
+            return false;
+        }
 
-            if (proof.TunaPathLeaseState == RuntimeUnlockTunaPathLeaseState.Retired)
-            {
-                rejectionReason = "tuna_path_lease_retired";
-                return false;
-            }
+        if (proof.TunaPathLeaseState == RuntimeUnlockTunaPathLeaseState.Retired)
+        {
+            rejectionReason = "tuna_path_lease_retired";
+            return false;
+        }
 
-            if (proof.TunaPathLeaseState != RuntimeUnlockTunaPathLeaseState.ListenerReady ||
-                !proof.TunaPathLeaseCurrent)
-            {
-                rejectionReason = "tuna_path_lease_unavailable";
-                return false;
-            }
+        if (proof.TunaPathLeaseState != RuntimeUnlockTunaPathLeaseState.ListenerReady ||
+            !proof.TunaPathLeaseCurrent)
+        {
+            rejectionReason = "tuna_path_lease_unavailable";
+            return false;
         }
 
         if (proof.PathProbeState == RuntimeUnlockPathProbeState.Failed)
@@ -670,6 +693,18 @@ internal static class RuntimeUnlockTransaction
             return false;
         }
 
+        if (string.IsNullOrWhiteSpace(proof.SamePathTunaProbeAckId))
+        {
+            rejectionReason = "same_path_tuna_probe_ack_missing";
+            return false;
+        }
+
+        if (!string.Equals(proof.SamePathTunaProbeAckId, proof.PathProbeId, StringComparison.Ordinal))
+        {
+            rejectionReason = "same_path_tuna_probe_ack_mismatch";
+            return false;
+        }
+
         if (proof.TransactionState != RuntimeUnlockTransactionState.RouteCommitPending)
         {
             rejectionReason = "transaction_not_commit_ready";
@@ -682,6 +717,15 @@ internal static class RuntimeUnlockTransaction
             proof.TargetTransport != FileTransferTransportKind.Tuna)
         {
             rejectionReason = "route_commit_metadata_invalid";
+            return false;
+        }
+
+        var survivalState = coordinatorState.RuntimeUnlockFallbackSurvivalState;
+        if (coordinatorState.RouteRuntime.UsesPostTunaFallbackV6Runtime &&
+            !survivalState.FallbackTerminalized &&
+            !survivalState.PairedFallbackYieldGranted)
+        {
+            rejectionReason = "paired_fallback_tail_yield_missing";
             return false;
         }
 

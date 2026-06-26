@@ -38,6 +38,7 @@ internal enum FileTransferCoordinatorActionKind
     RouteMismatchMark,
     RoutePublication,
     RuntimeUnlockAdmission,
+    RuntimeUnlockRouteCommit,
 }
 
 internal enum RuntimeUnlockAdmissionStatus
@@ -105,6 +106,35 @@ internal readonly record struct RuntimeUnlockAdmissionRequest(
     RuntimeOwnerToken? RuntimeOwner,
     bool TransactionFailed = false);
 
+internal readonly record struct RouteCommitToken(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    RuntimeOwnerToken RuntimeOwner,
+    RuntimeUnlockAdmissionToken RuntimeUnlockAdmission,
+    FileTransferRoute Route,
+    string RouteToken,
+    int ProtocolVersion,
+    int LiveRouteEpoch,
+    int RuntimeGeneration,
+    int TerminalGeneration,
+    int LegGeneration,
+    long TransactionGeneration,
+    long OfferGeneration,
+    long TunaPathLeaseGeneration,
+    string? TunaPathLeaseListenerRunId,
+    string SamePathTunaProbeAckId,
+    FileTransferRoute TargetRoute,
+    int TargetProtocolVersion,
+    FileTransferTransportKind TargetTransport,
+    int CommitGeneration,
+    string Reason)
+{
+    public bool IsDefault => CommitGeneration <= 0 ||
+                             RuntimeOwner.IsDefault ||
+                             RuntimeUnlockAdmission.IsDefault;
+}
+
 internal sealed record FileTransferCoordinatorState(
     string SessionId,
     string TransferId,
@@ -121,7 +151,9 @@ internal sealed record FileTransferCoordinatorState(
     IReadOnlyList<FileTransferLeg> LegHistory,
     RuntimeUnlockFallbackSurvivalState RuntimeUnlockFallbackSurvivalState = default,
     RuntimeUnlockAdmissionToken? CurrentRuntimeUnlockAdmission = null,
-    int LastRuntimeUnlockAdmissionGeneration = 0)
+    int LastRuntimeUnlockAdmissionGeneration = 0,
+    RouteCommitToken? CurrentRouteCommit = null,
+    int LastRouteCommitGeneration = 0)
 {
     public FileTransferRouteRuntimeDescriptor RouteRuntime => RouteSelection.RuntimeDescriptor;
 }
@@ -157,7 +189,8 @@ internal readonly record struct FileTransferCoordinatorActionRequest(
     int? LegGeneration = null,
     long? TransportEpochId = null,
     int? BridgeRecoveryGeneration = null,
-    string? CheckpointRequestId = null);
+    string? CheckpointRequestId = null,
+    RouteCommitToken? RouteCommitToken = null);
 
 internal readonly record struct FileTransferCoordinatorActionDecision(
     FileTransferCoordinatorActionKind Kind,
@@ -186,7 +219,8 @@ internal sealed record FileTransferCoordinatorDecision(
     string? RuntimeUnlockCommitRejectedReason = null,
     string? MutationRejectedReason = null,
     FileTransferLeg? MutatedLeg = null,
-    RuntimeUnlockAdmissionDecision? RuntimeUnlockAdmissionDecision = null);
+    RuntimeUnlockAdmissionDecision? RuntimeUnlockAdmissionDecision = null,
+    RouteCommitToken? RouteCommitToken = null);
 
 internal readonly record struct RuntimeOwnerToken(
     string SessionId,
@@ -299,6 +333,14 @@ internal static class FileTransferCoordinator
                     "transfer_terminal",
                     NormalizeRuntimeUnlockFallbackSurvivalState(state));
                 return Decision(state, reason, runtimeUnlockAdmissionDecision: admission);
+            }
+
+            if (coordinatorEvent.Kind == FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested)
+            {
+                return Decision(state, reason) with
+                {
+                    RuntimeUnlockCommitRejectedReason = "transfer_terminal",
+                };
             }
 
             return MutationRejected(state, reason, "terminal_state", terminalMutationRejected: true);
@@ -430,6 +472,27 @@ internal static class FileTransferCoordinator
                 request.Kind,
                 accepted: false,
                 rejectionReason: state.CurrentLeg is null ? "leg_missing" : "checkpoint_request_mismatch");
+        }
+
+        if (request.Kind == FileTransferCoordinatorActionKind.RoutePublication)
+        {
+            if (request.RouteCommitToken is not { } routeCommitToken)
+            {
+                return ActionDecision(
+                    state,
+                    request.Kind,
+                    accepted: false,
+                    rejectionReason: "route_commit_token_missing");
+            }
+
+            if (!IsRouteCommitTokenCurrent(state, routeCommitToken, out var routeCommitRejectionReason))
+            {
+                return ActionDecision(
+                    state,
+                    request.Kind,
+                    accepted: false,
+                    routeCommitRejectionReason);
+            }
         }
 
         return ActionDecision(
@@ -646,6 +709,82 @@ internal static class FileTransferCoordinator
         if (token.LegGeneration != (state.CurrentLeg?.Generation ?? 0))
         {
             rejectionReason = "leg_generation_mismatch";
+            return false;
+        }
+
+        return true;
+    }
+
+    public static bool IsRouteCommitTokenCurrent(
+        FileTransferCoordinatorState state,
+        RouteCommitToken token,
+        out string rejectionReason)
+    {
+        rejectionReason = "current";
+        if (token.IsDefault)
+        {
+            rejectionReason = "route_commit_token_missing";
+            return false;
+        }
+
+        if (!string.Equals(token.SessionId, state.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(token.TransferId, state.TransferId, StringComparison.Ordinal) ||
+            token.Direction != state.Direction)
+        {
+            rejectionReason = "session_transfer_or_direction_mismatch";
+            return false;
+        }
+
+        if (state.CurrentRouteCommit is not { } current ||
+            current.CommitGeneration != token.CommitGeneration)
+        {
+            rejectionReason = "route_commit_generation_mismatch";
+            return false;
+        }
+
+        if (!IsRuntimeOwnerCurrent(state, token.RuntimeOwner, out rejectionReason))
+        {
+            return false;
+        }
+
+        if (token.Route != state.RouteSelection.Route ||
+            token.ProtocolVersion != state.RouteSelection.ProtocolVersion ||
+            !string.Equals(token.RouteToken, state.RouteSelection.TelemetryToken, StringComparison.Ordinal))
+        {
+            rejectionReason = "route_or_protocol_mismatch";
+            return false;
+        }
+
+        var expectedLiveRouteEpoch = state.CurrentLiveRouteEpoch?.EpochId ?? 0;
+        if (token.LiveRouteEpoch != expectedLiveRouteEpoch)
+        {
+            rejectionReason = "live_route_epoch_mismatch";
+            return false;
+        }
+
+        if (token.TerminalGeneration != state.TerminalGeneration)
+        {
+            rejectionReason = "terminal_generation_mismatch";
+            return false;
+        }
+
+        if (token.LegGeneration != (state.CurrentLeg?.Generation ?? 0))
+        {
+            rejectionReason = "leg_generation_mismatch";
+            return false;
+        }
+
+        if (token.TargetRoute != FileTransferRoute.FileTunaV4 ||
+            token.TargetProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+            token.TargetTransport != FileTransferTransportKind.Tuna)
+        {
+            rejectionReason = "route_commit_metadata_invalid";
+            return false;
+        }
+
+        if (state.IsTerminal)
+        {
+            rejectionReason = "transfer_terminal";
             return false;
         }
 
@@ -1199,6 +1338,7 @@ internal static class FileTransferCoordinator
             LastRuntimeOwnerGeneration = runtimeGeneration,
             LegHistory = legHistory,
             CurrentRuntimeUnlockAdmission = null,
+            CurrentRouteCommit = null,
         };
         nextState = nextState with
         {
@@ -1256,6 +1396,7 @@ internal static class FileTransferCoordinator
             LastRuntimeOwnerGeneration = runtimeGeneration,
             LegHistory = legHistory,
             CurrentRuntimeUnlockAdmission = null,
+            CurrentRouteCommit = null,
         };
         nextState = nextState with
         {
@@ -1469,6 +1610,7 @@ internal static class FileTransferCoordinator
             state with
             {
                 CurrentRuntimeUnlockAdmission = null,
+                CurrentRouteCommit = null,
             },
             reason);
 
@@ -1492,10 +1634,51 @@ internal static class FileTransferCoordinator
             state,
             reason,
             recoverEpoch: true);
+        if (transition.State.CurrentRuntimeOwner is not { } runtimeOwner ||
+            proof.AdmissionToken is not { } admissionToken)
+        {
+            return Decision(state, reason) with
+            {
+                RuntimeUnlockCommitRejectedReason = "runtime_owner_missing",
+            };
+        }
+
+        var commitGeneration = Math.Max(1, state.LastRouteCommitGeneration + 1);
+        var routeCommitToken = new RouteCommitToken(
+            transition.State.SessionId,
+            transition.State.TransferId,
+            transition.State.Direction,
+            runtimeOwner,
+            admissionToken,
+            transition.State.RouteSelection.Route,
+            transition.State.RouteSelection.TelemetryToken,
+            transition.State.RouteSelection.ProtocolVersion,
+            transition.State.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            transition.State.LastRuntimeOwnerGeneration,
+            transition.State.TerminalGeneration,
+            transition.State.CurrentLeg?.Generation ?? 0,
+            proof.TransactionGeneration,
+            proof.OfferGeneration,
+            proof.TunaPathLeaseGeneration,
+            proof.TunaPathLeaseListenerRunId,
+            proof.SamePathTunaProbeAckId ?? proof.PathProbeId ?? string.Empty,
+            proof.TargetRoute,
+            proof.ProtocolVersion,
+            proof.TargetTransport,
+            commitGeneration,
+            reason);
+        var committedState = transition.State with
+        {
+            CurrentRouteCommit = routeCommitToken,
+            LastRouteCommitGeneration = commitGeneration,
+            CurrentRuntimeUnlockAdmission = null,
+        };
         return transition with
         {
+            State = committedState,
             RuntimeUnlockCommitAccepted = true,
             RuntimeUnlockCommitRejectedReason = null,
+            RouteCommitToken = routeCommitToken,
         };
     }
 
@@ -1515,6 +1698,7 @@ internal static class FileTransferCoordinator
                     ? owner with { TerminalGeneration = nextTerminalGeneration }
                     : null,
                 CurrentRuntimeUnlockAdmission = null,
+                CurrentRouteCommit = null,
             },
             reason,
             mutatedLeg: leg);
@@ -1576,7 +1760,8 @@ internal static class FileTransferCoordinator
             state.CurrentLeg?.Generation ?? 0);
 
     private static bool RequiresRuntimeOwner(FileTransferCoordinatorActionKind kind)
-        => kind != FileTransferCoordinatorActionKind.StartTransferLeg;
+        => kind is not FileTransferCoordinatorActionKind.StartTransferLeg and
+                   not FileTransferCoordinatorActionKind.RoutePublication;
 
     private static string NormalizeReason(string? reason)
         => string.IsNullOrWhiteSpace(reason)

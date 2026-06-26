@@ -327,7 +327,10 @@ public sealed class FileTransferCoordinatorTests
                 ObservedLane: "control_priority"),
             transaction).State;
 
-        var proof = RuntimeUnlockTransaction.CreateRouteCommitProof(transaction, "local_only");
+        var admission = RequestRuntimeUnlockAdmission(started.State, started.State.CurrentRuntimeOwner);
+        var admissionToken = admission.RuntimeUnlockAdmissionDecision!.Value.AdmissionToken!.Value;
+        var proof = WithCurrentTunaLease(
+            RuntimeUnlockTransaction.CreateRouteCommitProof(transaction, "local_only", admissionToken));
         var decision = FileTransferCoordinator.Apply(
             CoordinatorEvent(
                 FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested,
@@ -338,7 +341,7 @@ public sealed class FileTransferCoordinatorTests
                 FileTransferLegState.Active,
                 canSendData: true,
                 runtimeUnlockCommitProof: proof),
-            started.State);
+            admission.State);
 
         Assert.False(decision.RuntimeUnlockCommitAccepted);
         Assert.Equal("peer_visible_proof_missing", decision.RuntimeUnlockCommitRejectedReason);
@@ -379,7 +382,10 @@ public sealed class FileTransferCoordinatorTests
                 Reason: "transport_acceleration_answer"),
             transaction).State;
 
-        var proof = RuntimeUnlockTransaction.CreateRouteCommitProof(transaction, "answer_received");
+        var admission = RequestRuntimeUnlockAdmission(started.State, started.State.CurrentRuntimeOwner);
+        var admissionToken = admission.RuntimeUnlockAdmissionDecision!.Value.AdmissionToken!.Value;
+        var proof = WithCurrentTunaLease(
+            RuntimeUnlockTransaction.CreateRouteCommitProof(transaction, "answer_received", admissionToken));
         var decision = FileTransferCoordinator.Apply(
             CoordinatorEvent(
                 FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested,
@@ -392,7 +398,7 @@ public sealed class FileTransferCoordinatorTests
                 committedChunk: 3,
                 highestObservedChunk: 3,
                 runtimeUnlockCommitProof: proof),
-            started.State);
+            admission.State);
 
         Assert.False(decision.RuntimeUnlockCommitAccepted);
         Assert.Equal("runtime_unlock_probe_missing", decision.RuntimeUnlockCommitRejectedReason);
@@ -455,7 +461,10 @@ public sealed class FileTransferCoordinatorTests
                 PathProbeTransport: FileTransferTransportKind.Tuna),
             transaction).State;
 
-        var proof = RuntimeUnlockTransaction.CreateRouteCommitProof(transaction, "answer_received");
+        var admission = RequestRuntimeUnlockAdmission(started.State, started.State.CurrentRuntimeOwner);
+        var admissionToken = admission.RuntimeUnlockAdmissionDecision!.Value.AdmissionToken!.Value;
+        var proof = WithCurrentTunaLease(
+            RuntimeUnlockTransaction.CreateRouteCommitProof(transaction, "answer_received", admissionToken));
         var decision = FileTransferCoordinator.Apply(
             CoordinatorEvent(
                 FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested,
@@ -468,7 +477,7 @@ public sealed class FileTransferCoordinatorTests
                 committedChunk: 3,
                 highestObservedChunk: 3,
                 runtimeUnlockCommitProof: proof),
-            started.State);
+            admission.State);
 
         Assert.True(decision.RuntimeUnlockCommitAccepted);
         Assert.True(decision.RouteChanged);
@@ -476,6 +485,12 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(FileTransferProtocol.ProtocolVersionV4, decision.State.RouteSelection.ProtocolVersion);
         Assert.NotNull(decision.RecoveredLiveRouteEpoch);
         Assert.Equal(1, decision.RecoveredLiveRouteEpoch!.EpochId);
+        Assert.NotNull(decision.RouteCommitToken);
+        Assert.True(FileTransferCoordinator.IsRouteCommitTokenCurrent(
+            decision.State,
+            decision.RouteCommitToken!.Value,
+            out var routeCommitReason));
+        Assert.Equal("current", routeCommitReason);
     }
 
     [Fact]
@@ -503,7 +518,9 @@ public sealed class FileTransferCoordinatorTests
                 Reason: "transport_acceleration_answer"),
             transaction).State;
 
-        var proof = RuntimeUnlockTransaction.CreateRouteCommitProof(transaction, "answer_received") with
+        var admission = RequestRuntimeUnlockAdmission(started.State, started.State.CurrentRuntimeOwner);
+        var admissionToken = admission.RuntimeUnlockAdmissionDecision!.Value.AdmissionToken!.Value;
+        var proof = RuntimeUnlockTransaction.CreateRouteCommitProof(transaction, "answer_received", admissionToken) with
         {
             TunaPathLeaseRequired = true,
             TunaPathLeaseGeneration = 7,
@@ -522,7 +539,7 @@ public sealed class FileTransferCoordinatorTests
                 FileTransferLegState.Active,
                 canSendData: true,
                 runtimeUnlockCommitProof: proof),
-            started.State);
+            admission.State);
 
         Assert.False(decision.RuntimeUnlockCommitAccepted);
         Assert.Equal("tuna_path_lease_failed", decision.RuntimeUnlockCommitRejectedReason);
@@ -585,7 +602,9 @@ public sealed class FileTransferCoordinatorTests
             nowUtcMs: 102,
             out lease));
 
-        var proof = RuntimeUnlockTransaction.CreateRouteCommitProof(transaction, "answer_received") with
+        var admission = RequestRuntimeUnlockAdmission(started.State, started.State.CurrentRuntimeOwner);
+        var admissionToken = admission.RuntimeUnlockAdmissionDecision!.Value.AdmissionToken!.Value;
+        var proof = RuntimeUnlockTransaction.CreateRouteCommitProof(transaction, "answer_received", admissionToken) with
         {
             TunaPathLeaseRequired = true,
             TunaPathLeaseGeneration = lease.LeaseGeneration,
@@ -604,10 +623,253 @@ public sealed class FileTransferCoordinatorTests
                 FileTransferLegState.Active,
                 canSendData: true,
                 runtimeUnlockCommitProof: proof),
-            started.State);
+            admission.State);
 
         Assert.True(decision.RuntimeUnlockCommitAccepted);
         Assert.Equal(FileTransferRoute.FileTunaV4, decision.State.RouteSelection.Route);
+        Assert.NotNull(decision.RouteCommitToken);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRouteCommit_RejectsMissingAdmissionToken()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var started = StartRegular(regular);
+        var transaction = BuildCommitReadyRuntimeUnlockTransaction(started.State);
+        var proof = WithCurrentTunaLease(RuntimeUnlockTransaction.CreateRouteCommitProof(transaction, "answer_received"));
+
+        var decision = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested,
+                tuna,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                "runtime_unlock_commit",
+                FileTransferLegState.Active,
+                canSendData: true,
+                runtimeUnlockCommitProof: proof),
+            started.State);
+
+        Assert.False(decision.RuntimeUnlockCommitAccepted);
+        Assert.Null(decision.RouteCommitToken);
+        Assert.Equal("runtime_unlock_admission_missing", decision.RuntimeUnlockCommitRejectedReason);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRouteCommit_RejectsStaleAdmissionTokenAfterRouteChange()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var started = StartRegular(regular);
+        var admission = RequestRuntimeUnlockAdmission(started.State, started.State.CurrentRuntimeOwner);
+        var admissionToken = admission.RuntimeUnlockAdmissionDecision!.Value.AdmissionToken!.Value;
+        var changed = ActivateTuna(admission.State, tuna, committedChunk: 1);
+        var transaction = BuildCommitReadyRuntimeUnlockTransaction(admission.State);
+        var proof = WithCurrentTunaLease(
+            RuntimeUnlockTransaction.CreateRouteCommitProof(transaction, "answer_received", admissionToken));
+
+        var decision = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested,
+                tuna,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                "runtime_unlock_commit",
+                FileTransferLegState.Active,
+                canSendData: true,
+                runtimeUnlockCommitProof: proof),
+            changed.State);
+
+        Assert.False(decision.RuntimeUnlockCommitAccepted);
+        Assert.Equal("runtime_unlock_admission_generation_mismatch", decision.RuntimeUnlockCommitRejectedReason);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRouteCommit_RejectsMissingTunaLease()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var started = StartRegular(regular);
+        var admission = RequestRuntimeUnlockAdmission(started.State, started.State.CurrentRuntimeOwner);
+        var admissionToken = admission.RuntimeUnlockAdmissionDecision!.Value.AdmissionToken!.Value;
+        var transaction = BuildCommitReadyRuntimeUnlockTransaction(admission.State);
+        var proof = RuntimeUnlockTransaction.CreateRouteCommitProof(transaction, "answer_received", admissionToken);
+
+        var decision = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested,
+                tuna,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                "runtime_unlock_commit",
+                FileTransferLegState.Active,
+                canSendData: true,
+                runtimeUnlockCommitProof: proof),
+            admission.State);
+
+        Assert.False(decision.RuntimeUnlockCommitAccepted);
+        Assert.Equal("tuna_path_lease_generation_missing", decision.RuntimeUnlockCommitRejectedReason);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRouteCommit_RejectsMismatchedSamePathAck()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var started = StartRegular(regular);
+        var admission = RequestRuntimeUnlockAdmission(started.State, started.State.CurrentRuntimeOwner);
+        var admissionToken = admission.RuntimeUnlockAdmissionDecision!.Value.AdmissionToken!.Value;
+        var transaction = BuildCommitReadyRuntimeUnlockTransaction(admission.State, probeId: "probe-current");
+        var proof = WithCurrentTunaLease(
+            RuntimeUnlockTransaction.CreateRouteCommitProof(transaction, "answer_received", admissionToken) with
+            {
+                SamePathTunaProbeAckId = "probe-old",
+            });
+
+        var decision = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested,
+                tuna,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                "runtime_unlock_commit",
+                FileTransferLegState.Active,
+                canSendData: true,
+                runtimeUnlockCommitProof: proof),
+            admission.State);
+
+        Assert.False(decision.RuntimeUnlockCommitAccepted);
+        Assert.Equal("same_path_tuna_probe_ack_mismatch", decision.RuntimeUnlockCommitRejectedReason);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRouteCommit_RejectsInvalidTargetRoute()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        var started = StartRegular(regular);
+        var admission = RequestRuntimeUnlockAdmission(started.State, started.State.CurrentRuntimeOwner);
+        var admissionToken = admission.RuntimeUnlockAdmissionDecision!.Value.AdmissionToken!.Value;
+        var transaction = BuildCommitReadyRuntimeUnlockTransaction(admission.State);
+        var proof = WithCurrentTunaLease(
+            RuntimeUnlockTransaction.CreateRouteCommitProof(transaction, "answer_received", admissionToken) with
+            {
+                TargetRoute = fallback.Route,
+                ProtocolVersion = fallback.ProtocolVersion,
+                TargetTransport = FileTransferTransportKind.RegularNkn,
+            });
+
+        var decision = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested,
+                fallback,
+                FileTransferTransportHandoffKind.TunaToNormalFallback,
+                FileTransferTransportKind.RegularNkn,
+                "runtime_unlock_commit",
+                FileTransferLegState.Active,
+                canSendData: true,
+                runtimeUnlockCommitProof: proof),
+            admission.State);
+
+        Assert.False(decision.RuntimeUnlockCommitAccepted);
+        Assert.Equal("route_commit_metadata_invalid", decision.RuntimeUnlockCommitRejectedReason);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRouteCommit_RejectsFallbackActiveWithoutYield()
+    {
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var fallbackState = ActiveFallbackStateWithoutCheckpoint();
+        var owner = fallbackState.CurrentRuntimeOwner!.Value;
+        var survivalState = new RuntimeUnlockFallbackSurvivalState(
+            FallbackActive: true,
+            FallbackCurrent: true,
+            FallbackTerminalized: false,
+            CheckpointDeliveryRecoveryPending: false,
+            StateRefreshSendInFlight: false,
+            DeferredStateRefreshPending: false,
+            ProofReplayPending: false,
+            ControlPlanePressurePending: false,
+            BridgeRecoveryPending: false,
+            FallbackTailRepairPending: false,
+            PairedFallbackYieldGranted: false);
+        var forcedAdmissionToken = new RuntimeUnlockAdmissionToken(
+            fallbackState.SessionId,
+            fallbackState.TransferId,
+            fallbackState.Direction,
+            owner,
+            fallbackState.RouteSelection.Route,
+            fallbackState.RouteSelection.TelemetryToken,
+            fallbackState.RouteSelection.ProtocolVersion,
+            fallbackState.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            fallbackState.LastRuntimeOwnerGeneration,
+            fallbackState.TerminalGeneration,
+            fallbackState.CurrentLeg?.Generation ?? 0,
+            AdmissionGeneration: 1,
+            Reason: "forced_test_admission",
+            survivalState);
+        var forcedState = fallbackState with
+        {
+            RuntimeUnlockFallbackSurvivalState = survivalState,
+            CurrentRuntimeUnlockAdmission = forcedAdmissionToken,
+            LastRuntimeUnlockAdmissionGeneration = 1,
+        };
+        var transaction = BuildCommitReadyRuntimeUnlockTransaction(forcedState);
+        var proof = WithCurrentTunaLease(
+            RuntimeUnlockTransaction.CreateRouteCommitProof(transaction, "answer_received", forcedAdmissionToken));
+
+        var decision = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested,
+                tuna,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                "runtime_unlock_commit",
+                FileTransferLegState.Active,
+                canSendData: true,
+                runtimeUnlockCommitProof: proof),
+            forcedState);
+
+        Assert.False(decision.RuntimeUnlockCommitAccepted);
+        Assert.Equal("paired_fallback_tail_yield_missing", decision.RuntimeUnlockCommitRejectedReason);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRouteCommit_TokenBecomesStaleAfterOwnerChange()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var started = StartRegular(regular);
+        var admission = RequestRuntimeUnlockAdmission(started.State, started.State.CurrentRuntimeOwner);
+        var admissionToken = admission.RuntimeUnlockAdmissionDecision!.Value.AdmissionToken!.Value;
+        var transaction = BuildCommitReadyRuntimeUnlockTransaction(admission.State);
+        var proof = WithCurrentTunaLease(
+            RuntimeUnlockTransaction.CreateRouteCommitProof(transaction, "answer_received", admissionToken));
+        var committed = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested,
+                tuna,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                "runtime_unlock_commit",
+                FileTransferLegState.Active,
+                canSendData: true,
+                runtimeUnlockCommitProof: proof),
+            admission.State);
+        var token = committed.RouteCommitToken!.Value;
+
+        var nextStart = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.StartTransfer,
+                tuna,
+                reason: "new_owner",
+                state: FileTransferLegState.Active,
+                canSendData: true),
+            committed.State);
+
+        Assert.False(FileTransferCoordinator.IsRouteCommitTokenCurrent(nextStart.State, token, out var rejectionReason));
+        Assert.Equal("route_commit_generation_mismatch", rejectionReason);
     }
 
     [Fact]
@@ -687,7 +949,9 @@ public sealed class FileTransferCoordinatorTests
                 runtimeUnlockCommitProof: proof),
             terminal.State);
 
-        Assert.True(terminalRejected.TerminalMutationRejected);
+        Assert.False(terminalRejected.TerminalMutationRejected);
+        Assert.False(terminalRejected.RuntimeUnlockCommitAccepted);
+        Assert.Equal("transfer_terminal", terminalRejected.RuntimeUnlockCommitRejectedReason);
         Assert.Equal(FileTransferRoute.RegularNknV4Fast, terminalRejected.State.RouteSelection.Route);
     }
 
@@ -1563,6 +1827,66 @@ public sealed class FileTransferCoordinatorTests
                     "runtime_unlock_admission",
                     owner)),
             nextState);
+    }
+
+    private static RuntimeUnlockRouteCommitProof WithCurrentTunaLease(
+        RuntimeUnlockRouteCommitProof proof,
+        long leaseGeneration = 11,
+        string listenerRunId = "listener-start-11")
+        => proof with
+        {
+            TunaPathLeaseRequired = true,
+            TunaPathLeaseGeneration = leaseGeneration,
+            TunaPathLeaseState = RuntimeUnlockTunaPathLeaseState.ListenerReady,
+            TunaPathLeaseListenerRunId = listenerRunId,
+            TunaPathLeaseCurrent = true,
+            TunaPathLeaseFailureReason = null,
+        };
+
+    private static RuntimeUnlockTransactionSnapshot BuildCommitReadyRuntimeUnlockTransaction(
+        FileTransferCoordinatorState state,
+        long transactionGeneration = 21,
+        long offerGeneration = 22,
+        string probeId = "probe-22")
+    {
+        var transaction = RuntimeUnlockTransaction.Apply(
+            new RuntimeUnlockTransactionEvent(
+                RuntimeUnlockTransactionEventKind.OfferGenerationCreated,
+                state.SessionId,
+                state.TransferId,
+                transactionGeneration,
+                offerGeneration,
+                Reason: "runtime_unlock"),
+            RuntimeUnlockTransactionSnapshot.Idle).State;
+        transaction = RuntimeUnlockTransaction.Apply(
+            new RuntimeUnlockTransactionEvent(
+                RuntimeUnlockTransactionEventKind.PeerReceived,
+                state.SessionId,
+                state.TransferId,
+                transactionGeneration,
+                offerGeneration,
+                Reason: "tuna_acceleration_offer_received_raw"),
+            transaction).State;
+        transaction = RuntimeUnlockTransaction.Apply(
+            new RuntimeUnlockTransactionEvent(
+                RuntimeUnlockTransactionEventKind.AnswerReceived,
+                state.SessionId,
+                state.TransferId,
+                transactionGeneration,
+                offerGeneration,
+                Reason: "transport_acceleration_answer"),
+            transaction).State;
+        return RuntimeUnlockTransaction.Apply(
+            new RuntimeUnlockTransactionEvent(
+                RuntimeUnlockTransactionEventKind.PathProbeAcked,
+                state.SessionId,
+                state.TransferId,
+                transactionGeneration,
+                offerGeneration,
+                Reason: "transport_probe_ack",
+                PathProbeId: probeId,
+                PathProbeTransport: FileTransferTransportKind.Tuna),
+            transaction).State;
     }
 
     private static FileTransferCoordinatorState EmptyState(FileTransferRouteSelection routeSelection)
