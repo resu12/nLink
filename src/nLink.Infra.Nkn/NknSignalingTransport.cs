@@ -160,6 +160,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private readonly Dictionary<string, TransportFileTransferDataSession> fileTransferDataSessions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FileTransferRouteHint> fileTransferRouteHints = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FileTransferPostTunaFallbackRepairProofHint> fileTransferPostTunaFallbackRepairProofHints = new(StringComparer.Ordinal);
+    private readonly HashSet<string> fileTransferPostTunaFallbackYieldRuntimeUnlockRetries = new(StringComparer.Ordinal);
     private readonly HashSet<string> fileTransferDataSessionRemoteOpenSuppressed = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FileTransferV6PendingHandoffIntent> pendingFileTransferV6HandoffsBySession = new(StringComparer.Ordinal);
     private readonly object fileTransferFallbackProofGate = new();
@@ -711,17 +712,40 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             var role = string.IsNullOrWhiteSpace(hostReadyRole) ? "(none)" : hostReadyRole;
             var failureReason = string.IsNullOrWhiteSpace(hostReadyFailureReason) ? "(none)" : hostReadyFailureReason;
             var lastError = string.IsNullOrWhiteSpace(hostReadyLastError) ? "(none)" : hostReadyLastError;
+            var terminalFailure = hostReadyTerminalFailure != 0;
+            var readyEmitted = hostReadyEmitted != 0;
+            var controlReady = readyEmitted;
+            var mediaReady = readyEmitted;
+            var bulkReady = readyEmitted;
+            if (!readyEmitted && client is RealNknClientAdapter realClient)
+            {
+                var health = realClient.GetBridgeBootstrapHealthSnapshot();
+                controlReady = health.ControlReady;
+                mediaReady = health.MediaReady;
+                bulkReady = health.BulkReady;
+                if (!terminalFailure && health.TerminalFailure)
+                {
+                    terminalFailure = true;
+                    failureReason = health.FailureReason;
+                    lastError =
+                        $"health_age_ms={health.HealthSummaryAgeMs}; ready_emitted={(health.ReadyEmitted ? 1 : 0)}; " +
+                        $"control_ready={(health.ControlReady ? 1 : 0)}; media_ready={(health.MediaReady ? 1 : 0)}; bulk_ready={(health.BulkReady ? 1 : 0)}; " +
+                        $"disconnect_signals={health.DisconnectSignalCount}; connect_failed={health.ConnectFailedCountSinceLast}; ws_errors={health.WsErrorCountSinceLast}; " +
+                        $"rpc_fallback={health.RpcFallbackAttemptCountSinceLast}; unready_failure_samples={health.UnreadyFailureSampleCount}; last_error={SanitizeLogToken(health.LastError)}";
+                }
+            }
+
             return new BridgeBootstrapReadinessSnapshot(
                 Role: role,
                 Generation: generation,
                 RunId: identity.Identifier,
-                ReadyEmitted: hostReadyEmitted != 0,
-                ControlReady: hostReadyEmitted != 0,
-                MediaReady: hostReadyEmitted != 0,
-                BulkReady: hostReadyEmitted != 0,
+                ReadyEmitted: readyEmitted,
+                ControlReady: controlReady,
+                MediaReady: mediaReady,
+                BulkReady: bulkReady,
                 LastReadyUtcMs: hostReadyLastReadyUtcMs,
                 DeadlineUtcMs: hostReadyDeadlineUtcMs,
-                TerminalFailure: hostReadyTerminalFailure != 0,
+                TerminalFailure: terminalFailure,
                 FailureReason: failureReason,
                 LastError: lastError);
         }

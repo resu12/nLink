@@ -265,6 +265,7 @@ public enum FileTransferControlPlaneKind
     TransferCancel = 9,
     SessionEnd = 10,
     LivenessProof = 11,
+    FallbackTailYield = 12,
 }
 
 public sealed record FileTransferControlPlaneDeliveryRequest(

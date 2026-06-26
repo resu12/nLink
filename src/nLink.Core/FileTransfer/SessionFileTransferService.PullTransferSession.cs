@@ -763,7 +763,6 @@ public sealed partial class SessionFileTransferService
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_v6_handoff_tail_unblocked; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={handoff.EpochId}; reason={FormatProtocolLogValue(reason)}; committed_chunk={committedChunkIndex}; highest_observed_chunk={highestObservedChunkIndex}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}; remote_credit_until_chunk_index_exclusive={context.RemoteGrantedUntilExclusive}; discarded_repair_frame_count={discardedRepairFrameCount}; discarded_repair_chunk_count={discardedRepairChunkCount}");
-        TryResumeOutboundRuntimeUnlockAfterFallbackSurvivalProofLocked(context, "fallback_tail_quiescent");
         return true;
     }
 
@@ -1489,7 +1488,8 @@ public sealed partial class SessionFileTransferService
         }
 
         var resumedPauseReason = context.PullTransportPauseReason;
-        if (ShouldDeferTunaActivationReadyResumeUntilRouteHandoff(
+        if (!ShouldSuppressTunaActivationPauseForPostTunaFallbackLocked(context) &&
+            ShouldDeferTunaActivationReadyResumeUntilRouteHandoff(
                 resumedPauseReason,
                 reason,
                 handoffKind))
@@ -1743,7 +1743,8 @@ public sealed partial class SessionFileTransferService
         }
 
         var resumedPauseReason = context.PullTransportPauseReason;
-        if (ShouldDeferTunaActivationReadyResumeUntilRouteHandoff(
+        if (!ShouldSuppressTunaActivationPauseForPostTunaFallbackLocked(context) &&
+            ShouldDeferTunaActivationReadyResumeUntilRouteHandoff(
                 resumedPauseReason,
                 reason,
                 handoffKind))
@@ -2212,6 +2213,25 @@ public sealed partial class SessionFileTransferService
     private static bool IsFallbackSurvivalProofPending(InboundTransferContext context)
         => !EvaluateRuntimeUnlockAdmissionLocked(context).Granted;
 
+    private static string FormatRuntimeUnlockFallbackAdmissionRejection(
+        FileTransferDirection direction,
+        RuntimeUnlockAdmissionDecision admission)
+    {
+        if (admission.Granted)
+        {
+            return "none";
+        }
+
+        if (admission.Status == RuntimeUnlockAdmissionStatus.WaitingForFallbackOwner)
+        {
+            return direction == FileTransferDirection.Inbound
+                ? "inbound_fallback_tail_not_yielded"
+                : "outbound_fallback_tail_not_yielded";
+        }
+
+        return admission.Reason;
+    }
+
     private static RuntimeUnlockAdmissionDecision EvaluateRuntimeUnlockAdmissionLocked(OutboundTransferContext context)
     {
         var fallbackTailRepairPending =
@@ -2237,7 +2257,8 @@ public sealed partial class SessionFileTransferService
             bridgeRecoveryPending: context.PullPostTunaRecoveryActive,
             controlPlanePressurePending: false,
             fallbackTailRepairPending,
-            transactionFailed: false);
+            transactionFailed: false,
+            pairedFallbackYieldGranted: HasPairedFallbackTailYieldForCurrentOwner(context));
     }
 
     private static RuntimeUnlockAdmissionDecision EvaluateRuntimeUnlockAdmissionLocked(InboundTransferContext context)
@@ -2267,7 +2288,8 @@ public sealed partial class SessionFileTransferService
             bridgeRecoveryPending: context.PullPostTunaRecoveryActive,
             controlPlanePressurePending: false,
             fallbackTailRepairPending,
-            transactionFailed: false);
+            transactionFailed: false,
+            pairedFallbackYieldGranted: HasPairedFallbackTailYieldForCurrentOwner(context));
     }
 
     private static bool IsFallbackSurvivalOwnerPendingAfterAcceptedProof(OutboundTransferContext context)
@@ -2290,7 +2312,10 @@ public sealed partial class SessionFileTransferService
         var admission = EvaluateRuntimeUnlockAdmissionLocked(context);
         if (!admission.Granted)
         {
-            MarkOutboundRuntimeUnlockWaitingForFallbackSurvivalLocked(context, reason, admission.Reason);
+            MarkOutboundRuntimeUnlockWaitingForFallbackSurvivalLocked(
+                context,
+                reason,
+                FormatRuntimeUnlockFallbackAdmissionRejection(FileTransferDirection.Outbound, admission));
             return true;
         }
 
@@ -2319,7 +2344,10 @@ public sealed partial class SessionFileTransferService
         var admission = EvaluateRuntimeUnlockAdmissionLocked(context);
         if (!admission.Granted)
         {
-            MarkInboundRuntimeUnlockWaitingForFallbackSurvivalLocked(context, reason, admission.Reason);
+            MarkInboundRuntimeUnlockWaitingForFallbackSurvivalLocked(
+                context,
+                reason,
+                FormatRuntimeUnlockFallbackAdmissionRejection(FileTransferDirection.Inbound, admission));
             return true;
         }
 
@@ -3227,6 +3255,7 @@ public sealed partial class SessionFileTransferService
         foreach (var repairState in context.PullV4SenderPumpRepairRequests.Values)
         {
             repairState.Queued = false;
+            repairState.QueuedUtc = null;
             repairState.InFlight = false;
         }
 
@@ -3523,6 +3552,16 @@ public sealed partial class SessionFileTransferService
             return;
         }
 
+        if (!forceNewGeneration &&
+            IsPostTunaFallbackBridgeRecoveryEpochRefreshReason(reason) &&
+            TrySuppressPostYieldFallbackRecoveryRestartLocked(
+                context,
+                "post_tuna_fallback_recovery_restart",
+                reason))
+        {
+            return;
+        }
+
         if (forceNewGeneration)
         {
             var currentGeneration = Math.Max(
@@ -3585,6 +3624,12 @@ public sealed partial class SessionFileTransferService
     {
         var previousLeg = context.CurrentTransferLeg;
         StartOutboundPostTunaRecoveryLocked(context, reason);
+        if (ReferenceEquals(previousLeg, context.CurrentTransferLeg) &&
+            IsPostYieldFallbackTailOwnerRetiredAndYieldedLocked(context, context.CurrentTransferLeg))
+        {
+            return;
+        }
+
         if (ReferenceEquals(previousLeg, context.CurrentTransferLeg) &&
             context.CurrentTransferLeg is { State: FileTransferLegState.RecoveryActive })
         {
@@ -3679,6 +3724,15 @@ public sealed partial class SessionFileTransferService
     private static void StartInboundPostTunaRecoveryLocked(InboundTransferContext context, string reason)
     {
         if (context.ChunkCount <= 0)
+        {
+            return;
+        }
+
+        if (IsPostTunaFallbackBridgeRecoveryEpochRefreshReason(reason) &&
+            TrySuppressPostYieldFallbackRecoveryRestartLocked(
+                context,
+                "post_tuna_fallback_recovery_restart",
+                reason))
         {
             return;
         }

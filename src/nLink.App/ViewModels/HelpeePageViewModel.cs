@@ -34,6 +34,8 @@ namespace NLink.App.ViewModels;
 
 public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanelBindings, IWindowCloseAware
 {
+    private const string FileTunaV4RouteToken = "file_tuna_v4";
+
     private enum HelpeeConnectionViewState
     {
         Waiting,
@@ -2395,10 +2397,21 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                     "helpee_invite_bootstrap_cancelled_before_ready");
             }
         }
-        catch
+        catch (Exception ex)
         {
             if (!HasIncomingRequest && !IsRequestAllowed)
             {
+                var bridgeReadiness = sessionRuntime.BridgeBootstrapReadiness;
+                if (!bridgeReadiness.ReadyEmitted &&
+                    (bridgeReadiness.TerminalFailure ||
+                     ex.Message.Contains("nkn_bridge_bootstrap_not_ready", StringComparison.OrdinalIgnoreCase)))
+                {
+                    await SurfaceInviteBootstrapFailureAsync(
+                        "Helpee invite bootstrap failed before the local NKN bridge became ready.",
+                        "helpee_invite_bootstrap_bridge_not_ready");
+                    return;
+                }
+
                 await UiThreadDispatch.RunAsync(() =>
                 {
                     RefreshAutomaticIdentityRecoveryWarning();
@@ -3544,8 +3557,43 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void SyncTunaActiveFromRuntime()
     {
+        if (TryResolveActiveTransferTunaState(sessionRuntime.FileTransferSnapshot, out var activeTransferUsesTuna))
+        {
+            IsTunaActive = activeTransferUsesTuna;
+            TunaStatusReason = activeTransferUsesTuna
+                ? "file_transfer_route_file_tuna_v4"
+                : "file_transfer_route_not_file_tuna_v4";
+            return;
+        }
+
         IsTunaActive = sessionRuntime.IsTransportAccelerationActive;
         TunaStatusReason = sessionRuntime.TransportAccelerationStatusReason;
+    }
+
+    private static bool TryResolveActiveTransferTunaState(
+        SessionFileTransferSnapshot snapshot,
+        out bool activeTransferUsesTuna)
+    {
+        var hasActiveTransfer = false;
+        var usesTuna = false;
+
+        Inspect(snapshot.Outbound);
+        Inspect(snapshot.Inbound);
+        activeTransferUsesTuna = usesTuna;
+        return hasActiveTransfer;
+
+        void Inspect(FileTransferTransferSnapshot? transfer)
+        {
+            if (transfer is null || transfer.IsTerminal)
+            {
+                return;
+            }
+
+            hasActiveTransfer = true;
+            usesTuna |=
+                transfer.ProtocolVersion == 4 &&
+                string.Equals(transfer.RouteToken, FileTunaV4RouteToken, StringComparison.Ordinal);
+        }
     }
 
     private void OnTransientStatusChanged(object? sender, SessionRuntimeTransientStatusChangedEventArgs e)
@@ -4313,6 +4361,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         CanEndSession = nextCanEndSession;
         CanOpenDiagnostics = nextCanOpenDiagnostics;
         CanSendFiles = nextCanSendFiles;
+        SyncTunaActiveFromRuntime();
 
         RefreshCommandStates();
         LogCurrentChatPanelState(source);

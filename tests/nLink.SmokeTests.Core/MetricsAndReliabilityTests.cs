@@ -1037,6 +1037,19 @@ public sealed class MetricsAndReliabilityTests : CoreSmokeTestsBase
     }
 
 [Trait("Category", "LegacySmoke")]
+    [Theory]
+    [InlineData("nkn_bridge_bootstrap_not_ready: role=helpee; reason=bridge_transport_connect_failed_before_ready")]
+    [InlineData("bridge_transport_connect_failed_before_ready; ready_emitted=0; connect_failed=4")]
+    [InlineData("bridge_bootstrap_diagnostics_failure; last_error=bridge_connect_ready_timeout")]
+    public void TransportFailureMapper_MapsBridgeBootstrapNotReady_ToNonTransientBridgeStartFailure(string rawError)
+    {
+        var failure = TransportFailureMapper.FromSignals(rawError);
+
+        Assert.Equal(TransportFailureCategory.BridgeStartFailure, failure.Category);
+        Assert.False(failure.IsTransient);
+    }
+
+[Trait("Category", "LegacySmoke")]
     [Fact]
     public void TransportFailureMapper_MapsProcessExit_ToUnexpectedProcessExit()
     {

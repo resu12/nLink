@@ -629,29 +629,39 @@ public sealed partial class SessionFileTransferService
             if (direction == FileTransferDirection.Outbound &&
                 IsOutboundLifecycleMessageMatchLocked(sessionId, transferId) &&
                 outboundTransfer is { IsTerminal: false } outbound &&
-                outbound.RouteRuntime.UsesPostTunaFallbackV6Runtime &&
-                IsFallbackSurvivalProofPending(outbound))
+                outbound.RouteRuntime.UsesPostTunaFallbackV6Runtime)
             {
-                rejectionReason = "fallback_survival_pending";
-                MarkOutboundRuntimeUnlockWaitingForFallbackSurvivalLocked(
-                    outbound,
-                    "precommit_probe_received",
-                    rejectionReason);
-                return true;
+                var admission = EvaluateRuntimeUnlockAdmissionLocked(outbound);
+                if (!admission.Granted)
+                {
+                    rejectionReason = FormatRuntimeUnlockFallbackAdmissionRejection(
+                        FileTransferDirection.Outbound,
+                        admission);
+                    MarkOutboundRuntimeUnlockWaitingForFallbackSurvivalLocked(
+                        outbound,
+                        "precommit_probe_received",
+                        rejectionReason);
+                    return true;
+                }
             }
 
             if (direction == FileTransferDirection.Inbound &&
                 IsInboundLifecycleMessageMatchLocked(sessionId, transferId) &&
                 inboundTransfer is { IsTerminal: false } inbound &&
-                inbound.RouteRuntime.UsesPostTunaFallbackV6Runtime &&
-                IsFallbackSurvivalProofPending(inbound))
+                inbound.RouteRuntime.UsesPostTunaFallbackV6Runtime)
             {
-                rejectionReason = "fallback_survival_pending";
-                MarkInboundRuntimeUnlockWaitingForFallbackSurvivalLocked(
-                    inbound,
-                    "precommit_probe_received",
-                    rejectionReason);
-                return true;
+                var admission = EvaluateRuntimeUnlockAdmissionLocked(inbound);
+                if (!admission.Granted)
+                {
+                    rejectionReason = FormatRuntimeUnlockFallbackAdmissionRejection(
+                        FileTransferDirection.Inbound,
+                        admission);
+                    MarkInboundRuntimeUnlockWaitingForFallbackSurvivalLocked(
+                        inbound,
+                        "precommit_probe_received",
+                        rejectionReason);
+                    return true;
+                }
             }
         }
 
@@ -1308,10 +1318,13 @@ public sealed partial class SessionFileTransferService
                 }
                 else if (outbound.RouteRuntime.UsesPostTunaFallbackV6Runtime)
                 {
-                    if (!outbound.RuntimeUnlockActivationWindowGranted &&
-                        IsFallbackSurvivalProofPending(outbound))
+                    var admission = EvaluateRuntimeUnlockAdmissionLocked(outbound);
+                    if (!admission.Granted)
                     {
-                        MarkOutboundRuntimeUnlockWaitingForFallbackSurvivalLocked(outbound, reason, "precommit_probe_ack");
+                        MarkOutboundRuntimeUnlockWaitingForFallbackSurvivalLocked(
+                            outbound,
+                            reason,
+                            FormatRuntimeUnlockFallbackAdmissionRejection(FileTransferDirection.Outbound, admission));
                     }
                     else
                     {
@@ -1359,10 +1372,13 @@ public sealed partial class SessionFileTransferService
                 }
                 else if (inbound.RouteRuntime.UsesPostTunaFallbackV6Runtime)
                 {
-                    if (!inbound.RuntimeUnlockActivationWindowGranted &&
-                        IsFallbackSurvivalProofPending(inbound))
+                    var admission = EvaluateRuntimeUnlockAdmissionLocked(inbound);
+                    if (!admission.Granted)
                     {
-                        MarkInboundRuntimeUnlockWaitingForFallbackSurvivalLocked(inbound, reason, "precommit_probe_ack");
+                        MarkInboundRuntimeUnlockWaitingForFallbackSurvivalLocked(
+                            inbound,
+                            reason,
+                            FormatRuntimeUnlockFallbackAdmissionRejection(FileTransferDirection.Inbound, admission));
                     }
                     else
                     {
@@ -2743,6 +2759,7 @@ public sealed partial class SessionFileTransferService
         foreach (var repairState in context.PullV4SenderPumpRepairRequests.Values)
         {
             repairState.Queued = false;
+            repairState.QueuedUtc = null;
             repairState.InFlight = false;
         }
 

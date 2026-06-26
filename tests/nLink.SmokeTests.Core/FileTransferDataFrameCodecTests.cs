@@ -154,6 +154,53 @@ public sealed class FileTransferDataFrameCodecTests
     }
 
     [Fact]
+    public void V6FallbackTailYieldFrame_RoundTripsOwnerMetadata()
+    {
+        var payload = FileTransferDataFrameCodec.Serialize(
+            new FileTransferFallbackTailYieldFrameV6
+            {
+                SessionId = " session_a ",
+                TransferId = " transfer_tail_yield ",
+                TransportEpoch = 9,
+                BatchId = " fallback-tail-yield:4 ",
+                RepairRequestId = " checkpoint:42 ",
+                Priority = " control ",
+                RecoveryMode = " post_tuna_fallback_v6 ",
+                OwnerKey = " session_a|transfer_tail_yield|post_tuna_fallback_v6|6|4|5|2|9|checkpoint:42 ",
+                Direction = " inbound ",
+                YieldGeneration = 3,
+                LiveRouteEpoch = 4,
+                FallbackLegGeneration = 5,
+                BridgeRecoveryGeneration = 2,
+                CommittedChunkIndex = 1975,
+                HighestObservedChunkIndex = 2100,
+                SentUnixTimeMilliseconds = 1_772_000_000_000,
+            });
+
+        var parsed = FileTransferDataFrameCodec.TryDeserialize(payload, out var frame);
+
+        var yieldFrame = Assert.IsType<FileTransferFallbackTailYieldFrameV6>(frame);
+        Assert.True(parsed);
+        Assert.Equal(FileTransferProtocol.FallbackTailYieldFrameTypeV6, yieldFrame.Type);
+        Assert.Equal("session_a", yieldFrame.SessionId);
+        Assert.Equal("transfer_tail_yield", yieldFrame.TransferId);
+        Assert.Equal(9, yieldFrame.TransportEpoch);
+        Assert.Equal("fallback-tail-yield:4", yieldFrame.BatchId);
+        Assert.Equal("checkpoint:42", yieldFrame.RepairRequestId);
+        Assert.Equal("control", yieldFrame.Priority);
+        Assert.Equal("post_tuna_fallback_v6", yieldFrame.RecoveryMode);
+        Assert.Equal("session_a|transfer_tail_yield|post_tuna_fallback_v6|6|4|5|2|9|checkpoint:42", yieldFrame.OwnerKey);
+        Assert.Equal("inbound", yieldFrame.Direction);
+        Assert.Equal(3, yieldFrame.YieldGeneration);
+        Assert.Equal(4, yieldFrame.LiveRouteEpoch);
+        Assert.Equal(5, yieldFrame.FallbackLegGeneration);
+        Assert.Equal(2, yieldFrame.BridgeRecoveryGeneration);
+        Assert.Equal(1975, yieldFrame.CommittedChunkIndex);
+        Assert.Equal(2100, yieldFrame.HighestObservedChunkIndex);
+        Assert.Equal(1_772_000_000_000, yieldFrame.SentUnixTimeMilliseconds);
+    }
+
+    [Fact]
     public void V6ChunkBatchFrame_RoundTrips_WithinBudget()
     {
         var payload = FileTransferDataFrameCodec.Serialize(

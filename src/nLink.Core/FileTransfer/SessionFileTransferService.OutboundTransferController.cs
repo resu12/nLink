@@ -77,6 +77,7 @@ public sealed partial class SessionFileTransferService
             }
 
             context.CancelLifetime();
+            ConsumeOutboundFallbackTailTerminalProofBeforeTerminalLocked(context, terminalState, "transfer_terminal");
             context.State = terminalState;
             context.ErrorCode = NormalizeErrorCode(errorCode);
             context.StatusMessage = NormalizeReason(statusMessage) ?? statusMessage;
@@ -279,6 +280,7 @@ public sealed partial class SessionFileTransferService
             }
 
             context.CancelLifetime();
+            ConsumeInboundFallbackTailTerminalProofBeforeTerminalLocked(context, terminalState, "transfer_terminal");
             context.State = terminalState;
             context.ErrorCode = NormalizeErrorCode(errorCode);
             context.StatusMessage = NormalizeReason(statusMessage) ?? statusMessage;

@@ -228,6 +228,9 @@ public static class FileTransferDataFrameCodec
                 WriteBool(buffer, ack.Accepted);
                 WriteOptionalString(buffer, ack.Reason);
                 break;
+            case FileTransferFallbackTailYieldFrameV6 yield:
+                WriteFallbackTailYieldFields(buffer, yield);
+                break;
             case FileTransferFrontierRequestFrameV6 frontierRequest:
                 if (!TryNormalizeV4MissingRanges(
                         frontierRequest.MissingRanges,
@@ -709,6 +712,33 @@ public static class FileTransferDataFrameCodec
                     SentUnixTimeMilliseconds = preCommitAckFields.SentUnixTimeMilliseconds,
                     Accepted = preCommitAccepted,
                     Reason = preCommitAckReason,
+                };
+                break;
+            case 54:
+                if (!TryReadFallbackTailYieldFields(ref reader, out var yieldFields) ||
+                    !reader.IsFullyConsumed)
+                {
+                    return false;
+                }
+
+                frame = new FileTransferFallbackTailYieldFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    TransportEpoch = metadata.TransportEpoch,
+                    BatchId = metadata.BatchId,
+                    RepairRequestId = metadata.RepairRequestId,
+                    Priority = metadata.Priority,
+                    RecoveryMode = metadata.RecoveryMode,
+                    OwnerKey = yieldFields.OwnerKey,
+                    Direction = yieldFields.Direction,
+                    YieldGeneration = yieldFields.YieldGeneration,
+                    LiveRouteEpoch = yieldFields.LiveRouteEpoch,
+                    FallbackLegGeneration = yieldFields.FallbackLegGeneration,
+                    BridgeRecoveryGeneration = yieldFields.BridgeRecoveryGeneration,
+                    CommittedChunkIndex = yieldFields.CommittedChunkIndex,
+                    HighestObservedChunkIndex = yieldFields.HighestObservedChunkIndex,
+                    SentUnixTimeMilliseconds = yieldFields.SentUnixTimeMilliseconds,
                 };
                 break;
             case 45:
@@ -1262,6 +1292,10 @@ public static class FileTransferDataFrameCodec
                 TryNormalizeRuntimeUnlockPreCommitProbeAck(ack, sessionId, transferId, out var normalizedAck):
                 normalized = normalizedAck;
                 return true;
+            case FileTransferFallbackTailYieldFrameV6 yield when
+                TryNormalizeFallbackTailYield(yield, sessionId, transferId, out var normalizedYield):
+                normalized = normalizedYield;
+                return true;
             default:
                 return false;
         }
@@ -1321,6 +1355,53 @@ public static class FileTransferDataFrameCodec
             TargetTransport = fields.TargetTransport,
             HandoffKind = fields.HandoffKind,
             Reason = reason,
+            BatchId = NormalizeTransportMetadataToken(frame.BatchId),
+            RepairRequestId = NormalizeTransportMetadataToken(frame.RepairRequestId),
+            Priority = NormalizeTransportMetadataToken(frame.Priority),
+            RecoveryMode = NormalizeTransportMetadataToken(frame.RecoveryMode),
+        };
+        return true;
+    }
+
+    private static bool TryNormalizeFallbackTailYield(
+        FileTransferFallbackTailYieldFrameV6 frame,
+        string sessionId,
+        string transferId,
+        out FileTransferFallbackTailYieldFrameV6 normalized)
+    {
+        normalized = frame;
+        if (frame.TransportEpoch <= 0 ||
+            frame.YieldGeneration <= 0 ||
+            frame.LiveRouteEpoch <= 0 ||
+            frame.FallbackLegGeneration <= 0 ||
+            frame.BridgeRecoveryGeneration < 0 ||
+            frame.CommittedChunkIndex < 0 ||
+            frame.CommittedChunkIndex > FileTransferProtocol.MaxChunkCountV6 ||
+            frame.HighestObservedChunkIndex < -1 ||
+            frame.HighestObservedChunkIndex > FileTransferProtocol.MaxChunkCountV6 ||
+            frame.SentUnixTimeMilliseconds < 0 ||
+            !FileTransferPayloadCodec.TryNormalizeOptional(frame.OwnerKey, 1024, out var ownerKey) ||
+            string.IsNullOrWhiteSpace(ownerKey) ||
+            !FileTransferPayloadCodec.TryNormalizeOptional(frame.Direction, FileTransferProtocol.MaxReasonLength, out var direction) ||
+            string.IsNullOrWhiteSpace(direction))
+        {
+            return false;
+        }
+
+        var normalizedDirection = direction.Trim().ToLowerInvariant();
+        if (normalizedDirection is not ("outbound" or "inbound"))
+        {
+            return false;
+        }
+
+        normalized = frame with
+        {
+            Kind = FileTransferProtocol.Kind,
+            Type = FileTransferProtocol.FallbackTailYieldFrameTypeV6,
+            SessionId = sessionId,
+            TransferId = transferId,
+            OwnerKey = ownerKey,
+            Direction = normalizedDirection,
             BatchId = NormalizeTransportMetadataToken(frame.BatchId),
             RepairRequestId = NormalizeTransportMetadataToken(frame.RepairRequestId),
             Priority = NormalizeTransportMetadataToken(frame.Priority),
@@ -1393,6 +1474,21 @@ public static class FileTransferDataFrameCodec
         WriteInt64(stream, frame.SentUnixTimeMilliseconds);
     }
 
+    private static void WriteFallbackTailYieldFields(
+        Stream stream,
+        FileTransferFallbackTailYieldFrameV6 frame)
+    {
+        WriteString(stream, frame.OwnerKey);
+        WriteString(stream, frame.Direction);
+        WriteInt64(stream, frame.YieldGeneration);
+        WriteInt32(stream, frame.LiveRouteEpoch);
+        WriteInt32(stream, frame.FallbackLegGeneration);
+        WriteInt32(stream, frame.BridgeRecoveryGeneration);
+        WriteInt32(stream, frame.CommittedChunkIndex);
+        WriteInt32(stream, frame.HighestObservedChunkIndex);
+        WriteInt64(stream, frame.SentUnixTimeMilliseconds);
+    }
+
     private static bool TryReadTransportMetadata(ref BinaryFrameReader reader, out TransportMetadata metadata)
     {
         metadata = default;
@@ -1445,6 +1541,37 @@ public static class FileTransferDataFrameCodec
         return true;
     }
 
+    private static bool TryReadFallbackTailYieldFields(
+        ref BinaryFrameReader reader,
+        out FallbackTailYieldFields fields)
+    {
+        fields = default;
+        if (!reader.TryReadString(out var ownerKey) ||
+            !reader.TryReadString(out var direction) ||
+            !reader.TryReadInt64(out var yieldGeneration) ||
+            !reader.TryReadInt32(out var liveRouteEpoch) ||
+            !reader.TryReadInt32(out var fallbackLegGeneration) ||
+            !reader.TryReadInt32(out var bridgeRecoveryGeneration) ||
+            !reader.TryReadInt32(out var committedChunkIndex) ||
+            !reader.TryReadInt32(out var highestObservedChunkIndex) ||
+            !reader.TryReadInt64(out var sentUnixTimeMilliseconds))
+        {
+            return false;
+        }
+
+        fields = new FallbackTailYieldFields(
+            ownerKey,
+            direction,
+            yieldGeneration,
+            liveRouteEpoch,
+            fallbackLegGeneration,
+            bridgeRecoveryGeneration,
+            committedChunkIndex,
+            highestObservedChunkIndex,
+            sentUnixTimeMilliseconds);
+        return true;
+    }
+
     private static string? NormalizeTransportMetadataToken(string? value)
         => string.IsNullOrWhiteSpace(value)
             ? null
@@ -1471,6 +1598,17 @@ public static class FileTransferDataFrameCodec
         int TargetProtocolVersion,
         string TargetTransport,
         string HandoffKind,
+        long SentUnixTimeMilliseconds);
+
+    private readonly record struct FallbackTailYieldFields(
+        string OwnerKey,
+        string Direction,
+        long YieldGeneration,
+        int LiveRouteEpoch,
+        int FallbackLegGeneration,
+        int BridgeRecoveryGeneration,
+        int CommittedChunkIndex,
+        int HighestObservedChunkIndex,
         long SentUnixTimeMilliseconds);
 
     private static bool IsValidV4ChunkRange(int startChunkIndex, int chunkCount)
@@ -1619,6 +1757,7 @@ public static class FileTransferDataFrameCodec
             FileTransferHeartbeatFrameV6 => 51,
             FileTransferRuntimeUnlockPreCommitProbeFrame => 52,
             FileTransferRuntimeUnlockPreCommitProbeAckFrame => 53,
+            FileTransferFallbackTailYieldFrameV6 => 54,
             _ => throw new InvalidOperationException($"Unsupported file-transfer data frame type '{frame.GetType().Name}'."),
         };
 

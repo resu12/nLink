@@ -3094,6 +3094,86 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public void Bridge_PostTunaFallbackControlPlanePressureRefreshesNewerLegAuthority()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-post-tuna-newer-leg-pressure", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "post-tuna-newer-leg-pressure");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "post-tuna-newer-leg-pressure");
+            var identity = new NknIdentity("post-tuna-newer-leg-pressure", "post-tuna-newer-leg-pressure.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var transferId = $"transfer-post-tuna-newer-leg-pressure-{Guid.NewGuid():N}";
+            var sessionId = $"session-post-tuna-newer-leg-pressure-{Guid.NewGuid():N}";
+            var logStart = GetOperationalLogLength();
+
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.MarkActiveFileTransferPostTunaFallbackRuntime(transferId, "test_newer_leg_pressure");
+            adapter.MarkActiveFileTransferPostTunaFallbackLegAuthority(
+                transferId,
+                sessionId,
+                legGeneration: 3,
+                routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 2,
+                transportEpoch: 1,
+                bridgeRecoveryGeneration: 1,
+                checkpointRequestId: "v6-regular-nkn-state-refresh:2",
+                authorityReason: "old_bridge_authority");
+
+            adapter.ReportPostTunaFallbackControlPlanePressure(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 2,
+                legGeneration: 4,
+                bridgeRecoveryGeneration: 1,
+                transportEpoch: 2,
+                checkpointRequestId: null,
+                kind: "receiver_state",
+                reason: "frontier_stall_repair_due");
+
+            var logText = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "event=filetransfer_fallback_leg_authority_bridge_registered;",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "leg_generation=4; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; transport_epoch=2; bridge_recovery_generation=1; checkpoint_request_id=none; authority_reason=control_plane_pressure_authority_refresh",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_marked;",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains("authority_source=bridge_authority_refreshed_from_pressure", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_stale_ignored;",
+                logText,
+                StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public void Bridge_PostTunaFallbackControlPlanePressureRejectsCompletedBridgeAuthority()
     {
         var tempDir = Path.Combine(Path.GetTempPath(), "nlink-post-tuna-completed-pressure", Guid.NewGuid().ToString("N"));

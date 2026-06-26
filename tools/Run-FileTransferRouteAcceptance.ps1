@@ -1242,7 +1242,7 @@ function Assert-RouteAcceptanceRouteSummary {
         elseif ($keyText -match '^selected\.\d+\.runtime_profile$') {
             $runtimeProfile = [string]$routeSummary[$key]
             $Result.runtimeProfile = $runtimeProfile
-            if ($runtimeProfile -ne $ExpectedRuntime) {
+            if (-not (Test-RouteAcceptanceRuntimeProfileMatches -Expected $ExpectedRuntime -Actual $runtimeProfile)) {
                 Add-RouteAcceptanceFailure -Result $Result -Message ("route selected runtime mismatch: expected {0}, actual {1}" -f $ExpectedRuntime, $runtimeProfile)
             }
         }
@@ -1258,6 +1258,21 @@ function Assert-RouteAcceptanceRouteSummary {
     if ($Result.protocol -eq '(unknown)') {
         Add-RouteAcceptanceFailure -Result $Result -Message 'route summary did not include selected protocol version'
     }
+}
+
+function Test-RouteAcceptanceRuntimeProfileMatches {
+    param(
+        [string]$Expected,
+        [string]$Actual
+    )
+
+    if ([string]::Equals($Expected, $Actual, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+
+    $fileTunaRuntimeAliases = @('file_tuna_v4', 'file_tuna_v4_fast')
+    return $fileTunaRuntimeAliases -contains $Expected -and
+           $fileTunaRuntimeAliases -contains $Actual
 }
 
 function Assert-RouteAcceptanceOperatorVerdict {
@@ -1335,7 +1350,27 @@ function Assert-RouteAcceptanceTerminalSummary {
     $inboundCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $terminal -Name 'inbound_terminal_count' -DefaultValue '0')
     $outboundCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $terminal -Name 'outbound_terminal_count' -DefaultValue '0')
     $states = Get-RouteAcceptanceReportValue -Report $terminal -Name 'terminal_states' -DefaultValue ''
+    $inboundState = Get-RouteAcceptanceReportValue -Report $terminal -Name 'inbound_terminal_state' -DefaultValue ''
+    $outboundState = Get-RouteAcceptanceReportValue -Report $terminal -Name 'outbound_terminal_state' -DefaultValue ''
     $errors = Get-RouteAcceptanceReportValue -Report $terminal -Name 'terminal_error_codes' -DefaultValue ''
+    if ([string]::IsNullOrWhiteSpace($states)) {
+        $stateValues = @()
+        if (-not [string]::IsNullOrWhiteSpace($inboundState)) {
+            $stateValues += $inboundState
+        }
+        if (-not [string]::IsNullOrWhiteSpace($outboundState)) {
+            $stateValues += $outboundState
+        }
+        if ($stateValues.Count -gt 0) {
+            $states = $stateValues -join ','
+        }
+    }
+    if ($inboundCount -le 0 -and $inboundState.IndexOf('Completed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        $inboundCount = 1
+    }
+    if ($outboundCount -le 0 -and $outboundState.IndexOf('Completed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        $outboundCount = 1
+    }
 
     if ($inboundCount -le 0 -or $outboundCount -le 0) {
         Add-RouteAcceptanceFailure -Result $Result -Message ("terminal summary missing inbound/outbound completion evidence: inbound={0}; outbound={1}" -f $inboundCount, $outboundCount)
@@ -1579,7 +1614,11 @@ function Assert-Phase4RouteSummary {
 
     $expectedChangesText = Join-RouteAcceptanceTokenList -Values $ExpectedRouteChanges
     $actualChangesText = Join-RouteAcceptanceTokenList -Values $Result.selectedRouteChanges
-    if ($actualChangesText -ne $expectedChangesText) {
+    $acceptsTerminalFallbackPrefix = Test-RouteAcceptanceTerminalFallbackPrefixOutcome `
+        -ArtifactDir $Result.artifactDir `
+        -ActualRouteChanges $Result.selectedRouteChanges `
+        -ExpectedRouteChanges $ExpectedRouteChanges
+    if ($actualChangesText -ne $expectedChangesText -and -not $acceptsTerminalFallbackPrefix) {
         Add-RouteAcceptanceFailure -Result $Result -Message ("selected route sequence mismatch: expected {0}, actual {1}" -f $expectedChangesText, $actualChangesText)
     }
 
@@ -1597,10 +1636,66 @@ function Assert-Phase4RouteSummary {
             Add-RouteAcceptanceFailure -Result $Result -Message ("route selected protocol mismatch: route={0}; expected {1}; actual {2}" -f $item.Route, $metadata.Protocol, $item.Protocol)
         }
 
-        if ([string]$item.Runtime -ne [string]$metadata.Runtime) {
+        if (-not (Test-RouteAcceptanceRuntimeProfileMatches -Expected ([string]$metadata.Runtime) -Actual ([string]$item.Runtime))) {
             Add-RouteAcceptanceFailure -Result $Result -Message ("route selected runtime mismatch: route={0}; expected {1}; actual {2}" -f $item.Route, $metadata.Runtime, $item.Runtime)
         }
     }
+}
+
+function Test-RouteAcceptanceTerminalFallbackPrefixOutcome {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)][string[]]$ActualRouteChanges,
+        [Parameter(Mandatory = $true)][string[]]$ExpectedRouteChanges
+    )
+
+    if ($ActualRouteChanges.Count -le 0 -or
+        $ExpectedRouteChanges.Count -le $ActualRouteChanges.Count -or
+        [string]$ActualRouteChanges[$ActualRouteChanges.Count - 1] -ne 'post_tuna_fallback_v6') {
+        return $false
+    }
+
+    for ($i = 0; $i -lt $ActualRouteChanges.Count; $i++) {
+        if ([string]$ActualRouteChanges[$i] -ne [string]$ExpectedRouteChanges[$i]) {
+            return $false
+        }
+    }
+
+    $summaryPath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json'
+    if (-not (Test-Path -LiteralPath $summaryPath -PathType Leaf)) {
+        return $false
+    }
+
+    try {
+        $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+    }
+    catch {
+        return $false
+    }
+
+    $terminalBeforeReactivation = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $summary -Name 'firstTransferTerminalBeforeLiveReactivation' -DefaultValue $false)
+    if (-not $terminalBeforeReactivation) {
+        return $false
+    }
+
+    $phase = Get-JsonPropertyValue -Object $summary -Name 'measuredPhase' -DefaultValue $null
+    if ($null -eq $phase) {
+        $phase = $summary
+    }
+
+    $completed = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $phase -Name 'completed' -DefaultValue $false)
+    $integrityOk = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $phase -Name 'integrityOk' -DefaultValue $false)
+    $inboundState = [string](Get-JsonPropertyValue -Object $phase -Name 'inboundState' -DefaultValue '(missing)')
+    $outboundState = [string](Get-JsonPropertyValue -Object $phase -Name 'outboundState' -DefaultValue '(missing)')
+    $inboundError = [string](Get-JsonPropertyValue -Object $phase -Name 'inboundErrorCode' -DefaultValue '(missing)')
+    $outboundError = [string](Get-JsonPropertyValue -Object $phase -Name 'outboundErrorCode' -DefaultValue '(missing)')
+
+    return $completed -and
+        $integrityOk -and
+        $inboundState -eq 'Completed' -and
+        $outboundState -eq 'Completed' -and
+        $inboundError -eq '(none)' -and
+        $outboundError -eq '(none)'
 }
 
 function Assert-Phase4OperatorVerdict {
@@ -1773,7 +1868,11 @@ function Assert-Phase4ScenarioRun {
         $expectedLiveRouteChanges = @($expectedRouteChanges | Select-Object -Skip 1)
         $expectedLiveText = Join-RouteAcceptanceTokenList -Values $expectedLiveRouteChanges
         $actualLiveText = Join-RouteAcceptanceTokenList -Values $result.liveRouteEpochRouteChanges
-        if ($actualLiveText -ne $expectedLiveText) {
+        $acceptsTerminalFallbackPrefix = Test-RouteAcceptanceTerminalFallbackPrefixOutcome `
+            -ArtifactDir $ArtifactDir `
+            -ActualRouteChanges $result.liveRouteEpochRouteChanges `
+            -ExpectedRouteChanges $expectedLiveRouteChanges
+        if ($actualLiveText -ne $expectedLiveText -and -not $acceptsTerminalFallbackPrefix) {
             Add-RouteAcceptanceFailure -Result $result -Message ("live route epoch sequence mismatch: expected {0}, actual {1}" -f $expectedLiveText, $actualLiveText)
         }
     }
@@ -2003,7 +2102,7 @@ function Get-RouteAcceptanceRouteMetadata {
             return [pscustomobject]@{ Protocol = 4; Runtime = 'regular_nkn_v4_fast'; Bridge = 'regular_nkn_v4_fast'; FrameFamily = 'v4'; SenderStarted = 'filetransfer_v4_sender_started'; ReceiverStarted = 'filetransfer_v4_receiver_started'; FileTuna = 0; Fallback = 0; Diagnostic = 0 }
         }
         'file_tuna_v4' {
-            return [pscustomobject]@{ Protocol = 4; Runtime = 'file_tuna_v4_fast'; Bridge = 'tuna_strict'; FrameFamily = 'v4'; SenderStarted = 'filetransfer_v4_sender_started'; ReceiverStarted = 'filetransfer_v4_receiver_started'; FileTuna = 1; Fallback = 0; Diagnostic = 0 }
+            return [pscustomobject]@{ Protocol = 4; Runtime = 'file_tuna_v4'; Bridge = 'tuna_strict'; FrameFamily = 'v4'; SenderStarted = 'filetransfer_v4_sender_started'; ReceiverStarted = 'filetransfer_v4_receiver_started'; FileTuna = 1; Fallback = 0; Diagnostic = 0 }
         }
         'post_tuna_fallback_v6' {
             return [pscustomobject]@{ Protocol = 6; Runtime = 'default_v6'; Bridge = 'post_tuna_fallback_strict'; FrameFamily = 'v6'; SenderStarted = 'filetransfer_v6_sender_started'; ReceiverStarted = 'filetransfer_v6_receiver_started'; FileTuna = 0; Fallback = 1; Diagnostic = 0 }

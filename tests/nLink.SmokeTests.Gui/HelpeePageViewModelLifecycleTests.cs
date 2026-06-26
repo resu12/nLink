@@ -633,6 +633,45 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task HelpeePageViewModel_BridgeBootstrapNotReady_RehostsBeforeVisibleFailure()
+    {
+        var createdTransports = 0;
+        var hostCalls = 0;
+        using var runtime = new SessionRuntime(() =>
+        {
+            var attempt = Interlocked.Increment(ref createdTransports);
+            return new BootstrapRetryHelpeeHostTransport(
+                $"helpee.bootstrap.retry.{attempt}",
+                failBeforeReady: attempt == 1,
+                onHostCall: () => Interlocked.Increment(ref hostCalls));
+        });
+        using var helpee = new HelpeePageViewModel(
+            cancelAction: static () => { },
+            CreateDevLocalTestConfig(),
+            runtime,
+            inviteBootstrapTimeout: TimeSpan.FromSeconds(5));
+
+        try
+        {
+            await WaitUntilAsync(
+                () => Volatile.Read(ref hostCalls) >= 2 &&
+                      runtime.State == SessionRuntimeState.Waiting &&
+                      runtime.CurrentLocalPeerAddress is not null,
+                TimeSpan.FromSeconds(3));
+        }
+        catch (TimeoutException ex)
+        {
+            throw new TimeoutException(
+                $"created_transports={Volatile.Read(ref createdTransports)}; host_calls={Volatile.Read(ref hostCalls)}; state={runtime.State}; transport_state={runtime.TransportLifecycleState}; status={runtime.StatusText}; connection_state={helpee.ConnectionState}; invite_status={helpee.ShareInviteStatusText}",
+                ex);
+        }
+
+        Assert.NotEqual("Failed", helpee.ConnectionState);
+        Assert.DoesNotContain("Could not prepare invite", helpee.ShareInviteStatusText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public void HelpeePageViewModel_IncomingApproval_ClearsStalePeerEndedHeaderNotice()
     {
         using var runtime = new SessionRuntime(() => new DevLocalTransport());
@@ -875,6 +914,93 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
             emojiSequence,
             fallbackCode,
             SessionVerificationCodeDerivation.SourceHandshakeTranscriptV1);
+    }
+
+    private sealed class BootstrapRetryHelpeeHostTransport :
+        ISignalingTransport,
+        IAddressHostSignalingTransport,
+        IHostReadySignalingTransport,
+        IBridgeBootstrapReadinessSignalingTransport,
+        ILocalPeerAddressSignalingTransport,
+        ISessionSecuritySignalingTransport
+    {
+        private readonly TaskCompletionSource<bool> hostReadyTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly bool failBeforeReady;
+        private readonly Action onHostCall;
+        private int bootstrapFailed;
+        private SessionSecurityState currentSessionSecurityState = SessionSecurityState.Empty;
+
+        public BootstrapRetryHelpeeHostTransport(string localPeerAddress, bool failBeforeReady, Action onHostCall)
+        {
+            LocalPeerAddress = localPeerAddress;
+            this.failBeforeReady = failBeforeReady;
+            this.onHostCall = onHostCall;
+        }
+
+        public string LocalPeerAddress { get; }
+        public event EventHandler<IncomingJoinRequestEventArgs>? IncomingJoinRequest;
+        public event EventHandler<TransportSessionKeyReadyEventArgs>? SessionKeyReady;
+        public event EventHandler<TransportChatMessageEventArgs>? ChatMessageReceived;
+        public event EventHandler? Approved;
+        public event EventHandler? Rejected;
+        public event EventHandler? Disconnected;
+        public event EventHandler<TransportSessionSecurityStateChangedEventArgs>? SessionSecurityStateChanged;
+        public SessionSecurityState CurrentSessionSecurityState => currentSessionSecurityState;
+
+        public Task HostByAddressAsync(CancellationToken ct)
+        {
+            onHostCall();
+            if (failBeforeReady)
+            {
+                Volatile.Write(ref bootstrapFailed, 1);
+                NknRuntimeDiagnostics.SetLastError(
+                    "nkn_bridge_bootstrap_not_ready: role=helpee; reason=bridge_transport_connect_failed_before_ready");
+                throw new InvalidOperationException(
+                    "nkn_bridge_bootstrap_not_ready: role=helpee; reason=bridge_transport_connect_failed_before_ready");
+            }
+
+            currentSessionSecurityState = SessionSecurityState.CreateHelpeeWaiting(new PeerAddress(LocalPeerAddress));
+            SessionSecurityStateChanged?.Invoke(this, new TransportSessionSecurityStateChangedEventArgs(currentSessionSecurityState));
+            hostReadyTcs.TrySetResult(true);
+            return Task.Delay(Timeout.Infinite, ct);
+        }
+
+        public Task WaitUntilHostReadyAsync(CancellationToken ct) => hostReadyTcs.Task.WaitAsync(ct);
+
+        public BridgeBootstrapReadinessSnapshot GetBridgeBootstrapReadinessSnapshot()
+            => Volatile.Read(ref bootstrapFailed) == 0
+                ? new(
+                    Role: "helpee_test_host",
+                    Generation: 1,
+                    RunId: LocalPeerAddress,
+                    ReadyEmitted: !failBeforeReady,
+                    ControlReady: !failBeforeReady,
+                    MediaReady: !failBeforeReady,
+                    BulkReady: !failBeforeReady,
+                    LastReadyUtcMs: failBeforeReady ? 0 : 1,
+                    DeadlineUtcMs: 0,
+                    TerminalFailure: false,
+                    FailureReason: "(none)",
+                    LastError: "(none)")
+                : new(
+                    Role: "helpee_test_host",
+                    Generation: 1,
+                    RunId: LocalPeerAddress,
+                    ReadyEmitted: false,
+                    ControlReady: false,
+                    MediaReady: false,
+                    BulkReady: false,
+                    LastReadyUtcMs: 0,
+                    DeadlineUtcMs: 0,
+                    TerminalFailure: true,
+                    FailureReason: "bridge_transport_connect_failed_before_ready",
+                    LastError: "connect EACCES");
+
+        public Task SendChatMessageAsync(ReadOnlyMemory<byte> payload, CancellationToken ct) => Task.CompletedTask;
+
+        public void Dispose()
+        {
+        }
     }
 
     private sealed class NeverReadyHelpeeHostTransport :

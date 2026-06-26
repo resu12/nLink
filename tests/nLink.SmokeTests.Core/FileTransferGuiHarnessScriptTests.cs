@@ -98,6 +98,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var identityRetryEnd = scriptText.IndexOf("function Wait-HelpeeConnectionEntryMode", identityRetryStart, StringComparison.Ordinal);
         Assert.True(identityRetryEnd > identityRetryStart, "Expected to locate the end of the helper identity retry classifier.");
         var identityRetryBody = scriptText[identityRetryStart..identityRetryEnd];
+        Assert.Contains("Timed out waiting for helpee Allow approval UI", identityRetryBody, StringComparison.Ordinal);
         Assert.DoesNotContain("nkn_bridge_bootstrap_not_ready", identityRetryBody, StringComparison.Ordinal);
         Assert.DoesNotContain("HostByAddressAsync failed", identityRetryBody, StringComparison.Ordinal);
         Assert.DoesNotContain("Could not prepare invite", identityRetryBody, StringComparison.Ordinal);
@@ -293,6 +294,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("regular_activation_cycle_off_after_live_tuna_epoch", guiText, StringComparison.Ordinal);
         Assert.Contains("file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", guiText, StringComparison.Ordinal);
         Assert.Contains("regular-to-Tuna and fallback/reactivation strict live-route epoch cycling", guiText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer_tuna_gui_post_transfer_connected_header_wait_skipped", guiText, StringComparison.Ordinal);
+        Assert.Contains("$skipPostTransferConnectedHeaderWait", guiText, StringComparison.Ordinal);
+        Assert.Contains("terminal_fallback_outcome", guiText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -490,6 +494,22 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("$flatStringNeedleSet = $true", functionBody, StringComparison.Ordinal);
         Assert.Contains("$normalizedNeedleSets = @(, $normalizedNeedleSets)", functionBody, StringComparison.Ordinal);
         Assert.Contains("foreach ($needleSet in $normalizedNeedleSets)", functionBody, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GuiSmokeWindows_LiveTunaReactivationServicesLateWalletPrompt()
+    {
+        var repoRoot = FindRepoRoot();
+        var scriptText = File.ReadAllText(Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1"));
+        var unlockFunctionBody = ExtractPowerShellFunctionBody(scriptText, "Unlock-TunaFromSessionHeader", "Get-TunaGuiPayerRole");
+        var liveCycleFunctionBody = ExtractPowerShellFunctionBody(scriptText, "Invoke-FileTransferTunaHandoffFallbackCycle", "Wait-FileTransferTerminalOrProgressBeforeAction");
+
+        Assert.Contains("unlock_entry_existing_prompt", unlockFunctionBody, StringComparison.Ordinal);
+        Assert.Contains("runtime_evidence_late_wallet_prompt", unlockFunctionBody, StringComparison.Ordinal);
+        Assert.Contains("Submit-TunaWalletPasswordDialogsForPayersIfPresent", scriptText, StringComparison.Ordinal);
+        Assert.Contains("prearmed_on_step_", liveCycleFunctionBody, StringComparison.Ordinal);
+        Assert.Contains("activation_route_wait_step_", liveCycleFunctionBody, StringComparison.Ordinal);
+        Assert.Contains("-OnPoll $serviceWalletPrompts", liveCycleFunctionBody, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -143,6 +143,8 @@ internal interface INknTunaListenerSidecarSupervisor : IDisposable
     Task<NknTunaListenerSidecarEndpoint?> EnsureStartedAsync(NknTunaListenerStartRequest request, CancellationToken ct);
 
     void Stop(string reason);
+
+    event EventHandler<AccelerationStateChangedEventArgs>? StateChanged;
 }
 
 internal sealed record NknAccelerationLocalEndpoint(

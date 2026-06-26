@@ -77,6 +77,8 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         this.options = options ?? throw new ArgumentNullException(nameof(options));
     }
 
+    public event EventHandler<AccelerationStateChangedEventArgs>? StateChanged;
+
     public bool CanOfferListener
     {
         get
@@ -400,7 +402,14 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
             }
 
             var safeEvent = SanitizeLogToken(eventName);
-            LocalOperationalLog.Info("NKN.Tuna", $"event=tuna_listener_sidecar_event; sidecar_event={safeEvent}; line_len={line.Length}");
+            var sidecarReason = TryGetString(root, "terminalReason") ??
+                                TryGetString(root, "reason") ??
+                                TryGetString(root, "error") ??
+                                string.Empty;
+            var safeReason = SanitizeLogToken(sidecarReason);
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=tuna_listener_sidecar_event; sidecar_event={safeEvent}; sidecar_reason={safeReason}; line_len={line.Length}");
             RecordProviderPathDiagnosticEvent(eventName, root);
             var stageStatus = RuntimeStatusForSidecarEvent(eventName, root);
             if (!string.IsNullOrWhiteSpace(stageStatus))
@@ -455,10 +464,19 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
                     var terminalReason = TryGetString(root, "terminalReason") ?? TryGetString(root, "reason") ?? "unknown";
                     LogBridgeTerminal(root);
                     SetStatus("terminal_" + SanitizeLogToken(terminalReason));
+                    RaiseStateUnavailable("listener_terminal_" + terminalReason);
+                    break;
+                case "tuna_stream_rejected":
+                    var rejectReason = string.IsNullOrWhiteSpace(sidecarReason)
+                        ? "tuna_stream_rejected"
+                        : sidecarReason;
+                    SetStatus("stream_rejected_" + SanitizeLogToken(rejectReason));
+                    RaiseStateUnavailable("listener_stream_rejected_" + rejectReason);
                     break;
                 case "error":
                     SetLastStartFailureReason(TryGetString(root, "reason") ?? "sidecar_error");
                     SetStatus("sidecar_error");
+                    RaiseStateUnavailable("listener_sidecar_error");
                     break;
             }
         }
@@ -719,6 +737,22 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         catch
         {
             // Diagnostics-only status updates must never affect transport flow.
+        }
+    }
+
+    private void RaiseStateUnavailable(string reason)
+    {
+        try
+        {
+            StateChanged?.Invoke(
+                this,
+                new AccelerationStateChangedEventArgs(
+                    isAvailable: false,
+                    SanitizeLogToken(reason)));
+        }
+        catch
+        {
+            // Diagnostics-only state updates must never affect listener flow.
         }
     }
 

@@ -25,6 +25,7 @@ public static class FileTransferProtocol
     public const string TransportProbeFrameTypeV6 = "filetransfer.transport_probe.v6";
     public const string RuntimeUnlockPreCommitProbeFrameType = "filetransfer.runtime_unlock.precommit_probe";
     public const string RuntimeUnlockPreCommitProbeAckFrameType = "filetransfer.runtime_unlock.precommit_probe_ack";
+    public const string FallbackTailYieldFrameTypeV6 = "filetransfer.fallback_tail.yield.v6";
     public const string FrontierRequestFrameTypeV6 = "filetransfer.frontier_request.v6";
     public const string RepairProofFrameTypeV6 = "filetransfer.repair_proof.v6";
     public const string SessionCompleteFrameTypeV6 = "filetransfer.complete.v6";
@@ -76,6 +77,7 @@ public static class FileTransferProtocol
             or FileTransferTransportProbeFrameV6
             or FileTransferRuntimeUnlockPreCommitProbeFrame
             or FileTransferRuntimeUnlockPreCommitProbeAckFrame
+            or FileTransferFallbackTailYieldFrameV6
             or FileTransferFrontierRequestFrameV6
             or FileTransferRepairProofFrameV6
             or FileTransferCompleteFrameV6
@@ -92,6 +94,7 @@ public static class FileTransferProtocol
             or TransportProbeFrameTypeV6
             or RuntimeUnlockPreCommitProbeFrameType
             or RuntimeUnlockPreCommitProbeAckFrameType
+            or FallbackTailYieldFrameTypeV6
             or FrontierRequestFrameTypeV6
             or RepairProofFrameTypeV6
             or SessionCompleteFrameTypeV6

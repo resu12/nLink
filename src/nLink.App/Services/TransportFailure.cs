@@ -140,6 +140,18 @@ public static class TransportFailureMapper
                 isTransient: true);
         }
 
+        if (normalized.Contains("nkn_bridge_bootstrap_not_ready", StringComparison.Ordinal) ||
+            normalized.Contains("bridge_transport_connect_failed_before_ready", StringComparison.Ordinal) ||
+            normalized.Contains("bridge_bootstrap_diagnostics_failure", StringComparison.Ordinal))
+        {
+            return TransportFailure.Create(
+                TransportFailureCategory.BridgeStartFailure,
+                "Could not start the connection system",
+                exceptionType,
+                raw,
+                isTransient: false);
+        }
+
         if (normalized.Contains("bridge_connect_ready_timeout", StringComparison.Ordinal) ||
             normalized.Contains("connecttonodetimeouterror", StringComparison.Ordinal) ||
             normalized.Contains("rpctimeouterror", StringComparison.Ordinal) ||

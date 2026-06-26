@@ -566,6 +566,7 @@ public sealed partial class NknSignalingTransport
             FileTransferControlPlaneKind.TransferCancel => "transfer_cancel",
             FileTransferControlPlaneKind.SessionEnd => "session_end",
             FileTransferControlPlaneKind.LivenessProof => "liveness_proof",
+            FileTransferControlPlaneKind.FallbackTailYield => "fallback_tail_yield",
             _ => "unknown",
         };
 
@@ -1897,17 +1898,44 @@ public sealed partial class NknSignalingTransport
             normalizedProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
             runtimeUnlockAdmissionGranted)
         {
+            lock (accelerationGate)
+            {
+                ClearRuntimeUnlockPublishedRouteCommitUnsafe();
+            }
+
+            var fallbackYieldRetryKey = $"{normalizedTransferId}|{fallbackLegGeneration}";
             ConsumePostTunaFileFallbackRoute(
                 sessionId: null,
                 transferId: normalizedTransferId,
                 reason: string.IsNullOrWhiteSpace(runtimeUnlockAdmissionReason)
                     ? "fallback_tail_quiescent"
                     : runtimeUnlockAdmissionReason);
+            ScheduleRuntimeUnlockAfterPostTunaFallbackYield(
+                normalizedTransferId,
+                fallbackYieldRetryKey,
+                string.IsNullOrWhiteSpace(runtimeUnlockAdmissionReason)
+                    ? "fallback_tail_quiescent"
+                    : runtimeUnlockAdmissionReason);
+        }
+        else if (route == FileTransferRoute.PostTunaFallbackV6 &&
+                 normalizedProtocolVersion == FileTransferProtocol.ProtocolVersionV6)
+        {
+            lock (accelerationGate)
+            {
+                ClearRuntimeUnlockPublishedRouteCommitUnsafe();
+            }
+
+            NotifyTransportAccelerationStateChanged("post_tuna_fallback_route_active");
         }
 
         if (route != FileTransferRoute.PostTunaFallbackV6 ||
             normalizedProtocolVersion != FileTransferProtocol.ProtocolVersionV6)
         {
+            lock (gate)
+            {
+                fileTransferPostTunaFallbackYieldRuntimeUnlockRetries.RemoveWhere(
+                    key => key.StartsWith(normalizedTransferId + "|", StringComparison.Ordinal));
+            }
             MarkFileTransferFallbackLegAuthoritySupersededByRouteHint(
                 normalizedTransferId,
                 selection.TelemetryToken,
@@ -2035,7 +2063,8 @@ public sealed partial class NknSignalingTransport
             }
         }
 
-        if (currentRouteHint?.Route is FileTransferRoute.FileTunaV4 or FileTransferRoute.PostTunaFallbackV6)
+        if (!currentRouteHint.HasValue ||
+            currentRouteHint.Value.Route is FileTransferRoute.FileTunaV4 or FileTransferRoute.PostTunaFallbackV6)
         {
             return false;
         }

@@ -8003,6 +8003,14 @@ public sealed partial class SessionRuntime
             return false;
         }
 
+        if (failure.Category == TransportFailureCategory.BridgeStartFailure &&
+            (failure.RawError.Contains("nkn_bridge_bootstrap_not_ready", StringComparison.OrdinalIgnoreCase) ||
+             failure.RawError.Contains("bridge_transport_connect_failed_before_ready", StringComparison.OrdinalIgnoreCase)) &&
+            connectAttempt < MaxQuietHelpeeRehostConnectAttempt)
+        {
+            return true;
+        }
+
         return failure.IsTransient || failure.Category is
             TransportFailureCategory.BridgeUnresponsive or
             TransportFailureCategory.UnexpectedProcessExit or

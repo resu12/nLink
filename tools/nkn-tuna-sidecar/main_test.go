@@ -71,6 +71,15 @@ func TestVersionModeEmitsCompatibilityMetadataWithoutNetworkOrWallet(t *testing.
 	}
 }
 
+func TestStreamHelloTimeoutCoversRuntimeUnlockProbePath(t *testing.T) {
+	if streamHelloTimeout < 30*time.Second {
+		t.Fatalf("streamHelloTimeout = %s, want at least 30s for runtime-unlock first-byte delay", streamHelloTimeout)
+	}
+	if streamHelloTimeout >= 120*time.Second {
+		t.Fatalf("streamHelloTimeout = %s, want below app listener accept timeout", streamHelloTimeout)
+	}
+}
+
 func TestBridgeLaneSequenceSummaries(t *testing.T) {
 	stats := map[byte]*bridgeLaneSequenceStats{}
 	media := bridgeLaneStatsFor(stats, 1)

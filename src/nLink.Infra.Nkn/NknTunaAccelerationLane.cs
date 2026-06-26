@@ -31,6 +31,10 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
     {
         this.options = options ?? throw new ArgumentNullException(nameof(options));
         this.listenerSupervisor = listenerSupervisor;
+        if (this.listenerSupervisor is not null)
+        {
+            this.listenerSupervisor.StateChanged += OnListenerSupervisorStateChanged;
+        }
     }
 
     public bool IsAvailable
@@ -488,7 +492,11 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
         }
 
         clientToDispose?.Dispose();
-        listenerSupervisor?.Dispose();
+        if (listenerSupervisor is not null)
+        {
+            listenerSupervisor.StateChanged -= OnListenerSupervisorStateChanged;
+            listenerSupervisor.Dispose();
+        }
         if (processToStop is not null)
         {
             processToStop.Stop("disposed");
@@ -536,6 +544,9 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
         processToStop?.Stop(string.IsNullOrWhiteSpace(e.Reason) ? "client_unavailable" : e.Reason);
         StateChanged?.Invoke(this, e);
     }
+
+    private void OnListenerSupervisorStateChanged(object? sender, AccelerationStateChangedEventArgs e)
+        => StateChanged?.Invoke(this, e);
 
     private void ForwardCurrentClientReadyIfAvailable(NknTunaSidecarClient expectedClient, string reason)
     {

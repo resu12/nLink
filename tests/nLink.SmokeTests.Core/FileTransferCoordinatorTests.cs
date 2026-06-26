@@ -173,7 +173,7 @@ public sealed class FileTransferCoordinatorTests
 
         Assert.Equal(FileTransferLegState.Active, leg.State);
         Assert.True(leg.CanSendData);
-        Assert.True(FileTransferCoordinator.CanAdmitRuntimeUnlockWhilePostTunaFallback(
+        Assert.False(FileTransferCoordinator.CanAdmitRuntimeUnlockWhilePostTunaFallback(
             routeUsesPostTunaFallbackRuntime: true,
             leg,
             checkpointDeliveryRecoveryPending: false,
@@ -181,7 +181,7 @@ public sealed class FileTransferCoordinatorTests
             deferredStateRefreshPending: false,
             proofReplayPending: false,
             out var rejectionReason));
-        Assert.Equal("fallback_quiescent", rejectionReason);
+        Assert.Equal("paired_fallback_tail_yield_missing", rejectionReason);
     }
 
     [Fact]
@@ -803,6 +803,41 @@ public sealed class FileTransferCoordinatorTests
 
         Assert.Equal(RuntimeUnlockAdmissionStatus.WaitingForFallbackOwner, blocked.Status);
         Assert.Equal("fallback_tail_repair_pending", blocked.Reason);
+
+        var missingPairedYield = FileTransferCoordinator.EvaluateRuntimeUnlockAdmission(
+            isTerminal: false,
+            runtimeOwnerCurrent: true,
+            routeUsesPostTunaFallbackRuntime: true,
+            state.CurrentLeg,
+            checkpointDeliveryRecoveryPending: false,
+            stateRefreshSendInFlight: false,
+            deferredStateRefreshPending: false,
+            proofReplayPending: false,
+            bridgeRecoveryPending: false,
+            controlPlanePressurePending: false,
+            fallbackTailRepairPending: false,
+            transactionFailed: false);
+
+        Assert.Equal(RuntimeUnlockAdmissionStatus.WaitingForFallbackOwner, missingPairedYield.Status);
+        Assert.Equal("paired_fallback_tail_yield_missing", missingPairedYield.Reason);
+
+        var pairedYield = FileTransferCoordinator.EvaluateRuntimeUnlockAdmission(
+            isTerminal: false,
+            runtimeOwnerCurrent: true,
+            routeUsesPostTunaFallbackRuntime: true,
+            state.CurrentLeg,
+            checkpointDeliveryRecoveryPending: false,
+            stateRefreshSendInFlight: false,
+            deferredStateRefreshPending: false,
+            proofReplayPending: false,
+            bridgeRecoveryPending: false,
+            controlPlanePressurePending: false,
+            fallbackTailRepairPending: false,
+            transactionFailed: false,
+            pairedFallbackYieldGranted: true);
+
+        Assert.Equal(RuntimeUnlockAdmissionStatus.Granted, pairedYield.Status);
+        Assert.Equal("fallback_quiescent", pairedYield.Reason);
 
         var terminal = FileTransferCoordinator.EvaluateRuntimeUnlockAdmission(
             isTerminal: true,

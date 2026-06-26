@@ -352,11 +352,26 @@ function Get-FileTransferRouteExpectedRuntimeProfile {
 
     switch ($Route) {
         'regular_nkn_v4_fast' { return 'regular_nkn_v4_fast' }
-        'file_tuna_v4' { return 'file_tuna_v4_fast' }
+        'file_tuna_v4' { return 'file_tuna_v4' }
         'post_tuna_fallback_v6' { return 'default_v6' }
         'diagnostic_regular_nkn_v6' { return 'primary_regular_nkn_bulk_v6' }
         default { return '' }
     }
+}
+
+function Test-FileTransferRouteRuntimeProfileMatches {
+    param(
+        [string]$Expected,
+        [string]$Actual
+    )
+
+    if ([string]::Equals($Expected, $Actual, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+
+    $fileTunaRuntimeAliases = @('file_tuna_v4', 'file_tuna_v4_fast')
+    return $fileTunaRuntimeAliases -contains $Expected -and
+           $fileTunaRuntimeAliases -contains $Actual
 }
 
 function Get-FileTransferRouteExpectedBridgePolicy {
@@ -797,7 +812,9 @@ function Add-FileTransferRouteSelfConsistencyFindings {
 
     $expectedRuntimeProfile = Get-FileTransferRouteExpectedRuntimeProfile -Route $eventRoute
     $eventRuntimeProfile = Normalize-FileTransferRouteRuntimeProfile -Value (Get-FileTransferEventField -Event $Event -Name 'runtime_profile' -Default '')
-    if (-not [string]::IsNullOrWhiteSpace($eventRuntimeProfile) -and -not [string]::IsNullOrWhiteSpace($expectedRuntimeProfile) -and $eventRuntimeProfile -ne $expectedRuntimeProfile) {
+    if (-not [string]::IsNullOrWhiteSpace($eventRuntimeProfile) -and
+        -not [string]::IsNullOrWhiteSpace($expectedRuntimeProfile) -and
+        -not (Test-FileTransferRouteRuntimeProfileMatches -Expected $expectedRuntimeProfile -Actual $eventRuntimeProfile)) {
         Add-FileTransferRouteConsistencyFinding -Findings $Findings -EvidenceEvents $EvidenceEvents -Finding ("{0} route runtime mismatch: route={1}; expected_runtime={2}; actual_runtime={3}; event={4}" -f $Context, $eventRoute, $expectedRuntimeProfile, $eventRuntimeProfile, (Format-FileTransferEvidenceLine -Event $Event)) -Event $Event
     }
 
@@ -854,7 +871,8 @@ function Get-FileTransferRouteConsistency {
 
         $runtimeProfile = Normalize-FileTransferRouteRuntimeProfile -Value (Get-FileTransferEventField -Event $selected -Name 'runtime_profile' -Default '')
         $expectedRuntimeProfile = Get-FileTransferRouteExpectedRuntimeProfile -Route $route
-        if (-not [string]::IsNullOrWhiteSpace($runtimeProfile) -and $runtimeProfile -ne $expectedRuntimeProfile) {
+        if (-not [string]::IsNullOrWhiteSpace($runtimeProfile) -and
+            -not (Test-FileTransferRouteRuntimeProfileMatches -Expected $expectedRuntimeProfile -Actual $runtimeProfile)) {
             Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding ("route selected runtime mismatch: route={0}; expected_runtime={1}; actual_runtime={2}; event={3}" -f $route, $expectedRuntimeProfile, $runtimeProfile, (Format-FileTransferEvidenceLine -Event $selected)) -Event $selected
         }
 
@@ -937,7 +955,9 @@ function Get-FileTransferRouteConsistency {
         }
 
         $eventRuntimeProfile = Normalize-FileTransferRouteRuntimeProfile -Value (Get-FileTransferEventField -Event $event -Name 'runtime_profile' -Default '')
-        if (-not [string]::IsNullOrWhiteSpace($eventRuntimeProfile) -and -not [string]::IsNullOrWhiteSpace($expectedRuntimeProfile) -and $eventRuntimeProfile -ne $expectedRuntimeProfile) {
+        if (-not [string]::IsNullOrWhiteSpace($eventRuntimeProfile) -and
+            -not [string]::IsNullOrWhiteSpace($expectedRuntimeProfile) -and
+            -not (Test-FileTransferRouteRuntimeProfileMatches -Expected $expectedRuntimeProfile -Actual $eventRuntimeProfile)) {
             Add-FileTransferRouteConsistencyFinding -Findings $findings -EvidenceEvents $evidenceEvents -Finding ("route runtime mismatch: route={0}; expected_runtime={1}; actual_runtime={2}; event={3}" -f $selectedRoute, $expectedRuntimeProfile, $eventRuntimeProfile, (Format-FileTransferEvidenceLine -Event $event)) -Event $event
         }
 
@@ -1287,6 +1307,39 @@ function Get-FileTransferLiveRouteEpochProof {
         $terminalFallbackBeforeReactivation = @(
             Get-FileTransferEventsByName -Events $TransferEvents -Names @('filetransfer_tuna_gui_live_reactivation_first_transfer_terminal_before_activation')
         ).Count -gt 0
+        if (-not $terminalFallbackBeforeReactivation) {
+            $actualRouteChangesForTerminalFallback = @($routeChanges.ToArray())
+            $fallbackTerminalEvents = @(
+                Get-FileTransferEventsByName -Events $TransferEvents -Names @('transfer_terminal') |
+                    Where-Object {
+                        $route = Get-FileTransferEventField -Event $_ -Name 'route' -Default ''
+                        if (-not [string]::Equals($route, 'post_tuna_fallback_v6', [System.StringComparison]::OrdinalIgnoreCase)) {
+                            return $false
+                        }
+
+                        $errorCode = Get-FileTransferEventField -Event $_ -Name 'error_code' -Default '(none)'
+                        if (-not ([string]::IsNullOrWhiteSpace($errorCode) -or
+                                  [string]::Equals($errorCode, '(none)', [System.StringComparison]::OrdinalIgnoreCase))) {
+                            return $false
+                        }
+
+                        $bytesTransferred = Get-FileTransferEventInt64Field -Event $_ -Name 'bytes_transferred' -Default 0
+                        $fileSizeBytes = Get-FileTransferEventInt64Field -Event $_ -Name 'file_size_bytes' -Default 0
+                        $chunksTransferred = Get-FileTransferEventInt64Field -Event $_ -Name 'chunks_transferred' -Default 0
+                        $chunkCount = Get-FileTransferEventInt64Field -Event $_ -Name 'chunk_count' -Default 0
+                        ($fileSizeBytes -gt 0 -and $bytesTransferred -ge $fileSizeBytes) -or
+                            ($chunkCount -gt 0 -and $chunksTransferred -ge $chunkCount)
+                    }
+            )
+            if (($actualRouteChangesForTerminalFallback -join ',') -eq 'file_tuna_v4,post_tuna_fallback_v6' -and
+                $fallbackTerminalEvents.Count -gt 0) {
+                $terminalFallbackBeforeReactivation = $true
+                foreach ($terminalEvent in @($fallbackTerminalEvents | Select-Object -First 2)) {
+                    $evidence.Add($terminalEvent) | Out-Null
+                }
+            }
+        }
+
         if ($terminalFallbackBeforeReactivation) {
             $expectedRoutes = @('file_tuna_v4', 'post_tuna_fallback_v6')
             $expectedSelectedRouteChanges = @('regular_nkn_v4_fast', 'file_tuna_v4', 'post_tuna_fallback_v6')

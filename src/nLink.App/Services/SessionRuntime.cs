@@ -199,6 +199,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
         RemoteControlModifiersMask.Meta |
         RemoteControlModifiersMask.Win;
     private const int RemoteControlInjectionQueueCapacity = 256;
+    private const long MaxQuietHelpeeRehostConnectAttempt = 3;
     private const long RemoteControlConsentTokenTtlMs = 60_000;
     private const long RemoteControlAckMouseMoveMinSeqDelta = 8;
     private const string RemoteControlScreenChangedStatusTextHelper = "Screen changed";
@@ -801,6 +802,56 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
         lastBridgeBootstrapReadinessSnapshot = snapshot;
         return snapshot;
     }
+
+    private async Task WaitUntilHostReadyOrBridgeBootstrapFailureAsync(
+        ISignalingTransport currentTransport,
+        IHostReadySignalingTransport hostReadyTransport,
+        CancellationToken ct)
+    {
+        var readyTask = hostReadyTransport.WaitUntilHostReadyAsync(ct);
+
+        while (true)
+        {
+            if (readyTask.IsCompleted)
+            {
+                await readyTask.ConfigureAwait(false);
+                return;
+            }
+
+            var snapshot = CaptureBridgeBootstrapReadinessSnapshot(currentTransport);
+            if (snapshot is BridgeBootstrapReadinessSnapshot readySnapshot &&
+                !readySnapshot.ReadyEmitted &&
+                readySnapshot.TerminalFailure)
+            {
+                var reason = string.IsNullOrWhiteSpace(readySnapshot.FailureReason)
+                    ? "bridge_bootstrap_not_ready"
+                    : readySnapshot.FailureReason;
+                var lastError = string.IsNullOrWhiteSpace(readySnapshot.LastError)
+                    ? "(none)"
+                    : readySnapshot.LastError;
+                var message =
+                    $"nkn_bridge_bootstrap_not_ready: role={readySnapshot.Role}; generation={readySnapshot.Generation}; " +
+                    $"reason={reason}; ready_emitted=0; control_ready={(readySnapshot.ControlReady ? 1 : 0)}; " +
+                    $"media_ready={(readySnapshot.MediaReady ? 1 : 0)}; bulk_ready={(readySnapshot.BulkReady ? 1 : 0)}; last_error={lastError}";
+                NknRuntimeDiagnostics.SetLastError(message);
+                LocalOperationalLog.Warn(
+                    "Session",
+                    $"event=nkn_bridge_bootstrap_not_ready; subreason=host_ready_wait_bridge_bootstrap_failure; {message}");
+                throw new InvalidOperationException(message);
+            }
+
+            var delayTask = Task.Delay(TimeSpan.FromMilliseconds(250), ct);
+            var completed = await Task.WhenAny(readyTask, delayTask).ConfigureAwait(false);
+            if (ReferenceEquals(completed, readyTask))
+            {
+                await readyTask.ConfigureAwait(false);
+                return;
+            }
+
+            await delayTask.ConfigureAwait(false);
+        }
+    }
+
 
     public bool IsTransportAccelerationActive => transportAccelerationActive;
     public string TransportAccelerationStatusReason => transportAccelerationStatusReason;
@@ -1862,7 +1913,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
                 _ = RunHostAsync(nextTransport, linkedCts.Token);
                 if (nextTransport is IHostReadySignalingTransport hostReadyTransport)
                 {
-                    await hostReadyTransport.WaitUntilHostReadyAsync(linkedCts.Token).ConfigureAwait(false);
+                    await WaitUntilHostReadyOrBridgeBootstrapFailureAsync(nextTransport, hostReadyTransport, linkedCts.Token).ConfigureAwait(false);
                 }
 
                 hostReady = true;

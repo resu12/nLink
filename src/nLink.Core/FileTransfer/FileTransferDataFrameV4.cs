@@ -272,6 +272,42 @@ public record FileTransferRuntimeUnlockPreCommitProbeAckFrame : FileTransferRunt
     public string? Reason { get; init; }
 }
 
+public record FileTransferFallbackTailYieldFrameV6 : FileTransferDataFrame, IFileTransferTransportMetadataFrame
+{
+    public FileTransferFallbackTailYieldFrameV6()
+    {
+        Type = FileTransferProtocol.FallbackTailYieldFrameTypeV6;
+    }
+
+    public long TransportEpoch { get; init; }
+
+    public string? BatchId { get; init; }
+
+    public string? RepairRequestId { get; init; }
+
+    public string? Priority { get; init; }
+
+    public string? RecoveryMode { get; init; }
+
+    public string OwnerKey { get; init; } = string.Empty;
+
+    public string Direction { get; init; } = string.Empty;
+
+    public long YieldGeneration { get; init; }
+
+    public int LiveRouteEpoch { get; init; }
+
+    public int FallbackLegGeneration { get; init; }
+
+    public int BridgeRecoveryGeneration { get; init; }
+
+    public int CommittedChunkIndex { get; init; }
+
+    public int HighestObservedChunkIndex { get; init; }
+
+    public long SentUnixTimeMilliseconds { get; init; }
+}
+
 public record FileTransferFrontierRequestFrameV6 : FileTransferDataFrame
 {
     public FileTransferFrontierRequestFrameV6()

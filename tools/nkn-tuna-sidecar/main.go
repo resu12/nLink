@@ -58,10 +58,14 @@ const (
 	frameTypePong         byte   = 4
 	frameTypeClose        byte   = 5
 
-	bridgeTraceFirstFrames    = 16
-	bridgeTraceEveryFrames    = 128
-	bridgeSeqGapWarnMissing   = 16
-	streamHelloTimeout        = 10 * time.Second
+	bridgeTraceFirstFrames  = 16
+	bridgeTraceEveryFrames  = 128
+	bridgeSeqGapWarnMissing = 16
+	// Tuna may report the stream connected before the first framed bytes are
+	// readable on the listener side. Keep this below the app's listener accept
+	// timeout, but long enough that runtime-unlock precommit probes do not lose
+	// a valid path to transient first-byte delay.
+	streamHelloTimeout        = 30 * time.Second
 	providerWatchInterval     = 5 * time.Second
 	providerReadyPollInterval = 500 * time.Millisecond
 	bridgeIdleGapThreshold    = 2 * time.Second
@@ -916,13 +920,14 @@ func acceptValidatedTunaConn(
 
 		if err := readSidecarHello(conn); err != nil {
 			emit.emit(event{
-				"event":      "tuna_stream_rejected",
-				"role":       role,
-				"attempt":    attempts,
-				"durationMs": time.Since(attemptStarted).Milliseconds(),
-				"reason":     safeReason(err),
-				"localAddr":  connAddrDiagnostics(conn.LocalAddr()),
-				"remoteAddr": connAddrDiagnostics(conn.RemoteAddr()),
+				"event":          "tuna_stream_rejected",
+				"role":           role,
+				"attempt":        attempts,
+				"durationMs":     time.Since(attemptStarted).Milliseconds(),
+				"helloTimeoutMs": streamHelloTimeout.Milliseconds(),
+				"reason":         safeReason(err),
+				"localAddr":      connAddrDiagnostics(conn.LocalAddr()),
+				"remoteAddr":     connAddrDiagnostics(conn.RemoteAddr()),
 			})
 			_ = conn.Close()
 			continue

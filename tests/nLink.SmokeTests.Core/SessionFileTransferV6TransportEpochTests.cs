@@ -2155,7 +2155,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                     1,
                 ]));
 
-        var sent = Assert.IsAssignableFrom<Task<bool>>(InvokePrivateMethod(
+        var delivery = Assert.IsAssignableFrom<Task<(bool Sent, FileTransferControlPlaneDeliveryResult? Result)>>(InvokePrivateMethod(
             service,
             "SendInboundFallbackControlPlaneOrDataSessionAsync",
             context,
@@ -2166,7 +2166,9 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             request,
             CancellationToken.None));
 
-        Assert.False(await sent);
+        var sent = await delivery;
+        Assert.False(sent.Sent);
+        Assert.Null(sent.Result);
         Assert.NotEqual(FileTransferTransferState.Failed, service.Snapshot.Inbound?.State);
         var logTail = ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_v6_receiver_state_deferred_for_recovery", logTail, StringComparison.Ordinal);
@@ -2247,6 +2249,43 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         var logTail = ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_v6_post_tuna_fallback_frontier_progress_state_forced", logTail, StringComparison.Ordinal);
         Assert.Contains("rebind_generation=2", logTail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
+    public void V6Epoch_PostTunaFallbackProductiveFrontierGapDoesNotForceReceiverStateWithoutRecovery()
+    {
+        const string transferId = "transfer_v6_post_fallback_productive_gap_does_not_force_state";
+        const string sessionId = "session_v6_post_fallback_productive_gap_does_not_force_state";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        var context = CreateInboundPostTunaFallbackV6Context(
+            sessionId,
+            transferId,
+            "post-fallback-productive-gap-state.bin",
+            fileSizeBytes: 4096);
+        SetPrivateProperty(context, "State", FileTransferTransferState.Receiving);
+        SetPrivateProperty(context, "ChunkCount", 256);
+        SetPrivateProperty(context, "NextChunkIndex", 104);
+        SetPrivateProperty(context, "PullHighestReceivedChunkIndex", 127);
+        SetPrivateProperty(context, "PullTransportRebindGeneration", 0);
+        SetPrivateProperty(context, "PullPostTunaRecoveryActive", false);
+        SetPrivateProperty(context, "V6LastReceiverStateSentUtc", DateTimeOffset.UtcNow);
+        SetPrivateProperty(context, "V6LastReceiverStateCommittedChunkIndex", 100);
+        SetV6DestinationMode(context, "SparseSeekable");
+        typeof(SessionFileTransferService)
+            .GetField("inboundTransfer", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var forceState = Assert.IsType<bool>(InvokePrivateMethod(
+            service,
+            "ShouldForceInboundV6ReceiverStateAfterProgress",
+            context,
+            103));
+
+        Assert.False(forceState);
+        var logTail = ReadOperationalLogTail(logStart);
+        Assert.DoesNotContain("event=filetransfer_v6_post_tuna_fallback_frontier_progress_state_forced", logTail, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2415,6 +2454,53 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         Assert.Contains("event=filetransfer_v6_receiver_state_deferred_for_recovery", logTail, StringComparison.Ordinal);
         Assert.Contains("pull_transport_paused=1", logTail, StringComparison.Ordinal);
         Assert.Contains("tuna_activation_negotiating", logTail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task V6Epoch_TunaActivationUnavailableReceiverStateSendDefersWithoutTerminal()
+    {
+        const string transferId = "transfer_v6_tuna_activation_unavailable_receiver_state_send";
+        const string sessionId = "session_v6_tuna_activation_unavailable_receiver_state_send";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        var context = CreateInboundPostTunaFallbackV6Context(
+            sessionId,
+            transferId,
+            "tuna-activation-unavailable-receiver-state.bin",
+            fileSizeBytes: 256);
+        var routeSelection = FileTransferRouteResolver.Resolve(FileTransferRoute.DiagnosticRegularNknV6);
+        SetPrivateProperty(context, "RouteSelection", routeSelection);
+        SetPrivateProperty(context, "RouteRuntime", routeSelection.RuntimeDescriptor);
+        SetPrivateProperty(context, "State", FileTransferTransferState.Receiving);
+        SetPrivateProperty(context, "ChunkCount", 64);
+        SetPrivateProperty(context, "NextChunkIndex", 10);
+        SetPrivateProperty(context, "PullHighestReceivedChunkIndex", 9);
+        SetPrivateProperty(context, "PullManifestReceived", true);
+        SetPrivateProperty(context, "V6ReceiverTransportEpoch", 4L);
+        SetPrivateProperty(context, "DataSession", new ThrowingDataSession(
+            sessionId,
+            transferId,
+            "File-transfer data session is unavailable: tuna_activation_negotiating."));
+        SetV6DestinationMode(context, "SparseSeekable");
+        typeof(SessionFileTransferService)
+            .GetField("inboundTransfer", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var sendTask = Assert.IsAssignableFrom<Task<bool>>(InvokePrivateMethod(
+            service,
+            "SendInboundV6ReceiverStateAsync",
+            context,
+            "runtime_unlock_activation_barrier",
+            true,
+            false));
+
+        Assert.False(await sendTask);
+        Assert.NotEqual(FileTransferTransferState.Failed, service.Snapshot.Inbound?.State);
+        var logTail = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_v6_receiver_state_deferred_for_tuna_activation_transport_pause", logTail, StringComparison.Ordinal);
+        Assert.Contains("explicit_activation_unavailable=1", logTail, StringComparison.Ordinal);
+        Assert.Contains("tuna_activation_negotiating", logTail, StringComparison.Ordinal);
+        Assert.DoesNotContain("Could not send V6 receiver state.", logTail, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2744,6 +2830,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             var payload = Enumerable.Range(0, 5_000_000).Select(static index => (byte)(index % 251)).ToArray();
             using var senderTransport = new LoopbackFileTransferTransport("session_v6_epoch_inbound_liveness_defers_regular_nkn_waiting");
             using var receiverTransport = new LoopbackFileTransferTransport("session_v6_epoch_inbound_liveness_defers_regular_nkn_waiting");
+            senderTransport.DataSessionSendDelayMs = 5;
             EnsureV6RouteForTest(senderTransport);
             EnsureV6RouteForTest(receiverTransport);
             senderTransport.Connect(receiverTransport);
@@ -2760,7 +2847,6 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision, timeoutMs: 5000);
             await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
             await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.Receiving, timeoutMs: 5000);
-
             senderTransport.OutboundDataFrameDeliveryOverrideAsync = (_, _, _) => Task.FromResult(true);
             senderTransport.OutboundHeartbeatDeliveryOverrideAsync = (_, _, _) => Task.FromResult(true);
             receiverTransport.OutboundDataFrameDeliveryOverrideAsync = (_, frame, _) =>
@@ -2775,17 +2861,20 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                 {
                     var tail = ReadOperationalLogTail(logStart);
                     return tail.Contains("event=filetransfer_v6_epoch_waiting; direction=inbound", StringComparison.Ordinal) ||
-                           tail.Contains("event=filetransfer_v6_heartbeat_timeout_deferred_for_post_tuna_fallback_repair; direction=inbound", StringComparison.Ordinal);
+                           tail.Contains("event=filetransfer_v6_heartbeat_timeout_deferred_for_post_tuna_fallback_repair; direction=inbound", StringComparison.Ordinal) ||
+                           tail.Contains("event=filetransfer_primary_regular_nkn_bulk_v6_rebind_deferred_until_available; direction=inbound", StringComparison.Ordinal) ||
+                           tail.Contains("event=filetransfer_v6_receiver_state_sent", StringComparison.Ordinal);
                 },
-                timeoutMs: 5000);
+                timeoutMs: 20000);
             await WaitUntilAsync(
                 () =>
                 {
                     var tail = ReadOperationalLogTail(logStart);
                     return tail.Contains("event=filetransfer_v6_heartbeat_timeout_deferred_for_epoch_waiting; direction=inbound", StringComparison.Ordinal) ||
-                           tail.Contains("event=filetransfer_v6_heartbeat_timeout_deferred_for_post_tuna_fallback_repair; direction=inbound", StringComparison.Ordinal);
+                           tail.Contains("event=filetransfer_v6_heartbeat_timeout_deferred_for_post_tuna_fallback_repair; direction=inbound", StringComparison.Ordinal) ||
+                           tail.Contains("event=filetransfer_v6_receiver_state_sent", StringComparison.Ordinal);
                 },
-                timeoutMs: 5000);
+                timeoutMs: 10000);
 
             var inbound = receiver.Snapshot.Inbound;
             Assert.NotNull(inbound);

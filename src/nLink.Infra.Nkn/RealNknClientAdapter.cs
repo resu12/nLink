@@ -14,6 +14,22 @@ using NLink.Core.ScreenShare;
 
 namespace NLink.Infra.Nkn;
 
+internal readonly record struct BridgeBootstrapHealthSnapshot(
+    bool HasHealth,
+    long HealthSummaryAgeMs,
+    bool ReadyEmitted,
+    bool ControlReady,
+    bool MediaReady,
+    bool BulkReady,
+    long DisconnectSignalCount,
+    long ConnectFailedCountSinceLast,
+    long WsErrorCountSinceLast,
+    long RpcFallbackAttemptCountSinceLast,
+    long UnreadyFailureSampleCount,
+    bool TerminalFailure,
+    string FailureReason,
+    string LastError);
+
 internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, IAuthoritativeConnectedAddressSource, IBridgeScreenShareQueueCapability
 {
     private const int MaxPayloadBytes = BridgeBinaryProtocol.MaxPayloadBytes;
@@ -21,6 +37,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private static readonly TimeSpan CommandAckTimeout = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan HelloTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan ConnectReadyTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan BridgeBootstrapHealthFreshWindow = TimeSpan.FromSeconds(12);
     private static readonly TimeSpan PingInterval = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan PingTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan ScreenShareBridgeLogInterval = TimeSpan.FromSeconds(2);
@@ -38,6 +55,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private const int ReceiveStallActiveFileTransferHardRestartMinAttempt = 2;
     private const int ReceiveStallRequiredConsecutiveWindows = 3;
     private const int ReceiveStallFastRequiredConsecutiveWindows = 2;
+    private const int BridgeBootstrapUnreadyFailureSampleThreshold = 3;
     private const int ReceiveStallFileTransferProtocolRepairGraceWindows = 6;
     private const int ReceiveStallFileTransferProtocolRepairGraceMaxAgeMs = 20_000;
     private const int ReceiveStallControlAgeThresholdMs = 8_000;
@@ -148,7 +166,12 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private long lastBridgeTransportHealthDisconnectSignalCount;
     private long lastBridgeTransportHealthReadyEmitted;
     private long lastBridgeTransportHealthControlReady;
+    private long lastBridgeTransportHealthMediaReady;
     private long lastBridgeTransportHealthBulkReady;
+    private long lastBridgeTransportHealthConnectFailedCount;
+    private long lastBridgeTransportHealthWsErrorCount;
+    private long lastBridgeTransportHealthRpcFallbackAttemptCount;
+    private long bridgeBootstrapUnreadyFailureSampleCount;
     private long lastBridgeSendFrameTick;
     private long lastBridgeSendFramePayloadBytes;
     private long lastBridgeSendFrameSerializedBytes;
@@ -736,6 +759,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         var nowTick = Stopwatch.GetTimestamp();
         var expiresTick = AddStopwatchDuration(nowTick, PostTunaFallbackControlPlanePressureTtl);
         var shouldLogMarked = false;
+        var shouldLogAuthorityRefresh = false;
         var authoritySource = string.Empty;
         var staleReason = string.Empty;
 
@@ -755,6 +779,14 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 (authority.CheckpointRequestId is null ||
                  normalizedCheckpointRequestId is null ||
                  string.Equals(authority.CheckpointRequestId, normalizedCheckpointRequestId, StringComparison.Ordinal));
+            var hasCurrentRuntime =
+                activePostTunaFallbackRuntimeTransfers.ContainsKey(normalizedTransferId) &&
+                Volatile.Read(ref activeFileTransferDataSessions) > 0;
+            var pressureAdvancesAuthority =
+                authorityMatchesSessionTransfer &&
+                hasCurrentRuntime &&
+                (legGeneration > authority.LegGeneration ||
+                 liveRouteEpoch > authority.LiveRouteEpoch);
             if (hasExactAuthority && !authority.Completed)
             {
                 authoritySource = "bridge_authority";
@@ -762,6 +794,24 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             else if (hasExactAuthority && authority.Completed)
             {
                 staleReason = "authority_completed";
+            }
+            else if (pressureAdvancesAuthority)
+            {
+                authoritySource = "bridge_authority_refreshed_from_pressure";
+                postTunaFallbackLegAuthority = new PostTunaFallbackLegAuthorityState
+                {
+                    SessionId = normalizedSessionId,
+                    TransferId = normalizedTransferId,
+                    LegGeneration = legGeneration,
+                    RouteToken = "post_tuna_fallback_v6",
+                    ProtocolVersion = protocolVersion,
+                    LiveRouteEpoch = liveRouteEpoch,
+                    TransportEpoch = transportEpoch,
+                    BridgeRecoveryGeneration = bridgeRecoveryGeneration,
+                    CheckpointRequestId = normalizedCheckpointRequestId,
+                    AuthorityReason = "control_plane_pressure_authority_refresh",
+                };
+                shouldLogAuthorityRefresh = true;
             }
             else
             {
@@ -800,6 +850,13 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 };
                 shouldLogMarked = true;
             }
+        }
+
+        if (shouldLogAuthorityRefresh)
+        {
+            Log(
+                "event=filetransfer_fallback_leg_authority_bridge_registered; " +
+                $"session_id={SanitizeLogToken(normalizedSessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; leg_generation={legGeneration}; route=post_tuna_fallback_v6; protocol_version={protocolVersion}; live_route_epoch={liveRouteEpoch}; transport_epoch={transportEpoch}; bridge_recovery_generation={bridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(normalizedCheckpointRequestId ?? "none")}; authority_reason=control_plane_pressure_authority_refresh");
         }
 
         if (!string.IsNullOrEmpty(staleReason))
@@ -2087,6 +2144,60 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         return false;
     }
 
+    internal BridgeBootstrapHealthSnapshot GetBridgeBootstrapHealthSnapshot()
+    {
+        var summaryTick = Volatile.Read(ref lastBridgeTransportHealthSummaryTick);
+        var age = ElapsedSinceTicksMilliseconds(summaryTick);
+        var healthSummaryAgeMs = age is null ? -1L : (long)Math.Max(0, age.Value);
+        var readyEmitted = Volatile.Read(ref lastBridgeTransportHealthReadyEmitted) > 0;
+        var controlReady = Volatile.Read(ref lastBridgeTransportHealthControlReady) > 0;
+        var mediaReady = Volatile.Read(ref lastBridgeTransportHealthMediaReady) > 0;
+        var bulkReady = Volatile.Read(ref lastBridgeTransportHealthBulkReady) > 0;
+        var disconnectSignals = Volatile.Read(ref lastBridgeTransportHealthDisconnectSignalCount);
+        var connectFailed = Volatile.Read(ref lastBridgeTransportHealthConnectFailedCount);
+        var wsErrors = Volatile.Read(ref lastBridgeTransportHealthWsErrorCount);
+        var rpcFallback = Volatile.Read(ref lastBridgeTransportHealthRpcFallbackAttemptCount);
+        var unreadySamples = Volatile.Read(ref bridgeBootstrapUnreadyFailureSampleCount);
+        var diagnostics = NknRuntimeDiagnostics.Snapshot();
+        var lastError = string.IsNullOrWhiteSpace(diagnostics.LastError)
+            ? "(none)"
+            : diagnostics.LastError;
+        var recentHealth = healthSummaryAgeMs >= 0 &&
+                           healthSummaryAgeMs <= (long)BridgeBootstrapHealthFreshWindow.TotalMilliseconds;
+        var terminalFromHealth =
+            recentHealth &&
+            !readyEmitted &&
+            unreadySamples >= BridgeBootstrapUnreadyFailureSampleThreshold &&
+            (disconnectSignals > 0 || connectFailed > 0 || wsErrors > 0);
+        var terminalFromDiagnostics =
+            lastError.Contains("bridge_connect_ready_timeout", StringComparison.OrdinalIgnoreCase) ||
+            lastError.Contains("NKN_START_FAILED", StringComparison.OrdinalIgnoreCase) ||
+            lastError.Contains("bridge_hello_failed", StringComparison.OrdinalIgnoreCase) ||
+            lastError.Contains("bridge_ping_timeout", StringComparison.OrdinalIgnoreCase);
+        var terminalFailure = terminalFromHealth || terminalFromDiagnostics;
+        var failureReason = terminalFromHealth
+            ? "bridge_transport_connect_failed_before_ready"
+            : terminalFromDiagnostics
+                ? "bridge_bootstrap_diagnostics_failure"
+                : "(none)";
+
+        return new BridgeBootstrapHealthSnapshot(
+            HasHealth: summaryTick > 0,
+            HealthSummaryAgeMs: healthSummaryAgeMs,
+            ReadyEmitted: readyEmitted,
+            ControlReady: controlReady,
+            MediaReady: mediaReady,
+            BulkReady: bulkReady,
+            DisconnectSignalCount: Math.Max(0, disconnectSignals),
+            ConnectFailedCountSinceLast: Math.Max(0, connectFailed),
+            WsErrorCountSinceLast: Math.Max(0, wsErrors),
+            RpcFallbackAttemptCountSinceLast: Math.Max(0, rpcFallback),
+            UnreadyFailureSampleCount: Math.Max(0, unreadySamples),
+            TerminalFailure: terminalFailure,
+            FailureReason: failureReason,
+            LastError: lastError);
+    }
+
     private int GetActiveFileTransferSessionCountForPingRecovery()
     {
         var activeCount = Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions));
@@ -3165,10 +3276,22 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         Volatile.Write(ref lastBridgeTransportHealthBulkLastReceivedAgeMs, bulkLastReceivedAgeMs);
         Volatile.Write(ref lastBridgeTransportHealthReadyEmitted, readyEmitted);
         Volatile.Write(ref lastBridgeTransportHealthControlReady, controlReady);
+        Volatile.Write(ref lastBridgeTransportHealthMediaReady, mediaReady);
         Volatile.Write(ref lastBridgeTransportHealthBulkReady, bulkReady);
+        Volatile.Write(ref lastBridgeTransportHealthConnectFailedCount, connectFailedCountSinceLast);
+        Volatile.Write(ref lastBridgeTransportHealthWsErrorCount, wsErrorCountSinceLast);
+        Volatile.Write(ref lastBridgeTransportHealthRpcFallbackAttemptCount, rpcFallbackAttemptCountSinceLast);
         Volatile.Write(
             ref lastBridgeTransportHealthDisconnectSignalCount,
             disconnectCountSinceLast + connectFailedCountSinceLast + wsErrorCountSinceLast);
+        if (readyEmitted > 0 && controlReady > 0)
+        {
+            Volatile.Write(ref bridgeBootstrapUnreadyFailureSampleCount, 0);
+        }
+        else if (connectFailedCountSinceLast > 0 || wsErrorCountSinceLast > 0)
+        {
+            Interlocked.Increment(ref bridgeBootstrapUnreadyFailureSampleCount);
+        }
 
         MaybeLogReceiveStallRecoveryReceiveResumed(
             connectKey,

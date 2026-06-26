@@ -438,7 +438,8 @@ internal static class FileTransferCoordinator
         bool bridgeRecoveryPending,
         bool controlPlanePressurePending,
         bool fallbackTailRepairPending,
-        bool transactionFailed)
+        bool transactionFailed,
+        bool pairedFallbackYieldGranted = false)
     {
         if (isTerminal)
         {
@@ -546,6 +547,13 @@ internal static class FileTransferCoordinator
             return new RuntimeUnlockAdmissionDecision(
                 RuntimeUnlockAdmissionStatus.WaitingForFallbackOwner,
                 "fallback_tail_repair_pending");
+        }
+
+        if (!pairedFallbackYieldGranted)
+        {
+            return new RuntimeUnlockAdmissionDecision(
+                RuntimeUnlockAdmissionStatus.WaitingForFallbackOwner,
+                "paired_fallback_tail_yield_missing");
         }
 
         return new RuntimeUnlockAdmissionDecision(

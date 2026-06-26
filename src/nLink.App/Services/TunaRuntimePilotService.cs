@@ -2203,6 +2203,8 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             this.owner = owner;
         }
 
+        public event EventHandler<AccelerationStateChangedEventArgs>? StateChanged;
+
         public bool CanOfferListener
         {
             get
@@ -2235,8 +2237,14 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                 ObjectDisposedException.ThrowIf(disposed, this);
                 if (supervisor is null || !string.Equals(supervisorKey, nextKey, StringComparison.Ordinal))
                 {
-                    supervisor?.Dispose();
+                    if (supervisor is not null)
+                    {
+                        supervisor.StateChanged -= OnSupervisorStateChanged;
+                        supervisor.Dispose();
+                    }
+
                     supervisor = new NknTunaListenerSidecarSupervisor(options);
+                    supervisor.StateChanged += OnSupervisorStateChanged;
                     supervisorKey = nextKey;
                 }
 
@@ -2256,7 +2264,12 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                 }
 
                 disposed = true;
-                supervisor?.Dispose();
+                if (supervisor is not null)
+                {
+                    supervisor.StateChanged -= OnSupervisorStateChanged;
+                    supervisor.Dispose();
+                }
+
                 supervisor = null;
                 supervisorKey = null;
             }
@@ -2285,5 +2298,8 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                 options.RequireProviderReady ? "strict_provider_ready" : "degraded_provider_ready",
                 options.ProviderReadyAttempts.ToString(CultureInfo.InvariantCulture),
                 options.DegradedProviderGraceSeconds.ToString(CultureInfo.InvariantCulture));
+
+        private void OnSupervisorStateChanged(object? sender, AccelerationStateChangedEventArgs e)
+            => StateChanged?.Invoke(this, e);
     }
 }
