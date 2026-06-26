@@ -975,6 +975,178 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void RuntimeUnlockAdmission_AcceptsCurrentOwnerWithoutFallbackBlocker()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var state = StartRegular(regular).State;
+
+        var decision = RequestRuntimeUnlockAdmission(state, state.CurrentRuntimeOwner!);
+
+        var admission = decision.RuntimeUnlockAdmissionDecision!.Value;
+        Assert.True(admission.Granted);
+        Assert.Equal("not_post_tuna_fallback", admission.Reason);
+        Assert.NotNull(admission.AdmissionToken);
+        Assert.Equal(state.CurrentRuntimeOwner!.Value.RuntimeGeneration, admission.AdmissionToken!.Value.RuntimeGeneration);
+    }
+
+    [Fact]
+    public void RuntimeUnlockAdmission_RejectsTerminalState()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var state = StartRegular(regular).State;
+        var terminal = FileTransferCoordinator.Apply(
+            CoordinatorEvent(FileTransferCoordinatorEventKind.Terminalized, regular, reason: "complete"),
+            state).State;
+
+        var decision = RequestRuntimeUnlockAdmission(terminal, terminal.CurrentRuntimeOwner);
+
+        Assert.False(decision.RuntimeUnlockAdmissionDecision!.Value.Granted);
+        Assert.Equal(RuntimeUnlockAdmissionStatus.RejectedTerminal, decision.RuntimeUnlockAdmissionDecision!.Value.Status);
+        Assert.Equal("transfer_terminal", decision.RuntimeUnlockAdmissionDecision!.Value.Reason);
+    }
+
+    [Fact]
+    public void RuntimeUnlockAdmission_RejectsStaleOwner()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var regularState = StartRegular(regular).State;
+        var oldOwner = regularState.CurrentRuntimeOwner!.Value;
+        var tunaState = ActivateTuna(regularState, tuna, committedChunk: 4).State;
+
+        var decision = RequestRuntimeUnlockAdmission(tunaState, oldOwner);
+
+        Assert.False(decision.RuntimeUnlockAdmissionDecision!.Value.Granted);
+        Assert.Equal(RuntimeUnlockAdmissionStatus.RejectedStaleOwner, decision.RuntimeUnlockAdmissionDecision!.Value.Status);
+        Assert.Equal("runtime_generation_mismatch", decision.RuntimeUnlockAdmissionDecision!.Value.Reason);
+    }
+
+    [Fact]
+    public void RuntimeUnlockAdmission_RejectsActiveFallbackWithoutYield()
+    {
+        var fallbackState = ActiveFallbackStateWithoutCheckpoint();
+
+        var decision = RequestRuntimeUnlockAdmission(
+            fallbackState,
+            fallbackState.CurrentRuntimeOwner!,
+            new RuntimeUnlockFallbackSurvivalState(
+                FallbackActive: true,
+                FallbackCurrent: true,
+                FallbackTerminalized: false,
+                CheckpointDeliveryRecoveryPending: false,
+                StateRefreshSendInFlight: false,
+                DeferredStateRefreshPending: false,
+                ProofReplayPending: false,
+                ControlPlanePressurePending: false,
+                BridgeRecoveryPending: false,
+                FallbackTailRepairPending: false,
+                PairedFallbackYieldGranted: false));
+
+        Assert.False(decision.RuntimeUnlockAdmissionDecision!.Value.Granted);
+        Assert.Equal("paired_fallback_tail_yield_missing", decision.RuntimeUnlockAdmissionDecision!.Value.Reason);
+    }
+
+    [Fact]
+    public void RuntimeUnlockAdmission_AcceptsAfterFallbackTerminalized()
+    {
+        var fallbackState = ActiveFallbackStateWithoutCheckpoint();
+        fallbackState.CurrentLeg!.State = FileTransferLegState.Terminal;
+        fallbackState.CurrentLeg.CanSendData = false;
+
+        var decision = RequestRuntimeUnlockAdmission(
+            fallbackState,
+            fallbackState.CurrentRuntimeOwner!,
+            new RuntimeUnlockFallbackSurvivalState(
+                FallbackActive: true,
+                FallbackCurrent: true,
+                FallbackTerminalized: true,
+                CheckpointDeliveryRecoveryPending: false,
+                StateRefreshSendInFlight: false,
+                DeferredStateRefreshPending: false,
+                ProofReplayPending: false,
+                ControlPlanePressurePending: false,
+                BridgeRecoveryPending: false,
+                FallbackTailRepairPending: false,
+                PairedFallbackYieldGranted: false));
+
+        Assert.True(decision.RuntimeUnlockAdmissionDecision!.Value.Granted);
+        Assert.Equal("fallback_terminalized", decision.RuntimeUnlockAdmissionDecision!.Value.Reason);
+    }
+
+    [Fact]
+    public void RuntimeUnlockAdmission_AcceptsAfterPairedYield()
+    {
+        var fallbackState = ActiveFallbackStateWithoutCheckpoint();
+
+        var decision = RequestRuntimeUnlockAdmission(
+            fallbackState,
+            fallbackState.CurrentRuntimeOwner!,
+            new RuntimeUnlockFallbackSurvivalState(
+                FallbackActive: true,
+                FallbackCurrent: true,
+                FallbackTerminalized: false,
+                CheckpointDeliveryRecoveryPending: false,
+                StateRefreshSendInFlight: false,
+                DeferredStateRefreshPending: false,
+                ProofReplayPending: false,
+                ControlPlanePressurePending: false,
+                BridgeRecoveryPending: false,
+                FallbackTailRepairPending: false,
+                PairedFallbackYieldGranted: true));
+
+        Assert.True(decision.RuntimeUnlockAdmissionDecision!.Value.Granted);
+        Assert.Equal("fallback_quiescent", decision.RuntimeUnlockAdmissionDecision!.Value.Reason);
+    }
+
+    [Fact]
+    public void RuntimeUnlockAdmission_TokenCarriesCoordinatorAuthorityFields()
+    {
+        var state = ActiveFallbackStateWithoutCheckpoint();
+        var survival = new RuntimeUnlockFallbackSurvivalState(
+            FallbackActive: true,
+            FallbackCurrent: true,
+            FallbackTerminalized: false,
+            CheckpointDeliveryRecoveryPending: false,
+            StateRefreshSendInFlight: false,
+            DeferredStateRefreshPending: false,
+            ProofReplayPending: false,
+            ControlPlanePressurePending: false,
+            BridgeRecoveryPending: false,
+            FallbackTailRepairPending: false,
+            PairedFallbackYieldGranted: true);
+
+        var decision = RequestRuntimeUnlockAdmission(state, state.CurrentRuntimeOwner!, survival);
+        var token = decision.RuntimeUnlockAdmissionDecision!.Value.AdmissionToken!.Value;
+
+        Assert.Equal(state.CurrentRuntimeOwner, token.RuntimeOwner);
+        Assert.Equal(state.TerminalGeneration, token.TerminalGeneration);
+        Assert.Equal(state.CurrentLiveRouteEpoch!.EpochId, token.LiveRouteEpoch);
+        Assert.Equal(state.CurrentLeg!.Generation, token.LegGeneration);
+        Assert.Equal(state.CurrentRuntimeOwner!.Value.RuntimeGeneration, token.RuntimeGeneration);
+        Assert.Equal(survival, token.FallbackSurvivalState);
+    }
+
+    [Fact]
+    public void RuntimeUnlockAdmission_TokenBecomesStaleAfterRouteOwnerOrTerminalChange()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var state = StartRegular(regular).State;
+        var admitted = RequestRuntimeUnlockAdmission(state, state.CurrentRuntimeOwner!).State;
+        var token = admitted.CurrentRuntimeUnlockAdmission!.Value;
+
+        var tunaState = ActivateTuna(admitted, tuna, committedChunk: 3).State;
+        Assert.False(FileTransferCoordinator.IsRuntimeUnlockAdmissionTokenCurrent(tunaState, token, out var routeReason));
+        Assert.Equal("runtime_unlock_admission_generation_mismatch", routeReason);
+
+        var terminalState = FileTransferCoordinator.Apply(
+            CoordinatorEvent(FileTransferCoordinatorEventKind.Terminalized, regular, reason: "complete"),
+            admitted).State;
+        Assert.False(FileTransferCoordinator.IsRuntimeUnlockAdmissionTokenCurrent(terminalState, token, out var terminalReason));
+        Assert.Equal("runtime_unlock_admission_generation_mismatch", terminalReason);
+    }
+
+    [Fact]
     public void TerminalStateRejectsLaterRouteMutation()
     {
         var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
@@ -1340,6 +1512,59 @@ public sealed class FileTransferCoordinatorTests
                 transportEpoch: transportEpoch),
             state);
 
+    private static FileTransferCoordinatorState ActiveFallbackStateWithoutCheckpoint()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        var state = FallBack(
+            ActivateTuna(StartRegular(regular).State, tuna, committedChunk: 5).State,
+            fallback,
+            committedChunk: 5,
+            transportEpoch: 2).State;
+        state.CurrentLeg!.State = FileTransferLegState.Active;
+        state.CurrentLeg.CanSendData = true;
+        state.CurrentLeg.CheckpointRequestId = null;
+        return state;
+    }
+
+    private static FileTransferCoordinatorDecision RequestRuntimeUnlockAdmission(
+        FileTransferCoordinatorState state,
+        RuntimeOwnerToken? owner,
+        RuntimeUnlockFallbackSurvivalState? survivalState = null)
+    {
+        var nextState = state;
+        if (survivalState is { } survival)
+        {
+            nextState = FileTransferCoordinator.Apply(
+                CoordinatorEvent(
+                    FileTransferCoordinatorEventKind.RuntimeUnlockFallbackSurvivalUpdated,
+                    state.RouteSelection,
+                    reason: "fallback_survival_updated",
+                    state: state.CurrentLeg?.State ?? FileTransferLegState.Active,
+                    canSendData: state.CurrentLeg?.CanSendData ?? true,
+                    transportEpoch: state.CurrentLeg?.TransportEpochId ?? 0,
+                    bridgeRecoveryGeneration: state.CurrentLeg?.BridgeRecoveryGeneration ?? 0,
+                    runtimeUnlockFallbackSurvivalState: survival),
+                state).State;
+        }
+
+        return FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.RuntimeUnlockAdmission,
+                nextState.RouteSelection,
+                reason: "runtime_unlock_admission",
+                state: nextState.CurrentLeg?.State ?? FileTransferLegState.Active,
+                canSendData: nextState.CurrentLeg?.CanSendData ?? true,
+                transportEpoch: nextState.CurrentLeg?.TransportEpochId ?? 0,
+                bridgeRecoveryGeneration: nextState.CurrentLeg?.BridgeRecoveryGeneration ?? 0,
+                runtimeUnlockAdmissionRequest: new RuntimeUnlockAdmissionRequest(
+                    "test",
+                    "runtime_unlock_admission",
+                    owner)),
+            nextState);
+    }
+
     private static FileTransferCoordinatorState EmptyState(FileTransferRouteSelection routeSelection)
         => new(
             SessionId: "session_coordinator",
@@ -1393,7 +1618,9 @@ public sealed class FileTransferCoordinatorTests
         int bridgeRecoveryGeneration = 0,
         string? checkpointRequestId = null,
         string? checkpointPriority = null,
-        RuntimeUnlockRouteCommitProof? runtimeUnlockCommitProof = null)
+        RuntimeUnlockRouteCommitProof? runtimeUnlockCommitProof = null,
+        RuntimeUnlockAdmissionRequest? runtimeUnlockAdmissionRequest = null,
+        RuntimeUnlockFallbackSurvivalState? runtimeUnlockFallbackSurvivalState = null)
         => new(
             kind,
             routeSelection,
@@ -1408,5 +1635,7 @@ public sealed class FileTransferCoordinatorTests
             bridgeRecoveryGeneration,
             checkpointRequestId,
             checkpointPriority,
-            RuntimeUnlockCommitProof: runtimeUnlockCommitProof);
+            RuntimeUnlockCommitProof: runtimeUnlockCommitProof,
+            RuntimeUnlockAdmissionRequest: runtimeUnlockAdmissionRequest,
+            RuntimeUnlockFallbackSurvivalState: runtimeUnlockFallbackSurvivalState);
 }

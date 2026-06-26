@@ -1485,15 +1485,16 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
 
-        typeof(SessionFileTransferService)
-            .GetMethod("StartOutboundRuntimeUnlockPreCommitProbe", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, "unit_test_missing_owner"]);
+        var handled = Assert.IsType<bool>(typeof(SessionFileTransferService)
+            .GetMethod("TryStartOutboundRuntimeUnlockPreCommitProbeOrWaitForFallbackLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "unit_test_missing_owner", "runtime_unlock_probe_missing"])!);
 
+        Assert.True(handled);
         var log = ReadOperationalLogTail(logStart);
-        Assert.Contains("event=filetransfer_runtime_owner_stale_update_rejected;", log, StringComparison.Ordinal);
-        Assert.Contains("source=runtime_unlock_precommit_probe", log, StringComparison.Ordinal);
-        Assert.Contains("attempted_action=start_probe", log, StringComparison.Ordinal);
-        Assert.Contains("reason=runtime_owner_missing", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_runtime_unlock_admission_denied; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("source=precommit_probe_start", log, StringComparison.Ordinal);
+        Assert.Contains("reason=unit_test_missing_owner", log, StringComparison.Ordinal);
+        Assert.Contains("admission_reason=runtime_owner_missing", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=runtime_unlock_precommit_probe_started; direction=outbound; transfer_id=transfer_runtime_unlock_precommit_missing_owner", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=runtime_unlock_precommit_probe_sent; direction=outbound; transfer_id=transfer_runtime_unlock_precommit_missing_owner", log, StringComparison.Ordinal);
     }
@@ -11278,6 +11279,16 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         };
         service.AttachTransport(transport);
         var context = CreateRegularNknV4InboundContext(transferId);
+        var regularRoute = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        SetPrivateProperty(context, "CurrentRuntimeOwner", CreateRuntimeOwner(
+            sessionId,
+            transferId,
+            regularRoute,
+            liveRouteEpoch: 0,
+            runtimeGeneration: 1,
+            "test_responder_waits_for_peer_probe",
+            FileTransferDirection.Inbound));
+        SetPrivateProperty(context, "LastRuntimeOwnerGeneration", 1);
         var dataSession = new RecordingDataSession(sessionId, transferId);
         SetPrivateProperty(context, "DataSession", dataSession);
         serviceType

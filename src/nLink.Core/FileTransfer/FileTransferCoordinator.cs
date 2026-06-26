@@ -13,6 +13,9 @@ internal enum FileTransferCoordinatorEventKind
     BridgeRecoveryStarted,
     BridgeRecoveryCompleted,
     BridgeRecoveryExhausted,
+    RuntimeUnlockAdmission,
+    RuntimeUnlockAdmissionRetired,
+    RuntimeUnlockFallbackSurvivalUpdated,
     RuntimeUnlockCommitRequested,
     Terminalized,
 }
@@ -34,6 +37,7 @@ internal enum FileTransferCoordinatorActionKind
     ProgressMutation,
     RouteMismatchMark,
     RoutePublication,
+    RuntimeUnlockAdmission,
 }
 
 internal enum RuntimeUnlockAdmissionStatus
@@ -47,10 +51,59 @@ internal enum RuntimeUnlockAdmissionStatus
 
 internal readonly record struct RuntimeUnlockAdmissionDecision(
     RuntimeUnlockAdmissionStatus Status,
-    string Reason)
+    string Reason,
+    RuntimeUnlockAdmissionToken? AdmissionToken = null,
+    FileTransferRoute CurrentRoute = default,
+    int CurrentProtocolVersion = 0,
+    int CurrentLiveRouteEpoch = 0,
+    int CurrentRuntimeGeneration = 0,
+    int CurrentTerminalGeneration = 0,
+    int CurrentLegGeneration = 0,
+    RuntimeUnlockFallbackSurvivalState FallbackSurvivalState = default)
 {
     public bool Granted => Status == RuntimeUnlockAdmissionStatus.Granted;
 }
+
+internal readonly record struct RuntimeUnlockFallbackSurvivalState(
+    bool FallbackActive,
+    bool FallbackCurrent,
+    bool FallbackTerminalized,
+    bool CheckpointDeliveryRecoveryPending,
+    bool StateRefreshSendInFlight,
+    bool DeferredStateRefreshPending,
+    bool ProofReplayPending,
+    bool ControlPlanePressurePending,
+    bool BridgeRecoveryPending,
+    bool FallbackTailRepairPending,
+    bool PairedFallbackYieldGranted)
+{
+    public static RuntimeUnlockFallbackSurvivalState Empty { get; } = new();
+}
+
+internal readonly record struct RuntimeUnlockAdmissionToken(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    RuntimeOwnerToken RuntimeOwner,
+    FileTransferRoute Route,
+    string RouteToken,
+    int ProtocolVersion,
+    int LiveRouteEpoch,
+    int RuntimeGeneration,
+    int TerminalGeneration,
+    int LegGeneration,
+    int AdmissionGeneration,
+    string Reason,
+    RuntimeUnlockFallbackSurvivalState FallbackSurvivalState)
+{
+    public bool IsDefault => AdmissionGeneration <= 0 || RuntimeOwner.IsDefault;
+}
+
+internal readonly record struct RuntimeUnlockAdmissionRequest(
+    string Source,
+    string Reason,
+    RuntimeOwnerToken? RuntimeOwner,
+    bool TransactionFailed = false);
 
 internal sealed record FileTransferCoordinatorState(
     string SessionId,
@@ -65,7 +118,10 @@ internal sealed record FileTransferCoordinatorState(
     int LastRuntimeOwnerGeneration,
     int TerminalGeneration,
     RuntimeOwnerToken? CurrentRuntimeOwner,
-    IReadOnlyList<FileTransferLeg> LegHistory)
+    IReadOnlyList<FileTransferLeg> LegHistory,
+    RuntimeUnlockFallbackSurvivalState RuntimeUnlockFallbackSurvivalState = default,
+    RuntimeUnlockAdmissionToken? CurrentRuntimeUnlockAdmission = null,
+    int LastRuntimeUnlockAdmissionGeneration = 0)
 {
     public FileTransferRouteRuntimeDescriptor RouteRuntime => RouteSelection.RuntimeDescriptor;
 }
@@ -86,6 +142,8 @@ internal readonly record struct FileTransferCoordinatorEvent(
     string? CheckpointPriority = null,
     int CheckpointGeneration = 0,
     RuntimeUnlockRouteCommitProof? RuntimeUnlockCommitProof = null,
+    RuntimeUnlockAdmissionRequest? RuntimeUnlockAdmissionRequest = null,
+    RuntimeUnlockFallbackSurvivalState? RuntimeUnlockFallbackSurvivalState = null,
     bool FreezeCurrentLeg = true);
 
 internal readonly record struct FileTransferCoordinatorActionRequest(
@@ -127,7 +185,8 @@ internal sealed record FileTransferCoordinatorDecision(
     bool RuntimeUnlockCommitAccepted = false,
     string? RuntimeUnlockCommitRejectedReason = null,
     string? MutationRejectedReason = null,
-    FileTransferLeg? MutatedLeg = null);
+    FileTransferLeg? MutatedLeg = null,
+    RuntimeUnlockAdmissionDecision? RuntimeUnlockAdmissionDecision = null);
 
 internal readonly record struct RuntimeOwnerToken(
     string SessionId,
@@ -232,6 +291,16 @@ internal static class FileTransferCoordinator
         var reason = NormalizeReason(coordinatorEvent.Reason);
         if (state.IsTerminal)
         {
+            if (coordinatorEvent.Kind == FileTransferCoordinatorEventKind.RuntimeUnlockAdmission)
+            {
+                var admission = AdmissionDecision(
+                    state,
+                    RuntimeUnlockAdmissionStatus.RejectedTerminal,
+                    "transfer_terminal",
+                    NormalizeRuntimeUnlockFallbackSurvivalState(state));
+                return Decision(state, reason, runtimeUnlockAdmissionDecision: admission);
+            }
+
             return MutationRejected(state, reason, "terminal_state", terminalMutationRejected: true);
         }
 
@@ -248,6 +317,9 @@ internal static class FileTransferCoordinator
             FileTransferCoordinatorEventKind.BridgeRecoveryStarted => MarkCurrentFallbackLegState(state, FileTransferLegState.RecoveryActive, reason),
             FileTransferCoordinatorEventKind.BridgeRecoveryCompleted => PassThrough(state, reason),
             FileTransferCoordinatorEventKind.BridgeRecoveryExhausted => MarkCurrentFallbackLegState(state, FileTransferLegState.BridgeRestartPending, reason),
+            FileTransferCoordinatorEventKind.RuntimeUnlockFallbackSurvivalUpdated => UpdateRuntimeUnlockFallbackSurvival(coordinatorEvent, state, reason),
+            FileTransferCoordinatorEventKind.RuntimeUnlockAdmission => ApplyRuntimeUnlockAdmission(coordinatorEvent, state, reason),
+            FileTransferCoordinatorEventKind.RuntimeUnlockAdmissionRetired => RetireRuntimeUnlockAdmission(state, reason),
             FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested => ApplyRuntimeUnlockCommit(coordinatorEvent, state, reason),
             FileTransferCoordinatorEventKind.Terminalized => Terminalize(state, reason),
             _ => PassThrough(state, reason),
@@ -518,6 +590,68 @@ internal static class FileTransferCoordinator
         return true;
     }
 
+    public static bool IsRuntimeUnlockAdmissionTokenCurrent(
+        FileTransferCoordinatorState state,
+        RuntimeUnlockAdmissionToken token,
+        out string rejectionReason)
+    {
+        rejectionReason = "current";
+        if (token.IsDefault)
+        {
+            rejectionReason = "runtime_unlock_admission_missing";
+            return false;
+        }
+
+        if (!string.Equals(token.SessionId, state.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(token.TransferId, state.TransferId, StringComparison.Ordinal) ||
+            token.Direction != state.Direction)
+        {
+            rejectionReason = "session_transfer_or_direction_mismatch";
+            return false;
+        }
+
+        if (state.CurrentRuntimeUnlockAdmission is not { } current ||
+            current.AdmissionGeneration != token.AdmissionGeneration)
+        {
+            rejectionReason = "runtime_unlock_admission_generation_mismatch";
+            return false;
+        }
+
+        if (!IsRuntimeOwnerCurrent(state, token.RuntimeOwner, out rejectionReason))
+        {
+            return false;
+        }
+
+        if (token.Route != state.RouteSelection.Route ||
+            token.ProtocolVersion != state.RouteSelection.ProtocolVersion ||
+            !string.Equals(token.RouteToken, state.RouteSelection.TelemetryToken, StringComparison.Ordinal))
+        {
+            rejectionReason = "route_or_protocol_mismatch";
+            return false;
+        }
+
+        var expectedLiveRouteEpoch = state.CurrentLiveRouteEpoch?.EpochId ?? 0;
+        if (token.LiveRouteEpoch != expectedLiveRouteEpoch)
+        {
+            rejectionReason = "live_route_epoch_mismatch";
+            return false;
+        }
+
+        if (token.TerminalGeneration != state.TerminalGeneration)
+        {
+            rejectionReason = "terminal_generation_mismatch";
+            return false;
+        }
+
+        if (token.LegGeneration != (state.CurrentLeg?.Generation ?? 0))
+        {
+            rejectionReason = "leg_generation_mismatch";
+            return false;
+        }
+
+        return true;
+    }
+
     public static string ResolveRuntimeFamily(FileTransferRouteRuntimeDescriptor runtime)
     {
         if (runtime.UsesRegularNknV4FastRuntime)
@@ -580,6 +714,113 @@ internal static class FileTransferCoordinator
 
         rejectionReason = decision.Reason;
         return decision.Granted;
+    }
+
+    private static RuntimeUnlockAdmissionDecision EvaluateRuntimeUnlockAdmission(
+        FileTransferCoordinatorState state,
+        RuntimeUnlockAdmissionRequest request,
+        int admissionGeneration)
+    {
+        var survivalState = NormalizeRuntimeUnlockFallbackSurvivalState(state);
+        if (state.IsTerminal)
+        {
+            return AdmissionDecision(
+                state,
+                RuntimeUnlockAdmissionStatus.RejectedTerminal,
+                "transfer_terminal",
+                survivalState);
+        }
+
+        if (request.RuntimeOwner is not { } owner)
+        {
+            return AdmissionDecision(
+                state,
+                RuntimeUnlockAdmissionStatus.RejectedStaleOwner,
+                "runtime_owner_missing",
+                survivalState);
+        }
+
+        if (!IsRuntimeOwnerCurrent(state, owner, out var ownerRejectionReason))
+        {
+            return AdmissionDecision(
+                state,
+                RuntimeUnlockAdmissionStatus.RejectedStaleOwner,
+                ownerRejectionReason,
+                survivalState);
+        }
+
+        if (request.TransactionFailed)
+        {
+            return AdmissionDecision(
+                state,
+                RuntimeUnlockAdmissionStatus.RejectedFailedTransaction,
+                "runtime_unlock_transaction_failed",
+                survivalState);
+        }
+
+        if (state.RouteRuntime.UsesPostTunaFallbackV6Runtime &&
+            survivalState.FallbackTerminalized)
+        {
+            var terminalizedToken = new RuntimeUnlockAdmissionToken(
+                state.SessionId,
+                state.TransferId,
+                state.Direction,
+                owner,
+                state.RouteSelection.Route,
+                state.RouteSelection.TelemetryToken,
+                state.RouteSelection.ProtocolVersion,
+                state.CurrentLiveRouteEpoch?.EpochId ?? 0,
+                state.LastRuntimeOwnerGeneration,
+                state.TerminalGeneration,
+                state.CurrentLeg?.Generation ?? 0,
+                Math.Max(1, admissionGeneration),
+                "fallback_terminalized",
+                survivalState);
+            return AdmissionDecision(
+                state,
+                RuntimeUnlockAdmissionStatus.Granted,
+                "fallback_terminalized",
+                survivalState,
+                terminalizedToken);
+        }
+
+        var policy = EvaluateRuntimeUnlockAdmission(
+            state.IsTerminal,
+            runtimeOwnerCurrent: true,
+            state.RouteRuntime.UsesPostTunaFallbackV6Runtime,
+            state.CurrentLeg,
+            survivalState.CheckpointDeliveryRecoveryPending,
+            survivalState.StateRefreshSendInFlight,
+            survivalState.DeferredStateRefreshPending,
+            survivalState.ProofReplayPending,
+            survivalState.BridgeRecoveryPending,
+            survivalState.ControlPlanePressurePending,
+            survivalState.FallbackTailRepairPending,
+            transactionFailed: false,
+            survivalState.PairedFallbackYieldGranted);
+
+        if (!policy.Granted)
+        {
+            return AdmissionDecision(state, policy.Status, policy.Reason, survivalState);
+        }
+
+        var token = new RuntimeUnlockAdmissionToken(
+            state.SessionId,
+            state.TransferId,
+            state.Direction,
+            owner,
+            state.RouteSelection.Route,
+            state.RouteSelection.TelemetryToken,
+            state.RouteSelection.ProtocolVersion,
+            state.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            state.LastRuntimeOwnerGeneration,
+            state.TerminalGeneration,
+            state.CurrentLeg?.Generation ?? 0,
+            Math.Max(1, admissionGeneration),
+            policy.Reason,
+            survivalState);
+
+        return AdmissionDecision(state, policy.Status, policy.Reason, survivalState, token);
     }
 
     public static RuntimeUnlockAdmissionDecision EvaluateRuntimeUnlockAdmission(
@@ -716,6 +957,43 @@ internal static class FileTransferCoordinator
             RuntimeUnlockAdmissionStatus.Granted,
             "fallback_quiescent");
     }
+
+    private static RuntimeUnlockFallbackSurvivalState NormalizeRuntimeUnlockFallbackSurvivalState(
+        FileTransferCoordinatorState state)
+    {
+        var configured = state.RuntimeUnlockFallbackSurvivalState;
+        var fallbackActive = configured.FallbackActive ||
+            state.RouteRuntime.UsesPostTunaFallbackV6Runtime ||
+            state.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6;
+        var fallbackCurrent = configured.FallbackCurrent || IsCurrentPostTunaFallbackLeg(state.CurrentLeg);
+        var fallbackTerminalized = configured.FallbackTerminalized ||
+            state.CurrentLeg?.State == FileTransferLegState.Terminal;
+
+        return configured with
+        {
+            FallbackActive = fallbackActive,
+            FallbackCurrent = fallbackCurrent,
+            FallbackTerminalized = fallbackTerminalized,
+        };
+    }
+
+    private static RuntimeUnlockAdmissionDecision AdmissionDecision(
+        FileTransferCoordinatorState state,
+        RuntimeUnlockAdmissionStatus status,
+        string reason,
+        RuntimeUnlockFallbackSurvivalState survivalState,
+        RuntimeUnlockAdmissionToken? token = null)
+        => new(
+            status,
+            NormalizeReason(reason),
+            token,
+            state.RouteSelection.Route,
+            state.RouteSelection.ProtocolVersion,
+            state.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            state.CurrentRuntimeOwner?.RuntimeGeneration ?? state.LastRuntimeOwnerGeneration,
+            state.TerminalGeneration,
+            state.CurrentLeg?.Generation ?? 0,
+            survivalState);
 
     public static bool TryValidateCurrentFallbackCheckpointProof(
         FileTransferLeg? leg,
@@ -920,6 +1198,7 @@ internal static class FileTransferCoordinator
             LastTransferLegGeneration = leg.Generation,
             LastRuntimeOwnerGeneration = runtimeGeneration,
             LegHistory = legHistory,
+            CurrentRuntimeUnlockAdmission = null,
         };
         nextState = nextState with
         {
@@ -976,6 +1255,7 @@ internal static class FileTransferCoordinator
             LastTransferLegGeneration = leg.Generation,
             LastRuntimeOwnerGeneration = runtimeGeneration,
             LegHistory = legHistory,
+            CurrentRuntimeUnlockAdmission = null,
         };
         nextState = nextState with
         {
@@ -1148,6 +1428,50 @@ internal static class FileTransferCoordinator
         return PassThrough(state, reason);
     }
 
+    private static FileTransferCoordinatorDecision UpdateRuntimeUnlockFallbackSurvival(
+        FileTransferCoordinatorEvent coordinatorEvent,
+        FileTransferCoordinatorState state,
+        string reason)
+        => Decision(
+            state with
+            {
+                RuntimeUnlockFallbackSurvivalState =
+                    coordinatorEvent.RuntimeUnlockFallbackSurvivalState ??
+                    RuntimeUnlockFallbackSurvivalState.Empty,
+            },
+            reason);
+
+    private static FileTransferCoordinatorDecision ApplyRuntimeUnlockAdmission(
+        FileTransferCoordinatorEvent coordinatorEvent,
+        FileTransferCoordinatorState state,
+        string reason)
+    {
+        var request = coordinatorEvent.RuntimeUnlockAdmissionRequest ??
+            new RuntimeUnlockAdmissionRequest("runtime_unlock_admission", reason, state.CurrentRuntimeOwner);
+        var admissionGeneration = Math.Max(1, state.LastRuntimeUnlockAdmissionGeneration + 1);
+        var admission = EvaluateRuntimeUnlockAdmission(state, request, admissionGeneration);
+        var nextState = state with
+        {
+            RuntimeUnlockFallbackSurvivalState = admission.FallbackSurvivalState,
+            LastRuntimeUnlockAdmissionGeneration = admissionGeneration,
+            CurrentRuntimeUnlockAdmission = admission.AdmissionToken,
+        };
+        return Decision(
+            nextState,
+            reason,
+            runtimeUnlockAdmissionDecision: admission);
+    }
+
+    private static FileTransferCoordinatorDecision RetireRuntimeUnlockAdmission(
+        FileTransferCoordinatorState state,
+        string reason)
+        => Decision(
+            state with
+            {
+                CurrentRuntimeUnlockAdmission = null,
+            },
+            reason);
+
     private static FileTransferCoordinatorDecision ApplyRuntimeUnlockCommit(
         FileTransferCoordinatorEvent coordinatorEvent,
         FileTransferCoordinatorState state,
@@ -1190,6 +1514,7 @@ internal static class FileTransferCoordinator
                 CurrentRuntimeOwner = state.CurrentRuntimeOwner is { } owner
                     ? owner with { TerminalGeneration = nextTerminalGeneration }
                     : null,
+                CurrentRuntimeUnlockAdmission = null,
             },
             reason,
             mutatedLeg: leg);
@@ -1216,7 +1541,8 @@ internal static class FileTransferCoordinator
         FileTransferLeg? frozenLeg = null,
         FileTransferLeg? acceptedCheckpointLeg = null,
         FileTransferLeg? mutatedLeg = null,
-        bool fallbackCheckpointRequired = false)
+        bool fallbackCheckpointRequired = false,
+        RuntimeUnlockAdmissionDecision? runtimeUnlockAdmissionDecision = null)
         => new(
             state,
             RouteChanged: false,
@@ -1228,7 +1554,8 @@ internal static class FileTransferCoordinator
             AcceptedCheckpointLeg: acceptedCheckpointLeg,
             FallbackCheckpointRequired: fallbackCheckpointRequired,
             reason,
-            MutatedLeg: mutatedLeg);
+            MutatedLeg: mutatedLeg,
+            RuntimeUnlockAdmissionDecision: runtimeUnlockAdmissionDecision);
 
     private static FileTransferCoordinatorActionDecision ActionDecision(
         FileTransferCoordinatorState state,

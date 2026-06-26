@@ -484,13 +484,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_recovery_authority_fallback_proof";
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             SetPrivateField(host, "remoteBulkEndpoint", helperClient.ConnectedBulkAddress);
-            InvokePrivateMethod(
-                host,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_post_tuna_fallback_route");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(host, transferId, "test_post_tuna_fallback_route");
             var authorityRequest = new FileTransferReceiveRecoveryRequest(
                 sessionId,
                 transferId,
@@ -2401,6 +2395,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             await WaitUntilAsync(
                 () => host.IsPostTunaFileFallbackActiveForRouteSelection,
                 TimeSpan.FromSeconds(3));
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(
+                host,
+                "transfer_phase4_tuna_route_status_superseded",
+                "test_post_tuna_fallback_admission_denied");
 
             var logStart = GetOperationalLogLength();
             host.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen, sessionId);
@@ -2475,6 +2473,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             await WaitUntilAsync(
                 () => host.IsPostTunaFileFallbackActiveForRouteSelection,
                 TimeSpan.FromSeconds(3));
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(
+                host,
+                transferId,
+                "test_post_tuna_fallback_admission_denied");
 
             SetPrivateField(host, "accelerationSessionId", sessionId);
             SetPrivateField(host, "accelerationNegotiatedLanes", NknAccelerationLaneKind.File);
@@ -3661,14 +3663,14 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 NknAccelerationLaneKind.File,
                 "test_accept");
 
-            Assert.DoesNotContain(
+            Assert.Contains(
                 availabilityEvents,
                 e => e.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
                      e.TargetTransport == FileTransferTransportKind.Tuna);
 
             var logTail = ReadOperationalLogTail(logStart);
-            Assert.DoesNotContain("event=tuna_activation_filetransfer_handoff_requested;", logTail, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=filetransfer_data_session_handoff_invoking;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=tuna_activation_filetransfer_handoff_requested;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_data_session_handoff_invoking;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_tuna_activation_suppressed_for_route;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_data_session_send_canceled_for_tuna_activation_pause;", logTail, StringComparison.Ordinal);
         }
@@ -3966,13 +3968,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 cts.Token,
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
             const string transferId = "transfer_tuna_activation_post_fallback_no_pause";
-            InvokePrivateMethod(
-                host,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_post_tuna_fallback_route");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(host, transferId, "test_post_tuna_fallback_route");
             var dataSession = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             var availabilityEvents = new ConcurrentQueue<FileTransferDataSessionAvailabilityChangedEventArgs>();
             dataSession.AvailabilityChanged += (_, e) => availabilityEvents.Enqueue(e);
@@ -4006,7 +4002,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 "event=filetransfer_tuna_activation_negotiation_post_tuna_fallback_pause_suppressed;",
                 logTail,
                 StringComparison.Ordinal);
-            Assert.Contains("suppress_reason=active_post_tuna_fallback_route", logTail, StringComparison.Ordinal);
+            Assert.Contains("suppress_reason=recovery_active", logTail, StringComparison.Ordinal);
             Assert.Contains("trigger=runtime_unlock", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_tuna_activation_negotiation_regular_nkn_paused;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_activation_filetransfer_handoff_requested;", logTail, StringComparison.Ordinal);
@@ -4814,13 +4810,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
 
             SetPrivateField(host, "outboundAccelerationOfferTrigger", "runtime_unlock");
-            InvokePrivateMethod(
-                host,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_post_tuna_fallback_route");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(host, transferId, "test_post_tuna_fallback_route");
 
             var deferred = Assert.IsType<bool>(InvokePrivateMethod(
                 host,
@@ -4902,13 +4892,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 cts.Token,
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
             const string transferId = "transfer_tuna_activation_post_fallback_pre_pause";
-            InvokePrivateMethod(
-                host,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_post_tuna_fallback_route");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(host, transferId, "test_post_tuna_fallback_route");
             var dataSession = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             var availabilityEvents = new ConcurrentQueue<FileTransferDataSessionAvailabilityChangedEventArgs>();
             dataSession.AvailabilityChanged += (_, e) => availabilityEvents.Enqueue(e);
@@ -4928,7 +4912,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 "event=filetransfer_tuna_activation_negotiation_post_tuna_fallback_pause_suppressed;",
                 logTail,
                 StringComparison.Ordinal);
-            Assert.Contains("suppress_reason=active_post_tuna_fallback_route", logTail, StringComparison.Ordinal);
+            Assert.Contains("suppress_reason=recovery_active", logTail, StringComparison.Ordinal);
             Assert.True(
                 logTail.Contains("trigger=post_tuna_fallback_offer_send_prepare", StringComparison.Ordinal) ||
                 logTail.Contains("trigger=offer_send_prepare", StringComparison.Ordinal) ||
@@ -5453,13 +5437,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 cts.Token,
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
             const string transferId = "transfer_tuna_activation_post_fallback_recovery_request";
-            InvokePrivateMethod(
-                host,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_post_tuna_fallback_route");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(host, transferId, "test_post_tuna_fallback_route");
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             var logStart = GetOperationalLogLength();
 
@@ -5613,13 +5591,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 cts.Token,
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
             const string transferId = "transfer_tuna_activation_post_fallback_existing_recovery";
-            InvokePrivateMethod(
-                host,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_post_tuna_fallback_route");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(host, transferId, "test_post_tuna_fallback_route");
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             var fallbackStarted = Assert.IsType<bool>(InvokePrivateMethod(
                 host,
@@ -5793,13 +5765,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 cts.Token,
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
             const string transferId = "transfer_tuna_activation_recovered_post_fallback_existing_recovery";
-            InvokePrivateMethod(
-                host,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_recovered_post_tuna_fallback_route");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(host, transferId, "test_recovered_post_tuna_fallback_route");
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             var logStart = GetOperationalLogLength();
 
@@ -7182,13 +7148,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 cts.Token,
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
             const string transferId = "transfer_tuna_activation_post_fallback_observed_replay";
-            InvokePrivateMethod(
-                host,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_post_tuna_fallback_route");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(host, transferId, "test_post_tuna_fallback_route");
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             host.SeedRuntimeUnlockOfferCriticalSectionForTests(
                 sessionId,
@@ -7292,13 +7252,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 cts.Token,
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
             const string transferId = "transfer_tuna_activation_post_fallback_receive_stall_authority";
-            InvokePrivateMethod(
-                host,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_post_tuna_fallback_route");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(host, transferId, "test_post_tuna_fallback_route");
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             host.SeedRuntimeUnlockOfferCriticalSectionForTests(
                 sessionId,
@@ -7432,13 +7386,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 cts.Token,
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
             const string transferId = "transfer_tuna_activation_post_fallback_authority_deferred";
-            InvokePrivateMethod(
-                host,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_post_tuna_fallback_route");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(host, transferId, "test_post_tuna_fallback_route");
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             host.SeedRuntimeUnlockOfferCriticalSectionForTests(
                 sessionId,
@@ -7556,13 +7504,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 cts.Token,
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
             const string transferId = "transfer_tuna_activation_post_fallback_final_probe";
-            InvokePrivateMethod(
-                host,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_post_tuna_fallback_route");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(host, transferId, "test_post_tuna_fallback_route");
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             host.SeedRuntimeUnlockOfferCriticalSectionForTests(
                 sessionId,
@@ -7632,7 +7574,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             var softSettled = Assert.IsType<bool>(softSettleMethod!.Invoke(host, args));
             var settleReason = Assert.IsType<string>(args[2]);
             Assert.False(softSettled);
-            Assert.Equal("active_post_tuna_fallback_owner", settleReason);
+            Assert.Equal("recovery_active", settleReason);
 
             var retryAllowed = Assert.IsType<bool>(InvokePrivateMethod(
                 host,
@@ -7693,13 +7635,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 cts.Token,
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
             const string transferId = "transfer_tuna_activation_post_fallback_final_probe_bridge_recovery";
-            InvokePrivateMethod(
-                host,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_post_tuna_fallback_route");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(host, transferId, "test_post_tuna_fallback_route");
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             host.SeedRuntimeUnlockOfferCriticalSectionForTests(
                 sessionId,
@@ -7774,7 +7710,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             var softSettled = Assert.IsType<bool>(softSettleMethod!.Invoke(host, args));
             var settleReason = Assert.IsType<string>(args[2]);
             Assert.False(softSettled);
-            Assert.Equal("active_post_tuna_fallback_owner", settleReason);
+            Assert.Equal("recovery_active", settleReason);
 
             var retryAllowed = Assert.IsType<bool>(InvokePrivateMethod(
                 host,
@@ -7870,13 +7806,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 cts.Token,
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
             const string transferId = "transfer_tuna_activation_post_fallback_listener_rearm_bridge";
-            InvokePrivateMethod(
-                host,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_post_tuna_fallback_route");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(host, transferId, "test_post_tuna_fallback_route");
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
 
             var authorityRequest = new FileTransferReceiveRecoveryRequest(
@@ -7932,7 +7862,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             var softSettled = Assert.IsType<bool>(softSettleMethod!.Invoke(host, args));
             var settleReason = Assert.IsType<string>(args[2]);
             Assert.False(softSettled);
-            Assert.Equal("active_post_tuna_fallback_owner", settleReason);
+            Assert.Equal("recovery_active", settleReason);
 
             var retryAllowedBeforeRearm = Assert.IsType<bool>(InvokePrivateMethod(
                 host,
@@ -8373,13 +8303,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_tuna_activation_initial_fallback_proof";
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             SetPrivateField(host, "remoteBulkEndpoint", helperClient.ConnectedBulkAddress);
-            InvokePrivateMethod(
-                host,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_post_tuna_fallback_route");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(host, transferId, "test_post_tuna_fallback_route");
             InvokePrivateMethod(
                 host,
                 "RecordPostTunaFallbackReceiverFrontierProofHint",
@@ -8485,13 +8409,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_tuna_activation_initial_fallback_direct_success";
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             SetPrivateField(host, "remoteBulkEndpoint", helperClient.ConnectedBulkAddress);
-            InvokePrivateMethod(
-                host,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_post_tuna_fallback_route");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(host, transferId, "test_post_tuna_fallback_route");
             InvokePrivateMethod(
                 host,
                 "RecordPostTunaFallbackReceiverFrontierProofHint",
@@ -10022,13 +9940,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
             const string sessionId = "session_fallback_leg_authority_pending_handoff";
             const string transferId = "transfer_fallback_leg_authority_pending_handoff";
-            InvokePrivateMethod(
-                transport,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_current_fallback_route");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(transport, transferId, "test_current_fallback_route");
 
             var logStart = GetOperationalLogLength();
             InvokePrivateMethod(
@@ -10359,13 +10271,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
             const string transferId = "transfer_fallback_leg_authority_runtime_unlock_retry";
             _ = await transport.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
-            InvokePrivateMethod(
-                transport,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_post_tuna_fallback_route");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(transport, transferId, "test_post_tuna_fallback_route");
 
             var request = new FileTransferReceiveRecoveryRequest(
                 sessionId,
@@ -10598,6 +10504,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
             const string transferId = "transfer_tuna_activation_post_fallback_soft_settle";
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(
+                host,
+                transferId,
+                "test_post_tuna_fallback_admission_denied");
             Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
                 host,
                 "StartTunaFallbackProofIfNeeded",
@@ -10690,13 +10600,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
             const string transferId = "transfer_tuna_activation_post_fallback_proof_soft_settle";
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
-            InvokePrivateMethod(
-                host,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_post_tuna_fallback_route");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(host, transferId, "test_post_tuna_fallback_route");
             Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
                 host,
                 "StartTunaFallbackProofIfNeeded",
@@ -11970,11 +11874,16 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Contains("event=tuna_acceleration_retry_blocked_v6_epoch_unresolved;", blockedTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_retry_scheduled; reason=phase5_v6_epoch_unresolved", blockedTail, StringComparison.Ordinal);
 
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(
+                host,
+                transferId,
+                "test_post_tuna_fallback_admission_denied");
             SetPrivateField(host, "accelerationNegotiationRetryAttempts", 0);
             var runtimeUnlockLogStart = GetOperationalLogLength();
             InvokePrivateMethod(host, "ScheduleAccelerationNegotiationRetry", "runtime_unlock_offer_answer_timeout");
             var runtimeUnlockBlockedTail = ReadOperationalLogTail(runtimeUnlockLogStart);
             Assert.Contains("event=tuna_acceleration_retry_blocked_v6_epoch_unresolved;", runtimeUnlockBlockedTail, StringComparison.Ordinal);
+            Assert.Contains("fallback_owner_reason=recovery_active", runtimeUnlockBlockedTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_retry_allowed_post_tuna_fallback_unresolved;", runtimeUnlockBlockedTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_offer_answer_timeout", runtimeUnlockBlockedTail, StringComparison.Ordinal);
 
@@ -12004,6 +11913,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Contains("event=filetransfer_runtime_unlock_waiting_for_fallback_owner;", activeRepairTail, StringComparison.Ordinal);
             Assert.Contains("event=runtime_unlock_fallback_unavailable_suppressed;", activeRepairTail, StringComparison.Ordinal);
             Assert.Contains("source=unresolved_v6_epoch", activeRepairTail, StringComparison.Ordinal);
+            Assert.Contains("fallback_owner_reason=recovery_active", activeRepairTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_offer_answer_timeout", activeRepairTail, StringComparison.Ordinal);
 
             observer.ObserveFileTransferV6TransportEpoch(
@@ -12117,13 +12027,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.True(snapshot.RetryAuthorityGranted);
             Assert.True(snapshot.RetryAuthorityPending);
 
-            InvokePrivateMethod(
-                host,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_post_tuna_fallback_route");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(host, transferId, "test_post_tuna_fallback_route");
             var observer = Assert.IsAssignableFrom<IFileTransferV6TransportEpochObserver>(host);
             observer.ObserveFileTransferV6TransportEpoch(
                 new FileTransferV6TransportEpochSnapshot(
@@ -12237,6 +12141,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 "post_tuna_fallback_state_refresh_failed",
                 sessionId,
                 NknAccelerationLaneKind.File);
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(
+                host,
+                transferId,
+                "test_post_tuna_fallback_admission_denied");
 
             SetPrivateField(host, "accelerationNegotiationRetryAttempts", 0);
             var logStart = GetOperationalLogLength();
@@ -12247,6 +12155,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Contains("event=filetransfer_runtime_unlock_waiting_for_fallback_owner;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=runtime_unlock_fallback_unavailable_suppressed;", logTail, StringComparison.Ordinal);
             Assert.Contains("source=unresolved_v6_epoch", logTail, StringComparison.Ordinal);
+            Assert.Contains("fallback_owner_reason=recovery_active", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_offer_answer_timeout", logTail, StringComparison.Ordinal);
 
             SetPrivateField(host, "accelerationNegotiationRetryAttempts", 0);
@@ -12258,6 +12167,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Contains("event=filetransfer_runtime_unlock_waiting_for_fallback_owner;", listenerUnavailableTail, StringComparison.Ordinal);
             Assert.Contains("event=runtime_unlock_fallback_unavailable_suppressed;", listenerUnavailableTail, StringComparison.Ordinal);
             Assert.Contains("source=unresolved_v6_epoch", listenerUnavailableTail, StringComparison.Ordinal);
+            Assert.Contains("fallback_owner_reason=recovery_active", listenerUnavailableTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_preflight_listener_unavailable", listenerUnavailableTail, StringComparison.Ordinal);
         }
         finally
@@ -12385,13 +12295,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 cts.Token,
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare);
             const string transferId = "transfer_runtime_unlock_peer_timeout_listener_rearm_fallback_proof";
-            InvokePrivateMethod(
-                host,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_post_tuna_fallback_route");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(host, transferId, "test_post_tuna_fallback_route");
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             InvokePrivateMethod(
                 host,
@@ -12483,13 +12387,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 cts.Token,
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare);
             const string transferId = "transfer_runtime_unlock_peer_timeout_listener_rearm_fallback_bridge";
-            InvokePrivateMethod(
-                host,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_post_tuna_fallback_route");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(host, transferId, "test_post_tuna_fallback_route");
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             var authorityRequest = new FileTransferReceiveRecoveryRequest(
                 sessionId,
@@ -15716,13 +15614,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             dataSession.AvailabilityChanged += (_, e) => availabilityEvents.Enqueue(e);
 
             helper.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, sessionId);
-            InvokePrivateMethod(
-                helper,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_post_tuna_fallback_runtime_unlock_uncommitted");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(helper, transferId, "test_post_tuna_fallback_runtime_unlock_uncommitted");
             InvokePrivateMethod(
                 helper,
                 "RecordTunaFallbackFileTransferDataFrameReceived",
@@ -15756,8 +15648,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 "event=runtime_unlock_uncommitted_file_fallback_suppressed;",
                 logTail,
                 StringComparison.Ordinal);
-            Assert.Contains("suppress_reason=active_post_tuna_fallback_runtime_unlock", logTail, StringComparison.Ordinal);
-            Assert.Contains("active_post_tuna_fallback_route=1", logTail, StringComparison.Ordinal);
+            Assert.Contains("suppress_reason=recovery_active", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_fallback_filetransfer_rebind_requested;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain(
                 "event=filetransfer_data_session_availability_broadcast;",
@@ -15807,13 +15698,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             dataSession.AvailabilityChanged += (_, e) => availabilityEvents.Enqueue(e);
 
             helper.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, sessionId);
-            InvokePrivateMethod(
-                helper,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_post_tuna_fallback_runtime_unlock_unavailable_before_send");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(helper, transferId, "test_post_tuna_fallback_runtime_unlock_unavailable_before_send");
             InvokePrivateMethod(
                 helper,
                 "StartRuntimeUnlockTransactionForOfferUnsafe",
@@ -15846,8 +15731,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 "event=runtime_unlock_uncommitted_file_fallback_suppressed; reason=tuna_unavailable_before_send;",
                 logTail,
                 StringComparison.Ordinal);
-            Assert.Contains("suppress_reason=active_post_tuna_fallback_runtime_unlock", logTail, StringComparison.Ordinal);
-            Assert.Contains("active_post_tuna_fallback_route=1", logTail, StringComparison.Ordinal);
+            Assert.Contains("suppress_reason=recovery_active", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_fallback_started;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_fallback_nkn_proof_pending;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_fallback_filetransfer_rebind_requested;", logTail, StringComparison.Ordinal);
@@ -16941,6 +16825,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                     e.RequiresResumeRequest &&
                     e.Reason == "sidecar_remote_closed"),
                 TimeSpan.FromSeconds(2));
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(
+                host,
+                transferId,
+                "test_post_tuna_fallback_admission_denied");
 
             InvokePrivateMethod(
                 host,
@@ -16964,10 +16852,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 logTail,
                 StringComparison.Ordinal);
             Assert.True(
-                logTail.Contains("suppress_reason=active_post_tuna_fallback_route", StringComparison.Ordinal) ||
-                logTail.Contains("suppress_reason=active_post_tuna_fallback_state", StringComparison.Ordinal) ||
-                logTail.Contains("suppress_reason=unresolved_post_tuna_fallback_v6_epoch", StringComparison.Ordinal),
-                "Expected activation pause suppression to be tied to active post-Tuna fallback evidence.");
+                logTail.Contains("suppress_reason=recovery_active", StringComparison.Ordinal),
+                "Expected activation pause suppression to be tied to a coordinator admission denial.");
             Assert.Contains("trigger=runtime_unlock", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_tuna_activation_negotiation_regular_nkn_paused;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_tuna_activation_negotiation_transport_recovered_suppressed;", logTail, StringComparison.Ordinal);
@@ -17005,13 +16891,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             var availabilityEvents = new ConcurrentQueue<FileTransferDataSessionAvailabilityChangedEventArgs>();
             dataSession.AvailabilityChanged += (_, e) => availabilityEvents.Enqueue(e);
 
-            InvokePrivateMethod(
-                host,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_post_tuna_fallback_route");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(host, transferId, "test_post_tuna_fallback_route");
             SetPrivateField(host, "outboundAccelerationOfferNonce", "runtime_unlock_protect_nonce");
             SetPrivateField(host, "outboundAccelerationOfferTrigger", "runtime_unlock");
 
@@ -17101,13 +16981,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             var availabilityEvents = new ConcurrentQueue<FileTransferDataSessionAvailabilityChangedEventArgs>();
             dataSession.AvailabilityChanged += (_, e) => availabilityEvents.Enqueue(e);
 
-            InvokePrivateMethod(
-                helper,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_post_tuna_fallback_route");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(helper, transferId, "test_post_tuna_fallback_route");
             InvokePrivateMethod(
                 helper,
                 "RecordTunaFallbackFileTransferDataFrameReceived",
@@ -18396,13 +18270,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 cts.Token,
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare);
             const string transferId = "transfer_tuna_activation_post_fallback_stale_v4_blocker";
-            InvokePrivateMethod(
-                host,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_post_tuna_fallback_route");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(host, transferId, "test_post_tuna_fallback_route");
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
 
             SetPrivateField(host, "accelerationNegotiationRetryAttempts", 0);
@@ -18479,13 +18347,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 cts.Token,
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare);
             const string transferId = "transfer_tuna_activation_post_fallback_listener_rearm_wait";
-            InvokePrivateMethod(
-                host,
-                "TrackFileTransferRouteHint",
-                transferId,
-                FileTransferRouteResolver.PostTunaFallbackV6Token,
-                FileTransferProtocol.ProtocolVersionV6,
-                "test_post_tuna_fallback_route");
+            TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(host, transferId, "test_post_tuna_fallback_route");
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
 
             SetPrivateField(host, "outboundAccelerationOfferTrigger", "runtime_unlock");
@@ -19045,6 +18907,29 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
         Assert.Equal(expectedRoute, selection.Route);
         Assert.Equal(expectedProtocolVersion, selection.ProtocolVersion);
     }
+
+    private static void TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(
+        NknSignalingTransport transport,
+        string transferId,
+        string source = "test_post_tuna_fallback_route",
+        string admissionReason = "recovery_active",
+        string fallbackLegState = "checkpoint_pending",
+        bool fallbackLegCanSendData = false,
+        long fallbackLegGeneration = 1,
+        string? fallbackCheckpointRequestId = "v6-regular-nkn-state-refresh:test")
+        => InvokePrivateMethod(
+            transport,
+            "TrackFileTransferRouteHint",
+            transferId,
+            FileTransferRouteResolver.PostTunaFallbackV6Token,
+            FileTransferProtocol.ProtocolVersionV6,
+            source,
+            false,
+            admissionReason,
+            fallbackLegState,
+            fallbackLegCanSendData,
+            fallbackLegGeneration,
+            fallbackCheckpointRequestId);
 
     private sealed class RecordingTunaListenerSidecarSupervisor : INknTunaListenerSidecarSupervisor
     {

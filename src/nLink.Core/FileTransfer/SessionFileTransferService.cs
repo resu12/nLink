@@ -4720,7 +4720,10 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.LastRuntimeOwnerGeneration,
             context.TerminalGeneration,
             context.CurrentRuntimeOwner,
-            context.TransferLegHistory);
+            context.TransferLegHistory,
+            context.RuntimeUnlockFallbackSurvivalState,
+            context.RuntimeUnlockAdmissionToken,
+            context.LastRuntimeUnlockAdmissionGeneration);
 
     private static void ApplyCoordinatorDecisionToContextLocked(
         OutboundTransferContext context,
@@ -4731,6 +4734,9 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.LastRuntimeOwnerGeneration = decision.State.LastRuntimeOwnerGeneration;
         context.TerminalGeneration = decision.State.TerminalGeneration;
         context.CurrentRuntimeOwner = decision.State.CurrentRuntimeOwner;
+        context.RuntimeUnlockFallbackSurvivalState = decision.State.RuntimeUnlockFallbackSurvivalState;
+        context.RuntimeUnlockAdmissionToken = decision.State.CurrentRuntimeUnlockAdmission;
+        context.LastRuntimeUnlockAdmissionGeneration = decision.State.LastRuntimeUnlockAdmissionGeneration;
         var legHistory = decision.State.LegHistory.ToList();
         context.TransferLegHistory.Clear();
         context.TransferLegHistory.AddRange(legHistory);
@@ -4745,6 +4751,9 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.LastRuntimeOwnerGeneration = decision.State.LastRuntimeOwnerGeneration;
         context.TerminalGeneration = decision.State.TerminalGeneration;
         context.CurrentRuntimeOwner = decision.State.CurrentRuntimeOwner;
+        context.RuntimeUnlockFallbackSurvivalState = decision.State.RuntimeUnlockFallbackSurvivalState;
+        context.RuntimeUnlockAdmissionToken = decision.State.CurrentRuntimeUnlockAdmission;
+        context.LastRuntimeUnlockAdmissionGeneration = decision.State.LastRuntimeUnlockAdmissionGeneration;
         var legHistory = decision.State.LegHistory.ToList();
         context.TransferLegHistory.Clear();
         context.TransferLegHistory.AddRange(legHistory);
@@ -4764,7 +4773,10 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.LastRuntimeOwnerGeneration,
             context.TerminalGeneration,
             context.CurrentRuntimeOwner,
-            context.TransferLegHistory);
+            context.TransferLegHistory,
+            context.RuntimeUnlockFallbackSurvivalState,
+            context.RuntimeUnlockAdmissionToken,
+            context.LastRuntimeUnlockAdmissionGeneration);
 
     private static bool TryCaptureRuntimeOwnerLocked(
         OutboundTransferContext context,
@@ -6650,7 +6662,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.CurrentTransferLeg?.LiveRouteEpochId ?? context.CurrentLiveRouteEpoch?.EpochId ?? 0,
             "fallback_tail_paired_yield",
             context.CurrentTransferLeg,
-            EvaluateRuntimeUnlockAdmissionLocked(context));
+            RequestRuntimeUnlockAdmissionLocked(context, "route_hint", "fallback_tail_paired_yield"));
         TryResumeOutboundRuntimeUnlockAfterFallbackSurvivalProofLocked(
             context,
             "fallback_tail_quiescent");
@@ -6685,7 +6697,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.CurrentTransferLeg?.LiveRouteEpochId ?? context.CurrentLiveRouteEpoch?.EpochId ?? 0,
             "fallback_tail_paired_yield",
             context.CurrentTransferLeg,
-            EvaluateRuntimeUnlockAdmissionLocked(context));
+            RequestRuntimeUnlockAdmissionLocked(context, "route_hint", "fallback_tail_paired_yield"));
         TryResumeInboundRuntimeUnlockAfterFallbackSurvivalProofLocked(
             context,
             "fallback_tail_quiescent");
@@ -7606,7 +7618,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             leg.LiveRouteEpochId,
             "fallback_tail_quiescent",
             leg,
-            EvaluateRuntimeUnlockAdmissionLocked(context));
+            RequestRuntimeUnlockAdmissionLocked(context, "route_hint", "fallback_tail_quiescent"));
         LogFileTransferFallbackTailQuiescentYieldGranted(
             FileTransferDirection.Outbound,
             context.TransferId,
@@ -7810,7 +7822,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             currentLeg.LiveRouteEpochId,
             "fallback_tail_quiescent",
             currentLeg,
-            EvaluateRuntimeUnlockAdmissionLocked(context));
+            RequestRuntimeUnlockAdmissionLocked(context, "route_hint", "fallback_tail_quiescent"));
         RecordInboundFallbackTailLocalYieldLocked(
             context,
             currentLeg,
@@ -9769,7 +9781,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             leg.LiveRouteEpochId,
             "fallback_tail_quiescent",
             leg,
-            EvaluateRuntimeUnlockAdmissionLocked(context));
+            RequestRuntimeUnlockAdmissionLocked(context, "route_hint", "fallback_tail_quiescent"));
         LogFileTransferFallbackTailQuiescentYieldGranted(
             FileTransferDirection.Outbound,
             context.TransferId,
@@ -11153,6 +11165,12 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public RuntimeOwnerToken? CurrentRuntimeOwner { get; set; }
 
+        public RuntimeUnlockFallbackSurvivalState RuntimeUnlockFallbackSurvivalState { get; set; }
+
+        public RuntimeUnlockAdmissionToken? RuntimeUnlockAdmissionToken { get; set; }
+
+        public int LastRuntimeUnlockAdmissionGeneration { get; set; }
+
         public bool RuntimeUnlockWaitingForFallbackSurvival { get; set; }
 
         public string? RuntimeUnlockWaitingForFallbackSurvivalReason { get; set; }
@@ -11973,6 +11991,12 @@ public sealed partial class SessionFileTransferService : IDisposable
         public int TerminalGeneration { get; set; }
 
         public RuntimeOwnerToken? CurrentRuntimeOwner { get; set; }
+
+        public RuntimeUnlockFallbackSurvivalState RuntimeUnlockFallbackSurvivalState { get; set; }
+
+        public RuntimeUnlockAdmissionToken? RuntimeUnlockAdmissionToken { get; set; }
+
+        public int LastRuntimeUnlockAdmissionGeneration { get; set; }
 
         public bool RuntimeUnlockWaitingForFallbackSurvival { get; set; }
 
