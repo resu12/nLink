@@ -2769,6 +2769,13 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        if (!TryAuthorizeOutboundV6RegularNknRecoveryMutationLocked(
+                context,
+                "sender_request_feedback_stalled"))
+        {
+            return false;
+        }
+
         var clearedNormalRequestCount = 0;
         foreach (var chunkIndex in context.V6NormalRequestedChunks.ToArray())
         {
@@ -2803,7 +2810,8 @@ public sealed partial class SessionFileTransferService
                 context,
                 "sender_request_feedback_stalled",
                 FileTransferTransportHandoffKind.RegularNknRecovery,
-                FileTransferTransportKind.RegularNkn);
+                FileTransferTransportKind.RegularNkn,
+                coordinatorAuthorized: true);
         }
 
         var transportEpoch = context.V6TransportEpoch?.EpochId ?? 0;
@@ -2960,6 +2968,13 @@ public sealed partial class SessionFileTransferService
             }
             else
             {
+                if (!TryAuthorizeOutboundV6RegularNknRecoveryMutationLocked(
+                        context,
+                        "sender_request_feedback_stalled"))
+                {
+                    return;
+                }
+
                 context.V6LastReceiveRecoveryRequestedUtc = now;
                 context.V6EpochLivenessDeferralCount++;
                 context.V6EpochLivenessDeferralUtc = now;
@@ -2977,7 +2992,8 @@ public sealed partial class SessionFileTransferService
                         context,
                         "sender_request_feedback_stalled",
                         FileTransferTransportHandoffKind.RegularNknRecovery,
-                        FileTransferTransportKind.RegularNkn);
+                        FileTransferTransportKind.RegularNkn,
+                        coordinatorAuthorized: true);
                 }
 
                 transportEpoch = context.V6TransportEpoch?.EpochId ?? 0;
@@ -3011,6 +3027,29 @@ public sealed partial class SessionFileTransferService
             await AnnounceAndProbeOutboundV6TransportEpochAsync(outboundToProbe).ConfigureAwait(false);
             SignalOutboundSparseSenderPump(outboundToProbe);
         }
+    }
+
+    private static bool TryAuthorizeOutboundV6RegularNknRecoveryMutationLocked(
+        OutboundTransferContext context,
+        string reason)
+    {
+        var targetTransport = NormalizeV6TargetTransport(
+            FileTransferTransportHandoffKind.RegularNknRecovery,
+            FileTransferTransportKind.RegularNkn);
+        return TryAuthorizeTransportEpochActionLocked(
+            context,
+            FileTransferCoordinatorActionKind.TransportEpochAdoption,
+            TransportEpochActionKind.Adopt,
+            "v6_transport_epoch_start",
+            reason,
+            context.CurrentTransferLeg,
+            null,
+            context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+            null,
+            context.RouteSelection.Route,
+            context.NegotiatedDataProtocolVersion,
+            targetTransport,
+            out _);
     }
 
     private bool ShouldAllowOutboundV6FrontierProofWhileTransportPausedLocked(OutboundTransferContext context)

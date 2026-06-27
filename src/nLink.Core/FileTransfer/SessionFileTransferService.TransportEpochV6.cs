@@ -2200,14 +2200,16 @@ public sealed partial class SessionFileTransferService
             "FileTransferService",
             $"event=runtime_unlock_precommit_probe_ignored; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; frame_type={FormatProtocolLogValue(frame.Type)}; transaction_generation={frame.TransactionGeneration}; offer_generation={frame.OfferGeneration}; tuna_path_lease_generation={frame.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(frame.ProbeId ?? "(none)")}; received_transport={FormatFileTransferTransportKind(receivedTransportKind)}; reason={FormatProtocolLogValue(reason)}");
 
-    private void StartOutboundV6TransportEpochLocked(
+    private bool StartOutboundV6TransportEpochLocked(
         OutboundTransferContext context,
         string reason,
         FileTransferTransportHandoffKind handoffKind,
-        FileTransferTransportKind targetTransport)
+        FileTransferTransportKind targetTransport,
+        bool coordinatorAuthorized = false)
     {
         targetTransport = NormalizeV6TargetTransport(handoffKind, targetTransport);
-        if (!TryAuthorizeTransportEpochActionLocked(
+        if (!coordinatorAuthorized &&
+            !TryAuthorizeTransportEpochActionLocked(
                 context,
                 FileTransferCoordinatorActionKind.TransportEpochAdoption,
                 TransportEpochActionKind.Adopt,
@@ -2222,7 +2224,7 @@ public sealed partial class SessionFileTransferService
                 targetTransport,
                 out _))
         {
-            return;
+            return false;
         }
 
         if (context.V6TransportEpoch is { } current &&
@@ -2232,7 +2234,7 @@ public sealed partial class SessionFileTransferService
             {
                 AdoptOutboundFallbackLegTransportEpochLocked(context, current.EpochId, reason);
                 LogV6TransportEpochReused(FileTransferDirection.Outbound, context.TransferId, context.SessionId, current, reason);
-                return;
+                return true;
             }
 
             TerminalizeV6TransportEpochLocked(FileTransferDirection.Outbound, context.TransferId, context.SessionId, current, "superseded");
@@ -2274,6 +2276,7 @@ public sealed partial class SessionFileTransferService
         context.StatusMessage = GetV6TransportEpochStatus(epoch);
         LogV6TransportEpochStarted(context.TransferId, context.SessionId, epoch);
         PublishV6TransportEpochSnapshot(context.SessionId, context.TransferId, epoch);
+        return true;
     }
 
     private void StartInboundV6TransportEpochLocked(

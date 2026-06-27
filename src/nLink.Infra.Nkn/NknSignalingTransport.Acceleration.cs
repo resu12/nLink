@@ -686,7 +686,10 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
-        if (hasFallbackLegAuthority)
+        var accepted = realClient.RequestFileTransferReceiveStallRecovery(
+            request.BridgeRecoveryAuthority!,
+            bridgeRecoveryReason);
+        if (accepted && hasFallbackLegAuthority)
         {
             fallbackAuthority = MarkFileTransferFallbackLegAuthorityStarted(request, sessionId, transferId, reason);
             realClient.MarkActiveFileTransferPostTunaFallbackLegAuthority(
@@ -700,13 +703,6 @@ public sealed partial class NknSignalingTransport
                 request.BridgeRecoveryGeneration,
                 request.CheckpointRequestId,
                 request.AuthorityReason ?? reason);
-        }
-
-        var accepted = realClient.RequestFileTransferReceiveStallRecovery(
-            request.BridgeRecoveryAuthority!,
-            bridgeRecoveryReason);
-        if (accepted && fallbackAuthority is not null)
-        {
             MarkFileTransferFallbackLegAuthorityBridgeRecoveryRequested(fallbackAuthority, bridgeRecoveryReason);
         }
         else if (accepted && hasRegularV4RecoveryLiveness)
