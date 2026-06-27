@@ -4733,7 +4733,15 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.CurrentFallbackControlPlanePressureToken,
             context.LastFallbackControlPlanePressureGeneration,
             context.LastFallbackTailYieldDecision,
-            context.LastFallbackTailYieldGeneration);
+            context.LastFallbackTailYieldGeneration,
+            context.CurrentRepairReplayDecision,
+            context.LastRepairReplayGeneration,
+            context.CurrentTransportEpochDecision,
+            context.LastTransportEpochDecisionGeneration,
+            context.CurrentBridgeRecoveryDecision,
+            context.LastBridgeRecoveryDecisionGeneration,
+            context.CurrentRecoveryLivenessLease,
+            context.LastRecoveryLivenessLeaseGeneration);
 
     private static void ApplyCoordinatorDecisionToContextLocked(
         OutboundTransferContext context,
@@ -4762,6 +4770,14 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.LastFallbackControlPlanePressureGeneration = decision.State.LastFallbackControlPlanePressureGeneration;
         context.LastFallbackTailYieldDecision = decision.State.LastFallbackTailYieldDecision;
         context.LastFallbackTailYieldGeneration = decision.State.LastFallbackTailYieldGeneration;
+        context.CurrentRepairReplayDecision = decision.State.CurrentRepairReplayDecision;
+        context.LastRepairReplayGeneration = decision.State.LastRepairReplayGeneration;
+        context.CurrentTransportEpochDecision = decision.State.CurrentTransportEpochDecision;
+        context.LastTransportEpochDecisionGeneration = decision.State.LastTransportEpochDecisionGeneration;
+        context.CurrentBridgeRecoveryDecision = decision.State.CurrentBridgeRecoveryDecision;
+        context.LastBridgeRecoveryDecisionGeneration = decision.State.LastBridgeRecoveryDecisionGeneration;
+        context.CurrentRecoveryLivenessLease = decision.State.CurrentRecoveryLivenessLease;
+        context.LastRecoveryLivenessLeaseGeneration = decision.State.LastRecoveryLivenessLeaseGeneration;
         var legHistory = decision.State.LegHistory.ToList();
         context.TransferLegHistory.Clear();
         context.TransferLegHistory.AddRange(legHistory);
@@ -4794,6 +4810,14 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.LastFallbackControlPlanePressureGeneration = decision.State.LastFallbackControlPlanePressureGeneration;
         context.LastFallbackTailYieldDecision = decision.State.LastFallbackTailYieldDecision;
         context.LastFallbackTailYieldGeneration = decision.State.LastFallbackTailYieldGeneration;
+        context.CurrentRepairReplayDecision = decision.State.CurrentRepairReplayDecision;
+        context.LastRepairReplayGeneration = decision.State.LastRepairReplayGeneration;
+        context.CurrentTransportEpochDecision = decision.State.CurrentTransportEpochDecision;
+        context.LastTransportEpochDecisionGeneration = decision.State.LastTransportEpochDecisionGeneration;
+        context.CurrentBridgeRecoveryDecision = decision.State.CurrentBridgeRecoveryDecision;
+        context.LastBridgeRecoveryDecisionGeneration = decision.State.LastBridgeRecoveryDecisionGeneration;
+        context.CurrentRecoveryLivenessLease = decision.State.CurrentRecoveryLivenessLease;
+        context.LastRecoveryLivenessLeaseGeneration = decision.State.LastRecoveryLivenessLeaseGeneration;
         var legHistory = decision.State.LegHistory.ToList();
         context.TransferLegHistory.Clear();
         context.TransferLegHistory.AddRange(legHistory);
@@ -4826,7 +4850,15 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.CurrentFallbackControlPlanePressureToken,
             context.LastFallbackControlPlanePressureGeneration,
             context.LastFallbackTailYieldDecision,
-            context.LastFallbackTailYieldGeneration);
+            context.LastFallbackTailYieldGeneration,
+            context.CurrentRepairReplayDecision,
+            context.LastRepairReplayGeneration,
+            context.CurrentTransportEpochDecision,
+            context.LastTransportEpochDecisionGeneration,
+            context.CurrentBridgeRecoveryDecision,
+            context.LastBridgeRecoveryDecisionGeneration,
+            context.CurrentRecoveryLivenessLease,
+            context.LastRecoveryLivenessLeaseGeneration);
 
     private static bool TryCaptureRuntimeOwnerLocked(
         OutboundTransferContext context,
@@ -9883,6 +9915,29 @@ public sealed partial class SessionFileTransferService : IDisposable
             return;
         }
 
+        if (!TryAuthorizeRuntimeOwnerLegActionLocked(
+                context,
+                FileTransferCoordinatorActionKind.StartTransferLeg,
+                reason,
+                "fallback_checkpoint_recovery_leg_start",
+                leg: currentLeg,
+                checkpointRequestId: null,
+                transportEpochId: currentLeg.TransportEpochId,
+                bridgeRecoveryGeneration: currentLeg.BridgeRecoveryGeneration,
+                checkpointGeneration: currentLeg.CheckpointGeneration,
+                fallbackControlPlaneToken: null,
+                fallbackCheckpointLease: null,
+                fallbackControlPlanePressureToken: null,
+                controlPlaneKind: null,
+                controlPlanePurpose: null,
+                controlPlanePeerVisible: null,
+                controlPlaneAcceptedAny: null,
+                fallbackTailYieldKind: null,
+                out _))
+        {
+            return;
+        }
+
         var previousLegGeneration = currentLeg.Generation;
         var previousTransportEpoch = currentLeg.TransportEpochId;
         var frontier = Math.Clamp(context.NextChunkIndex, 0, Math.Max(0, context.ChunkCount - 1));
@@ -12426,6 +12481,22 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public int LastFallbackTailYieldGeneration { get; set; }
 
+        public RepairReplayDecision? CurrentRepairReplayDecision { get; set; }
+
+        public int LastRepairReplayGeneration { get; set; }
+
+        public TransportEpochDecision? CurrentTransportEpochDecision { get; set; }
+
+        public int LastTransportEpochDecisionGeneration { get; set; }
+
+        public BridgeRecoveryDecision? CurrentBridgeRecoveryDecision { get; set; }
+
+        public int LastBridgeRecoveryDecisionGeneration { get; set; }
+
+        public RecoveryLivenessLease? CurrentRecoveryLivenessLease { get; set; }
+
+        public int LastRecoveryLivenessLeaseGeneration { get; set; }
+
         public string? LastOutboundFallbackCheckpointRepairRequestId { get; set; }
 
         public long LastOutboundFallbackCheckpointRepairTransportEpoch { get; set; }
@@ -13396,6 +13467,22 @@ public sealed partial class SessionFileTransferService : IDisposable
         public FallbackTailYieldDecision? LastFallbackTailYieldDecision { get; set; }
 
         public int LastFallbackTailYieldGeneration { get; set; }
+
+        public RepairReplayDecision? CurrentRepairReplayDecision { get; set; }
+
+        public int LastRepairReplayGeneration { get; set; }
+
+        public TransportEpochDecision? CurrentTransportEpochDecision { get; set; }
+
+        public int LastTransportEpochDecisionGeneration { get; set; }
+
+        public BridgeRecoveryDecision? CurrentBridgeRecoveryDecision { get; set; }
+
+        public int LastBridgeRecoveryDecisionGeneration { get; set; }
+
+        public RecoveryLivenessLease? CurrentRecoveryLivenessLease { get; set; }
+
+        public int LastRecoveryLivenessLeaseGeneration { get; set; }
 
         public int V6PostTunaFallbackProofReplayGeneration { get; set; }
 

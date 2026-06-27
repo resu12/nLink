@@ -747,14 +747,47 @@ public sealed partial class SessionFileTransferService
 
         var accepted = true;
         var ackReason = RuntimeUnlockPreCommitProbeReceivedReason;
-        if (TryGetRuntimeUnlockPreCommitProbeAdmissionRejectionLocked(
-                direction,
-                sessionId,
-                transferId,
-                out var admissionRejectionReason))
+        if (!HasCurrentRuntimeUnlockPreCommitProbeAdmissionLocked(direction, sessionId, transferId))
         {
-            accepted = false;
-            ackReason = admissionRejectionReason;
+            if (TryRequestRuntimeUnlockPreCommitProbeFallbackAdmissionRejectionLocked(
+                    direction,
+                    sessionId,
+                    transferId,
+                    out var admissionRejectionReason))
+            {
+                accepted = false;
+                ackReason = admissionRejectionReason;
+            }
+            else
+            {
+                lock (gate)
+                {
+                    _ = TryAuthorizeRuntimeUnlockCallbackActionForDirectionLocked(
+                        direction,
+                        sessionId,
+                        transferId,
+                        runtimeOwner: null,
+                        actionKind: FileTransferCoordinatorActionKind.RuntimeUnlockProbeAck,
+                        source: "runtime_unlock_precommit_probe_received",
+                        attemptedAction: "probe_received",
+                        admissionToken: null,
+                        routeCommitToken: null,
+                        transactionGeneration: probe.TransactionGeneration,
+                        offerGeneration: probe.OfferGeneration,
+                        tunaPathLeaseGeneration: probe.TunaPathLeaseGeneration,
+                        tunaPathLeaseListenerRunId: null,
+                        probeId: probe.ProbeId,
+                        probeAcked: true,
+                        samePathTunaProbeAckId: probe.ProbeId,
+                        routeCommitGeneration: null,
+                        targetRoute: FileTransferRoute.FileTunaV4,
+                        targetProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
+                        targetTransport: FileTransferTransportKind.Tuna,
+                        out _);
+                }
+
+                return;
+            }
         }
 
         var ack = new FileTransferRuntimeUnlockPreCommitProbeAckFrame
@@ -863,7 +896,32 @@ public sealed partial class SessionFileTransferService
         }
     }
 
-    private bool TryGetRuntimeUnlockPreCommitProbeAdmissionRejectionLocked(
+    private bool HasCurrentRuntimeUnlockPreCommitProbeAdmissionLocked(
+        FileTransferDirection direction,
+        string sessionId,
+        string transferId)
+    {
+        lock (gate)
+        {
+            if (direction == FileTransferDirection.Outbound &&
+                IsOutboundLifecycleMessageMatchLocked(sessionId, transferId) &&
+                outboundTransfer is { IsTerminal: false } outbound)
+            {
+                return HasCurrentRuntimeUnlockAdmissionLocked(outbound);
+            }
+
+            if (direction == FileTransferDirection.Inbound &&
+                IsInboundLifecycleMessageMatchLocked(sessionId, transferId) &&
+                inboundTransfer is { IsTerminal: false } inbound)
+            {
+                return HasCurrentRuntimeUnlockAdmissionLocked(inbound);
+            }
+        }
+
+        return false;
+    }
+
+    private bool TryRequestRuntimeUnlockPreCommitProbeFallbackAdmissionRejectionLocked(
         FileTransferDirection direction,
         string sessionId,
         string transferId,
@@ -874,44 +932,74 @@ public sealed partial class SessionFileTransferService
         {
             if (direction == FileTransferDirection.Outbound &&
                 IsOutboundLifecycleMessageMatchLocked(sessionId, transferId) &&
-                outboundTransfer is { IsTerminal: false } outbound &&
-                outbound.RouteRuntime.UsesPostTunaFallbackV6Runtime)
+                outboundTransfer is { IsTerminal: false } outbound)
             {
+                if (HasCurrentRuntimeUnlockAdmissionLocked(outbound) ||
+                    !ShouldRequestRuntimeUnlockPreCommitProbeFallbackAdmissionRejectionLocked(outbound))
+                {
+                    return false;
+                }
+
                 var admission = RequestRuntimeUnlockAdmissionLocked(
                     outbound,
                     "precommit_probe_received",
                     "precommit_probe_received");
+                if (admission.Granted)
+                {
+                    ClearOutboundRuntimeUnlockFallbackSeparationStateLocked(outbound);
+                    return false;
+                }
+
                 if (!admission.Granted)
                 {
                     rejectionReason = FormatRuntimeUnlockFallbackAdmissionRejection(
                         FileTransferDirection.Outbound,
                         admission);
-                    MarkOutboundRuntimeUnlockWaitingForFallbackSurvivalLocked(
-                        outbound,
-                        "precommit_probe_received",
-                        rejectionReason);
+                    if (outbound.RouteRuntime.UsesPostTunaFallbackV6Runtime)
+                    {
+                        MarkOutboundRuntimeUnlockWaitingForFallbackSurvivalLocked(
+                            outbound,
+                            "precommit_probe_received",
+                            rejectionReason);
+                    }
+
                     return true;
                 }
             }
 
             if (direction == FileTransferDirection.Inbound &&
                 IsInboundLifecycleMessageMatchLocked(sessionId, transferId) &&
-                inboundTransfer is { IsTerminal: false } inbound &&
-                inbound.RouteRuntime.UsesPostTunaFallbackV6Runtime)
+                inboundTransfer is { IsTerminal: false } inbound)
             {
+                if (HasCurrentRuntimeUnlockAdmissionLocked(inbound) ||
+                    !ShouldRequestRuntimeUnlockPreCommitProbeFallbackAdmissionRejectionLocked(inbound))
+                {
+                    return false;
+                }
+
                 var admission = RequestRuntimeUnlockAdmissionLocked(
                     inbound,
                     "precommit_probe_received",
                     "precommit_probe_received");
+                if (admission.Granted)
+                {
+                    ClearInboundRuntimeUnlockFallbackSeparationStateLocked(inbound);
+                    return false;
+                }
+
                 if (!admission.Granted)
                 {
                     rejectionReason = FormatRuntimeUnlockFallbackAdmissionRejection(
                         FileTransferDirection.Inbound,
                         admission);
-                    MarkInboundRuntimeUnlockWaitingForFallbackSurvivalLocked(
-                        inbound,
-                        "precommit_probe_received",
-                        rejectionReason);
+                    if (inbound.RouteRuntime.UsesPostTunaFallbackV6Runtime)
+                    {
+                        MarkInboundRuntimeUnlockWaitingForFallbackSurvivalLocked(
+                            inbound,
+                            "precommit_probe_received",
+                            rejectionReason);
+                    }
+
                     return true;
                 }
             }
@@ -919,6 +1007,130 @@ public sealed partial class SessionFileTransferService
 
         return false;
     }
+
+    private static bool ShouldRequestRuntimeUnlockPreCommitProbeFallbackAdmissionRejectionLocked(
+        OutboundTransferContext context)
+    {
+        if (!context.RouteRuntime.UsesPostTunaFallbackV6Runtime)
+        {
+            return false;
+        }
+
+        var survivalState = BuildRuntimeUnlockFallbackSurvivalStateLocked(context);
+        return survivalState is
+        {
+            FallbackActive: true,
+            FallbackCurrent: true,
+            FallbackTerminalized: false,
+            PairedFallbackYieldGranted: false,
+        };
+    }
+
+    private static bool ShouldRequestRuntimeUnlockPreCommitProbeFallbackAdmissionRejectionLocked(
+        InboundTransferContext context)
+    {
+        if (!context.RouteRuntime.UsesPostTunaFallbackV6Runtime)
+        {
+            return false;
+        }
+
+        var survivalState = BuildRuntimeUnlockFallbackSurvivalStateLocked(context);
+        return survivalState is
+        {
+            FallbackActive: true,
+            FallbackCurrent: true,
+            FallbackTerminalized: false,
+            PairedFallbackYieldGranted: false,
+        };
+    }
+
+    private static bool HasCurrentRuntimeUnlockAdmissionLocked(OutboundTransferContext context)
+        => context.RuntimeUnlockAdmissionToken is { } token &&
+           FileTransferCoordinator.IsRuntimeUnlockAdmissionTokenCurrent(
+               CreateCoordinatorStateLocked(context),
+               token,
+               out _);
+
+    private static bool HasCurrentRuntimeUnlockAdmissionLocked(InboundTransferContext context)
+        => context.RuntimeUnlockAdmissionToken is { } token &&
+           FileTransferCoordinator.IsRuntimeUnlockAdmissionTokenCurrent(
+               CreateCoordinatorStateLocked(context),
+               token,
+               out _);
+
+    private static bool TryGetCurrentRuntimeUnlockAdmissionLocked(
+        OutboundTransferContext context,
+        string reason,
+        out RuntimeUnlockAdmissionDecision admission)
+    {
+        if (context.RuntimeUnlockAdmissionToken is { } token &&
+            FileTransferCoordinator.IsRuntimeUnlockAdmissionTokenCurrent(
+                CreateCoordinatorStateLocked(context),
+                token,
+                out _))
+        {
+            admission = RuntimeUnlockAdmissionDecisionFromToken(context, token, reason);
+            return true;
+        }
+
+        admission = new RuntimeUnlockAdmissionDecision(
+            RuntimeUnlockAdmissionStatus.RejectedStaleOwner,
+            "runtime_unlock_admission_missing");
+        return false;
+    }
+
+    private static bool TryGetCurrentRuntimeUnlockAdmissionLocked(
+        InboundTransferContext context,
+        string reason,
+        out RuntimeUnlockAdmissionDecision admission)
+    {
+        if (context.RuntimeUnlockAdmissionToken is { } token &&
+            FileTransferCoordinator.IsRuntimeUnlockAdmissionTokenCurrent(
+                CreateCoordinatorStateLocked(context),
+                token,
+                out _))
+        {
+            admission = RuntimeUnlockAdmissionDecisionFromToken(context, token, reason);
+            return true;
+        }
+
+        admission = new RuntimeUnlockAdmissionDecision(
+            RuntimeUnlockAdmissionStatus.RejectedStaleOwner,
+            "runtime_unlock_admission_missing");
+        return false;
+    }
+
+    private static RuntimeUnlockAdmissionDecision RuntimeUnlockAdmissionDecisionFromToken(
+        OutboundTransferContext context,
+        RuntimeUnlockAdmissionToken token,
+        string reason)
+        => new(
+            RuntimeUnlockAdmissionStatus.Granted,
+            NormalizeReason(reason) ?? token.Reason,
+            token,
+            context.RouteSelection.Route,
+            context.RouteSelection.ProtocolVersion,
+            context.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0,
+            context.TerminalGeneration,
+            context.CurrentTransferLeg?.Generation ?? 0,
+            context.RuntimeUnlockFallbackSurvivalState);
+
+    private static RuntimeUnlockAdmissionDecision RuntimeUnlockAdmissionDecisionFromToken(
+        InboundTransferContext context,
+        RuntimeUnlockAdmissionToken token,
+        string reason)
+        => new(
+            RuntimeUnlockAdmissionStatus.Granted,
+            NormalizeReason(reason) ?? token.Reason,
+            token,
+            context.RouteSelection.Route,
+            context.RouteSelection.ProtocolVersion,
+            context.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0,
+            context.TerminalGeneration,
+            context.CurrentTransferLeg?.Generation ?? 0,
+            context.RuntimeUnlockFallbackSurvivalState);
 
     private static bool IsRuntimeUnlockPreCommitProbeCommitConfirmationReason(string? reason)
     {
@@ -1782,11 +1994,7 @@ public sealed partial class SessionFileTransferService
             {
                 if (outbound.RouteRuntime.UsesRegularNknV4FastRuntime)
                 {
-                    var admission = RequestRuntimeUnlockAdmissionLocked(
-                        outbound,
-                        "precommit_probe_ack_commit",
-                        reason);
-                    if (admission.Granted)
+                    if (TryGetCurrentRuntimeUnlockAdmissionLocked(outbound, reason, out var admission))
                     {
                         if (!outbound.RuntimeUnlockActivationWindowGranted)
                         {
@@ -1802,16 +2010,12 @@ public sealed partial class SessionFileTransferService
                 }
                 else if (outbound.RouteRuntime.UsesPostTunaFallbackV6Runtime)
                 {
-                    var admission = RequestRuntimeUnlockAdmissionLocked(
-                        outbound,
-                        "precommit_probe_ack_commit",
-                        reason);
-                    if (!admission.Granted)
+                    if (!TryGetCurrentRuntimeUnlockAdmissionLocked(outbound, reason, out var admission))
                     {
                         MarkOutboundRuntimeUnlockWaitingForFallbackSurvivalLocked(
                             outbound,
                             reason,
-                            FormatRuntimeUnlockFallbackAdmissionRejection(FileTransferDirection.Outbound, admission));
+                            "runtime_unlock_admission_missing");
                     }
                     else
                     {
@@ -1848,11 +2052,7 @@ public sealed partial class SessionFileTransferService
             {
                 if (inbound.RouteRuntime.UsesRegularNknV4FastRuntime)
                 {
-                    var admission = RequestRuntimeUnlockAdmissionLocked(
-                        inbound,
-                        "precommit_probe_ack_commit",
-                        reason);
-                    if (admission.Granted)
+                    if (TryGetCurrentRuntimeUnlockAdmissionLocked(inbound, reason, out var admission))
                     {
                         if (!inbound.RuntimeUnlockActivationWindowGranted)
                         {
@@ -1868,16 +2068,12 @@ public sealed partial class SessionFileTransferService
                 }
                 else if (inbound.RouteRuntime.UsesPostTunaFallbackV6Runtime)
                 {
-                    var admission = RequestRuntimeUnlockAdmissionLocked(
-                        inbound,
-                        "precommit_probe_ack_commit",
-                        reason);
-                    if (!admission.Granted)
+                    if (!TryGetCurrentRuntimeUnlockAdmissionLocked(inbound, reason, out var admission))
                     {
                         MarkInboundRuntimeUnlockWaitingForFallbackSurvivalLocked(
                             inbound,
                             reason,
-                            FormatRuntimeUnlockFallbackAdmissionRejection(FileTransferDirection.Inbound, admission));
+                            "runtime_unlock_admission_missing");
                     }
                     else
                     {
