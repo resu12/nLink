@@ -11354,6 +11354,7 @@ public sealed partial class SessionFileTransferService
         try
         {
             FileTransferControlPlaneDeliveryRequest? controlPlaneRequest = null;
+            var peerVisibleControlPlaneProof = false;
             lock (gate)
             {
                 if (ReferenceEquals(inboundTransfer, context) &&
@@ -11386,6 +11387,7 @@ public sealed partial class SessionFileTransferService
                     return false;
                 }
 
+                peerVisibleControlPlaneProof = delivery.Result?.PeerVisibleAny == true;
                 if (state is FileTransferReceiverStateFrameV6 receiverState)
                 {
                     lock (gate)
@@ -11406,6 +11408,13 @@ public sealed partial class SessionFileTransferService
             else
             {
                 await dataSession.SendAsync(state, context.LifetimeCts.Token).ConfigureAwait(false);
+            }
+
+            if (controlPlaneRequest is not null &&
+                state is FileTransferReceiverStateFrameV6 { RecoveryMode: V6RegularNknStateRefreshRecoveryMode } &&
+                !peerVisibleControlPlaneProof)
+            {
+                return true;
             }
 
             lock (gate)

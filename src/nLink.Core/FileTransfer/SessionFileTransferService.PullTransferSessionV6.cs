@@ -5085,6 +5085,7 @@ public sealed partial class SessionFileTransferService
         try
         {
             FileTransferControlPlaneDeliveryRequest? controlPlaneRequest = null;
+            var peerVisibleControlPlaneProof = false;
             lock (gate)
             {
                 if (ReferenceEquals(inboundTransfer, context) &&
@@ -5115,6 +5116,7 @@ public sealed partial class SessionFileTransferService
                     return false;
                 }
 
+                peerVisibleControlPlaneProof = delivery.Result?.PeerVisibleAny == true;
                 lock (gate)
                 {
                     if (ReferenceEquals(inboundTransfer, context) &&
@@ -5136,6 +5138,11 @@ public sealed partial class SessionFileTransferService
 
             if (string.Equals(state.RecoveryMode, V6RegularNknStateRefreshRecoveryMode, StringComparison.Ordinal))
             {
+                if (controlPlaneRequest is not null && !peerVisibleControlPlaneProof)
+                {
+                    return true;
+                }
+
                 lock (gate)
                 {
                     if (ReferenceEquals(inboundTransfer, context) && !context.IsTerminal)

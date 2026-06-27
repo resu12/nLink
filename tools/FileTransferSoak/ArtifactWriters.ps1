@@ -3276,10 +3276,12 @@ function Get-FileTransferStaleRejectedProofActionFamily {
             'progressmutation' { return 'progress' }
             'fallbackcheckpointbegin' { return 'checkpoint' }
             'fallbackcheckpointaccept' { return 'checkpoint' }
-            'fallbackcheckpointreissue' { return 'checkpoint' }
+            'FallbackCheckpointReissue' { return 'checkpoint' }
             'fallbackcheckpointretire' { return 'checkpoint' }
-            'fallbacktailquiescent' { return 'checkpoint' }
+            'FallbackTailQuiescent' { return 'checkpoint' }
             'fallbacktailfailed' { return 'checkpoint' }
+            'ControlPlaneSendCompletion' { return 'control_plane' }
+            'FallbackControlPlanePressure' { return 'control_plane' }
             'bridgerecovery' { return 'bridge_recovery' }
             'controlplanesend' { return 'control_plane' }
             'routemismatchmark' { return 'route_publication' }
@@ -3333,6 +3335,55 @@ function Get-FileTransferStaleRejectedProofActionFamily {
     }
 
     return 'unknown'
+}
+
+function Get-FileTransferStaleRejectedProofFallbackSubfamily {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    $actionKind = Get-FileTransferStaleRejectedProofFirstField -Event $Event -Names @('action_kind')
+    if (Test-FileTransferStaleRejectedProofMeaningfulValue -Value $actionKind) {
+        switch ($actionKind.ToLowerInvariant()) {
+            'controlplanesend' { return 'fallback_send' }
+            'controlplanesendcompletion' { return 'fallback_send' }
+            'fallbackcheckpointbegin' { return 'fallback_checkpoint' }
+            'fallbackcheckpointaccept' { return 'fallback_checkpoint' }
+            'fallbackcheckpointretire' { return 'fallback_checkpoint' }
+            'FallbackCheckpointReissue' { return 'fallback_reissue' }
+            'FallbackTailQuiescent' { return 'fallback_tail_yield' }
+            'fallbacktailfailed' { return 'fallback_tail_yield' }
+            'FallbackControlPlanePressure' { return 'fallback_pressure' }
+        }
+    }
+
+    $textParts = @(
+        (Get-FileTransferEventField -Event $Event -Name 'attempted_action' -Default ''),
+        (Get-FileTransferEventField -Event $Event -Name 'source' -Default ''),
+        (Get-FileTransferEventField -Event $Event -Name 'reason' -Default ''),
+        (Get-FileTransferEventField -Event $Event -Name 'rejection_reason' -Default '')
+    )
+    $text = ($textParts -join ' ').ToLowerInvariant()
+
+    if ($text -match 'fallback.*pressure|control_plane_pressure|control-plane-pressure|pressure_authority') {
+        return 'fallback_pressure'
+    }
+
+    if ($text -match 'checkpoint.*reissue|reissue.*checkpoint|checkpoint_request_retry|checkpoint_request_replay') {
+        return 'fallback_reissue'
+    }
+
+    if ($text -match 'tail|yield') {
+        return 'fallback_tail_yield'
+    }
+
+    if ($text -match 'checkpoint') {
+        return 'fallback_checkpoint'
+    }
+
+    if ($text -match 'control_plane|control-plane|delivery|receiver_state_control|frontier_request_control') {
+        return 'fallback_send'
+    }
+
+    return ''
 }
 
 function Test-FileTransferStaleRejectedProofScopeMatches {
@@ -3392,7 +3443,11 @@ function Test-FileTransferStaleRejectedProofAuthorityMatches {
         [pscustomobject]@{ Stale = @('attempted_leg_generation', 'leg_generation'); Current = @('current_leg_generation'); Effect = @('leg_generation') },
         [pscustomobject]@{ Stale = @('attempted_transport_epoch', 'transport_epoch'); Current = @('current_transport_epoch'); Effect = @('transport_epoch') },
         [pscustomobject]@{ Stale = @('attempted_bridge_recovery_generation', 'bridge_recovery_generation'); Current = @('current_bridge_recovery_generation'); Effect = @('bridge_recovery_generation') },
-        [pscustomobject]@{ Stale = @('attempted_checkpoint_request_id', 'checkpoint_request_id'); Current = @('current_checkpoint_request_id'); Effect = @('checkpoint_request_id') }
+        [pscustomobject]@{ Stale = @('attempted_checkpoint_request_id', 'checkpoint_request_id'); Current = @('current_checkpoint_request_id'); Effect = @('checkpoint_request_id') },
+        [pscustomobject]@{ Stale = @('attempted_checkpoint_generation', 'checkpoint_generation'); Current = @('current_checkpoint_generation'); Effect = @('checkpoint_generation') },
+        [pscustomobject]@{ Stale = @('attempted_control_plane_token_generation', 'control_plane_token_generation', 'fallback_control_plane_token_generation', 'token_generation'); Current = @('current_control_plane_token_generation', 'current_fallback_control_plane_token_generation', 'current_token_generation'); Effect = @('control_plane_token_generation', 'fallback_control_plane_token_generation', 'token_generation') },
+        [pscustomobject]@{ Stale = @('attempted_checkpoint_lease_generation', 'checkpoint_lease_generation', 'fallback_checkpoint_lease_generation', 'lease_generation'); Current = @('current_checkpoint_lease_generation', 'current_fallback_checkpoint_lease_generation', 'current_lease_generation'); Effect = @('checkpoint_lease_generation', 'fallback_checkpoint_lease_generation', 'lease_generation') },
+        [pscustomobject]@{ Stale = @('attempted_pressure_generation', 'pressure_generation', 'fallback_control_plane_pressure_generation'); Current = @('current_pressure_generation', 'current_fallback_control_plane_pressure_generation'); Effect = @('pressure_generation', 'fallback_control_plane_pressure_generation') }
     )
 
     $matchedStaleAuthority = $false
@@ -3463,10 +3518,81 @@ function Test-FileTransferStaleRejectedProofAuthorityMatches {
 function Test-FileTransferStaleRejectedProofForbiddenEffect {
     param(
         [Parameter(Mandatory = $true)][string]$Family,
-        [Parameter(Mandatory = $true)]$Event
+        [Parameter(Mandatory = $true)]$Event,
+        [string]$FallbackSubfamily = ''
     )
 
     $name = [string]$Event.EventName
+    if (Test-FileTransferStaleRejectedProofMeaningfulValue -Value $FallbackSubfamily) {
+        switch ($FallbackSubfamily) {
+            'fallback_send' {
+                return $name -in @(
+                    'filetransfer_control_plane_delivery_result',
+                    'filetransfer_control_plane_delivery_observed',
+                    'filetransfer_control_plane_delivery_failed',
+                    'filetransfer_control_plane_delivery_unavailable',
+                    'filetransfer_fallback_checkpoint_requested',
+                    'filetransfer_fallback_checkpoint_accepted',
+                    'filetransfer_fallback_checkpoint_retired',
+                    'filetransfer_fallback_checkpoint_exchange_retired',
+                    'filetransfer_fallback_checkpoint_retry_state_cleared',
+                    'filetransfer_fallback_checkpoint_recovery_leg_started')
+            }
+            'fallback_checkpoint' {
+                return $name -in @(
+                    'filetransfer_fallback_checkpoint_requested',
+                    'filetransfer_fallback_checkpoint_accepted',
+                    'filetransfer_fallback_checkpoint_retired',
+                    'filetransfer_fallback_checkpoint_exchange_retired',
+                    'filetransfer_fallback_checkpoint_retry_state_cleared',
+                    'filetransfer_fallback_checkpoint_recovery_leg_started',
+                    'filetransfer_fallback_leg_authority_checkpoint_accepted',
+                    'filetransfer_live_route_epoch_recovered')
+            }
+            'fallback_reissue' {
+                if ($name -in @(
+                        'filetransfer_fallback_checkpoint_reissue_requested',
+                        'filetransfer_fallback_checkpoint_response_timeout_reissued',
+                        'filetransfer_fallback_checkpoint_request_sent',
+                        'filetransfer_v6_regular_nkn_state_refresh_sent',
+                        'filetransfer_v6_frontier_request_sent')) {
+                    return $true
+                }
+
+                if ($name -in @('filetransfer_control_plane_delivery_result', 'filetransfer_control_plane_delivery_observed')) {
+                    $kind = (Get-FileTransferEventField -Event $Event -Name 'kind' -Default '').ToLowerInvariant()
+                    $reason = (Get-FileTransferEventField -Event $Event -Name 'reason' -Default '').ToLowerInvariant()
+                    return $kind -match 'fallback_checkpoint_request|frontier_request' -or $reason -match 'reissue|retry|replay|checkpoint_request'
+                }
+
+                return $false
+            }
+            'fallback_tail_yield' {
+                return $name -in @(
+                    'filetransfer_fallback_tail_quiescent_yield_granted',
+                    'filetransfer_fallback_tail_failed',
+                    'filetransfer_fallback_tail_yield_proof_sent',
+                    'filetransfer_fallback_tail_paired_yield_granted',
+                    'filetransfer_fallback_tail_reconciliation_requested',
+                    'filetransfer_fallback_tail_reconciliation_accepted',
+                    'filetransfer_runtime_unlock_admission_granted',
+                    'filetransfer_normal_to_tuna_handoff_route_hint_deferred',
+                    'filetransfer_route_selected',
+                    'filetransfer_live_route_epoch_started',
+                    'filetransfer_live_route_epoch_recovered',
+                    'filetransfer_runtime_started')
+            }
+            'fallback_pressure' {
+                return $name -in @(
+                    'filetransfer_post_tuna_fallback_control_plane_pressure_marked',
+                    'filetransfer_post_tuna_fallback_control_plane_pressure_cleared',
+                    'filetransfer_runtime_unlock_admission_granted',
+                    'runtime_unlock_precommit_probe_started',
+                    'runtime_unlock_precommit_probe_sent')
+            }
+        }
+    }
+
     switch ($Family) {
         'liveness' {
             return $name -in @(
@@ -3509,12 +3635,16 @@ function Test-FileTransferStaleRejectedProofForbiddenEffect {
             return $name -in @(
                 'filetransfer_fallback_checkpoint_requested',
                 'filetransfer_fallback_checkpoint_accepted',
+                'filetransfer_fallback_checkpoint_retired',
                 'filetransfer_fallback_checkpoint_reissue_requested',
                 'filetransfer_fallback_checkpoint_exchange_retired',
+                'filetransfer_fallback_checkpoint_retry_state_cleared',
                 'filetransfer_fallback_checkpoint_recovery_leg_started',
                 'filetransfer_fallback_leg_authority_checkpoint_accepted',
                 'filetransfer_fallback_tail_quiescent_yield_granted',
                 'filetransfer_fallback_tail_failed',
+                'filetransfer_fallback_tail_yield_proof_sent',
+                'filetransfer_fallback_tail_paired_yield_granted',
                 'filetransfer_fallback_tail_reconciliation_requested',
                 'filetransfer_fallback_tail_reconciliation_accepted')
         }
@@ -3536,6 +3666,8 @@ function Test-FileTransferStaleRejectedProofForbiddenEffect {
                 'filetransfer_control_plane_delivery_unavailable',
                 'filetransfer_fallback_checkpoint_request_sent',
                 'filetransfer_fallback_checkpoint_proof_sent',
+                'filetransfer_fallback_checkpoint_response_timeout_reissued',
+                'filetransfer_v6_regular_nkn_state_refresh_sent',
                 'filetransfer_v6_frontier_request_sent',
                 'filetransfer_v6_receiver_state_sent',
                 'filetransfer_data_frame_dispatched',
@@ -3578,6 +3710,55 @@ function Test-FileTransferStaleRejectedProofForbiddenEffect {
     }
 }
 
+function Test-FileTransferFallbackLocalDeliveryWithoutPeerVisibleProof {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    if ($Event.EventName -ne 'filetransfer_control_plane_delivery_result' -and
+        $Event.EventName -ne 'filetransfer_control_plane_delivery_observed') {
+        return $false
+    }
+
+    $acceptedAny = Get-FileTransferEventField -Event $Event -Name 'accepted_any' -Default '0'
+    $peerVisibleAny = Get-FileTransferEventField -Event $Event -Name 'peer_visible_any' -Default '0'
+    $controlQueue = Get-FileTransferEventField -Event $Event -Name 'control_queue' -Default '0'
+    $localOnlyRejected = Get-FileTransferEventField -Event $Event -Name 'local_only_rejected' -Default '0'
+    if ($peerVisibleAny -eq '1') {
+        return $false
+    }
+
+    if ($acceptedAny -ne '1' -and $controlQueue -ne '1' -and $localOnlyRejected -ne '1') {
+        return $false
+    }
+
+    $route = Get-FileTransferEventField -Event $Event -Name 'route' -Default ''
+    $kind = (Get-FileTransferEventField -Event $Event -Name 'kind' -Default '').ToLowerInvariant()
+    $reason = (Get-FileTransferEventField -Event $Event -Name 'reason' -Default '').ToLowerInvariant()
+    return ($route -eq 'post_tuna_fallback_v6' -or
+        $kind -match 'fallback|receiver_state|frontier_request' -or
+        $reason -match 'fallback|checkpoint|receiver_state|frontier')
+}
+
+function Test-FileTransferFallbackPeerVisibleCompletion {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    if ($Event.EventName -ne 'filetransfer_control_plane_delivery_result' -and
+        $Event.EventName -ne 'filetransfer_control_plane_delivery_observed') {
+        return $false
+    }
+
+    $peerVisibleAny = Get-FileTransferEventField -Event $Event -Name 'peer_visible_any' -Default '0'
+    if ($peerVisibleAny -ne '1') {
+        return $false
+    }
+
+    $route = Get-FileTransferEventField -Event $Event -Name 'route' -Default ''
+    $kind = (Get-FileTransferEventField -Event $Event -Name 'kind' -Default '').ToLowerInvariant()
+    $reason = (Get-FileTransferEventField -Event $Event -Name 'reason' -Default '').ToLowerInvariant()
+    return ($route -eq 'post_tuna_fallback_v6' -or
+        $kind -match 'fallback|receiver_state|frontier_request' -or
+        $reason -match 'fallback|checkpoint|receiver_state|frontier')
+}
+
 function Get-FileTransferStaleRejectedActionEffectProof {
     param([Parameter(Mandatory = $true)]$Summary)
 
@@ -3600,6 +3781,11 @@ function Get-FileTransferStaleRejectedActionEffectProof {
     foreach ($family in @($families)) {
         $familyCounts[$family] = 0
     }
+    $fallbackSubfamilies = @('fallback_send', 'fallback_checkpoint', 'fallback_reissue', 'fallback_tail_yield', 'fallback_pressure')
+    $fallbackSubfamilyCounts = @{}
+    foreach ($subfamily in @($fallbackSubfamilies)) {
+        $fallbackSubfamilyCounts[$subfamily] = 0
+    }
 
     $unknownActionCount = 0
     $forbiddenEffectCount = 0
@@ -3608,6 +3794,7 @@ function Get-FileTransferStaleRejectedActionEffectProof {
 
     foreach ($rejection in @($rejections | Sort-Object Sequence)) {
         $family = Get-FileTransferStaleRejectedProofActionFamily -Event $rejection
+        $fallbackSubfamily = Get-FileTransferStaleRejectedProofFallbackSubfamily -Event $rejection
         if ($family -eq 'unknown') {
             $unknownActionCount++
             $actionKind = Get-FileTransferEventField -Event $rejection -Name 'action_kind' -Default '(none)'
@@ -3618,7 +3805,7 @@ function Get-FileTransferStaleRejectedActionEffectProof {
         }
 
         foreach ($effect in @($events | Where-Object { $_.Sequence -gt $rejection.Sequence })) {
-            if (-not (Test-FileTransferStaleRejectedProofForbiddenEffect -Family $family -Event $effect)) {
+            if (-not (Test-FileTransferStaleRejectedProofForbiddenEffect -Family $family -Event $effect -FallbackSubfamily $fallbackSubfamily)) {
                 continue
             }
 
@@ -3632,13 +3819,46 @@ function Get-FileTransferStaleRejectedActionEffectProof {
 
             $forbiddenEffectCount++
             $familyCounts[$family] = [int]$familyCounts[$family] + 1
-            $findings.Add(("stale rejected {0} action was followed by matching effect: rejection={1}; effect={2}" -f $family, (Format-FileTransferEvidenceLine -Event $rejection), (Format-FileTransferEvidenceLine -Event $effect))) | Out-Null
+            if (Test-FileTransferStaleRejectedProofMeaningfulValue -Value $fallbackSubfamily) {
+                $fallbackSubfamilyCounts[$fallbackSubfamily] = [int]$fallbackSubfamilyCounts[$fallbackSubfamily] + 1
+            }
+            $displayFamily = if (Test-FileTransferStaleRejectedProofMeaningfulValue -Value $fallbackSubfamily) { $fallbackSubfamily } else { $family }
+            $findings.Add(("stale rejected {0} action was followed by matching effect: rejection={1}; effect={2}" -f $displayFamily, (Format-FileTransferEvidenceLine -Event $rejection), (Format-FileTransferEvidenceLine -Event $effect))) | Out-Null
             $evidence.Add($rejection) | Out-Null
             $evidence.Add($effect) | Out-Null
         }
     }
 
-    $verdict = if ($rejections.Count -eq 0) { 'none' } elseif ($findings.Count -eq 0) { 'pass' } else { 'fail' }
+    [object[]]$localDeliveries = @($events | Where-Object { Test-FileTransferFallbackLocalDeliveryWithoutPeerVisibleProof -Event $_ } | Sort-Object Sequence)
+    foreach ($localDelivery in @($localDeliveries)) {
+        [object[]]$laterAdmissionGrants = @($events | Where-Object {
+                $_.Sequence -gt $localDelivery.Sequence -and
+                $_.EventName -eq 'filetransfer_runtime_unlock_admission_granted' -and
+                (Test-FileTransferStaleRejectedProofScopeMatches -Rejection $localDelivery -Effect $_)
+            } | Sort-Object Sequence)
+
+        foreach ($admissionGrant in @($laterAdmissionGrants)) {
+            [object[]]$peerVisibleCompletions = @($events | Where-Object {
+                    $_.Sequence -gt $localDelivery.Sequence -and
+                    $_.Sequence -lt $admissionGrant.Sequence -and
+                    (Test-FileTransferFallbackPeerVisibleCompletion -Event $_) -and
+                    (Test-FileTransferStaleRejectedProofScopeMatches -Rejection $localDelivery -Effect $_)
+                })
+            if ($peerVisibleCompletions.Count -gt 0) {
+                continue
+            }
+
+            $forbiddenEffectCount++
+            $familyCounts['control_plane'] = [int]$familyCounts['control_plane'] + 1
+            $fallbackSubfamilyCounts['fallback_send'] = [int]$fallbackSubfamilyCounts['fallback_send'] + 1
+            $findings.Add(("local fallback control-plane acceptance was followed by runtime unlock admission without matching peer-visible completion: delivery={0}; admission={1}" -f (Format-FileTransferEvidenceLine -Event $localDelivery), (Format-FileTransferEvidenceLine -Event $admissionGrant))) | Out-Null
+            $evidence.Add($localDelivery) | Out-Null
+            $evidence.Add($admissionGrant) | Out-Null
+        }
+    }
+
+    $verdict = if ($rejections.Count -eq 0 -and $localDeliveries.Count -eq 0) { 'none' } elseif ($findings.Count -eq 0) { 'pass' } else { 'fail' }
+
     return [pscustomobject]@{
         Verdict = $verdict
         FailureClass = if ($verdict -eq 'fail') { 'stale_rejected_action_effect' } else { 'none' }
@@ -3652,6 +3872,11 @@ function Get-FileTransferStaleRejectedActionEffectProof {
         BridgeRecoveryForbiddenEffectCount = [int]$familyCounts['bridge_recovery']
         ControlPlaneForbiddenEffectCount = [int]$familyCounts['control_plane']
         RoutePublicationForbiddenEffectCount = [int]$familyCounts['route_publication']
+        FallbackSendForbiddenEffectCount = [int]$fallbackSubfamilyCounts['fallback_send']
+        FallbackCheckpointForbiddenEffectCount = [int]$fallbackSubfamilyCounts['fallback_checkpoint']
+        FallbackReissueForbiddenEffectCount = [int]$fallbackSubfamilyCounts['fallback_reissue']
+        FallbackTailYieldForbiddenEffectCount = [int]$fallbackSubfamilyCounts['fallback_tail_yield']
+        FallbackPressureForbiddenEffectCount = [int]$fallbackSubfamilyCounts['fallback_pressure']
         Findings = $findings
         EvidenceEvents = @($evidence.ToArray() | Select-Object -First 20)
     }
@@ -4001,6 +4226,11 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("stale_rejected_bridge_recovery_effect_count={0}" -f $staleRejectedActionEffectProof.BridgeRecoveryForbiddenEffectCount)) | Out-Null
     $lines.Add(("stale_rejected_control_plane_effect_count={0}" -f $staleRejectedActionEffectProof.ControlPlaneForbiddenEffectCount)) | Out-Null
     $lines.Add(("stale_rejected_route_publication_effect_count={0}" -f $staleRejectedActionEffectProof.RoutePublicationForbiddenEffectCount)) | Out-Null
+    $lines.Add(("stale_rejected_fallback_send_effect_count={0}" -f $staleRejectedActionEffectProof.FallbackSendForbiddenEffectCount)) | Out-Null
+    $lines.Add(("stale_rejected_fallback_checkpoint_effect_count={0}" -f $staleRejectedActionEffectProof.FallbackCheckpointForbiddenEffectCount)) | Out-Null
+    $lines.Add(("stale_rejected_fallback_reissue_effect_count={0}" -f $staleRejectedActionEffectProof.FallbackReissueForbiddenEffectCount)) | Out-Null
+    $lines.Add(("stale_rejected_fallback_tail_yield_effect_count={0}" -f $staleRejectedActionEffectProof.FallbackTailYieldForbiddenEffectCount)) | Out-Null
+    $lines.Add(("stale_rejected_fallback_pressure_effect_count={0}" -f $staleRejectedActionEffectProof.FallbackPressureForbiddenEffectCount)) | Out-Null
     $lines.Add(("stale_rejected_unknown_action_count={0}" -f $staleRejectedActionEffectProof.UnknownActionCount)) | Out-Null
     $lines.Add(("fallback_runtime_unlock_separation_verdict={0}" -f $fallbackRuntimeUnlockSeparationProof.Verdict)) | Out-Null
     $lines.Add(("runtime_fallback_separation_verdict={0}" -f $fallbackRuntimeUnlockSeparationProof.Verdict)) | Out-Null
@@ -6956,6 +7186,11 @@ function Get-FileTransferRecoveryFailureClassification {
         StaleRejectedActionEffectIsolationVerdict = $staleRejectedActionEffectProof.Verdict
         StaleRejectedActionCount = $staleRejectedActionEffectProof.RejectedActionCount
         StaleRejectedActionForbiddenEffectCount = $staleRejectedActionEffectProof.ForbiddenEffectCount
+        StaleRejectedFallbackSendEffectCount = $staleRejectedActionEffectProof.FallbackSendForbiddenEffectCount
+        StaleRejectedFallbackCheckpointEffectCount = $staleRejectedActionEffectProof.FallbackCheckpointForbiddenEffectCount
+        StaleRejectedFallbackReissueEffectCount = $staleRejectedActionEffectProof.FallbackReissueForbiddenEffectCount
+        StaleRejectedFallbackTailYieldEffectCount = $staleRejectedActionEffectProof.FallbackTailYieldForbiddenEffectCount
+        StaleRejectedFallbackPressureEffectCount = $staleRejectedActionEffectProof.FallbackPressureForbiddenEffectCount
         StaleRejectedUnknownActionCount = $staleRejectedActionEffectProof.UnknownActionCount
         FallbackRuntimeUnlockSeparationVerdict = $fallbackRuntimeUnlockSeparationProof.Verdict
         FallbackRuntimeUnlockWaitingCount = $fallbackRuntimeUnlockSeparationProof.WaitingForFallbackSurvivalCount
@@ -7121,6 +7356,11 @@ function New-FileTransferInvariantLedgerObject {
         stale_rejected_bridge_recovery_effect_count = [string]$staleRejectedActionEffectProof.BridgeRecoveryForbiddenEffectCount
         stale_rejected_control_plane_effect_count = [string]$staleRejectedActionEffectProof.ControlPlaneForbiddenEffectCount
         stale_rejected_route_publication_effect_count = [string]$staleRejectedActionEffectProof.RoutePublicationForbiddenEffectCount
+        stale_rejected_fallback_send_effect_count = [string]$staleRejectedActionEffectProof.FallbackSendForbiddenEffectCount
+        stale_rejected_fallback_checkpoint_effect_count = [string]$staleRejectedActionEffectProof.FallbackCheckpointForbiddenEffectCount
+        stale_rejected_fallback_reissue_effect_count = [string]$staleRejectedActionEffectProof.FallbackReissueForbiddenEffectCount
+        stale_rejected_fallback_tail_yield_effect_count = [string]$staleRejectedActionEffectProof.FallbackTailYieldForbiddenEffectCount
+        stale_rejected_fallback_pressure_effect_count = [string]$staleRejectedActionEffectProof.FallbackPressureForbiddenEffectCount
         stale_rejected_unknown_action_count = [string]$staleRejectedActionEffectProof.UnknownActionCount
         invariant_failure_class = $combinedInvariant.FailureClass
         goodput_bytes_per_second = $goodput
@@ -7270,6 +7510,11 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("stale_rejected_bridge_recovery_effect_count={0}" -f $staleRejectedActionEffectProof.BridgeRecoveryForbiddenEffectCount),
         ("stale_rejected_control_plane_effect_count={0}" -f $staleRejectedActionEffectProof.ControlPlaneForbiddenEffectCount),
         ("stale_rejected_route_publication_effect_count={0}" -f $staleRejectedActionEffectProof.RoutePublicationForbiddenEffectCount),
+        ("stale_rejected_fallback_send_effect_count={0}" -f $staleRejectedActionEffectProof.FallbackSendForbiddenEffectCount),
+        ("stale_rejected_fallback_checkpoint_effect_count={0}" -f $staleRejectedActionEffectProof.FallbackCheckpointForbiddenEffectCount),
+        ("stale_rejected_fallback_reissue_effect_count={0}" -f $staleRejectedActionEffectProof.FallbackReissueForbiddenEffectCount),
+        ("stale_rejected_fallback_tail_yield_effect_count={0}" -f $staleRejectedActionEffectProof.FallbackTailYieldForbiddenEffectCount),
+        ("stale_rejected_fallback_pressure_effect_count={0}" -f $staleRejectedActionEffectProof.FallbackPressureForbiddenEffectCount),
         ("stale_rejected_unknown_action_count={0}" -f $staleRejectedActionEffectProof.UnknownActionCount),
         ("invariant_failure_class={0}" -f $combinedInvariant.FailureClass),
         ("fallback_consumed={0}" -f $invariantLedger.fallback_consumed),
@@ -7393,6 +7638,11 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("classification_stale_rejected_action_effect_isolation_verdict={0}" -f $recoveryClassification.StaleRejectedActionEffectIsolationVerdict),
         ("classification_stale_rejected_action_count={0}" -f $recoveryClassification.StaleRejectedActionCount),
         ("classification_stale_rejected_action_forbidden_effect_count={0}" -f $recoveryClassification.StaleRejectedActionForbiddenEffectCount),
+        ("classification_stale_rejected_fallback_send_effect_count={0}" -f $recoveryClassification.StaleRejectedFallbackSendEffectCount),
+        ("classification_stale_rejected_fallback_checkpoint_effect_count={0}" -f $recoveryClassification.StaleRejectedFallbackCheckpointEffectCount),
+        ("classification_stale_rejected_fallback_reissue_effect_count={0}" -f $recoveryClassification.StaleRejectedFallbackReissueEffectCount),
+        ("classification_stale_rejected_fallback_tail_yield_effect_count={0}" -f $recoveryClassification.StaleRejectedFallbackTailYieldEffectCount),
+        ("classification_stale_rejected_fallback_pressure_effect_count={0}" -f $recoveryClassification.StaleRejectedFallbackPressureEffectCount),
         ("classification_stale_rejected_unknown_action_count={0}" -f $recoveryClassification.StaleRejectedUnknownActionCount),
         ("observed_start_utc={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.FirstTimestamp)) { '(unknown)' } else { $Summary.FirstTimestamp }))),
         ("observed_end_utc={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.LastTimestamp)) { '(unknown)' } else { $Summary.LastTimestamp }))),

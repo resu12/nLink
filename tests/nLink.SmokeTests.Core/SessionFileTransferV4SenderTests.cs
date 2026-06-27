@@ -1900,6 +1900,12 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         string? checkpointRequestId,
         string reason)
     {
+        checkpointRequestId = EnsureInboundFallbackCheckpointLeaseForTest(
+            context,
+            leg,
+            transportEpoch,
+            checkpointRequestId,
+            reason);
         var method = typeof(SessionFileTransferService)
             .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
             .Single(static candidate =>
@@ -1917,12 +1923,82 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         string? checkpointRequestId,
         string reason)
     {
+        checkpointRequestId = EnsureOutboundFallbackCheckpointLeaseForTest(
+            context,
+            leg,
+            transportEpoch,
+            checkpointRequestId,
+            reason);
         var method = typeof(SessionFileTransferService)
             .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
             .Single(static candidate =>
                 candidate.Name == "TryAcceptOutboundFallbackCheckpointWithCoordinatorLocked" &&
                 candidate.GetParameters()[0].ParameterType.Name.Contains("OutboundTransferContext", StringComparison.Ordinal));
         Assert.True((bool)method.Invoke(null, [context, leg, transportEpoch, committed, highestObserved, checkpointRequestId, reason])!);
+    }
+
+    private static string EnsureInboundFallbackCheckpointLeaseForTest(
+        object context,
+        FileTransferLeg leg,
+        long transportEpoch,
+        string? checkpointRequestId,
+        string reason)
+    {
+        var lease = GetPrivatePropertyValue(context, "CurrentFallbackCheckpointLease");
+        var requestId = string.IsNullOrWhiteSpace(checkpointRequestId)
+            ? $"test-fallback-checkpoint:{Guid.NewGuid():N}"
+            : checkpointRequestId!;
+        if (lease is not null && string.Equals(leg.CheckpointRequestId, requestId, StringComparison.Ordinal))
+        {
+            return requestId;
+        }
+
+        var request = new FileTransferFrontierRequestFrameV6
+        {
+            SessionId = GetPrivateProperty<string>(context, "SessionId"),
+            TransferId = GetPrivateProperty<string>(context, "TransferId"),
+            TransportEpoch = transportEpoch,
+            RepairRequestId = requestId,
+            Priority = "state_refresh",
+            RecoveryMode = "regular_nkn_state_refresh",
+            MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = Math.Max(0, GetPrivatePropertyValue(context, "NextChunkIndex") is int nextChunk ? nextChunk : 0), ChunkCount = 1 }],
+        };
+        var method = typeof(SessionFileTransferService)
+            .GetMethod("MarkInboundFallbackCheckpointRequestedLocked", BindingFlags.Static | BindingFlags.NonPublic)!;
+        Assert.True((bool)method.Invoke(null, [context, request, reason])!);
+        return requestId;
+    }
+
+    private static string EnsureOutboundFallbackCheckpointLeaseForTest(
+        object context,
+        FileTransferLeg leg,
+        long transportEpoch,
+        string? checkpointRequestId,
+        string reason)
+    {
+        var lease = GetPrivatePropertyValue(context, "CurrentFallbackCheckpointLease");
+        var requestId = string.IsNullOrWhiteSpace(checkpointRequestId)
+            ? $"test-fallback-checkpoint:{Guid.NewGuid():N}"
+            : checkpointRequestId!;
+        if (lease is not null && string.Equals(leg.CheckpointRequestId, requestId, StringComparison.Ordinal))
+        {
+            return requestId;
+        }
+
+        var request = new FileTransferFrontierRequestFrameV6
+        {
+            SessionId = GetPrivateProperty<string>(context, "SessionId"),
+            TransferId = GetPrivateProperty<string>(context, "TransferId"),
+            TransportEpoch = transportEpoch,
+            RepairRequestId = requestId,
+            Priority = "state_refresh",
+            RecoveryMode = "regular_nkn_state_refresh",
+            MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = Math.Max(0, GetPrivateProperty<int>(context, "RemoteNextExpectedChunkIndex")), ChunkCount = 1 }],
+        };
+        var method = typeof(SessionFileTransferService)
+            .GetMethod("MarkOutboundFallbackCheckpointRequestedLocked", BindingFlags.Static | BindingFlags.NonPublic)!;
+        Assert.True((bool)method.Invoke(null, [context, request, reason])!);
+        return requestId;
     }
 
     [Fact]
@@ -2587,6 +2663,10 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     {
         using var service = new SessionFileTransferService();
         var serviceType = typeof(SessionFileTransferService);
+        using var transport = new PeerVisibleControlPlaneLoopbackTransport(
+            "session_transfer_post_tuna_fallback_v6_inbound_checkpoint_retire",
+            deliverFrames: false);
+        service.AttachTransport(transport);
         var context = CreatePostTunaFallbackV6InboundContext(
             "transfer_post_tuna_fallback_v6_inbound_checkpoint_retire");
         SetPrivateProperty(context, "PullTransportRebindGeneration", 3);
@@ -2640,6 +2720,10 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     {
         using var service = new SessionFileTransferService();
         var serviceType = typeof(SessionFileTransferService);
+        using var transport = new PeerVisibleControlPlaneLoopbackTransport(
+            "session_transfer_post_tuna_fallback_v6_inbound_checkpoint_replay",
+            deliverFrames: false);
+        service.AttachTransport(transport);
         var context = CreatePostTunaFallbackV6InboundContext(
             "transfer_post_tuna_fallback_v6_inbound_checkpoint_replay");
         SetPrivateProperty(context, "PullTransportRebindGeneration", 3);
@@ -8295,8 +8379,8 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         var payload = Enumerable.Range(0, 768_000).Select(static index => (byte)(index % 229)).ToArray();
         var allowFrontierChunk = 0;
         var droppedFrontierBatchCount = 0;
-        using var senderTransport = new LoopbackFileTransferTransport("session_file_tuna_v4_live_switch_off_replay");
-        using var receiverTransport = new LoopbackFileTransferTransport("session_file_tuna_v4_live_switch_off_replay");
+        using var senderTransport = new PeerVisibleControlPlaneLoopbackTransport("session_file_tuna_v4_live_switch_off_replay");
+        using var receiverTransport = new PeerVisibleControlPlaneLoopbackTransport("session_file_tuna_v4_live_switch_off_replay");
         ConfigureFileTunaV4RouteForTest(senderTransport, receiverTransport);
         senderTransport.OutboundDataFrameDeliveryOverrideAsync = (_, frame, _) =>
         {
@@ -10757,7 +10841,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
     [Fact]
     [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
-    public void InboundPostTunaFallbackOwnerlessCheckpointProgress_AcceptsAndYields()
+    public void InboundPostTunaFallbackOwnerlessCheckpointProgress_DoesNotAcceptOrYield()
     {
         using var service = new SessionFileTransferService();
         var serviceType = typeof(SessionFileTransferService);
@@ -10801,20 +10885,19 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             .GetMethod("TryMarkInboundFallbackTailQuiescentLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, [context, 2L, "chunk_batch_committed"])!;
 
-        Assert.True(yielded);
-        Assert.Equal(FileTransferLegState.Active, GetPrivateProperty<FileTransferLegState>(leg, "State"));
-        Assert.True(GetPrivateProperty<bool>(leg, "CanSendData"));
+        Assert.False(yielded);
+        Assert.Equal(FileTransferLegState.CheckpointPending, GetPrivateProperty<FileTransferLegState>(leg, "State"));
+        Assert.False(GetPrivateProperty<bool>(leg, "CanSendData"));
         Assert.Null(GetPrivatePropertyValue(leg, "CheckpointRequestId"));
-        Assert.False(GetPrivateProperty<bool>(context, "PullPostTunaRecoveryActive"));
-        Assert.Null(GetPrivatePropertyValue(context, "V6TransportHandoff"));
+        Assert.True(GetPrivateProperty<bool>(context, "PullPostTunaRecoveryActive"));
+        Assert.NotNull(GetPrivatePropertyValue(context, "V6TransportHandoff"));
         Assert.True(GetPrivateProperty<bool>(context, "RuntimeUnlockWaitingForFallbackSurvival"));
         Assert.False(GetPrivateProperty<bool>(context, "RuntimeUnlockActivationWindowGranted"));
 
         var log = ReadOperationalLogTail(logStart);
-        Assert.Contains("event=filetransfer_fallback_checkpoint_accepted; direction=inbound;", log, StringComparison.Ordinal);
-        Assert.Contains("checkpoint_request_id=(none)", log, StringComparison.Ordinal);
-        Assert.Contains("reason=ownerless_current_fallback_progress", log, StringComparison.Ordinal);
-        Assert.Contains("event=filetransfer_fallback_tail_quiescent_yield_granted; direction=inbound;", log, StringComparison.Ordinal);
+        Assert.Contains("reason=ownerless_current_progress_evidence_only", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_fallback_checkpoint_accepted; direction=inbound;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_fallback_tail_quiescent_yield_granted; direction=inbound;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_runtime_unlock_activation_window_granted; direction=inbound;", log, StringComparison.Ordinal);
     }
 
@@ -16508,6 +16591,46 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
         public void Dispose()
         {
+        }
+    }
+
+    private sealed class PeerVisibleControlPlaneLoopbackTransport(
+        string sessionId,
+        bool deliverFrames = true) :
+        LoopbackFileTransferTransport(sessionId),
+        IFileTransferControlPlaneDeliveryTransport
+    {
+        public async Task<FileTransferControlPlaneDeliveryResult> SendFileTransferControlPlaneFrameAsync(
+            FileTransferControlPlaneDeliveryRequest request,
+            CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            var accepted = request.PreTransportDeliveryValidator?.Invoke() ?? true;
+            if (accepted && deliverFrames)
+            {
+                var dataSession = await OpenFileTransferDataSessionAsync(
+                    request.Frame.SessionId,
+                    request.Frame.TransferId,
+                    ct).ConfigureAwait(false);
+                await dataSession.SendAsync(request.Frame, ct).ConfigureAwait(false);
+            }
+
+            var errorName = accepted ? string.Empty : "pre_transport_validator_rejected";
+            return new FileTransferControlPlaneDeliveryResult(
+                request.Kind,
+                request.Frame.TransferId,
+                request.Frame.SessionId,
+                "loopback-control-plane",
+                ControlQueue: accepted,
+                ControlAck: false,
+                ControlCopy: accepted,
+                BulkCopy: false,
+                PeerVisibleAny: accepted,
+                AcceptedAny: accepted,
+                ControlQueueErrorName: errorName,
+                ControlAckErrorName: string.Empty,
+                ControlCopyErrorName: errorName,
+                BulkCopyErrorName: string.Empty);
         }
     }
 

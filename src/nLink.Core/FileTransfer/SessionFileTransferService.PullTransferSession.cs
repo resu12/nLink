@@ -4182,6 +4182,17 @@ public sealed partial class SessionFileTransferService
                     "retire_fallback_checkpoint",
                     previousInboundLeg,
                     retiredCheckpointRequestId,
+                    previousInboundLeg!.TransportEpochId,
+                    previousInboundLeg.BridgeRecoveryGeneration,
+                    previousInboundLeg.CheckpointGeneration,
+                    null,
+                    context.CurrentFallbackCheckpointLease,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
                     out _))
             {
                 return;
@@ -4201,7 +4212,8 @@ public sealed partial class SessionFileTransferService
                         context.PullHighestReceivedChunkIndex,
                         previousInboundLeg!.TransportEpochId,
                         previousInboundLeg.BridgeRecoveryGeneration,
-                        CheckpointRequestId: retiredCheckpointRequestId),
+                        CheckpointRequestId: retiredCheckpointRequestId,
+                        FallbackCheckpointLease: context.CurrentFallbackCheckpointLease),
                     FileTransferCoordinatorActionKind.FallbackCheckpointRetire,
                     "retire_fallback_checkpoint",
                     previousInboundLeg,

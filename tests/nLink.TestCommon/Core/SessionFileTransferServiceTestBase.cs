@@ -166,7 +166,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         return builder.ToString();
     }
 
-    protected sealed class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRouteCompletionObserver, ITransportAccelerationStatus, IFileTransferSessionContextProvider, IRuntimeUnlockRouteCommitProofProvider
+    protected class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRouteCompletionObserver, ITransportAccelerationStatus, IFileTransferSessionContextProvider, IRuntimeUnlockRouteCommitProofProvider
     {
         private readonly string sessionId;
         private readonly ConcurrentDictionary<string, LoopbackDataSession> dataSessions = new(StringComparer.Ordinal);

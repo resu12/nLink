@@ -113,6 +113,202 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
         Assert.Equal("PASS", verdict["verdict"]);
     }
 
+    [Theory]
+    [Trait("RetainedAuthorityProofSuite", "StaleRejectedActionEffectIsolation")]
+    [Trait("Category", "Smoke")]
+    [InlineData("fallback_send", "ControlPlaneSend", "control_plane")]
+    [InlineData("fallback_checkpoint", "FallbackCheckpointAccept", "checkpoint")]
+    [InlineData("fallback_reissue", "FallbackCheckpointReissue", "checkpoint")]
+    [InlineData("fallback_pressure", "FallbackControlPlanePressure", "control_plane")]
+    [InlineData("fallback_tail_yield", "FallbackTailQuiescent", "checkpoint")]
+    public async Task AnalyzeRetained_FallbackAuthorityRejectedActionWithoutMatchingEffect_Passes(
+        string subfamily,
+        string actionKind,
+        string family)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var transferId = $"transfer_phase3c_{subfamily}_pass";
+        var lines = BuildAuthorityProofFixture(
+            transferId,
+            FallbackAuthorityRejectedMessage(subfamily, actionKind, transferId));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("pass", route["stale_rejected_action_effect_isolation_verdict"]);
+        Assert.Equal("1", route["stale_rejected_action_count"]);
+        Assert.Equal("0", route["stale_rejected_action_forbidden_effect_count"]);
+        Assert.Equal("0", route[FamilyCounterName(family)]);
+        Assert.Equal("0", route[FallbackSubfamilyCounterName(subfamily)]);
+        Assert.Equal("0", route["stale_rejected_unknown_action_count"]);
+    }
+
+    [Theory]
+    [Trait("RetainedAuthorityProofSuite", "StaleRejectedActionEffectIsolation")]
+    [Trait("Category", "Smoke")]
+    [InlineData("fallback_send", "ControlPlaneSend", "control_plane")]
+    [InlineData("fallback_checkpoint", "FallbackCheckpointAccept", "checkpoint")]
+    [InlineData("fallback_reissue", "FallbackCheckpointReissue", "checkpoint")]
+    [InlineData("fallback_pressure", "FallbackControlPlanePressure", "control_plane")]
+    [InlineData("fallback_tail_yield", "FallbackTailQuiescent", "checkpoint")]
+    public async Task AnalyzeRetained_FallbackAuthorityRejectedActionFollowedByMatchingEffect_Fails(
+        string subfamily,
+        string actionKind,
+        string family)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var transferId = $"transfer_phase3c_{subfamily}_fail";
+        var lines = BuildAuthorityProofFixture(
+            transferId,
+            FallbackAuthorityRejectedMessage(subfamily, actionKind, transferId),
+            FallbackForbiddenEffectMessage(subfamily, transferId));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("fail", route["stale_rejected_action_effect_isolation_verdict"]);
+        Assert.Equal("1", route["stale_rejected_action_count"]);
+        Assert.Equal("1", route["stale_rejected_action_forbidden_effect_count"]);
+        Assert.Equal("1", route[FamilyCounterName(family)]);
+        Assert.Equal("1", route[FallbackSubfamilyCounterName(subfamily)]);
+        Assert.Equal("0", route["stale_rejected_unknown_action_count"]);
+
+        var ledger = ReadArtifactReport(result.ArtifactDir, "phase0-invariant-ledger.txt");
+        Assert.Equal("fail", ledger["stale_rejected_action_effect_isolation_verdict"]);
+        Assert.Equal("1", ledger[FallbackSubfamilyCounterName(subfamily)]);
+        Assert.Equal("stale_rejected_action_effect", ledger["invariant_failure_class"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("stale_rejected_action_effect", verdict["acceptance_failure_class"]);
+        Assert.Equal("stale_rejected_action_effect", verdict["recovery_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "StaleRejectedActionEffectIsolation")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_DiagnosticOnlyFallbackEventsAfterRejection_Pass()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_phase3c_diagnostic_only_pass";
+        var lines = BuildAuthorityProofFixture(
+            transferId,
+            FallbackAuthorityRejectedMessage("fallback_tail_yield", "FallbackTailQuiescent", transferId),
+            $"event=filetransfer_fallback_tail_yield_proof_stale_ignored; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; leg_generation=2; transport_epoch=7; bridge_recovery_generation=1; checkpoint_request_id=checkpoint-a; reason=stale_owner",
+            $"event=filetransfer_control_plane_send_retired_stale_generation; direction=outbound; kind=fallback_checkpoint_request; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; leg_generation=2; current_leg_generation=3; bridge_recovery_generation=1; current_bridge_recovery_generation=2; transport_epoch=7; current_transport_epoch=8; checkpoint_request_id=checkpoint-a; current_checkpoint_request_id=checkpoint-b; reason=stale_leg_generation; frame_type=filetransfer.frontier_request.v6",
+            $"event=filetransfer_fallback_checkpoint_reissue_suppressed; direction=outbound; transfer_id={transferId}; session_id=sess_a; reason=current_checkpoint_send_in_flight; source=phase3c_fixture; leg_generation=2; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; transport_epoch=7; checkpoint_request_id=checkpoint-a; proof_transport_epoch=7; proof_checkpoint_request_id=checkpoint-a",
+            $"event=filetransfer_post_tuna_fallback_control_plane_pressure_stale_ignored; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; leg_generation=2; transport_epoch=7; checkpoint_request_id=checkpoint-a; reason=stale_pressure",
+            $"event=filetransfer_fallback_tail_recovery_owner_retired_after_yield; direction=outbound; transfer_id={transferId}; session_id=sess_a; leg_id=leg:2; leg_generation=2; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; transport_epoch=7; previous_handoff_epoch=0; previous_handoff_state=none; discarded_repair_frame_count=1; discarded_repair_chunk_count=1; reason=fallback_tail_quiescent");
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("pass", route["stale_rejected_action_effect_isolation_verdict"]);
+        Assert.Equal("0", route["stale_rejected_action_forbidden_effect_count"]);
+        Assert.Equal("0", route["stale_rejected_fallback_tail_yield_effect_count"]);
+        Assert.Equal("0", route["stale_rejected_unknown_action_count"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("PASS", verdict["verdict"]);
+    }
+
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "StaleRejectedActionEffectIsolation")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_FallbackCurrentAuthorityEffectAfterStaleRejection_Passes()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_phase3c_current_authority_pass";
+        var lines = BuildAuthorityProofFixture(
+            transferId,
+            FallbackAuthorityRejectedMessage("fallback_reissue", "FallbackCheckpointReissue", transferId),
+            FallbackForbiddenEffectMessage("fallback_reissue", transferId, liveRouteEpoch: 2));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("pass", route["stale_rejected_action_effect_isolation_verdict"]);
+        Assert.Equal("1", route["stale_rejected_action_count"]);
+        Assert.Equal("0", route["stale_rejected_action_forbidden_effect_count"]);
+        Assert.Equal("0", route["stale_rejected_fallback_reissue_effect_count"]);
+    }
+
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "StaleRejectedActionEffectIsolation")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_LocalAcceptedAnyDeliveryBeforeUnlockAdmissionWithoutPeerVisibleCompletion_Fails()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_phase3c_accepted_any_unlock_fail";
+        var lines = BuildAuthorityProofFixture(
+            transferId,
+            FallbackLocalDeliveryMessage(transferId, peerVisible: false),
+            RuntimeUnlockAdmissionGrantedMessage(transferId));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("fail", route["stale_rejected_action_effect_isolation_verdict"]);
+        Assert.Equal("0", route["stale_rejected_action_count"]);
+        Assert.Equal("1", route["stale_rejected_action_forbidden_effect_count"]);
+        Assert.Equal("1", route["stale_rejected_control_plane_effect_count"]);
+        Assert.Equal("1", route["stale_rejected_fallback_send_effect_count"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("stale_rejected_action_effect", verdict["acceptance_failure_class"]);
+        Assert.Equal("stale_rejected_action_effect", verdict["recovery_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "StaleRejectedActionEffectIsolation")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_LocalAcceptedAnyDeliveryBeforeUnlockAdmissionWithPeerVisibleCompletion_Passes()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_phase3c_accepted_any_unlock_pass";
+        var lines = BuildAuthorityProofFixture(
+            transferId,
+            FallbackLocalDeliveryMessage(transferId, peerVisible: false),
+            FallbackLocalDeliveryMessage(transferId, peerVisible: true),
+            RuntimeUnlockAdmissionGrantedMessage(transferId));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("pass", route["stale_rejected_action_effect_isolation_verdict"]);
+        Assert.Equal("0", route["stale_rejected_action_count"]);
+        Assert.Equal("0", route["stale_rejected_action_forbidden_effect_count"]);
+        Assert.Equal("0", route["stale_rejected_fallback_send_effect_count"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("PASS", verdict["verdict"]);
+    }
+
     [Fact]
     [Trait("RetainedAuthorityProofSuite", "StaleRejectedActionEffectIsolation")]
     [Trait("Category", "Smoke")]
@@ -321,6 +517,20 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
     private static string RuntimeUnlockCallbackRejectedMessage(string actionKind, string transferId)
         => $"event=filetransfer_runtime_unlock_callback_rejected; direction=outbound; transfer_id={transferId}; session_id=sess_a; action_kind={actionKind}; source=phase2c_fixture; attempted_action=runtime_unlock_callback; rejection_reason=runtime_generation_mismatch; reason=runtime_unlock_callback; current_route=regular_nkn_v4_fast; current_protocol_version=4; current_live_route_epoch=2; current_runtime_generation=2; current_terminal_generation=0; current_leg_generation=3; attempted_route=file_tuna_v4; attempted_protocol_version=4; attempted_live_route_epoch=1; attempted_runtime_generation=1; attempted_terminal_generation=0; attempted_leg_generation=2; transaction_generation=11; offer_generation=12; tuna_path_lease_generation=13; probe_id=probe-12; same_path_tuna_probe_ack_id=probe-12; route_commit_generation=4; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; admission_generation=5; route_commit_token_generation=4";
 
+    private static string FallbackAuthorityRejectedMessage(string subfamily, string actionKind, string transferId)
+        => $"event=filetransfer_coordinator_leg_mutation_rejected; direction=outbound; transfer_id={transferId}; session_id=sess_a; action_kind={actionKind}; attempted_action={FallbackAttemptedAction(subfamily)}; rejection_reason=runtime_generation_mismatch; current_route=file_tuna_v4; current_protocol_version=4; current_live_route_epoch=2; current_runtime_generation=2; current_terminal_generation=0; current_leg_generation=3; current_transport_epoch=8; current_bridge_recovery_generation=2; current_checkpoint_request_id=checkpoint-b; current_checkpoint_generation=12; current_control_plane_token_generation=5; current_checkpoint_lease_generation=6; current_pressure_generation=7; attempted_route=regular_nkn_v4_fast; attempted_protocol_version=4; attempted_live_route_epoch=0; attempted_runtime_generation=1; attempted_terminal_generation=0; attempted_leg_generation=2; attempted_transport_epoch=7; attempted_bridge_recovery_generation=1; attempted_checkpoint_request_id=checkpoint-a; attempted_checkpoint_generation=11; attempted_control_plane_token_generation=4; attempted_checkpoint_lease_generation=5; attempted_pressure_generation=6; reason=phase3c_fixture";
+
+    private static string FallbackAttemptedAction(string subfamily)
+        => subfamily switch
+        {
+            "fallback_send" => "fallback_control_plane_send",
+            "fallback_checkpoint" => "fallback_checkpoint_accept",
+            "fallback_reissue" => "fallback_checkpoint_reissue",
+            "fallback_pressure" => "fallback_control_plane_pressure",
+            "fallback_tail_yield" => "fallback_tail_quiescent",
+            _ => subfamily
+        };
+
     private static string AttemptedAction(string family)
         => family switch
         {
@@ -347,6 +557,35 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
             _ => throw new ArgumentOutOfRangeException(nameof(family), family, "Unknown action family.")
         };
 
+    private static string FallbackForbiddenEffectMessage(
+        string subfamily,
+        string transferId,
+        int liveRouteEpoch = 0,
+        int runtimeGeneration = 1,
+        int legGeneration = 2,
+        int transportEpoch = 7,
+        int bridgeRecoveryGeneration = 1,
+        string checkpointRequestId = "checkpoint-a")
+        => subfamily switch
+        {
+            "fallback_send" => $"event=filetransfer_control_plane_delivery_observed; kind=fallback_checkpoint_request; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch={liveRouteEpoch}; runtime_generation={runtimeGeneration}; leg_generation={legGeneration}; bridge_recovery_generation={bridgeRecoveryGeneration}; transport_epoch={transportEpoch}; checkpoint_request_id={checkpointRequestId}; checkpoint_generation=11; control_plane_token_generation=4; frame_type=filetransfer.frontier_request.v6; control_queue=1; control_copy=1; bulk_copy=0; peer_visible_any=1; accepted_any=1; local_only_rejected=0",
+            "fallback_checkpoint" => $"event=filetransfer_fallback_checkpoint_accepted; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch={liveRouteEpoch}; runtime_generation={runtimeGeneration}; leg_generation={legGeneration}; transport_epoch={transportEpoch}; bridge_recovery_generation={bridgeRecoveryGeneration}; checkpoint_request_id={checkpointRequestId}; checkpoint_generation=11; checkpoint_lease_generation=5; reason=phase3c_fixture",
+            "fallback_reissue" => $"event=filetransfer_fallback_checkpoint_reissue_requested; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch={liveRouteEpoch}; runtime_generation={runtimeGeneration}; leg_generation={legGeneration}; transport_epoch={transportEpoch}; bridge_recovery_generation={bridgeRecoveryGeneration}; checkpoint_request_id={checkpointRequestId}; checkpoint_generation=11; checkpoint_lease_generation=5; reason=phase3c_fixture",
+            "fallback_pressure" => $"event=filetransfer_post_tuna_fallback_control_plane_pressure_marked; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch={liveRouteEpoch}; runtime_generation={runtimeGeneration}; leg_generation={legGeneration}; transport_epoch={transportEpoch}; bridge_recovery_generation={bridgeRecoveryGeneration}; checkpoint_request_id={checkpointRequestId}; pressure_generation=6; reason=phase3c_fixture",
+            "fallback_tail_yield" => $"event=filetransfer_fallback_tail_yield_proof_sent; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch={liveRouteEpoch}; runtime_generation={runtimeGeneration}; leg_generation={legGeneration}; transport_epoch={transportEpoch}; bridge_recovery_generation={bridgeRecoveryGeneration}; checkpoint_request_id={checkpointRequestId}; checkpoint_generation=11; checkpoint_lease_generation=5; yield_generation=3; reason=phase3c_fixture",
+            _ => throw new ArgumentOutOfRangeException(nameof(subfamily), subfamily, "Unknown fallback subfamily.")
+        };
+
+    private static string FallbackLocalDeliveryMessage(string transferId, bool peerVisible)
+    {
+        var peerVisibleValue = peerVisible ? 1 : 0;
+        var reason = peerVisible ? "peer_visible_checkpoint_completion" : "local_queue_only_checkpoint_completion";
+        return $"event=filetransfer_control_plane_delivery_observed; kind=fallback_checkpoint_request; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; leg_generation=2; bridge_recovery_generation=1; transport_epoch=7; checkpoint_request_id=checkpoint-a; checkpoint_generation=11; reason={reason}; frame_type=filetransfer.frontier_request.v6; control_queue=1; control_copy={peerVisibleValue}; bulk_copy=0; peer_visible_any={peerVisibleValue}; accepted_any=1; local_only_rejected=0";
+    }
+
+    private static string RuntimeUnlockAdmissionGrantedMessage(string transferId)
+        => $"event=filetransfer_runtime_unlock_admission_granted; direction=outbound; transfer_id={transferId}; session_id=sess_a; source=phase3c_fixture; reason=fallback_survival; admission_generation=9; admission_reason=paired_fallback_tail_yield_granted; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=2; fallback_active=1; fallback_current=1; fallback_terminalized=0; checkpoint_delivery_recovery_pending=0; state_refresh_send_in_flight=0; deferred_state_refresh_pending=0; proof_replay_pending=0; control_plane_pressure_pending=0; bridge_recovery_pending=0; fallback_tail_repair_pending=0; paired_fallback_yield_granted=1";
+
     private static string RuntimeUnlockForbiddenEffectMessage(string family, string transferId)
         => family switch
         {
@@ -366,5 +605,16 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
             "control_plane" => "stale_rejected_control_plane_effect_count",
             "route_publication" => "stale_rejected_route_publication_effect_count",
             _ => throw new ArgumentOutOfRangeException(nameof(family), family, "Unknown action family.")
+        };
+
+    private static string FallbackSubfamilyCounterName(string subfamily)
+        => subfamily switch
+        {
+            "fallback_send" => "stale_rejected_fallback_send_effect_count",
+            "fallback_checkpoint" => "stale_rejected_fallback_checkpoint_effect_count",
+            "fallback_reissue" => "stale_rejected_fallback_reissue_effect_count",
+            "fallback_pressure" => "stale_rejected_fallback_pressure_effect_count",
+            "fallback_tail_yield" => "stale_rejected_fallback_tail_yield_effect_count",
+            _ => throw new ArgumentOutOfRangeException(nameof(subfamily), subfamily, "Unknown fallback subfamily.")
         };
 }
