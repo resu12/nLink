@@ -1186,7 +1186,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             regularRoute.Route,
             regularRoute.TelemetryToken,
             regularRoute.ProtocolVersion,
-            0,
+            GetPrivateProperty<LiveRouteEpoch>(context, "CurrentLiveRouteEpoch").EpochId,
             1,
             0,
             FileTransferCoordinator.ResolveRuntimeFamily(regularRoute.RuntimeDescriptor),
@@ -1275,6 +1275,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             .GetProperty("PullV4SenderPumpRepairQueuedChunkIndices", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!
             .GetValue(context)!;
         queuedChunkIndices.GetType().GetMethod("Clear")!.Invoke(queuedChunkIndices, null);
+        SetPrivateProperty(context, "CurrentRuntimeOwner", null);
 
         var args = new object?[] { context, dequeuedRepair, 0 };
         var requeued = (bool)typeof(SessionFileTransferService)
@@ -1287,7 +1288,6 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Contains("event=filetransfer_runtime_owner_stale_update_rejected;", log, StringComparison.Ordinal);
         Assert.Contains("source=regular_v4_peer_silence_safety_replay", log, StringComparison.Ordinal);
         Assert.Contains("attempted_action=requeue_after_send_timeout", log, StringComparison.Ordinal);
-        Assert.Contains("reason=runtime_owner_missing", log, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1312,7 +1312,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             regularRoute.Route,
             regularRoute.TelemetryToken,
             regularRoute.ProtocolVersion,
-            0,
+            GetPrivateProperty<LiveRouteEpoch>(context, "CurrentLiveRouteEpoch").EpochId,
             1,
             0,
             FileTransferCoordinator.ResolveRuntimeFamily(regularRoute.RuntimeDescriptor),
@@ -1380,7 +1380,8 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             remoteNextExpectedChunkIndex: 100,
             chunksAcceptedForTransport: 256,
             remoteGrantedUntilExclusive: 256,
-            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10),
+            seedRuntimeOwner: false);
         typeof(SessionFileTransferService)
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
@@ -1447,7 +1448,6 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Contains("event=filetransfer_runtime_owner_stale_update_rejected;", log, StringComparison.Ordinal);
         Assert.Contains("source=regular_v4_receive_recovery", log, StringComparison.Ordinal);
         Assert.Contains("attempted_action=receive_recovery_request", log, StringComparison.Ordinal);
-        Assert.Contains("reason=runtime_owner_missing", log, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_regular_v4_receive_recovery_suppressed_by_current_route_owner;", log, StringComparison.Ordinal);
     }
 
@@ -1464,7 +1464,8 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             remoteNextExpectedChunkIndex: 100,
             chunksAcceptedForTransport: 256,
             remoteGrantedUntilExclusive: 256,
-            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10),
+            seedRuntimeOwner: false);
         typeof(SessionFileTransferService)
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
@@ -1712,7 +1713,8 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         int remoteNextExpectedChunkIndex,
         int chunksAcceptedForTransport,
         int remoteGrantedUntilExclusive,
-        DateTimeOffset lastGrantReceivedUtc)
+        DateTimeOffset lastGrantReceivedUtc,
+        bool seedRuntimeOwner = true)
     {
         var serviceType = typeof(SessionFileTransferService);
         var contextType = serviceType.GetNestedType("OutboundTransferContext", BindingFlags.NonPublic)!;
@@ -1737,6 +1739,11 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         SetPrivateProperty(context, "ChunksAcceptedForTransport", chunksAcceptedForTransport);
         SetPrivateProperty(context, "RemoteGrantedUntilExclusive", remoteGrantedUntilExclusive);
         SetPrivateProperty(context, "PullV4LastGrantReceivedUtc", lastGrantReceivedUtc);
+        if (seedRuntimeOwner)
+        {
+            SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Outbound, "unit_test_regular");
+        }
+
         return context;
     }
 
@@ -1772,6 +1779,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         SetPrivateProperty(context, "RemoteNextExpectedChunkIndex", remoteNextExpectedChunkIndex);
         SetPrivateProperty(context, "RemoteGrantedUntilExclusive", remoteGrantedUntilExclusive);
         SetPrivateProperty(context, "ChunksAcceptedForTransport", chunksAcceptedForTransport);
+        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Outbound, "unit_test_file_tuna_v4");
         return context;
     }
 
@@ -1813,6 +1821,9 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         SetPrivateProperty(context, "ChunksAcceptedForTransport", chunksAcceptedForTransport);
         SetPrivateProperty(context, "PullTransportFrontierOnlyRepairActive", true);
         SetPrivateProperty(context, "PullTransportFrontierOnlyRepairStartChunkIndex", remoteNextExpectedChunkIndex);
+        var leg = SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Outbound, "unit_test_post_tuna_fallback_v6");
+        leg.TransportEpochId = 3;
+        leg.BridgeRecoveryGeneration = 1;
         return context;
     }
 
@@ -1849,6 +1860,9 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         SetPrivateProperty(context, "ReceiverSparseWriteActive", true);
         SetPrivateProperty(context, "NextChunkIndex", 100);
         SetPrivateProperty(context, "PullHighestReceivedChunkIndex", 255);
+        var leg = SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "unit_test_post_tuna_fallback_v6");
+        leg.TransportEpochId = 3;
+        leg.BridgeRecoveryGeneration = 1;
         return context;
     }
 
@@ -9250,6 +9264,9 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         SetPrivateProperty(context, "PullTransportLastSafetyReplayFrontierChunkIndex", 100);
         SetPrivateProperty(context, "PullTransportLastSafetyReplayEndChunkIndex", 256);
         SetPrivateProperty(context, "PullTransportLastSafetyReplayUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        var leg = SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Outbound, "unit_test_post_tuna_fallback_v6_wrap");
+        leg.TransportEpochId = 3;
+        leg.BridgeRecoveryGeneration = 1;
         serviceType
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
@@ -9365,6 +9382,9 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         SetPrivateProperty(context, "ChunksAcceptedForTransport", 256);
         SetPrivateProperty(context, "PullTransportFrontierOnlyRepairActive", true);
         SetPrivateProperty(context, "PullTransportFrontierOnlyRepairStartChunkIndex", 100);
+        var leg = SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Outbound, "unit_test_post_tuna_fallback_v6_epochless");
+        leg.TransportEpochId = 3;
+        leg.BridgeRecoveryGeneration = 1;
         serviceType
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
@@ -14319,6 +14339,9 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         var context = CreatePostTunaFallbackV6OutboundContext(
             "transfer_post_tuna_fallback_v6_newer_same_leg_epoch");
         SetPrivateProperty(context, "PullTransportRebindGeneration", 1);
+        var currentLeg = GetPrivatePropertyValue(context, "CurrentTransferLeg");
+        Assert.NotNull(currentLeg);
+        SetPrivateProperty(currentLeg!, "TransportEpochId", 1L);
         serviceType
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
@@ -14427,6 +14450,9 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         var context = CreatePostTunaFallbackV6OutboundContext(
             "transfer_post_tuna_fallback_v6_ordinary_state_not_checkpoint");
         SetPrivateProperty(context, "PullTransportRebindGeneration", 1);
+        var currentLeg = GetPrivatePropertyValue(context, "CurrentTransferLeg");
+        Assert.NotNull(currentLeg);
+        SetPrivateProperty(currentLeg!, "TransportEpochId", 1L);
         serviceType
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);

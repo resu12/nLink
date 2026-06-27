@@ -2207,6 +2207,24 @@ public sealed partial class SessionFileTransferService
         FileTransferTransportKind targetTransport)
     {
         targetTransport = NormalizeV6TargetTransport(handoffKind, targetTransport);
+        if (!TryAuthorizeTransportEpochActionLocked(
+                context,
+                FileTransferCoordinatorActionKind.TransportEpochAdoption,
+                TransportEpochActionKind.Adopt,
+                "v6_transport_epoch_start",
+                reason,
+                context.CurrentTransferLeg,
+                null,
+                context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                null,
+                context.RouteSelection.Route,
+                context.NegotiatedDataProtocolVersion,
+                targetTransport,
+                out _))
+        {
+            return;
+        }
+
         if (context.V6TransportEpoch is { } current &&
             IsV6TransportEpochUnresolved(current))
         {
@@ -2265,6 +2283,24 @@ public sealed partial class SessionFileTransferService
         FileTransferTransportKind targetTransport)
     {
         targetTransport = NormalizeV6TargetTransport(handoffKind, targetTransport);
+        if (!TryAuthorizeTransportEpochActionLocked(
+                context,
+                FileTransferCoordinatorActionKind.TransportEpochAdoption,
+                TransportEpochActionKind.Adopt,
+                "v6_transport_epoch_start",
+                reason,
+                context.CurrentTransferLeg,
+                null,
+                context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                null,
+                context.RouteSelection.Route,
+                context.NegotiatedDataProtocolVersion,
+                targetTransport,
+                out _))
+        {
+            return;
+        }
+
         if (context.V6TransportEpoch is { } current &&
             IsV6TransportEpochUnresolved(current))
         {
@@ -2418,6 +2454,24 @@ public sealed partial class SessionFileTransferService
 
             epoch = context.V6TransportEpoch;
             dataSession = context.DataSession;
+            if (!TryAuthorizeTransportEpochActionLocked(
+                    context,
+                    FileTransferCoordinatorActionKind.TransportEpochAdoption,
+                    TransportEpochActionKind.Adopt,
+                    "v6_transport_epoch_probe",
+                    "announce_probe",
+                    context.CurrentTransferLeg,
+                    ResolveV6TransportEpochAuthorityId(context.CurrentTransferLeg, epoch),
+                    context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                    null,
+                    context.RouteSelection.Route,
+                    context.NegotiatedDataProtocolVersion,
+                    epoch.TargetTransport,
+                    out _))
+            {
+                return;
+            }
+
             epoch.LastAnnouncedUtc = DateTimeOffset.UtcNow;
         }
 
@@ -2431,6 +2485,24 @@ public sealed partial class SessionFileTransferService
                 IsV6TransportEpochUnresolved(epoch) &&
                 epoch.State == V6TransportEpochState.TargetProofPending)
             {
+                if (!TryAuthorizeTransportEpochActionLocked(
+                        context,
+                        FileTransferCoordinatorActionKind.TransportEpochAdoption,
+                        TransportEpochActionKind.Adopt,
+                        "v6_transport_epoch_probe",
+                        "probe_sent",
+                        context.CurrentTransferLeg,
+                        ResolveV6TransportEpochAuthorityId(context.CurrentTransferLeg, epoch),
+                        context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                        null,
+                        context.RouteSelection.Route,
+                        context.NegotiatedDataProtocolVersion,
+                        epoch.TargetTransport,
+                        out _))
+                {
+                    return;
+                }
+
                 var changed = TrySetV6TransportEpochStateLocked(
                     epoch,
                     context.TransferId,
@@ -2463,6 +2535,24 @@ public sealed partial class SessionFileTransferService
 
             epoch = context.V6TransportEpoch;
             dataSession = context.DataSession;
+            if (!TryAuthorizeTransportEpochActionLocked(
+                    context,
+                    FileTransferCoordinatorActionKind.TransportEpochAdoption,
+                    TransportEpochActionKind.Adopt,
+                    "v6_transport_epoch_probe",
+                    "announce_probe",
+                    context.CurrentTransferLeg,
+                    ResolveV6TransportEpochAuthorityId(context.CurrentTransferLeg, epoch),
+                    context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                    null,
+                    context.RouteSelection.Route,
+                    context.NegotiatedDataProtocolVersion,
+                    epoch.TargetTransport,
+                    out _))
+            {
+                return;
+            }
+
             epoch.LastAnnouncedUtc = DateTimeOffset.UtcNow;
         }
 
@@ -2476,6 +2566,24 @@ public sealed partial class SessionFileTransferService
                 IsV6TransportEpochUnresolved(epoch) &&
                 epoch.State == V6TransportEpochState.TargetProofPending)
             {
+                if (!TryAuthorizeTransportEpochActionLocked(
+                        context,
+                        FileTransferCoordinatorActionKind.TransportEpochAdoption,
+                        TransportEpochActionKind.Adopt,
+                        "v6_transport_epoch_probe",
+                        "probe_sent",
+                        context.CurrentTransferLeg,
+                        ResolveV6TransportEpochAuthorityId(context.CurrentTransferLeg, epoch),
+                        context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                        null,
+                        context.RouteSelection.Route,
+                        context.NegotiatedDataProtocolVersion,
+                        epoch.TargetTransport,
+                        out _))
+                {
+                    return;
+                }
+
                 var changed = TrySetV6TransportEpochStateLocked(
                     epoch,
                     context.TransferId,
@@ -2806,7 +2914,8 @@ public sealed partial class SessionFileTransferService
             {
                 var previousEpochId = outbound.V6TransportEpoch?.EpochId;
                 AdoptOutboundV6TransportEpochLocked(outbound, message);
-                if (previousEpochId != message.TransportEpoch)
+                if (outbound.V6TransportEpoch?.EpochId == message.TransportEpoch &&
+                    previousEpochId != message.TransportEpoch)
                 {
                     outboundToProbe = outbound;
                 }
@@ -2817,7 +2926,8 @@ public sealed partial class SessionFileTransferService
             {
                 var previousEpochId = inbound.V6TransportEpoch?.EpochId;
                 AdoptInboundV6TransportEpochLocked(inbound, message);
-                if (previousEpochId != message.TransportEpoch)
+                if (inbound.V6TransportEpoch?.EpochId == message.TransportEpoch &&
+                    previousEpochId != message.TransportEpoch)
                 {
                     inboundToProbe = inbound;
                 }
@@ -2849,6 +2959,7 @@ public sealed partial class SessionFileTransferService
         var target = ParseFileTransferTransportKind(message.TargetTransport);
         var kind = ParseFileTransferTransportHandoffKind(message.HandoffKind);
         var reason = NormalizeReason(message.Reason) ?? "peer_transport_epoch";
+        var normalizedTarget = NormalizeV6TargetTransport(kind, target);
         if (context.V6TransportEpoch is { } current &&
             IsV6TransportEpochUnresolved(current))
         {
@@ -2863,7 +2974,42 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
+            if (!TryAuthorizeTransportEpochActionLocked(
+                    context,
+                    FileTransferCoordinatorActionKind.TransportEpochAdoption,
+                    TransportEpochActionKind.Adopt,
+                    "peer_transport_epoch",
+                    reason,
+                    context.CurrentTransferLeg,
+                    null,
+                    context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                    null,
+                    context.RouteSelection.Route,
+                    context.NegotiatedDataProtocolVersion,
+                    normalizedTarget,
+                    out _))
+            {
+                return;
+            }
+
             TerminalizeV6TransportEpochLocked(FileTransferDirection.Outbound, context.TransferId, context.SessionId, current, "superseded_by_peer_epoch");
+        }
+        else if (!TryAuthorizeTransportEpochActionLocked(
+                context,
+                FileTransferCoordinatorActionKind.TransportEpochAdoption,
+                TransportEpochActionKind.Adopt,
+                "peer_transport_epoch",
+                reason,
+                context.CurrentTransferLeg,
+                null,
+                context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                null,
+                context.RouteSelection.Route,
+                context.NegotiatedDataProtocolVersion,
+                normalizedTarget,
+                out _))
+        {
+            return;
         }
 
         var senderLocalAvailabilityUntilExclusive = ResolveOutboundSenderLocalAvailabilityUntilExclusiveLocked(context);
@@ -2897,6 +3043,7 @@ public sealed partial class SessionFileTransferService
             context,
             epoch.EpochId,
             "peer_transport_epoch_adopted");
+        AdoptOutboundFallbackLegTransportEpochLocked(context, epoch.EpochId, reason);
         context.StatusMessage = GetV6TransportEpochStatus(epoch);
         LogV6TransportEpochStarted(context.TransferId, context.SessionId, epoch);
         PublishV6TransportEpochSnapshot(context.SessionId, context.TransferId, epoch);
@@ -2912,6 +3059,13 @@ public sealed partial class SessionFileTransferService
         var target = ParseFileTransferTransportKind(message.TargetTransport);
         var kind = ParseFileTransferTransportHandoffKind(message.HandoffKind);
         var reason = NormalizeReason(message.Reason) ?? "peer_transport_epoch";
+        var normalizedTarget = NormalizeV6TargetTransport(kind, target);
+        var adoptionTargetRoute = CanUseV6TransportEpochsLocked(context)
+            ? context.RouteSelection.Route
+            : FileTransferRoute.PostTunaFallbackV6;
+        var adoptionTargetProtocol = adoptionTargetRoute == FileTransferRoute.PostTunaFallbackV6
+            ? FileTransferProtocol.ProtocolVersionV6
+            : context.NegotiatedDataProtocolVersion;
         if (context.V6TransportEpoch is { } current &&
             IsV6TransportEpochUnresolved(current))
         {
@@ -2923,14 +3077,81 @@ public sealed partial class SessionFileTransferService
 
             if (current.EpochId == message.TransportEpoch)
             {
+                if (!TryAuthorizeTransportEpochActionLocked(
+                        context,
+                        FileTransferCoordinatorActionKind.TransportEpochAdoption,
+                        TransportEpochActionKind.Adopt,
+                        "peer_transport_epoch",
+                        reason,
+                        context.CurrentTransferLeg,
+                        ResolveV6TransportEpochAuthorityId(context.CurrentTransferLeg, current),
+                        context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                        null,
+                        adoptionTargetRoute,
+                        adoptionTargetProtocol,
+                        normalizedTarget,
+                        out _))
+                {
+                    return;
+                }
+
                 context.V6ReceiverTransportEpoch = current.EpochId;
+                return;
+            }
+
+            if (!TryAuthorizeTransportEpochActionLocked(
+                    context,
+                    FileTransferCoordinatorActionKind.TransportEpochAdoption,
+                    TransportEpochActionKind.Adopt,
+                    "peer_transport_epoch",
+                    reason,
+                    context.CurrentTransferLeg,
+                    null,
+                    context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                    null,
+                    adoptionTargetRoute,
+                    adoptionTargetProtocol,
+                    normalizedTarget,
+                    out _))
+            {
                 return;
             }
 
             TerminalizeV6TransportEpochLocked(FileTransferDirection.Inbound, context.TransferId, context.SessionId, current, "superseded_by_peer_epoch");
         }
+        else if (!TryAuthorizeTransportEpochActionLocked(
+                context,
+                FileTransferCoordinatorActionKind.TransportEpochAdoption,
+                TransportEpochActionKind.Adopt,
+                "peer_transport_epoch",
+                reason,
+                context.CurrentTransferLeg,
+                null,
+                context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                null,
+                adoptionTargetRoute,
+                adoptionTargetProtocol,
+                normalizedTarget,
+                out _))
+        {
+            return;
+        }
 
         if (!CanUseV6TransportEpochsLocked(context) &&
+            TryAuthorizeTransportEpochActionLocked(
+                context,
+                FileTransferCoordinatorActionKind.PeerEpochPromotion,
+                TransportEpochActionKind.PromotePeerEpoch,
+                "peer_transport_epoch",
+                "peer_epoch_promotion",
+                context.CurrentTransferLeg,
+                null,
+                context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                null,
+                FileTransferRoute.PostTunaFallbackV6,
+                FileTransferProtocol.ProtocolVersionV6,
+                normalizedTarget,
+                out _) &&
             (TryPromoteInboundFileTunaV4FallbackToPostTunaV6Locked(context, reason, kind, target) ||
              TryPromoteInboundRegularNknV4FallbackToPostTunaV6Locked(context, reason, kind, target)))
         {
@@ -2958,6 +3179,7 @@ public sealed partial class SessionFileTransferService
         context.V6ReceiverTransportEpoch = epoch.EpochId;
         context.V6LastReceiverStateSentUtc = null;
         context.V6LastFrontierRequestSentUtc = null;
+        AdoptInboundFallbackLegTransportEpochLocked(context, epoch.EpochId, reason);
         context.StatusMessage = GetV6TransportEpochStatus(epoch);
         LogV6TransportEpochStarted(context.TransferId, context.SessionId, epoch);
         PublishV6TransportEpochSnapshot(context.SessionId, context.TransferId, epoch);
@@ -2972,6 +3194,13 @@ public sealed partial class SessionFileTransferService
         => LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_v6_peer_epoch_ignored; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; reason=stale_peer_epoch; current_transport_epoch={current.EpochId}; peer_transport_epoch={message.TransportEpoch}; current_handoff_kind={FormatFileTransferTransportHandoffKind(current.Kind)}; peer_handoff_kind={FormatProtocolLogValue(message.HandoffKind)}; current_target_transport={FormatFileTransferTransportKind(current.TargetTransport)}; peer_target_transport={FormatProtocolLogValue(message.TargetTransport)}");
+
+    private static long? ResolveV6TransportEpochAuthorityId(FileTransferLeg? leg, V6TransportEpoch epoch)
+        => IsCurrentPostTunaFallbackLeg(leg)
+            ? epoch.EpochId
+            : leg?.TransportEpochId == epoch.EpochId
+                ? epoch.EpochId
+                : null;
 
     private Task HandleIncomingTransportProbeAckAsync(FileTransferTransportProbeV6 message)
     {
@@ -3040,6 +3269,24 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        if (!TryAuthorizeTransportEpochActionLocked(
+                context,
+                FileTransferCoordinatorActionKind.TransportEpochAdoption,
+                TransportEpochActionKind.RecoverLiveRoute,
+                "transport_probe_ack",
+                "recover_transport_epoch",
+                context.CurrentTransferLeg,
+                ResolveV6TransportEpochAuthorityId(context.CurrentTransferLeg, epoch),
+                context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                null,
+                context.RouteSelection.Route,
+                context.NegotiatedDataProtocolVersion,
+                epoch.TargetTransport,
+                out _))
+        {
+            return false;
+        }
+
         NotifyRuntimeUnlockPathProbeResult(
             context.SessionId,
             context.TransferId,
@@ -3057,6 +3304,24 @@ public sealed partial class SessionFileTransferService
             string.IsNullOrWhiteSpace(epoch.ProbeId) ||
             !string.Equals(epoch.ProbeId, message.ProbeId, StringComparison.Ordinal) ||
             ParseFileTransferTransportKind(message.TargetTransport) != epoch.TargetTransport)
+        {
+            return false;
+        }
+
+        if (!TryAuthorizeTransportEpochActionLocked(
+                context,
+                FileTransferCoordinatorActionKind.TransportEpochAdoption,
+                TransportEpochActionKind.RecoverLiveRoute,
+                "transport_probe_ack",
+                "recover_transport_epoch",
+                context.CurrentTransferLeg,
+                ResolveV6TransportEpochAuthorityId(context.CurrentTransferLeg, epoch),
+                context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                null,
+                context.RouteSelection.Route,
+                context.NegotiatedDataProtocolVersion,
+                epoch.TargetTransport,
+                out _))
         {
             return false;
         }
@@ -3118,6 +3383,41 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        if (!TryAuthorizeRepairReplayLocked(
+                context,
+                context.CurrentRuntimeOwner,
+                inferredFrontierProof ? RepairReplayKind.UnmatchedFrontierProof : RepairReplayKind.V6Repair,
+                "v6_repair_proof",
+                repairRequestId,
+                context.CurrentTransferLeg,
+                ResolveV6TransportEpochAuthorityId(context.CurrentTransferLeg, epoch),
+                context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                null,
+                out _))
+        {
+            return false;
+        }
+
+        if (!TryAuthorizeTransportEpochActionLocked(
+                context,
+                inferredFrontierProof
+                    ? FileTransferCoordinatorActionKind.UnmatchedFrontierProof
+                    : FileTransferCoordinatorActionKind.TransportEpochAdoption,
+                TransportEpochActionKind.RecoverLiveRoute,
+                "v6_repair_proof",
+                repairRequestId,
+                context.CurrentTransferLeg,
+                ResolveV6TransportEpochAuthorityId(context.CurrentTransferLeg, epoch),
+                context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                null,
+                context.RouteSelection.Route,
+                context.NegotiatedDataProtocolVersion,
+                epoch.TargetTransport,
+                out _))
+        {
+            return false;
+        }
+
         if (!knownRepairRequest)
         {
             LocalOperationalLog.Info(
@@ -3146,6 +3446,24 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        if (!TryAuthorizeTransportEpochActionLocked(
+                context,
+                FileTransferCoordinatorActionKind.TransportEpochAdoption,
+                TransportEpochActionKind.RecoverLiveRoute,
+                "v6_peer_control",
+                reason,
+                context.CurrentTransferLeg,
+                ResolveV6TransportEpochAuthorityId(context.CurrentTransferLeg, epoch),
+                context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                null,
+                context.RouteSelection.Route,
+                context.NegotiatedDataProtocolVersion,
+                epoch.TargetTransport,
+                out _))
+        {
+            return false;
+        }
+
         return CompleteOutboundV6TransportEpochLocked(context, reason);
     }
 
@@ -3162,6 +3480,24 @@ public sealed partial class SessionFileTransferService
             state.Epoch <= 0 ||
             (epoch.Kind != FileTransferTransportHandoffKind.RegularNknRecovery &&
              epoch.Kind != FileTransferTransportHandoffKind.TunaToNormalFallback))
+        {
+            return false;
+        }
+
+        if (!TryAuthorizeTransportEpochActionLocked(
+                context,
+                FileTransferCoordinatorActionKind.TransportEpochAdoption,
+                TransportEpochActionKind.RecoverLiveRoute,
+                "v4_legacy_state_proof",
+                reason,
+                context.CurrentTransferLeg,
+                ResolveV6TransportEpochAuthorityId(context.CurrentTransferLeg, epoch),
+                context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                null,
+                context.RouteSelection.Route,
+                context.NegotiatedDataProtocolVersion,
+                epoch.TargetTransport,
+                out _))
         {
             return false;
         }
@@ -3191,6 +3527,24 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        if (!TryAuthorizeTransportEpochActionLocked(
+                context,
+                FileTransferCoordinatorActionKind.TransportEpochAdoption,
+                TransportEpochActionKind.RecoverLiveRoute,
+                "v6_chunk_proof",
+                reason,
+                context.CurrentTransferLeg,
+                ResolveV6TransportEpochAuthorityId(context.CurrentTransferLeg, epoch),
+                context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                null,
+                context.RouteSelection.Route,
+                context.NegotiatedDataProtocolVersion,
+                epoch.TargetTransport,
+                out _))
+        {
+            return false;
+        }
+
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_v6_regular_nkn_chunk_probe_accepted; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={batch.TransportEpoch}; handoff_kind={FormatFileTransferTransportHandoffKind(epoch.Kind)}; target_transport={FormatFileTransferTransportKind(epoch.TargetTransport)}; reason={FormatProtocolLogValue(reason)}; start_chunk_index={batch.StartChunkIndex}; batch_chunk_count={batch.ChunkCount}; observed_chunk_count={observedChunkCount}; committed_chunk={context.NextChunkIndex}; highest_observed_chunk={context.PullHighestReceivedChunkIndex}");
@@ -3211,6 +3565,24 @@ public sealed partial class SessionFileTransferService
             observedChunkCount <= 0 ||
             (epoch.Kind != FileTransferTransportHandoffKind.RegularNknRecovery &&
              epoch.Kind != FileTransferTransportHandoffKind.TunaToNormalFallback))
+        {
+            return false;
+        }
+
+        if (!TryAuthorizeTransportEpochActionLocked(
+                context,
+                FileTransferCoordinatorActionKind.TransportEpochAdoption,
+                TransportEpochActionKind.RecoverLiveRoute,
+                "v4_legacy_chunk_proof",
+                reason,
+                context.CurrentTransferLeg,
+                ResolveV6TransportEpochAuthorityId(context.CurrentTransferLeg, epoch),
+                context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                null,
+                context.RouteSelection.Route,
+                context.NegotiatedDataProtocolVersion,
+                epoch.TargetTransport,
+                out _))
         {
             return false;
         }
@@ -3314,6 +3686,24 @@ public sealed partial class SessionFileTransferService
             {
                 return false;
             }
+        }
+
+        if (!TryAuthorizeTransportEpochActionLocked(
+                context,
+                FileTransferCoordinatorActionKind.TransportEpochAdoption,
+                TransportEpochActionKind.RecoverLiveRoute,
+                "v6_peer_caught_up",
+                "frontier_caught_up_to_accepted_tail",
+                context.CurrentTransferLeg,
+                ResolveV6TransportEpochAuthorityId(context.CurrentTransferLeg, epoch),
+                context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                null,
+                context.RouteSelection.Route,
+                context.NegotiatedDataProtocolVersion,
+                epoch.TargetTransport,
+                out _))
+        {
+            return false;
         }
 
         if (!CompleteOutboundV6TransportEpochLocked(context, "frontier_caught_up_to_accepted_tail"))
@@ -3700,6 +4090,24 @@ public sealed partial class SessionFileTransferService
                     epoch.EpochId == epochId &&
                     IsV6TransportEpochUnresolved(epoch))
                 {
+                    if (!TryAuthorizeTransportEpochActionLocked(
+                            context,
+                            FileTransferCoordinatorActionKind.TransportEpochAdoption,
+                            TransportEpochActionKind.Adopt,
+                            "v6_transport_epoch_timeout",
+                            "proof_timeout",
+                            context.CurrentTransferLeg,
+                            ResolveV6TransportEpochAuthorityId(context.CurrentTransferLeg, epoch),
+                            context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                            null,
+                            context.RouteSelection.Route,
+                            context.NegotiatedDataProtocolVersion,
+                            epoch.TargetTransport,
+                            out _))
+                    {
+                        return;
+                    }
+
                     waiting = TrySetV6TransportEpochStateLocked(
                         epoch,
                         context.TransferId,
@@ -3738,6 +4146,24 @@ public sealed partial class SessionFileTransferService
                     epoch.EpochId == epochId &&
                     IsV6TransportEpochUnresolved(epoch))
                 {
+                    if (!TryAuthorizeTransportEpochActionLocked(
+                            context,
+                            FileTransferCoordinatorActionKind.TransportEpochAdoption,
+                            TransportEpochActionKind.Adopt,
+                            "v6_transport_epoch_timeout",
+                            "proof_timeout",
+                            context.CurrentTransferLeg,
+                            ResolveV6TransportEpochAuthorityId(context.CurrentTransferLeg, epoch),
+                            context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                            null,
+                            context.RouteSelection.Route,
+                            context.NegotiatedDataProtocolVersion,
+                            epoch.TargetTransport,
+                            out _))
+                    {
+                        return;
+                    }
+
                     waiting = TrySetV6TransportEpochStateLocked(
                         epoch,
                         context.TransferId,
@@ -3839,6 +4265,37 @@ public sealed partial class SessionFileTransferService
                 string.IsNullOrWhiteSpace(repairRequestId) ||
                 !batchCoversPreviousFrontier ||
                 committedChunkIndex <= previousCommittedChunkIndex)
+            {
+                return;
+            }
+
+            if (!TryAuthorizeRepairReplayLocked(
+                    context,
+                    context.CurrentRuntimeOwner,
+                    inferredRepairRequestId ? RepairReplayKind.UnmatchedFrontierProof : RepairReplayKind.V6Repair,
+                    "v6_chunk_repair_proof",
+                    repairRequestId,
+                    context.CurrentTransferLeg,
+                    ResolveV6TransportEpochAuthorityId(context.CurrentTransferLeg, epoch),
+                    context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                    null,
+                    out _) ||
+                !TryAuthorizeTransportEpochActionLocked(
+                    context,
+                    inferredRepairRequestId
+                        ? FileTransferCoordinatorActionKind.UnmatchedFrontierProof
+                        : FileTransferCoordinatorActionKind.TransportEpochAdoption,
+                    TransportEpochActionKind.RecoverLiveRoute,
+                    "v6_chunk_repair_proof",
+                    repairRequestId,
+                    context.CurrentTransferLeg,
+                    ResolveV6TransportEpochAuthorityId(context.CurrentTransferLeg, epoch),
+                    context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                    null,
+                    context.RouteSelection.Route,
+                    context.NegotiatedDataProtocolVersion,
+                    epoch.TargetTransport,
+                    out _))
             {
                 return;
             }

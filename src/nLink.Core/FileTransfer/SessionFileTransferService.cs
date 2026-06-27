@@ -4823,6 +4823,34 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.TransferLegHistory.AddRange(legHistory);
     }
 
+    private static void ApplyCoordinatorActionDecisionToContextLocked(
+        OutboundTransferContext context,
+        FileTransferCoordinatorActionDecision decision)
+    {
+        context.CurrentRepairReplayDecision = decision.State.CurrentRepairReplayDecision;
+        context.LastRepairReplayGeneration = decision.State.LastRepairReplayGeneration;
+        context.CurrentTransportEpochDecision = decision.State.CurrentTransportEpochDecision;
+        context.LastTransportEpochDecisionGeneration = decision.State.LastTransportEpochDecisionGeneration;
+        context.CurrentBridgeRecoveryDecision = decision.State.CurrentBridgeRecoveryDecision;
+        context.LastBridgeRecoveryDecisionGeneration = decision.State.LastBridgeRecoveryDecisionGeneration;
+        context.CurrentRecoveryLivenessLease = decision.State.CurrentRecoveryLivenessLease;
+        context.LastRecoveryLivenessLeaseGeneration = decision.State.LastRecoveryLivenessLeaseGeneration;
+    }
+
+    private static void ApplyCoordinatorActionDecisionToContextLocked(
+        InboundTransferContext context,
+        FileTransferCoordinatorActionDecision decision)
+    {
+        context.CurrentRepairReplayDecision = decision.State.CurrentRepairReplayDecision;
+        context.LastRepairReplayGeneration = decision.State.LastRepairReplayGeneration;
+        context.CurrentTransportEpochDecision = decision.State.CurrentTransportEpochDecision;
+        context.LastTransportEpochDecisionGeneration = decision.State.LastTransportEpochDecisionGeneration;
+        context.CurrentBridgeRecoveryDecision = decision.State.CurrentBridgeRecoveryDecision;
+        context.LastBridgeRecoveryDecisionGeneration = decision.State.LastBridgeRecoveryDecisionGeneration;
+        context.CurrentRecoveryLivenessLease = decision.State.CurrentRecoveryLivenessLease;
+        context.LastRecoveryLivenessLeaseGeneration = decision.State.LastRecoveryLivenessLeaseGeneration;
+    }
+
     private static FileTransferCoordinatorState CreateCoordinatorStateLocked(InboundTransferContext context)
         => new(
             context.SessionId,
@@ -5154,6 +5182,424 @@ public sealed partial class SessionFileTransferService : IDisposable
         }
 
         return decision.Accepted;
+    }
+
+    private static bool TryAuthorizeRepairReplayLocked(
+        OutboundTransferContext context,
+        RuntimeOwnerToken? token,
+        RepairReplayKind repairKind,
+        string source,
+        string attemptedAction,
+        FileTransferLeg? leg,
+        long? transportEpochId,
+        int? bridgeRecoveryGeneration,
+        int? recoveryDecisionGeneration,
+        out RepairReplayDecision? repairDecision)
+    {
+        repairDecision = null;
+        if (token is not { } owner)
+        {
+            RejectMissingRuntimeOwnerActionLocked(
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentRuntimeOwner,
+                source,
+                attemptedAction);
+            LogFileTransferRecoveryAuthorityRejected(
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                FileTransferCoordinatorActionKind.RepairReplay,
+                source,
+                attemptedAction,
+                "runtime_owner_missing",
+                context.CurrentRuntimeOwner,
+                null,
+                repairKind,
+                null,
+                leg,
+                transportEpochId,
+                bridgeRecoveryGeneration,
+                recoveryDecisionGeneration,
+                null,
+                null,
+                null);
+            return false;
+        }
+
+        var decision = FileTransferCoordinator.AuthorizeAction(
+            CreateCoordinatorStateLocked(context),
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RepairReplay,
+                source,
+                attemptedAction,
+                RuntimeOwner: owner,
+                Route: leg?.RouteSelection.Route ?? owner.Route,
+                ProtocolVersion: leg?.ProtocolVersion ?? owner.ProtocolVersion,
+                LiveRouteEpoch: leg?.LiveRouteEpochId ?? owner.LiveRouteEpoch,
+                LegGeneration: leg?.Generation,
+                TransportEpochId: transportEpochId,
+                BridgeRecoveryGeneration: bridgeRecoveryGeneration,
+                RepairReplayKind: repairKind,
+                RecoveryDecisionGeneration: recoveryDecisionGeneration));
+        if (!decision.Accepted || decision.RepairReplayDecision is null)
+        {
+            if (IsRecoveryOwnerAuthorityRejection(decision.Accepted ? "repair_replay_decision_missing" : decision.RejectionReason))
+            {
+                RejectStaleRuntimeOwnerUpdateLocked(
+                    FileTransferDirection.Outbound,
+                    context.TransferId,
+                    context.SessionId,
+                    context.CurrentRuntimeOwner,
+                    owner,
+                    source,
+                    attemptedAction,
+                    decision.Accepted ? "repair_replay_decision_missing" : decision.RejectionReason);
+            }
+
+            LogFileTransferRecoveryAuthorityRejected(
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                FileTransferCoordinatorActionKind.RepairReplay,
+                source,
+                attemptedAction,
+                decision.Accepted ? "repair_replay_decision_missing" : decision.RejectionReason,
+                context.CurrentRuntimeOwner,
+                owner,
+                repairKind,
+                null,
+                leg,
+                transportEpochId,
+                bridgeRecoveryGeneration,
+                recoveryDecisionGeneration,
+                null,
+                null,
+                null);
+            return false;
+        }
+
+        ApplyCoordinatorActionDecisionToContextLocked(context, decision);
+        repairDecision = decision.RepairReplayDecision;
+        return true;
+    }
+
+    private static bool TryAuthorizeRepairReplayLocked(
+        InboundTransferContext context,
+        RuntimeOwnerToken? token,
+        RepairReplayKind repairKind,
+        string source,
+        string attemptedAction,
+        FileTransferLeg? leg,
+        long? transportEpochId,
+        int? bridgeRecoveryGeneration,
+        int? recoveryDecisionGeneration,
+        out RepairReplayDecision? repairDecision)
+    {
+        repairDecision = null;
+        if (token is not { } owner)
+        {
+            RejectMissingRuntimeOwnerActionLocked(
+                FileTransferDirection.Inbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentRuntimeOwner,
+                source,
+                attemptedAction);
+            LogFileTransferRecoveryAuthorityRejected(
+                FileTransferDirection.Inbound,
+                context.TransferId,
+                context.SessionId,
+                FileTransferCoordinatorActionKind.RepairReplay,
+                source,
+                attemptedAction,
+                "runtime_owner_missing",
+                context.CurrentRuntimeOwner,
+                null,
+                repairKind,
+                null,
+                leg,
+                transportEpochId,
+                bridgeRecoveryGeneration,
+                recoveryDecisionGeneration,
+                null,
+                null,
+                null);
+            return false;
+        }
+
+        var decision = FileTransferCoordinator.AuthorizeAction(
+            CreateCoordinatorStateLocked(context),
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RepairReplay,
+                source,
+                attemptedAction,
+                RuntimeOwner: owner,
+                Route: leg?.RouteSelection.Route ?? owner.Route,
+                ProtocolVersion: leg?.ProtocolVersion ?? owner.ProtocolVersion,
+                LiveRouteEpoch: leg?.LiveRouteEpochId ?? owner.LiveRouteEpoch,
+                LegGeneration: leg?.Generation,
+                TransportEpochId: transportEpochId,
+                BridgeRecoveryGeneration: bridgeRecoveryGeneration,
+                RepairReplayKind: repairKind,
+                RecoveryDecisionGeneration: recoveryDecisionGeneration));
+        if (!decision.Accepted || decision.RepairReplayDecision is null)
+        {
+            if (IsRecoveryOwnerAuthorityRejection(decision.Accepted ? "repair_replay_decision_missing" : decision.RejectionReason))
+            {
+                RejectStaleRuntimeOwnerUpdateLocked(
+                    FileTransferDirection.Inbound,
+                    context.TransferId,
+                    context.SessionId,
+                    context.CurrentRuntimeOwner,
+                    owner,
+                    source,
+                    attemptedAction,
+                    decision.Accepted ? "repair_replay_decision_missing" : decision.RejectionReason);
+            }
+
+            LogFileTransferRecoveryAuthorityRejected(
+                FileTransferDirection.Inbound,
+                context.TransferId,
+                context.SessionId,
+                FileTransferCoordinatorActionKind.RepairReplay,
+                source,
+                attemptedAction,
+                decision.Accepted ? "repair_replay_decision_missing" : decision.RejectionReason,
+                context.CurrentRuntimeOwner,
+                owner,
+                repairKind,
+                null,
+                leg,
+                transportEpochId,
+                bridgeRecoveryGeneration,
+                recoveryDecisionGeneration,
+                null,
+                null,
+                null);
+            return false;
+        }
+
+        ApplyCoordinatorActionDecisionToContextLocked(context, decision);
+        repairDecision = decision.RepairReplayDecision;
+        return true;
+    }
+
+    private static bool TryAuthorizeTransportEpochActionLocked(
+        OutboundTransferContext context,
+        FileTransferCoordinatorActionKind actionKind,
+        TransportEpochActionKind transportEpochActionKind,
+        string source,
+        string attemptedAction,
+        FileTransferLeg? leg,
+        long? transportEpochId,
+        int? bridgeRecoveryGeneration,
+        int? recoveryDecisionGeneration,
+        FileTransferRoute? targetRoute,
+        int? targetProtocolVersion,
+        FileTransferTransportKind? targetTransport,
+        out TransportEpochDecision? transportDecision)
+    {
+        transportDecision = null;
+        if (context.CurrentRuntimeOwner is not { } owner)
+        {
+            RejectMissingRuntimeOwnerActionLocked(
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentRuntimeOwner,
+                source,
+                attemptedAction);
+            LogFileTransferRecoveryAuthorityRejected(
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                actionKind,
+                source,
+                attemptedAction,
+                "runtime_owner_missing",
+                context.CurrentRuntimeOwner,
+                null,
+                null,
+                transportEpochActionKind,
+                leg,
+                transportEpochId,
+                bridgeRecoveryGeneration,
+                recoveryDecisionGeneration,
+                targetRoute,
+                targetProtocolVersion,
+                targetTransport);
+            return false;
+        }
+
+        var decision = FileTransferCoordinator.AuthorizeAction(
+            CreateCoordinatorStateLocked(context),
+            new FileTransferCoordinatorActionRequest(
+                actionKind,
+                source,
+                attemptedAction,
+                RuntimeOwner: owner,
+                Route: leg?.RouteSelection.Route ?? owner.Route,
+                ProtocolVersion: leg?.ProtocolVersion ?? owner.ProtocolVersion,
+                LiveRouteEpoch: leg?.LiveRouteEpochId ?? owner.LiveRouteEpoch,
+                LegGeneration: leg?.Generation,
+                TransportEpochId: transportEpochId,
+                BridgeRecoveryGeneration: bridgeRecoveryGeneration,
+                TransportEpochActionKind: transportEpochActionKind,
+                RecoveryDecisionGeneration: recoveryDecisionGeneration,
+                TargetRoute: targetRoute,
+                TargetProtocolVersion: targetProtocolVersion,
+                TargetTransport: targetTransport));
+        if (!decision.Accepted || decision.TransportEpochDecision is null)
+        {
+            var reason = decision.Accepted ? "transport_epoch_decision_missing" : decision.RejectionReason;
+            if (IsRecoveryOwnerAuthorityRejection(reason))
+            {
+                RejectStaleRuntimeOwnerUpdateLocked(
+                    FileTransferDirection.Outbound,
+                    context.TransferId,
+                    context.SessionId,
+                    context.CurrentRuntimeOwner,
+                    owner,
+                    source,
+                    attemptedAction,
+                    reason);
+            }
+
+            LogFileTransferRecoveryAuthorityRejected(
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                actionKind,
+                source,
+                attemptedAction,
+                reason,
+                context.CurrentRuntimeOwner,
+                owner,
+                null,
+                transportEpochActionKind,
+                leg,
+                transportEpochId,
+                bridgeRecoveryGeneration,
+                recoveryDecisionGeneration,
+                targetRoute,
+                targetProtocolVersion,
+                targetTransport);
+            return false;
+        }
+
+        ApplyCoordinatorActionDecisionToContextLocked(context, decision);
+        transportDecision = decision.TransportEpochDecision;
+        return true;
+    }
+
+    private static bool TryAuthorizeTransportEpochActionLocked(
+        InboundTransferContext context,
+        FileTransferCoordinatorActionKind actionKind,
+        TransportEpochActionKind transportEpochActionKind,
+        string source,
+        string attemptedAction,
+        FileTransferLeg? leg,
+        long? transportEpochId,
+        int? bridgeRecoveryGeneration,
+        int? recoveryDecisionGeneration,
+        FileTransferRoute? targetRoute,
+        int? targetProtocolVersion,
+        FileTransferTransportKind? targetTransport,
+        out TransportEpochDecision? transportDecision)
+    {
+        transportDecision = null;
+        if (context.CurrentRuntimeOwner is not { } owner)
+        {
+            RejectMissingRuntimeOwnerActionLocked(
+                FileTransferDirection.Inbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentRuntimeOwner,
+                source,
+                attemptedAction);
+            LogFileTransferRecoveryAuthorityRejected(
+                FileTransferDirection.Inbound,
+                context.TransferId,
+                context.SessionId,
+                actionKind,
+                source,
+                attemptedAction,
+                "runtime_owner_missing",
+                context.CurrentRuntimeOwner,
+                null,
+                null,
+                transportEpochActionKind,
+                leg,
+                transportEpochId,
+                bridgeRecoveryGeneration,
+                recoveryDecisionGeneration,
+                targetRoute,
+                targetProtocolVersion,
+                targetTransport);
+            return false;
+        }
+
+        var decision = FileTransferCoordinator.AuthorizeAction(
+            CreateCoordinatorStateLocked(context),
+            new FileTransferCoordinatorActionRequest(
+                actionKind,
+                source,
+                attemptedAction,
+                RuntimeOwner: owner,
+                Route: leg?.RouteSelection.Route ?? owner.Route,
+                ProtocolVersion: leg?.ProtocolVersion ?? owner.ProtocolVersion,
+                LiveRouteEpoch: leg?.LiveRouteEpochId ?? owner.LiveRouteEpoch,
+                LegGeneration: leg?.Generation,
+                TransportEpochId: transportEpochId,
+                BridgeRecoveryGeneration: bridgeRecoveryGeneration,
+                TransportEpochActionKind: transportEpochActionKind,
+                RecoveryDecisionGeneration: recoveryDecisionGeneration,
+                TargetRoute: targetRoute,
+                TargetProtocolVersion: targetProtocolVersion,
+                TargetTransport: targetTransport));
+        if (!decision.Accepted || decision.TransportEpochDecision is null)
+        {
+            var reason = decision.Accepted ? "transport_epoch_decision_missing" : decision.RejectionReason;
+            if (IsRecoveryOwnerAuthorityRejection(reason))
+            {
+                RejectStaleRuntimeOwnerUpdateLocked(
+                    FileTransferDirection.Inbound,
+                    context.TransferId,
+                    context.SessionId,
+                    context.CurrentRuntimeOwner,
+                    owner,
+                    source,
+                    attemptedAction,
+                    reason);
+            }
+
+            LogFileTransferRecoveryAuthorityRejected(
+                FileTransferDirection.Inbound,
+                context.TransferId,
+                context.SessionId,
+                actionKind,
+                source,
+                attemptedAction,
+                reason,
+                context.CurrentRuntimeOwner,
+                owner,
+                null,
+                transportEpochActionKind,
+                leg,
+                transportEpochId,
+                bridgeRecoveryGeneration,
+                recoveryDecisionGeneration,
+                targetRoute,
+                targetProtocolVersion,
+                targetTransport);
+            return false;
+        }
+
+        ApplyCoordinatorActionDecisionToContextLocked(context, decision);
+        transportDecision = decision.TransportEpochDecision;
+        return true;
     }
 
     private static bool TryApplyOutboundCoordinatorLegMutationLocked(
@@ -5576,6 +6022,14 @@ public sealed partial class SessionFileTransferService : IDisposable
                      "route_commit_token_missing" or
                      "route_commit_generation_mismatch";
 
+    private static bool IsRecoveryOwnerAuthorityRejection(string reason)
+        => reason is "runtime_owner_missing" or
+                     "runtime_generation_mismatch" or
+                     "terminal_generation_mismatch" or
+                     "route_or_protocol_mismatch" or
+                     "live_route_epoch_mismatch" or
+                     "session_transfer_or_direction_mismatch";
+
     private static void RejectMissingRuntimeOwnerActionLocked(
         FileTransferDirection direction,
         string transferId,
@@ -5669,6 +6123,29 @@ public sealed partial class SessionFileTransferService : IDisposable
 
     private static string FormatRuntimeUnlockCallbackRouteToken(FileTransferRoute route)
         => FileTransferRouteResolver.Resolve(route).TelemetryToken;
+
+    private static void LogFileTransferRecoveryAuthorityRejected(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        FileTransferCoordinatorActionKind actionKind,
+        string source,
+        string attemptedAction,
+        string rejectionReason,
+        RuntimeOwnerToken? currentOwner,
+        RuntimeOwnerToken? attemptedOwner,
+        RepairReplayKind? repairReplayKind,
+        TransportEpochActionKind? transportEpochActionKind,
+        FileTransferLeg? attemptedLeg,
+        long? transportEpoch,
+        int? bridgeRecoveryGeneration,
+        int? recoveryDecisionGeneration,
+        FileTransferRoute? targetRoute,
+        int? targetProtocolVersion,
+        FileTransferTransportKind? targetTransport)
+        => LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_recovery_authority_rejected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; action_kind={FormatProtocolLogValue(actionKind.ToString())}; source={FormatProtocolLogValue(source)}; attempted_action={FormatProtocolLogValue(attemptedAction)}; rejection_reason={FormatProtocolLogValue(rejectionReason)}; reason={FormatProtocolLogValue(rejectionReason)}; repair_replay_kind={FormatProtocolLogValue(repairReplayKind?.ToString() ?? "(none)")}; transport_epoch_action_kind={FormatProtocolLogValue(transportEpochActionKind?.ToString() ?? "(none)")}; current_route={FormatProtocolLogValue(currentOwner?.RouteToken ?? "(none)")}; current_protocol_version={currentOwner?.ProtocolVersion ?? 0}; current_live_route_epoch={currentOwner?.LiveRouteEpoch ?? 0}; current_runtime_generation={currentOwner?.RuntimeGeneration ?? 0}; current_terminal_generation={currentOwner?.TerminalGeneration ?? 0}; attempted_route={FormatProtocolLogValue(attemptedLeg?.RouteSelection.TelemetryToken ?? attemptedOwner?.RouteToken ?? "(none)")}; attempted_protocol_version={attemptedLeg?.ProtocolVersion ?? attemptedOwner?.ProtocolVersion ?? 0}; attempted_live_route_epoch={attemptedLeg?.LiveRouteEpochId ?? attemptedOwner?.LiveRouteEpoch ?? 0}; attempted_runtime_generation={attemptedOwner?.RuntimeGeneration ?? 0}; attempted_terminal_generation={attemptedOwner?.TerminalGeneration ?? 0}; attempted_leg_generation={attemptedLeg?.Generation ?? 0}; attempted_transport_epoch={transportEpoch ?? attemptedLeg?.TransportEpochId ?? 0}; attempted_bridge_recovery_generation={bridgeRecoveryGeneration ?? attemptedLeg?.BridgeRecoveryGeneration ?? 0}; recovery_decision_generation={recoveryDecisionGeneration ?? 0}; target_route={FormatProtocolLogValue(targetRoute is { } route ? FileTransferRouteResolver.Resolve(route).TelemetryToken : "(none)")}; target_protocol_version={targetProtocolVersion ?? 0}; target_transport={FormatProtocolLogValue(targetTransport is { } transport ? FormatFileTransferTransportKind(transport) : "(none)")}");
 
     private static void LogFileTransferCoordinatorLegMutationRejected(
         FileTransferDirection direction,

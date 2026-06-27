@@ -3978,12 +3978,16 @@ public sealed partial class SessionFileTransferService
                     {
                         if (ReferenceEquals(outboundTransfer, context))
                         {
-                            if (!TryAuthorizeRuntimeOwnerActionLocked(
+                            if (!TryAuthorizeRepairReplayLocked(
                                     context,
                                     repairSend.RuntimeOwner,
-                                    FileTransferCoordinatorActionKind.RepairReplay,
+                                    ResolveRepairReplayKind(repairSend),
                                     "v4_repair_send",
                                     repairSend.DeliveryEscalationReason,
+                                    context.CurrentTransferLeg,
+                                    context.CurrentTransferLeg?.TransportEpochId,
+                                    context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                                    null,
                                     out _))
                             {
                                 MarkOutboundV4QueuedRepairSuppressedLocked(context, repairSend);
@@ -4271,15 +4275,11 @@ public sealed partial class SessionFileTransferService
         var chunkIndices = new List<int>(replayChunkCount);
         for (var chunkIndex = replayStartChunkIndex; chunkIndex < replayEndExclusive; chunkIndex++)
         {
-            if (context.PullV4SenderPumpRepairQueuedChunkIndices.Add(chunkIndex))
+            if (!context.PullV4SenderPumpRepairQueuedChunkIndices.Contains(chunkIndex))
             {
                 chunkIndices.Add(chunkIndex);
             }
         }
-
-        context.PullRegularNknV4LastPeerSilenceSafetyReplayUtc = now;
-        context.PullRegularNknV4LastPeerSilenceSafetyReplayFrontierChunkIndex = remoteFrontier;
-        context.PullRegularNknV4LastPeerSilenceSafetyReplayEndChunkIndex = replayEndExclusive;
         if (chunkIndices.Count == 0)
         {
             LocalOperationalLog.Info(
@@ -4288,6 +4288,29 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        if (!TryAuthorizeRepairReplayLocked(
+                context,
+                context.CurrentRuntimeOwner,
+                RepairReplayKind.PeerSilenceReplay,
+                "regular_v4_peer_silence_safety_replay",
+                reason,
+                context.CurrentTransferLeg,
+                context.CurrentTransferLeg?.TransportEpochId,
+                context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                null,
+                out _))
+        {
+            return false;
+        }
+
+        foreach (var chunkIndex in chunkIndices)
+        {
+            context.PullV4SenderPumpRepairQueuedChunkIndices.Add(chunkIndex);
+        }
+
+        context.PullRegularNknV4LastPeerSilenceSafetyReplayUtc = now;
+        context.PullRegularNknV4LastPeerSilenceSafetyReplayFrontierChunkIndex = remoteFrontier;
+        context.PullRegularNknV4LastPeerSilenceSafetyReplayEndChunkIndex = replayEndExclusive;
         var replayOrdinal = ++context.PullRegularNknV4PeerSilenceSafetyReplayCount;
         var repairKey = $"regular_v4_peer_silence_safety_replay:{remoteFrontier}:{replayStartChunkIndex}:{chunkIndices.Count}:{replayOrdinal}";
         context.PullV4SenderPumpRepairQueue.Enqueue(
@@ -4382,7 +4405,7 @@ public sealed partial class SessionFileTransferService
         var chunkIndices = new List<int>(replayChunkCount);
         for (var chunkIndex = remoteFrontier; chunkIndex < replayEndExclusive; chunkIndex++)
         {
-            if (context.PullV4SenderPumpRepairQueuedChunkIndices.Add(chunkIndex))
+            if (!context.PullV4SenderPumpRepairQueuedChunkIndices.Contains(chunkIndex))
             {
                 chunkIndices.Add(chunkIndex);
             }
@@ -4394,6 +4417,26 @@ public sealed partial class SessionFileTransferService
                 "FileTransferService",
                 $"event=filetransfer_v4_post_reactivation_frontier_replay_skipped; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; skip_reason=chunks_already_queued; reactivation_generation={context.PullFileTunaV4PostTunaReactivationGeneration}; remote_next_expected_chunk_index={remoteFrontier}; replay_start_chunk_index={remoteFrontier}; replay_end_chunk_exclusive={replayEndExclusive}; feedback_silence_ms={(long)Math.Max(0, feedbackSilence.TotalMilliseconds)}");
             return false;
+        }
+
+        if (!TryAuthorizeRepairReplayLocked(
+                context,
+                context.CurrentRuntimeOwner,
+                RepairReplayKind.TransportRebindSafetyReplay,
+                "file_tuna_v4_post_tuna_frontier_replay",
+                reason,
+                context.CurrentTransferLeg,
+                context.CurrentTransferLeg?.TransportEpochId,
+                context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                null,
+                out _))
+        {
+            return false;
+        }
+
+        foreach (var chunkIndex in chunkIndices)
+        {
+            context.PullV4SenderPumpRepairQueuedChunkIndices.Add(chunkIndex);
         }
 
         context.PullFileTunaV4PostTunaLastFrontierReplayUtc = now;
@@ -4448,12 +4491,16 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        if (!TryAuthorizeRuntimeOwnerActionLocked(
+        if (!TryAuthorizeRepairReplayLocked(
                 context,
                 repairSend.RuntimeOwner,
-                FileTransferCoordinatorActionKind.RepairReplay,
+                RepairReplayKind.PeerSilenceReplay,
                 "regular_v4_peer_silence_safety_replay",
                 "requeue_after_send_timeout",
+                context.CurrentTransferLeg,
+                context.CurrentTransferLeg?.TransportEpochId,
+                context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                null,
                 out _))
         {
             return false;
@@ -4969,6 +5016,21 @@ public sealed partial class SessionFileTransferService
                 context.PullV4LastRegularNknControlFeedbackPressureObservedUtc = null;
             }
 
+            return false;
+        }
+
+        if (!TryAuthorizeRepairReplayLocked(
+                context,
+                context.CurrentRuntimeOwner,
+                RepairReplayKind.TransportRebindSafetyReplay,
+                "regular_v4_receive_recovery_frontier_rebind",
+                source,
+                context.CurrentTransferLeg,
+                context.CurrentTransferLeg?.TransportEpochId,
+                context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                null,
+                out _))
+        {
             return false;
         }
 
@@ -5738,6 +5800,24 @@ public sealed partial class SessionFileTransferService
             }
 
             var isBackfillRequest = string.Equals(repairRequest.Priority, "backfill", StringComparison.OrdinalIgnoreCase);
+            var repairReplayKind = IsV6RegularNknFrontierStallMode(repairRequest.RecoveryMode) || allowEpochlessPostTunaFallbackFrontier
+                ? RepairReplayKind.FrontierStallRepair
+                : RepairReplayKind.V6Repair;
+            if (!TryAuthorizeRepairReplayLocked(
+                    context,
+                    context.CurrentRuntimeOwner,
+                    repairReplayKind,
+                    "v6_repair_request",
+                    repairRequest.RepairRequestId ?? repairRequest.RecoveryMode ?? "frontier_request",
+                    context.CurrentTransferLeg,
+                    context.CurrentTransferLeg?.TransportEpochId,
+                    context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                    null,
+                    out _))
+            {
+                return;
+            }
+
             if (allowEpochlessPostTunaFallbackFrontier)
             {
                 ActivateOutboundV4PostRebindFrontierOnlyRepairLocked(
@@ -6261,6 +6341,21 @@ public sealed partial class SessionFileTransferService
             -1,
             context.CurrentRuntimeOwner);
 
+        if (!TryAuthorizeRepairReplayLocked(
+                context,
+                queuedRepair.RuntimeOwner,
+                ResolveRepairReplayKind(queuedRepair),
+                "v4_repair_schedule",
+                repairRequestKey,
+                context.CurrentTransferLeg,
+                context.CurrentTransferLeg?.TransportEpochId,
+                context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                null,
+                out _))
+        {
+            return;
+        }
+
         if (chunkIndices.Count == 0)
         {
             LocalOperationalLog.Info(
@@ -6418,6 +6513,30 @@ public sealed partial class SessionFileTransferService
             repairState.InFlight = false;
             repairState.SuppressedCount++;
         }
+    }
+
+    private static RepairReplayKind ResolveRepairReplayKind(PullV4QueuedRepairSend queuedRepair)
+    {
+        if (string.Equals(queuedRepair.DeliveryEscalationReason, "regular_v4_peer_silence_safety_replay", StringComparison.Ordinal))
+        {
+            return RepairReplayKind.PeerSilenceReplay;
+        }
+
+        if (queuedRepair.DeliveryEscalationReason.StartsWith("transport_rebind_", StringComparison.Ordinal) ||
+            queuedRepair.RepairRequestKey.StartsWith("transport_rebind_safety_replay:", StringComparison.Ordinal))
+        {
+            return RepairReplayKind.TransportRebindSafetyReplay;
+        }
+
+        if (queuedRepair.RepairRequestKey.StartsWith("v6-frontier:", StringComparison.Ordinal) ||
+            queuedRepair.RepairRequestKey.StartsWith("v6-state-frontier:", StringComparison.Ordinal) ||
+            string.Equals(queuedRepair.ProtocolRecoveryMode, V6RegularNknFrontierRepairTransactionRecoveryMode, StringComparison.Ordinal) ||
+            string.Equals(queuedRepair.ProtocolRecoveryMode, V6RegularNknStateRefreshRecoveryMode, StringComparison.Ordinal))
+        {
+            return RepairReplayKind.FrontierStallRepair;
+        }
+
+        return RepairReplayKind.V4Repair;
     }
 
     private static bool HasOutboundV4RepairWorkInProgressLocked(OutboundTransferContext context)
@@ -8952,6 +9071,21 @@ public sealed partial class SessionFileTransferService
             return;
         }
 
+        if (!TryAuthorizeRepairReplayLocked(
+                context,
+                context.CurrentRuntimeOwner,
+                RepairReplayKind.TransportRebindSafetyReplay,
+                "transport_rebind_safety_replay",
+                reason,
+                context.CurrentTransferLeg,
+                context.CurrentTransferLeg?.TransportEpochId,
+                context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                null,
+                out _))
+        {
+            return;
+        }
+
         if (IsCurrentPostTunaFallbackLegCheckpointPending(context.CurrentTransferLeg))
         {
             if (!IsCurrentPostTunaFallbackTailReconciliationCheckpointPending(context.CurrentTransferLeg))
@@ -9081,7 +9215,7 @@ public sealed partial class SessionFileTransferService
             {
                 replayStartChunkIndex = context.PullTransportLastSafetyReplayEndChunkIndex;
             }
-            else if (postTunaFallbackPeerSilenceSweep)
+            else if (postTunaFallbackPeerSilenceSweep || currentPostTunaFallbackLegSweep)
             {
                 replayStartChunkIndex = remoteFrontier;
                 postTunaFallbackSweepWrappedToFrontier = true;
