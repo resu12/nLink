@@ -147,10 +147,12 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
 
         Assert.Contains("Get-TunaGuiFileTransferSetupFailureClassification", scriptText, StringComparison.Ordinal);
         Assert.Contains("Wait-TunaGuiFileTransferAcceptOrThrow", scriptText, StringComparison.Ordinal);
-        Assert.Contains("Tuna transport active before measured GUI file transfer", scriptText, StringComparison.Ordinal);
-        Assert.Contains("Wait-TunaGuiActiveBridgeQuietWindow", scriptText, StringComparison.Ordinal);
-        Assert.Contains("tuna_gui_active_bridge_quiet_window", scriptText, StringComparison.Ordinal);
-        Assert.Contains("NLINK_TUNA_GUI_ACTIVE_BRIDGE_QUIET_MS", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Wait-TunaGuiDiagnosticReadinessBeforeMeasuredTransfer", scriptText, StringComparison.Ordinal);
+        Assert.Contains("diagnostic Tuna readiness before measured GUI file transfer", scriptText, StringComparison.Ordinal);
+        Assert.Contains("pretransfer_tuna_readiness_missing", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Wait-TunaGuiFileTunaV4PublicationAfterBookmark", scriptText, StringComparison.Ordinal);
+        Assert.Contains("file_tuna_v4_publication_missing_after_transfer", scriptText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Tuna transport active before measured GUI file transfer", scriptText, StringComparison.Ordinal);
         Assert.Contains("nkn_bridge_receive_stall_recovery_unproven", scriptText, StringComparison.Ordinal);
         Assert.Contains("failurePhase", scriptText, StringComparison.Ordinal);
         Assert.Contains("failureReason", scriptText, StringComparison.Ordinal);
@@ -174,6 +176,36 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("Get-TunaGuiReadinessStateAfterBookmark -Bookmark $Bookmark", scriptText, StringComparison.Ordinal);
         Assert.Contains("rawListenerUnavailable", scriptText, StringComparison.Ordinal);
         Assert.Contains("rawListenerReady", scriptText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RunFileTransferTunaGuiSmoke_PreactivationRequiresPublicationAuthorityAfterMeasuredTransfer()
+    {
+        var repoRoot = FindRepoRoot();
+        var scriptPath = Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1");
+        var scriptText = File.ReadAllText(scriptPath);
+        var cycleBody = ExtractPowerShellFunctionBody(scriptText, "Invoke-FileTransferTunaHandoffFallbackCycle", "Wait-FileTransferTerminalOrProgressBeforeAction");
+
+        Assert.Contains("diagnosticTunaReadinessObserved", cycleBody, StringComparison.Ordinal);
+        Assert.Contains("fileTunaV4PublicationObserved", cycleBody, StringComparison.Ordinal);
+        Assert.Contains("Test-GuiSmokeFieldEquals", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Name 'route' -Expected 'file_tuna_v4'", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Name 'target_route' -Expected 'file_tuna_v4'", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Name 'target_transport' -Expected 'tuna'", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Name 'coordinator_decision_reason' -Expected 'accepted'", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Name 'route_publication_action_kind' -Expected $ActionKind", scriptText, StringComparison.Ordinal);
+        Assert.Contains("-ActionKind 'RoutePublication'", cycleBody, StringComparison.Ordinal);
+        Assert.Contains("-ActionKind 'RouteCommitPublication'", cycleBody, StringComparison.Ordinal);
+        Assert.Contains("'route_publication_generation'", scriptText, StringComparison.Ordinal);
+        Assert.Contains("'runtime_generation'", scriptText, StringComparison.Ordinal);
+        Assert.Contains("'terminal_generation'", scriptText, StringComparison.Ordinal);
+        Assert.Contains("'leg_generation'", scriptText, StringComparison.Ordinal);
+        Assert.Contains("RequireZeroRouteCommitGeneration $true", cycleBody, StringComparison.Ordinal);
+        Assert.Contains("RequirePositiveRouteCommitGeneration $true", cycleBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("Get-TunaGuiFileTunaV4PublicationNeedles", scriptText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Needle 'event=tuna_acceleration_negotiated' -TimeoutMs 150000 -Description 'Tuna negotiated before measured GUI file transfer'", cycleBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("active=1', 'paid_listener_active'", cycleBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("active=1', 'free_dialer_active'", cycleBody, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -258,8 +290,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", guiText, StringComparison.Ordinal);
         Assert.Contains("$fallbackRouteLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $stepBookmark -NeedleSets @(", guiText, StringComparison.Ordinal);
         Assert.Contains("@('event=filetransfer_route_selected', 'route=post_tuna_fallback_v6', 'protocol_version=6')", guiText, StringComparison.Ordinal);
-        Assert.Contains("$activationRouteLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $stepBookmark -NeedleSets @(", guiText, StringComparison.Ordinal);
-        Assert.Contains("@('event=filetransfer_route_selected', 'route=file_tuna_v4', 'protocol_version=4')", guiText, StringComparison.Ordinal);
+        Assert.Contains("$activationRouteLine = [string](Wait-TunaGuiFileTunaV4PublicationAfterBookmark -Bookmark $stepBookmark", guiText, StringComparison.Ordinal);
+        Assert.Contains("-ActionKind 'RouteCommitPublication'", guiText, StringComparison.Ordinal);
+        Assert.Contains("-RequirePositiveRouteCommitGeneration $true", guiText, StringComparison.Ordinal);
         Assert.DoesNotContain("$fallbackRouteLine = if ($fallbackStartedLine.IndexOf('route=post_tuna_fallback_v6'", guiText, StringComparison.Ordinal);
         Assert.DoesNotContain("$activationRouteLine = if ($activationStartedLine.IndexOf('route=file_tuna_v4'", guiText, StringComparison.Ordinal);
         Assert.Contains("same-transfer strict live-route epoch cycling", guiText, StringComparison.Ordinal);

@@ -2149,16 +2149,17 @@ function Write-RouteAcceptanceFakeRetainedLog {
     $sessionId = 'route-acceptance-session'
     $terminalError = if ($TerminalState -eq 'Completed') { '(none)' } else { 'pending' }
     $rawBytes = 67108864L
+    $publicationSuffix = Get-RouteAcceptanceFakePublicationAuthoritySuffix -Route $Route -Protocol $protocol
 
     $lines = @(
-        (New-RouteAcceptanceFakeLogLine -Message ("event=filetransfer_route_selected; direction=outbound; transfer_id={0}; session_id={1}; route={2}; protocol_version={3}; runtime_profile={4}; frame_family={5}; handoff_kind=none; bridge_recovery_policy={6}; liveness_terminal_policy={2}; selection_reason=route_acceptance_fake; file_tuna_active={7}; post_tuna_fallback_active={8}; diagnostic_regular_nkn_v6={9}; transport_profile=nkn" -f $TransferId, $sessionId, $Route, $protocol, $metadata.Runtime, $frameFamily, $metadata.Bridge, $metadata.FileTuna, $metadata.Fallback, $metadata.Diagnostic))
-        (New-RouteAcceptanceFakeLogLine -Message ("event=filetransfer_route_selected; direction=inbound; transfer_id={0}; session_id={1}; route={2}; protocol_version={3}; runtime_profile={4}; frame_family={5}; handoff_kind=none; bridge_recovery_policy={6}; liveness_terminal_policy={2}; selection_reason=route_acceptance_fake; file_tuna_active={7}; post_tuna_fallback_active={8}; diagnostic_regular_nkn_v6={9}; transport_profile=nkn" -f $TransferId, $sessionId, $Route, $protocol, $metadata.Runtime, $frameFamily, $metadata.Bridge, $metadata.FileTuna, $metadata.Fallback, $metadata.Diagnostic))
+        (New-RouteAcceptanceFakeLogLine -Message ("event=filetransfer_route_selected; direction=outbound; transfer_id={0}; session_id={1}; route={2}; protocol_version={3}; runtime_profile={4}; frame_family={5}; handoff_kind=none; bridge_recovery_policy={6}; liveness_terminal_policy={2}; selection_reason=route_acceptance_fake; file_tuna_active={7}; post_tuna_fallback_active={8}; diagnostic_regular_nkn_v6={9}; transport_profile=nkn{10}" -f $TransferId, $sessionId, $Route, $protocol, $metadata.Runtime, $frameFamily, $metadata.Bridge, $metadata.FileTuna, $metadata.Fallback, $metadata.Diagnostic, $publicationSuffix))
+        (New-RouteAcceptanceFakeLogLine -Message ("event=filetransfer_route_selected; direction=inbound; transfer_id={0}; session_id={1}; route={2}; protocol_version={3}; runtime_profile={4}; frame_family={5}; handoff_kind=none; bridge_recovery_policy={6}; liveness_terminal_policy={2}; selection_reason=route_acceptance_fake; file_tuna_active={7}; post_tuna_fallback_active={8}; diagnostic_regular_nkn_v6={9}; transport_profile=nkn{10}" -f $TransferId, $sessionId, $Route, $protocol, $metadata.Runtime, $frameFamily, $metadata.Bridge, $metadata.FileTuna, $metadata.Fallback, $metadata.Diagnostic, $publicationSuffix))
         (New-RouteAcceptanceFakeLogLine -Message ("event=filetransfer_protocol_negotiated; direction=outbound; transfer_id={0}; session_id={1}; route={2}; protocol_version={3}; runtime_profile={4}; frame_family={5}; bridge_recovery_policy={6}; selection_reason=route_acceptance_fake" -f $TransferId, $sessionId, $Route, $protocol, $metadata.Runtime, $frameFamily, $metadata.Bridge))
         (New-RouteAcceptanceFakeLogLine -Message ("event=filetransfer_session_opened; direction=outbound; transfer_id={0}; session_id={1}; route={2}; protocol_version={3}; runtime_profile={4}; frame_family={5}; bridge_recovery_policy={6}; reason=role=Sender" -f $TransferId, $sessionId, $Route, $protocol, $metadata.Runtime, $frameFamily, $metadata.Bridge))
         (New-RouteAcceptanceFakeLogLine -Message ("event=filetransfer_bridge_recovery_policy_selected; direction=outbound; transfer_id={0}; session_id={1}; route={2}; protocol_version={3}; runtime_profile={4}; frame_family={5}; bridge_recovery_policy={6}" -f $TransferId, $sessionId, $Route, $protocol, $metadata.Runtime, $frameFamily, $metadata.Bridge))
         (New-RouteAcceptanceFakeLogLine -Message ("event={0}; direction=outbound; transfer_id={1}; session_id={2}; route={3}; protocol_version={4}; runtime_profile={5}; frame_family={6}; bridge_recovery_policy={7}" -f $metadata.SenderStarted, $TransferId, $sessionId, $Route, $protocol, $metadata.Runtime, $frameFamily, $metadata.Bridge))
         (New-RouteAcceptanceFakeLogLine -Message ("event={0}; direction=inbound; transfer_id={1}; session_id={2}; route={3}; protocol_version={4}; runtime_profile={5}; frame_family={6}; bridge_recovery_policy={7}" -f $metadata.ReceiverStarted, $TransferId, $sessionId, $Route, $protocol, $metadata.Runtime, $frameFamily, $metadata.Bridge))
-        (New-RouteAcceptanceFakeLogLine -Message ("event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={0}; session_id={1}; route={2}; protocol_version={3}; runtime_profile={4}; frame_family={5}; bridge_recovery_policy={6}" -f $TransferId, $sessionId, $Route, $protocol, $metadata.Runtime, $frameFamily, $metadata.Bridge))
+        (New-RouteAcceptanceFakeLogLine -Message ("event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={0}; session_id={1}; route={2}; protocol_version={3}; runtime_profile={4}; frame_family={5}; bridge_recovery_policy={6}{7}" -f $TransferId, $sessionId, $Route, $protocol, $metadata.Runtime, $frameFamily, $metadata.Bridge, $publicationSuffix))
         (New-RouteAcceptanceFakeLogLine -Message ("event=filetransfer_binary_frame_sent; transfer_id={0}; session_id={1}; frame_type={2}; chunk_index=0-31; payload_bytes={3}; serialized_payload_bytes={3}; raw_chunk_bytes={3}; chunk_count=32" -f $TransferId, $sessionId, $frameType, $rawBytes))
         (New-RouteAcceptanceFakeLogLine -Message ("event=filetransfer_binary_frame_received; transfer_id={0}; session_id={1}; frame_type={2}; chunk_index=0-31; raw_chunk_bytes={3}; chunk_count=32" -f $TransferId, $sessionId, $frameType, $rawBytes))
         (New-RouteAcceptanceFakeLogLine -SecondsOffset 120 -Message ("event=file_transfer_inbound_terminal; role=helper; session_id={0}; transfer_id={1}; state={2}; error_code={3}; bytes_transferred={4}; saved_path=(none); integrity_ok={5}" -f $sessionId, $TransferId, $TerminalState, $terminalError, $rawBytes, ($(if ($TerminalState -eq 'Completed') { 1 } else { 0 }))))
@@ -2182,7 +2183,7 @@ function New-RouteAcceptanceRouteSelectedLogLine {
 
     $metadata = Get-RouteAcceptanceRouteMetadata -Route $Route
     $protocol = [int]$metadata.Protocol
-    $suffix = if ($LiveRouteEpoch -gt 0) { "; live_route_epoch=$LiveRouteEpoch" } else { "" }
+    $suffix = Get-RouteAcceptanceFakePublicationAuthoritySuffix -Route $Route -Protocol $protocol -LiveRouteEpoch $LiveRouteEpoch -HandoffKind $HandoffKind
     return New-RouteAcceptanceFakeLogLine -SecondsOffset $SecondsOffset -Message (
         "event=filetransfer_route_selected; direction={0}; transfer_id={1}; session_id={2}; route={3}; protocol_version={4}; runtime_profile={5}; frame_family={6}; handoff_kind={7}; bridge_recovery_policy={8}; liveness_terminal_policy={3}; selection_reason=phase4_fake; file_tuna_active={9}; post_tuna_fallback_active={10}; diagnostic_regular_nkn_v6={11}; transport_profile=nkn{12}" -f
             $Direction,
@@ -2200,6 +2201,44 @@ function New-RouteAcceptanceRouteSelectedLogLine {
             $suffix)
 }
 
+function Get-RouteAcceptanceFakePublicationAuthoritySuffix {
+    param(
+        [Parameter(Mandatory = $true)][string]$Route,
+        [Parameter(Mandatory = $true)][int]$Protocol,
+        [int]$LiveRouteEpoch = 0,
+        [string]$HandoffKind = 'none'
+    )
+
+    $targetTransport = if ($Route -eq 'file_tuna_v4') {
+        'tuna'
+    }
+    elseif ($Route -eq 'post_tuna_fallback_v6') {
+        'regular_nkn'
+    }
+    else {
+        'regular_nkn'
+    }
+    $actionKind = if ($Route -eq 'file_tuna_v4' -and $HandoffKind -eq 'normal_to_tuna_activation' -and $LiveRouteEpoch -gt 0) {
+        'RouteCommitPublication'
+    }
+    else {
+        'RoutePublication'
+    }
+    $routeCommitGeneration = if ($actionKind -eq 'RouteCommitPublication') { [Math]::Max(1, $LiveRouteEpoch) } else { 0 }
+    $authorityGeneration = [Math]::Max(1, $LiveRouteEpoch + 1)
+    $legGeneration = [Math]::Max(1, $LiveRouteEpoch + 1)
+
+    return ("; live_route_epoch={0}; runtime_generation={1}; terminal_generation=0; leg_generation={2}; route_publication_generation={1}; route_commit_generation={3}; target_route={4}; target_protocol_version={5}; target_transport={6}; route_publication_action_kind={7}; coordinator_decision_reason=accepted" -f
+        $LiveRouteEpoch,
+        $authorityGeneration,
+        $legGeneration,
+        $routeCommitGeneration,
+        $Route,
+        $Protocol,
+        $targetTransport,
+        $actionKind)
+}
+
 function New-RouteAcceptanceRuntimeLogLines {
     param(
         [Parameter(Mandatory = $true)][string]$TransferId,
@@ -2210,12 +2249,13 @@ function New-RouteAcceptanceRuntimeLogLines {
 
     $metadata = Get-RouteAcceptanceRouteMetadata -Route $Route
     $protocol = [int]$metadata.Protocol
+    $publicationSuffix = Get-RouteAcceptanceFakePublicationAuthoritySuffix -Route $Route -Protocol $protocol
     return @(
         (New-RouteAcceptanceFakeLogLine -SecondsOffset $SecondsOffset -Message ("event=filetransfer_protocol_negotiated; direction=outbound; transfer_id={0}; session_id={1}; route={2}; protocol_version={3}; runtime_profile={4}; frame_family={5}; bridge_recovery_policy={6}; selection_reason=phase4_fake" -f $TransferId, $SessionId, $Route, $protocol, $metadata.Runtime, $metadata.FrameFamily, $metadata.Bridge))
         (New-RouteAcceptanceFakeLogLine -SecondsOffset $SecondsOffset -Message ("event=filetransfer_session_opened; direction=outbound; transfer_id={0}; session_id={1}; route={2}; protocol_version={3}; runtime_profile={4}; frame_family={5}; bridge_recovery_policy={6}; reason=role=Sender" -f $TransferId, $SessionId, $Route, $protocol, $metadata.Runtime, $metadata.FrameFamily, $metadata.Bridge))
         (New-RouteAcceptanceFakeLogLine -SecondsOffset $SecondsOffset -Message ("event={0}; direction=outbound; transfer_id={1}; session_id={2}; route={3}; protocol_version={4}; runtime_profile={5}; frame_family={6}; bridge_recovery_policy={7}" -f $metadata.SenderStarted, $TransferId, $SessionId, $Route, $protocol, $metadata.Runtime, $metadata.FrameFamily, $metadata.Bridge))
         (New-RouteAcceptanceFakeLogLine -SecondsOffset $SecondsOffset -Message ("event={0}; direction=inbound; transfer_id={1}; session_id={2}; route={3}; protocol_version={4}; runtime_profile={5}; frame_family={6}; bridge_recovery_policy={7}" -f $metadata.ReceiverStarted, $TransferId, $SessionId, $Route, $protocol, $metadata.Runtime, $metadata.FrameFamily, $metadata.Bridge))
-        (New-RouteAcceptanceFakeLogLine -SecondsOffset $SecondsOffset -Message ("event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={0}; session_id={1}; route={2}; protocol_version={3}; runtime_profile={4}; frame_family={5}; bridge_recovery_policy={6}" -f $TransferId, $SessionId, $Route, $protocol, $metadata.Runtime, $metadata.FrameFamily, $metadata.Bridge))
+        (New-RouteAcceptanceFakeLogLine -SecondsOffset $SecondsOffset -Message ("event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={0}; session_id={1}; route={2}; protocol_version={3}; runtime_profile={4}; frame_family={5}; bridge_recovery_policy={6}{7}" -f $TransferId, $SessionId, $Route, $protocol, $metadata.Runtime, $metadata.FrameFamily, $metadata.Bridge, $publicationSuffix))
     )
 }
 
@@ -2249,9 +2289,10 @@ function New-RouteAcceptanceLiveRouteEpochLogLines {
         )
     }
 
+    $publicationSuffix = Get-RouteAcceptanceFakePublicationAuthoritySuffix -Route $Route -Protocol $protocol -LiveRouteEpoch $LiveRouteEpoch -HandoffKind $handoffKind
     return @(
-        (New-RouteAcceptanceFakeLogLine -SecondsOffset $SecondsOffset -Message ("event=filetransfer_live_route_epoch_started; direction=outbound; transfer_id={0}; session_id={1}; route={2}; protocol_version={3}; handoff_kind={4}; target_transport={5}; live_route_epoch={6}" -f $TransferId, $SessionId, $Route, $protocol, $handoffKind, $targetTransport, $LiveRouteEpoch))
-        (New-RouteAcceptanceFakeLogLine -SecondsOffset ($SecondsOffset + 1) -Message ("event=filetransfer_live_route_epoch_recovered; direction=outbound; transfer_id={0}; session_id={1}; route={2}; protocol_version={3}; handoff_kind={4}; target_transport={5}; live_route_epoch={6}" -f $TransferId, $SessionId, $Route, $protocol, $handoffKind, $targetTransport, $LiveRouteEpoch))
+        (New-RouteAcceptanceFakeLogLine -SecondsOffset $SecondsOffset -Message ("event=filetransfer_live_route_epoch_started; direction=outbound; transfer_id={0}; session_id={1}; route={2}; protocol_version={3}; handoff_kind={4}; target_transport={5}{6}" -f $TransferId, $SessionId, $Route, $protocol, $handoffKind, $targetTransport, $publicationSuffix))
+        (New-RouteAcceptanceFakeLogLine -SecondsOffset ($SecondsOffset + 1) -Message ("event=filetransfer_live_route_epoch_recovered; direction=outbound; transfer_id={0}; session_id={1}; route={2}; protocol_version={3}; handoff_kind={4}; target_transport={5}{6}" -f $TransferId, $SessionId, $Route, $protocol, $handoffKind, $targetTransport, $publicationSuffix))
     )
 }
 
@@ -3220,6 +3261,7 @@ function Write-RouteAcceptanceFakeTunaRun {
     $emitNoFaultExternalWarning = $RouteMode -eq 'preactivated' -and (Test-RouteAcceptanceEnvEnabled -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_TUNA_NOFAULT_EXTERNAL_WARNING')
     $isControlledRestartMode = $RouteMode -eq 'v4-restart-v6-fallback'
     $emitFallbackRecoveredBridgeWarning = $isControlledRestartMode -and (Test-RouteAcceptanceEnvEnabled -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_FALLBACK_RECOVERED_BRIDGE_WARNING')
+    $setupFileTunaPublicationSuffix = Get-RouteAcceptanceFakePublicationAuthoritySuffix -Route 'file_tuna_v4' -Protocol 4
 
     Write-RouteAcceptanceFakeRetainedLog -ArtifactDir $ArtifactDir -TransferId ('fake-tuna-{0}' -f $RouteMode) -Route $effectiveRoute -ProtocolOverride $protocolOverride -TerminalState $terminalState -BridgeBulkSendFailures 0
     if ($emitNoFaultExternalWarning) {
@@ -3239,7 +3281,7 @@ function Write-RouteAcceptanceFakeTunaRun {
         Copy-Item -LiteralPath $logPath -Destination (Join-Path $ArtifactDir 'filetransfer-measured-fallback-retained-log-slice.log') -Force
         @(
             (New-RouteAcceptanceFakeLogLine -Message 'event=filetransfer_tuna_gui_phase_marker; phase=setup_file_tuna_v4_started')
-            (New-RouteAcceptanceFakeLogLine -Message 'event=filetransfer_route_selected; direction=outbound; transfer_id=fake-tuna-v4-setup; session_id=sess_setup; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=tuna_strict; liveness_terminal_policy=file_tuna_v4_fast; selection_reason=file_tuna_active; file_tuna_active=1; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=fake')
+            (New-RouteAcceptanceFakeLogLine -Message ("event=filetransfer_route_selected; direction=outbound; transfer_id=fake-tuna-v4-setup; session_id=sess_setup; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=tuna_strict; liveness_terminal_policy=file_tuna_v4_fast; selection_reason=file_tuna_active; file_tuna_active=1; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=fake{0}" -f $setupFileTunaPublicationSuffix))
             (New-RouteAcceptanceFakeLogLine -Message 'event=file_transfer_inbound_terminal; role=helper; session_id=sess_setup; transfer_id=fake-tuna-v4-setup; state=Canceled; error_code=canceled_remote')
             (New-RouteAcceptanceFakeLogLine -Message 'event=file_transfer_outbound_terminal; role=helpee; session_id=sess_setup; transfer_id=fake-tuna-v4-setup; state=Canceled; error_code=canceled_local')
             (New-RouteAcceptanceFakeLogLine -Message 'event=filetransfer_v4_feedback_both_failed; transport=nkn; transfer_id=fake-tuna-v4-setup; session_id=sess_setup; frame_type=filetransfer.cancel.v4; first_lane=control; second_lane=bulk; first_error=OperationCanceledException; second_error=OperationCanceledException')
@@ -3349,9 +3391,10 @@ function Write-RouteAcceptanceFakeFallbackRetryableFailure {
     )
 
     New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
+    $setupFileTunaPublicationSuffix = Get-RouteAcceptanceFakePublicationAuthoritySuffix -Route 'file_tuna_v4' -Protocol 4
     $setupLines = @(
         (New-RouteAcceptanceFakeLogLine -Message 'event=filetransfer_tuna_gui_phase_marker; phase=setup_file_tuna_v4_started')
-        (New-RouteAcceptanceFakeLogLine -Message 'event=filetransfer_route_selected; direction=outbound; transfer_id=fake-tuna-v4-setup; session_id=sess_setup; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=tuna_strict; liveness_terminal_policy=file_tuna_v4_fast; selection_reason=file_tuna_active; file_tuna_active=1; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=fake')
+        (New-RouteAcceptanceFakeLogLine -Message ("event=filetransfer_route_selected; direction=outbound; transfer_id=fake-tuna-v4-setup; session_id=sess_setup; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=tuna_strict; liveness_terminal_policy=file_tuna_v4_fast; selection_reason=file_tuna_active; file_tuna_active=1; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=fake{0}" -f $setupFileTunaPublicationSuffix))
         (New-RouteAcceptanceFakeLogLine -Message 'event=file_transfer_inbound_terminal; role=helper; session_id=sess_setup; transfer_id=fake-tuna-v4-setup; state=Canceled; error_code=canceled_remote')
         (New-RouteAcceptanceFakeLogLine -Message 'event=file_transfer_outbound_terminal; role=helpee; session_id=sess_setup; transfer_id=fake-tuna-v4-setup; state=Canceled; error_code=canceled_local')
         (New-RouteAcceptanceFakeLogLine -Message 'event=filetransfer_tuna_gui_phase_marker; phase=setup_file_tuna_v4_cleanup_closed')
@@ -3379,16 +3422,18 @@ function Write-RouteAcceptanceFakeFallbackRouteNotReadyFailure {
     )
 
     New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
+    $setupFileTunaPublicationSuffix = Get-RouteAcceptanceFakePublicationAuthoritySuffix -Route 'file_tuna_v4' -Protocol 4
+    $measuredFallbackPublicationSuffix = Get-RouteAcceptanceFakePublicationAuthoritySuffix -Route 'post_tuna_fallback_v6' -Protocol 6 -LiveRouteEpoch 1 -HandoffKind 'tuna_to_normal_fallback'
     $setupLines = @(
         (New-RouteAcceptanceFakeLogLine -Message 'event=filetransfer_tuna_gui_phase_marker; phase=setup_file_tuna_v4_started')
-        (New-RouteAcceptanceFakeLogLine -Message 'event=filetransfer_route_selected; direction=outbound; transfer_id=fake-tuna-v4-setup; session_id=sess_setup; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=tuna_strict; liveness_terminal_policy=file_tuna_v4_fast; selection_reason=file_tuna_active; file_tuna_active=1; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=fake')
+        (New-RouteAcceptanceFakeLogLine -Message ("event=filetransfer_route_selected; direction=outbound; transfer_id=fake-tuna-v4-setup; session_id=sess_setup; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=tuna_strict; liveness_terminal_policy=file_tuna_v4_fast; selection_reason=file_tuna_active; file_tuna_active=1; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=fake{0}" -f $setupFileTunaPublicationSuffix))
         (New-RouteAcceptanceFakeLogLine -Message 'event=file_transfer_inbound_terminal; role=helper; session_id=sess_setup; transfer_id=fake-tuna-v4-setup; state=Canceled; error_code=canceled_remote')
         (New-RouteAcceptanceFakeLogLine -Message 'event=file_transfer_outbound_terminal; role=helpee; session_id=sess_setup; transfer_id=fake-tuna-v4-setup; state=Canceled; error_code=canceled_local')
         (New-RouteAcceptanceFakeLogLine -Message 'event=filetransfer_tuna_gui_phase_marker; phase=setup_file_tuna_v4_cleanup_closed')
     )
     $measuredLines = @(
         (New-RouteAcceptanceFakeLogLine -Message 'event=filetransfer_tuna_gui_phase_marker; phase=measured_post_tuna_fallback_v6_started')
-        (New-RouteAcceptanceFakeLogLine -Message 'event=filetransfer_route_selected; direction=outbound; transfer_id=fake-fallback-route-not-ready; session_id=(none); route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6_repair; selection_reason=post_tuna_file_fallback_active; file_tuna_active=0; post_tuna_fallback_active=1; diagnostic_regular_nkn_v6=0; transport_profile=fake')
+        (New-RouteAcceptanceFakeLogLine -Message ("event=filetransfer_route_selected; direction=outbound; transfer_id=fake-fallback-route-not-ready; session_id=(none); route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6_repair; selection_reason=post_tuna_file_fallback_active; file_tuna_active=0; post_tuna_fallback_active=1; diagnostic_regular_nkn_v6=0; transport_profile=fake{0}" -f $measuredFallbackPublicationSuffix))
         (New-RouteAcceptanceFakeLogLine -Message 'event=filetransfer_legacy_negotiation_rejected; transfer_id=fake-fallback-route-not-ready; session_id=sess_fallback; direction=Inbound; offered_version=6; accepted_version=(none); reason=offer_route_not_active')
         (New-RouteAcceptanceFakeLogLine -Message 'event=file_transfer_outbound_terminal; role=Helpee; session_id=; transfer_id=fake-fallback-route-not-ready; state=Declined; error_code=(none)')
         (New-RouteAcceptanceFakeLogLine -Message 'event=transfer_terminal; direction=outbound; transfer_id=fake-fallback-route-not-ready; session_id=; file_name_len=33; file_size_bytes=134217728; bytes_transferred=0; chunks_transferred=0; chunk_count=0; error_code=(none); reason=transport_incompatible; saved_path=(none); route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6_repair; selection_reason=post_tuna_file_fallback_active')
