@@ -1110,6 +1110,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         OutboundTransferContext context;
         IFileTransferSignalingTransport currentTransport;
         FileTransferRouteResolverInput routeInput;
+        FileTransferInitialTunaReadinessEvidence? initialTunaEvidence;
 
         lock (gate)
         {
@@ -1124,8 +1125,17 @@ public sealed partial class SessionFileTransferService : IDisposable
                 return null;
             }
 
-            routeInput = FileTransferRouteResolverInput.FromTransport(currentTransport);
-            var routeSelection = ResolveFileTransferRouteForNewTransfer(routeInput);
+            var transportRouteInput = FileTransferRouteResolverInput.FromTransport(currentTransport);
+            routeInput = CreateInitialRouteResolverInputForNewTransfer(currentTransport);
+            initialTunaEvidence = CaptureInitialTunaReadinessEvidence(
+                currentTransport,
+                ResolveCurrentFileTransferSessionId(currentTransport),
+                normalizedDescriptor.TransferId ?? string.Empty,
+                FileTransferDirection.Outbound);
+            var routeSelection = ResolveInitialOutboundRouteSelection(
+                routeInput,
+                transportRouteInput,
+                initialTunaEvidence);
             context = new OutboundTransferContext(normalizedDescriptor, openReadStreamAsync)
             {
                 SessionId = ResolveCurrentFileTransferSessionId(currentTransport),
@@ -1136,7 +1146,16 @@ public sealed partial class SessionFileTransferService : IDisposable
             ApplyFileTransferRuntimeProfileSelectionLocked(
                 context,
                 FileTransferRuntimeProfileSelection.FromRouteSelection(routeSelection));
-            EnsureOutboundTransferLegLocked(context, "new_transfer");
+            if (EnsureOutboundTransferLegLocked(
+                    context,
+                    "new_transfer",
+                    initialTunaEvidence,
+                    ResolveFileTransferRouteForNewTransfer(routeInput)) is null)
+            {
+                return null;
+            }
+
+            routeInput = CreateRouteInputForPublishedSelection(context.RouteSelection, routeInput.TransportProfileKind);
             outboundTransfer = context;
         }
 
@@ -2503,7 +2522,12 @@ public sealed partial class SessionFileTransferService : IDisposable
             currentTransport = transport;
         }
 
-        var routeInput = FileTransferRouteResolverInput.FromTransport(currentTransport);
+        var routeInput = CreateInitialRouteResolverInputForNewTransfer(currentTransport);
+        var initialTunaEvidence = CaptureInitialTunaReadinessEvidence(
+            currentTransport,
+            message.SessionId,
+            message.TransferId,
+            FileTransferDirection.Inbound);
         if (!TryResolveIncomingOfferRouteSelection(message, routeInput, out var routeSelection, out var routeRejectReason))
         {
             LogLegacyNegotiationRejected(
@@ -2525,7 +2549,20 @@ public sealed partial class SessionFileTransferService : IDisposable
         ApplyFileTransferRuntimeProfileSelectionLocked(
             incoming,
             FileTransferRuntimeProfileSelection.FromRouteSelection(routeSelection));
-        EnsureInboundTransferLegLocked(incoming, "offer_received");
+        if (EnsureInboundTransferLegLocked(incoming, "offer_received", initialTunaEvidence) is null)
+        {
+            LogLegacyNegotiationRejected(
+                message.TransferId,
+                message.SessionId,
+                FileTransferDirection.Inbound,
+                offeredVersion: message.PreferredDataProtocolVersion,
+                acceptedVersion: null,
+                reason: "offer_route_not_active");
+            await SendDeclineAsync(message.SessionId, message.TransferId, TransportIncompatibleErrorCode, CancellationToken.None).ConfigureAwait(false);
+            return;
+        }
+
+        routeInput = CreateRouteInputForPublishedSelection(incoming.RouteSelection, routeInput.TransportProfileKind);
 
         lock (gate)
         {
@@ -4535,10 +4572,56 @@ public sealed partial class SessionFileTransferService : IDisposable
             or FileTransferProtocol.ProtocolVersionV6;
 
     private static int ResolvePreferredDataProtocolVersionForNewTransfer(IFileTransferSignalingTransport? currentTransport)
-        => ResolveFileTransferRouteForNewTransfer(FileTransferRouteResolverInput.FromTransport(currentTransport)).ProtocolVersion;
+        => ResolveFileTransferRouteForNewTransfer(CreateInitialRouteResolverInputForNewTransfer(currentTransport)).ProtocolVersion;
 
     private static FileTransferRouteSelection ResolveFileTransferRouteForNewTransfer(FileTransferRouteResolverInput input)
         => FileTransferRouteResolver.Resolve(input);
+
+    private static FileTransferRouteResolverInput CreateInitialRouteResolverInputForNewTransfer(
+        IFileTransferSignalingTransport? currentTransport)
+    {
+        var input = FileTransferRouteResolverInput.FromTransport(currentTransport);
+        return input with { IsFileTunaActive = false };
+    }
+
+    private static FileTransferRouteSelection ResolveInitialOutboundRouteSelection(
+        FileTransferRouteResolverInput baseRouteInput,
+        FileTransferRouteResolverInput transportRouteInput,
+        FileTransferInitialTunaReadinessEvidence? initialTunaEvidence)
+    {
+        if (!baseRouteInput.IsPostTunaFileFallbackActive &&
+            (initialTunaEvidence is not null || transportRouteInput.IsFileTunaActive))
+        {
+            return FileTransferRouteResolver.Resolve(new FileTransferRouteResolverInput(
+                IsFileTunaActive: true,
+                IsPostTunaFileFallbackActive: false,
+                IsDiagnosticRegularNknV6RouteEnabled: false,
+                HandoffKind: FileTransferTransportHandoffKind.None,
+                TransportProfileKind: baseRouteInput.TransportProfileKind));
+        }
+
+        return ResolveFileTransferRouteForNewTransfer(baseRouteInput);
+    }
+
+    private static FileTransferRouteResolverInput CreateRouteInputForPublishedSelection(
+        FileTransferRouteSelection routeSelection,
+        FileTransferTransportProfileKind transportProfileKind)
+        => new(
+            IsFileTunaActive: routeSelection.Route == FileTransferRoute.FileTunaV4,
+            IsPostTunaFileFallbackActive: routeSelection.Route == FileTransferRoute.PostTunaFallbackV6,
+            IsDiagnosticRegularNknV6RouteEnabled: routeSelection.Route == FileTransferRoute.DiagnosticRegularNknV6,
+            HandoffKind: routeSelection.HandoffKind,
+            TransportProfileKind: transportProfileKind);
+
+    private static FileTransferInitialTunaReadinessEvidence? CaptureInitialTunaReadinessEvidence(
+        IFileTransferSignalingTransport? currentTransport,
+        string sessionId,
+        string transferId,
+        FileTransferDirection direction)
+        => currentTransport is IFileTransferInitialTunaReadinessProvider provider &&
+           provider.TryGetInitialTunaReadinessEvidence(sessionId, transferId, direction, out var evidence)
+            ? evidence
+            : null;
 
     private static bool TryResolveIncomingOfferRouteSelection(
         FileTransferOfferV2 message,
@@ -4564,7 +4647,8 @@ public sealed partial class SessionFileTransferService : IDisposable
                 return false;
             }
 
-            if (explicitSelection.Route != localSelection.Route)
+            if (explicitSelection.Route != localSelection.Route &&
+                explicitSelection.Route != FileTransferRoute.FileTunaV4)
             {
                 reason = "offer_route_not_active";
                 return false;
@@ -4698,23 +4782,34 @@ public sealed partial class SessionFileTransferService : IDisposable
     private static string FormatFileTransferLegState(FileTransferLegState state)
         => FileTransferCoordinator.FormatLegState(state);
 
-    private static FileTransferLeg? EnsureOutboundTransferLegLocked(OutboundTransferContext context, string reason)
+    private static FileTransferLeg? EnsureOutboundTransferLegLocked(
+        OutboundTransferContext context,
+        string reason,
+        FileTransferInitialTunaReadinessEvidence? initialTunaReadinessEvidence = null,
+        FileTransferRouteSelection? initialRouteFallbackSelection = null)
         => context.CurrentTransferLeg ?? StartOutboundTransferLegLocked(
             context,
             context.RouteSelection,
             reason,
             FileTransferLegState.Active,
             canSendData: true,
-            freezeCurrent: false);
+            freezeCurrent: false,
+            initialTunaReadinessEvidence: initialTunaReadinessEvidence,
+            allowInitialRouteFallback: initialRouteFallbackSelection.HasValue,
+            initialRouteFallbackSelection: initialRouteFallbackSelection);
 
-    private static FileTransferLeg? EnsureInboundTransferLegLocked(InboundTransferContext context, string reason)
+    private static FileTransferLeg? EnsureInboundTransferLegLocked(
+        InboundTransferContext context,
+        string reason,
+        FileTransferInitialTunaReadinessEvidence? initialTunaReadinessEvidence = null)
         => context.CurrentTransferLeg ?? StartInboundTransferLegLocked(
             context,
             context.RouteSelection,
             reason,
             FileTransferLegState.Active,
             canSendData: true,
-            freezeCurrent: false);
+            freezeCurrent: false,
+            initialTunaReadinessEvidence: initialTunaReadinessEvidence);
 
     private static FileTransferCoordinatorState CreateCoordinatorStateLocked(OutboundTransferContext context)
         => new(
@@ -7278,6 +7373,33 @@ public sealed partial class SessionFileTransferService : IDisposable
             "FileTransferService",
             $"event=filetransfer_coordinator_leg_mutation_rejected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; action_kind={FormatProtocolLogValue(actionKind.ToString())}; attempted_action={FormatProtocolLogValue(attemptedAction)}; rejection_reason={FormatProtocolLogValue(decision.MutationRejectedReason ?? "mutation_rejected")}; current_route={FormatProtocolLogValue(decision.State.RouteSelection.TelemetryToken)}; current_protocol_version={decision.State.RouteSelection.ProtocolVersion}; current_live_route_epoch={decision.State.CurrentLiveRouteEpoch?.EpochId ?? 0}; current_runtime_generation={decision.State.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; current_terminal_generation={decision.State.TerminalGeneration}; current_leg_generation={decision.State.CurrentLeg?.Generation ?? 0}; attempted_route={FormatProtocolLogValue(attemptedLeg?.RouteSelection.TelemetryToken ?? "(none)")}; attempted_protocol_version={attemptedLeg?.ProtocolVersion ?? 0}; attempted_live_route_epoch={attemptedLeg?.LiveRouteEpochId ?? 0}; attempted_leg_generation={attemptedLeg?.Generation ?? 0}; attempted_transport_epoch={transportEpoch}; attempted_checkpoint_request_id={FormatProtocolLogValue(checkpointRequestId ?? "(none)")}; reason={FormatProtocolLogValue(reason)}");
 
+    private static void LogInitialTunaRouteSelectionDecision(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        InitialTunaRouteSelectionDecision? decision)
+    {
+        if (decision is not { } initialTuna)
+        {
+            return;
+        }
+
+        var evidence = initialTuna.Evidence;
+        var eventName = initialTuna.Accepted
+            ? "filetransfer_initial_tuna_route_selection_granted"
+            : "filetransfer_initial_tuna_route_selection_denied";
+        var message =
+            $"event={eventName}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; requested_route={FormatProtocolLogValue(FileTransferRouteResolver.Resolve(initialTuna.RequestedRoute).TelemetryToken)}; requested_protocol_version={initialTuna.RequestedProtocolVersion}; requested_transport={FormatProtocolLogValue(FormatFileTransferTransportKind(initialTuna.RequestedTransport))}; selected_route={FormatProtocolLogValue(FileTransferRouteResolver.Resolve(initialTuna.SelectedRoute).TelemetryToken)}; selected_protocol_version={initialTuna.SelectedProtocolVersion}; fallback_applied={(initialTuna.FallbackApplied ? 1 : 0)}; coordinator_reason={FormatProtocolLogValue(initialTuna.Reason)}; evidence_session_id={FormatProtocolLogValue(evidence?.SessionId ?? "(none)")}; evidence_transfer_id={FormatProtocolLogValue(evidence?.TransferId ?? "(none)")}; lease_generation={evidence?.LeaseGeneration ?? 0}; listener_run_id={FormatProtocolLogValue(evidence?.ListenerRunId ?? "(none)")}; lease_current={(evidence?.LeaseCurrent == true ? 1 : 0)}; listener_ready={(evidence?.ListenerReady == true ? 1 : 0)}; offer_generation={evidence?.OfferGeneration ?? 0}; peer_visible_proof={(evidence?.PeerVisibleProof == true ? 1 : 0)}; answer_received={(evidence?.AnswerReceived == true ? 1 : 0)}; answer_ack_received={(evidence?.AnswerAckReceived == true ? 1 : 0)}; tuna_negotiated_observed={(evidence?.TunaNegotiatedObserved == true ? 1 : 0)}";
+        if (initialTuna.Accepted)
+        {
+            LocalOperationalLog.Info("FileTransferService", message);
+        }
+        else
+        {
+            LocalOperationalLog.Warn("FileTransferService", message);
+        }
+    }
+
     private static void RetireRuntimeOwnedWorkersLocked(
         OutboundTransferContext context,
         RuntimeOwnerToken? retiredOwner,
@@ -7370,7 +7492,10 @@ public sealed partial class SessionFileTransferService : IDisposable
         bool canSendData,
         bool freezeCurrent = true,
         long? transportEpochOverride = null,
-        int? bridgeRecoveryGenerationOverride = null)
+        int? bridgeRecoveryGenerationOverride = null,
+        FileTransferInitialTunaReadinessEvidence? initialTunaReadinessEvidence = null,
+        bool allowInitialRouteFallback = false,
+        FileTransferRouteSelection? initialRouteFallbackSelection = null)
     {
         var retiredLeg = context.CurrentTransferLeg;
         var committedChunk = Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, Math.Max(0, context.ChunkCount));
@@ -7384,7 +7509,9 @@ public sealed partial class SessionFileTransferService : IDisposable
                 FileTransferCoordinatorEventKind.StartTransfer,
                 routeSelection,
                 FileTransferTransportHandoffKind.None,
-                FileTransferTransportKind.Unknown,
+                routeSelection.Route == FileTransferRoute.FileTunaV4
+                    ? FileTransferTransportKind.Tuna
+                    : FileTransferTransportKind.Unknown,
                 reason,
                 state,
                 canSendData,
@@ -7392,8 +7519,16 @@ public sealed partial class SessionFileTransferService : IDisposable
                 Math.Max(-1, context.ChunksAcceptedForTransport - 1),
                 transportEpoch,
                 bridgeRecoveryGeneration,
-                FreezeCurrentLeg: freezeCurrent),
+                FreezeCurrentLeg: freezeCurrent,
+                InitialTunaReadinessEvidence: initialTunaReadinessEvidence,
+                AllowInitialRouteFallback: allowInitialRouteFallback,
+                InitialRouteFallbackSelection: initialRouteFallbackSelection),
             CreateCoordinatorStateLocked(context));
+        LogInitialTunaRouteSelectionDecision(
+            FileTransferDirection.Outbound,
+            context.TransferId,
+            context.SessionId,
+            decision.InitialTunaRouteSelectionDecision);
         if (decision.StartedLeg is not { } leg)
         {
             LogFileTransferCoordinatorLegMutationRejected(
@@ -7442,7 +7577,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         bool canSendData,
         bool freezeCurrent = true,
         long? transportEpochOverride = null,
-        int? bridgeRecoveryGenerationOverride = null)
+        int? bridgeRecoveryGenerationOverride = null,
+        FileTransferInitialTunaReadinessEvidence? initialTunaReadinessEvidence = null)
     {
         var retiredLeg = context.CurrentTransferLeg;
         var committedChunk = Math.Clamp(context.NextChunkIndex, 0, Math.Max(0, context.ChunkCount));
@@ -7454,7 +7590,9 @@ public sealed partial class SessionFileTransferService : IDisposable
                 FileTransferCoordinatorEventKind.StartTransfer,
                 routeSelection,
                 FileTransferTransportHandoffKind.None,
-                FileTransferTransportKind.Unknown,
+                routeSelection.Route == FileTransferRoute.FileTunaV4
+                    ? FileTransferTransportKind.Tuna
+                    : FileTransferTransportKind.Unknown,
                 reason,
                 state,
                 canSendData,
@@ -7462,8 +7600,14 @@ public sealed partial class SessionFileTransferService : IDisposable
                 context.PullHighestReceivedChunkIndex,
                 transportEpoch,
                 bridgeRecoveryGeneration,
-                FreezeCurrentLeg: freezeCurrent),
+                FreezeCurrentLeg: freezeCurrent,
+                InitialTunaReadinessEvidence: initialTunaReadinessEvidence),
             CreateCoordinatorStateLocked(context));
+        LogInitialTunaRouteSelectionDecision(
+            FileTransferDirection.Inbound,
+            context.TransferId,
+            context.SessionId,
+            decision.InitialTunaRouteSelectionDecision);
         if (decision.StartedLeg is not { } leg)
         {
             LogFileTransferCoordinatorLegMutationRejected(

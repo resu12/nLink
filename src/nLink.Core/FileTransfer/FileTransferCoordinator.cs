@@ -118,6 +118,17 @@ internal enum RecoveryLivenessLeaseState
     Retired,
 }
 
+internal readonly record struct InitialTunaRouteSelectionDecision(
+    bool Accepted,
+    string Reason,
+    FileTransferRoute RequestedRoute,
+    int RequestedProtocolVersion,
+    FileTransferTransportKind RequestedTransport,
+    FileTransferRoute SelectedRoute,
+    int SelectedProtocolVersion,
+    bool FallbackApplied,
+    FileTransferInitialTunaReadinessEvidence? Evidence);
+
 internal readonly record struct RuntimeUnlockAdmissionDecision(
     RuntimeUnlockAdmissionStatus Status,
     string Reason,
@@ -472,7 +483,10 @@ internal readonly record struct FileTransferCoordinatorEvent(
     string? ControlPlanePurpose = null,
     bool ControlPlanePeerVisible = false,
     bool ControlPlaneAcceptedAny = false,
-    FallbackTailYieldKind FallbackTailYieldKind = FallbackTailYieldKind.Unknown);
+    FallbackTailYieldKind FallbackTailYieldKind = FallbackTailYieldKind.Unknown,
+    FileTransferInitialTunaReadinessEvidence? InitialTunaReadinessEvidence = null,
+    bool AllowInitialRouteFallback = false,
+    FileTransferRouteSelection? InitialRouteFallbackSelection = null);
 
 internal readonly record struct FileTransferCoordinatorActionRequest(
     FileTransferCoordinatorActionKind Kind,
@@ -564,7 +578,8 @@ internal sealed record FileTransferCoordinatorDecision(
     FallbackCheckpointLease? FallbackCheckpointLease = null,
     FallbackControlPlanePressureToken? FallbackControlPlanePressureToken = null,
     FallbackTailYieldDecision? FallbackTailYieldDecision = null,
-    bool ControlPlanePeerVisibleProofAccepted = false);
+    bool ControlPlanePeerVisibleProofAccepted = false,
+    InitialTunaRouteSelectionDecision? InitialTunaRouteSelectionDecision = null);
 
 internal readonly record struct RuntimeOwnerToken(
     string SessionId,
@@ -662,6 +677,8 @@ internal sealed class FileTransferLeg
 
 internal static class FileTransferCoordinator
 {
+    private static readonly TimeSpan InitialTunaReadinessEvidenceMaxAge = TimeSpan.FromSeconds(30);
+
     public static FileTransferCoordinatorDecision Apply(
         FileTransferCoordinatorEvent coordinatorEvent,
         FileTransferCoordinatorState state)
@@ -2744,12 +2761,90 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorState state,
         string reason)
     {
+        var routeSelection = coordinatorEvent.RouteSelection;
+        InitialTunaRouteSelectionDecision? initialTunaDecision = null;
+        if (routeSelection.Route == FileTransferRoute.FileTunaV4)
+        {
+            if (!CanStartInitialFileTunaRoute(
+                    state,
+                    coordinatorEvent,
+                    routeSelection,
+                    out var initialTunaRejectionReason))
+            {
+                if (coordinatorEvent.AllowInitialRouteFallback &&
+                    coordinatorEvent.InitialRouteFallbackSelection is { } fallbackSelection)
+                {
+                    if (!IsValidInitialTunaFallbackSelection(fallbackSelection))
+                    {
+                        var fallbackRejected = new InitialTunaRouteSelectionDecision(
+                            Accepted: false,
+                            Reason: "initial_tuna_fallback_route_invalid",
+                            RequestedRoute: routeSelection.Route,
+                            RequestedProtocolVersion: routeSelection.ProtocolVersion,
+                            RequestedTransport: coordinatorEvent.TargetTransport,
+                            SelectedRoute: state.RouteSelection.Route,
+                            SelectedProtocolVersion: state.RouteSelection.ProtocolVersion,
+                            FallbackApplied: false,
+                            Evidence: coordinatorEvent.InitialTunaReadinessEvidence);
+                        return MutationRejected(
+                            state,
+                            reason,
+                            "initial_tuna_fallback_route_invalid",
+                            initialTunaRouteSelectionDecision: fallbackRejected);
+                    }
+
+                    initialTunaDecision = new InitialTunaRouteSelectionDecision(
+                        Accepted: false,
+                        Reason: initialTunaRejectionReason,
+                        RequestedRoute: routeSelection.Route,
+                        RequestedProtocolVersion: routeSelection.ProtocolVersion,
+                        RequestedTransport: coordinatorEvent.TargetTransport,
+                        SelectedRoute: fallbackSelection.Route,
+                        SelectedProtocolVersion: fallbackSelection.ProtocolVersion,
+                        FallbackApplied: true,
+                        Evidence: coordinatorEvent.InitialTunaReadinessEvidence);
+                    routeSelection = fallbackSelection;
+                }
+                else
+                {
+                    var rejected = new InitialTunaRouteSelectionDecision(
+                        Accepted: false,
+                        Reason: initialTunaRejectionReason,
+                        RequestedRoute: routeSelection.Route,
+                        RequestedProtocolVersion: routeSelection.ProtocolVersion,
+                        RequestedTransport: coordinatorEvent.TargetTransport,
+                        SelectedRoute: state.RouteSelection.Route,
+                        SelectedProtocolVersion: state.RouteSelection.ProtocolVersion,
+                        FallbackApplied: false,
+                        Evidence: coordinatorEvent.InitialTunaReadinessEvidence);
+                    return MutationRejected(
+                        state,
+                        reason,
+                        initialTunaRejectionReason,
+                        initialTunaRouteSelectionDecision: rejected);
+                }
+            }
+            else
+            {
+                initialTunaDecision = new InitialTunaRouteSelectionDecision(
+                    Accepted: true,
+                    Reason: "accepted",
+                    RequestedRoute: routeSelection.Route,
+                    RequestedProtocolVersion: routeSelection.ProtocolVersion,
+                    RequestedTransport: coordinatorEvent.TargetTransport,
+                    SelectedRoute: routeSelection.Route,
+                    SelectedProtocolVersion: routeSelection.ProtocolVersion,
+                    FallbackApplied: false,
+                    Evidence: coordinatorEvent.InitialTunaReadinessEvidence);
+            }
+        }
+
         var frozenLeg = coordinatorEvent.FreezeCurrentLeg
             ? FreezeLeg(state.CurrentLeg, DateTimeOffset.UtcNow)
             : null;
         var legHistory = state.LegHistory.ToList();
         var leg = StartLeg(new FileTransferLegStartRequest(
-            coordinatorEvent.RouteSelection,
+            routeSelection,
             state.LastTransferLegGeneration,
             state.CurrentLiveRouteEpoch?.EpochId ?? 0,
             coordinatorEvent.TransportEpochId,
@@ -2763,7 +2858,7 @@ internal static class FileTransferCoordinator
         var runtimeGeneration = Math.Max(1, state.LastRuntimeOwnerGeneration + 1);
         var nextState = state with
         {
-            RouteSelection = coordinatorEvent.RouteSelection,
+            RouteSelection = routeSelection,
             CurrentLeg = leg,
             LastTransferLegGeneration = leg.Generation,
             LastRuntimeOwnerGeneration = runtimeGeneration,
@@ -2777,13 +2872,89 @@ internal static class FileTransferCoordinator
         {
             CurrentRuntimeOwner = IssueRuntimeOwnerToken(
                 nextState,
-                coordinatorEvent.RouteSelection,
+                routeSelection,
                 nextState.CurrentLiveRouteEpoch?.EpochId ?? 0,
                 runtimeGeneration,
                 nextState.TerminalGeneration,
                 reason),
         };
-        return Decision(nextState, reason, startedLeg: leg, frozenLeg: frozenLeg);
+        return Decision(
+            nextState,
+            reason,
+            startedLeg: leg,
+            frozenLeg: frozenLeg,
+            initialTunaRouteSelectionDecision: initialTunaDecision);
+    }
+
+    private static bool IsValidInitialTunaFallbackSelection(FileTransferRouteSelection routeSelection)
+        => routeSelection.Route == FileTransferRoute.RegularNknV4Fast &&
+           routeSelection.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4;
+
+    private static bool CanStartInitialFileTunaRoute(
+        FileTransferCoordinatorState state,
+        FileTransferCoordinatorEvent coordinatorEvent,
+        FileTransferRouteSelection routeSelection,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (routeSelection.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+            coordinatorEvent.TargetTransport != FileTransferTransportKind.Tuna)
+        {
+            rejectionReason = "initial_tuna_target_invalid";
+            return false;
+        }
+
+        if (coordinatorEvent.InitialTunaReadinessEvidence is not { } evidence)
+        {
+            rejectionReason = "initial_tuna_readiness_missing";
+            return false;
+        }
+
+        if (!string.Equals(evidence.SessionId, state.SessionId, StringComparison.Ordinal))
+        {
+            rejectionReason = "initial_tuna_session_mismatch";
+            return false;
+        }
+
+        if (!string.Equals(evidence.TransferId, state.TransferId, StringComparison.Ordinal))
+        {
+            rejectionReason = "initial_tuna_transfer_mismatch";
+            return false;
+        }
+
+        if (evidence.Direction != state.Direction)
+        {
+            rejectionReason = "initial_tuna_direction_mismatch";
+            return false;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        if (evidence.CapturedUtc == default ||
+            evidence.CapturedUtc > now ||
+            now - evidence.CapturedUtc > InitialTunaReadinessEvidenceMaxAge)
+        {
+            rejectionReason = "initial_tuna_evidence_not_current";
+            return false;
+        }
+
+        if (evidence.LeaseGeneration <= 0 ||
+            string.IsNullOrWhiteSpace(evidence.ListenerRunId) ||
+            !evidence.LeaseCurrent ||
+            !evidence.ListenerReady)
+        {
+            rejectionReason = "initial_tuna_listener_or_lease_not_ready";
+            return false;
+        }
+
+        if (evidence.OfferGeneration <= 0 ||
+            !evidence.PeerVisibleProof ||
+            !evidence.AnswerReceived)
+        {
+            rejectionReason = "initial_tuna_peer_visible_answer_missing";
+            return false;
+        }
+
+        return true;
     }
 
     private static FileTransferCoordinatorDecision TransitionToRoute(
@@ -3416,11 +3587,13 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorState state,
         string reason,
         string rejectionReason,
-        bool terminalMutationRejected = false)
+        bool terminalMutationRejected = false,
+        InitialTunaRouteSelectionDecision? initialTunaRouteSelectionDecision = null)
         => Decision(state, reason) with
         {
             TerminalMutationRejected = terminalMutationRejected,
             MutationRejectedReason = rejectionReason,
+            InitialTunaRouteSelectionDecision = initialTunaRouteSelectionDecision,
         };
 
     private static FileTransferCoordinatorDecision Decision(
@@ -3436,7 +3609,8 @@ internal static class FileTransferCoordinator
         FallbackCheckpointLease? fallbackCheckpointLease = null,
         FallbackControlPlanePressureToken? fallbackControlPlanePressureToken = null,
         FallbackTailYieldDecision? fallbackTailYieldDecision = null,
-        bool controlPlanePeerVisibleProofAccepted = false)
+        bool controlPlanePeerVisibleProofAccepted = false,
+        InitialTunaRouteSelectionDecision? initialTunaRouteSelectionDecision = null)
         => new(
             state,
             RouteChanged: false,
@@ -3454,7 +3628,8 @@ internal static class FileTransferCoordinator
             FallbackCheckpointLease: fallbackCheckpointLease,
             FallbackControlPlanePressureToken: fallbackControlPlanePressureToken,
             FallbackTailYieldDecision: fallbackTailYieldDecision,
-            ControlPlanePeerVisibleProofAccepted: controlPlanePeerVisibleProofAccepted);
+            ControlPlanePeerVisibleProofAccepted: controlPlanePeerVisibleProofAccepted,
+            InitialTunaRouteSelectionDecision: initialTunaRouteSelectionDecision);
 
     private static FileTransferCoordinatorActionDecision ActionDecision(
         FileTransferCoordinatorState state,

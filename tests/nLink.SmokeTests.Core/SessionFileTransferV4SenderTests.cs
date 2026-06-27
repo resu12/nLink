@@ -8424,6 +8424,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         using var senderTransport = new PeerVisibleControlPlaneLoopbackTransport("session_file_tuna_v4_live_switch_off_replay");
         using var receiverTransport = new PeerVisibleControlPlaneLoopbackTransport("session_file_tuna_v4_live_switch_off_replay");
         ConfigureFileTunaV4RouteForTest(senderTransport, receiverTransport);
+        SeedInitialFileTunaReadinessForTest(senderTransport, receiverTransport, transferId);
         senderTransport.OutboundDataFrameDeliveryOverrideAsync = (_, frame, _) =>
         {
             if (frame is FileTransferChunkBatchFrameV4 { StartChunkIndex: 0 } &&
@@ -8828,6 +8829,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         using var senderTransport = new LoopbackFileTransferTransport("session_file_tuna_v4_live_switch_off_reenable");
         using var receiverTransport = new LoopbackFileTransferTransport("session_file_tuna_v4_live_switch_off_reenable");
         ConfigureFileTunaV4RouteForTest(senderTransport, receiverTransport);
+        SeedInitialFileTunaReadinessForTest(senderTransport, receiverTransport, transferId);
         senderTransport.OutboundDataFrameDeliveryOverrideAsync = async (_, frame, ct) =>
         {
             if (frame.TransferId == transferId &&
@@ -8951,6 +8953,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Contains("event=filetransfer_live_route_epoch_terminal; direction=inbound", log, StringComparison.Ordinal);
 
         const string activeTunaNextTransferId = "transfer_file_tuna_v4_after_live_reenable_active";
+        SeedInitialFileTunaReadinessForTest(senderTransport, receiverTransport, activeTunaNextTransferId);
         await RunCompletedLoopbackTransferAsync(
             sender,
             receiver,
@@ -8986,6 +8989,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         using var senderTransport = new LoopbackFileTransferTransport("session_file_tuna_v4_live_cycle_off_on_off");
         using var receiverTransport = new LoopbackFileTransferTransport("session_file_tuna_v4_live_cycle_off_on_off");
         ConfigureFileTunaV4RouteForTest(senderTransport, receiverTransport);
+        SeedInitialFileTunaReadinessForTest(senderTransport, receiverTransport, transferId);
         senderTransport.OutboundDataFrameDeliveryOverrideAsync = async (_, frame, ct) =>
         {
             if (frame.TransferId == transferId &&
@@ -15175,6 +15179,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             using var senderTransport = new LoopbackFileTransferTransport(sessionId);
             using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
             ConfigureFileTunaV4RouteForTest(senderTransport, receiverTransport);
+            SeedInitialFileTunaReadinessForTest(senderTransport, receiverTransport, transferId);
             senderTransport.AllowUnavailableV4FallbackRecoveryFramesForTests = true;
             receiverTransport.AllowUnavailableV4FallbackRecoveryFramesForTests = true;
             senderTransport.OutboundDataFrameDeliveryOverrideAsync = async (_, frame, ct) =>
@@ -16705,6 +16710,15 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     {
         senderTransport.IsFileTunaActiveForRouteSelection = true;
         receiverTransport.IsFileTunaActiveForRouteSelection = true;
+    }
+
+    private static void SeedInitialFileTunaReadinessForTest(
+        LoopbackFileTransferTransport senderTransport,
+        LoopbackFileTransferTransport receiverTransport,
+        string transferId)
+    {
+        senderTransport.SeedInitialTunaReadinessEvidenceForTests(transferId, FileTransferDirection.Outbound);
+        receiverTransport.SeedInitialTunaReadinessEvidenceForTests(transferId, FileTransferDirection.Inbound);
     }
 
     private static void ConfigurePostTunaFallbackV6RouteForTest(

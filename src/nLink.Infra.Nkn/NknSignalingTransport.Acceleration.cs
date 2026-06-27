@@ -4348,6 +4348,61 @@ public sealed partial class NknSignalingTransport
         }
     }
 
+    bool IFileTransferInitialTunaReadinessProvider.TryGetInitialTunaReadinessEvidence(
+        string sessionId,
+        string transferId,
+        FileTransferDirection direction,
+        out FileTransferInitialTunaReadinessEvidence? evidence)
+    {
+        evidence = null;
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? string.Empty : sessionId.Trim();
+        var normalizedTransferId = string.IsNullOrWhiteSpace(transferId) ? string.Empty : transferId.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedSessionId) ||
+            string.IsNullOrWhiteSpace(normalizedTransferId))
+        {
+            return false;
+        }
+
+        lock (accelerationGate)
+        {
+            var state = runtimeUnlockTransactionState;
+            if (state.IsTerminal ||
+                !string.Equals(state.SessionId, normalizedSessionId, StringComparison.Ordinal) ||
+                (!string.IsNullOrWhiteSpace(state.TransferId) &&
+                 !string.Equals(state.TransferId, normalizedTransferId, StringComparison.Ordinal)))
+            {
+                return false;
+            }
+
+            var lease = runtimeUnlockTunaPathLeaseState;
+            var leaseMatches = RuntimeUnlockTunaPathLease.IsApplicableToOffer(
+                lease,
+                state.SessionId,
+                state.TransactionGeneration,
+                state.OfferGeneration);
+            var answerAckReceived =
+                !string.IsNullOrWhiteSpace(pendingAccelerationAnswerAckNonce) &&
+                IsRuntimeUnlockActivationReason(pendingAccelerationAnswerAckTrigger) &&
+                string.Equals(pendingAccelerationAnswerAckSessionId, normalizedSessionId, StringComparison.Ordinal);
+            evidence = new FileTransferInitialTunaReadinessEvidence(
+                normalizedSessionId,
+                normalizedTransferId,
+                direction,
+                DateTimeOffset.UtcNow,
+                leaseMatches ? lease.LeaseGeneration : state.TunaPathLeaseGeneration,
+                leaseMatches ? lease.ListenerRunId : state.TunaPathLeaseListenerRunId,
+                leaseMatches ? lease.IsCurrent : state.TunaPathLeaseCurrent,
+                (leaseMatches ? lease.State : state.TunaPathLeaseState) == RuntimeUnlockTunaPathLeaseState.ListenerReady,
+                state.OfferGeneration,
+                state.HasPeerVisibleProof,
+                state.AnswerReceived,
+                answerAckReceived,
+                !string.IsNullOrWhiteSpace(accelerationSessionId) &&
+                string.Equals(accelerationSessionId, normalizedSessionId, StringComparison.Ordinal));
+            return true;
+        }
+    }
+
     void IRuntimeUnlockRouteCommitProofProvider.NotifyRuntimeUnlockRouteCommitResult(
         string sessionId,
         string transferId,

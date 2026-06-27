@@ -353,6 +353,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
 
         var senderSession = await StartManualInboundFileTunaV4ReceiverAsync(
             senderTransport,
+            receiverTransport,
             receiver,
             transferId,
             sessionId,
@@ -464,6 +465,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
 
         var senderSession = await StartManualInboundFileTunaV4ReceiverAsync(
             senderTransport,
+            receiverTransport,
             receiver,
             transferId,
             sessionId,
@@ -551,6 +553,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
 
         var senderSession = await StartManualInboundFileTunaV4ReceiverAsync(
             senderTransport,
+            receiverTransport,
             receiver,
             transferId,
             sessionId,
@@ -1175,7 +1178,13 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                     TransportEpoch = probeFrame.TransportEpoch,
                 },
                 CancellationToken.None);
-            await Task.Delay(250);
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart)
+                    .Split(Environment.NewLine)
+                    .Count(line =>
+                        line.Contains("event=filetransfer_v6_regular_nkn_redundant_data_enabled", StringComparison.Ordinal) &&
+                        line.Contains($"transfer_id={transferId}", StringComparison.Ordinal)) == 1,
+                timeoutMs: 5000);
 
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Equal(
@@ -2395,6 +2404,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                     false,
                     null,
                     null,
+                    null,
                 ])!;
         var legTransportEpochProperty = leg.GetType()
             .GetProperty("TransportEpochId", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)!;
@@ -3298,6 +3308,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
 
     private static async Task<IFileTransferDataSession> StartManualInboundFileTunaV4ReceiverAsync(
         LoopbackFileTransferTransport senderTransport,
+        LoopbackFileTransferTransport receiverTransport,
         SessionFileTransferService receiver,
         string transferId,
         string sessionId,
@@ -3307,6 +3318,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         FileTransferWriteStreamFactory openWriteStreamAsync)
     {
         const string routeToken = FileTransferRouteResolver.FileTunaV4Token;
+        receiverTransport.SeedInitialTunaReadinessEvidenceForTests(transferId, FileTransferDirection.Inbound);
         await senderTransport.SendFileTransferOfferAsync(
             new FileTransferOfferV2
             {

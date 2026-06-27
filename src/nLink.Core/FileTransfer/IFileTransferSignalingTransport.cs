@@ -174,6 +174,30 @@ public interface IFileTransferRouteCompletionObserver
     void ObserveFileTransferRouteCompleted(FileTransferRouteCompletedNotification notification);
 }
 
+public sealed record FileTransferInitialTunaReadinessEvidence(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    DateTimeOffset CapturedUtc,
+    long LeaseGeneration,
+    string? ListenerRunId,
+    bool LeaseCurrent,
+    bool ListenerReady,
+    long OfferGeneration,
+    bool PeerVisibleProof,
+    bool AnswerReceived,
+    bool AnswerAckReceived,
+    bool TunaNegotiatedObserved);
+
+public interface IFileTransferInitialTunaReadinessProvider
+{
+    bool TryGetInitialTunaReadinessEvidence(
+        string sessionId,
+        string transferId,
+        FileTransferDirection direction,
+        out FileTransferInitialTunaReadinessEvidence? evidence);
+}
+
 public sealed record FileTransferRoutePublicationAuthority(
     string SessionId,
     string TransferId,

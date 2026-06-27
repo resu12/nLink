@@ -36,6 +36,120 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void StartTransfer_ValidInitialTunaEvidenceStartsFileTunaV4()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var state = EmptyState(regular);
+
+        var decision = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.StartTransfer,
+                tuna,
+                targetTransport: FileTransferTransportKind.Tuna,
+                initialTunaReadinessEvidence: InitialTunaEvidence(state)),
+            state);
+
+        Assert.NotNull(decision.StartedLeg);
+        Assert.Equal(FileTransferRoute.FileTunaV4, decision.State.RouteSelection.Route);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV4, decision.State.RouteSelection.ProtocolVersion);
+        Assert.True(decision.InitialTunaRouteSelectionDecision?.Accepted);
+        Assert.False(decision.InitialTunaRouteSelectionDecision?.FallbackApplied);
+        Assert.Equal("accepted", decision.InitialTunaRouteSelectionDecision?.Reason);
+    }
+
+    [Fact]
+    public void StartTransfer_InitialTunaActiveOnlyEvidenceFallsBackToRegularWhenAllowed()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var state = EmptyState(regular);
+
+        var decision = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.StartTransfer,
+                tuna,
+                targetTransport: FileTransferTransportKind.Tuna,
+                initialTunaReadinessEvidence: InitialTunaEvidence(
+                    state,
+                    leaseCurrent: false,
+                    listenerReady: false,
+                    peerVisibleProof: false,
+                    answerReceived: false,
+                    tunaNegotiatedObserved: true),
+                allowInitialRouteFallback: true,
+                initialRouteFallbackSelection: regular),
+            state);
+
+        Assert.NotNull(decision.StartedLeg);
+        Assert.Equal(FileTransferRoute.RegularNknV4Fast, decision.State.RouteSelection.Route);
+        Assert.False(decision.InitialTunaRouteSelectionDecision?.Accepted);
+        Assert.True(decision.InitialTunaRouteSelectionDecision?.FallbackApplied);
+        Assert.Equal("initial_tuna_listener_or_lease_not_ready", decision.InitialTunaRouteSelectionDecision?.Reason);
+    }
+
+    [Fact]
+    public void StartTransfer_InitialTunaStrictRejectsWhenEvidenceMissing()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var state = EmptyState(regular);
+
+        var decision = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.StartTransfer,
+                tuna,
+                targetTransport: FileTransferTransportKind.Tuna),
+            state);
+
+        Assert.Null(decision.StartedLeg);
+        Assert.Equal("initial_tuna_readiness_missing", decision.MutationRejectedReason);
+        Assert.False(decision.InitialTunaRouteSelectionDecision?.Accepted);
+        Assert.False(decision.InitialTunaRouteSelectionDecision?.FallbackApplied);
+    }
+
+    [Fact]
+    public void StartTransfer_InitialTunaRejectsWrongTransferEvidence()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var state = EmptyState(regular);
+
+        var decision = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.StartTransfer,
+                tuna,
+                targetTransport: FileTransferTransportKind.Tuna,
+                initialTunaReadinessEvidence: InitialTunaEvidence(state, transferId: "other_transfer")),
+            state);
+
+        Assert.Null(decision.StartedLeg);
+        Assert.Equal("initial_tuna_transfer_mismatch", decision.MutationRejectedReason);
+    }
+
+    [Fact]
+    public void StartTransfer_InitialTunaRejectsStaleReadinessEvidence()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var state = EmptyState(regular);
+
+        var decision = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.StartTransfer,
+                tuna,
+                targetTransport: FileTransferTransportKind.Tuna,
+                initialTunaReadinessEvidence: InitialTunaEvidence(
+                    state,
+                    capturedUtc: DateTimeOffset.UtcNow - TimeSpan.FromMinutes(2))),
+            state);
+
+        Assert.Null(decision.StartedLeg);
+        Assert.Equal("initial_tuna_evidence_not_current", decision.MutationRejectedReason);
+        Assert.False(decision.InitialTunaRouteSelectionDecision?.Accepted);
+    }
+
+    [Fact]
     public void RegularV4ToTunaV4_CreatesRecoveredLiveEpochAndActiveTunaLeg()
     {
         var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
@@ -1531,7 +1645,7 @@ public sealed class FileTransferCoordinatorTests
         var nextStart = FileTransferCoordinator.Apply(
             CoordinatorEvent(
                 FileTransferCoordinatorEventKind.StartTransfer,
-                tuna,
+                regular,
                 reason: "new_owner",
                 state: FileTransferLegState.Active,
                 canSendData: true),
@@ -3175,6 +3289,33 @@ public sealed class FileTransferCoordinatorTests
             CurrentRuntimeOwner: null,
             LegHistory: []);
 
+    private static FileTransferInitialTunaReadinessEvidence InitialTunaEvidence(
+        FileTransferCoordinatorState state,
+        string? sessionId = null,
+        string? transferId = null,
+        FileTransferDirection? direction = null,
+        bool leaseCurrent = true,
+        bool listenerReady = true,
+        bool peerVisibleProof = true,
+        bool answerReceived = true,
+        bool answerAckReceived = true,
+        bool tunaNegotiatedObserved = true,
+        DateTimeOffset? capturedUtc = null)
+        => new(
+            sessionId ?? state.SessionId,
+            transferId ?? state.TransferId,
+            direction ?? state.Direction,
+            capturedUtc ?? DateTimeOffset.UtcNow,
+            LeaseGeneration: 1,
+            ListenerRunId: "listener-test-1",
+            LeaseCurrent: leaseCurrent,
+            ListenerReady: listenerReady,
+            OfferGeneration: 1,
+            PeerVisibleProof: peerVisibleProof,
+            AnswerReceived: answerReceived,
+            AnswerAckReceived: answerAckReceived,
+            TunaNegotiatedObserved: tunaNegotiatedObserved);
+
     private static FileTransferCoordinatorActionRequest ActionRequest(
         FileTransferCoordinatorActionKind kind,
         RuntimeOwnerToken owner,
@@ -3343,7 +3484,10 @@ public sealed class FileTransferCoordinatorTests
         string? controlPlanePurpose = null,
         bool controlPlanePeerVisible = false,
         bool controlPlaneAcceptedAny = false,
-        FallbackTailYieldKind fallbackTailYieldKind = FallbackTailYieldKind.Unknown)
+        FallbackTailYieldKind fallbackTailYieldKind = FallbackTailYieldKind.Unknown,
+        FileTransferInitialTunaReadinessEvidence? initialTunaReadinessEvidence = null,
+        bool allowInitialRouteFallback = false,
+        FileTransferRouteSelection? initialRouteFallbackSelection = null)
         => new(
             kind,
             routeSelection,
@@ -3368,5 +3512,8 @@ public sealed class FileTransferCoordinatorTests
             ControlPlanePurpose: controlPlanePurpose,
             ControlPlanePeerVisible: controlPlanePeerVisible,
             ControlPlaneAcceptedAny: controlPlaneAcceptedAny,
-            FallbackTailYieldKind: fallbackTailYieldKind);
+            FallbackTailYieldKind: fallbackTailYieldKind,
+            InitialTunaReadinessEvidence: initialTunaReadinessEvidence,
+            AllowInitialRouteFallback: allowInitialRouteFallback,
+            InitialRouteFallbackSelection: initialRouteFallbackSelection);
 }

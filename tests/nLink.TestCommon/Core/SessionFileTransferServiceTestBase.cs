@@ -166,7 +166,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         return builder.ToString();
     }
 
-    protected class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRouteCompletionObserver, ITransportAccelerationStatus, IFileTransferSessionContextProvider, IRuntimeUnlockRouteCommitProofProvider
+    protected class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRouteCompletionObserver, ITransportAccelerationStatus, IFileTransferSessionContextProvider, IFileTransferInitialTunaReadinessProvider, IRuntimeUnlockRouteCommitProofProvider
     {
         private readonly string sessionId;
         private readonly ConcurrentDictionary<string, LoopbackDataSession> dataSessions = new(StringComparer.Ordinal);
@@ -241,6 +241,36 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         public ConcurrentQueue<string> RuntimeUnlockProbeEvents { get; } = [];
         public ConcurrentQueue<string> RuntimeUnlockRouteCommitResults { get; } = [];
         internal RuntimeUnlockRouteCommitSnapshot? RuntimeUnlockRouteCommitSnapshot { get; set; }
+        internal FileTransferInitialTunaReadinessEvidence? InitialTunaReadinessEvidence { get; set; }
+
+        internal void SeedInitialTunaReadinessEvidenceForTests(
+            string transferId,
+            FileTransferDirection direction,
+            long leaseGeneration = 1,
+            long offerGeneration = 1,
+            bool leaseCurrent = true,
+            bool listenerReady = true,
+            bool peerVisibleProof = true,
+            bool answerReceived = true,
+            bool answerAckReceived = true,
+            bool tunaNegotiatedObserved = true)
+        {
+            var normalizedTransferId = string.IsNullOrWhiteSpace(transferId) ? "loopback-transfer" : transferId.Trim();
+            InitialTunaReadinessEvidence = new FileTransferInitialTunaReadinessEvidence(
+                sessionId,
+                normalizedTransferId,
+                direction,
+                DateTimeOffset.UtcNow,
+                leaseGeneration,
+                $"loopback-listener-{leaseGeneration}",
+                leaseCurrent,
+                listenerReady,
+                offerGeneration,
+                peerVisibleProof,
+                answerReceived,
+                answerAckReceived,
+                tunaNegotiatedObserved);
+        }
 
         internal void SeedRuntimeUnlockRouteCommitProofForTests(
             string transferId,
@@ -384,6 +414,16 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         {
             snapshot = RuntimeUnlockRouteCommitSnapshot!;
             return RuntimeUnlockRouteCommitSnapshot is not null;
+        }
+
+        bool IFileTransferInitialTunaReadinessProvider.TryGetInitialTunaReadinessEvidence(
+            string sessionId,
+            string transferId,
+            FileTransferDirection direction,
+            out FileTransferInitialTunaReadinessEvidence? evidence)
+        {
+            evidence = InitialTunaReadinessEvidence;
+            return evidence is not null;
         }
 
         void IRuntimeUnlockRouteCommitProofProvider.NotifyRuntimeUnlockRouteCommitResult(
