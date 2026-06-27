@@ -5159,6 +5159,315 @@ public sealed partial class SessionFileTransferService : IDisposable
         return false;
     }
 
+    private bool TryAuthorizeRuntimeUnlockCallbackActionForDirectionLocked(
+        FileTransferDirection direction,
+        string sessionId,
+        string transferId,
+        RuntimeOwnerToken? runtimeOwner,
+        FileTransferCoordinatorActionKind actionKind,
+        string source,
+        string attemptedAction,
+        RuntimeUnlockAdmissionToken? admissionToken,
+        RouteCommitToken? routeCommitToken,
+        long? transactionGeneration,
+        long? offerGeneration,
+        long? tunaPathLeaseGeneration,
+        string? tunaPathLeaseListenerRunId,
+        string? probeId,
+        bool? probeAcked,
+        string? samePathTunaProbeAckId,
+        int? routeCommitGeneration,
+        FileTransferRoute? targetRoute,
+        int? targetProtocolVersion,
+        FileTransferTransportKind? targetTransport,
+        out string rejectionReason)
+    {
+        rejectionReason = "transfer_not_current";
+        if (direction == FileTransferDirection.Outbound &&
+            IsOutboundLifecycleMessageMatchLocked(sessionId, transferId) &&
+            outboundTransfer is { } outbound)
+        {
+            return TryAuthorizeRuntimeUnlockCallbackActionLocked(
+                outbound,
+                runtimeOwner,
+                actionKind,
+                source,
+                attemptedAction,
+                admissionToken,
+                routeCommitToken,
+                transactionGeneration,
+                offerGeneration,
+                tunaPathLeaseGeneration,
+                tunaPathLeaseListenerRunId,
+                probeId,
+                probeAcked,
+                samePathTunaProbeAckId,
+                routeCommitGeneration,
+                targetRoute,
+                targetProtocolVersion,
+                targetTransport,
+                out rejectionReason);
+        }
+
+        if (direction == FileTransferDirection.Inbound &&
+            IsInboundLifecycleMessageMatchLocked(sessionId, transferId) &&
+            inboundTransfer is { } inbound)
+        {
+            return TryAuthorizeRuntimeUnlockCallbackActionLocked(
+                inbound,
+                runtimeOwner,
+                actionKind,
+                source,
+                attemptedAction,
+                admissionToken,
+                routeCommitToken,
+                transactionGeneration,
+                offerGeneration,
+                tunaPathLeaseGeneration,
+                tunaPathLeaseListenerRunId,
+                probeId,
+                probeAcked,
+                samePathTunaProbeAckId,
+                routeCommitGeneration,
+                targetRoute,
+                targetProtocolVersion,
+                targetTransport,
+                out rejectionReason);
+        }
+
+        LogRuntimeUnlockCallbackRejected(
+            direction,
+            transferId,
+            sessionId,
+            actionKind,
+            source,
+            attemptedAction,
+            rejectionReason,
+            currentOwner: null,
+            attemptedOwner: runtimeOwner ?? admissionToken?.RuntimeOwner ?? routeCommitToken?.RuntimeOwner,
+            admissionToken,
+            routeCommitToken,
+            transactionGeneration,
+            offerGeneration,
+            tunaPathLeaseGeneration,
+            tunaPathLeaseListenerRunId,
+            probeId,
+            probeAcked,
+            samePathTunaProbeAckId,
+            routeCommitGeneration,
+            targetRoute,
+            targetProtocolVersion,
+            targetTransport,
+            currentRoute: null,
+            currentProtocolVersion: 0,
+            currentLiveRouteEpoch: 0,
+            currentRuntimeGeneration: 0,
+            currentTerminalGeneration: 0,
+            currentLegGeneration: 0);
+        return false;
+    }
+
+    private static bool TryAuthorizeRuntimeUnlockCallbackActionLocked(
+        OutboundTransferContext context,
+        RuntimeOwnerToken? runtimeOwner,
+        FileTransferCoordinatorActionKind actionKind,
+        string source,
+        string attemptedAction,
+        RuntimeUnlockAdmissionToken? admissionToken,
+        RouteCommitToken? routeCommitToken,
+        long? transactionGeneration,
+        long? offerGeneration,
+        long? tunaPathLeaseGeneration,
+        string? tunaPathLeaseListenerRunId,
+        string? probeId,
+        bool? probeAcked,
+        string? samePathTunaProbeAckId,
+        int? routeCommitGeneration,
+        FileTransferRoute? targetRoute,
+        int? targetProtocolVersion,
+        FileTransferTransportKind? targetTransport,
+        out string rejectionReason)
+        => TryAuthorizeRuntimeUnlockCallbackActionLocked(
+            FileTransferDirection.Outbound,
+            context.TransferId,
+            context.SessionId,
+            CreateCoordinatorStateLocked(context),
+            context.CurrentRuntimeOwner,
+            runtimeOwner,
+            actionKind,
+            source,
+            attemptedAction,
+            admissionToken ?? context.RuntimeUnlockAdmissionToken,
+            routeCommitToken ?? context.RuntimeUnlockRouteCommitToken,
+            transactionGeneration,
+            offerGeneration,
+            tunaPathLeaseGeneration,
+            tunaPathLeaseListenerRunId,
+            probeId,
+            probeAcked,
+            samePathTunaProbeAckId,
+            routeCommitGeneration,
+            targetRoute,
+            targetProtocolVersion,
+            targetTransport,
+            out rejectionReason);
+
+    private static bool TryAuthorizeRuntimeUnlockCallbackActionLocked(
+        InboundTransferContext context,
+        RuntimeOwnerToken? runtimeOwner,
+        FileTransferCoordinatorActionKind actionKind,
+        string source,
+        string attemptedAction,
+        RuntimeUnlockAdmissionToken? admissionToken,
+        RouteCommitToken? routeCommitToken,
+        long? transactionGeneration,
+        long? offerGeneration,
+        long? tunaPathLeaseGeneration,
+        string? tunaPathLeaseListenerRunId,
+        string? probeId,
+        bool? probeAcked,
+        string? samePathTunaProbeAckId,
+        int? routeCommitGeneration,
+        FileTransferRoute? targetRoute,
+        int? targetProtocolVersion,
+        FileTransferTransportKind? targetTransport,
+        out string rejectionReason)
+        => TryAuthorizeRuntimeUnlockCallbackActionLocked(
+            FileTransferDirection.Inbound,
+            context.TransferId,
+            context.SessionId,
+            CreateCoordinatorStateLocked(context),
+            context.CurrentRuntimeOwner,
+            runtimeOwner,
+            actionKind,
+            source,
+            attemptedAction,
+            admissionToken ?? context.RuntimeUnlockAdmissionToken,
+            routeCommitToken ?? context.RuntimeUnlockRouteCommitToken,
+            transactionGeneration,
+            offerGeneration,
+            tunaPathLeaseGeneration,
+            tunaPathLeaseListenerRunId,
+            probeId,
+            probeAcked,
+            samePathTunaProbeAckId,
+            routeCommitGeneration,
+            targetRoute,
+            targetProtocolVersion,
+            targetTransport,
+            out rejectionReason);
+
+    private static bool TryAuthorizeRuntimeUnlockCallbackActionLocked(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        FileTransferCoordinatorState coordinatorState,
+        RuntimeOwnerToken? currentOwner,
+        RuntimeOwnerToken? runtimeOwner,
+        FileTransferCoordinatorActionKind actionKind,
+        string source,
+        string attemptedAction,
+        RuntimeUnlockAdmissionToken? admissionToken,
+        RouteCommitToken? routeCommitToken,
+        long? transactionGeneration,
+        long? offerGeneration,
+        long? tunaPathLeaseGeneration,
+        string? tunaPathLeaseListenerRunId,
+        string? probeId,
+        bool? probeAcked,
+        string? samePathTunaProbeAckId,
+        int? routeCommitGeneration,
+        FileTransferRoute? targetRoute,
+        int? targetProtocolVersion,
+        FileTransferTransportKind? targetTransport,
+        out string rejectionReason)
+    {
+        var attemptedOwner = runtimeOwner ??
+            admissionToken?.RuntimeOwner ??
+            routeCommitToken?.RuntimeOwner ??
+            currentOwner;
+        var decision = FileTransferCoordinator.AuthorizeAction(
+            coordinatorState,
+            new FileTransferCoordinatorActionRequest(
+                actionKind,
+                source,
+                attemptedAction,
+                RuntimeOwner: attemptedOwner,
+                RuntimeUnlockAdmissionToken: admissionToken,
+                RouteCommitToken: routeCommitToken,
+                RuntimeUnlockTransactionGeneration: transactionGeneration,
+                RuntimeUnlockOfferGeneration: offerGeneration,
+                RuntimeUnlockTunaPathLeaseGeneration: tunaPathLeaseGeneration,
+                RuntimeUnlockTunaPathLeaseListenerRunId: tunaPathLeaseListenerRunId,
+                RuntimeUnlockProbeId: probeId,
+                RuntimeUnlockProbeAcked: probeAcked,
+                RuntimeUnlockSamePathTunaProbeAckId: samePathTunaProbeAckId,
+                RouteCommitGeneration: routeCommitGeneration,
+                TargetRoute: targetRoute,
+                TargetProtocolVersion: targetProtocolVersion,
+                TargetTransport: targetTransport));
+        rejectionReason = decision.Accepted ? "current" : decision.RejectionReason;
+        if (!decision.Accepted)
+        {
+            if (IsRuntimeUnlockCallbackStaleOwnerOrTokenRejection(decision.RejectionReason))
+            {
+                RejectStaleRuntimeOwnerUpdateLocked(
+                    direction,
+                    transferId,
+                    sessionId,
+                    currentOwner,
+                    attemptedOwner,
+                    source,
+                    attemptedAction,
+                    decision.RejectionReason);
+            }
+
+            LogRuntimeUnlockCallbackRejected(
+                direction,
+                transferId,
+                sessionId,
+                actionKind,
+                source,
+                attemptedAction,
+                decision.RejectionReason,
+                currentOwner,
+                attemptedOwner,
+                admissionToken,
+                routeCommitToken,
+                transactionGeneration,
+                offerGeneration,
+                tunaPathLeaseGeneration,
+                tunaPathLeaseListenerRunId,
+                probeId,
+                probeAcked,
+                samePathTunaProbeAckId,
+                routeCommitGeneration,
+                targetRoute,
+                targetProtocolVersion,
+                targetTransport,
+                decision.CurrentRoute,
+                decision.CurrentProtocolVersion,
+                decision.CurrentLiveRouteEpoch,
+                decision.CurrentRuntimeGeneration,
+                decision.CurrentTerminalGeneration,
+                decision.CurrentLegGeneration);
+        }
+
+        return decision.Accepted;
+    }
+
+    private static bool IsRuntimeUnlockCallbackStaleOwnerOrTokenRejection(string reason)
+        => reason is "runtime_owner_missing" or
+                     "runtime_generation_mismatch" or
+                     "terminal_generation_mismatch" or
+                     "route_or_protocol_mismatch" or
+                     "live_route_epoch_mismatch" or
+                     "session_transfer_or_direction_mismatch" or
+                     "runtime_unlock_admission_missing" or
+                     "runtime_unlock_admission_generation_mismatch" or
+                     "route_commit_token_missing" or
+                     "route_commit_generation_mismatch";
+
     private static void RejectMissingRuntimeOwnerActionLocked(
         FileTransferDirection direction,
         string transferId,
@@ -5188,6 +5497,70 @@ public sealed partial class SessionFileTransferService : IDisposable
         => LocalOperationalLog.Warn(
             "FileTransferService",
             $"event=filetransfer_runtime_owner_stale_update_rejected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; source={FormatProtocolLogValue(source)}; attempted_action={FormatProtocolLogValue(attemptedAction)}; reason={FormatProtocolLogValue(reason)}; runtime_generation={attemptedOwner?.RuntimeGeneration ?? 0}; current_runtime_generation={currentOwner?.RuntimeGeneration ?? 0}; terminal_generation={attemptedOwner?.TerminalGeneration ?? 0}; current_terminal_generation={currentOwner?.TerminalGeneration ?? 0}; route={FormatProtocolLogValue(attemptedOwner?.RouteToken ?? "(none)")}; current_route={FormatProtocolLogValue(currentOwner?.RouteToken ?? "(none)")}; protocol_version={attemptedOwner?.ProtocolVersion ?? 0}; current_protocol_version={currentOwner?.ProtocolVersion ?? 0}; live_route_epoch={attemptedOwner?.LiveRouteEpoch ?? 0}; current_live_route_epoch={currentOwner?.LiveRouteEpoch ?? 0}; runtime_family={FormatProtocolLogValue(attemptedOwner?.RuntimeFamily ?? "(none)")}; current_runtime_family={FormatProtocolLogValue(currentOwner?.RuntimeFamily ?? "(none)")}");
+
+    private static void LogRuntimeUnlockCallbackRejected(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        FileTransferCoordinatorActionKind actionKind,
+        string source,
+        string attemptedAction,
+        string rejectionReason,
+        RuntimeOwnerToken? currentOwner,
+        RuntimeOwnerToken? attemptedOwner,
+        RuntimeUnlockAdmissionToken? admissionToken,
+        RouteCommitToken? routeCommitToken,
+        long? transactionGeneration,
+        long? offerGeneration,
+        long? tunaPathLeaseGeneration,
+        string? tunaPathLeaseListenerRunId,
+        string? probeId,
+        bool? probeAcked,
+        string? samePathTunaProbeAckId,
+        int? routeCommitGeneration,
+        FileTransferRoute? targetRoute,
+        int? targetProtocolVersion,
+        FileTransferTransportKind? targetTransport,
+        FileTransferRoute? currentRoute,
+        int currentProtocolVersion,
+        int currentLiveRouteEpoch,
+        int currentRuntimeGeneration,
+        int currentTerminalGeneration,
+        int currentLegGeneration)
+    {
+        var attemptedRoute = targetRoute is { } explicitTargetRoute
+            ? FormatRuntimeUnlockCallbackRouteToken(explicitTargetRoute)
+            : routeCommitToken is { } commitToken
+                ? FormatRuntimeUnlockCallbackRouteToken(commitToken.TargetRoute)
+                : attemptedOwner?.RouteToken ?? admissionToken?.RouteToken ?? "(none)";
+        var attemptedProtocolVersion = targetProtocolVersion ??
+            routeCommitToken?.TargetProtocolVersion ??
+            attemptedOwner?.ProtocolVersion ??
+            admissionToken?.ProtocolVersion ??
+            0;
+        var attemptedLiveRouteEpoch = attemptedOwner?.LiveRouteEpoch ??
+            admissionToken?.LiveRouteEpoch ??
+            routeCommitToken?.LiveRouteEpoch ??
+            0;
+        var attemptedRuntimeGeneration = attemptedOwner?.RuntimeGeneration ??
+            admissionToken?.RuntimeGeneration ??
+            routeCommitToken?.RuntimeGeneration ??
+            0;
+        var attemptedTerminalGeneration = attemptedOwner?.TerminalGeneration ??
+            admissionToken?.TerminalGeneration ??
+            routeCommitToken?.TerminalGeneration ??
+            0;
+        var attemptedLegGeneration = admissionToken?.LegGeneration ??
+            routeCommitToken?.LegGeneration ??
+            0;
+
+        LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_runtime_unlock_callback_rejected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; action_kind={FormatProtocolLogValue(actionKind.ToString())}; source={FormatProtocolLogValue(source)}; attempted_action={FormatProtocolLogValue(attemptedAction)}; rejection_reason={FormatProtocolLogValue(rejectionReason)}; reason={FormatProtocolLogValue(attemptedAction)}; current_route={FormatProtocolLogValue(currentRoute is { } route ? FormatRuntimeUnlockCallbackRouteToken(route) : currentOwner?.RouteToken ?? "(none)")}; current_protocol_version={currentProtocolVersion}; current_live_route_epoch={currentLiveRouteEpoch}; current_runtime_generation={currentRuntimeGeneration}; current_terminal_generation={currentTerminalGeneration}; current_leg_generation={currentLegGeneration}; attempted_route={FormatProtocolLogValue(attemptedRoute)}; attempted_protocol_version={attemptedProtocolVersion}; attempted_live_route_epoch={attemptedLiveRouteEpoch}; attempted_runtime_generation={attemptedRuntimeGeneration}; attempted_terminal_generation={attemptedTerminalGeneration}; attempted_leg_generation={attemptedLegGeneration}; transaction_generation={transactionGeneration ?? 0}; offer_generation={offerGeneration ?? 0}; tuna_path_lease_generation={tunaPathLeaseGeneration ?? 0}; tuna_path_lease_listener_run_id={FormatProtocolLogValue(tunaPathLeaseListenerRunId ?? "(none)")}; probe_id={FormatProtocolLogValue(probeId ?? "(none)")}; probe_acked={(probeAcked == true ? 1 : 0)}; same_path_tuna_probe_ack_id={FormatProtocolLogValue(samePathTunaProbeAckId ?? "(none)")}; route_commit_generation={routeCommitGeneration ?? routeCommitToken?.CommitGeneration ?? 0}; target_route={FormatProtocolLogValue(targetRoute is { } routeTarget ? FormatRuntimeUnlockCallbackRouteToken(routeTarget) : routeCommitToken is { } token ? FormatRuntimeUnlockCallbackRouteToken(token.TargetRoute) : "(none)")}; target_protocol_version={targetProtocolVersion ?? routeCommitToken?.TargetProtocolVersion ?? 0}; target_transport={FormatProtocolLogValue(targetTransport is { } transportKind ? FormatFileTransferTransportKind(transportKind) : routeCommitToken is { } routeToken ? FormatFileTransferTransportKind(routeToken.TargetTransport) : "(none)")}; admission_generation={admissionToken?.AdmissionGeneration ?? 0}; route_commit_token_generation={routeCommitToken?.CommitGeneration ?? 0}");
+    }
+
+    private static string FormatRuntimeUnlockCallbackRouteToken(FileTransferRoute route)
+        => FileTransferRouteResolver.Resolve(route).TelemetryToken;
 
     private static void LogFileTransferCoordinatorLegMutationRejected(
         FileTransferDirection direction,

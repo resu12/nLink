@@ -1183,13 +1183,14 @@ function Get-FileTransferInvariantCombinedGateResult {
         [Parameter(Mandatory = $true)]$TerminalLifecycle,
         [Parameter(Mandatory = $true)]$ControlPriority,
         $RuntimeOwner = $null,
-        $StaleRejectedActionEffect = $null
+        $StaleRejectedActionEffect = $null,
+        $FallbackRuntimeUnlockSeparation = $null
     )
 
     $findings = New-Object System.Collections.Generic.List[string]
     $evidence = New-Object System.Collections.Generic.List[object]
     $failureClass = 'none'
-    foreach ($result in @($RouteLaw, $TerminalLifecycle, $ControlPriority, $RuntimeOwner, $StaleRejectedActionEffect)) {
+    foreach ($result in @($RouteLaw, $TerminalLifecycle, $ControlPriority, $RuntimeOwner, $StaleRejectedActionEffect, $FallbackRuntimeUnlockSeparation)) {
         if ($null -eq $result) {
             continue
         }
@@ -3283,6 +3284,12 @@ function Get-FileTransferStaleRejectedProofActionFamily {
             'controlplanesend' { return 'control_plane' }
             'routemismatchmark' { return 'route_publication' }
             'routepublication' { return 'route_publication' }
+            'runtimeunlockoffercallback' { return 'control_plane' }
+            'runtimeunlockanswercallback' { return 'control_plane' }
+            'runtimeunlockprobestart' { return 'control_plane' }
+            'runtimeunlockprobeack' { return 'control_plane' }
+            'runtimeunlocktransactioncallback' { return 'control_plane' }
+            'routecommitpublication' { return 'route_publication' }
             'starttransferleg' { return 'route_publication' }
             'runtimeownervalidation' { }
             default { return 'unknown' }
@@ -3301,7 +3308,7 @@ function Get-FileTransferStaleRejectedProofActionFamily {
         return 'checkpoint'
     }
 
-    if ($text -match 'control_plane|control-plane|delivery|receiver_state_control|frontier_request_control') {
+    if ($text -match 'control_plane|control-plane|delivery|receiver_state_control|frontier_request_control|runtime_unlock|precommit_probe|probe_ack|offer_callback|answer_callback|transaction_callback') {
         return 'control_plane'
     }
 
@@ -3415,6 +3422,41 @@ function Test-FileTransferStaleRejectedProofAuthorityMatches {
         }
     }
 
+    if (-not $matchedStaleAuthority -and
+        $Rejection.EventName -eq 'filetransfer_runtime_unlock_callback_rejected') {
+        $runtimeUnlockFields = @(
+            @('transaction_generation'),
+            @('offer_generation'),
+            @('tuna_path_lease_generation'),
+            @('probe_id'),
+            @('same_path_tuna_probe_ack_id'),
+            @('route_commit_generation')
+        )
+
+        $matchedRuntimeUnlockAuthority = $false
+        foreach ($fieldNames in @($runtimeUnlockFields)) {
+            $staleValue = Get-FileTransferStaleRejectedProofFirstField -Event $Rejection -Names $fieldNames
+            if (-not (Test-FileTransferStaleRejectedProofMeaningfulValue -Value $staleValue)) {
+                continue
+            }
+
+            $effectValue = Get-FileTransferStaleRejectedProofFirstField -Event $Effect -Names $fieldNames
+            if (-not (Test-FileTransferStaleRejectedProofMeaningfulValue -Value $effectValue)) {
+                continue
+            }
+
+            if (-not [string]::Equals($effectValue, $staleValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+
+            $matchedRuntimeUnlockAuthority = $true
+        }
+
+        if ($matchedRuntimeUnlockAuthority) {
+            return $true
+        }
+    }
+
     return $matchedStaleAuthority
 }
 
@@ -3451,7 +3493,10 @@ function Test-FileTransferStaleRejectedProofForbiddenEffect {
                 'filetransfer_regular_v4_receive_recovery_peer_silence_replay_armed',
                 'filetransfer_transport_rebind_safety_replay_started',
                 'filetransfer_v4_post_reactivation_frontier_replay_started',
-                'filetransfer_rebind_duplicate_state_repair_enqueued')
+                'filetransfer_rebind_duplicate_state_repair_enqueued',
+                'runtime_unlock_tuna_probe_sidecar_closed_fresh_transaction_scheduled',
+                'tuna_acceleration_runtime_unlock_unobserved_offer_reset_retry_scheduled',
+                'tuna_acceleration_runtime_unlock_interrupted_offer_reset_retry_scheduled')
         }
         'progress' {
             return $name -in @(
@@ -3493,7 +3538,25 @@ function Test-FileTransferStaleRejectedProofForbiddenEffect {
                 'filetransfer_fallback_checkpoint_proof_sent',
                 'filetransfer_v6_frontier_request_sent',
                 'filetransfer_v6_receiver_state_sent',
-                'filetransfer_data_frame_dispatched')
+                'filetransfer_data_frame_dispatched',
+                'runtime_unlock_precommit_probe_started',
+                'runtime_unlock_precommit_probe_sent',
+                'runtime_unlock_tuna_probe_sent',
+                'runtime_unlock_tuna_probe_received',
+                'runtime_unlock_tuna_probe_ack_sent',
+                'runtime_unlock_tuna_probe_ack_received',
+                'runtime_unlock_precommit_probe_ack_sent',
+                'runtime_unlock_precommit_probe_commit_confirmation_sent',
+                'runtime_unlock_precommit_probe_acked',
+                'runtime_unlock_precommit_probe_failed',
+                'runtime_unlock_probe_started',
+                'runtime_unlock_probe_acked',
+                'runtime_unlock_probe_failed',
+                'runtime_unlock_paired_commit_started',
+                'runtime_unlock_paired_commit_confirmed',
+                'runtime_unlock_paired_commit_aborted',
+                'runtime_unlock_fallback_unavailable_suppressed',
+                'filetransfer_runtime_unlock_marked_fallback_unavailable')
         }
         'route_publication' {
             return $name -in @(
@@ -3504,7 +3567,12 @@ function Test-FileTransferStaleRejectedProofForbiddenEffect {
                 'filetransfer_v6_peer_epoch_promoted_live_route',
                 'filetransfer_route_transitioned',
                 'filetransfer_leg_started',
-                'filetransfer_leg_frozen')
+                'filetransfer_leg_frozen',
+                'filetransfer_runtime_unlock_route_commit_accepted',
+                'filetransfer_runtime_unlock_route_commit_publication_deferred',
+                'runtime_unlock_precommit_probe_paired_commit_confirmed',
+                'runtime_unlock_paired_route_commit_publication_enabled',
+                'filetransfer_runtime_started')
         }
         default { return $false }
     }
@@ -3524,7 +3592,8 @@ function Get-FileTransferStaleRejectedActionEffectProof {
     $events = @($events | Sort-Object Sequence)
     $rejections = @($events | Where-Object {
             $_.EventName -eq 'filetransfer_runtime_owner_stale_update_rejected' -or
-            $_.EventName -eq 'filetransfer_coordinator_leg_mutation_rejected'
+            $_.EventName -eq 'filetransfer_coordinator_leg_mutation_rejected' -or
+            $_.EventName -eq 'filetransfer_runtime_unlock_callback_rejected'
         })
     $families = @('liveness', 'repair', 'progress', 'checkpoint', 'bridge_recovery', 'control_plane', 'route_publication')
     $familyCounts = @{}
@@ -3588,6 +3657,72 @@ function Get-FileTransferStaleRejectedActionEffectProof {
     }
 }
 
+function Test-FileTransferRuntimeUnlockFallbackUnavailableDenialScopeMatches {
+    param(
+        [Parameter(Mandatory = $true)]$Denial,
+        [Parameter(Mandatory = $true)]$FallbackUnavailable
+    )
+
+    $denialSessionId = Get-FileTransferEventField -Event $Denial -Name 'session_id' -Default ''
+    $fallbackSessionId = Get-FileTransferEventField -Event $FallbackUnavailable -Name 'session_id' -Default ''
+    if (-not (Test-FileTransferStaleRejectedProofMeaningfulValue -Value $denialSessionId) -or
+        -not (Test-FileTransferStaleRejectedProofMeaningfulValue -Value $fallbackSessionId) -or
+        -not [string]::Equals($denialSessionId, $fallbackSessionId, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+
+    $denialTransferId = Get-FileTransferStaleRejectedProofTransferId -Event $Denial
+    $fallbackTransferId = Get-FileTransferStaleRejectedProofTransferId -Event $FallbackUnavailable
+    if ((Test-FileTransferStaleRejectedProofMeaningfulValue -Value $denialTransferId) -and
+        (Test-FileTransferStaleRejectedProofMeaningfulValue -Value $fallbackTransferId) -and
+        -not [string]::Equals($denialTransferId, $fallbackTransferId, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+
+    return $true
+}
+
+function Test-FileTransferRuntimeUnlockCoordinatorDenialEvent {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    if ($Event.EventName -in @(
+            'filetransfer_runtime_unlock_admission_denied',
+            'filetransfer_runtime_unlock_callback_rejected',
+            'filetransfer_runtime_unlock_route_commit_rejected')) {
+        return $true
+    }
+
+    if ($Event.EventName -eq 'filetransfer_runtime_owner_stale_update_rejected') {
+        $text = @(
+            (Get-FileTransferEventField -Event $Event -Name 'attempted_action' -Default ''),
+            (Get-FileTransferEventField -Event $Event -Name 'source' -Default ''),
+            (Get-FileTransferEventField -Event $Event -Name 'reason' -Default '')
+        ) -join ' '
+        return $text.ToLowerInvariant() -match 'runtime_unlock|precommit_probe|route_commit'
+    }
+
+    return $false
+}
+
+function Test-FileTransferRuntimeUnlockFallbackUnavailableHasCoordinatorDenial {
+    param(
+        [Parameter(Mandatory = $true)]$FallbackUnavailable,
+        [Parameter(Mandatory = $true)][object[]]$Events
+    )
+
+    foreach ($event in @($Events | Where-Object { $_.Sequence -lt $FallbackUnavailable.Sequence } | Sort-Object Sequence -Descending)) {
+        if (-not (Test-FileTransferRuntimeUnlockCoordinatorDenialEvent -Event $event)) {
+            continue
+        }
+
+        if (Test-FileTransferRuntimeUnlockFallbackUnavailableDenialScopeMatches -Denial $event -FallbackUnavailable $FallbackUnavailable) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
 function Get-FileTransferFallbackRuntimeUnlockSeparationProof {
     param(
         [Parameter(Mandatory = $true)]$Summary
@@ -3625,6 +3760,10 @@ function Get-FileTransferFallbackRuntimeUnlockSeparationProof {
     $fallbackUnavailableSuppressedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_fallback_unavailable_suppressed'
     })
+    $fallbackUnavailableEvents = @($fallbackUnavailableMarkEvents + $fallbackUnavailableSuppressedEvents)
+    $fallbackUnavailableWithoutCoordinatorDenialEvents = @($fallbackUnavailableEvents | Where-Object {
+        -not (Test-FileTransferRuntimeUnlockFallbackUnavailableHasCoordinatorDenial -FallbackUnavailable $_ -Events $events)
+    })
 
     $postTunaRouteSelected = @($events | Where-Object {
         $_.EventName -eq 'filetransfer_route_selected' -and
@@ -3656,9 +3795,9 @@ function Get-FileTransferFallbackRuntimeUnlockSeparationProof {
 
     $findings = New-Object System.Collections.Generic.List[string]
     $evidence = New-Object System.Collections.Generic.List[object]
-    if ($fallbackUnavailableMarkEvents.Count -gt 0) {
-        $findings.Add(("runtime unlock marked or paused fallback unavailable count={0}" -f $fallbackUnavailableMarkEvents.Count)) | Out-Null
-        foreach ($event in @($fallbackUnavailableMarkEvents | Select-Object -First 5)) {
+    if ($fallbackUnavailableWithoutCoordinatorDenialEvents.Count -gt 0) {
+        $findings.Add(("runtime unlock fallback-unavailable outcome without coordinator denial count={0}" -f $fallbackUnavailableWithoutCoordinatorDenialEvents.Count)) | Out-Null
+        foreach ($event in @($fallbackUnavailableWithoutCoordinatorDenialEvents | Select-Object -First 5)) {
             $evidence.Add($event) | Out-Null
         }
     }
@@ -3685,12 +3824,22 @@ function Get-FileTransferFallbackRuntimeUnlockSeparationProof {
         $activationWindowGrantedEvents.Count -eq 0 -and
         $fallbackResumedEvents.Count -eq 0 -and
         $preCommitProbeStartedEvents.Count -eq 0 -and
-        $preCommitProbeFailedEvents.Count -eq 0) {
+        $preCommitProbeFailedEvents.Count -eq 0 -and
+        $fallbackUnavailableEvents.Count -eq 0) {
         $verdict = 'none'
     }
 
     [pscustomobject]@{
         Verdict = $verdict
+        FailureClass = if ($verdict -eq 'fail' -and $fallbackUnavailableWithoutCoordinatorDenialEvents.Count -gt 0) {
+            'stale_rejected_action_effect'
+        }
+        elseif ($verdict -eq 'fail') {
+            'runtime_fallback_separation_violation'
+        }
+        else {
+            'none'
+        }
         WaitingForFallbackSurvivalCount = $waitingEvents.Count
         ActivationWindowGrantedCount = $activationWindowGrantedEvents.Count
         ProbeFailedFallbackResumedCount = $fallbackResumedEvents.Count
@@ -3698,6 +3847,7 @@ function Get-FileTransferFallbackRuntimeUnlockSeparationProof {
         RegularNknProbeRejectedCount = $regularNknProbeRejectedEvents.Count
         FallbackUnavailableMarkCount = $fallbackUnavailableMarkEvents.Count
         FallbackUnavailableSuppressedCount = $fallbackUnavailableSuppressedEvents.Count
+        FallbackUnavailableWithoutCoordinatorDenialCount = $fallbackUnavailableWithoutCoordinatorDenialEvents.Count
         Findings = $findings
         EvidenceEvents = @($evidence.ToArray())
     }
@@ -3862,6 +4012,7 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("runtime_unlock_regular_nkn_probe_rejected_count={0}" -f $fallbackRuntimeUnlockSeparationProof.RegularNknProbeRejectedCount)) | Out-Null
     $lines.Add(("runtime_unlock_fallback_unavailable_mark_count={0}" -f $fallbackRuntimeUnlockSeparationProof.FallbackUnavailableMarkCount)) | Out-Null
     $lines.Add(("runtime_unlock_fallback_unavailable_suppressed_count={0}" -f $fallbackRuntimeUnlockSeparationProof.FallbackUnavailableSuppressedCount)) | Out-Null
+    $lines.Add(("runtime_unlock_fallback_unavailable_without_denial_count={0}" -f $fallbackRuntimeUnlockSeparationProof.FallbackUnavailableWithoutCoordinatorDenialCount)) | Out-Null
 
     $index = 0
     foreach ($event in @($routeSelectedEvents | Sort-Object Sequence)) {
@@ -6362,6 +6513,9 @@ function Get-FileTransferRecoveryFailureClassification {
     if ($staleRejectedActionEffectProof.Verdict -eq 'fail') {
         $class = 'stale_rejected_action_effect'
     }
+    elseif ($fallbackRuntimeUnlockSeparationProof.FallbackUnavailableWithoutCoordinatorDenialCount -gt 0) {
+        $class = 'stale_rejected_action_effect'
+    }
     elseif ($fileTunaV6Events.Count -gt 0) {
         $class = 'active_file_tuna_v6_evidence'
     }
@@ -6385,7 +6539,12 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     elseif ($fallbackRuntimeUnlockSeparationProof.Verdict -eq 'fail' -and
         $hasPostTunaFallbackEvidence) {
-        $class = 'runtime_fallback_separation_violation'
+        $class = if ($fallbackRuntimeUnlockSeparationProof.FallbackUnavailableWithoutCoordinatorDenialCount -gt 0) {
+            'stale_rejected_action_effect'
+        }
+        else {
+            'runtime_fallback_separation_violation'
+        }
     }
     elseif ($fallbackTailProof.Verdict -eq 'fail') {
         $class = 'fallback_tail_reconciliation'
@@ -6469,7 +6628,12 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     elseif ($fallbackRuntimeUnlockSeparationProof.Verdict -eq 'fail' -and
         $routeChanges -contains 'post_tuna_fallback_v6') {
-        $class = 'runtime_fallback_separation_violation'
+        $class = if ($fallbackRuntimeUnlockSeparationProof.FallbackUnavailableWithoutCoordinatorDenialCount -gt 0) {
+            'stale_rejected_action_effect'
+        }
+        else {
+            'runtime_fallback_separation_violation'
+        }
     }
     elseif ($runtimeUnlockProbeInvalidRejectedEvents.Count -gt 0 -or
         $runtimeUnlockProbeFailedEvents.Count -gt 0) {
@@ -6800,6 +6964,7 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockProbeStartedWithoutActivationWindowCount = $fallbackRuntimeUnlockSeparationProof.ProbeStartedWithoutActivationWindowCount
         RuntimeUnlockRegularNknProbeRejectedCount = $fallbackRuntimeUnlockSeparationProof.RegularNknProbeRejectedCount
         RuntimeUnlockFallbackUnavailableMarkCount = $fallbackRuntimeUnlockSeparationProof.FallbackUnavailableMarkCount
+        RuntimeUnlockFallbackUnavailableWithoutDenialCount = $fallbackRuntimeUnlockSeparationProof.FallbackUnavailableWithoutCoordinatorDenialCount
     }
 }
 
@@ -6876,7 +7041,7 @@ function New-FileTransferInvariantLedgerObject {
     $terminalLifecycle = Get-FileTransferInvariantTerminalLifecycleResult -Summary $Summary -LateFrameClassification $lateFrameClassification
     $controlPriority = Get-FileTransferInvariantControlPriorityResult -Summary $Summary
     $runtimeOwner = Get-FileTransferInvariantRuntimeOwnerResult -Summary $Summary
-    $combinedInvariant = Get-FileTransferInvariantCombinedGateResult -RouteLaw $routeLaw -TerminalLifecycle $terminalLifecycle -ControlPriority $controlPriority -RuntimeOwner $runtimeOwner -StaleRejectedActionEffect $staleRejectedActionEffectProof
+    $combinedInvariant = Get-FileTransferInvariantCombinedGateResult -RouteLaw $routeLaw -TerminalLifecycle $terminalLifecycle -ControlPriority $controlPriority -RuntimeOwner $runtimeOwner -StaleRejectedActionEffect $staleRejectedActionEffectProof -FallbackRuntimeUnlockSeparation $fallbackRuntimeUnlockSeparationProof
 
     $maxLiveEpoch = -1L
     foreach ($event in @($Summary.TransferEvents)) {
@@ -6934,6 +7099,7 @@ function New-FileTransferInvariantLedgerObject {
         control_plane_peer_visible_proof_count = [string]$controlPlaneProof.PeerVisibleCount
         runtime_fallback_separation_verdict = $fallbackRuntimeUnlockSeparationProof.Verdict
         runtime_fallback_arbitration_verdict = $fallbackRuntimeUnlockSeparationProof.Verdict
+        runtime_unlock_fallback_unavailable_without_denial_count = [string]$fallbackRuntimeUnlockSeparationProof.FallbackUnavailableWithoutCoordinatorDenialCount
         control_plane_isolation_verdict = $controlPlaneProof.Verdict
         bridge_liveness_integration_verdict = $bridgeLivenessProof.Verdict
         release_route_law_verdict = $routeLaw.Verdict
@@ -7057,7 +7223,7 @@ function Write-FileTransferDiagnosticsArtifacts {
     $terminalLifecycleInvariant = Get-FileTransferInvariantTerminalLifecycleResult -Summary $Summary -LateFrameClassification $invariantLedger.late_frame_classification
     $controlPriorityInvariant = Get-FileTransferInvariantControlPriorityResult -Summary $Summary
     $runtimeOwnerInvariant = Get-FileTransferInvariantRuntimeOwnerResult -Summary $Summary
-    $combinedInvariant = Get-FileTransferInvariantCombinedGateResult -RouteLaw $releaseRouteLaw -TerminalLifecycle $terminalLifecycleInvariant -ControlPriority $controlPriorityInvariant -RuntimeOwner $runtimeOwnerInvariant -StaleRejectedActionEffect $staleRejectedActionEffectProof
+    $combinedInvariant = Get-FileTransferInvariantCombinedGateResult -RouteLaw $releaseRouteLaw -TerminalLifecycle $terminalLifecycleInvariant -ControlPriority $controlPriorityInvariant -RuntimeOwner $runtimeOwnerInvariant -StaleRejectedActionEffect $staleRejectedActionEffectProof -FallbackRuntimeUnlockSeparation $fallbackRuntimeUnlockSeparationProof
 
     $effectiveVerdict = $GateResult.Verdict
     $effectiveGateStatus = $GateResult.GateStatus
@@ -7159,6 +7325,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_regular_nkn_probe_rejected_count={0}" -f $fallbackRuntimeUnlockSeparationProof.RegularNknProbeRejectedCount),
         ("runtime_unlock_fallback_unavailable_mark_count={0}" -f $fallbackRuntimeUnlockSeparationProof.FallbackUnavailableMarkCount),
         ("runtime_unlock_fallback_unavailable_suppressed_count={0}" -f $fallbackRuntimeUnlockSeparationProof.FallbackUnavailableSuppressedCount),
+        ("runtime_unlock_fallback_unavailable_without_denial_count={0}" -f $fallbackRuntimeUnlockSeparationProof.FallbackUnavailableWithoutCoordinatorDenialCount),
         ("runtime_unlock_transaction_commit_pending_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionCommitPendingCount),
         ("runtime_unlock_transaction_committed_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionCommittedCount),
         ("runtime_unlock_transaction_failed_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionFailedCount),

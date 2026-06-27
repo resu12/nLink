@@ -482,6 +482,7 @@ function Test-FileTransferDiagnosticFallbackRouteEvent {
         'filetransfer_fallback_checkpoint_exchange_retired' { return $true }
         'filetransfer_control_plane_send_retired_stale_generation' { return $true }
         'filetransfer_coordinator_leg_mutation_rejected' { return $true }
+        'filetransfer_runtime_unlock_callback_rejected' { return $true }
         'filetransfer_v6_post_tuna_fallback_control_coalesced' { return $true }
         'filetransfer_post_tuna_fallback_control_plane_pressure_marked' { return $true }
         'filetransfer_post_tuna_fallback_control_plane_pressure_cleared' { return $true }

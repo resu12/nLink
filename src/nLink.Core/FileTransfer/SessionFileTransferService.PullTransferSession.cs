@@ -2799,7 +2799,18 @@ public sealed partial class SessionFileTransferService
             RetireRuntimeOwnedWorkersLocked(context, owner, reason);
         }
 
-        return TryAuthorizeRuntimeUnlockRoutePublicationLocked(context, routeCommitToken, reason, out rejectionReason);
+        if (!TryAuthorizeRuntimeUnlockRoutePublicationLocked(context, routeCommitToken, reason, out rejectionReason))
+        {
+            return false;
+        }
+
+        PublishRuntimeUnlockRouteCommitResultIfAuthorizedLocked(
+            FileTransferDirection.Outbound,
+            context.SessionId,
+            context.TransferId,
+            routeCommitToken,
+            reason);
+        return true;
     }
 
     private bool TryAcceptRuntimeUnlockRouteCommitLocked(
@@ -2897,7 +2908,18 @@ public sealed partial class SessionFileTransferService
             RetireRuntimeOwnedWorkersLocked(context, owner, reason);
         }
 
-        return TryAuthorizeRuntimeUnlockRoutePublicationLocked(context, routeCommitToken, reason, out rejectionReason);
+        if (!TryAuthorizeRuntimeUnlockRoutePublicationLocked(context, routeCommitToken, reason, out rejectionReason))
+        {
+            return false;
+        }
+
+        PublishRuntimeUnlockRouteCommitResultIfAuthorizedLocked(
+            FileTransferDirection.Inbound,
+            context.SessionId,
+            context.TransferId,
+            routeCommitToken,
+            reason);
+        return true;
     }
 
     private bool TryAcceptRuntimeUnlockRouteCommitLocked(
@@ -2962,31 +2984,6 @@ public sealed partial class SessionFileTransferService
             decision.RouteCommitToken is { } token &&
             !token.IsDefault)
         {
-            if (ShouldPublishRuntimeUnlockRouteCommitResult(reason))
-            {
-                proofProvider.NotifyRuntimeUnlockRouteCommitResult(
-                    sessionId,
-                    transferId,
-                    snapshot.TransactionGeneration,
-                    snapshot.OfferGeneration,
-                    accepted: true,
-                    reason);
-            }
-            else
-            {
-                LocalOperationalLog.Info(
-                    "FileTransfer",
-                    $"event=filetransfer_runtime_unlock_route_commit_publication_deferred; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={snapshot.TransactionGeneration}; offer_generation={snapshot.OfferGeneration}; route_commit_generation={token.CommitGeneration}; reason={FormatProtocolLogValue(reason)}");
-            }
-
-            LogRuntimeUnlockRouteCommitAccepted(
-                direction,
-                transferId,
-                sessionId,
-                snapshot.TransactionGeneration,
-                snapshot.OfferGeneration,
-                reason,
-                token.CommitGeneration);
             routeCommitToken = token;
             acceptedDecision = decision;
             return true;
@@ -3012,23 +3009,58 @@ public sealed partial class SessionFileTransferService
         var decision = FileTransferCoordinator.AuthorizeAction(
             CreateCoordinatorStateLocked(context),
             new FileTransferCoordinatorActionRequest(
-                FileTransferCoordinatorActionKind.RoutePublication,
+                FileTransferCoordinatorActionKind.RouteCommitPublication,
                 Source: "runtime_unlock_route_publication",
                 Reason: reason,
                 Route: routeCommitToken.Route,
                 ProtocolVersion: routeCommitToken.ProtocolVersion,
                 LiveRouteEpoch: routeCommitToken.LiveRouteEpoch,
                 LegGeneration: routeCommitToken.LegGeneration,
-                RouteCommitToken: routeCommitToken));
+                RuntimeUnlockAdmissionToken: routeCommitToken.RuntimeUnlockAdmission,
+                RouteCommitToken: routeCommitToken,
+                RuntimeUnlockTransactionGeneration: routeCommitToken.TransactionGeneration,
+                RuntimeUnlockOfferGeneration: routeCommitToken.OfferGeneration,
+                RuntimeUnlockTunaPathLeaseGeneration: routeCommitToken.TunaPathLeaseGeneration,
+                RuntimeUnlockTunaPathLeaseListenerRunId: routeCommitToken.TunaPathLeaseListenerRunId,
+                RuntimeUnlockProbeId: routeCommitToken.SamePathTunaProbeAckId,
+                RuntimeUnlockProbeAcked: true,
+                RuntimeUnlockSamePathTunaProbeAckId: routeCommitToken.SamePathTunaProbeAckId,
+                RouteCommitGeneration: routeCommitToken.CommitGeneration,
+                TargetRoute: routeCommitToken.TargetRoute,
+                TargetProtocolVersion: routeCommitToken.TargetProtocolVersion,
+                TargetTransport: routeCommitToken.TargetTransport));
         rejectionReason = decision.Accepted ? "current" : decision.RejectionReason;
         if (!decision.Accepted)
         {
-            LogRuntimeUnlockRouteCommitRejected(
+            LogRuntimeUnlockCallbackRejected(
                 FileTransferDirection.Outbound,
                 context.TransferId,
                 context.SessionId,
+                FileTransferCoordinatorActionKind.RouteCommitPublication,
+                "runtime_unlock_route_publication",
                 reason,
-                decision.RejectionReason);
+                decision.RejectionReason,
+                context.CurrentRuntimeOwner,
+                routeCommitToken.RuntimeOwner,
+                routeCommitToken.RuntimeUnlockAdmission,
+                routeCommitToken,
+                routeCommitToken.TransactionGeneration,
+                routeCommitToken.OfferGeneration,
+                routeCommitToken.TunaPathLeaseGeneration,
+                routeCommitToken.TunaPathLeaseListenerRunId,
+                routeCommitToken.SamePathTunaProbeAckId,
+                true,
+                routeCommitToken.SamePathTunaProbeAckId,
+                routeCommitToken.CommitGeneration,
+                routeCommitToken.TargetRoute,
+                routeCommitToken.TargetProtocolVersion,
+                routeCommitToken.TargetTransport,
+                decision.CurrentRoute,
+                decision.CurrentProtocolVersion,
+                decision.CurrentLiveRouteEpoch,
+                decision.CurrentRuntimeGeneration,
+                decision.CurrentTerminalGeneration,
+                decision.CurrentLegGeneration);
         }
 
         return decision.Accepted;
@@ -3043,26 +3075,98 @@ public sealed partial class SessionFileTransferService
         var decision = FileTransferCoordinator.AuthorizeAction(
             CreateCoordinatorStateLocked(context),
             new FileTransferCoordinatorActionRequest(
-                FileTransferCoordinatorActionKind.RoutePublication,
+                FileTransferCoordinatorActionKind.RouteCommitPublication,
                 Source: "runtime_unlock_route_publication",
                 Reason: reason,
                 Route: routeCommitToken.Route,
                 ProtocolVersion: routeCommitToken.ProtocolVersion,
                 LiveRouteEpoch: routeCommitToken.LiveRouteEpoch,
                 LegGeneration: routeCommitToken.LegGeneration,
-                RouteCommitToken: routeCommitToken));
+                RuntimeUnlockAdmissionToken: routeCommitToken.RuntimeUnlockAdmission,
+                RouteCommitToken: routeCommitToken,
+                RuntimeUnlockTransactionGeneration: routeCommitToken.TransactionGeneration,
+                RuntimeUnlockOfferGeneration: routeCommitToken.OfferGeneration,
+                RuntimeUnlockTunaPathLeaseGeneration: routeCommitToken.TunaPathLeaseGeneration,
+                RuntimeUnlockTunaPathLeaseListenerRunId: routeCommitToken.TunaPathLeaseListenerRunId,
+                RuntimeUnlockProbeId: routeCommitToken.SamePathTunaProbeAckId,
+                RuntimeUnlockProbeAcked: true,
+                RuntimeUnlockSamePathTunaProbeAckId: routeCommitToken.SamePathTunaProbeAckId,
+                RouteCommitGeneration: routeCommitToken.CommitGeneration,
+                TargetRoute: routeCommitToken.TargetRoute,
+                TargetProtocolVersion: routeCommitToken.TargetProtocolVersion,
+                TargetTransport: routeCommitToken.TargetTransport));
         rejectionReason = decision.Accepted ? "current" : decision.RejectionReason;
         if (!decision.Accepted)
         {
-            LogRuntimeUnlockRouteCommitRejected(
+            LogRuntimeUnlockCallbackRejected(
                 FileTransferDirection.Inbound,
                 context.TransferId,
                 context.SessionId,
+                FileTransferCoordinatorActionKind.RouteCommitPublication,
+                "runtime_unlock_route_publication",
                 reason,
-                decision.RejectionReason);
+                decision.RejectionReason,
+                context.CurrentRuntimeOwner,
+                routeCommitToken.RuntimeOwner,
+                routeCommitToken.RuntimeUnlockAdmission,
+                routeCommitToken,
+                routeCommitToken.TransactionGeneration,
+                routeCommitToken.OfferGeneration,
+                routeCommitToken.TunaPathLeaseGeneration,
+                routeCommitToken.TunaPathLeaseListenerRunId,
+                routeCommitToken.SamePathTunaProbeAckId,
+                true,
+                routeCommitToken.SamePathTunaProbeAckId,
+                routeCommitToken.CommitGeneration,
+                routeCommitToken.TargetRoute,
+                routeCommitToken.TargetProtocolVersion,
+                routeCommitToken.TargetTransport,
+                decision.CurrentRoute,
+                decision.CurrentProtocolVersion,
+                decision.CurrentLiveRouteEpoch,
+                decision.CurrentRuntimeGeneration,
+                decision.CurrentTerminalGeneration,
+                decision.CurrentLegGeneration);
         }
 
         return decision.Accepted;
+    }
+
+    private void PublishRuntimeUnlockRouteCommitResultIfAuthorizedLocked(
+        FileTransferDirection direction,
+        string sessionId,
+        string transferId,
+        RouteCommitToken routeCommitToken,
+        string reason)
+    {
+        if (ShouldPublishRuntimeUnlockRouteCommitResult(reason))
+        {
+            if (transport is IRuntimeUnlockRouteCommitProofProvider proofProvider)
+            {
+                proofProvider.NotifyRuntimeUnlockRouteCommitResult(
+                    sessionId,
+                    transferId,
+                    routeCommitToken.TransactionGeneration,
+                    routeCommitToken.OfferGeneration,
+                    accepted: true,
+                    reason);
+            }
+        }
+        else
+        {
+            LocalOperationalLog.Info(
+                "FileTransfer",
+                $"event=filetransfer_runtime_unlock_route_commit_publication_deferred; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={routeCommitToken.TransactionGeneration}; offer_generation={routeCommitToken.OfferGeneration}; route_commit_generation={routeCommitToken.CommitGeneration}; reason={FormatProtocolLogValue(reason)}");
+        }
+
+        LogRuntimeUnlockRouteCommitAccepted(
+            direction,
+            transferId,
+            sessionId,
+            routeCommitToken.TransactionGeneration,
+            routeCommitToken.OfferGeneration,
+            reason,
+            routeCommitToken.CommitGeneration);
     }
 
     private static bool ShouldPublishRuntimeUnlockRouteCommitResult(string reason)

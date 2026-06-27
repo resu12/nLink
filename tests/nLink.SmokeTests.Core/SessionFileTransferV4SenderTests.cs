@@ -11225,6 +11225,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         };
         service.AttachTransport(transport);
         var context = CreateRegularNknV4InboundContext(transferId);
+        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "test_local_probe_started");
         serviceType
             .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
