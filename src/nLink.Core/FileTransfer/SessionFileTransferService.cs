@@ -12989,7 +12989,10 @@ public sealed partial class SessionFileTransferService : IDisposable
                     : FileTransferCoordinator.FormatLegState(currentLeg.State),
                 currentLeg?.CanSendData ?? false,
                 currentLeg?.Generation ?? 0,
-                currentLeg?.CheckpointRequestId));
+                currentLeg?.CheckpointRequestId,
+                CreateRoutePublicationAuthority(
+                    routePublicationToken,
+                    coordinatorDecisionReason)));
         }
         catch (Exception ex)
         {
@@ -13032,6 +13035,33 @@ public sealed partial class SessionFileTransferService : IDisposable
             ? $"; route_commit_generation={routeCommitGeneration}"
             : string.Empty;
         return $"; route_publication_generation={token.PublicationGeneration}; runtime_generation={token.RuntimeGeneration}; terminal_generation={token.TerminalGeneration}; leg_generation={token.LegGeneration}{routeCommitGenerationSuffix}; coordinator_decision_reason={FormatProtocolLogValue(coordinatorDecisionReason ?? token.Reason)}";
+    }
+
+    private static FileTransferRoutePublicationAuthority? CreateRoutePublicationAuthority(
+        RoutePublicationToken? routePublicationToken,
+        string? coordinatorDecisionReason)
+    {
+        if (routePublicationToken is not { } token || token.IsDefault)
+        {
+            return null;
+        }
+
+        return new FileTransferRoutePublicationAuthority(
+            token.SessionId,
+            token.TransferId,
+            token.Direction,
+            token.RouteToken,
+            token.ProtocolVersion,
+            token.LiveRouteEpoch,
+            token.RuntimeGeneration,
+            token.TerminalGeneration,
+            token.LegGeneration,
+            token.PublicationGeneration,
+            token.RouteCommitGeneration,
+            FileTransferRouteResolver.Resolve(token.TargetRoute).TelemetryToken,
+            token.TargetProtocolVersion,
+            token.TargetTransport,
+            coordinatorDecisionReason ?? token.Reason);
     }
 
     private static FileTransferTransportKind ResolveRoutePublicationTargetTransport(FileTransferRoute route)

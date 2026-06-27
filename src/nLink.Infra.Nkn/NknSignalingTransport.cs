@@ -44,6 +44,9 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         FileTransferRoute Route,
         string Token,
         int ProtocolVersion,
+        string SessionId,
+        FileTransferDirection Direction,
+        int LiveRouteEpoch,
         string Source,
         bool RuntimeUnlockAdmissionGranted,
         string RuntimeUnlockAdmissionReason,
@@ -51,6 +54,15 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         bool FallbackLegCanSendData,
         long FallbackLegGeneration,
         string? FallbackCheckpointRequestId,
+        int RoutePublicationGeneration,
+        int RuntimeGeneration,
+        int TerminalGeneration,
+        long PublicationLegGeneration,
+        int? RouteCommitGeneration,
+        string TargetRouteToken,
+        int TargetProtocolVersion,
+        FileTransferTransportKind TargetTransport,
+        string CoordinatorDecisionReason,
         DateTimeOffset RecordedUtc);
 
     private readonly record struct FileTransferPostTunaFallbackRepairProofHint(
@@ -161,6 +173,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private readonly Dictionary<string, FileTransferRouteHint> fileTransferRouteHints = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FileTransferPostTunaFallbackRepairProofHint> fileTransferPostTunaFallbackRepairProofHints = new(StringComparer.Ordinal);
     private readonly HashSet<string> fileTransferPostTunaFallbackYieldRuntimeUnlockRetries = new(StringComparer.Ordinal);
+    private int fileTransferRoutePublicationAuthorityForTestsGeneration;
     private readonly HashSet<string> fileTransferDataSessionRemoteOpenSuppressed = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FileTransferV6PendingHandoffIntent> pendingFileTransferV6HandoffsBySession = new(StringComparer.Ordinal);
     private readonly object fileTransferFallbackProofGate = new();
@@ -459,7 +472,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     public string? CurrentFileTransferSessionId => currentSessionSecurityState.SessionId?.Value;
     public bool IsTransportAccelerationActive => IsTransportAccelerationPublishedActive();
     public bool ShouldUseFileTransferV6ForAcceleration => ShouldUseFileTransferV6ForAccelerationCore();
-    public bool IsFileTunaActiveForRouteSelection => IsFileTransferAccelerationPublishedAndHealthy();
+    public bool IsFileTunaActiveForRouteSelection =>
+        HasActiveFileTunaV4FileTransferRouteHint(currentSessionSecurityState.SessionId?.Value);
     public bool IsPostTunaFileFallbackActiveForRouteSelection => IsFileTransferUsingRegularNknFallbackForCurrentSession();
     public bool IsDiagnosticRegularNknV6RouteEnabled => IsDiagnosticRegularNknV6RouteEnabledCore();
     public string TransportAccelerationStatusReason

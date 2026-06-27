@@ -4407,11 +4407,12 @@ public sealed partial class NknSignalingTransport
 
         if (accepted)
         {
-            TrackFileTransferRouteHint(
+            ObserveFileTransferRouteHintEvidence(
                 transferId,
                 FileTransferRouteResolver.FileTunaV4Token,
                 FileTransferProtocol.ProtocolVersionV4,
-                "runtime_unlock_route_commit_accepted");
+                "runtime_unlock_route_commit_accepted",
+                normalizedReason);
         }
 
         LogRuntimeUnlockTransactionDecision(
@@ -5403,31 +5404,43 @@ public sealed partial class NknSignalingTransport
 
     private bool HasActiveFileTunaV4FileTransferRouteHint(string? sessionId)
     {
+        return TryGetLatestFileTransferRouteHintForSession(sessionId, out var routeHint) &&
+               routeHint.Route == FileTransferRoute.FileTunaV4;
+    }
+
+    private bool TryGetLatestFileTransferRouteHintForSession(
+        string? sessionId,
+        out FileTransferRouteHint routeHint)
+    {
+        routeHint = default;
         if (string.IsNullOrWhiteSpace(sessionId))
         {
             return false;
         }
 
         var normalizedSessionId = sessionId.Trim();
+        var found = false;
         lock (gate)
         {
-            foreach (var session in fileTransferDataSessions.Values)
+            foreach (var candidate in fileTransferRouteHints.Values)
             {
-                if (session.IsDisposed ||
-                    !string.Equals(session.SessionId, normalizedSessionId, StringComparison.Ordinal))
+                if (!string.Equals(candidate.SessionId, normalizedSessionId, StringComparison.Ordinal))
                 {
                     continue;
                 }
 
-                if (fileTransferRouteHints.TryGetValue(session.TransferId, out var routeHint) &&
-                    routeHint.Route == FileTransferRoute.FileTunaV4)
+                if (!found ||
+                    candidate.RecordedUtc > routeHint.RecordedUtc ||
+                    (candidate.RecordedUtc == routeHint.RecordedUtc &&
+                     candidate.RoutePublicationGeneration > routeHint.RoutePublicationGeneration))
                 {
-                    return true;
+                    routeHint = candidate;
+                    found = true;
                 }
             }
         }
 
-        return false;
+        return found;
     }
 
     private bool ShouldSuppressUncommittedRuntimeUnlockFileFallback(

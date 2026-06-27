@@ -174,6 +174,23 @@ public interface IFileTransferRouteCompletionObserver
     void ObserveFileTransferRouteCompleted(FileTransferRouteCompletedNotification notification);
 }
 
+public sealed record FileTransferRoutePublicationAuthority(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    string RouteToken,
+    int ProtocolVersion,
+    int LiveRouteEpoch,
+    int RuntimeGeneration,
+    int TerminalGeneration,
+    long LegGeneration,
+    int RoutePublicationGeneration,
+    int? RouteCommitGeneration,
+    string TargetRouteToken,
+    int TargetProtocolVersion,
+    FileTransferTransportKind TargetTransport,
+    string CoordinatorDecisionReason);
+
 public sealed record FileTransferRouteHintNotification(
     string SessionId,
     string TransferId,
@@ -185,7 +202,8 @@ public sealed record FileTransferRouteHintNotification(
     string FallbackLegState = "unknown",
     bool FallbackLegCanSendData = false,
     long FallbackLegGeneration = 0,
-    string? FallbackCheckpointRequestId = null);
+    string? FallbackCheckpointRequestId = null,
+    FileTransferRoutePublicationAuthority? PublicationAuthority = null);
 
 public interface IFileTransferRouteHintObserver
 {

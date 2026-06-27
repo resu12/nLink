@@ -1413,7 +1413,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             IFileTransferDataSession receiverRecoverySession = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             CoreSmokeTestsBase.InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.PostTunaFallbackV6Token,
                 FileTransferProtocol.ProtocolVersionV6,
@@ -1477,7 +1477,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             IFileTransferDataSession receiverRecoverySession = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             CoreSmokeTestsBase.InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.PostTunaFallbackV6Token,
                 FileTransferProtocol.ProtocolVersionV6,

@@ -33,7 +33,7 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
-        TrackFileTransferRouteHint(
+        ObserveFileTransferRouteHintEvidence(
             message.TransferId,
             message.FileTransferRoute,
             message.PreferredDataProtocolVersion ?? 0,
@@ -59,7 +59,7 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
-        TrackFileTransferRouteHint(
+        ObserveFileTransferRouteHintEvidence(
             message.TransferId,
             message.FileTransferRoute,
             message.AcceptedDataProtocolVersion ?? 0,
@@ -105,7 +105,7 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
-        TrackFileTransferRouteHint(
+        ObserveFileTransferRouteHintEvidence(
             message.TransferId,
             message.FileTransferRoute,
             message.ProtocolVersion,
@@ -1840,7 +1840,36 @@ public sealed partial class NknSignalingTransport
         => handoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
            targetTransport == FileTransferTransportKind.Tuna;
 
-    private void TrackFileTransferRouteHint(
+    private void ObserveFileTransferRouteHintEvidence(
+        string? transferId,
+        string? routeToken,
+        int protocolVersion,
+        string source,
+        string? reason = null)
+    {
+        if (string.IsNullOrWhiteSpace(transferId) ||
+            string.IsNullOrWhiteSpace(routeToken))
+        {
+            return;
+        }
+
+        var normalizedRoute = SanitizeLogToken(routeToken);
+        var normalizedProtocolVersion = protocolVersion;
+        if (FileTransferRouteResolver.TryParseTelemetryToken(routeToken, out var route))
+        {
+            var selection = FileTransferRouteResolver.Resolve(route);
+            normalizedRoute = selection.TelemetryToken;
+            normalizedProtocolVersion = protocolVersion > 0
+                ? protocolVersion
+                : selection.ProtocolVersion;
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=filetransfer_route_hint_observed_without_publication_authority; transfer_id={SanitizeLogToken(transferId)}; route={normalizedRoute}; protocol_version={normalizedProtocolVersion}; source={SanitizeLogToken(source)}; reason={SanitizeLogToken(reason ?? "observation_only")}");
+    }
+
+    private void TrackAuthorizedFileTransferRouteHintForTests(
         string? transferId,
         string? routeToken,
         int protocolVersion,
@@ -1859,63 +1888,304 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
-        var normalizedTransferId = transferId.Trim();
         var selection = FileTransferRouteResolver.Resolve(route);
         var normalizedProtocolVersion = protocolVersion > 0
             ? protocolVersion
             : selection.ProtocolVersion;
-        lock (gate)
-        {
-            fileTransferRouteHints[normalizedTransferId] = new FileTransferRouteHint(
-                route,
+        var authority = CreateSyntheticRoutePublicationAuthorityForTests(
+            transferId,
+            selection.TelemetryToken,
+            normalizedProtocolVersion,
+            source);
+        TrackAuthorizedFileTransferRouteHint(
+            new FileTransferRouteHintNotification(
+                currentSessionSecurityState.SessionId?.Value ?? authority.SessionId,
+                transferId,
                 selection.TelemetryToken,
                 normalizedProtocolVersion,
                 source,
                 runtimeUnlockAdmissionGranted,
-                SanitizeLogToken(runtimeUnlockAdmissionReason),
-                SanitizeLogToken(fallbackLegState),
+                runtimeUnlockAdmissionReason,
+                fallbackLegState,
                 fallbackLegCanSendData,
                 fallbackLegGeneration,
-                string.IsNullOrWhiteSpace(fallbackCheckpointRequestId)
-                    ? null
-                    : SanitizeLogToken(fallbackCheckpointRequestId),
-                DateTimeOffset.UtcNow);
+                fallbackCheckpointRequestId,
+                authority));
+    }
+
+    private FileTransferRoutePublicationAuthority CreateSyntheticRoutePublicationAuthorityForTests(
+        string transferId,
+        string routeToken,
+        int protocolVersion,
+        string source)
+    {
+        var targetTransport = string.Equals(routeToken, FileTransferRouteResolver.FileTunaV4Token, StringComparison.Ordinal)
+            ? FileTransferTransportKind.Tuna
+            : FileTransferTransportKind.RegularNkn;
+        var generation = Interlocked.Increment(ref fileTransferRoutePublicationAuthorityForTestsGeneration);
+        var session = currentSessionSecurityState.SessionId?.Value ?? "test_session";
+        return new FileTransferRoutePublicationAuthority(
+            session,
+            transferId.Trim(),
+            FileTransferDirection.Outbound,
+            routeToken,
+            protocolVersion,
+            generation,
+            generation,
+            0,
+            generation,
+            generation,
+            null,
+            routeToken,
+            protocolVersion,
+            targetTransport,
+            SanitizeLogToken(source));
+    }
+
+    private bool TryValidateFileTransferRoutePublicationAuthority(
+        FileTransferRouteHintNotification notification,
+        out string normalizedTransferId,
+        out FileTransferRoute route,
+        out FileTransferRouteSelection selection,
+        out int normalizedProtocolVersion,
+        out string rejectionReason)
+    {
+        normalizedTransferId = string.IsNullOrWhiteSpace(notification.TransferId)
+            ? string.Empty
+            : notification.TransferId.Trim();
+        route = FileTransferRoute.RegularNknV4Fast;
+        selection = FileTransferRouteResolver.Resolve(route);
+        normalizedProtocolVersion = notification.ProtocolVersion;
+        rejectionReason = "unknown";
+
+        if (string.IsNullOrWhiteSpace(normalizedTransferId) ||
+            string.IsNullOrWhiteSpace(notification.RouteToken) ||
+            !FileTransferRouteResolver.TryParseTelemetryToken(notification.RouteToken, out route))
+        {
+            rejectionReason = "route_hint_invalid";
+            return false;
         }
+
+        selection = FileTransferRouteResolver.Resolve(route);
+        normalizedProtocolVersion = notification.ProtocolVersion > 0
+            ? notification.ProtocolVersion
+            : selection.ProtocolVersion;
+
+        if (notification.PublicationAuthority is not { } authority)
+        {
+            rejectionReason = "missing_publication_authority";
+            return false;
+        }
+
+        if (authority.RoutePublicationGeneration <= 0 ||
+            string.IsNullOrWhiteSpace(authority.SessionId) ||
+            string.IsNullOrWhiteSpace(authority.TransferId) ||
+            string.IsNullOrWhiteSpace(authority.RouteToken) ||
+            string.IsNullOrWhiteSpace(authority.TargetRouteToken))
+        {
+            rejectionReason = "invalid_publication_authority";
+            return false;
+        }
+
+        if (!string.Equals(authority.TransferId.Trim(), normalizedTransferId, StringComparison.Ordinal) ||
+            !string.Equals(authority.SessionId?.Trim() ?? string.Empty, notification.SessionId?.Trim() ?? string.Empty, StringComparison.Ordinal) ||
+            !string.Equals(authority.RouteToken.Trim(), selection.TelemetryToken, StringComparison.Ordinal) ||
+            authority.ProtocolVersion != normalizedProtocolVersion)
+        {
+            rejectionReason = "publication_authority_mismatch";
+            return false;
+        }
+
+        if (!FileTransferRouteResolver.TryParseTelemetryToken(authority.TargetRouteToken, out var targetRoute))
+        {
+            rejectionReason = string.Equals(authority.TargetRouteToken, "file_tuna_v6", StringComparison.Ordinal)
+                ? "file_tuna_v6_rejected"
+                : "invalid_publication_target";
+            return false;
+        }
+
+        var targetSelection = FileTransferRouteResolver.Resolve(targetRoute);
+        if (!IsLegalAuthorizedRoutePublicationTarget(
+                targetRoute,
+                authority.TargetProtocolVersion,
+                authority.TargetTransport) ||
+            !string.Equals(targetSelection.TelemetryToken, selection.TelemetryToken, StringComparison.Ordinal) ||
+            authority.TargetProtocolVersion != normalizedProtocolVersion)
+        {
+            rejectionReason = "invalid_publication_target";
+            return false;
+        }
+
+        rejectionReason = "accepted";
+        return true;
+    }
+
+    private static bool IsLegalAuthorizedRoutePublicationTarget(
+        FileTransferRoute route,
+        int protocolVersion,
+        FileTransferTransportKind targetTransport)
+        => route switch
+        {
+            FileTransferRoute.RegularNknV4Fast =>
+                protocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+                targetTransport == FileTransferTransportKind.RegularNkn,
+            FileTransferRoute.FileTunaV4 =>
+                protocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+                targetTransport == FileTransferTransportKind.Tuna,
+            FileTransferRoute.PostTunaFallbackV6 =>
+                protocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
+                targetTransport == FileTransferTransportKind.RegularNkn,
+            _ => false,
+        };
+
+    private static bool IsStaleRoutePublicationAuthority(
+        FileTransferRouteHint current,
+        FileTransferRoutePublicationAuthority authority,
+        string routeToken,
+        int protocolVersion)
+    {
+        if (authority.RoutePublicationGeneration < current.RoutePublicationGeneration ||
+            authority.RuntimeGeneration < current.RuntimeGeneration ||
+            authority.TerminalGeneration < current.TerminalGeneration ||
+            authority.LegGeneration < current.PublicationLegGeneration ||
+            authority.LiveRouteEpoch < current.LiveRouteEpoch)
+        {
+            return true;
+        }
+
+        return authority.RoutePublicationGeneration == current.RoutePublicationGeneration &&
+               (!string.Equals(current.Token, routeToken, StringComparison.Ordinal) ||
+                current.ProtocolVersion != protocolVersion ||
+                current.Direction != authority.Direction ||
+                current.LiveRouteEpoch != authority.LiveRouteEpoch ||
+                !string.Equals(current.TargetRouteToken, authority.TargetRouteToken, StringComparison.Ordinal) ||
+                current.TargetProtocolVersion != authority.TargetProtocolVersion ||
+                current.TargetTransport != authority.TargetTransport);
+    }
+
+    private static string GetRouteHintPublicationAuthorityRejectedEventName(string rejectionReason)
+        => rejectionReason switch
+        {
+            "missing_publication_authority" => "filetransfer_route_hint_ignored_missing_publication_authority",
+            "stale_publication_authority" => "filetransfer_route_hint_ignored_stale_publication_authority",
+            _ => "filetransfer_route_hint_ignored_invalid_publication_authority",
+        };
+
+    private static void LogFileTransferRouteHintPublicationAuthorityRejected(
+        FileTransferRouteHintNotification notification,
+        string rejectionReason)
+    {
+        var authority = notification.PublicationAuthority;
+        LocalOperationalLog.Warn(
+            "NKN.Tuna",
+            $"event={GetRouteHintPublicationAuthorityRejectedEventName(rejectionReason)}; session_id={SanitizeLogToken(notification.SessionId)}; transfer_id={SanitizeLogToken(notification.TransferId)}; direction={FormatFileTransferDirection(authority?.Direction)}; route={SanitizeLogToken(notification.RouteToken)}; protocol_version={notification.ProtocolVersion}; live_route_epoch={authority?.LiveRouteEpoch ?? 0}; source={SanitizeLogToken(notification.Source)}; rejection_reason={SanitizeLogToken(rejectionReason)}; route_publication_generation={authority?.RoutePublicationGeneration ?? 0}; runtime_generation={authority?.RuntimeGeneration ?? 0}; terminal_generation={authority?.TerminalGeneration ?? 0}; leg_generation={authority?.LegGeneration ?? 0}; route_commit_generation={authority?.RouteCommitGeneration ?? 0}; target_route={SanitizeLogToken(authority?.TargetRouteToken ?? "(none)")}; target_protocol_version={authority?.TargetProtocolVersion ?? 0}; target_transport={FormatFileTransferTransportKindForLog(authority?.TargetTransport ?? FileTransferTransportKind.Unknown)}; coordinator_decision_reason={SanitizeLogToken(authority?.CoordinatorDecisionReason ?? "(none)")}");
+    }
+
+    private void TrackAuthorizedFileTransferRouteHint(FileTransferRouteHintNotification notification)
+    {
+        if (!TryValidateFileTransferRoutePublicationAuthority(
+                notification,
+                out var normalizedTransferId,
+                out var route,
+                out var selection,
+                out var normalizedProtocolVersion,
+                out var rejectionReason))
+        {
+            LogFileTransferRouteHintPublicationAuthorityRejected(notification, rejectionReason);
+            return;
+        }
+
+        var authority = notification.PublicationAuthority!;
+        var normalizedSessionId = authority.SessionId.Trim();
+        var normalizedSource = string.IsNullOrWhiteSpace(notification.Source)
+            ? "service_route_hint"
+            : SanitizeLogToken(notification.Source);
+        var sanitizedAdmissionReason = SanitizeLogToken(notification.RuntimeUnlockAdmissionReason);
+        var sanitizedFallbackLegState = SanitizeLogToken(notification.FallbackLegState);
+        var sanitizedCheckpointRequestId = string.IsNullOrWhiteSpace(notification.FallbackCheckpointRequestId)
+            ? null
+            : SanitizeLogToken(notification.FallbackCheckpointRequestId);
+        var stalePublicationRejected = false;
+        lock (gate)
+        {
+            if (fileTransferRouteHints.TryGetValue(normalizedTransferId, out var current) &&
+                IsStaleRoutePublicationAuthority(current, authority, selection.TelemetryToken, normalizedProtocolVersion))
+            {
+                stalePublicationRejected = true;
+            }
+            else
+            {
+                fileTransferRouteHints[normalizedTransferId] = new FileTransferRouteHint(
+                    route,
+                    selection.TelemetryToken,
+                    normalizedProtocolVersion,
+                    normalizedSessionId,
+                    authority.Direction,
+                    authority.LiveRouteEpoch,
+                    normalizedSource,
+                    notification.RuntimeUnlockAdmissionGranted,
+                    sanitizedAdmissionReason,
+                    sanitizedFallbackLegState,
+                    notification.FallbackLegCanSendData,
+                    notification.FallbackLegGeneration,
+                    sanitizedCheckpointRequestId,
+                    authority.RoutePublicationGeneration,
+                    authority.RuntimeGeneration,
+                    authority.TerminalGeneration,
+                    authority.LegGeneration,
+                    authority.RouteCommitGeneration,
+                    SanitizeLogToken(authority.TargetRouteToken),
+                    authority.TargetProtocolVersion,
+                    authority.TargetTransport,
+                    SanitizeLogToken(authority.CoordinatorDecisionReason),
+                    DateTimeOffset.UtcNow);
+            }
+        }
+
+        if (stalePublicationRejected)
+        {
+            LogFileTransferRouteHintPublicationAuthorityRejected(notification, "stale_publication_authority");
+            return;
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=filetransfer_route_hint_authorized_publication_accepted; session_id={SanitizeLogToken(notification.SessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; direction={FormatFileTransferDirection(authority.Direction)}; route={selection.TelemetryToken}; protocol_version={normalizedProtocolVersion}; live_route_epoch={authority.LiveRouteEpoch}; source={normalizedSource}; route_publication_generation={authority.RoutePublicationGeneration}; runtime_generation={authority.RuntimeGeneration}; terminal_generation={authority.TerminalGeneration}; leg_generation={authority.LegGeneration}; route_commit_generation={authority.RouteCommitGeneration ?? 0}; target_route={SanitizeLogToken(authority.TargetRouteToken)}; target_protocol_version={authority.TargetProtocolVersion}; target_transport={FormatFileTransferTransportKindForLog(authority.TargetTransport)}; coordinator_decision_reason={SanitizeLogToken(authority.CoordinatorDecisionReason)}");
 
         if (client is RealNknClientAdapter realClient)
         {
             if (route == FileTransferRoute.PostTunaFallbackV6)
             {
-                realClient.MarkActiveFileTransferPostTunaFallbackRuntime(normalizedTransferId, source);
+                realClient.MarkActiveFileTransferPostTunaFallbackRuntime(normalizedTransferId, normalizedSource);
             }
             else
             {
-                realClient.ClearActiveFileTransferPostTunaFallbackRuntime(normalizedTransferId, source);
+                realClient.ClearActiveFileTransferPostTunaFallbackRuntime(normalizedTransferId, normalizedSource);
             }
         }
 
         if (route == FileTransferRoute.PostTunaFallbackV6 &&
             normalizedProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
-            runtimeUnlockAdmissionGranted)
+            notification.RuntimeUnlockAdmissionGranted)
         {
             lock (accelerationGate)
             {
                 ClearRuntimeUnlockPublishedRouteCommitUnsafe();
             }
 
-            var fallbackYieldRetryKey = $"{normalizedTransferId}|{fallbackLegGeneration}";
+            var fallbackYieldRetryKey = $"{normalizedTransferId}|{notification.FallbackLegGeneration}";
             ConsumePostTunaFileFallbackRoute(
                 sessionId: null,
                 transferId: normalizedTransferId,
-                reason: string.IsNullOrWhiteSpace(runtimeUnlockAdmissionReason)
+                reason: string.IsNullOrWhiteSpace(notification.RuntimeUnlockAdmissionReason)
                     ? "fallback_tail_quiescent"
-                    : runtimeUnlockAdmissionReason);
+                    : notification.RuntimeUnlockAdmissionReason);
             ScheduleRuntimeUnlockAfterPostTunaFallbackYield(
                 normalizedTransferId,
                 fallbackYieldRetryKey,
-                string.IsNullOrWhiteSpace(runtimeUnlockAdmissionReason)
+                string.IsNullOrWhiteSpace(notification.RuntimeUnlockAdmissionReason)
                     ? "fallback_tail_quiescent"
-                    : runtimeUnlockAdmissionReason);
+                    : notification.RuntimeUnlockAdmissionReason);
         }
         else if (route == FileTransferRoute.PostTunaFallbackV6 &&
                  normalizedProtocolVersion == FileTransferProtocol.ProtocolVersionV6)
@@ -1940,7 +2210,7 @@ public sealed partial class NknSignalingTransport
                 normalizedTransferId,
                 selection.TelemetryToken,
                 normalizedProtocolVersion,
-                source);
+                normalizedSource);
         }
 
         if (route != FileTransferRoute.RegularNknV4Fast ||
@@ -1950,25 +2220,13 @@ public sealed partial class NknSignalingTransport
                 normalizedTransferId,
                 selection.TelemetryToken,
                 normalizedProtocolVersion,
-                source);
+                normalizedSource);
         }
     }
 
     public void ObserveFileTransferRouteHint(FileTransferRouteHintNotification notification)
     {
-        TrackFileTransferRouteHint(
-            notification.TransferId,
-            notification.RouteToken,
-            notification.ProtocolVersion,
-            string.IsNullOrWhiteSpace(notification.Source)
-                ? "service_route_hint"
-                : notification.Source,
-            notification.RuntimeUnlockAdmissionGranted,
-            notification.RuntimeUnlockAdmissionReason,
-            notification.FallbackLegState,
-            notification.FallbackLegCanSendData,
-            notification.FallbackLegGeneration,
-            notification.FallbackCheckpointRequestId);
+        TrackAuthorizedFileTransferRouteHint(notification);
     }
 
     private void TrackFileTransferRouteHintForHandoff(
@@ -1999,19 +2257,21 @@ public sealed partial class NknSignalingTransport
         if (handoffKind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
             targetTransport == FileTransferTransportKind.RegularNkn)
         {
-            TrackFileTransferRouteHint(
+            ObserveFileTransferRouteHintEvidence(
                 transferId,
                 FileTransferRouteResolver.PostTunaFallbackV6Token,
                 FileTransferProtocol.ProtocolVersionV6,
-                source);
+                source,
+                reason ?? "handoff_observation");
         }
         else if (ShouldBypassActiveFileTunaSuppressionForPostTunaFallbackRecovery(reason ?? string.Empty, handoffKind, targetTransport))
         {
-            TrackFileTransferRouteHint(
+            ObserveFileTransferRouteHintEvidence(
                 transferId,
                 FileTransferRouteResolver.PostTunaFallbackV6Token,
                 FileTransferProtocol.ProtocolVersionV6,
-                source);
+                source,
+                reason ?? "handoff_observation");
         }
         else if (handoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
                  targetTransport == FileTransferTransportKind.Tuna)
@@ -2459,7 +2719,7 @@ public sealed partial class NknSignalingTransport
 
         LogFileTransferEnvelopeEvent("received", MsgType.FileTransferOffer, message.TransferId, source);
         Log($"FileTransferOffer received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length}, file_name_len={message.FileName.Length}, size_bytes={message.FileSizeBytes})");
-        TrackFileTransferRouteHint(
+        ObserveFileTransferRouteHintEvidence(
             message.TransferId,
             message.FileTransferRoute,
             message.PreferredDataProtocolVersion ?? 0,
@@ -2491,7 +2751,7 @@ public sealed partial class NknSignalingTransport
 
         LogFileTransferEnvelopeEvent("received", MsgType.FileTransferAccept, message.TransferId, source);
         Log($"FileTransferAccept received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length})");
-        TrackFileTransferRouteHint(
+        ObserveFileTransferRouteHintEvidence(
             message.TransferId,
             message.FileTransferRoute,
             message.AcceptedDataProtocolVersion ?? 0,
@@ -2689,7 +2949,7 @@ public sealed partial class NknSignalingTransport
             {
                 LogFileTransferEnvelopeEvent("received", MsgType.FileTransferOffer, message.TransferId, source);
                 Log($"FileTransferOffer received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length}, file_name_len={message.FileName.Length}, size_bytes={message.FileSizeBytes})");
-                TrackFileTransferRouteHint(
+                ObserveFileTransferRouteHintEvidence(
                     message.TransferId,
                     message.FileTransferRoute,
                     message.PreferredDataProtocolVersion ?? 0,
@@ -2729,7 +2989,7 @@ public sealed partial class NknSignalingTransport
             {
                 LogFileTransferEnvelopeEvent("received", MsgType.FileTransferAccept, message.TransferId, source);
                 Log($"FileTransferAccept received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length})");
-                TrackFileTransferRouteHint(
+                ObserveFileTransferRouteHintEvidence(
                     message.TransferId,
                     message.FileTransferRoute,
                     message.AcceptedDataProtocolVersion ?? 0,
@@ -3165,7 +3425,7 @@ public sealed partial class NknSignalingTransport
             () =>
             {
                 LogFileTransferEnvelopeEvent("received", MsgType.FileTransferSessionOpen, message.TransferId, source);
-                TrackFileTransferRouteHint(
+                ObserveFileTransferRouteHintEvidence(
                     message.TransferId,
                     message.FileTransferRoute,
                     message.ProtocolVersion,

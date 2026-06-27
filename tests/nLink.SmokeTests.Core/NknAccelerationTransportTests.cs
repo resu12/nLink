@@ -109,7 +109,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             host.SeedSessionLivenessProofForTests(sessionId, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -230,7 +230,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             SetPrivateField(host, "remoteBulkEndpoint", helperClient.ConnectedBulkAddress);
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -349,7 +349,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             dataSession.AvailabilityChanged += (_, e) => availabilityEvents.Enqueue(e);
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -633,7 +633,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             host.SeedSessionLivenessProofForTests(sessionId, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -782,7 +782,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             SetPrivateField(host, "remoteBulkEndpoint", helperClient.ConnectedBulkAddress);
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -1099,7 +1099,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -1211,7 +1211,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -1317,7 +1317,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             host.SeedSessionLivenessProofForTests(sessionId, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -1451,7 +1451,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             dataSession.AvailabilityChanged += (_, e) => availabilityEvents.Enqueue(e);
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -1611,7 +1611,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             var dataSession = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -1712,7 +1712,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -1789,7 +1789,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -1892,7 +1892,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -1996,7 +1996,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             var dataSession = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -2317,6 +2317,16 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
             host.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen, sessionId);
             helper.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen, sessionId);
+            const string transferId = "transfer_phase4_tuna_route_status_fallback";
+            var routeHints = Assert.IsAssignableFrom<IFileTransferRouteHintObserver>(host);
+            routeHints.ObserveFileTransferRouteHint(CreateAuthorizedRouteHintNotification(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.FileTunaV4Token,
+                FileTransferProtocol.ProtocolVersionV4,
+                "unit_test_initial_file_tuna_publication",
+                routeCommitGeneration: 1,
+                coordinatorReason: "route_commit_publication_accepted"));
             Assert.True(host.IsFileTunaActiveForRouteSelection);
             Assert.False(host.IsPostTunaFileFallbackActiveForRouteSelection);
             AssertNknRoute(host, FileTransferRoute.FileTunaV4, FileTransferProtocol.ProtocolVersionV4);
@@ -2324,12 +2334,22 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
             _ = await host.OpenFileTransferDataSessionAsync(
                 sessionId,
-                "transfer_phase4_tuna_route_status_fallback",
+                transferId,
                 cts.Token);
             await ((ITransportAccelerationControl)host).StopAccelerationAsync("header_switch_off", cts.Token);
             await WaitUntilAsync(
                 () => host.IsPostTunaFileFallbackActiveForRouteSelection,
                 TimeSpan.FromSeconds(3));
+            routeHints.ObserveFileTransferRouteHint(CreateAuthorizedRouteHintNotification(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                FileTransferProtocol.ProtocolVersionV6,
+                "unit_test_post_tuna_fallback_publication",
+                publicationGeneration: 2,
+                runtimeGeneration: 2,
+                legGeneration: 2,
+                liveRouteEpoch: 2));
 
             Assert.False(host.IsFileTunaActiveForRouteSelection);
             Assert.True(host.IsPostTunaFileFallbackActiveForRouteSelection);
@@ -2339,7 +2359,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             host.ObserveFileTransferRouteCompleted(
                 new FileTransferRouteCompletedNotification(
                     sessionId,
-                    "transfer_phase4_post_tuna_fallback_v6_completed",
+                    transferId,
                     FileTransferRouteResolver.PostTunaFallbackV6Token,
                     FileTransferProtocol.ProtocolVersionV6));
 
@@ -2725,6 +2745,15 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
             host.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen, sessionId);
             helper.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen, sessionId);
+            Assert.IsAssignableFrom<IFileTransferRouteHintObserver>(host).ObserveFileTransferRouteHint(
+                CreateAuthorizedRouteHintNotification(
+                    sessionId,
+                    "transfer_file_tuna_route_status_default",
+                    FileTransferRouteResolver.FileTunaV4Token,
+                    FileTransferProtocol.ProtocolVersionV4,
+                    "unit_test_initial_file_tuna_publication",
+                    routeCommitGeneration: 1,
+                    coordinatorReason: "route_commit_publication_accepted"));
 
             Assert.True(((ITransportAccelerationStatus)host).IsTransportAccelerationActive);
             Assert.True(host.IsFileTunaActiveForRouteSelection);
@@ -3540,11 +3569,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                     e.TargetTransport == FileTransferTransportKind.Tuna),
                 TimeSpan.FromSeconds(5));
             await WaitUntilAsync(
-                () => host.IsFileTunaActiveForRouteSelection,
-                TimeSpan.FromSeconds(6));
-            await WaitUntilAsync(
                 () => host.IsAccelerationAvailableForTests && helper.IsAccelerationAvailableForTests,
                 TimeSpan.FromSeconds(6));
+            Assert.False(host.IsFileTunaActiveForRouteSelection);
             Assert.False(hostAccelerationStatus.ShouldUseFileTransferV6ForAcceleration);
 
             Assert.True(host.IsAccelerationAvailableForTests);
@@ -3595,7 +3622,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_tuna_activation_regular_v4_no_pause";
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -4050,7 +4077,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             var logStart = GetOperationalLogLength();
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.PostTunaFallbackV6Token,
                 FileTransferProtocol.ProtocolVersionV6,
@@ -4387,7 +4414,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_tuna_activation_pause_drain";
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -4821,7 +4848,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -6372,7 +6399,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_tuna_activation_observed_offer";
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -6604,7 +6631,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_tuna_activation_queue_pressure";
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -6834,7 +6861,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_tuna_activation_receive_stall_authority";
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -6948,7 +6975,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_tuna_activation_receive_stall_stale_authority";
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -7058,7 +7085,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_tuna_activation_observed_replay";
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -7971,7 +7998,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_tuna_activation_listener_authority";
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -8052,7 +8079,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_tuna_activation_inflight_authority";
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -8166,7 +8193,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_tuna_activation_receive_stall_skip";
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -8511,7 +8538,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             SetPrivateField(host, "remoteBulkEndpoint", helperClient.ConnectedBulkAddress);
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.PostTunaFallbackV6Token,
                 FileTransferProtocol.ProtocolVersionV6,
@@ -8625,7 +8652,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_tuna_activation_regular_pressure_recovery";
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -8796,7 +8823,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_tuna_activation_regular_v4_soft_settle";
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -8908,7 +8935,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_tuna_activation_regular_v4_predispatch_soft_settle";
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -9025,7 +9052,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_tuna_activation_contract_backoff";
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -9112,7 +9139,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_tuna_activation_regular_v4_completed_soft_settle";
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -9223,7 +9250,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_tuna_activation_regular_v4_started_probe_delay";
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -9344,7 +9371,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_tuna_activation_regular_v4_authority_wait";
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -9712,7 +9739,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
             InvokePrivateMethod(
                 transport,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 "unrelated_transfer",
                 FileTransferRouteResolver.FileTunaV4Token,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -9721,7 +9748,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
             InvokePrivateMethod(
                 transport,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.FileTunaV4Token,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -9777,7 +9804,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken, regularSnapshot.RouteToken);
 
             var routeHints = Assert.IsAssignableFrom<IFileTransferRouteHintObserver>(transport);
-            routeHints.ObserveFileTransferRouteHint(new FileTransferRouteHintNotification(
+            routeHints.ObserveFileTransferRouteHint(CreateAuthorizedRouteHintNotification(
                 sessionId,
                 transferId,
                 FileTransferRouteResolver.PostTunaFallbackV6Token,
@@ -9785,6 +9812,335 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 "unit_test_service_live_route_transition"));
 
             Assert.False(recoveryState.TryGetActiveFileTransferRecoveryLivenessSnapshot(sessionId, out _));
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void RouteHintObserver_RejectsMissingPublicationAuthority()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var options = NknTransportOptions.Load();
+            var client = new FakeNknClient("route.hint.missing.authority.address");
+            using var transport = new NknSignalingTransport(
+                client,
+                options,
+                new NknIdentity("route-hint-missing-authority-id", client.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+
+            var logStart = GetOperationalLogLength();
+            var routeHints = Assert.IsAssignableFrom<IFileTransferRouteHintObserver>(transport);
+            routeHints.ObserveFileTransferRouteHint(new FileTransferRouteHintNotification(
+                "session_route_hint_missing_authority",
+                "transfer_route_hint_missing_authority",
+                FileTransferRouteResolver.FileTunaV4Token,
+                FileTransferProtocol.ProtocolVersionV4,
+                "unit_test_missing_authority"));
+
+            Assert.Null(GetFileTransferRouteHintTokenForTests(transport, "transfer_route_hint_missing_authority"));
+            AssertNknRoute(transport, FileTransferRoute.RegularNknV4Fast, FileTransferProtocol.ProtocolVersionV4);
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=filetransfer_route_hint_ignored_missing_publication_authority;", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void RouteHintObserver_AcceptsAuthorizedFileTunaV4Publication()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var options = NknTransportOptions.Load();
+            var client = new FakeNknClient("route.hint.authorized.tuna.address");
+            using var transport = new NknSignalingTransport(
+                client,
+                options,
+                new NknIdentity("route-hint-authorized-tuna-id", client.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+
+            var logStart = GetOperationalLogLength();
+            var routeHints = Assert.IsAssignableFrom<IFileTransferRouteHintObserver>(transport);
+            routeHints.ObserveFileTransferRouteHint(CreateAuthorizedRouteHintNotification(
+                "session_route_hint_authorized_tuna",
+                "transfer_route_hint_authorized_tuna",
+                FileTransferRouteResolver.FileTunaV4Token,
+                FileTransferProtocol.ProtocolVersionV4,
+                "unit_test_authorized_tuna_publication",
+                routeCommitGeneration: 1,
+                coordinatorReason: "route_commit_publication_accepted"));
+
+            Assert.Equal(
+                FileTransferRouteResolver.FileTunaV4Token,
+                GetFileTransferRouteHintTokenForTests(transport, "transfer_route_hint_authorized_tuna"));
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=filetransfer_route_hint_authorized_publication_accepted;", logTail, StringComparison.Ordinal);
+            Assert.Contains("route_publication_generation=1", logTail, StringComparison.Ordinal);
+            Assert.Contains("live_route_epoch=1", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RouteHintObserver_AuthorizedFileTunaV4PublicationDrivesRouteSelection()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("route.hint.authorized.tuna.route.host");
+            var helperClient = new FakeNknClient("route.hint.authorized.tuna.route.helper");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("route-hint-authorized-tuna-route-host-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("route-hint-authorized-tuna-route-helper-id", helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare);
+
+            const string transferId = "transfer_route_hint_authorized_tuna_route";
+            var routeHints = Assert.IsAssignableFrom<IFileTransferRouteHintObserver>(host);
+            routeHints.ObserveFileTransferRouteHint(CreateAuthorizedRouteHintNotification(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.FileTunaV4Token,
+                FileTransferProtocol.ProtocolVersionV4,
+                "unit_test_authorized_tuna_route_publication",
+                routeCommitGeneration: 1,
+                coordinatorReason: "route_commit_publication_accepted"));
+
+            Assert.True(host.IsFileTunaActiveForRouteSelection);
+            AssertNknRoute(host, FileTransferRoute.FileTunaV4, FileTransferProtocol.ProtocolVersionV4);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void RouteHintObserver_RejectsStalePublicationAuthority()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var options = NknTransportOptions.Load();
+            var client = new FakeNknClient("route.hint.stale.authority.address");
+            using var transport = new NknSignalingTransport(
+                client,
+                options,
+                new NknIdentity("route-hint-stale-authority-id", client.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+
+            const string sessionId = "session_route_hint_stale_authority";
+            const string transferId = "transfer_route_hint_stale_authority";
+            var routeHints = Assert.IsAssignableFrom<IFileTransferRouteHintObserver>(transport);
+            routeHints.ObserveFileTransferRouteHint(CreateAuthorizedRouteHintNotification(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                FileTransferProtocol.ProtocolVersionV6,
+                "unit_test_current_fallback_publication",
+                publicationGeneration: 2,
+                runtimeGeneration: 2,
+                legGeneration: 2));
+
+            var logStart = GetOperationalLogLength();
+            routeHints.ObserveFileTransferRouteHint(CreateAuthorizedRouteHintNotification(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.FileTunaV4Token,
+                FileTransferProtocol.ProtocolVersionV4,
+                "unit_test_stale_tuna_publication",
+                publicationGeneration: 1,
+                runtimeGeneration: 1,
+                legGeneration: 1,
+                routeCommitGeneration: 1));
+
+            Assert.False(transport.IsFileTunaActiveForRouteSelection);
+            Assert.Equal(
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                GetFileTransferRouteHintTokenForTests(transport, transferId));
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=filetransfer_route_hint_ignored_stale_publication_authority;", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void RouteHintObserver_RejectsStaleLiveRouteEpochPublicationAuthority()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var options = NknTransportOptions.Load();
+            var client = new FakeNknClient("route.hint.stale.live.epoch.address");
+            using var transport = new NknSignalingTransport(
+                client,
+                options,
+                new NknIdentity("route-hint-stale-live-epoch-id", client.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+
+            const string sessionId = "session_route_hint_stale_live_epoch";
+            const string transferId = "transfer_route_hint_stale_live_epoch";
+            var routeHints = Assert.IsAssignableFrom<IFileTransferRouteHintObserver>(transport);
+            routeHints.ObserveFileTransferRouteHint(CreateAuthorizedRouteHintNotification(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                FileTransferProtocol.ProtocolVersionV6,
+                "unit_test_current_fallback_publication",
+                publicationGeneration: 2,
+                runtimeGeneration: 2,
+                legGeneration: 2,
+                liveRouteEpoch: 5));
+
+            var logStart = GetOperationalLogLength();
+            routeHints.ObserveFileTransferRouteHint(CreateAuthorizedRouteHintNotification(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.FileTunaV4Token,
+                FileTransferProtocol.ProtocolVersionV4,
+                "unit_test_stale_live_epoch_tuna_publication",
+                publicationGeneration: 3,
+                runtimeGeneration: 3,
+                legGeneration: 3,
+                liveRouteEpoch: 4,
+                routeCommitGeneration: 1));
+
+            Assert.Equal(
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                GetFileTransferRouteHintTokenForTests(transport, transferId));
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=filetransfer_route_hint_ignored_stale_publication_authority;", logTail, StringComparison.Ordinal);
+            Assert.Contains("live_route_epoch=4", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void RouteHintObserver_RejectsFileTunaV6PublicationTarget()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var options = NknTransportOptions.Load();
+            var client = new FakeNknClient("route.hint.file.tuna.v6.address");
+            using var transport = new NknSignalingTransport(
+                client,
+                options,
+                new NknIdentity("route-hint-file-tuna-v6-id", client.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+
+            const string sessionId = "session_route_hint_file_tuna_v6";
+            const string transferId = "transfer_route_hint_file_tuna_v6";
+            var logStart = GetOperationalLogLength();
+            var routeHints = Assert.IsAssignableFrom<IFileTransferRouteHintObserver>(transport);
+            routeHints.ObserveFileTransferRouteHint(new FileTransferRouteHintNotification(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.FileTunaV4Token,
+                FileTransferProtocol.ProtocolVersionV4,
+                "unit_test_file_tuna_v6_publication",
+                PublicationAuthority: new FileTransferRoutePublicationAuthority(
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Outbound,
+                    FileTransferRouteResolver.FileTunaV4Token,
+                    FileTransferProtocol.ProtocolVersionV4,
+                    1,
+                    1,
+                    0,
+                    1,
+                    1,
+                    1,
+                    "file_tuna_v6",
+                    FileTransferProtocol.ProtocolVersionV6,
+                    FileTransferTransportKind.Tuna,
+                    "unit_test_invalid_target")));
+
+            Assert.Null(GetFileTransferRouteHintTokenForTests(transport, transferId));
+            AssertNknRoute(transport, FileTransferRoute.RegularNknV4Fast, FileTransferProtocol.ProtocolVersionV4);
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=filetransfer_route_hint_ignored_invalid_publication_authority;", logTail, StringComparison.Ordinal);
+            Assert.Contains("rejection_reason=file_tuna_v6_rejected", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void RouteHintObservation_DoesNotPublishTunaActiveState()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var options = NknTransportOptions.Load();
+            var client = new FakeNknClient("route.hint.observation.only.address");
+            using var transport = new NknSignalingTransport(
+                client,
+                options,
+                new NknIdentity("route-hint-observation-only-id", client.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+
+            var logStart = GetOperationalLogLength();
+            InvokePrivateMethod(
+                transport,
+                "ObserveFileTransferRouteHintEvidence",
+                "transfer_route_hint_observation_only",
+                FileTransferRouteResolver.FileTunaV4Token,
+                FileTransferProtocol.ProtocolVersionV4,
+                "runtime_unlock_route_commit_accepted",
+                "unit_test_observation_only");
+
+            Assert.Null(GetFileTransferRouteHintTokenForTests(transport, "transfer_route_hint_observation_only"));
+            AssertNknRoute(transport, FileTransferRoute.RegularNknV4Fast, FileTransferProtocol.ProtocolVersionV4);
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=filetransfer_route_hint_observed_without_publication_authority;", logTail, StringComparison.Ordinal);
         }
         finally
         {
@@ -9840,7 +10196,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
             InvokePrivateMethod(
                 transport,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 "unrelated_transfer",
                 FileTransferRouteResolver.FileTunaV4Token,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -9850,7 +10206,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             var logStart = GetOperationalLogLength();
             InvokePrivateMethod(
                 transport,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.FileTunaV4Token,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -9887,7 +10243,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_fallback_leg_authority_late_completed_superseded";
             InvokePrivateMethod(
                 transport,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.FileTunaV4Token,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -10082,7 +10438,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_fallback_leg_authority_stale_request";
             InvokePrivateMethod(
                 transport,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.FileTunaV4Token,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -11481,7 +11837,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_tuna_v4_suppresses_stale_pending_regular";
             InvokePrivateMethod(
                 helper,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.FileTunaV4Token,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -11550,7 +11906,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_tuna_v4_suppresses_stale_immediate_regular";
             InvokePrivateMethod(
                 helper,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.FileTunaV4Token,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -11662,7 +12018,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_tuna_v4_allows_explicit_fallback_recovered";
             InvokePrivateMethod(
                 helper,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.FileTunaV4Token,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -12083,7 +12439,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_runtime_unlock_post_fallback_authority";
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -12295,7 +12651,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_activation_recovery_unproven_allows_retry";
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -12790,7 +13146,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_tuna_listener_start_no_pause";
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -13642,7 +13998,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -13714,7 +14070,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -14442,7 +14798,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -15550,7 +15906,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             dataSession.AvailabilityChanged += (_, e) => availabilityEvents.Enqueue(e);
             InvokePrivateMethod(
                 helper,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -15615,7 +15971,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             dataSession.AvailabilityChanged += (_, e) => availabilityEvents.Enqueue(e);
             InvokePrivateMethod(
                 helper,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -15857,7 +16213,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             helper.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, sessionId);
             InvokePrivateMethod(
                 helper,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -16049,14 +16405,14 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             var accelerationStatus = Assert.IsAssignableFrom<ITransportAccelerationStatus>(helper);
             InvokePrivateMethod(
                 helper,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
                 "test_regular_v4_runtime_unlock_uncommitted_data");
             helper.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen, sessionId);
             Assert.True(accelerationStatus.IsTransportAccelerationActive);
-            Assert.True(helper.IsFileTunaActiveForRouteSelection);
+            Assert.False(helper.IsFileTunaActiveForRouteSelection);
             InvokePrivateMethod(
                 helper,
                 "ApplyRuntimeUnlockTransaction",
@@ -16118,7 +16474,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 reason: "precommit_probe_commit_confirmed_reply");
             InvokePrivateMethod(helper, "NotifyTransportAccelerationStateChanged", "runtime_unlock_test_paired_commit_confirmed");
             Assert.True(accelerationStatus.IsTransportAccelerationActive);
-            Assert.True(helper.IsFileTunaActiveForRouteSelection);
+            Assert.False(helper.IsFileTunaActiveForRouteSelection);
         }
         finally
         {
@@ -16159,7 +16515,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             var accelerationStatus = Assert.IsAssignableFrom<ITransportAccelerationStatus>(helper);
             InvokePrivateMethod(
                 helper,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -16202,12 +16558,15 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.True(accelerationStatus.IsTransportAccelerationActive);
 
             var routeHints = Assert.IsAssignableFrom<IFileTransferRouteHintObserver>(helper);
-            routeHints.ObserveFileTransferRouteHint(new FileTransferRouteHintNotification(
+            routeHints.ObserveFileTransferRouteHint(CreateAuthorizedRouteHintNotification(
                 sessionId,
                 transferId,
                 FileTransferRouteResolver.PostTunaFallbackV6Token,
                 FileTransferProtocol.ProtocolVersionV6,
-                "unit_test_post_tuna_fallback_route"));
+                "unit_test_post_tuna_fallback_route",
+                publicationGeneration: 2,
+                runtimeGeneration: 2,
+                legGeneration: 2));
             Assert.False(accelerationStatus.IsTransportAccelerationActive);
             Assert.False(helper.IsFileTunaActiveForRouteSelection);
 
@@ -18230,7 +18589,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             const string transferId = "transfer_tuna_activation_listener_rearm_defer";
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -18518,7 +18877,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -18622,7 +18981,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -18711,7 +19070,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             InvokePrivateMethod(
                 host,
-                "TrackFileTransferRouteHint",
+                "TrackAuthorizedFileTransferRouteHintForTests",
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
@@ -18983,6 +19342,77 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
         Assert.Equal(expectedProtocolVersion, selection.ProtocolVersion);
     }
 
+    private static string? GetFileTransferRouteHintTokenForTests(NknSignalingTransport transport, string transferId)
+    {
+        var field = typeof(NknSignalingTransport).GetField(
+            "fileTransferRouteHints",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        var dictionary = Assert.IsAssignableFrom<System.Collections.IDictionary>(field.GetValue(transport));
+        if (!dictionary.Contains(transferId))
+        {
+            return null;
+        }
+
+        var value = dictionary[transferId];
+        var tokenProperty = value?.GetType().GetProperty("Token");
+        Assert.NotNull(tokenProperty);
+        return Assert.IsType<string>(tokenProperty.GetValue(value));
+    }
+
+    private static FileTransferRouteHintNotification CreateAuthorizedRouteHintNotification(
+        string sessionId,
+        string transferId,
+        string routeToken,
+        int protocolVersion,
+        string source,
+        int publicationGeneration = 0,
+        int runtimeGeneration = 0,
+        int terminalGeneration = 0,
+        long legGeneration = 0,
+        int liveRouteEpoch = 0,
+        int? routeCommitGeneration = null,
+        string coordinatorReason = "test_authorized_publication")
+    {
+        publicationGeneration = publicationGeneration <= 0
+            ? 1
+            : publicationGeneration;
+        runtimeGeneration = runtimeGeneration <= 0
+            ? publicationGeneration
+            : runtimeGeneration;
+        legGeneration = legGeneration <= 0
+            ? publicationGeneration
+            : legGeneration;
+        liveRouteEpoch = liveRouteEpoch <= 0
+            ? publicationGeneration
+            : liveRouteEpoch;
+        var targetTransport = string.Equals(routeToken, FileTransferRouteResolver.FileTunaV4Token, StringComparison.Ordinal)
+            ? FileTransferTransportKind.Tuna
+            : FileTransferTransportKind.RegularNkn;
+        return new FileTransferRouteHintNotification(
+            sessionId,
+            transferId,
+            routeToken,
+            protocolVersion,
+            source,
+            PublicationAuthority: new FileTransferRoutePublicationAuthority(
+                sessionId,
+                transferId,
+                FileTransferDirection.Outbound,
+                routeToken,
+                protocolVersion,
+                liveRouteEpoch,
+                runtimeGeneration,
+                terminalGeneration,
+                legGeneration,
+                publicationGeneration,
+                routeCommitGeneration,
+                routeToken,
+                protocolVersion,
+                targetTransport,
+                coordinatorReason));
+    }
+
     private static void TrackPostTunaFallbackRuntimeUnlockAdmissionDenied(
         NknSignalingTransport transport,
         string transferId,
@@ -18994,7 +19424,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
         string? fallbackCheckpointRequestId = "v6-regular-nkn-state-refresh:test")
         => InvokePrivateMethod(
             transport,
-            "TrackFileTransferRouteHint",
+            "TrackAuthorizedFileTransferRouteHintForTests",
             transferId,
             FileTransferRouteResolver.PostTunaFallbackV6Token,
             FileTransferProtocol.ProtocolVersionV6,
