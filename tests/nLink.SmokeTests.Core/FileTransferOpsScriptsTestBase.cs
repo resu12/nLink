@@ -1217,36 +1217,29 @@ public abstract class FileTransferOpsScriptsTestBase
         message = AppendFixtureLogFieldIfMissing(message, "terminal_generation", "0");
         message = AppendFixtureLogFieldIfMissing(message, "leg_generation", "1");
         message = AppendFixtureLogFieldIfMissing(message, "route_publication_generation", "1");
+        message = AppendFixtureLogFieldIfMissing(message, "route_publication_action_kind", "RoutePublication");
         message = AppendFixtureLogFieldIfMissing(message, "coordinator_decision_reason", "fixture_authorized_publication");
 
         route = GetFixtureLogField(message, "route");
-        var eventName = GetFixtureLogField(message, "event");
         var targetTransport = GetFixtureLogField(message, "target_transport");
-        var selectionReason = GetFixtureLogField(message, "selection_reason");
-        var handoffKind = GetFixtureLogField(message, "handoff_kind");
-        var requiresCommitFields =
-            string.Equals(eventName, "filetransfer_route_hint_authorized_publication_accepted", StringComparison.Ordinal) ||
-            string.Equals(route, "file_tuna_v4", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(targetTransport, "tuna", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(selectionReason, "file_tuna_active", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(handoffKind, "normal_to_tuna_activation", StringComparison.OrdinalIgnoreCase);
-        if (requiresCommitFields)
-        {
-            var targetRoute = string.IsNullOrWhiteSpace(GetFixtureLogField(message, "target_route"))
-                ? route
-                : GetFixtureLogField(message, "target_route");
-            var targetProtocolVersion = string.IsNullOrWhiteSpace(GetFixtureLogField(message, "target_protocol_version"))
-                ? protocolVersion
-                : GetFixtureLogField(message, "target_protocol_version");
-            var transport = string.IsNullOrWhiteSpace(targetTransport)
-                ? (string.Equals(route, "file_tuna_v4", StringComparison.OrdinalIgnoreCase) ? "tuna" : "regular_nkn")
-                : targetTransport;
+        var targetRoute = string.IsNullOrWhiteSpace(GetFixtureLogField(message, "target_route"))
+            ? route
+            : GetFixtureLogField(message, "target_route");
+        var targetProtocolVersion = string.IsNullOrWhiteSpace(GetFixtureLogField(message, "target_protocol_version"))
+            ? protocolVersion
+            : GetFixtureLogField(message, "target_protocol_version");
+        var transport = string.IsNullOrWhiteSpace(targetTransport)
+            ? (string.Equals(route, "file_tuna_v4", StringComparison.OrdinalIgnoreCase) ? "tuna" : "regular_nkn")
+            : targetTransport;
+        var actionKind = GetFixtureLogField(message, "route_publication_action_kind");
+        var routeCommitGeneration = string.Equals(actionKind, "RouteCommitPublication", StringComparison.Ordinal)
+            ? "1"
+            : "0";
 
-            message = AppendFixtureLogFieldIfMissing(message, "route_commit_generation", "1");
-            message = AppendFixtureLogFieldIfMissing(message, "target_route", targetRoute);
-            message = AppendFixtureLogFieldIfMissing(message, "target_protocol_version", targetProtocolVersion);
-            message = AppendFixtureLogFieldIfMissing(message, "target_transport", transport);
-        }
+        message = AppendFixtureLogFieldIfMissing(message, "route_commit_generation", routeCommitGeneration);
+        message = AppendFixtureLogFieldIfMissing(message, "target_route", targetRoute);
+        message = AppendFixtureLogFieldIfMissing(message, "target_protocol_version", targetProtocolVersion);
+        message = AppendFixtureLogFieldIfMissing(message, "target_transport", transport);
 
         return message;
     }

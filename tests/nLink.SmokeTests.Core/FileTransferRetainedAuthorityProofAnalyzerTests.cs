@@ -746,6 +746,12 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
     [InlineData("runtime_generation")]
     [InlineData("terminal_generation")]
     [InlineData("leg_generation")]
+    [InlineData("live_route_epoch")]
+    [InlineData("route_commit_generation")]
+    [InlineData("target_route")]
+    [InlineData("target_protocol_version")]
+    [InlineData("target_transport")]
+    [InlineData("route_publication_action_kind")]
     [InlineData("coordinator_decision_reason")]
     public async Task AnalyzeRetained_PublicationAuthorityFieldCoverageMissingRequiredField_Fails(string omittedFieldName)
     {
@@ -789,6 +795,88 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
         var lines = BuildAuthorityProofFixture(
             transferId,
             PublicationEffectMissingFieldMessage("filetransfer_route_selected", transferId, "route_commit_generation", route: "file_tuna_v4", protocolVersion: 4, targetTransport: "tuna"));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("fail", route["publication_authority_field_coverage_verdict"]);
+        Assert.NotEqual("0", route["publication_authority_missing_field_count"]);
+    }
+
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "PublicationAuthorityFieldCoverage")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_FileTunaV4NormalPublicationWithZeroCommitGeneration_Passes()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_phase5d_tuna_normal_publication_zero_commit_generation";
+        var lines = BuildAuthorityProofFixture(
+            transferId,
+            PublicationEffectMessage(
+                "filetransfer_route_selected",
+                transferId,
+                route: "file_tuna_v4",
+                protocolVersion: 4,
+                targetTransport: "tuna",
+                routeCommitGeneration: 0,
+                routePublicationActionKind: "RoutePublication"));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("pass", route["publication_authority_field_coverage_verdict"]);
+        Assert.Equal("0", route["publication_authority_missing_field_count"]);
+    }
+
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "PublicationAuthorityFieldCoverage")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RouteCommitPublicationZeroCommitGeneration_Fails()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_phase5d_route_commit_publication_zero_commit_generation";
+        var lines = BuildAuthorityProofFixture(
+            transferId,
+            PublicationEffectMessage(
+                "filetransfer_route_selected",
+                transferId,
+                route: "file_tuna_v4",
+                protocolVersion: 4,
+                targetTransport: "tuna",
+                routeCommitGeneration: 0,
+                routePublicationActionKind: "RouteCommitPublication"));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("fail", route["publication_authority_field_coverage_verdict"]);
+        Assert.NotEqual("0", route["publication_authority_missing_field_count"]);
+    }
+
+    [Theory]
+    [Trait("RetainedAuthorityProofSuite", "PublicationAuthorityFieldCoverage")]
+    [Trait("Category", "Smoke")]
+    [InlineData("route")]
+    [InlineData("protocol_version")]
+    public async Task AnalyzeRetained_RouteTransitionedMissingCanonicalRouteOrProtocol_Fails(string omittedFieldName)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var transferId = $"transfer_phase5d_route_transitioned_missing_{omittedFieldName}";
+        var lines = BuildAuthorityProofFixture(
+            transferId,
+            PublicationEffectMissingFieldMessage("filetransfer_route_transitioned", transferId, omittedFieldName));
 
         var result = await RunAnalyzeFixtureAsync(lines);
 
@@ -841,7 +929,7 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
             return $"event={eventName}; direction=outbound; transfer_id={transferId}; session_id=sess_a; route={route}; protocol_version={protocolVersion}; source=phase5d_fixture; reason=missing_publication_authority";
         }
 
-        return $"event={eventName}; direction=outbound; transfer_id={transferId}; session_id=sess_a; action_kind=RoutePublication; source=phase5d_fixture; attempted_action=route_publication; rejection_reason=route_publication_generation_mismatch; reason=phase5d_fixture; current_route={route}; current_protocol_version={protocolVersion}; current_live_route_epoch=0; current_runtime_generation=2; current_terminal_generation=0; current_leg_generation=2; current_route_publication_generation=2; current_route_commit_generation=2; current_target_route={route}; current_target_protocol_version={protocolVersion}; current_target_transport={targetTransport}; attempted_route={route}; attempted_protocol_version={protocolVersion}; attempted_live_route_epoch=0; attempted_runtime_generation=1; attempted_terminal_generation=0; attempted_leg_generation=1; attempted_route_publication_generation=1; attempted_route_commit_generation=1; attempted_target_route={route}; attempted_target_protocol_version={protocolVersion}; attempted_target_transport={targetTransport}; route={route}; protocol_version={protocolVersion}; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; route_publication_generation=1; route_commit_generation=1; target_route={route}; target_protocol_version={protocolVersion}; target_transport={targetTransport}";
+        return $"event={eventName}; direction=outbound; transfer_id={transferId}; session_id=sess_a; action_kind=RoutePublication; source=phase5d_fixture; attempted_action=route_publication; rejection_reason=route_publication_generation_mismatch; reason=phase5d_fixture; current_route={route}; current_protocol_version={protocolVersion}; current_live_route_epoch=0; current_runtime_generation=2; current_terminal_generation=0; current_leg_generation=2; current_route_publication_generation=2; current_route_commit_generation=0; current_target_route={route}; current_target_protocol_version={protocolVersion}; current_target_transport={targetTransport}; attempted_route={route}; attempted_protocol_version={protocolVersion}; attempted_live_route_epoch=0; attempted_runtime_generation=1; attempted_terminal_generation=0; attempted_leg_generation=1; attempted_route_publication_generation=1; attempted_route_commit_generation=0; attempted_target_route={route}; attempted_target_protocol_version={protocolVersion}; attempted_target_transport={targetTransport}; route={route}; protocol_version={protocolVersion}; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; route_publication_generation=1; route_commit_generation=0; target_route={route}; target_protocol_version={protocolVersion}; target_transport={targetTransport}; route_publication_action_kind=RoutePublication";
     }
 
     private static string PublicationEffectMessage(
@@ -854,24 +942,23 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
         int terminalGeneration = 0,
         int legGeneration = 1,
         int routePublicationGeneration = 1,
-        string targetTransport = "regular_nkn")
+        string targetTransport = "regular_nkn",
+        int routeCommitGeneration = 0,
+        string routePublicationActionKind = "RoutePublication")
     {
         var actualEventName = eventName;
         var coordinatorReason = "phase5d_fixture";
-        var routeCommitFields =
-            route == "file_tuna_v4" ||
-            targetTransport == "tuna" ||
-            actualEventName == "filetransfer_route_hint_authorized_publication_accepted"
-                ? $"; route_commit_generation=1; target_route={route}; target_protocol_version={protocolVersion}; target_transport={targetTransport}"
-                : string.Empty;
-        var common = $"event={actualEventName}; direction=outbound; transfer_id={transferId}; session_id=sess_a; route={route}; protocol_version={protocolVersion}; live_route_epoch={liveRouteEpoch}; runtime_generation={runtimeGeneration}; terminal_generation={terminalGeneration}; leg_generation={legGeneration}; route_publication_generation={routePublicationGeneration}; coordinator_decision_reason={coordinatorReason}{routeCommitFields}";
+        var effectiveTargetTransport = targetTransport == "regular_nkn" && route == "file_tuna_v4"
+            ? "tuna"
+            : targetTransport;
+        var common = $"event={actualEventName}; direction=outbound; transfer_id={transferId}; session_id=sess_a; route={route}; protocol_version={protocolVersion}; live_route_epoch={liveRouteEpoch}; runtime_generation={runtimeGeneration}; terminal_generation={terminalGeneration}; leg_generation={legGeneration}; route_publication_generation={routePublicationGeneration}; route_commit_generation={routeCommitGeneration}; target_route={route}; target_protocol_version={protocolVersion}; target_transport={effectiveTargetTransport}; route_publication_action_kind={routePublicationActionKind}; coordinator_decision_reason={coordinatorReason}";
         return actualEventName switch
         {
             "filetransfer_route_selected" => $"{common}; runtime_profile={route}; frame_family=v{protocolVersion}; handoff_kind={(route == "file_tuna_v4" ? "normal_to_tuna_activation" : "none")}; bridge_recovery_policy={route}; liveness_terminal_policy={route}; selection_reason={(route == "file_tuna_v4" ? "file_tuna_active" : "phase5d_fixture")}; file_tuna_active={(route == "file_tuna_v4" ? 1 : 0)}; post_tuna_fallback_active={(route == "post_tuna_fallback_v6" ? 1 : 0)}; diagnostic_regular_nkn_v6=0; transport_profile=nkn",
-            "filetransfer_live_route_epoch_started" => $"{common}; previous_route=regular_nkn_v4_fast; target_transport={targetTransport}; state=started; reason=phase5d_fixture",
-            "filetransfer_live_route_epoch_recovered" => $"{common}; target_transport={targetTransport}; reason=phase5d_fixture",
+            "filetransfer_live_route_epoch_started" => $"{common}; previous_route=regular_nkn_v4_fast; state=started; reason=phase5d_fixture",
+            "filetransfer_live_route_epoch_recovered" => $"{common}; reason=phase5d_fixture",
             "filetransfer_runtime_started" => $"{common}; role=sender; runtime_profile={route}; frame_family=v{protocolVersion}; bridge_recovery_policy={route}",
-            "filetransfer_route_transitioned" => $"{common}; previous_route=regular_nkn_v4_fast; reason=phase5d_fixture",
+            "filetransfer_route_transitioned" => $"{common}; previous_route=regular_nkn_v4_fast; new_route={route}; previous_protocol_version=4; new_protocol_version={protocolVersion}; reason=phase5d_fixture",
             "filetransfer_route_hint_authorized_publication_accepted" => $"{common}; source=phase5d_fixture; reason=authorized_publication",
             _ => throw new ArgumentOutOfRangeException(nameof(eventName), eventName, "Unknown publication effect event.")
         };

@@ -11682,10 +11682,14 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         var routeTransitionLog = log
             .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
             .Single(line => line.Contains("event=filetransfer_route_transitioned; direction=outbound;", StringComparison.Ordinal));
-        Assert.Contains("route_publication_generation=", routeTransitionLog, StringComparison.Ordinal);
-        Assert.Contains("runtime_generation=", routeTransitionLog, StringComparison.Ordinal);
-        Assert.Contains("terminal_generation=", routeTransitionLog, StringComparison.Ordinal);
-        Assert.Contains("leg_generation=", routeTransitionLog, StringComparison.Ordinal);
+        AssertPublicationAuthorityFields(
+            routeTransitionLog,
+            route: FileTransferRouteResolver.FileTunaV4Token,
+            protocolVersion: FileTransferProtocol.ProtocolVersionV4,
+            targetTransport: "tuna",
+            actionKind: "RouteCommitPublication");
+        Assert.Contains("route=file_tuna_v4", routeTransitionLog, StringComparison.Ordinal);
+        Assert.Contains("protocol_version=4", routeTransitionLog, StringComparison.Ordinal);
         Assert.Contains("coordinator_decision_reason=accepted", routeTransitionLog, StringComparison.Ordinal);
         Assert.Contains("event=runtime_unlock_paired_commit_confirmed; direction=outbound;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=runtime_unlock_paired_commit_aborted; direction=outbound;", log, StringComparison.Ordinal);
@@ -16994,6 +16998,26 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
             cursor = recoveredIndex;
         }
+    }
+
+    private static void AssertPublicationAuthorityFields(
+        string logLine,
+        string route,
+        int protocolVersion,
+        string targetTransport,
+        string actionKind = "RoutePublication")
+    {
+        Assert.Contains("live_route_epoch=", logLine, StringComparison.Ordinal);
+        Assert.Contains("route_publication_generation=", logLine, StringComparison.Ordinal);
+        Assert.Contains("runtime_generation=", logLine, StringComparison.Ordinal);
+        Assert.Contains("terminal_generation=", logLine, StringComparison.Ordinal);
+        Assert.Contains("leg_generation=", logLine, StringComparison.Ordinal);
+        Assert.Contains("route_commit_generation=", logLine, StringComparison.Ordinal);
+        Assert.Contains($"target_route={route}", logLine, StringComparison.Ordinal);
+        Assert.Contains($"target_protocol_version={protocolVersion}", logLine, StringComparison.Ordinal);
+        Assert.Contains($"target_transport={targetTransport}", logLine, StringComparison.Ordinal);
+        Assert.Contains($"route_publication_action_kind={actionKind}", logLine, StringComparison.Ordinal);
+        Assert.Contains("coordinator_decision_reason=", logLine, StringComparison.Ordinal);
     }
 
     private static int CountOccurrences(string text, string value)

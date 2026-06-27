@@ -12954,7 +12954,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     {
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_route_selected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; route={routeSelection.TelemetryToken}; protocol_version={routeSelection.ProtocolVersion}; runtime_profile={FormatFileTransferRouteRuntimeProfile(routeSelection.RuntimeProfile)}; frame_family={FormatFileTransferFrameFamily(routeSelection.FrameFamily)}; handoff_kind={FormatFileTransferTransportHandoffKind(routeSelection.HandoffKind)}; bridge_recovery_policy={FormatFileTransferRouteBridgeRecoveryPolicy(routeSelection.BridgeRecoveryPolicy)}; liveness_terminal_policy={FormatFileTransferRouteLivenessTerminalPolicy(routeSelection.LivenessTerminalPolicy)}; selection_reason={FormatProtocolLogValue(routeSelection.SelectionReason)}; file_tuna_active={(routeInput.IsFileTunaActive ? 1 : 0)}; post_tuna_fallback_active={(routeInput.IsPostTunaFileFallbackActive ? 1 : 0)}; diagnostic_regular_nkn_v6={(routeInput.IsDiagnosticRegularNknV6RouteEnabled ? 1 : 0)}; transport_profile={FormatFileTransferTransportProfileKind(routeInput.TransportProfileKind)}{FormatLiveRouteEpochSuffix(liveRouteEpochId)}{FormatRoutePublicationAuthoritySuffix(routePublicationToken, coordinatorDecisionReason)}");
+            $"event=filetransfer_route_selected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; route={routeSelection.TelemetryToken}; protocol_version={routeSelection.ProtocolVersion}; runtime_profile={FormatFileTransferRouteRuntimeProfile(routeSelection.RuntimeProfile)}; frame_family={FormatFileTransferFrameFamily(routeSelection.FrameFamily)}; handoff_kind={FormatFileTransferTransportHandoffKind(routeSelection.HandoffKind)}; bridge_recovery_policy={FormatFileTransferRouteBridgeRecoveryPolicy(routeSelection.BridgeRecoveryPolicy)}; liveness_terminal_policy={FormatFileTransferRouteLivenessTerminalPolicy(routeSelection.LivenessTerminalPolicy)}; selection_reason={FormatProtocolLogValue(routeSelection.SelectionReason)}; file_tuna_active={(routeInput.IsFileTunaActive ? 1 : 0)}; post_tuna_fallback_active={(routeInput.IsPostTunaFileFallbackActive ? 1 : 0)}; diagnostic_regular_nkn_v6={(routeInput.IsDiagnosticRegularNknV6RouteEnabled ? 1 : 0)}; transport_profile={FormatFileTransferTransportProfileKind(routeInput.TransportProfileKind)}{FormatPublicationLiveRouteEpochSuffix(routePublicationToken, liveRouteEpochId)}{FormatRoutePublicationAuthoritySuffix(routePublicationToken, coordinatorDecisionReason)}");
     }
 
     private void NotifyFileTransferRouteHintObserver(
@@ -13014,13 +13014,20 @@ public sealed partial class SessionFileTransferService : IDisposable
     {
         LocalOperationalLog.Warn(
             "FileTransferService",
-            $"event=filetransfer_route_transitioned; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; previous_route={previousRouteSelection.TelemetryToken}; new_route={routeSelection.TelemetryToken}; previous_protocol_version={previousRouteSelection.ProtocolVersion}; new_protocol_version={routeSelection.ProtocolVersion}; previous_runtime_profile={FormatFileTransferRouteRuntimeProfile(previousRouteSelection.RuntimeProfile)}; new_runtime_profile={FormatFileTransferRouteRuntimeProfile(routeSelection.RuntimeProfile)}; previous_frame_family={FormatFileTransferFrameFamily(previousRouteSelection.FrameFamily)}; new_frame_family={FormatFileTransferFrameFamily(routeSelection.FrameFamily)}; handoff_kind={FormatFileTransferTransportHandoffKind(routeSelection.HandoffKind)}; bridge_recovery_policy={FormatFileTransferRouteBridgeRecoveryPolicy(routeSelection.BridgeRecoveryPolicy)}; selection_reason={FormatProtocolLogValue(routeSelection.SelectionReason)}; reason={FormatProtocolLogValue(reason)}{FormatRoutePublicationAuthoritySuffix(routePublicationToken, coordinatorDecisionReason)}");
+            $"event=filetransfer_route_transitioned; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; route={routeSelection.TelemetryToken}; protocol_version={routeSelection.ProtocolVersion}; previous_route={previousRouteSelection.TelemetryToken}; new_route={routeSelection.TelemetryToken}; previous_protocol_version={previousRouteSelection.ProtocolVersion}; new_protocol_version={routeSelection.ProtocolVersion}; previous_runtime_profile={FormatFileTransferRouteRuntimeProfile(previousRouteSelection.RuntimeProfile)}; new_runtime_profile={FormatFileTransferRouteRuntimeProfile(routeSelection.RuntimeProfile)}; previous_frame_family={FormatFileTransferFrameFamily(previousRouteSelection.FrameFamily)}; new_frame_family={FormatFileTransferFrameFamily(routeSelection.FrameFamily)}; handoff_kind={FormatFileTransferTransportHandoffKind(routeSelection.HandoffKind)}; bridge_recovery_policy={FormatFileTransferRouteBridgeRecoveryPolicy(routeSelection.BridgeRecoveryPolicy)}; selection_reason={FormatProtocolLogValue(routeSelection.SelectionReason)}; reason={FormatProtocolLogValue(reason)}{FormatPublicationLiveRouteEpochSuffix(routePublicationToken, 0)}{FormatRoutePublicationAuthoritySuffix(routePublicationToken, coordinatorDecisionReason)}");
     }
 
     private static string FormatLiveRouteEpochSuffix(int liveRouteEpochId)
         => liveRouteEpochId > 0
             ? $"; live_route_epoch={liveRouteEpochId}"
             : string.Empty;
+
+    private static string FormatPublicationLiveRouteEpochSuffix(
+        RoutePublicationToken? routePublicationToken,
+        int liveRouteEpochId)
+        => routePublicationToken is { } token && !token.IsDefault
+            ? $"; live_route_epoch={token.LiveRouteEpoch}"
+            : FormatLiveRouteEpochSuffix(liveRouteEpochId);
 
     private static string FormatRoutePublicationAuthoritySuffix(
         RoutePublicationToken? routePublicationToken,
@@ -13031,10 +13038,9 @@ public sealed partial class SessionFileTransferService : IDisposable
             return string.Empty;
         }
 
-        var routeCommitGenerationSuffix = token.RouteCommitGeneration is { } routeCommitGeneration
-            ? $"; route_commit_generation={routeCommitGeneration}"
-            : string.Empty;
-        return $"; route_publication_generation={token.PublicationGeneration}; runtime_generation={token.RuntimeGeneration}; terminal_generation={token.TerminalGeneration}; leg_generation={token.LegGeneration}{routeCommitGenerationSuffix}; coordinator_decision_reason={FormatProtocolLogValue(coordinatorDecisionReason ?? token.Reason)}";
+        var targetRoute = FileTransferRouteResolver.Resolve(token.TargetRoute).TelemetryToken;
+        var routeCommitGeneration = token.RouteCommitGeneration ?? 0;
+        return $"; route_publication_generation={token.PublicationGeneration}; runtime_generation={token.RuntimeGeneration}; terminal_generation={token.TerminalGeneration}; leg_generation={token.LegGeneration}; route_commit_generation={routeCommitGeneration}; target_route={targetRoute}; target_protocol_version={token.TargetProtocolVersion}; target_transport={FormatFileTransferTransportKind(token.TargetTransport)}; route_publication_action_kind={FormatProtocolLogValue(token.ActionKind.ToString())}; coordinator_decision_reason={FormatProtocolLogValue(coordinatorDecisionReason ?? token.Reason)}";
     }
 
     private static FileTransferRoutePublicationAuthority? CreateRoutePublicationAuthority(
@@ -13061,6 +13067,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             FileTransferRouteResolver.Resolve(token.TargetRoute).TelemetryToken,
             token.TargetProtocolVersion,
             token.TargetTransport,
+            token.ActionKind.ToString(),
             coordinatorDecisionReason ?? token.Reason);
     }
 
@@ -13377,7 +13384,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     {
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_runtime_started; direction={direction.ToString().ToLowerInvariant()}; role={FormatProtocolLogValue(runtimeRole)}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; route={routeSelection.TelemetryToken}; protocol_version={routeSelection.ProtocolVersion}; runtime_profile={FormatFileTransferRouteRuntimeProfile(routeSelection.RuntimeProfile)}; frame_family={FormatFileTransferFrameFamily(routeSelection.FrameFamily)}; handoff_kind={FormatFileTransferTransportHandoffKind(routeSelection.HandoffKind)}; bridge_recovery_policy={FormatFileTransferRouteBridgeRecoveryPolicy(routeSelection.BridgeRecoveryPolicy)}; liveness_terminal_policy={FormatFileTransferRouteLivenessTerminalPolicy(routeSelection.LivenessTerminalPolicy)}; selection_reason={FormatProtocolLogValue(routeSelection.SelectionReason)}{FormatLiveRouteEpochSuffix(liveRouteEpochId)}{FormatRoutePublicationAuthoritySuffix(routePublicationToken, coordinatorDecisionReason)}");
+            $"event=filetransfer_runtime_started; direction={direction.ToString().ToLowerInvariant()}; role={FormatProtocolLogValue(runtimeRole)}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; route={routeSelection.TelemetryToken}; protocol_version={routeSelection.ProtocolVersion}; runtime_profile={FormatFileTransferRouteRuntimeProfile(routeSelection.RuntimeProfile)}; frame_family={FormatFileTransferFrameFamily(routeSelection.FrameFamily)}; handoff_kind={FormatFileTransferTransportHandoffKind(routeSelection.HandoffKind)}; bridge_recovery_policy={FormatFileTransferRouteBridgeRecoveryPolicy(routeSelection.BridgeRecoveryPolicy)}; liveness_terminal_policy={FormatFileTransferRouteLivenessTerminalPolicy(routeSelection.LivenessTerminalPolicy)}; selection_reason={FormatProtocolLogValue(routeSelection.SelectionReason)}{FormatPublicationLiveRouteEpochSuffix(routePublicationToken, liveRouteEpochId)}{FormatRoutePublicationAuthoritySuffix(routePublicationToken, coordinatorDecisionReason)}");
     }
 
     private static void LogV6SessionOpenRejected(

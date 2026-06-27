@@ -3825,23 +3825,13 @@ function Get-FileTransferPublicationAuthorityRequiredFields {
             'terminal_generation',
             'leg_generation',
             'route_publication_generation',
+            'route_commit_generation',
+            'target_route',
+            'target_protocol_version',
+            'target_transport',
+            'route_publication_action_kind',
             'coordinator_decision_reason')) {
         $fields.Add($fieldName) | Out-Null
-    }
-
-    $route = Get-FileTransferEventField -Event $Event -Name 'route' -Default ''
-    $targetTransport = Get-FileTransferEventField -Event $Event -Name 'target_transport' -Default ''
-    $selectionReason = Get-FileTransferEventField -Event $Event -Name 'selection_reason' -Default ''
-    $handoffKind = Get-FileTransferEventField -Event $Event -Name 'handoff_kind' -Default ''
-    $requiresCommitFields = $Event.EventName -eq 'filetransfer_route_hint_authorized_publication_accepted' -or
-        $route -eq 'file_tuna_v4' -or
-        $targetTransport -eq 'tuna' -or
-        $selectionReason -eq 'file_tuna_active' -or
-        $handoffKind -eq 'normal_to_tuna_activation'
-    if ($requiresCommitFields) {
-        foreach ($fieldName in @('route_commit_generation', 'target_route', 'target_protocol_version', 'target_transport')) {
-            $fields.Add($fieldName) | Out-Null
-        }
     }
 
     return $fields.ToArray()
@@ -3858,6 +3848,10 @@ function Test-FileTransferPublicationAuthorityFieldValue {
         return $false
     }
 
+    if ($FieldName -eq 'route_publication_action_kind') {
+        return $value -eq 'RoutePublication' -or $value -eq 'RouteCommitPublication'
+    }
+
     if ($FieldName -match '(^protocol_version$|^target_protocol_version$|generation$|epoch$)') {
         $number = 0L
         if (-not [long]::TryParse([string]$value, [ref]$number)) {
@@ -3866,6 +3860,13 @@ function Test-FileTransferPublicationAuthorityFieldValue {
 
         if ($number -lt 0) {
             return $false
+        }
+
+        if ($FieldName -eq 'route_commit_generation') {
+            $actionKind = Get-FileTransferEventField -Event $Event -Name 'route_publication_action_kind' -Default ''
+            if ($actionKind -eq 'RouteCommitPublication' -and $number -le 0) {
+                return $false
+            }
         }
     }
 

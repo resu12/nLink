@@ -421,6 +421,16 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         var logTail = ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_route_selected; direction=inbound", logTail, StringComparison.Ordinal);
         Assert.Contains("route=post_tuna_fallback_v6; protocol_version=6", logTail, StringComparison.Ordinal);
+        var routeSelectedLog = logTail
+            .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+            .Single(line =>
+                line.Contains("event=filetransfer_route_selected; direction=inbound", StringComparison.Ordinal) &&
+                line.Contains("route=post_tuna_fallback_v6; protocol_version=6", StringComparison.Ordinal));
+        AssertPublicationAuthorityFields(
+            routeSelectedLog,
+            route: FileTransferRouteResolver.PostTunaFallbackV6Token,
+            protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+            targetTransport: "regular_nkn");
         Assert.Contains("event=filetransfer_v6_peer_epoch_promoted_live_route; direction=inbound", logTail, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_v6_chunk_batch_received", logTail, StringComparison.Ordinal);
         Assert.DoesNotContain(
@@ -3454,6 +3464,26 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                 return received;
             }
         }
+    }
+
+    private static void AssertPublicationAuthorityFields(
+        string logLine,
+        string route,
+        int protocolVersion,
+        string targetTransport,
+        string actionKind = "RoutePublication")
+    {
+        Assert.Contains("live_route_epoch=", logLine, StringComparison.Ordinal);
+        Assert.Contains("route_publication_generation=", logLine, StringComparison.Ordinal);
+        Assert.Contains("runtime_generation=", logLine, StringComparison.Ordinal);
+        Assert.Contains("terminal_generation=", logLine, StringComparison.Ordinal);
+        Assert.Contains("leg_generation=", logLine, StringComparison.Ordinal);
+        Assert.Contains("route_commit_generation=", logLine, StringComparison.Ordinal);
+        Assert.Contains($"target_route={route}", logLine, StringComparison.Ordinal);
+        Assert.Contains($"target_protocol_version={protocolVersion}", logLine, StringComparison.Ordinal);
+        Assert.Contains($"target_transport={targetTransport}", logLine, StringComparison.Ordinal);
+        Assert.Contains($"route_publication_action_kind={actionKind}", logLine, StringComparison.Ordinal);
+        Assert.Contains("coordinator_decision_reason=", logLine, StringComparison.Ordinal);
     }
 
     private static int CountOccurrences(string text, string value)

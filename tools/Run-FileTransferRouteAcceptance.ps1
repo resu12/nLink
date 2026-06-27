@@ -3938,6 +3938,102 @@ function Invoke-Phase5BridgeReadinessPreflight {
     }
 }
 
+function Assert-Phase5RouteAcceptanceExecutableFresh {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$RunRoot,
+        [Parameter(Mandatory = $true)][string]$ResolvedExePath
+    )
+
+    $exeItem = Get-Item -LiteralPath $ResolvedExePath -ErrorAction Stop
+    $freshnessInputs = New-Object System.Collections.Generic.List[System.IO.FileInfo]
+    foreach ($root in @(
+            (Join-Path $RepoRoot 'src'),
+            (Join-Path $RepoRoot 'tools\FileTransferSoak'))) {
+        if (Test-Path -LiteralPath $root -PathType Container) {
+            foreach ($file in Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue) {
+                if ($file.FullName -match '[\\/](bin|obj)[\\/]') {
+                    continue
+                }
+
+                $freshnessInputs.Add($file) | Out-Null
+            }
+        }
+    }
+
+    foreach ($path in @(
+            (Join-Path $RepoRoot 'tools\Run-FileTransferRouteAcceptance.ps1'),
+            (Join-Path $RepoRoot 'VERSION'))) {
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            $freshnessInputs.Add((Get-Item -LiteralPath $path)) | Out-Null
+        }
+    }
+
+    $headUnixRaw = (& git -C $RepoRoot log -1 --format=%ct 2>$null)
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$headUnixRaw)) {
+        throw 'Phase 5 executable freshness preflight could not resolve current Git HEAD commit time.'
+    }
+
+    $headUnix = 0L
+    if (-not [long]::TryParse(([string]$headUnixRaw).Trim(), [ref]$headUnix)) {
+        throw ("Phase 5 executable freshness preflight could not parse current Git HEAD commit time: {0}" -f $headUnixRaw)
+    }
+
+    $headUtc = [DateTimeOffset]::FromUnixTimeSeconds($headUnix)
+    $latestInput = @($freshnessInputs | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1)
+    $latestInputUtc = if ($latestInput.Count -gt 0) {
+        [DateTimeOffset]$latestInput[0].LastWriteTimeUtc
+    }
+    else {
+        $headUtc
+    }
+    $latestInputPath = if ($latestInput.Count -gt 0) {
+        $latestInput[0].FullName
+    }
+    else {
+        '(none)'
+    }
+    $baselineUtc = if ($latestInputUtc -gt $headUtc) { $latestInputUtc } else { $headUtc }
+    $exeUtc = [DateTimeOffset]$exeItem.LastWriteTimeUtc
+    $passed = $exeUtc -ge $baselineUtc
+    $reason = if ($passed) {
+        'portable_executable_fresh'
+    }
+    elseif ($latestInputUtc -gt $headUtc -and $exeUtc -lt $latestInputUtc) {
+        'portable_executable_older_than_source_inputs'
+    }
+    else {
+        'portable_executable_older_than_git_head'
+    }
+    $lines = @(
+        'Phase 5 Portable Executable Freshness Preflight',
+        ("passed={0}" -f ($(if ($passed) { '1' } else { '0' }))),
+        ("reason={0}" -f $reason),
+        ("exe_path={0}" -f $exeItem.FullName),
+        ("exe_last_write_utc={0:o}" -f $exeUtc),
+        ("git_head_utc={0:o}" -f $headUtc),
+        ("latest_source_input_utc={0:o}" -f $latestInputUtc),
+        ("latest_source_input_path={0}" -f $latestInputPath),
+        ("freshness_baseline_utc={0:o}" -f $baselineUtc)
+    )
+    $lines | Set-Content -LiteralPath (Join-Path $RunRoot 'phase5-portable-freshness-preflight.txt') -Encoding UTF8
+    @{
+        event = 'phase5_portable_freshness_preflight'
+        passed = $passed
+        reason = $reason
+        exePath = $exeItem.FullName
+        exeLastWriteUtc = $exeUtc.ToString('o')
+        gitHeadUtc = $headUtc.ToString('o')
+        latestSourceInputUtc = $latestInputUtc.ToString('o')
+        latestSourceInputPath = $latestInputPath
+        freshnessBaselineUtc = $baselineUtc.ToString('o')
+    } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $RunRoot 'phase5-portable-freshness-preflight.json') -Encoding UTF8
+
+    if (-not $passed) {
+        throw ("Phase 5 portable executable is stale: exe_last_write_utc={0:o}; freshness_baseline_utc={1:o}; reason={2}; latest_source_input={3}; rebuild/publish the portable app before rerunning GUI acceptance." -f $exeUtc, $baselineUtc, $reason, $latestInputPath)
+    }
+}
+
 function Test-Phase5BridgeReadinessPreflightRetryableFailure {
     param(
         [Parameter(Mandatory = $true)]$PreflightResult
@@ -5971,6 +6067,10 @@ try {
             $resolvedExePath = (Resolve-Path -LiteralPath (Resolve-RouteAcceptancePath -RepoRoot $repoRoot -Path $ExePath)).Path
             $resolvedWalletPath = (Resolve-Path -LiteralPath (Resolve-RouteAcceptancePath -RepoRoot $repoRoot -Path $WalletPath)).Path
             $resolvedSidecarPath = (Resolve-Path -LiteralPath (Resolve-RouteAcceptancePath -RepoRoot $repoRoot -Path $SidecarPath)).Path
+            if ($acceptancePhase -eq 'phase5') {
+                Assert-Phase5RouteAcceptanceExecutableFresh -RepoRoot $repoRoot -RunRoot $runRoot -ResolvedExePath $resolvedExePath
+            }
+
             Ensure-RouteAcceptancePackagedBridgeRuntime -RepoRoot $repoRoot -ResolvedExePath $resolvedExePath -ArtifactDir $runRoot -Runtime $Runtime
             Assert-RouteAcceptanceCleanAppProcessState -ResolvedExePath $resolvedExePath -ArtifactDir $runRoot -Reason ("{0}_matrix_start" -f $acceptancePhase)
         }

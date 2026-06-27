@@ -9889,6 +9889,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Contains("event=filetransfer_route_hint_authorized_publication_accepted;", logTail, StringComparison.Ordinal);
             Assert.Contains("route_publication_generation=1", logTail, StringComparison.Ordinal);
             Assert.Contains("live_route_epoch=1", logTail, StringComparison.Ordinal);
+            Assert.Contains("route_publication_action_kind=RouteCommitPublication", logTail, StringComparison.Ordinal);
         }
         finally
         {
@@ -10097,6 +10098,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                     "file_tuna_v6",
                     FileTransferProtocol.ProtocolVersionV6,
                     FileTransferTransportKind.Tuna,
+                    "RoutePublication",
                     "unit_test_invalid_target")));
 
             Assert.Null(GetFileTransferRouteHintTokenForTests(transport, transferId));
@@ -10104,6 +10106,68 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=filetransfer_route_hint_ignored_invalid_publication_authority;", logTail, StringComparison.Ordinal);
             Assert.Contains("rejection_reason=file_tuna_v6_rejected", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Theory]
+    [Trait("Category", "Smoke")]
+    [InlineData("not_a_publication_action", 1, "invalid_publication_action_kind")]
+    [InlineData("RouteCommitPublication", null, "route_commit_generation_missing")]
+    [InlineData("RouteCommitPublication", 0, "route_commit_generation_missing")]
+    public void RouteHintObserver_RejectsMalformedPublicationActionAuthority(
+        string routePublicationActionKind,
+        int? routeCommitGeneration,
+        string expectedRejectionReason)
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var options = NknTransportOptions.Load();
+            var client = new FakeNknClient("route.hint.malformed.publication.action.address");
+            using var transport = new NknSignalingTransport(
+                client,
+                options,
+                new NknIdentity("route-hint-malformed-publication-action-id", client.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+
+            const string sessionId = "session_route_hint_malformed_publication_action";
+            var transferId = $"transfer_route_hint_malformed_publication_action_{expectedRejectionReason}_{routeCommitGeneration?.ToString(CultureInfo.InvariantCulture) ?? "null"}";
+            var logStart = GetOperationalLogLength();
+            var routeHints = Assert.IsAssignableFrom<IFileTransferRouteHintObserver>(transport);
+            routeHints.ObserveFileTransferRouteHint(new FileTransferRouteHintNotification(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.FileTunaV4Token,
+                FileTransferProtocol.ProtocolVersionV4,
+                "unit_test_malformed_publication_action",
+                PublicationAuthority: new FileTransferRoutePublicationAuthority(
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Outbound,
+                    FileTransferRouteResolver.FileTunaV4Token,
+                    FileTransferProtocol.ProtocolVersionV4,
+                    1,
+                    1,
+                    0,
+                    1,
+                    1,
+                    routeCommitGeneration,
+                    FileTransferRouteResolver.FileTunaV4Token,
+                    FileTransferProtocol.ProtocolVersionV4,
+                    FileTransferTransportKind.Tuna,
+                    routePublicationActionKind,
+                    "unit_test_malformed_publication_action")));
+
+            Assert.Null(GetFileTransferRouteHintTokenForTests(transport, transferId));
+            AssertNknRoute(transport, FileTransferRoute.RegularNknV4Fast, FileTransferProtocol.ProtocolVersionV4);
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=filetransfer_route_hint_ignored_invalid_publication_authority;", logTail, StringComparison.Ordinal);
+            Assert.Contains($"rejection_reason={expectedRejectionReason}", logTail, StringComparison.Ordinal);
         }
         finally
         {
@@ -19410,6 +19474,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 routeToken,
                 protocolVersion,
                 targetTransport,
+                routeCommitGeneration.HasValue ? "RouteCommitPublication" : "RoutePublication",
                 coordinatorReason));
     }
 

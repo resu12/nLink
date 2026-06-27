@@ -1939,6 +1939,7 @@ public sealed partial class NknSignalingTransport
             routeToken,
             protocolVersion,
             targetTransport,
+            "RoutePublication",
             SanitizeLogToken(source));
     }
 
@@ -1981,9 +1982,25 @@ public sealed partial class NknSignalingTransport
             string.IsNullOrWhiteSpace(authority.SessionId) ||
             string.IsNullOrWhiteSpace(authority.TransferId) ||
             string.IsNullOrWhiteSpace(authority.RouteToken) ||
-            string.IsNullOrWhiteSpace(authority.TargetRouteToken))
+            string.IsNullOrWhiteSpace(authority.TargetRouteToken) ||
+            string.IsNullOrWhiteSpace(authority.RoutePublicationActionKind))
         {
             rejectionReason = "invalid_publication_authority";
+            return false;
+        }
+
+        var routePublicationActionKind = authority.RoutePublicationActionKind.Trim();
+        if (!string.Equals(routePublicationActionKind, "RoutePublication", StringComparison.Ordinal) &&
+            !string.Equals(routePublicationActionKind, "RouteCommitPublication", StringComparison.Ordinal))
+        {
+            rejectionReason = "invalid_publication_action_kind";
+            return false;
+        }
+
+        if (string.Equals(routePublicationActionKind, "RouteCommitPublication", StringComparison.Ordinal) &&
+            authority.RouteCommitGeneration.GetValueOrDefault() <= 0)
+        {
+            rejectionReason = "route_commit_generation_missing";
             return false;
         }
 
@@ -2150,7 +2167,7 @@ public sealed partial class NknSignalingTransport
 
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=filetransfer_route_hint_authorized_publication_accepted; session_id={SanitizeLogToken(notification.SessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; direction={FormatFileTransferDirection(authority.Direction)}; route={selection.TelemetryToken}; protocol_version={normalizedProtocolVersion}; live_route_epoch={authority.LiveRouteEpoch}; source={normalizedSource}; route_publication_generation={authority.RoutePublicationGeneration}; runtime_generation={authority.RuntimeGeneration}; terminal_generation={authority.TerminalGeneration}; leg_generation={authority.LegGeneration}; route_commit_generation={authority.RouteCommitGeneration ?? 0}; target_route={SanitizeLogToken(authority.TargetRouteToken)}; target_protocol_version={authority.TargetProtocolVersion}; target_transport={FormatFileTransferTransportKindForLog(authority.TargetTransport)}; coordinator_decision_reason={SanitizeLogToken(authority.CoordinatorDecisionReason)}");
+            $"event=filetransfer_route_hint_authorized_publication_accepted; session_id={SanitizeLogToken(notification.SessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; direction={FormatFileTransferDirection(authority.Direction)}; route={selection.TelemetryToken}; protocol_version={normalizedProtocolVersion}; live_route_epoch={authority.LiveRouteEpoch}; source={normalizedSource}; route_publication_generation={authority.RoutePublicationGeneration}; runtime_generation={authority.RuntimeGeneration}; terminal_generation={authority.TerminalGeneration}; leg_generation={authority.LegGeneration}; route_commit_generation={authority.RouteCommitGeneration ?? 0}; target_route={SanitizeLogToken(authority.TargetRouteToken)}; target_protocol_version={authority.TargetProtocolVersion}; target_transport={FormatFileTransferTransportKindForLog(authority.TargetTransport)}; route_publication_action_kind={SanitizeLogToken(authority.RoutePublicationActionKind)}; coordinator_decision_reason={SanitizeLogToken(authority.CoordinatorDecisionReason)}");
 
         if (client is RealNknClientAdapter realClient)
         {

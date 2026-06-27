@@ -189,6 +189,7 @@ public sealed record FileTransferRoutePublicationAuthority(
     string TargetRouteToken,
     int TargetProtocolVersion,
     FileTransferTransportKind TargetTransport,
+    string RoutePublicationActionKind,
     string CoordinatorDecisionReason);
 
 public sealed record FileTransferRouteHintNotification(
