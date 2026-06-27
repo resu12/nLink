@@ -3276,16 +3276,24 @@ function Get-FileTransferStaleRejectedProofActionFamily {
             'progressmutation' { return 'progress' }
             'fallbackcheckpointbegin' { return 'checkpoint' }
             'fallbackcheckpointaccept' { return 'checkpoint' }
-            'FallbackCheckpointReissue' { return 'checkpoint' }
+            'fallbackcheckpointreissue' { return 'checkpoint' }
             'fallbackcheckpointretire' { return 'checkpoint' }
-            'FallbackTailQuiescent' { return 'checkpoint' }
+            'fallbacktailquiescent' { return 'checkpoint' }
             'fallbacktailfailed' { return 'checkpoint' }
-            'ControlPlaneSendCompletion' { return 'control_plane' }
-            'FallbackControlPlanePressure' { return 'control_plane' }
+            'controlplanesendcompletion' { return 'control_plane' }
+            'fallbackcontrolplanepressure' { return 'control_plane' }
             'bridgerecovery' { return 'bridge_recovery' }
+            'receiverecovery' { return 'bridge_recovery' }
+            'bridgereceivestallrecovery' { return 'bridge_recovery' }
             'controlplanesend' { return 'control_plane' }
+            'transportepochadoption' { return 'route_publication' }
+            'peerepochpromotion' { return 'route_publication' }
+            'unmatchedfrontierproof' { return 'repair' }
             'routemismatchmark' { return 'route_publication' }
             'routepublication' { return 'route_publication' }
+            'recoverylivenessleasebegin' { return 'liveness' }
+            'recoverylivenessleasevalidate' { return 'liveness' }
+            'recoverylivenessleaseretire' { return 'liveness' }
             'runtimeunlockoffercallback' { return 'control_plane' }
             'runtimeunlockanswercallback' { return 'control_plane' }
             'runtimeunlockprobestart' { return 'control_plane' }
@@ -3348,10 +3356,10 @@ function Get-FileTransferStaleRejectedProofFallbackSubfamily {
             'fallbackcheckpointbegin' { return 'fallback_checkpoint' }
             'fallbackcheckpointaccept' { return 'fallback_checkpoint' }
             'fallbackcheckpointretire' { return 'fallback_checkpoint' }
-            'FallbackCheckpointReissue' { return 'fallback_reissue' }
-            'FallbackTailQuiescent' { return 'fallback_tail_yield' }
+            'fallbackcheckpointreissue' { return 'fallback_reissue' }
+            'fallbacktailquiescent' { return 'fallback_tail_yield' }
             'fallbacktailfailed' { return 'fallback_tail_yield' }
-            'FallbackControlPlanePressure' { return 'fallback_pressure' }
+            'fallbackcontrolplanepressure' { return 'fallback_pressure' }
         }
     }
 
@@ -3700,6 +3708,9 @@ function Test-FileTransferStaleRejectedProofForbiddenEffect {
                 'filetransfer_route_transitioned',
                 'filetransfer_leg_started',
                 'filetransfer_leg_frozen',
+                'filetransfer_v6_epoch_started',
+                'filetransfer_v6_epoch_reused',
+                'filetransfer_v6_epoch_state_changed',
                 'filetransfer_runtime_unlock_route_commit_accepted',
                 'filetransfer_runtime_unlock_route_commit_publication_deferred',
                 'runtime_unlock_precommit_probe_paired_commit_confirmed',
@@ -3774,7 +3785,8 @@ function Get-FileTransferStaleRejectedActionEffectProof {
     $rejections = @($events | Where-Object {
             $_.EventName -eq 'filetransfer_runtime_owner_stale_update_rejected' -or
             $_.EventName -eq 'filetransfer_coordinator_leg_mutation_rejected' -or
-            $_.EventName -eq 'filetransfer_runtime_unlock_callback_rejected'
+            $_.EventName -eq 'filetransfer_runtime_unlock_callback_rejected' -or
+            $_.EventName -eq 'filetransfer_recovery_authority_rejected'
         })
     $families = @('liveness', 'repair', 'progress', 'checkpoint', 'bridge_recovery', 'control_plane', 'route_publication')
     $familyCounts = @{}

@@ -3329,7 +3329,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public async Task Bridge_ReceiveStallRecovery_ControlOnlyOverrideSuppressesPostTunaFallbackControlPlanePressure()
+    public async Task Bridge_ReceiveStallRecovery_ControlOnlyOverrideTreatsPostTunaFallbackControlPlanePressureAsDiagnostic()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -3418,15 +3418,18 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 () =>
                 {
                     var text = ReadOperationalLogTail(logStart);
-                    return text.Contains("event=nkn_bridge_control_receive_recovery_suppressed", StringComparison.Ordinal) &&
-                           text.Contains("reason=post_tuna_fallback_control_plane_pressure_diagnostic_only", StringComparison.Ordinal);
+                    return text.Contains("event=nkn_bridge_control_receive_pressure_diagnostic", StringComparison.Ordinal) &&
+                           text.Contains("reason=post_tuna_fallback_control_plane_pressure", StringComparison.Ordinal) &&
+                           text.Contains("event=nkn_bridge_control_receive_recovery_suppressed", StringComparison.Ordinal);
                 },
                 TimeSpan.FromSeconds(5));
 
             var logText = ReadOperationalLogTail(logStart);
             Assert.Contains("event=filetransfer_post_tuna_fallback_control_plane_pressure_marked", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_control_receive_pressure_diagnostic", logText, StringComparison.Ordinal);
             Assert.Contains("event=nkn_bridge_control_receive_recovery_suppressed", logText, StringComparison.Ordinal);
-            Assert.Contains("reason=post_tuna_fallback_control_plane_pressure_diagnostic_only", logText, StringComparison.Ordinal);
+            Assert.Contains("reason=filetransfer_bulk_receive_active", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("reason=post_tuna_fallback_control_plane_pressure_diagnostic_only", logText, StringComparison.Ordinal);
             Assert.DoesNotContain("event=nkn_bridge_control_receive_recovery_allowed", logText, StringComparison.Ordinal);
             Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_started", logText, StringComparison.Ordinal);
             Assert.True(File.Exists(countFile));
@@ -4951,7 +4954,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public async Task Bridge_ReceiveStallRecovery_PostTunaFallbackProofWindowSuppressesControlPlanePressure()
+    public async Task Bridge_ReceiveStallRecovery_PostTunaFallbackProofWindowTreatsControlPlanePressureAsDiagnostic()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -5052,7 +5055,10 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 {
                     var text = ReadOperationalLogTail(logBaseline);
                     return text.Contains(
-                            "event=nkn_bridge_receive_stall_recovery_suppressed; reason=post_tuna_fallback_control_plane_pressure",
+                            "event=nkn_bridge_receive_stall_pressure_diagnostic; reason=post_tuna_fallback_control_plane_pressure",
+                            StringComparison.Ordinal) &&
+                           text.Contains(
+                            "event=nkn_bridge_receive_stall_recovery_suppressed; reason=post_tuna_fallback_proof_send_window",
                             StringComparison.Ordinal);
                 },
                 TimeSpan.FromSeconds(8));
@@ -5060,6 +5066,9 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             var logText = ReadOperationalLogTail(logBaseline);
             Assert.Contains("proof_window_trigger=unit_test_state_refresh_queued", logText, StringComparison.Ordinal);
             Assert.Contains("pressure_remaining_ms=", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_receive_stall_pressure_diagnostic", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_receive_stall_recovery_suppressed; reason=post_tuna_fallback_proof_send_window", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_suppressed; reason=post_tuna_fallback_control_plane_pressure", logText, StringComparison.Ordinal);
             Assert.DoesNotContain("event=nkn_bridge_post_tuna_fallback_proof_send_window_expired_for_pressure", logText, StringComparison.Ordinal);
             Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_protocol_repair_bypassed; reason=post_tuna_fallback_proof_window_unproven", logText, StringComparison.Ordinal);
             Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_started", logText, StringComparison.Ordinal);

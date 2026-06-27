@@ -312,6 +312,63 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
     [Fact]
     [Trait("RetainedAuthorityProofSuite", "StaleRejectedActionEffectIsolation")]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RecoveryAuthorityRejectedPeerEpochPromotionFollowedByMatchingRoutePromotion_Fails()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_phase4_recovery_peer_epoch_promotion_fail";
+        var lines = BuildAuthorityProofFixture(
+            transferId,
+            RecoveryAuthorityRejectedMessage("PeerEpochPromotion", transferId),
+            $"event=filetransfer_v6_peer_epoch_promoted_live_route; direction=inbound; transfer_id={transferId}; session_id=sess_a; transport_epoch=7; route=post_tuna_fallback_v6; protocol_version=6; handoff_kind=regular_nkn_to_regular_nkn; target_transport=regular_nkn; reason=phase4_fixture");
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("fail", route["stale_rejected_action_effect_isolation_verdict"]);
+        Assert.Equal("1", route["stale_rejected_action_count"]);
+        Assert.Equal("1", route["stale_rejected_action_forbidden_effect_count"]);
+        Assert.Equal("1", route["stale_rejected_route_publication_effect_count"]);
+        Assert.Equal("0", route["stale_rejected_unknown_action_count"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("stale_rejected_action_effect", verdict["acceptance_failure_class"]);
+        Assert.Equal("stale_rejected_action_effect", verdict["recovery_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "StaleRejectedActionEffectIsolation")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RecoveryAuthorityRejectedPeerEpochPromotionFollowedByCurrentRoutePromotion_Passes()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_phase4_recovery_peer_epoch_promotion_current_pass";
+        var lines = BuildAuthorityProofFixture(
+            transferId,
+            RecoveryAuthorityRejectedMessage("PeerEpochPromotion", transferId),
+            $"event=filetransfer_v6_peer_epoch_promoted_live_route; direction=inbound; transfer_id={transferId}; session_id=sess_a; transport_epoch=8; route=regular_nkn_v4_fast; protocol_version=4; handoff_kind=regular_nkn_to_regular_nkn; target_transport=regular_nkn; reason=phase4_fixture");
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("pass", route["stale_rejected_action_effect_isolation_verdict"]);
+        Assert.Equal("1", route["stale_rejected_action_count"]);
+        Assert.Equal("0", route["stale_rejected_action_forbidden_effect_count"]);
+        Assert.Equal("0", route["stale_rejected_route_publication_effect_count"]);
+        Assert.Equal("0", route["stale_rejected_unknown_action_count"]);
+    }
+
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "StaleRejectedActionEffectIsolation")]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_CoordinatorLegMutationRejected_IsIndexedAndDiagnosticWhenNoEffectFollows()
     {
         if (!OperatingSystem.IsWindows())
@@ -519,6 +576,9 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
 
     private static string FallbackAuthorityRejectedMessage(string subfamily, string actionKind, string transferId)
         => $"event=filetransfer_coordinator_leg_mutation_rejected; direction=outbound; transfer_id={transferId}; session_id=sess_a; action_kind={actionKind}; attempted_action={FallbackAttemptedAction(subfamily)}; rejection_reason=runtime_generation_mismatch; current_route=file_tuna_v4; current_protocol_version=4; current_live_route_epoch=2; current_runtime_generation=2; current_terminal_generation=0; current_leg_generation=3; current_transport_epoch=8; current_bridge_recovery_generation=2; current_checkpoint_request_id=checkpoint-b; current_checkpoint_generation=12; current_control_plane_token_generation=5; current_checkpoint_lease_generation=6; current_pressure_generation=7; attempted_route=regular_nkn_v4_fast; attempted_protocol_version=4; attempted_live_route_epoch=0; attempted_runtime_generation=1; attempted_terminal_generation=0; attempted_leg_generation=2; attempted_transport_epoch=7; attempted_bridge_recovery_generation=1; attempted_checkpoint_request_id=checkpoint-a; attempted_checkpoint_generation=11; attempted_control_plane_token_generation=4; attempted_checkpoint_lease_generation=5; attempted_pressure_generation=6; reason=phase3c_fixture";
+
+    private static string RecoveryAuthorityRejectedMessage(string actionKind, string transferId)
+        => $"event=filetransfer_recovery_authority_rejected; direction=inbound; transfer_id={transferId}; session_id=sess_a; action_kind={actionKind}; source=phase4_fixture; attempted_action=peer_epoch_promotion; rejection_reason=runtime_generation_mismatch; reason=runtime_generation_mismatch; current_route=regular_nkn_v4_fast; current_protocol_version=4; current_live_route_epoch=2; current_runtime_generation=2; current_terminal_generation=0; attempted_route=post_tuna_fallback_v6; attempted_protocol_version=6; attempted_live_route_epoch=1; attempted_runtime_generation=1; attempted_terminal_generation=0; attempted_leg_generation=2; attempted_transport_epoch=7; attempted_bridge_recovery_generation=1; recovery_decision_generation=3; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn";
 
     private static string FallbackAttemptedAction(string subfamily)
         => subfamily switch

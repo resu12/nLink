@@ -3477,17 +3477,9 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                     pressureGraceExhausted)
                 {
                     Log(
-                        "event=nkn_bridge_control_receive_recovery_suppressed; reason=post_tuna_fallback_control_plane_pressure_diagnostic_only; " +
+                        "event=nkn_bridge_control_receive_pressure_diagnostic; reason=post_tuna_fallback_control_plane_pressure; " +
                         $"connect_key={connectKey}; consecutive_control_zero_receive_windows={controlConsecutiveWindows}; active_file_transfer_sessions={fileTransferActiveSessionCount}; recovery_count={Volatile.Read(ref receiveStallRecoveryCount)}; " +
                         $"control_messages_received_since_last={controlMessagesReceivedSinceLast}; bulk_messages_received_since_last={bulkMessagesReceivedSinceLast}; control_last_received_age_ms={controlLastReceivedAgeMs}; bulk_last_received_age_ms={bulkLastReceivedAgeMs}; pressure_grace_exhausted={(pressureGraceExhausted ? 1 : 0)}; protocol_repair_grace_windows={ReceiveStallFileTransferProtocolRepairGraceWindows}; protocol_repair_grace_max_age_ms={ReceiveStallFileTransferProtocolRepairGraceMaxAgeMs}{FormatPostTunaFallbackControlPlanePressureFields(postTunaFallbackControlPlanePressure)}");
-                    EmitReceiveStallRecoveryDeferredLifecycle(
-                        "post_tuna_fallback_control_plane_pressure_diagnostic_only",
-                        PostTunaFallbackControlPlanePressureStallReason,
-                        connectKey);
-                    if (!regularV4ControlFeedbackPressureActive)
-                    {
-                        return;
-                    }
                 }
                 if (options.ReceiveStallControlOnlyRecoveryEnabled &&
                     regularV4ControlFeedbackPressureActive &&
@@ -3595,32 +3587,25 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                     qualifiedConsecutiveWindows >= ReceiveStallFastRequiredConsecutiveWindows)
                 {
                     Log(
-                        "event=nkn_bridge_receive_stall_recovery_suppressed; " +
+                        "event=nkn_bridge_receive_stall_pressure_diagnostic; " +
                         "reason=post_tuna_fallback_control_plane_pressure; " +
                         $"connect_key={connectKey}; stall_reason={stallReason}; consecutive_zero_receive_windows={qualifiedConsecutiveWindows}; all_zero_receive_consecutive_windows={consecutiveWindows}; bulk_zero_receive_consecutive_windows={bulkConsecutiveWindows}; control_zero_receive_consecutive_windows={controlConsecutiveWindows}; " +
                         $"proof_window_reason={SanitizeLogToken(proofWindowReason)}; proof_window_trigger={SanitizeLogToken(proofWindowTrigger)}; session_id={SanitizeLogToken(proofWindowSessionId)}; proof_window_remaining_ms={proofWindowRemainingMs}; " +
                         $"active_file_transfer_sessions={fileTransferActiveSessionCount}; active_file_transfer_runtime_sessions={fileTransferActiveRuntimeCount}; active_post_tuna_fallback_runtime_sessions={activePostTunaFallbackRuntimeTransfers.Count}; recovery_count={Volatile.Read(ref receiveStallRecoveryCount)}; " +
                         $"control_messages_received_since_last={controlMessagesReceivedSinceLast}; bulk_messages_received_since_last={bulkMessagesReceivedSinceLast}; control_last_received_age_ms={controlLastReceivedAgeMs}; bulk_last_received_age_ms={bulkLastReceivedAgeMs}; pressure_remaining_ms={postTunaFallbackControlPlanePressureRemainingMs}{FormatPostTunaFallbackControlPlanePressureFields(postTunaFallbackControlPlanePressure)}");
-                    EmitReceiveStallRecoveryDeferredLifecycle(
-                        "post_tuna_fallback_control_plane_pressure_diagnostic_only",
-                        PostTunaFallbackControlPlanePressureStallReason,
-                        connectKey);
-                    return;
                 }
-                else
-                {
-                    Log(
-                        "event=nkn_bridge_receive_stall_recovery_suppressed; reason=post_tuna_fallback_proof_send_window; " +
-                        $"connect_key={connectKey}; stall_reason={stallReason}; consecutive_zero_receive_windows={qualifiedConsecutiveWindows}; all_zero_receive_consecutive_windows={consecutiveWindows}; bulk_zero_receive_consecutive_windows={bulkConsecutiveWindows}; control_zero_receive_consecutive_windows={controlConsecutiveWindows}; " +
-                        $"proof_window_reason={SanitizeLogToken(proofWindowReason)}; proof_window_trigger={SanitizeLogToken(proofWindowTrigger)}; session_id={SanitizeLogToken(proofWindowSessionId)}; proof_window_remaining_ms={proofWindowRemainingMs}; " +
-                        $"active_file_transfer_sessions={fileTransferActiveSessionCount}; active_file_transfer_runtime_sessions={fileTransferActiveRuntimeCount}; active_post_tuna_fallback_runtime_sessions={activePostTunaFallbackRuntimeTransfers.Count}; recovery_count={Volatile.Read(ref receiveStallRecoveryCount)}; " +
-                        $"control_messages_received_since_last={controlMessagesReceivedSinceLast}; bulk_messages_received_since_last={bulkMessagesReceivedSinceLast}; control_last_received_age_ms={controlLastReceivedAgeMs}; bulk_last_received_age_ms={bulkLastReceivedAgeMs}");
-                    EmitReceiveStallRecoveryDeferredLifecycle(
-                        "post_tuna_fallback_proof_send_window",
-                        stallReason,
-                        connectKey);
-                    return;
-                }
+
+                Log(
+                    "event=nkn_bridge_receive_stall_recovery_suppressed; reason=post_tuna_fallback_proof_send_window; " +
+                    $"connect_key={connectKey}; stall_reason={stallReason}; consecutive_zero_receive_windows={qualifiedConsecutiveWindows}; all_zero_receive_consecutive_windows={consecutiveWindows}; bulk_zero_receive_consecutive_windows={bulkConsecutiveWindows}; control_zero_receive_consecutive_windows={controlConsecutiveWindows}; " +
+                    $"proof_window_reason={SanitizeLogToken(proofWindowReason)}; proof_window_trigger={SanitizeLogToken(proofWindowTrigger)}; session_id={SanitizeLogToken(proofWindowSessionId)}; proof_window_remaining_ms={proofWindowRemainingMs}; " +
+                    $"active_file_transfer_sessions={fileTransferActiveSessionCount}; active_file_transfer_runtime_sessions={fileTransferActiveRuntimeCount}; active_post_tuna_fallback_runtime_sessions={activePostTunaFallbackRuntimeTransfers.Count}; recovery_count={Volatile.Read(ref receiveStallRecoveryCount)}; " +
+                    $"control_messages_received_since_last={controlMessagesReceivedSinceLast}; bulk_messages_received_since_last={bulkMessagesReceivedSinceLast}; control_last_received_age_ms={controlLastReceivedAgeMs}; bulk_last_received_age_ms={bulkLastReceivedAgeMs}");
+                EmitReceiveStallRecoveryDeferredLifecycle(
+                    "post_tuna_fallback_proof_send_window",
+                    stallReason,
+                    connectKey);
+                return;
             }
 
             if (regularV4ControlFeedbackPressureRecoveryNeeded)
