@@ -8377,9 +8377,22 @@ public sealed partial class SessionRuntime
             return false;
         }
 
+        if (!fileTransferService.TryAuthorizeRecoveryLivenessDeferral(
+                snapshot,
+                "transport_disconnected_filetransfer_recovery",
+                snapshot.LivenessDeferralDeadlineUtc,
+                out var livenessGrant) ||
+            livenessGrant is null)
+        {
+            LocalOperationalLog.Warn(
+                "Session",
+                $"event=transport_disconnected_filetransfer_recovery_not_deferred; session_id={sessionIdSnapshot}; transfer_id={snapshot.TransferId}; route={snapshot.RouteToken}; protocol_version={snapshot.ProtocolVersion}; live_route_epoch={snapshot.LiveRouteEpoch}; leg_generation={snapshot.TransferLegGeneration}; bridge_recovery_generation={snapshot.BridgeRecoveryGeneration}; transport_epoch={snapshot.TransportEpoch}; authority_reason={SanitizeSessionLivenessReason(snapshot.AuthorityReason)}; recovery_state={snapshot.State.ToString().ToLowerInvariant()}; reason=recovery_liveness_lease_rejected; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+            return false;
+        }
+
         LocalOperationalLog.Warn(
             "Session",
-            $"event=transport_disconnected_deferred_for_filetransfer_recovery; session_id={sessionIdSnapshot}; transfer_id={snapshot.TransferId}; route={snapshot.RouteToken}; protocol_version={snapshot.ProtocolVersion}; live_route_epoch={snapshot.LiveRouteEpoch}; leg_generation={snapshot.TransferLegGeneration}; bridge_recovery_generation={snapshot.BridgeRecoveryGeneration}; transport_epoch={snapshot.TransportEpoch}; checkpoint_request_id={SanitizeSessionLivenessReason(snapshot.CheckpointRequestId ?? "(none)")}; authority_reason={SanitizeSessionLivenessReason(snapshot.AuthorityReason)}; recovery_state={snapshot.State.ToString().ToLowerInvariant()}; liveness_deferral_deadline_utc_ms={snapshot.LivenessDeferralDeadlineUtc.ToUnixTimeMilliseconds()}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+            $"event=transport_disconnected_deferred_for_filetransfer_recovery; session_id={sessionIdSnapshot}; transfer_id={snapshot.TransferId}; route={snapshot.RouteToken}; protocol_version={snapshot.ProtocolVersion}; live_route_epoch={snapshot.LiveRouteEpoch}; leg_generation={snapshot.TransferLegGeneration}; bridge_recovery_generation={snapshot.BridgeRecoveryGeneration}; transport_epoch={snapshot.TransportEpoch}; checkpoint_request_id={SanitizeSessionLivenessReason(snapshot.CheckpointRequestId ?? "(none)")}; authority_reason={SanitizeSessionLivenessReason(snapshot.AuthorityReason)}; recovery_state={snapshot.State.ToString().ToLowerInvariant()}; liveness_deferral_deadline_utc_ms={livenessGrant.LivenessDeferralDeadlineUtc.ToUnixTimeMilliseconds()}; recovery_liveness_lease_generation={livenessGrant.LeaseGeneration}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
         return true;
     }
 

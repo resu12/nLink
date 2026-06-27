@@ -153,6 +153,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private int postTunaFallbackUnprovenRecoveryEscalationPending;
     private long postTunaFallbackUnprovenRecoveryEscalationPendingTick;
     private string postTunaFallbackUnprovenRecoveryEscalationPendingReason = "post_tuna_fallback_state_refresh_failed";
+    private FileTransferBridgeRecoveryAuthority? postTunaFallbackUnprovenRecoveryEscalationPendingAuthority;
     private long postTunaFallbackProofSendWindowExpiresTick;
     private string postTunaFallbackProofSendWindowReason = "none";
     private string postTunaFallbackProofSendWindowTrigger = "none";
@@ -177,10 +178,14 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private long lastBridgeSendFrameSerializedBytes;
     private long lastBridgeSendFrameChannel;
     private int activeFileTransferDataSessions;
+    private readonly ConcurrentDictionary<string, byte> activeFileTransferDataSessionTransfers = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> activeFileTransferRuntimeTransfers = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> activePostTunaFallbackRuntimeTransfers = new(StringComparer.Ordinal);
     private PostTunaFallbackLegAuthorityState? postTunaFallbackLegAuthority;
     private PostTunaFallbackControlPlanePressureState? postTunaFallbackControlPlanePressure;
+    private FileTransferBridgeRecoveryAuthority? activeFileTransferBridgeRecoveryAuthority;
+    private int activeFileTransferBridgeRecoveryAuthorityGeneration;
+    private long activeFileTransferBridgeRecoveryAuthorityExpiresTick;
     private long activeFileTransferRecoveryTombstoneExpiresTick;
     private long regularV4ControlFeedbackPressureExpiresTick;
     private long regularV4ActivationSendPressureExpiresTick;
@@ -493,10 +498,12 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
     internal void RegisterActiveFileTransferDataSession(string transferId)
     {
+        var normalizedTransferId = string.IsNullOrWhiteSpace(transferId) ? "(unknown)" : transferId.Trim();
         var activeCount = Interlocked.Increment(ref activeFileTransferDataSessions);
+        activeFileTransferDataSessionTransfers.TryAdd(normalizedTransferId, 0);
         Volatile.Write(ref activeFileTransferRecoveryTombstoneExpiresTick, 0);
         NknRuntimeDiagnostics.SetActiveFileTransferTombstones(0);
-        Log($"event=filetransfer_v4_receive_liveness_summary; reason=data_session_opened; transfer_id={SanitizeLogToken(transferId)}; active_file_transfer_sessions={activeCount}");
+        Log($"event=filetransfer_v4_receive_liveness_summary; reason=data_session_opened; transfer_id={SanitizeLogToken(normalizedTransferId)}; active_file_transfer_sessions={activeCount}");
     }
 
     internal void RegisterActiveFileTransferRuntime(string transferId)
@@ -842,6 +849,16 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             Log(
                 "event=filetransfer_post_tuna_fallback_control_plane_pressure_stale_ignored; " +
                 $"reason={staleReason}; session_id={SanitizeLogToken(normalizedSessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; route={SanitizeLogToken(routeToken ?? "(none)")}; protocol_version={protocolVersion}; live_route_epoch={liveRouteEpoch}; leg_generation={legGeneration}; bridge_recovery_generation={bridgeRecoveryGeneration}; transport_epoch={transportEpoch}; checkpoint_request_id={SanitizeLogToken(normalizedCheckpointRequestId ?? "none")}; kind={normalizedKind}; pressure_reason={normalizedReason}");
+            if (string.Equals(
+                    staleReason,
+                    "control_plane_pressure_authority_refresh_diagnostic_only",
+                    StringComparison.Ordinal))
+            {
+                Log(
+                    "event=control_plane_pressure_observed_without_recovery_authority; " +
+                    $"reason=control_plane_pressure_authority_refresh; session_id={SanitizeLogToken(normalizedSessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; route={SanitizeLogToken(routeToken ?? "(none)")}; protocol_version={protocolVersion}; live_route_epoch={liveRouteEpoch}; leg_generation={legGeneration}; bridge_recovery_generation={bridgeRecoveryGeneration}; transport_epoch={transportEpoch}; checkpoint_request_id={SanitizeLogToken(normalizedCheckpointRequestId ?? "none")}; kind={normalizedKind}; pressure_reason={normalizedReason}");
+            }
+
             return;
         }
 
@@ -961,6 +978,13 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             }
         }
 
+        if (Volatile.Read(ref activeFileTransferBridgeRecoveryAuthority) is { } bridgeAuthority &&
+            string.Equals(bridgeAuthority.TransferId, normalizedTransferId, StringComparison.Ordinal) &&
+            !IsFileTransferBridgeRecoveryAuthorityTransferActive(bridgeAuthority))
+        {
+            ClearActiveFileTransferBridgeRecoveryAuthority();
+        }
+
         if (activeFileTransferRuntimeTransfers.IsEmpty && Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions)) == 0)
         {
             Volatile.Write(ref activeFileTransferRecoveryTombstoneExpiresTick, 0);
@@ -994,8 +1018,14 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         if (Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions)) == 0)
         {
             Volatile.Write(ref activeFileTransferRecoveryTombstoneExpiresTick, 0);
+            ClearActiveFileTransferBridgeRecoveryAuthority();
             NknRuntimeDiagnostics.SetActiveFileTransferTombstones(0);
             ResetReceiveStallTrackingAfterFileTransferIdle("runtime_cleared", reason);
+        }
+        else if (Volatile.Read(ref activeFileTransferBridgeRecoveryAuthority) is { } bridgeAuthority &&
+                 !activeFileTransferDataSessionTransfers.ContainsKey(bridgeAuthority.TransferId))
+        {
+            ClearActiveFileTransferBridgeRecoveryAuthority();
         }
 
         Log(
@@ -1009,6 +1039,108 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         var normalizedReason = string.IsNullOrWhiteSpace(reason)
             ? "core_filetransfer_receive_recovery"
             : SanitizeLogToken(reason);
+        Log(
+            "event=nkn_bridge_receive_stall_recovery_rejected_no_filetransfer_authority; " +
+            $"requested_reason={normalizedReason}; rejection_reason=bridge_recovery_authority_missing; active_file_transfer_sessions={Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions))}; active_file_transfer_runtime_sessions={GetActiveFileTransferRuntimeTransferCountForDiagnostics()}");
+        return false;
+    }
+
+    internal bool RequestFileTransferReceiveStallRecovery(
+        FileTransferBridgeRecoveryAuthority authority,
+        string reason)
+    {
+        var normalizedReason = string.IsNullOrWhiteSpace(reason)
+            ? "core_filetransfer_receive_recovery"
+            : SanitizeLogToken(reason);
+        if (!IsValidFileTransferBridgeRecoveryAuthority(authority))
+        {
+            Log(
+                "event=nkn_bridge_receive_stall_recovery_rejected_no_filetransfer_authority; " +
+                $"requested_reason={normalizedReason}; rejection_reason=bridge_recovery_authority_invalid; session_id={SanitizeLogToken(authority.SessionId ?? "none")}; transfer_id={SanitizeLogToken(authority.TransferId ?? "none")}; route={SanitizeLogToken(authority.RouteToken ?? "none")}; protocol_version={authority.ProtocolVersion}; live_route_epoch={authority.LiveRouteEpoch}; leg_generation={authority.TransferLegGeneration}; transport_epoch={authority.TransportEpoch}; bridge_recovery_generation={authority.BridgeRecoveryGeneration}; bridge_decision_generation={authority.BridgeDecisionGeneration}");
+            return false;
+        }
+
+        var accepted = RequestFileTransferReceiveStallRecoveryCore(normalizedReason, authority);
+        if (accepted)
+        {
+            MarkActiveFileTransferBridgeRecoveryAuthority(authority);
+        }
+
+        return accepted;
+    }
+
+    private static bool IsValidFileTransferBridgeRecoveryAuthority(FileTransferBridgeRecoveryAuthority authority)
+        => !string.IsNullOrWhiteSpace(authority.SessionId) &&
+           !string.IsNullOrWhiteSpace(authority.TransferId) &&
+           !string.IsNullOrWhiteSpace(authority.RouteToken) &&
+           authority.ProtocolVersion > 0 &&
+           authority.LiveRouteEpoch >= 0 &&
+           authority.RuntimeGeneration > 0 &&
+           authority.TerminalGeneration >= 0 &&
+           authority.TransferLegGeneration > 0 &&
+           authority.BridgeDecisionGeneration > 0;
+
+    private void MarkActiveFileTransferBridgeRecoveryAuthority(FileTransferBridgeRecoveryAuthority authority)
+    {
+        Volatile.Write(ref activeFileTransferBridgeRecoveryAuthority, authority);
+        Volatile.Write(ref activeFileTransferBridgeRecoveryAuthorityGeneration, authority.BridgeDecisionGeneration);
+        Volatile.Write(
+            ref activeFileTransferBridgeRecoveryAuthorityExpiresTick,
+            AddStopwatchDuration(Stopwatch.GetTimestamp(), ActiveFileTransferRecoveryTombstoneTtl));
+    }
+
+    private void ClearActiveFileTransferBridgeRecoveryAuthority()
+    {
+        Volatile.Write(ref activeFileTransferBridgeRecoveryAuthority, null);
+        Volatile.Write(ref activeFileTransferBridgeRecoveryAuthorityGeneration, 0);
+        Volatile.Write(ref activeFileTransferBridgeRecoveryAuthorityExpiresTick, 0);
+    }
+
+    private bool HasCurrentFileTransferBridgeRecoveryAuthority()
+    {
+        var authority = Volatile.Read(ref activeFileTransferBridgeRecoveryAuthority);
+        var generation = Volatile.Read(ref activeFileTransferBridgeRecoveryAuthorityGeneration);
+        var expiresTick = Volatile.Read(ref activeFileTransferBridgeRecoveryAuthorityExpiresTick);
+        if (authority is null ||
+            generation <= 0 ||
+            expiresTick <= 0 ||
+            authority.BridgeDecisionGeneration != generation)
+        {
+            ClearActiveFileTransferBridgeRecoveryAuthority();
+            return false;
+        }
+
+        if (expiresTick <= Stopwatch.GetTimestamp())
+        {
+            ClearActiveFileTransferBridgeRecoveryAuthority();
+            return false;
+        }
+
+        if (!IsFileTransferBridgeRecoveryAuthorityTransferActive(authority))
+        {
+            ClearActiveFileTransferBridgeRecoveryAuthority();
+            return false;
+        }
+
+        return true;
+    }
+
+    private int GetActiveFileTransferRuntimeTransferCountForDiagnostics()
+        => activeFileTransferRuntimeTransfers?.Count ?? 0;
+
+    private bool IsFileTransferBridgeRecoveryAuthorityTransferActive(FileTransferBridgeRecoveryAuthority authority)
+    {
+        var transferId = string.IsNullOrWhiteSpace(authority.TransferId)
+            ? "(unknown)"
+            : authority.TransferId.Trim();
+        return activeFileTransferDataSessionTransfers.ContainsKey(transferId) ||
+               activeFileTransferRuntimeTransfers.ContainsKey(transferId);
+    }
+
+    private bool RequestFileTransferReceiveStallRecoveryCore(
+        string normalizedReason,
+        FileTransferBridgeRecoveryAuthority authority)
+    {
         var postTunaFallbackRecoveryRequest = IsPostTunaFallbackReceiveStallRecoveryReason(normalizedReason);
         var regularV4RuntimeUnlockRecoveryRequest = IsRegularV4RuntimeUnlockReceiveStallRecoveryReason(normalizedReason);
         var nowTick = Stopwatch.GetTimestamp();
@@ -1062,7 +1194,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                     ArmPendingPostTunaFallbackUnprovenRecoveryEscalation(
                         normalizedReason,
                         "core_request_already_in_progress",
-                        nowTick))
+                        nowTick,
+                        authority))
                 {
                     EmitReceiveStallRecoveryDeferredLifecycle(
                         "post_tuna_fallback_unproven_escalation_pending",
@@ -1169,6 +1302,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
     internal void UnregisterActiveFileTransferDataSession(string transferId)
     {
+        var normalizedTransferId = string.IsNullOrWhiteSpace(transferId) ? "(unknown)" : transferId.Trim();
         var activeCount = Interlocked.Decrement(ref activeFileTransferDataSessions);
         if (activeCount < 0)
         {
@@ -1176,15 +1310,24 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             Interlocked.Exchange(ref activeFileTransferDataSessions, 0);
         }
 
+        activeFileTransferDataSessionTransfers.TryRemove(normalizedTransferId, out _);
+        if (Volatile.Read(ref activeFileTransferBridgeRecoveryAuthority) is { } bridgeAuthority &&
+            string.Equals(bridgeAuthority.TransferId, normalizedTransferId, StringComparison.Ordinal) &&
+            !IsFileTransferBridgeRecoveryAuthorityTransferActive(bridgeAuthority))
+        {
+            ClearActiveFileTransferBridgeRecoveryAuthority();
+        }
+
         if (activeCount == 0 && activeFileTransferRuntimeTransfers.IsEmpty)
         {
             var expiresTick = AddStopwatchDuration(Stopwatch.GetTimestamp(), ActiveFileTransferRecoveryTombstoneTtl);
             Volatile.Write(ref activeFileTransferRecoveryTombstoneExpiresTick, expiresTick);
+            ClearActiveFileTransferBridgeRecoveryAuthority();
             NknRuntimeDiagnostics.SetActiveFileTransferTombstones(1);
-            ResetReceiveStallTrackingAfterFileTransferIdle("data_session_closed", transferId);
+            ResetReceiveStallTrackingAfterFileTransferIdle("data_session_closed", normalizedTransferId);
             Log(
                 "event=filetransfer_active_recovery_tombstone_started; " +
-                $"transfer_id={SanitizeLogToken(transferId)}; ttl_ms={(long)ActiveFileTransferRecoveryTombstoneTtl.TotalMilliseconds}");
+                $"transfer_id={SanitizeLogToken(normalizedTransferId)}; ttl_ms={(long)ActiveFileTransferRecoveryTombstoneTtl.TotalMilliseconds}");
         }
         else
         {
@@ -1467,7 +1610,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private bool ArmPendingPostTunaFallbackUnprovenRecoveryEscalation(
         string requestedReason,
         string trigger,
-        long nowTick)
+        long nowTick,
+        FileTransferBridgeRecoveryAuthority? authority)
     {
         if (!IsPostTunaFallbackReceiveStallRecoveryReason(requestedReason) ||
             Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions)) <= 0 &&
@@ -1479,6 +1623,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         lock (gate)
         {
             postTunaFallbackUnprovenRecoveryEscalationPendingReason = SanitizeLogToken(requestedReason);
+            postTunaFallbackUnprovenRecoveryEscalationPendingAuthority = authority;
         }
 
         Volatile.Write(ref postTunaFallbackUnprovenRecoveryEscalationPending, 1);
@@ -1848,10 +1993,13 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         }
 
         string requestedReason;
+        FileTransferBridgeRecoveryAuthority? pendingAuthority;
         lock (gate)
         {
             requestedReason = postTunaFallbackUnprovenRecoveryEscalationPendingReason;
             postTunaFallbackUnprovenRecoveryEscalationPendingReason = "post_tuna_fallback_state_refresh_failed";
+            pendingAuthority = postTunaFallbackUnprovenRecoveryEscalationPendingAuthority;
+            postTunaFallbackUnprovenRecoveryEscalationPendingAuthority = null;
         }
 
         var pendingTick = Volatile.Read(ref postTunaFallbackUnprovenRecoveryEscalationPendingTick);
@@ -1881,16 +2029,15 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         _ = Task.Run(
             () =>
             {
-                try
-                {
-                    RequestFileTransferReceiveStallRecovery(requestedReason);
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
+                if (pendingAuthority is null)
                 {
                     Log(
-                        "event=nkn_bridge_receive_stall_recovery_post_tuna_fallback_unproven_escalation_pending_failed; " +
-                        $"trigger={SanitizeLogToken(trigger)}; requested_reason={SanitizeLogToken(requestedReason)}; reason={ex.GetType().Name}; message={SanitizeLogToken(ex.Message)}");
+                        "event=nkn_bridge_receive_stall_recovery_rejected_no_filetransfer_authority; " +
+                        $"requested_reason={SanitizeLogToken(requestedReason)}; rejection_reason=pending_escalation_without_coordinator_authority; trigger={SanitizeLogToken(trigger)}; active_file_transfer_sessions={Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions))}; active_file_transfer_runtime_sessions={GetActiveFileTransferRuntimeTransferCountForDiagnostics()}");
+                    return;
                 }
+
+                RequestFileTransferReceiveStallRecovery(pendingAuthority, requestedReason);
             },
             CancellationToken.None);
     }
@@ -3859,7 +4006,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                     ArmPendingPostTunaFallbackUnprovenRecoveryEscalation(
                         "post_tuna_fallback_peer_silence",
                         "automatic_recovery_already_in_progress",
-                        nowTick))
+                        nowTick,
+                        authority: null))
                 {
                     Volatile.Write(ref postTunaFallbackUnprovenRecoveryEscalationUsedRecoveryCount, -1);
                     EmitReceiveStallRecoveryDeferredLifecycle(
@@ -5771,6 +5919,15 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             return false;
         }
 
+        if (!HasCurrentFileTransferBridgeRecoveryAuthority())
+        {
+            Log(
+                "event=nkn_bridge_ping_timeout_filetransfer_recovery_suppression_diagnostic_only; " +
+                "reason=bridge_recovery_authority_missing; " +
+                $"active_file_transfer_sessions={activeFileTransferSessionCount}; active_file_transfer_runtime_sessions={GetActiveFileTransferRuntimeTransferCountForDiagnostics()}");
+            return false;
+        }
+
         var recentActivityWindowMs = Math.Max(5000, (int)ScreenShareBridgeLogInterval.TotalMilliseconds * 3);
         var summaryTick = Volatile.Read(ref lastBridgeTransportHealthSummaryTick);
         var summaryAgeMs = ElapsedSinceTicksMilliseconds(summaryTick);
@@ -5829,6 +5986,15 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         var activeFileTransferSessionCount = GetActiveFileTransferSessionCountForPingRecovery();
         if (activeFileTransferSessionCount <= 0)
         {
+            return false;
+        }
+
+        if (!HasCurrentFileTransferBridgeRecoveryAuthority())
+        {
+            Log(
+                "event=nkn_bridge_ping_timeout_filetransfer_recovery_diagnostic_only; " +
+                "reason=bridge_recovery_authority_missing; " +
+                $"active_file_transfer_sessions={activeFileTransferSessionCount}; active_file_transfer_runtime_sessions={GetActiveFileTransferRuntimeTransferCountForDiagnostics()}");
             return false;
         }
 

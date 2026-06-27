@@ -27,6 +27,69 @@ public sealed partial class SessionFileTransferService
     public bool RequestFileTransferReceiveRecovery(FileTransferReceiveRecoveryRequest request)
         => TryRequestFileTransferReceiveRecovery(request);
 
+    public bool TryAuthorizeRecoveryLivenessDeferral(
+        FileTransferRecoveryLivenessSnapshot snapshot,
+        string reason,
+        DateTimeOffset livenessDeferralDeadlineUtc,
+        out FileTransferRecoveryLivenessDeferralGrant? grant)
+    {
+        grant = null;
+        if (string.IsNullOrWhiteSpace(snapshot.SessionId) ||
+            string.IsNullOrWhiteSpace(snapshot.TransferId))
+        {
+            return false;
+        }
+
+        var attemptedAction = string.IsNullOrWhiteSpace(reason)
+            ? "session_liveness_recovery_state"
+            : reason.Trim();
+        lock (gate)
+        {
+            if (outboundTransfer is { } outbound &&
+                string.Equals(outbound.SessionId, snapshot.SessionId, StringComparison.Ordinal) &&
+                string.Equals(outbound.TransferId, snapshot.TransferId, StringComparison.Ordinal))
+            {
+                return TryAuthorizeRecoveryLivenessLeaseLocked(
+                    outbound,
+                    "session_liveness_recovery_state",
+                    attemptedAction,
+                    attemptedAction,
+                    livenessDeferralDeadlineUtc,
+                    snapshot.RouteToken,
+                    snapshot.ProtocolVersion,
+                    snapshot.LiveRouteEpoch,
+                    snapshot.TransferLegGeneration,
+                    snapshot.TransportEpoch,
+                    snapshot.BridgeRecoveryGeneration,
+                    out grant);
+            }
+
+            if (inboundTransfer is { } inbound &&
+                string.Equals(inbound.SessionId, snapshot.SessionId, StringComparison.Ordinal) &&
+                string.Equals(inbound.TransferId, snapshot.TransferId, StringComparison.Ordinal))
+            {
+                return TryAuthorizeRecoveryLivenessLeaseLocked(
+                    inbound,
+                    "session_liveness_recovery_state",
+                    attemptedAction,
+                    attemptedAction,
+                    livenessDeferralDeadlineUtc,
+                    snapshot.RouteToken,
+                    snapshot.ProtocolVersion,
+                    snapshot.LiveRouteEpoch,
+                    snapshot.TransferLegGeneration,
+                    snapshot.TransportEpoch,
+                    snapshot.BridgeRecoveryGeneration,
+                    out grant);
+            }
+        }
+
+        LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_recovery_liveness_lease_rejected; direction=unknown; transfer_id={FormatProtocolLogValue(snapshot.TransferId)}; session_id={FormatProtocolLogValue(snapshot.SessionId)}; action_kind={FormatProtocolLogValue(FileTransferCoordinatorActionKind.RecoveryLivenessLeaseBegin.ToString())}; source=session_liveness_recovery_state; attempted_action={FormatProtocolLogValue(attemptedAction)}; rejection_reason=current_transfer_missing; reason=current_transfer_missing; route={FormatProtocolLogValue(snapshot.RouteToken)}; protocol_version={snapshot.ProtocolVersion}; live_route_epoch={snapshot.LiveRouteEpoch}; leg_generation={snapshot.TransferLegGeneration}; transport_epoch={snapshot.TransportEpoch}; bridge_recovery_generation={snapshot.BridgeRecoveryGeneration}");
+        return false;
+    }
+
     private bool TryRequestFileTransferReceiveRecovery(FileTransferReceiveRecoveryRequest request)
     {
         IFileTransferReceiveRecoveryController? controller;
@@ -37,6 +100,44 @@ public sealed partial class SessionFileTransferService
             request = AttachActiveRouteRuntimeForReceiveRecoveryLocked(request);
             if (TrySuppressReceiveRecoveryForSupersededRegularV4RuntimeLocked(request))
             {
+                return false;
+            }
+
+            if (request.Direction == FileTransferDirection.Outbound &&
+                outboundTransfer is { } outbound &&
+                string.Equals(outbound.TransferId, request.TransferId, StringComparison.Ordinal) &&
+                string.Equals(outbound.SessionId, request.SessionId, StringComparison.Ordinal))
+            {
+                if (!TryAuthorizeBridgeRecoveryLocked(
+                        outbound,
+                        request,
+                        "filetransfer_receive_recovery",
+                        request.Reason,
+                        out request))
+                {
+                    return false;
+                }
+            }
+            else if (request.Direction == FileTransferDirection.Inbound &&
+                     inboundTransfer is { } inbound &&
+                     string.Equals(inbound.TransferId, request.TransferId, StringComparison.Ordinal) &&
+                     string.Equals(inbound.SessionId, request.SessionId, StringComparison.Ordinal))
+            {
+                if (!TryAuthorizeBridgeRecoveryLocked(
+                        inbound,
+                        request,
+                        "filetransfer_receive_recovery",
+                        request.Reason,
+                        out request))
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                LocalOperationalLog.Warn(
+                    "FileTransferService",
+                    $"event=filetransfer_bridge_recovery_authority_rejected; direction={request.Direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(request.TransferId)}; session_id={FormatProtocolLogValue(request.SessionId)}; action_kind={FormatProtocolLogValue(FileTransferCoordinatorActionKind.BridgeReceiveStallRecovery.ToString())}; source=filetransfer_receive_recovery; attempted_action={FormatProtocolLogValue(request.Reason)}; rejection_reason=current_transfer_missing; reason=current_transfer_missing{FormatReceiveRecoveryAuthorityFields(request)}");
                 return false;
             }
 
@@ -804,6 +905,23 @@ public sealed partial class SessionFileTransferService
                 ? TimeSpan.Zero
                 : now - lastPeerLivenessUtc.Value;
 
+            if (!TryAuthorizeRecoveryLivenessLeaseLocked(
+                    context,
+                    "v6_peer_liveness_timeout",
+                    "post_tuna_fallback_peer_liveness_repair",
+                    "post_tuna_fallback_peer_liveness_repair",
+                    now.Add(peerLivenessTimeout),
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    out _))
+            {
+                return false;
+            }
+
             context.V6PeerLivenessRecoveryDeferralCount++;
             context.V6PeerLivenessRecoveryDeferredUtc = now;
             context.V6EpochLivenessDeferralCount++;
@@ -873,6 +991,23 @@ public sealed partial class SessionFileTransferService
                 ? TimeSpan.Zero
                 : now - lastPeerLivenessUtc.Value;
 
+            if (!TryAuthorizeRecoveryLivenessLeaseLocked(
+                    context,
+                    "v6_peer_liveness_timeout",
+                    "v6_regular_nkn_sparse_runtime",
+                    "v6_regular_nkn_sparse_runtime",
+                    now.Add(peerLivenessTimeout),
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    out _))
+            {
+                return false;
+            }
+
             context.V6PeerLivenessRecoveryDeferralCount++;
             context.V6PeerLivenessRecoveryDeferredUtc = now;
             context.V6EpochLivenessDeferralCount++;
@@ -921,6 +1056,23 @@ public sealed partial class SessionFileTransferService
             }
 
             now = DateTimeOffset.UtcNow;
+            if (!TryAuthorizeRecoveryLivenessLeaseLocked(
+                    context,
+                    "v6_peer_liveness_timeout",
+                    "peer_liveness_epoch_waiting",
+                    "peer_liveness_epoch_waiting",
+                    now.Add(peerLivenessTimeout),
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    out _))
+            {
+                return false;
+            }
+
             context.V6EpochLivenessDeferralCount++;
             context.V6EpochLivenessDeferralUtc = now;
             context.PullTransportResumeRequestPending = true;
@@ -994,6 +1146,23 @@ public sealed partial class SessionFileTransferService
                 return false;
             }
 
+            if (!TryAuthorizeRecoveryLivenessLeaseLocked(
+                    context,
+                    "v6_peer_liveness_timeout",
+                    "regular_nkn_feedback_repair",
+                    "regular_nkn_feedback_repair",
+                    now.Add(peerLivenessTimeout),
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    out _))
+            {
+                return false;
+            }
+
             context.V6PeerLivenessRecoveryDeferralCount++;
             context.V6PeerLivenessRecoveryDeferredUtc = now;
             context.V6EpochLivenessDeferralCount++;
@@ -1049,6 +1218,23 @@ public sealed partial class SessionFileTransferService
                 context.SentAwaitingAck.Count > 0 ||
                 context.V6ChunkSendsInFlight.Count > 0;
             if (recentChunkSends <= 0 && !hasUnacknowledgedOutboundData)
+            {
+                return false;
+            }
+
+            if (!TryAuthorizeRecoveryLivenessLeaseLocked(
+                    context,
+                    "v6_peer_liveness_timeout",
+                    "peer_liveness_recovery",
+                    "peer_liveness_recovery",
+                    now.Add(peerLivenessTimeout),
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    out _))
             {
                 return false;
             }
@@ -1227,6 +1413,23 @@ public sealed partial class SessionFileTransferService
                 ? TimeSpan.Zero
                 : now - lastPeerLivenessUtc.Value;
 
+            if (!TryAuthorizeRecoveryLivenessLeaseLocked(
+                    context,
+                    "v6_peer_liveness_timeout",
+                    "post_tuna_fallback_peer_liveness_repair",
+                    "post_tuna_fallback_peer_liveness_repair",
+                    now.Add(peerLivenessTimeout),
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    out _))
+            {
+                return false;
+            }
+
             context.V6EpochLivenessDeferralCount++;
             context.V6EpochLivenessDeferralUtc = now;
             context.PullTransportResumeRequestPending = true;
@@ -1287,6 +1490,23 @@ public sealed partial class SessionFileTransferService
                 ? TimeSpan.Zero
                 : now - lastPeerLivenessUtc.Value;
 
+            if (!TryAuthorizeRecoveryLivenessLeaseLocked(
+                    context,
+                    "v6_peer_liveness_timeout",
+                    "v6_regular_nkn_sparse_runtime",
+                    "v6_regular_nkn_sparse_runtime",
+                    now.Add(peerLivenessTimeout),
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    out _))
+            {
+                return false;
+            }
+
             context.V6EpochLivenessDeferralCount++;
             context.V6EpochLivenessDeferralUtc = now;
             context.V6LastReceiverStateSentUtc = null;
@@ -1333,6 +1553,23 @@ public sealed partial class SessionFileTransferService
             }
 
             now = DateTimeOffset.UtcNow;
+            if (!TryAuthorizeRecoveryLivenessLeaseLocked(
+                    context,
+                    "v6_peer_liveness_timeout",
+                    "peer_liveness_epoch_waiting",
+                    "peer_liveness_epoch_waiting",
+                    now.Add(peerLivenessTimeout),
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    out _))
+            {
+                return false;
+            }
+
             context.V6EpochLivenessDeferralCount++;
             context.V6EpochLivenessDeferralUtc = now;
             context.PullTransportResumeRequestPending = true;
@@ -1393,6 +1630,23 @@ public sealed partial class SessionFileTransferService
                 : now - lastPeerLivenessUtc.Value;
             if (lastPeerLivenessUtc is not null &&
                 peerLivenessSilence >= repairGrace)
+            {
+                return false;
+            }
+
+            if (!TryAuthorizeRecoveryLivenessLeaseLocked(
+                    context,
+                    "v6_peer_liveness_timeout",
+                    "regular_nkn_feedback_repair",
+                    "regular_nkn_feedback_repair",
+                    now.Add(peerLivenessTimeout),
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    out _))
             {
                 return false;
             }

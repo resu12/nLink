@@ -27,6 +27,39 @@ public interface IFileTransferProtocolCapabilities
     bool SupportsFileTransferV6Streaming { get; }
 }
 
+public sealed record FileTransferBridgeRecoveryAuthority(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    string RouteToken,
+    int ProtocolVersion,
+    int LiveRouteEpoch,
+    int RuntimeGeneration,
+    int TerminalGeneration,
+    int TransferLegGeneration,
+    long TransportEpoch,
+    int BridgeRecoveryGeneration,
+    int BridgeDecisionGeneration,
+    string RecoveryKind,
+    string Reason);
+
+public sealed record FileTransferRecoveryLivenessDeferralGrant(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    string RouteToken,
+    int ProtocolVersion,
+    int LiveRouteEpoch,
+    int RuntimeGeneration,
+    int TerminalGeneration,
+    int TransferLegGeneration,
+    long TransportEpoch,
+    int BridgeRecoveryGeneration,
+    int LeaseGeneration,
+    string LeaseState,
+    string Reason,
+    DateTimeOffset LivenessDeferralDeadlineUtc);
+
 public sealed record FileTransferReceiveRecoveryRequest(
     string SessionId,
     string TransferId,
@@ -48,6 +81,8 @@ public sealed record FileTransferReceiveRecoveryRequest(
     public string? CheckpointRequestId { get; init; }
 
     public string? AuthorityReason { get; init; }
+
+    public FileTransferBridgeRecoveryAuthority? BridgeRecoveryAuthority { get; init; }
 }
 
 public interface IFileTransferReceiveRecoveryController

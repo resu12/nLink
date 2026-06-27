@@ -665,6 +665,19 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
+        if (!TryValidateFileTransferBridgeRecoveryAuthority(
+                request,
+                sessionId,
+                transferId,
+                reason,
+                out var authorityRejectionReason))
+        {
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=nkn_bridge_receive_stall_recovery_rejected_no_filetransfer_authority; session_id={SanitizeLogToken(sessionId ?? "none")}; transfer_id={SanitizeLogToken(transferId)}; direction={direction}; reason={reason}; rejection_reason={SanitizeLogToken(authorityRejectionReason)}{authorityFields}");
+            return;
+        }
+
         if (client is not RealNknClientAdapter realClient)
         {
             LocalOperationalLog.Info(
@@ -689,7 +702,9 @@ public sealed partial class NknSignalingTransport
                 request.AuthorityReason ?? reason);
         }
 
-        var accepted = realClient.RequestFileTransferReceiveStallRecovery(bridgeRecoveryReason);
+        var accepted = realClient.RequestFileTransferReceiveStallRecovery(
+            request.BridgeRecoveryAuthority!,
+            bridgeRecoveryReason);
         if (accepted && fallbackAuthority is not null)
         {
             MarkFileTransferFallbackLegAuthorityBridgeRecoveryRequested(fallbackAuthority, bridgeRecoveryReason);
@@ -753,6 +768,76 @@ public sealed partial class NknSignalingTransport
         => request.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
            string.Equals(request.RouteToken, FileTransferRouteResolver.RegularNknV4FastToken, StringComparison.Ordinal);
 
+    private static bool TryValidateFileTransferBridgeRecoveryAuthority(
+        FileTransferReceiveRecoveryRequest request,
+        string? sessionId,
+        string transferId,
+        string reason,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (request.BridgeRecoveryAuthority is not { } authority)
+        {
+            rejectionReason = "bridge_recovery_authority_missing";
+            return false;
+        }
+
+        if (!string.Equals(authority.SessionId, sessionId ?? string.Empty, StringComparison.Ordinal) ||
+            !string.Equals(authority.TransferId, transferId, StringComparison.Ordinal) ||
+            authority.Direction != request.Direction)
+        {
+            rejectionReason = "session_transfer_or_direction_mismatch";
+            return false;
+        }
+
+        if (!string.Equals(authority.RouteToken, request.RouteToken, StringComparison.Ordinal) ||
+            authority.ProtocolVersion != request.ProtocolVersion ||
+            authority.LiveRouteEpoch != request.LiveRouteEpoch ||
+            authority.TransferLegGeneration != request.TransferLegGeneration ||
+            authority.TransportEpoch != request.TransportEpoch ||
+            authority.BridgeRecoveryGeneration != request.BridgeRecoveryGeneration)
+        {
+            rejectionReason = "bridge_recovery_authority_field_mismatch";
+            return false;
+        }
+
+        if (authority.BridgeDecisionGeneration <= 0 ||
+            authority.RuntimeGeneration <= 0 ||
+            authority.TerminalGeneration < 0)
+        {
+            rejectionReason = "bridge_recovery_authority_generation_invalid";
+            return false;
+        }
+
+        if (!IsValidFileTransferBridgeRecoveryKind(authority.RecoveryKind))
+        {
+            rejectionReason = "bridge_recovery_authority_kind_mismatch";
+            return false;
+        }
+
+        var authorityReason = string.IsNullOrWhiteSpace(authority.Reason)
+            ? string.Empty
+            : SanitizeLogToken(authority.Reason);
+        if (string.IsNullOrWhiteSpace(authorityReason) ||
+            string.IsNullOrWhiteSpace(reason))
+        {
+            rejectionReason = "bridge_recovery_authority_reason_missing";
+            return false;
+        }
+
+        if (!string.Equals(authorityReason, reason, StringComparison.Ordinal))
+        {
+            rejectionReason = "bridge_recovery_authority_reason_mismatch";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool IsValidFileTransferBridgeRecoveryKind(string? recoveryKind)
+        => string.Equals(recoveryKind, "BridgeReceiveStallRecovery", StringComparison.Ordinal) ||
+           string.Equals(recoveryKind, "ReceiveRecoveryRequest", StringComparison.Ordinal);
+
     private static string ResolveFileTransferReceiveStallRecoveryBridgeReason(
         FileTransferReceiveRecoveryRequest request,
         string reason,
@@ -790,7 +875,8 @@ public sealed partial class NknSignalingTransport
                 $"; route={SanitizeLogToken(request.RouteToken ?? FileTransferRouteResolver.RegularNknV4FastToken)}" +
                 $"; protocol_version={request.ProtocolVersion}" +
                 $"; live_route_epoch={request.LiveRouteEpoch}" +
-                $"; authority_reason={SanitizeLogToken(request.AuthorityReason ?? request.Reason)}";
+                $"; authority_reason={SanitizeLogToken(request.AuthorityReason ?? request.Reason)}" +
+                $"; bridge_decision_generation={request.BridgeRecoveryAuthority?.BridgeDecisionGeneration ?? 0}";
         }
 
         return
@@ -801,7 +887,8 @@ public sealed partial class NknSignalingTransport
             $"; bridge_recovery_generation={request.BridgeRecoveryGeneration}" +
             $"; transport_epoch={request.TransportEpoch}" +
             $"; checkpoint_request_id={SanitizeLogToken(request.CheckpointRequestId ?? "none")}" +
-            $"; authority_reason={SanitizeLogToken(request.AuthorityReason ?? "none")}";
+            $"; authority_reason={SanitizeLogToken(request.AuthorityReason ?? "none")}" +
+            $"; bridge_decision_generation={request.BridgeRecoveryAuthority?.BridgeDecisionGeneration ?? 0}";
     }
 
     private FileTransferFallbackLegAuthorityState MarkFileTransferFallbackLegAuthorityStarted(
@@ -5017,7 +5104,7 @@ public sealed partial class NknSignalingTransport
         var accepted = RuntimeUnlockOfferSendRecoveryRequestOverrideForTests?.Invoke(this, reason, sessionId);
         if (accepted is null)
         {
-            if (client is not RealNknClientAdapter realClient)
+            if (client is not RealNknClientAdapter)
             {
                 LocalOperationalLog.Info(
                     "NKN.Tuna",
@@ -5025,7 +5112,10 @@ public sealed partial class NknSignalingTransport
                 return false;
             }
 
-            accepted = realClient.RequestFileTransferReceiveStallRecovery(bridgeRecoveryReason);
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=nkn_bridge_receive_stall_recovery_rejected_no_filetransfer_authority; session_id={SanitizeLogToken(sessionId ?? "none")}; transfer_id=runtime_unlock; direction=outbound; reason={SanitizeLogToken(bridgeRecoveryReason)}; rejection_reason=transport_callback_without_coordinator_authority; purpose={normalizedPurpose}; trigger={SanitizeLogToken(trigger)}");
+            accepted = false;
         }
 
         LocalOperationalLog.Warn(

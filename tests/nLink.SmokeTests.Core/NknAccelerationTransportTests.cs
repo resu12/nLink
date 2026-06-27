@@ -9973,9 +9973,88 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=filetransfer_normal_to_tuna_handoff_route_hint_deferred;", logTail, StringComparison.Ordinal);
             Assert.Contains("source=handoff_broadcast", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_v6_bridge_receive_recovery_request_unsupported;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_receive_stall_recovery_rejected_no_filetransfer_authority;", logTail, StringComparison.Ordinal);
+            Assert.Contains("rejection_reason=bridge_recovery_authority_missing", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_fallback_leg_authority_stale_request_ignored;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_fallback_leg_authority_superseded_by_route_hint;", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void FileTransferReceiveRecovery_RejectsMismatchedBridgeRecoveryAuthority()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var options = NknTransportOptions.Load();
+            var client = new FakeNknClient("fallback.bridge.authority.mismatch.address");
+            using var transport = new NknSignalingTransport(
+                client,
+                options,
+                new NknIdentity("fallback-bridge-authority-mismatch-id", client.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+
+            const string sessionId = "session_bridge_authority_mismatch";
+            const string transferId = "transfer_bridge_authority_mismatch";
+            var logStart = GetOperationalLogLength();
+            var request = new FileTransferReceiveRecoveryRequest(
+                sessionId,
+                transferId,
+                FileTransferDirection.Outbound,
+                "session_liveness_timeout_pending")
+            {
+                RouteToken = FileTransferRouteResolver.RegularNknV4FastToken,
+                ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                LiveRouteEpoch = 1,
+                TransferLegGeneration = 1,
+                BridgeRecoveryGeneration = 1,
+                TransportEpoch = 1,
+                AuthorityReason = "session_liveness_timeout_pending",
+                BridgeRecoveryAuthority = new FileTransferBridgeRecoveryAuthority(
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Outbound,
+                    FileTransferRouteResolver.RegularNknV4FastToken,
+                    FileTransferProtocol.ProtocolVersionV4,
+                    LiveRouteEpoch: 1,
+                    RuntimeGeneration: 1,
+                    TerminalGeneration: 0,
+                    TransferLegGeneration: 1,
+                    TransportEpoch: 1,
+                    BridgeRecoveryGeneration: 1,
+                    BridgeDecisionGeneration: 1,
+                    RecoveryKind: "BridgeReceiveStallRecovery",
+                    Reason: "different_liveness_reason"),
+            };
+
+            transport.RequestFileTransferReceiveRecovery(request);
+
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=nkn_bridge_receive_stall_recovery_rejected_no_filetransfer_authority;", logTail, StringComparison.Ordinal);
+            Assert.Contains("rejection_reason=bridge_recovery_authority_reason_mismatch", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_v6_bridge_receive_recovery_request_unsupported;", logTail, StringComparison.Ordinal);
+
+            var kindMismatchStart = GetOperationalLogLength();
+            transport.RequestFileTransferReceiveRecovery(request with
+            {
+                BridgeRecoveryAuthority = request.BridgeRecoveryAuthority! with
+                {
+                    RecoveryKind = "RepairReplay",
+                    Reason = "session_liveness_timeout_pending",
+                    BridgeDecisionGeneration = 2,
+                },
+            });
+
+            var kindMismatchLogTail = ReadOperationalLogTail(kindMismatchStart);
+            Assert.Contains("event=nkn_bridge_receive_stall_recovery_rejected_no_filetransfer_authority;", kindMismatchLogTail, StringComparison.Ordinal);
+            Assert.Contains("rejection_reason=bridge_recovery_authority_kind_mismatch", kindMismatchLogTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_v6_bridge_receive_recovery_request_unsupported;", kindMismatchLogTail, StringComparison.Ordinal);
         }
         finally
         {
@@ -14805,7 +14884,6 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Contains("event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_sidecar_unavailable", logTail, StringComparison.Ordinal);
             Assert.Contains("event=runtime_unlock_answer_rejected_tuna_path_lease_unavailable;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_path_lease_failed;", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=tuna_path_lease_sidecar_unavailable;", logTail, StringComparison.Ordinal);
             Assert.Contains("listener_ready_reuse=0", logTail, StringComparison.Ordinal);
             Assert.Contains("event=session_recovery_contract_listener_rearm_required; session_id=", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=session_recovery_contract_listener_rearm_skipped; session_id=", logTail, StringComparison.Ordinal);
@@ -15429,12 +15507,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 "event=filetransfer_post_tuna_fallback_v6_route_suppressed_no_active_transfer;",
                 logTail,
                 StringComparison.Ordinal);
-            Assert.Contains(
-                "event=filetransfer_v6_fallback_recovered_state_synthesis_suppressed_no_active_transfer;",
-                logTail,
-                StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_fallback_started;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_v6_fallback_recovered_state_synthesized;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_v6_peer_epoch_promoted_live_route;", logTail, StringComparison.Ordinal);
             Assert.False(helper.IsPostTunaFileFallbackActiveForRouteSelection);
             Assert.False(helper.ShouldUseFileTransferV6ForAcceleration);
         }

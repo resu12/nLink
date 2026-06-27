@@ -2293,16 +2293,13 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
             var recovered = await adapter.RecoverBridgePingTimeoutForActiveFileTransferForTestsAsync();
 
-            Assert.True(recovered);
-            await WaitUntilAsync(
-                () => File.Exists(countFile) && int.TryParse(File.ReadAllText(countFile).Trim(), out var count) && count >= 2,
-                TimeSpan.FromSeconds(5));
+            Assert.False(recovered);
             await Task.Delay(150, cts.Token);
             Assert.Equal(0, Volatile.Read(ref disconnectedCount));
             var logText = LocalOperationalLog.GetRecentLogText();
-            Assert.Contains("event=nkn_bridge_ping_timeout_filetransfer_recovery_forced", logText, StringComparison.Ordinal);
-            Assert.Contains("event=nkn_bridge_ping_timeout_filetransfer_recovery_started", logText, StringComparison.Ordinal);
-            Assert.Contains("event=nkn_bridge_ping_timeout_disconnect_suppressed", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_ping_timeout_filetransfer_recovery_diagnostic_only", logText, StringComparison.Ordinal);
+            Assert.Contains("reason=bridge_recovery_authority_missing", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_ping_timeout_filetransfer_recovery_started", logText, StringComparison.Ordinal);
 
             adapter.UnregisterActiveFileTransferDataSession("transfer-ping-timeout-active-only");
             await adapter.DisconnectAsync();
@@ -2378,16 +2375,13 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
             var recovered = await adapter.RecoverBridgePingTimeoutForActiveFileTransferForTestsAsync();
 
-            Assert.True(recovered);
-            await WaitUntilAsync(
-                () => File.Exists(countFile) && int.TryParse(File.ReadAllText(countFile).Trim(), out var count) && count >= 2,
-                TimeSpan.FromSeconds(5));
+            Assert.False(recovered);
             await Task.Delay(150, cts.Token);
             Assert.Equal(0, Volatile.Read(ref disconnectedCount));
             var logText = LocalOperationalLog.GetRecentLogText();
             Assert.Contains("event=filetransfer_active_runtime_used", logText, StringComparison.Ordinal);
-            Assert.Contains("event=nkn_bridge_ping_timeout_filetransfer_recovery_started", logText, StringComparison.Ordinal);
-            Assert.Contains("event=nkn_bridge_ping_timeout_disconnect_suppressed", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_ping_timeout_filetransfer_recovery_diagnostic_only", logText, StringComparison.Ordinal);
+            Assert.Contains("reason=bridge_recovery_authority_missing", logText, StringComparison.Ordinal);
 
             adapter.UnregisterActiveFileTransferRuntime("transfer-ping-timeout-runtime");
             await adapter.DisconnectAsync();
@@ -2455,7 +2449,9 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             adapter.RegisterActiveFileTransferDataSession("transfer-ping-timeout-recovery");
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
             await adapter.ConnectAsync(cts.Token);
-            Assert.True(adapter.RequestFileTransferReceiveStallRecovery("test_ping_timeout_recovery"));
+            Assert.True(adapter.RequestFileTransferReceiveStallRecovery(
+                CreateBridgeRecoveryAuthority("transfer-ping-timeout-recovery", "test_ping_timeout_recovery"),
+                "test_ping_timeout_recovery"));
 
             await WaitUntilAsync(
                 () => File.Exists(countFile) &&
@@ -2542,7 +2538,9 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             adapter.RegisterActiveFileTransferDataSession("transfer-ping-timeout-tombstone");
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
             await adapter.ConnectAsync(cts.Token);
-            Assert.True(adapter.RequestFileTransferReceiveStallRecovery("test_ping_timeout_tombstone"));
+            Assert.True(adapter.RequestFileTransferReceiveStallRecovery(
+                CreateBridgeRecoveryAuthority("transfer-ping-timeout-tombstone", "test_ping_timeout_tombstone"),
+                "test_ping_timeout_tombstone"));
 
             await WaitUntilAsync(
                 () => File.Exists(countFile) &&
@@ -2554,17 +2552,13 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             adapter.UnregisterActiveFileTransferDataSession("transfer-ping-timeout-tombstone");
             var recovered = await adapter.RecoverBridgePingTimeoutForActiveFileTransferForTestsAsync();
 
-            Assert.True(recovered);
-            await WaitUntilAsync(
-                () => File.Exists(countFile) && int.TryParse(File.ReadAllText(countFile).Trim(), out var count) && count >= 3,
-                TimeSpan.FromSeconds(5));
+            Assert.False(recovered);
             await Task.Delay(150, cts.Token);
             Assert.Equal(0, Volatile.Read(ref disconnectedCount));
             var logText = LocalOperationalLog.GetRecentLogText();
             Assert.Contains("event=filetransfer_active_recovery_tombstone_started", logText, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_active_recovery_tombstone_used", logText, StringComparison.Ordinal);
-            Assert.Contains("event=nkn_bridge_ping_timeout_filetransfer_recovery_started", logText, StringComparison.Ordinal);
-            Assert.Contains("event=nkn_bridge_ping_timeout_disconnect_suppressed", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_ping_timeout_filetransfer_recovery_diagnostic_only", logText, StringComparison.Ordinal);
+            Assert.Contains("reason=bridge_recovery_authority_missing", logText, StringComparison.Ordinal);
 
             await adapter.DisconnectAsync();
         }
@@ -3065,10 +3059,10 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 "event=filetransfer_fallback_leg_authority_bridge_registered;",
                 afterRefresh,
                 StringComparison.Ordinal);
-            Assert.Contains(
-                "transport_epoch=2; bridge_recovery_generation=1; checkpoint_request_id=none; authority_reason=transport_epoch_advanced",
-                afterRefresh,
-                StringComparison.Ordinal);
+            Assert.Contains("transport_epoch=2", afterRefresh, StringComparison.Ordinal);
+            Assert.Contains("bridge_recovery_generation=1", afterRefresh, StringComparison.Ordinal);
+            Assert.Contains("checkpoint_request_id=none", afterRefresh, StringComparison.Ordinal);
+            Assert.Contains("authority_reason=transport_epoch_advanced", afterRefresh, StringComparison.Ordinal);
             Assert.Contains(
                 "event=filetransfer_post_tuna_fallback_control_plane_pressure_marked;",
                 afterRefresh,
@@ -4227,7 +4221,9 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             SetPrivateField(adapter, "receiveStallRecoveryRequiresBulkProof", 1);
             var logBaseline = GetOperationalLogLength();
 
-            Assert.True(adapter.RequestFileTransferReceiveStallRecovery("tuna_activation_offer_replay_send_timeout"));
+            Assert.True(adapter.RequestFileTransferReceiveStallRecovery(
+                CreateBridgeRecoveryAuthority("transfer-runtime-unlock-replay-escalation", "tuna_activation_offer_replay_send_timeout"),
+                "tuna_activation_offer_replay_send_timeout"));
 
             await WaitUntilAsync(
                 () =>
@@ -4312,7 +4308,9 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             await adapter.ConnectAsync(cts.Token);
 
-            Assert.True(adapter.RequestFileTransferReceiveStallRecovery("sender_request_feedback_stalled"));
+            Assert.True(adapter.RequestFileTransferReceiveStallRecovery(
+                CreateBridgeRecoveryAuthority("transfer-core-filetransfer-recovery", "sender_request_feedback_stalled"),
+                "sender_request_feedback_stalled"));
 
             await WaitUntilAsync(
                 () => File.Exists(countFile) &&
@@ -4398,7 +4396,13 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Assert.NotNull(recoveryCountField);
             recoveryCountField.SetValue(adapter, 1);
 
-            Assert.True(adapter.RequestFileTransferReceiveStallRecovery("post_tuna_fallback_state_refresh_failed"));
+            Assert.True(adapter.RequestFileTransferReceiveStallRecovery(
+                CreateBridgeRecoveryAuthority(
+                    "transfer-post-tuna-refresh-recovery",
+                    "post_tuna_fallback_state_refresh_failed",
+                    routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+                    protocolVersion: FileTransferProtocol.ProtocolVersionV6),
+                "post_tuna_fallback_state_refresh_failed"));
 
             await WaitUntilAsync(
                 () => GetRecentLogTextSince(logBaseline).Contains(
@@ -4479,7 +4483,9 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             await adapter.ConnectAsync(cts.Token);
 
-            Assert.True(adapter.RequestFileTransferReceiveStallRecovery("session_liveness_timeout_pending"));
+            Assert.True(adapter.RequestFileTransferReceiveStallRecovery(
+                CreateBridgeRecoveryAuthority("transfer-session-liveness-recovery", "session_liveness_timeout_pending"),
+                "session_liveness_timeout_pending"));
 
             await WaitUntilAsync(
                 () => GetRecentLogTextSince(logBaseline).Contains(
@@ -4580,7 +4586,9 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             SetPrivateField(adapter, "receiveStallRecoveryRequiresBulkProof", 1);
 
             Assert.True(
-                adapter.RequestFileTransferReceiveStallRecovery(requestedReason),
+                adapter.RequestFileTransferReceiveStallRecovery(
+                    CreateBridgeRecoveryAuthority($"transfer-runtime-unlock-unproven-escalation-{reasonName}", requestedReason),
+                    requestedReason),
                 GetRecentLogTextSince(logBaseline));
             var expectedStaleGateReason = staleInProgress
                 ? "reason=regular_v4_stale_in_progress_recovery"
@@ -4687,7 +4695,13 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
             await adapter.ConnectAsync(cts.Token);
 
-            Assert.True(adapter.RequestFileTransferReceiveStallRecovery("post_tuna_fallback_state_refresh_failed"));
+            Assert.True(adapter.RequestFileTransferReceiveStallRecovery(
+                CreateBridgeRecoveryAuthority(
+                    "transfer-post-tuna-unproven-escalation",
+                    "post_tuna_fallback_state_refresh_failed",
+                    routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+                    protocolVersion: FileTransferProtocol.ProtocolVersionV6),
+                "post_tuna_fallback_state_refresh_failed"));
             await WaitUntilAsync(
                 () =>
                 {
@@ -4697,7 +4711,14 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 },
                 TimeSpan.FromSeconds(10));
 
-            Assert.True(adapter.RequestFileTransferReceiveStallRecovery("post_tuna_fallback_state_refresh_failed"));
+            Assert.True(adapter.RequestFileTransferReceiveStallRecovery(
+                CreateBridgeRecoveryAuthority(
+                    "transfer-post-tuna-unproven-escalation",
+                    "post_tuna_fallback_state_refresh_failed",
+                    routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+                    protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                    bridgeDecisionGeneration: 2),
+                "post_tuna_fallback_state_refresh_failed"));
             await WaitUntilAsync(
                 () =>
                 {
@@ -5146,7 +5167,13 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Assert.NotNull(recoveryCountField);
             recoveryCountField.SetValue(adapter, 1);
 
-            Assert.True(adapter.RequestFileTransferReceiveStallRecovery("post_tuna_fallback_state_refresh_failed"));
+            Assert.True(adapter.RequestFileTransferReceiveStallRecovery(
+                CreateBridgeRecoveryAuthority(
+                    "transfer-post-tuna-soft-fallback",
+                    "post_tuna_fallback_state_refresh_failed",
+                    routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+                    protocolVersion: FileTransferProtocol.ProtocolVersionV6),
+                "post_tuna_fallback_state_refresh_failed"));
 
             await WaitUntilAsync(
                 () =>
@@ -5187,6 +5214,48 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             catch
             {
             }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void Bridge_FileTransferRecoveryRejectedByOptionsDoesNotCacheBridgeAuthority()
+    {
+        var previousRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", "0");
+            var options = NknTransportOptions.Load();
+            var identity = new NknIdentity("rejected-bridge-authority-cache", "rejected-bridge-authority-cache.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            const string transferId = "transfer_rejected_bridge_authority_cache";
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            var logStart = GetOperationalLogLength();
+
+            Assert.False(adapter.RequestFileTransferReceiveStallRecovery(
+                CreateBridgeRecoveryAuthority(transferId, "test_rejected_bridge_authority_cache"),
+                "test_rejected_bridge_authority_cache"));
+
+            var suppressed = adapter.SuppressBridgePingTimeoutForActiveFileTransferForTests(
+                framesSentSinceLast: 1,
+                messagesReceivedSinceLast: 1,
+                controlLastReceivedAgeMs: 10,
+                bulkLastReceivedAgeMs: 10,
+                disconnectSignalCount: 0,
+                healthSummaryAge: TimeSpan.FromMilliseconds(10));
+
+            Assert.False(suppressed);
+            var logText = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=nkn_bridge_receive_stall_recovery_request_ignored; reason=recovery_disabled;", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_ping_timeout_filetransfer_recovery_suppression_diagnostic_only;", logText, StringComparison.Ordinal);
+            Assert.Contains("reason=bridge_recovery_authority_missing", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_ping_timeout_filetransfer_recovery_suppressed;", logText, StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", previousRecovery);
         }
     }
 
@@ -5780,10 +5849,10 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             disconnectSignalCount: 0,
             healthSummaryAge: TimeSpan.FromSeconds(1));
 
-        Assert.True(suppressed);
+        Assert.False(suppressed);
         var logText = LocalOperationalLog.GetRecentLogText();
-        Assert.Contains("event=nkn_bridge_ping_timeout_filetransfer_recovery_suppressed", logText, StringComparison.Ordinal);
-        Assert.Contains("reason=recent_bridge_health_summary", logText, StringComparison.Ordinal);
+        Assert.Contains("event=nkn_bridge_ping_timeout_filetransfer_recovery_suppression_diagnostic_only", logText, StringComparison.Ordinal);
+        Assert.Contains("reason=bridge_recovery_authority_missing", logText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -5804,8 +5873,8 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
         Assert.False(suppressed);
         var logText = LocalOperationalLog.GetRecentLogText();
-        Assert.Contains("event=nkn_bridge_ping_timeout_filetransfer_recovery_not_suppressed", logText, StringComparison.Ordinal);
-        Assert.Contains("reason=stale_bridge_health_and_send", logText, StringComparison.Ordinal);
+        Assert.Contains("event=nkn_bridge_ping_timeout_filetransfer_recovery_suppression_diagnostic_only", logText, StringComparison.Ordinal);
+        Assert.Contains("reason=bridge_recovery_authority_missing", logText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -5822,10 +5891,10 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             serializedBytes: 65_050,
             sendAge: TimeSpan.FromSeconds(1));
 
-        Assert.True(suppressed);
+        Assert.False(suppressed);
         var logText = LocalOperationalLog.GetRecentLogText();
-        Assert.Contains("event=nkn_bridge_ping_timeout_filetransfer_recovery_suppressed", logText, StringComparison.Ordinal);
-        Assert.Contains("reason=recent_bridge_send", logText, StringComparison.Ordinal);
+        Assert.Contains("event=nkn_bridge_ping_timeout_filetransfer_recovery_suppression_diagnostic_only", logText, StringComparison.Ordinal);
+        Assert.Contains("reason=bridge_recovery_authority_missing", logText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -5844,8 +5913,8 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
         Assert.False(suppressed);
         var logText = LocalOperationalLog.GetRecentLogText();
-        Assert.Contains("event=nkn_bridge_ping_timeout_filetransfer_recovery_not_suppressed", logText, StringComparison.Ordinal);
-        Assert.Contains("reason=stale_bridge_health_and_send", logText, StringComparison.Ordinal);
+        Assert.Contains("event=nkn_bridge_ping_timeout_filetransfer_recovery_suppression_diagnostic_only", logText, StringComparison.Ordinal);
+        Assert.Contains("reason=bridge_recovery_authority_missing", logText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -6739,5 +6808,33 @@ rl.on('line', (line) => {{
             ? text[baselineLength..]
             : text;
     }
+
+    private static FileTransferBridgeRecoveryAuthority CreateBridgeRecoveryAuthority(
+        string transferId,
+        string reason,
+        string routeToken = FileTransferRouteResolver.RegularNknV4FastToken,
+        int protocolVersion = FileTransferProtocol.ProtocolVersionV4,
+        int liveRouteEpoch = 1,
+        int runtimeGeneration = 1,
+        int terminalGeneration = 0,
+        int legGeneration = 1,
+        long transportEpoch = 1,
+        int bridgeRecoveryGeneration = 1,
+        int bridgeDecisionGeneration = 1)
+        => new(
+            "test-session",
+            transferId,
+            FileTransferDirection.Outbound,
+            routeToken,
+            protocolVersion,
+            liveRouteEpoch,
+            runtimeGeneration,
+            terminalGeneration,
+            legGeneration,
+            transportEpoch,
+            bridgeRecoveryGeneration,
+            bridgeDecisionGeneration,
+            "BridgeReceiveStallRecovery",
+            reason);
 
 }

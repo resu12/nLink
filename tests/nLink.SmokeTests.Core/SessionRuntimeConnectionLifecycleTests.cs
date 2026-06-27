@@ -724,7 +724,7 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
     }
 
     [Fact]
-    public async Task FileTransferRecoveryLiveness_LivenessDefersForCurrentFallbackBridgeRecovery()
+    public async Task FileTransferRecoveryLiveness_SnapshotAloneDoesNotDeferForFallbackBridgeRecovery()
     {
         var delay = new ControlledDelayScheduler();
         var now = DateTimeOffset.UtcNow;
@@ -778,45 +778,6 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
 
         now = now.AddSeconds(10);
         delay.CompleteLatest();
-        await Task.Delay(50);
-
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal(0, disconnected);
-        Assert.True(Volatile.Read(ref heartbeatCount) > 0);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(95);
-        delay.CompleteLatest();
-        await Task.Delay(50);
-
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal(0, disconnected);
-
-        scripted.SetFileTransferRecoveryLivenessSnapshotForTests(new FileTransferRecoveryLivenessSnapshot(
-            sessionId,
-            "ft_fallback_liveness",
-            "post_tuna_fallback_v6",
-            FileTransferProtocol.ProtocolVersionV6,
-            LiveRouteEpoch: 2,
-            TransferLegGeneration: 4,
-            BridgeRecoveryGeneration: 1,
-            TransportEpoch: 9,
-            CheckpointRequestId: "v6-regular-nkn-state-refresh:1",
-            AuthorityReason: "post_tuna_fallback_state_refresh_failed",
-            State: FileTransferRecoveryLivenessState.Exhausted,
-            CreatedUtc: now.AddSeconds(-50),
-            LivenessDeferralDeadlineUtc: now.AddSeconds(-1),
-            BridgeRecoveryRequested: true,
-            BridgeRecoveryStarted: true,
-            BridgeRecoveryCompleted: true,
-            ReceiveProofObserved: false,
-            RecoveryExhausted: true,
-            AuthorityCompleted: false,
-            TerminalRecommended: true));
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(41);
-        delay.CompleteLatest();
         await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Failed, TimeSpan.FromSeconds(1));
 
         Assert.Equal("Connection lost.", runtime.StatusText);
@@ -824,7 +785,7 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
     }
 
     [Fact]
-    public async Task FileTransferRecoveryLiveness_LivenessDefersForCurrentRegularV4BridgeRecovery()
+    public async Task FileTransferRecoveryLiveness_SnapshotAloneDoesNotDeferForCurrentRegularV4BridgeRecovery()
     {
         var delay = new ControlledDelayScheduler();
         var now = DateTimeOffset.UtcNow;
@@ -877,37 +838,6 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
         await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
 
         now = now.AddSeconds(10);
-        delay.CompleteLatest();
-        await Task.Delay(50);
-
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal(0, disconnected);
-        Assert.True(Volatile.Read(ref heartbeatCount) > 0);
-
-        scripted.SetFileTransferRecoveryLivenessSnapshotForTests(new FileTransferRecoveryLivenessSnapshot(
-            sessionId,
-            "ft_regular_v4_liveness",
-            "regular_nkn_v4_fast",
-            FileTransferProtocol.ProtocolVersionV4,
-            LiveRouteEpoch: 0,
-            TransferLegGeneration: 1,
-            BridgeRecoveryGeneration: 1,
-            TransportEpoch: 0,
-            CheckpointRequestId: null,
-            AuthorityReason: "session_liveness_timeout_pending",
-            State: FileTransferRecoveryLivenessState.Exhausted,
-            CreatedUtc: now.AddSeconds(-80),
-            LivenessDeferralDeadlineUtc: now.AddSeconds(-1),
-            BridgeRecoveryRequested: true,
-            BridgeRecoveryStarted: true,
-            BridgeRecoveryCompleted: true,
-            ReceiveProofObserved: false,
-            RecoveryExhausted: true,
-            AuthorityCompleted: false,
-            TerminalRecommended: true));
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(90);
         delay.CompleteLatest();
         await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Failed, TimeSpan.FromSeconds(1));
 
@@ -989,7 +919,7 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
     }
 
     [Fact]
-    public async Task FileTransferRecoveryLiveness_ExpiredRegularV4BridgeRecoveryStartedGetsBoundedGrace()
+    public async Task FileTransferRecoveryLiveness_ExpiredRegularV4BridgeRecoveryStartedSnapshotDoesNotDefer()
     {
         var delay = new ControlledDelayScheduler();
         var now = DateTimeOffset.UtcNow;
@@ -1043,15 +973,6 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
 
         now = now.AddSeconds(10);
         delay.CompleteLatest();
-        await Task.Delay(50);
-
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal(0, disconnected);
-        Assert.True(Volatile.Read(ref heartbeatCount) > 0);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(220);
-        delay.CompleteLatest();
         await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Failed, TimeSpan.FromSeconds(1));
 
         Assert.Equal("Connection lost.", runtime.StatusText);
@@ -1059,7 +980,7 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
     }
 
     [Fact]
-    public async Task FileTransferRecoveryLiveness_ReceiveProofClearsCurrentFallbackDeferral()
+    public async Task FileTransferRecoveryLiveness_ReceiveProofDoesNotCreateDeferralWithoutLease()
     {
         var delay = new ControlledDelayScheduler();
         var now = DateTimeOffset.UtcNow;
@@ -1107,22 +1028,10 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
 
         now = now.AddSeconds(10);
         delay.CompleteLatest();
-        await Task.Delay(50);
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Failed, TimeSpan.FromSeconds(1));
 
-        scripted.InjectSessionLivenessProof(
-            sessionId,
-            proofKind: "bridge_receive_stall_recovery_receive_resumed",
-            lane: "bridge_bulk");
-        scripted.SetFileTransferRecoveryLivenessSnapshotForTests(null);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(4);
-        delay.CompleteLatest();
-        await Task.Delay(50);
-
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal(0, disconnected);
+        Assert.Equal("Connection lost.", runtime.StatusText);
+        Assert.Equal(1, disconnected);
     }
 
     [Fact]
@@ -1510,7 +1419,7 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
     }
 
     [Fact]
-    public async Task SessionRuntime_SessionLivenessTimeout_ActiveFileTransferRequestsRecoveryBeforeDisconnect()
+    public async Task SessionRuntime_SessionLivenessTimeout_ActiveFileTransferSnapshotDoesNotRequestRecoveryWithoutAuthority()
     {
         var delay = new ControlledDelayScheduler();
         var now = DateTimeOffset.UtcNow;
@@ -1563,51 +1472,20 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
         now = now.AddSeconds(2);
         delay.CompleteLatest();
         await Task.Delay(50);
-        Assert.Equal(0, recoveryRequests.Count);
+        Assert.Empty(recoveryRequests);
 
         await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
         now = now.AddSeconds(10);
         delay.CompleteLatest();
-        await WaitUntilAsync(() => recoveryRequests.Count == 1, TimeSpan.FromSeconds(1));
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-
-        var request = Assert.Single(recoveryRequests);
-        Assert.Equal(sessionId, request.SessionId);
-        Assert.Equal("ft_liveness_active_progress", request.TransferId);
-        Assert.Equal(FileTransferDirection.Outbound, request.Direction);
-        Assert.Equal("session_liveness_timeout_pending", request.Reason);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(41);
-        delay.CompleteLatest();
-        await Task.Delay(50);
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal(0, disconnected);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(200);
-        delay.CompleteLatest();
-        await WaitUntilAsync(() => recoveryRequests.Count == 2, TimeSpan.FromSeconds(1));
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal(0, disconnected);
-
-        var finalRequest = recoveryRequests.Last();
-        Assert.Equal(sessionId, finalRequest.SessionId);
-        Assert.Equal("ft_liveness_active_progress", finalRequest.TransferId);
-        Assert.Equal(FileTransferDirection.Outbound, finalRequest.Direction);
-        Assert.Equal("session_liveness_timeout_pending", finalRequest.Reason);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(36);
-        delay.CompleteLatest();
         await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Failed, TimeSpan.FromSeconds(1));
 
+        Assert.Empty(recoveryRequests);
         Assert.Equal("Connection lost.", runtime.StatusText);
         Assert.Equal(1, disconnected);
     }
 
     [Fact]
-    public async Task SessionRuntime_SessionLivenessTimeout_DefersForRuntimeUnlockListenerUnavailableStartup()
+    public async Task SessionRuntime_SessionLivenessTimeout_RuntimeUnlockListenerUnavailableStartupDoesNotDeferWithoutAuthority()
     {
         var delay = new ControlledDelayScheduler();
         var now = DateTimeOffset.UtcNow;
@@ -1665,11 +1543,10 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
 
         now = now.AddSeconds(6);
         delay.CompleteLatest();
-        await Task.Delay(50);
+        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Failed, TimeSpan.FromSeconds(1));
 
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal(0, disconnected);
-        Assert.True(Volatile.Read(ref heartbeatCount) > 0);
+        Assert.Equal("Connection lost.", runtime.StatusText);
+        Assert.Equal(1, disconnected);
         Assert.Empty(recoveryRequests);
     }
 
@@ -1727,7 +1604,7 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
         delay.CompleteLatest();
         await Task.Delay(50);
         Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal(0, recoveryRequests.Count);
+        Assert.Empty(recoveryRequests);
         Assert.Equal(0, disconnected);
 
         await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
@@ -1737,12 +1614,12 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
         await Task.Delay(50);
 
         Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal(0, recoveryRequests.Count);
+        Assert.Empty(recoveryRequests);
         Assert.Equal(0, disconnected);
     }
 
     [Fact]
-    public async Task SessionRuntime_SessionLivenessTimeout_RegularV4LocalAcceptedBytesRequestsOneRecoveryButDoesNotRefreshProof()
+    public async Task SessionRuntime_SessionLivenessTimeout_RegularV4LocalAcceptedBytesDoesNotRequestRecoveryWithoutAuthority()
     {
         var delay = new ControlledDelayScheduler();
         var now = DateTimeOffset.UtcNow;
@@ -1794,26 +1671,10 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
 
         now = now.AddSeconds(10);
         delay.CompleteLatest();
-        await WaitUntilAsync(() => recoveryRequests.Count == 1, TimeSpan.FromSeconds(1));
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal(0, disconnected);
-
-        var request = Assert.Single(recoveryRequests);
-        Assert.Equal(sessionId, request.SessionId);
-        Assert.Equal("ft_liveness_local_only_regular_v4", request.TransferId);
-        Assert.Equal(FileTransferDirection.Outbound, request.Direction);
-        Assert.Equal("session_liveness_timeout_pending", request.Reason);
-        Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken, request.RouteToken);
-        Assert.Equal(FileTransferProtocol.ProtocolVersionV4, request.ProtocolVersion);
-        Assert.Equal("regular_v4_startup_local_only_no_ack", request.AuthorityReason);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(10);
-        delay.CompleteLatest();
         await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Failed, TimeSpan.FromSeconds(1));
 
         Assert.Equal("Connection lost.", runtime.StatusText);
-        Assert.Single(recoveryRequests);
+        Assert.Empty(recoveryRequests);
         Assert.Equal(1, disconnected);
     }
 
@@ -2302,7 +2163,7 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
     }
 
     [Fact]
-    public async Task SessionRuntime_SessionLivenessTimeout_FinalActiveFileTransferRecoveryAcceptsLateProof()
+    public async Task SessionRuntime_SessionLivenessTimeout_FinalActiveFileTransferSnapshotDoesNotAcceptLateProofWithoutAuthority()
     {
         var delay = new ControlledDelayScheduler();
         var now = DateTimeOffset.UtcNow;
@@ -2352,37 +2213,20 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
 
         now = now.AddSeconds(10);
         delay.CompleteLatest();
-        await WaitUntilAsync(() => recoveryRequests.Count == 1, TimeSpan.FromSeconds(1));
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Failed, TimeSpan.FromSeconds(1));
 
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(211);
-        delay.CompleteLatest();
-        await WaitUntilAsync(() => recoveryRequests.Count == 2, TimeSpan.FromSeconds(1));
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(8);
-        scripted.InjectSessionLivenessProof(
-            sessionId,
-            generation: 1,
-            sequence: 42,
-            proofKind: "bridge_receive_stall_recovery_receive_resumed",
-            lane: "bridge_control");
-        delay.CompleteLatest();
-        await Task.Delay(50);
-
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal("Connected", runtime.StatusText);
-        Assert.Equal(0, disconnected);
+        Assert.Empty(recoveryRequests);
+        Assert.Equal("Connection lost.", runtime.StatusText);
+        Assert.Equal(1, disconnected);
     }
 
     [Theory]
     [InlineData("regular_v4_unproven_recovery_escalation")]
     [InlineData("post_tuna_fallback_unproven_recovery_escalation")]
     [InlineData("session_liveness_timeout_pending")]
-    public async Task SessionRuntime_SessionLivenessTimeout_ActiveFileTransferBridgeRecoveryExtendsProofWindow(string bridgeRecoveryReason)
+    public async Task SessionRuntime_SessionLivenessTimeout_ActiveFileTransferBridgeRecoveryDoesNotExtendProofWindowWithoutAuthority(string bridgeRecoveryReason)
     {
+        _ = bridgeRecoveryReason;
         var delay = new ControlledDelayScheduler();
         var now = DateTimeOffset.UtcNow;
         var recoveryRequests = new ConcurrentQueue<FileTransferReceiveRecoveryRequest>();
@@ -2433,69 +2277,20 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
         PublishProgress();
         delay.CompleteLatest();
         await Task.Delay(50);
-        Assert.Equal(0, recoveryRequests.Count);
+        Assert.Empty(recoveryRequests);
 
         await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
         now = now.AddSeconds(10);
         delay.CompleteLatest();
-        await WaitUntilAsync(() => recoveryRequests.Count == 1, TimeSpan.FromSeconds(1));
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(8);
-        InvokePrivateMethod(
-            runtime,
-            "OnBridgeLifecycle",
-            null,
-            new BridgeLifecycleEvent(
-                BridgeLifecycleEventKind.ReceiveStallRecoveryStarted,
-                StartMode: null,
-                Pid: null,
-                ReadyTimeMs: null,
-                PingRttMs: null,
-                UptimeMs: null,
-                ExitCode: null,
-                ExitReasonKind: null,
-                ExitReasonText: bridgeRecoveryReason));
-
-        now = now.AddSeconds(3);
-        delay.CompleteLatest();
-        await Task.Delay(50);
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal(0, disconnected);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(13);
-        delay.CompleteLatest();
-        await Task.Delay(50);
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal(0, disconnected);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(25);
-        delay.CompleteLatest();
-        await Task.Delay(50);
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal(0, disconnected);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(155);
-        delay.CompleteLatest();
-        await WaitUntilAsync(() => recoveryRequests.Count == 2, TimeSpan.FromSeconds(1));
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal(0, disconnected);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(36);
-        delay.CompleteLatest();
         await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Failed, TimeSpan.FromSeconds(1));
 
+        Assert.Empty(recoveryRequests);
         Assert.Equal("Connection lost.", runtime.StatusText);
         Assert.Equal(1, disconnected);
     }
 
     [Fact]
-    public async Task SessionRuntime_SessionLivenessTimeout_ActiveBridgeRecoveryStartOverLimitStillExtendsProofWindow()
+    public async Task SessionRuntime_SessionLivenessTimeout_ActiveBridgeRecoveryStartOverLimitDoesNotExtendProofWindowWithoutAuthority()
     {
         var delay = new ControlledDelayScheduler();
         var now = DateTimeOffset.UtcNow;
@@ -2576,33 +2371,6 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
                 ExitReasonText: "regular_v4_unproven_recovery_escalation"));
 
         delay.CompleteLatest();
-        await Task.Delay(50);
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal(0, disconnected);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(13);
-        delay.CompleteLatest();
-        await Task.Delay(50);
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(41);
-        delay.CompleteLatest();
-        await Task.Delay(50);
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal(0, disconnected);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(185);
-        delay.CompleteLatest();
-        await Task.Delay(50);
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal(0, disconnected);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(36);
-        delay.CompleteLatest();
         await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Failed, TimeSpan.FromSeconds(1));
 
         Assert.Equal("Connection lost.", runtime.StatusText);
@@ -2610,7 +2378,7 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
     }
 
     [Fact]
-    public async Task SessionRuntime_SessionLivenessTimeout_ActiveBridgeRecoveryCannotDeferPastPeerSilenceCap()
+    public async Task SessionRuntime_SessionLivenessTimeout_ActiveBridgeRecoveryCannotDeferWithoutAuthority()
     {
         var delay = new ControlledDelayScheduler();
         var now = DateTimeOffset.UtcNow;
@@ -2673,13 +2441,6 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
                 ExitReasonText: "regular_v4_unproven_recovery_escalation"));
 
         delay.CompleteLatest();
-        await Task.Delay(50);
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal(0, disconnected);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(36);
-        delay.CompleteLatest();
         await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Failed, TimeSpan.FromSeconds(1));
 
         Assert.Equal("Connection lost.", runtime.StatusText);
@@ -2687,7 +2448,7 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
     }
 
     [Fact]
-    public async Task SessionRuntime_SessionLivenessTimeout_RuntimeUnlockRecoveryInProgressGetsLongProofWindow()
+    public async Task SessionRuntime_SessionLivenessTimeout_RuntimeUnlockRecoveryInProgressDoesNotDeferWithoutAuthority()
     {
         var delay = new ControlledDelayScheduler();
         var now = DateTimeOffset.UtcNow;
@@ -2751,33 +2512,6 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
 
         now = now.AddSeconds(20);
         delay.CompleteLatest();
-        await Task.Delay(50);
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal(0, disconnected);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(16);
-        delay.CompleteLatest();
-        await Task.Delay(50);
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(11);
-        delay.CompleteLatest();
-        await Task.Delay(50);
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal(0, disconnected);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(160);
-        delay.CompleteLatest();
-        await Task.Delay(50);
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal(0, disconnected);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(36);
-        delay.CompleteLatest();
         await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Failed, TimeSpan.FromSeconds(1));
 
         Assert.Equal("Connection lost.", runtime.StatusText);
@@ -2785,7 +2519,7 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
     }
 
     [Fact]
-    public async Task SessionRuntime_SessionLivenessTimeout_RuntimeUnlockStartupDefersActiveFileTransferTimeout()
+    public async Task SessionRuntime_SessionLivenessTimeout_RuntimeUnlockStartupDoesNotDeferWithoutAuthority()
     {
         var delay = new ControlledDelayScheduler();
         var now = DateTimeOffset.UtcNow;
@@ -2836,44 +2570,9 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
 
         now = now.AddSeconds(10);
         delay.CompleteLatest();
-        await Task.Delay(50);
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Empty(recoveryRequests);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        scripted.SetTransportAccelerationForTests(isActive: false, reason: "activation_offer_not_observed");
-        now = now.AddSeconds(41);
-        delay.CompleteLatest();
-        await Task.Delay(50);
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal(0, disconnected);
-        Assert.Empty(recoveryRequests);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(61);
-        delay.CompleteLatest();
-        await WaitUntilAsync(() => recoveryRequests.Count == 1, TimeSpan.FromSeconds(1));
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(41);
-        delay.CompleteLatest();
-        await Task.Delay(50);
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal(0, disconnected);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(96);
-        delay.CompleteLatest();
-        await WaitUntilAsync(() => recoveryRequests.Count == 2, TimeSpan.FromSeconds(1));
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal(0, disconnected);
-
-        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
-        now = now.AddSeconds(36);
-        delay.CompleteLatest();
         await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Failed, TimeSpan.FromSeconds(1));
 
+        Assert.Empty(recoveryRequests);
         Assert.Equal("Connection lost.", runtime.StatusText);
         Assert.Equal(1, disconnected);
     }
@@ -3732,7 +3431,7 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public async Task SessionRuntime_TransportDisconnect_DefersForCurrentFallbackRecovery()
+    public async Task SessionRuntime_TransportDisconnect_DoesNotDeferForFallbackRecoverySnapshotWithoutAuthority()
     {
         var now = DateTimeOffset.UtcNow;
         var scripted = new ScriptedSignalingTransport();
@@ -3774,11 +3473,10 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
         InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
 
         scripted.RaiseDisconnected();
-        await Task.Delay(50);
+        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Failed, TimeSpan.FromSeconds(1));
 
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal("Connected", runtime.StatusText);
-        Assert.Equal(0, disconnectedCount);
+        Assert.Equal("Connection lost.", runtime.StatusText);
+        Assert.Equal(1, disconnectedCount);
     }
 
     [Trait("Category", "LegacySmoke")]
@@ -3818,7 +3516,7 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public void SessionRuntime_BridgeReceiveStallRecoveryExhausted_DefersForActiveRegularV4Progress()
+    public void SessionRuntime_BridgeReceiveStallRecoveryExhausted_ActiveRegularV4ProgressDoesNotDeferWithoutAuthority()
     {
         var scripted = new ScriptedSignalingTransport();
         using var runtime = new SessionRuntime(() => scripted);
@@ -3872,10 +3570,10 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
                 ExitReasonKind: null,
                 ExitReasonText: "regular_v4_unproven_recovery_escalation"));
 
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal("Connected", runtime.StatusText);
+        Assert.Equal(SessionRuntimeState.Failed, runtime.State);
+        Assert.Equal("Connection lost.", runtime.StatusText);
         Assert.False(runtime.LastDisconnectWasRemoteEnd);
-        Assert.Equal(0, disconnectedCount);
+        Assert.Equal(1, disconnectedCount);
     }
 
     [Trait("Category", "LegacySmoke")]
@@ -3952,7 +3650,7 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public void SessionRuntime_BridgeReceiveStallRecoveryExhausted_SuppressesSiblingPostTunaFallbackExhaustionDuringActiveProgressDeferral()
+    public void SessionRuntime_BridgeReceiveStallRecoveryExhausted_DoesNotSuppressSiblingPostTunaFallbackExhaustionWithoutAuthority()
     {
         var scripted = new ScriptedSignalingTransport();
         using var runtime = new SessionRuntime(() => scripted);
@@ -3972,15 +3670,15 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
         RaiseBridgeExhausted(runtime, "post_tuna_fallback_stale_state_refresh_send_retired_recovery_failed");
         RaiseBridgeExhausted(runtime, "post_tuna_fallback_state_refresh_failed_recovery_failed");
 
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal("Connected", runtime.StatusText);
+        Assert.Equal(SessionRuntimeState.Failed, runtime.State);
+        Assert.Equal("Connection lost.", runtime.StatusText);
         Assert.False(runtime.LastDisconnectWasRemoteEnd);
-        Assert.Equal(0, disconnectedCount);
+        Assert.Equal(1, disconnectedCount);
     }
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public void SessionRuntime_BridgeReceiveStallRecoveryExhausted_SuppressesGenericBulkExhaustionDuringActivePostTunaDeferral()
+    public void SessionRuntime_BridgeReceiveStallRecoveryExhausted_DoesNotSuppressGenericBulkExhaustionWithoutAuthority()
     {
         var scripted = new ScriptedSignalingTransport();
         using var runtime = new SessionRuntime(() => scripted);
@@ -4000,10 +3698,10 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
         RaiseBridgeExhausted(runtime, "post_tuna_fallback_tail_reconciliation_failed");
         RaiseBridgeExhausted(runtime, "bulk_receive_stalled_max_restarts");
 
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal("Connected", runtime.StatusText);
+        Assert.Equal(SessionRuntimeState.Failed, runtime.State);
+        Assert.Equal("Connection lost.", runtime.StatusText);
         Assert.False(runtime.LastDisconnectWasRemoteEnd);
-        Assert.Equal(0, disconnectedCount);
+        Assert.Equal(1, disconnectedCount);
     }
 
     [Trait("Category", "LegacySmoke")]
@@ -4068,7 +3766,7 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public void SessionRuntime_BridgeReceiveStallRecoveryExhausted_ReceiveResumedKeepsSuppressedSiblingFromDisconnecting()
+    public void SessionRuntime_BridgeReceiveStallRecoveryExhausted_ReceiveResumedDoesNotRestoreUnauthorizedSiblingDeferral()
     {
         var scripted = new ScriptedSignalingTransport();
         using var runtime = new SessionRuntime(() => scripted);
@@ -4102,9 +3800,9 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
                 ExitReasonKind: null,
                 ExitReasonText: "post_tuna_fallback_state_refresh_failed_recovery_resumed"));
 
-        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
-        Assert.Equal("Connected", runtime.StatusText);
-        Assert.Equal(0, disconnectedCount);
+        Assert.Equal(SessionRuntimeState.Failed, runtime.State);
+        Assert.Equal("Connection lost.", runtime.StatusText);
+        Assert.Equal(1, disconnectedCount);
     }
 
     [Trait("Category", "LegacySmoke")]

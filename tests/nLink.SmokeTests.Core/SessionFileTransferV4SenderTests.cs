@@ -1086,6 +1086,11 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         typeof(SessionFileTransferService)
             .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
+        var inboundContext = CreateRegularNknV4InboundContext(transferId);
+        SeedCurrentRuntimeOwnerForTest(inboundContext, FileTransferDirection.Inbound, "unit_test_regular");
+        typeof(SessionFileTransferService)
+            .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, inboundContext);
         var method = typeof(SessionFileTransferService)
             .GetMethod("TryRequestFileTransferReceiveRecovery", BindingFlags.Instance | BindingFlags.NonPublic)!;
 
@@ -2138,6 +2143,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             nextChunkIndex: 477,
             durableHighestChunkIndex: 476,
             creditUntilChunkIndexExclusive: 720);
+        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "unit_test_regular");
         SetPrivateProperty(
             context,
             "DataSession",
