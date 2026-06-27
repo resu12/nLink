@@ -234,6 +234,11 @@ function New-FileTransferRetainedEventIndex {
             'filetransfer_coordinator_leg_mutation_rejected',
             'filetransfer_runtime_unlock_callback_rejected',
             'filetransfer_recovery_authority_rejected',
+            'filetransfer_route_publication_rejected',
+            'filetransfer_route_hint_authorized_publication_accepted',
+            'filetransfer_route_hint_ignored_missing_publication_authority',
+            'filetransfer_route_hint_ignored_stale_publication_authority',
+            'filetransfer_route_hint_ignored_invalid_publication_authority',
             'session_liveness_timeout')) {
         $criticalMarkerNames.Add($markerName) | Out-Null
     }

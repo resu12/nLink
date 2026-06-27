@@ -1187,7 +1187,102 @@ public abstract class FileTransferOpsScriptsTestBase
     protected static readonly DateTimeOffset FakeLogStartUtc = new(2026, 4, 26, 11, 17, 58, TimeSpan.Zero);
 
     protected static string LogLine(string message, int secondsOffset = 0)
-        => $"[{FakeLogStartUtc.AddSeconds(secondsOffset).ToString("yyyy-MM-dd HH:mm:ss'Z'", CultureInfo.InvariantCulture)}] [INFO] [FileTransferTest] {message}";
+    {
+        message = AddFixturePublicationAuthorityFields(message);
+        return $"[{FakeLogStartUtc.AddSeconds(secondsOffset).ToString("yyyy-MM-dd HH:mm:ss'Z'", CultureInfo.InvariantCulture)}] [INFO] [FileTransferTest] {message}";
+    }
+
+    private static string AddFixturePublicationAuthorityFields(string message)
+    {
+        const string skipFieldName = "fixture_skip_publication_authority_fields";
+        if (!IsFixturePublicationAuthorityEvent(message))
+        {
+            return message;
+        }
+
+        if (HasFixtureLogField(message, skipFieldName))
+        {
+            return RemoveSemicolonLogField(message, skipFieldName);
+        }
+
+        var route = GetFixtureLogField(message, "route");
+        var protocolVersion = GetFixtureLogField(message, "protocol_version");
+        if (string.IsNullOrWhiteSpace(protocolVersion))
+        {
+            protocolVersion = string.Equals(route, "post_tuna_fallback_v6", StringComparison.OrdinalIgnoreCase) ? "6" : "4";
+        }
+
+        message = AppendFixtureLogFieldIfMissing(message, "live_route_epoch", "0");
+        message = AppendFixtureLogFieldIfMissing(message, "runtime_generation", "1");
+        message = AppendFixtureLogFieldIfMissing(message, "terminal_generation", "0");
+        message = AppendFixtureLogFieldIfMissing(message, "leg_generation", "1");
+        message = AppendFixtureLogFieldIfMissing(message, "route_publication_generation", "1");
+        message = AppendFixtureLogFieldIfMissing(message, "coordinator_decision_reason", "fixture_authorized_publication");
+
+        route = GetFixtureLogField(message, "route");
+        var eventName = GetFixtureLogField(message, "event");
+        var targetTransport = GetFixtureLogField(message, "target_transport");
+        var selectionReason = GetFixtureLogField(message, "selection_reason");
+        var handoffKind = GetFixtureLogField(message, "handoff_kind");
+        var requiresCommitFields =
+            string.Equals(eventName, "filetransfer_route_hint_authorized_publication_accepted", StringComparison.Ordinal) ||
+            string.Equals(route, "file_tuna_v4", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(targetTransport, "tuna", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(selectionReason, "file_tuna_active", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(handoffKind, "normal_to_tuna_activation", StringComparison.OrdinalIgnoreCase);
+        if (requiresCommitFields)
+        {
+            var targetRoute = string.IsNullOrWhiteSpace(GetFixtureLogField(message, "target_route"))
+                ? route
+                : GetFixtureLogField(message, "target_route");
+            var targetProtocolVersion = string.IsNullOrWhiteSpace(GetFixtureLogField(message, "target_protocol_version"))
+                ? protocolVersion
+                : GetFixtureLogField(message, "target_protocol_version");
+            var transport = string.IsNullOrWhiteSpace(targetTransport)
+                ? (string.Equals(route, "file_tuna_v4", StringComparison.OrdinalIgnoreCase) ? "tuna" : "regular_nkn")
+                : targetTransport;
+
+            message = AppendFixtureLogFieldIfMissing(message, "route_commit_generation", "1");
+            message = AppendFixtureLogFieldIfMissing(message, "target_route", targetRoute);
+            message = AppendFixtureLogFieldIfMissing(message, "target_protocol_version", targetProtocolVersion);
+            message = AppendFixtureLogFieldIfMissing(message, "target_transport", transport);
+        }
+
+        return message;
+    }
+
+    private static bool IsFixturePublicationAuthorityEvent(string message)
+    {
+        var eventName = GetFixtureLogField(message, "event");
+        return eventName is
+            "filetransfer_route_selected" or
+            "filetransfer_live_route_epoch_started" or
+            "filetransfer_live_route_epoch_recovered" or
+            "filetransfer_runtime_started" or
+            "filetransfer_route_transitioned" or
+            "filetransfer_route_hint_authorized_publication_accepted";
+    }
+
+    private static string AppendFixtureLogFieldIfMissing(string message, string fieldName, string value)
+        => HasFixtureLogField(message, fieldName)
+            ? message
+            : $"{message}; {fieldName}={value}";
+
+    private static bool HasFixtureLogField(string message, string fieldName)
+        => !string.IsNullOrWhiteSpace(GetFixtureLogField(message, fieldName));
+
+    private static string GetFixtureLogField(string message, string fieldName)
+    {
+        foreach (var part in message.Split("; ", StringSplitOptions.None))
+        {
+            if (part.StartsWith(fieldName + "=", StringComparison.Ordinal))
+            {
+                return part[(fieldName.Length + 1)..].Trim();
+            }
+        }
+
+        return string.Empty;
+    }
 
     protected static string RetimestampLogLine(string line, int secondsOffset)
         => Regex.Replace(

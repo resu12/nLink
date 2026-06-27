@@ -1184,13 +1184,14 @@ function Get-FileTransferInvariantCombinedGateResult {
         [Parameter(Mandatory = $true)]$ControlPriority,
         $RuntimeOwner = $null,
         $StaleRejectedActionEffect = $null,
-        $FallbackRuntimeUnlockSeparation = $null
+        $FallbackRuntimeUnlockSeparation = $null,
+        $PublicationAuthorityFieldCoverage = $null
     )
 
     $findings = New-Object System.Collections.Generic.List[string]
     $evidence = New-Object System.Collections.Generic.List[object]
     $failureClass = 'none'
-    foreach ($result in @($RouteLaw, $TerminalLifecycle, $ControlPriority, $RuntimeOwner, $StaleRejectedActionEffect, $FallbackRuntimeUnlockSeparation)) {
+    foreach ($result in @($RouteLaw, $TerminalLifecycle, $ControlPriority, $RuntimeOwner, $StaleRejectedActionEffect, $FallbackRuntimeUnlockSeparation, $PublicationAuthorityFieldCoverage)) {
         if ($null -eq $result) {
             continue
         }
@@ -3268,6 +3269,14 @@ function Get-FileTransferStaleRejectedProofTransferId {
 function Get-FileTransferStaleRejectedProofActionFamily {
     param([Parameter(Mandatory = $true)]$Event)
 
+    if ($Event.EventName -in @(
+            'filetransfer_route_publication_rejected',
+            'filetransfer_route_hint_ignored_missing_publication_authority',
+            'filetransfer_route_hint_ignored_stale_publication_authority',
+            'filetransfer_route_hint_ignored_invalid_publication_authority')) {
+        return 'route_publication'
+    }
+
     $actionKind = Get-FileTransferStaleRejectedProofFirstField -Event $Event -Names @('action_kind')
     if (Test-FileTransferStaleRejectedProofMeaningfulValue -Value $actionKind) {
         switch ($actionKind.ToLowerInvariant()) {
@@ -3455,7 +3464,12 @@ function Test-FileTransferStaleRejectedProofAuthorityMatches {
         [pscustomobject]@{ Stale = @('attempted_checkpoint_generation', 'checkpoint_generation'); Current = @('current_checkpoint_generation'); Effect = @('checkpoint_generation') },
         [pscustomobject]@{ Stale = @('attempted_control_plane_token_generation', 'control_plane_token_generation', 'fallback_control_plane_token_generation', 'token_generation'); Current = @('current_control_plane_token_generation', 'current_fallback_control_plane_token_generation', 'current_token_generation'); Effect = @('control_plane_token_generation', 'fallback_control_plane_token_generation', 'token_generation') },
         [pscustomobject]@{ Stale = @('attempted_checkpoint_lease_generation', 'checkpoint_lease_generation', 'fallback_checkpoint_lease_generation', 'lease_generation'); Current = @('current_checkpoint_lease_generation', 'current_fallback_checkpoint_lease_generation', 'current_lease_generation'); Effect = @('checkpoint_lease_generation', 'fallback_checkpoint_lease_generation', 'lease_generation') },
-        [pscustomobject]@{ Stale = @('attempted_pressure_generation', 'pressure_generation', 'fallback_control_plane_pressure_generation'); Current = @('current_pressure_generation', 'current_fallback_control_plane_pressure_generation'); Effect = @('pressure_generation', 'fallback_control_plane_pressure_generation') }
+        [pscustomobject]@{ Stale = @('attempted_pressure_generation', 'pressure_generation', 'fallback_control_plane_pressure_generation'); Current = @('current_pressure_generation', 'current_fallback_control_plane_pressure_generation'); Effect = @('pressure_generation', 'fallback_control_plane_pressure_generation') },
+        [pscustomobject]@{ Stale = @('attempted_route_publication_generation', 'route_publication_generation', 'publication_generation'); Current = @('current_route_publication_generation', 'current_publication_generation'); Effect = @('route_publication_generation', 'publication_generation') },
+        [pscustomobject]@{ Stale = @('attempted_route_commit_generation', 'route_commit_generation'); Current = @('current_route_commit_generation'); Effect = @('route_commit_generation') },
+        [pscustomobject]@{ Stale = @('attempted_target_route', 'target_route'); Current = @('current_target_route'); Effect = @('target_route') },
+        [pscustomobject]@{ Stale = @('attempted_target_protocol_version', 'target_protocol_version'); Current = @('current_target_protocol_version'); Effect = @('target_protocol_version') },
+        [pscustomobject]@{ Stale = @('attempted_target_transport', 'target_transport'); Current = @('current_target_transport'); Effect = @('target_transport') }
     )
 
     $matchedStaleAuthority = $false
@@ -3715,9 +3729,186 @@ function Test-FileTransferStaleRejectedProofForbiddenEffect {
                 'filetransfer_runtime_unlock_route_commit_publication_deferred',
                 'runtime_unlock_precommit_probe_paired_commit_confirmed',
                 'runtime_unlock_paired_route_commit_publication_enabled',
+                'filetransfer_route_hint_authorized_publication_accepted',
                 'filetransfer_runtime_started')
         }
         default { return $false }
+    }
+}
+
+function Test-FileTransferPublicationMissingAuthorityRejection {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    return $Event.EventName -eq 'filetransfer_route_hint_ignored_missing_publication_authority'
+}
+
+function Test-FileTransferPublicationAuthorityAcceptanceEvent {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    return $Event.EventName -eq 'filetransfer_route_hint_authorized_publication_accepted'
+}
+
+function Test-FileTransferPublicationScopeRouteMatches {
+    param(
+        [Parameter(Mandatory = $true)]$Left,
+        [Parameter(Mandatory = $true)]$Right
+    )
+
+    if (-not (Test-FileTransferStaleRejectedProofScopeMatches -Rejection $Left -Effect $Right)) {
+        return $false
+    }
+
+    foreach ($fieldName in @('route', 'protocol_version', 'target_route', 'target_protocol_version', 'target_transport')) {
+        $leftValue = Get-FileTransferEventField -Event $Left -Name $fieldName -Default ''
+        if (-not (Test-FileTransferStaleRejectedProofMeaningfulValue -Value $leftValue)) {
+            continue
+        }
+
+        $rightValue = Get-FileTransferEventField -Event $Right -Name $fieldName -Default ''
+        if (-not (Test-FileTransferStaleRejectedProofMeaningfulValue -Value $rightValue)) {
+            continue
+        }
+
+        if (-not [string]::Equals($leftValue, $rightValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Test-FileTransferPublicationEffectHasPriorAuthorizedAcceptance {
+    param(
+        [Parameter(Mandatory = $true)]$Rejection,
+        [Parameter(Mandatory = $true)]$Effect,
+        [Parameter(Mandatory = $true)][object[]]$Events
+    )
+
+    foreach ($candidate in @($Events | Where-Object {
+                $_.Sequence -gt $Rejection.Sequence -and
+                $_.Sequence -lt $Effect.Sequence -and
+                (Test-FileTransferPublicationAuthorityAcceptanceEvent -Event $_)
+            } | Sort-Object Sequence)) {
+        if ((Test-FileTransferPublicationScopeRouteMatches -Left $Rejection -Right $candidate) -and
+            (Test-FileTransferPublicationScopeRouteMatches -Left $candidate -Right $Effect)) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Test-FileTransferPublicationAuthorityFieldEvent {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    return $Event.EventName -in @(
+        'filetransfer_route_selected',
+        'filetransfer_live_route_epoch_started',
+        'filetransfer_live_route_epoch_recovered',
+        'filetransfer_runtime_started',
+        'filetransfer_route_transitioned',
+        'filetransfer_route_hint_authorized_publication_accepted')
+}
+
+function Get-FileTransferPublicationAuthorityRequiredFields {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    $fields = New-Object System.Collections.Generic.List[string]
+    foreach ($fieldName in @(
+            'session_id',
+            'transfer_id',
+            'direction',
+            'route',
+            'protocol_version',
+            'live_route_epoch',
+            'runtime_generation',
+            'terminal_generation',
+            'leg_generation',
+            'route_publication_generation',
+            'coordinator_decision_reason')) {
+        $fields.Add($fieldName) | Out-Null
+    }
+
+    $route = Get-FileTransferEventField -Event $Event -Name 'route' -Default ''
+    $targetTransport = Get-FileTransferEventField -Event $Event -Name 'target_transport' -Default ''
+    $selectionReason = Get-FileTransferEventField -Event $Event -Name 'selection_reason' -Default ''
+    $handoffKind = Get-FileTransferEventField -Event $Event -Name 'handoff_kind' -Default ''
+    $requiresCommitFields = $Event.EventName -eq 'filetransfer_route_hint_authorized_publication_accepted' -or
+        $route -eq 'file_tuna_v4' -or
+        $targetTransport -eq 'tuna' -or
+        $selectionReason -eq 'file_tuna_active' -or
+        $handoffKind -eq 'normal_to_tuna_activation'
+    if ($requiresCommitFields) {
+        foreach ($fieldName in @('route_commit_generation', 'target_route', 'target_protocol_version', 'target_transport')) {
+            $fields.Add($fieldName) | Out-Null
+        }
+    }
+
+    return $fields.ToArray()
+}
+
+function Test-FileTransferPublicationAuthorityFieldValue {
+    param(
+        [Parameter(Mandatory = $true)]$Event,
+        [Parameter(Mandatory = $true)][string]$FieldName
+    )
+
+    $value = Get-FileTransferEventField -Event $Event -Name $FieldName -Default ''
+    if (-not (Test-FileTransferStaleRejectedProofMeaningfulValue -Value $value)) {
+        return $false
+    }
+
+    if ($FieldName -match '(^protocol_version$|^target_protocol_version$|generation$|epoch$)') {
+        $number = 0L
+        if (-not [long]::TryParse([string]$value, [ref]$number)) {
+            return $false
+        }
+
+        if ($number -lt 0) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Get-FileTransferPublicationAuthorityFieldCoverageProof {
+    param([Parameter(Mandatory = $true)]$Summary)
+
+    [object[]]$events = @()
+    if ($null -ne $Summary.PSObject.Properties['AllEvents']) {
+        $events = @($Summary.AllEvents)
+    }
+    if ($events.Count -eq 0) {
+        $events = @($Summary.GlobalEvents + $Summary.TransferEvents)
+    }
+
+    $events = @($events | Sort-Object Sequence)
+    [object[]]$publicationEvents = @($events | Where-Object { Test-FileTransferPublicationAuthorityFieldEvent -Event $_ })
+    $findings = New-Object System.Collections.Generic.List[string]
+    $evidence = New-Object System.Collections.Generic.List[object]
+    $missingFieldCount = 0
+
+    foreach ($event in @($publicationEvents)) {
+        foreach ($fieldName in @(Get-FileTransferPublicationAuthorityRequiredFields -Event $event)) {
+            if (Test-FileTransferPublicationAuthorityFieldValue -Event $event -FieldName $fieldName) {
+                continue
+            }
+
+            $missingFieldCount++
+            $findings.Add(("publication authority field missing or invalid field={0}: {1}" -f $fieldName, (Format-FileTransferEvidenceLine -Event $event))) | Out-Null
+            $evidence.Add($event) | Out-Null
+        }
+    }
+
+    $verdict = if ($publicationEvents.Count -eq 0) { 'none' } elseif ($findings.Count -eq 0) { 'pass' } else { 'fail' }
+    return [pscustomobject]@{
+        Verdict = $verdict
+        FailureClass = if ($verdict -eq 'fail') { 'publication_authority_missing' } else { 'none' }
+        CheckedEventCount = [int]$publicationEvents.Count
+        MissingFieldCount = [int]$missingFieldCount
+        Findings = $findings
+        EvidenceEvents = @($evidence.ToArray() | Select-Object -First 20)
     }
 }
 
@@ -3786,7 +3977,11 @@ function Get-FileTransferStaleRejectedActionEffectProof {
             $_.EventName -eq 'filetransfer_runtime_owner_stale_update_rejected' -or
             $_.EventName -eq 'filetransfer_coordinator_leg_mutation_rejected' -or
             $_.EventName -eq 'filetransfer_runtime_unlock_callback_rejected' -or
-            $_.EventName -eq 'filetransfer_recovery_authority_rejected'
+            $_.EventName -eq 'filetransfer_recovery_authority_rejected' -or
+            $_.EventName -eq 'filetransfer_route_publication_rejected' -or
+            $_.EventName -eq 'filetransfer_route_hint_ignored_missing_publication_authority' -or
+            $_.EventName -eq 'filetransfer_route_hint_ignored_stale_publication_authority' -or
+            $_.EventName -eq 'filetransfer_route_hint_ignored_invalid_publication_authority'
         })
     $families = @('liveness', 'repair', 'progress', 'checkpoint', 'bridge_recovery', 'control_plane', 'route_publication')
     $familyCounts = @{}
@@ -3825,7 +4020,17 @@ function Get-FileTransferStaleRejectedActionEffectProof {
                 continue
             }
 
-            if (-not (Test-FileTransferStaleRejectedProofAuthorityMatches -Rejection $rejection -Effect $effect)) {
+            $missingPublicationAuthority = Test-FileTransferPublicationMissingAuthorityRejection -Event $rejection
+            if ($missingPublicationAuthority) {
+                if (Test-FileTransferPublicationAuthorityAcceptanceEvent -Event $effect) {
+                    continue
+                }
+
+                if (Test-FileTransferPublicationEffectHasPriorAuthorizedAcceptance -Rejection $rejection -Effect $effect -Events $events) {
+                    continue
+                }
+            }
+            elseif (-not (Test-FileTransferStaleRejectedProofAuthorityMatches -Rejection $rejection -Effect $effect)) {
                 continue
             }
 
@@ -4137,6 +4342,7 @@ function New-FileTransferRouteConsistencySummaryLines {
     $controlPlaneProof = Get-FileTransferControlPlaneIsolationProof -Summary $Summary
     $staleRejectedActionEffectProof = Get-FileTransferStaleRejectedActionEffectProof -Summary $Summary
     $fallbackRuntimeUnlockSeparationProof = Get-FileTransferFallbackRuntimeUnlockSeparationProof -Summary $Summary
+    $publicationAuthorityFieldCoverageProof = Get-FileTransferPublicationAuthorityFieldCoverageProof -Summary $Summary
     [object[]]$fallbackAuthoritySequence = @($fallbackAuthorityProof.Sequence)
 
     $lines = New-Object System.Collections.Generic.List[string]
@@ -4244,6 +4450,9 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("stale_rejected_fallback_tail_yield_effect_count={0}" -f $staleRejectedActionEffectProof.FallbackTailYieldForbiddenEffectCount)) | Out-Null
     $lines.Add(("stale_rejected_fallback_pressure_effect_count={0}" -f $staleRejectedActionEffectProof.FallbackPressureForbiddenEffectCount)) | Out-Null
     $lines.Add(("stale_rejected_unknown_action_count={0}" -f $staleRejectedActionEffectProof.UnknownActionCount)) | Out-Null
+    $lines.Add(("publication_authority_field_coverage_verdict={0}" -f $publicationAuthorityFieldCoverageProof.Verdict)) | Out-Null
+    $lines.Add(("publication_authority_checked_event_count={0}" -f $publicationAuthorityFieldCoverageProof.CheckedEventCount)) | Out-Null
+    $lines.Add(("publication_authority_missing_field_count={0}" -f $publicationAuthorityFieldCoverageProof.MissingFieldCount)) | Out-Null
     $lines.Add(("fallback_runtime_unlock_separation_verdict={0}" -f $fallbackRuntimeUnlockSeparationProof.Verdict)) | Out-Null
     $lines.Add(("runtime_fallback_separation_verdict={0}" -f $fallbackRuntimeUnlockSeparationProof.Verdict)) | Out-Null
     $lines.Add(("runtime_fallback_arbitration_verdict={0}" -f $fallbackRuntimeUnlockSeparationProof.Verdict)) | Out-Null
@@ -6728,6 +6937,7 @@ function Get-FileTransferRecoveryFailureClassification {
     $controlPlaneProof = Get-FileTransferControlPlaneIsolationProof -Summary $Summary
     $staleRejectedActionEffectProof = Get-FileTransferStaleRejectedActionEffectProof -Summary $Summary
     $fallbackRuntimeUnlockSeparationProof = Get-FileTransferFallbackRuntimeUnlockSeparationProof -Summary $Summary
+    $publicationAuthorityFieldCoverageProof = Get-FileTransferPublicationAuthorityFieldCoverageProof -Summary $Summary
 
     $routeChanges = New-Object System.Collections.Generic.List[string]
     $lastRoute = ''
@@ -6752,7 +6962,10 @@ function Get-FileTransferRecoveryFailureClassification {
     }
 
     $class = '(none)'
-    if ($staleRejectedActionEffectProof.Verdict -eq 'fail') {
+    if ($publicationAuthorityFieldCoverageProof.Verdict -eq 'fail') {
+        $class = 'publication_authority_missing'
+    }
+    elseif ($staleRejectedActionEffectProof.Verdict -eq 'fail') {
         $class = 'stale_rejected_action_effect'
     }
     elseif ($fallbackRuntimeUnlockSeparationProof.FallbackUnavailableWithoutCoordinatorDenialCount -gt 0) {
@@ -7278,6 +7491,7 @@ function New-FileTransferInvariantLedgerObject {
     $controlPlaneProof = Get-FileTransferControlPlaneIsolationProof -Summary $Summary
     $staleRejectedActionEffectProof = Get-FileTransferStaleRejectedActionEffectProof -Summary $Summary
     $fallbackRuntimeUnlockSeparationProof = Get-FileTransferFallbackRuntimeUnlockSeparationProof -Summary $Summary
+    $publicationAuthorityFieldCoverageProof = Get-FileTransferPublicationAuthorityFieldCoverageProof -Summary $Summary
     $recoveryClassification = Get-FileTransferRecoveryFailureClassification -Summary $Summary
 
     $shaOk = Get-FileTransferInvariantShaOk -TerminalEvents @($Summary.TerminalEvents) -GateVerdict $GateResult.Verdict
@@ -7288,7 +7502,7 @@ function New-FileTransferInvariantLedgerObject {
     $terminalLifecycle = Get-FileTransferInvariantTerminalLifecycleResult -Summary $Summary -LateFrameClassification $lateFrameClassification
     $controlPriority = Get-FileTransferInvariantControlPriorityResult -Summary $Summary
     $runtimeOwner = Get-FileTransferInvariantRuntimeOwnerResult -Summary $Summary
-    $combinedInvariant = Get-FileTransferInvariantCombinedGateResult -RouteLaw $routeLaw -TerminalLifecycle $terminalLifecycle -ControlPriority $controlPriority -RuntimeOwner $runtimeOwner -StaleRejectedActionEffect $staleRejectedActionEffectProof -FallbackRuntimeUnlockSeparation $fallbackRuntimeUnlockSeparationProof
+    $combinedInvariant = Get-FileTransferInvariantCombinedGateResult -RouteLaw $routeLaw -TerminalLifecycle $terminalLifecycle -ControlPriority $controlPriority -RuntimeOwner $runtimeOwner -StaleRejectedActionEffect $staleRejectedActionEffectProof -FallbackRuntimeUnlockSeparation $fallbackRuntimeUnlockSeparationProof -PublicationAuthorityFieldCoverage $publicationAuthorityFieldCoverageProof
 
     $maxLiveEpoch = -1L
     foreach ($event in @($Summary.TransferEvents)) {
@@ -7374,6 +7588,9 @@ function New-FileTransferInvariantLedgerObject {
         stale_rejected_fallback_tail_yield_effect_count = [string]$staleRejectedActionEffectProof.FallbackTailYieldForbiddenEffectCount
         stale_rejected_fallback_pressure_effect_count = [string]$staleRejectedActionEffectProof.FallbackPressureForbiddenEffectCount
         stale_rejected_unknown_action_count = [string]$staleRejectedActionEffectProof.UnknownActionCount
+        publication_authority_field_coverage_verdict = $publicationAuthorityFieldCoverageProof.Verdict
+        publication_authority_checked_event_count = [string]$publicationAuthorityFieldCoverageProof.CheckedEventCount
+        publication_authority_missing_field_count = [string]$publicationAuthorityFieldCoverageProof.MissingFieldCount
         invariant_failure_class = $combinedInvariant.FailureClass
         goodput_bytes_per_second = $goodput
         recovery_failure_class = $recoveryClassification.Class
@@ -7470,12 +7687,13 @@ function Write-FileTransferDiagnosticsArtifacts {
     $controlPlaneProof = Get-FileTransferControlPlaneIsolationProof -Summary $Summary
     $staleRejectedActionEffectProof = Get-FileTransferStaleRejectedActionEffectProof -Summary $Summary
     $fallbackRuntimeUnlockSeparationProof = Get-FileTransferFallbackRuntimeUnlockSeparationProof -Summary $Summary
+    $publicationAuthorityFieldCoverageProof = Get-FileTransferPublicationAuthorityFieldCoverageProof -Summary $Summary
     $invariantLedger = New-FileTransferInvariantLedgerObject -ArtifactDir $ArtifactDir -Summary $Summary -GateResult $GateResult -LiveRouteProofMode $LiveRouteProofMode
     $releaseRouteLaw = Get-FileTransferInvariantRouteLawResult -Summary $Summary
     $terminalLifecycleInvariant = Get-FileTransferInvariantTerminalLifecycleResult -Summary $Summary -LateFrameClassification $invariantLedger.late_frame_classification
     $controlPriorityInvariant = Get-FileTransferInvariantControlPriorityResult -Summary $Summary
     $runtimeOwnerInvariant = Get-FileTransferInvariantRuntimeOwnerResult -Summary $Summary
-    $combinedInvariant = Get-FileTransferInvariantCombinedGateResult -RouteLaw $releaseRouteLaw -TerminalLifecycle $terminalLifecycleInvariant -ControlPriority $controlPriorityInvariant -RuntimeOwner $runtimeOwnerInvariant -StaleRejectedActionEffect $staleRejectedActionEffectProof -FallbackRuntimeUnlockSeparation $fallbackRuntimeUnlockSeparationProof
+    $combinedInvariant = Get-FileTransferInvariantCombinedGateResult -RouteLaw $releaseRouteLaw -TerminalLifecycle $terminalLifecycleInvariant -ControlPriority $controlPriorityInvariant -RuntimeOwner $runtimeOwnerInvariant -StaleRejectedActionEffect $staleRejectedActionEffectProof -FallbackRuntimeUnlockSeparation $fallbackRuntimeUnlockSeparationProof -PublicationAuthorityFieldCoverage $publicationAuthorityFieldCoverageProof
 
     $effectiveVerdict = $GateResult.Verdict
     $effectiveGateStatus = $GateResult.GateStatus
@@ -7528,6 +7746,9 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("stale_rejected_fallback_tail_yield_effect_count={0}" -f $staleRejectedActionEffectProof.FallbackTailYieldForbiddenEffectCount),
         ("stale_rejected_fallback_pressure_effect_count={0}" -f $staleRejectedActionEffectProof.FallbackPressureForbiddenEffectCount),
         ("stale_rejected_unknown_action_count={0}" -f $staleRejectedActionEffectProof.UnknownActionCount),
+        ("publication_authority_field_coverage_verdict={0}" -f $publicationAuthorityFieldCoverageProof.Verdict),
+        ("publication_authority_checked_event_count={0}" -f $publicationAuthorityFieldCoverageProof.CheckedEventCount),
+        ("publication_authority_missing_field_count={0}" -f $publicationAuthorityFieldCoverageProof.MissingFieldCount),
         ("invariant_failure_class={0}" -f $combinedInvariant.FailureClass),
         ("fallback_consumed={0}" -f $invariantLedger.fallback_consumed),
         ("stale_route_worker_activity_count={0}" -f $invariantLedger.stale_route_worker_activity_count),
