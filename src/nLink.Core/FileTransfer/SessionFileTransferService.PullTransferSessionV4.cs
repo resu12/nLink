@@ -450,7 +450,17 @@ public sealed partial class SessionFileTransferService
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event={(useV6Envelope ? "filetransfer_v6_sender_started" : "filetransfer_v4_sender_started")}; transfer_id={context.TransferId}; session_id={context.SessionId}; protocol_version={context.NegotiatedDataProtocolVersion}; route={context.RouteSelection.TelemetryToken}; runtime_profile={FormatFileTransferRouteRuntimeProfile(context.RouteSelection.RuntimeProfile)}; frame_family={FormatFileTransferFrameFamily(context.RouteSelection.FrameFamily)}; bridge_recovery_policy={FormatFileTransferRouteBridgeRecoveryPolicy(context.RouteSelection.BridgeRecoveryPolicy)}; chunk_size_bytes={context.ChunkSizeBytes}; chunk_count={context.ChunkCount}; pipeline_depth={V4SenderPumpDepth}; pending_bytes_limit={V4SenderPumpPendingBytes}");
-            LogFileTransferRuntimeStarted(context.TransferId, context.SessionId, FileTransferDirection.Outbound, "sender", context.RouteSelection);
+            lock (gate)
+            {
+                if (ReferenceEquals(outboundTransfer, context) && !context.IsTerminal)
+                {
+                    TryPublishRuntimeStartedIfAuthorizedLocked(
+                        context,
+                        "sender",
+                        "v4_sender_start",
+                        "runtime_started");
+                }
+            }
 
             UpdateOutboundState(
                 context,
@@ -9839,7 +9849,17 @@ public sealed partial class SessionFileTransferService
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event={(useV6Envelope ? "filetransfer_v6_receiver_started" : "filetransfer_v4_receiver_started")}; transfer_id={context.TransferId}; session_id={context.SessionId}; protocol_version={context.NegotiatedDataProtocolVersion}; route={context.RouteSelection.TelemetryToken}; runtime_profile={FormatFileTransferRouteRuntimeProfile(context.RouteSelection.RuntimeProfile)}; frame_family={FormatFileTransferFrameFamily(context.RouteSelection.FrameFamily)}; bridge_recovery_policy={FormatFileTransferRouteBridgeRecoveryPolicy(context.RouteSelection.BridgeRecoveryPolicy)}; session_open_chunk_size_bytes={sessionOpen.ChunkSizeBytes}; session_open_pipeline_depth={sessionOpen.InitialPipelineDepth}");
-        LogFileTransferRuntimeStarted(context.TransferId, context.SessionId, FileTransferDirection.Inbound, "receiver", context.RouteSelection);
+        lock (gate)
+        {
+            if (ReferenceEquals(inboundTransfer, context) && !context.IsTerminal)
+            {
+                TryPublishRuntimeStartedIfAuthorizedLocked(
+                    context,
+                    "receiver",
+                    "v4_receiver_start",
+                    "runtime_started");
+            }
+        }
 
         try
         {

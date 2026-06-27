@@ -8593,9 +8593,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Equal(100, GetPrivateProperty<int>(context, "RemoteNextExpectedChunkIndex"));
         Assert.Equal(128, GetPrivateProperty<int>(context, "RemoteGrantedUntilExclusive"));
         Assert.Contains("event=filetransfer_fallback_checkpoint_accepted; direction=outbound;", log, StringComparison.Ordinal);
-        Assert.Contains("event=filetransfer_live_route_epoch_recovered; direction=outbound;", log, StringComparison.Ordinal);
-        Assert.Contains("live_route_epoch=4; route=post_tuna_fallback_v6; protocol_version=6;", log, StringComparison.Ordinal);
-        Assert.Contains("reason=fallback_checkpoint_accepted", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_live_route_epoch_recovered; direction=outbound;", log, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_fallback_state_epoch_floor_reset; direction=outbound;", log, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_v4_state_received; transfer_id=[redacted]; session_id=[redacted]; epoch=1; previous_epoch=0;", log, StringComparison.Ordinal);
         Assert.Contains("applied=1; stale=0; duplicate=0; repair_request_id=v6-regular-nkn-state-refresh:epoch-reset; priority=state_refresh; recovery_mode=fallback_leg_checkpoint", log, StringComparison.Ordinal);
@@ -8813,12 +8811,10 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 ]);
 
         var log = ReadOperationalLogTail(logStart);
-        var recoveredIndex = log.IndexOf("event=filetransfer_live_route_epoch_recovered; direction=outbound", StringComparison.Ordinal);
         var terminalIndex = log.IndexOf("event=filetransfer_live_route_epoch_terminal; direction=outbound", StringComparison.Ordinal);
-        Assert.True(recoveredIndex >= 0, log);
-        Assert.True(terminalIndex > recoveredIndex, log);
+        Assert.DoesNotContain("event=filetransfer_live_route_epoch_recovered; direction=outbound", log, StringComparison.Ordinal);
+        Assert.True(terminalIndex >= 0, log);
         Assert.Contains("live_route_epoch=4; route=post_tuna_fallback_v6; protocol_version=6", log, StringComparison.Ordinal);
-        Assert.Contains("reason=terminal_completed_completed", log, StringComparison.Ordinal);
         Assert.Contains("terminal_state=completed", log, StringComparison.Ordinal);
     }
 
@@ -11683,6 +11679,14 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Contains("event=runtime_unlock_precommit_probe_commit_confirmation_sent; direction=outbound;", log, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_route_transitioned; direction=outbound;", log, StringComparison.Ordinal);
         Assert.Contains("new_route=file_tuna_v4", log, StringComparison.Ordinal);
+        var routeTransitionLog = log
+            .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+            .Single(line => line.Contains("event=filetransfer_route_transitioned; direction=outbound;", StringComparison.Ordinal));
+        Assert.Contains("route_publication_generation=", routeTransitionLog, StringComparison.Ordinal);
+        Assert.Contains("runtime_generation=", routeTransitionLog, StringComparison.Ordinal);
+        Assert.Contains("terminal_generation=", routeTransitionLog, StringComparison.Ordinal);
+        Assert.Contains("leg_generation=", routeTransitionLog, StringComparison.Ordinal);
+        Assert.Contains("coordinator_decision_reason=accepted", routeTransitionLog, StringComparison.Ordinal);
         Assert.Contains("event=runtime_unlock_paired_commit_confirmed; direction=outbound;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=runtime_unlock_paired_commit_aborted; direction=outbound;", log, StringComparison.Ordinal);
     }

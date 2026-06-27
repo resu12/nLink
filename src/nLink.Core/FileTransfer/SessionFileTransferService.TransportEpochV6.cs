@@ -1925,7 +1925,7 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        if (!TryAuthorizeRuntimeUnlockRoutePublicationLocked(context, token, reason, out _))
+        if (!TryAuthorizeRuntimeUnlockRoutePublicationLocked(context, token, reason, out _, out _))
         {
             return false;
         }
@@ -1965,7 +1965,7 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        if (!TryAuthorizeRuntimeUnlockRoutePublicationLocked(context, token, reason, out _))
+        if (!TryAuthorizeRuntimeUnlockRoutePublicationLocked(context, token, reason, out _, out _))
         {
             return false;
         }
@@ -3943,11 +3943,9 @@ public sealed partial class SessionFileTransferService
         if (epoch.Kind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
             epoch.TargetTransport == FileTransferTransportKind.RegularNkn)
         {
-            LogLiveRouteEpochRecovered(
-                FileTransferDirection.Outbound,
-                context.TransferId,
-                context.SessionId,
-                context.CurrentLiveRouteEpoch,
+            TryPublishLiveRouteEpochRecoveredIfAuthorizedLocked(
+                context,
+                "transport_epoch_live_route_epoch_recovered",
                 reason);
         }
         else if (epoch.Kind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
@@ -4050,11 +4048,9 @@ public sealed partial class SessionFileTransferService
         if (epoch.Kind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
             epoch.TargetTransport == FileTransferTransportKind.RegularNkn)
         {
-            LogLiveRouteEpochRecovered(
-                FileTransferDirection.Inbound,
-                context.TransferId,
-                context.SessionId,
-                context.CurrentLiveRouteEpoch,
+            TryPublishLiveRouteEpochRecoveredIfAuthorizedLocked(
+                context,
+                "transport_epoch_live_route_epoch_recovered",
                 reason);
         }
         else if (epoch.Kind == FileTransferTransportHandoffKind.NormalToTunaActivation &&

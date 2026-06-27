@@ -203,6 +203,43 @@ internal readonly record struct RouteCommitToken(
                              RuntimeUnlockAdmission.IsDefault;
 }
 
+internal readonly record struct RoutePublicationToken(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    RuntimeOwnerToken RuntimeOwner,
+    FileTransferRoute Route,
+    string RouteToken,
+    int ProtocolVersion,
+    int LiveRouteEpoch,
+    int RuntimeGeneration,
+    int TerminalGeneration,
+    int LegGeneration,
+    int? RouteCommitGeneration,
+    FileTransferRoute TargetRoute,
+    int TargetProtocolVersion,
+    FileTransferTransportKind TargetTransport,
+    int PublicationGeneration,
+    FileTransferCoordinatorActionKind ActionKind,
+    string Reason)
+{
+    public bool IsDefault => PublicationGeneration <= 0 || RuntimeOwner.IsDefault;
+}
+
+internal readonly record struct RoutePublicationDecision(
+    FileTransferCoordinatorActionKind ActionKind,
+    bool Accepted,
+    string RejectionReason,
+    FileTransferRoute CurrentRoute,
+    string CurrentRouteToken,
+    int CurrentProtocolVersion,
+    int CurrentLiveRouteEpoch,
+    int CurrentRuntimeGeneration,
+    int CurrentTerminalGeneration,
+    int CurrentLegGeneration,
+    RouteCommitToken? RouteCommitToken,
+    RoutePublicationToken? RoutePublicationToken);
+
 internal readonly record struct FallbackControlPlaneToken(
     string SessionId,
     string TransferId,
@@ -402,7 +439,9 @@ internal sealed record FileTransferCoordinatorState(
     BridgeRecoveryDecision? CurrentBridgeRecoveryDecision = null,
     int LastBridgeRecoveryDecisionGeneration = 0,
     RecoveryLivenessLease? CurrentRecoveryLivenessLease = null,
-    int LastRecoveryLivenessLeaseGeneration = 0)
+    int LastRecoveryLivenessLeaseGeneration = 0,
+    RoutePublicationToken? CurrentRoutePublicationToken = null,
+    int LastRoutePublicationGeneration = 0)
 {
     public FileTransferRouteRuntimeDescriptor RouteRuntime => RouteSelection.RuntimeDescriptor;
 }
@@ -473,7 +512,10 @@ internal readonly record struct FileTransferCoordinatorActionRequest(
     TransportEpochActionKind? TransportEpochActionKind = null,
     BridgeRecoveryKind? BridgeRecoveryKind = null,
     RecoveryLivenessLease? RecoveryLivenessLease = null,
-    int? RecoveryDecisionGeneration = null);
+    int? RecoveryDecisionGeneration = null,
+    int? RuntimeGeneration = null,
+    int? TerminalGeneration = null,
+    RoutePublicationToken? RoutePublicationToken = null);
 
 internal readonly record struct FileTransferCoordinatorActionDecision(
     FileTransferCoordinatorActionKind Kind,
@@ -494,7 +536,9 @@ internal readonly record struct FileTransferCoordinatorActionDecision(
     RepairReplayDecision? RepairReplayDecision = null,
     TransportEpochDecision? TransportEpochDecision = null,
     BridgeRecoveryDecision? BridgeRecoveryDecision = null,
-    RecoveryLivenessLease? RecoveryLivenessLease = null)
+    RecoveryLivenessLease? RecoveryLivenessLease = null,
+    RoutePublicationDecision? RoutePublicationDecision = null,
+    RoutePublicationToken? RoutePublicationToken = null)
 {
     public FileTransferCoordinatorState State { get; init; } = null!;
 }
@@ -689,6 +733,7 @@ internal static class FileTransferCoordinator
             ? request.RouteCommitToken?.RuntimeOwner ??
               request.RuntimeOwner ??
               request.RuntimeUnlockAdmissionToken?.RuntimeOwner ??
+              request.RoutePublicationToken?.RuntimeOwner ??
               request.FallbackControlPlaneToken?.RuntimeOwner ??
               request.FallbackCheckpointLease?.RuntimeOwner ??
               request.FallbackControlPlanePressureToken?.RuntimeOwner ??
@@ -696,6 +741,7 @@ internal static class FileTransferCoordinator
             : request.RuntimeOwner ??
               request.RuntimeUnlockAdmissionToken?.RuntimeOwner ??
               request.RouteCommitToken?.RuntimeOwner ??
+              request.RoutePublicationToken?.RuntimeOwner ??
               request.FallbackControlPlaneToken?.RuntimeOwner ??
               request.FallbackCheckpointLease?.RuntimeOwner ??
               request.FallbackControlPlanePressureToken?.RuntimeOwner ??
@@ -718,6 +764,26 @@ internal static class FileTransferCoordinator
                 request.Kind,
                 accepted: false,
                 rejectionReason: "runtime_owner_missing");
+        }
+
+        if (request.RuntimeGeneration is { } runtimeGeneration &&
+            runtimeGeneration != (state.CurrentRuntimeOwner?.RuntimeGeneration ?? 0))
+        {
+            return ActionDecision(
+                state,
+                request.Kind,
+                accepted: false,
+                rejectionReason: "runtime_generation_mismatch");
+        }
+
+        if (request.TerminalGeneration is { } terminalGeneration &&
+            terminalGeneration != state.TerminalGeneration)
+        {
+            return ActionDecision(
+                state,
+                request.Kind,
+                accepted: false,
+                rejectionReason: "terminal_generation_mismatch");
         }
 
         if (request.Route is { } route && route != state.RouteSelection.Route)
@@ -865,6 +931,16 @@ internal static class FileTransferCoordinator
                 optionalRouteCommitRejectionReason);
         }
 
+        if (request.RoutePublicationToken is { } routePublicationToken &&
+            !IsRoutePublicationTokenCurrent(state, routePublicationToken, out var routePublicationRejectionReason))
+        {
+            return ActionDecision(
+                state,
+                request.Kind,
+                accepted: false,
+                routePublicationRejectionReason);
+        }
+
         if (!ValidateRuntimeUnlockCallbackMetadata(request, out var callbackRejectionReason))
         {
             return ActionDecision(
@@ -872,6 +948,15 @@ internal static class FileTransferCoordinator
                 request.Kind,
                 accepted: false,
                 callbackRejectionReason);
+        }
+
+        if (!ValidateRoutePublicationAction(state, request, out var publicationRejectionReason))
+        {
+            return ActionDecision(
+                state,
+                request.Kind,
+                accepted: false,
+                publicationRejectionReason);
         }
 
         if (!ValidateFallbackOwnershipAction(state, request, out var fallbackRejectionReason))
@@ -975,6 +1060,15 @@ internal static class FileTransferCoordinator
             _ => null,
         };
 
+        var routePublicationDecision = IsRoutePublicationAuthorityAction(request.Kind)
+            ? CreateRoutePublicationDecision(
+                state,
+                request,
+                accepted: true,
+                rejectionReason: "accepted",
+                Math.Max(1, state.LastRoutePublicationGeneration + 1))
+            : (RoutePublicationDecision?)null;
+
         var acceptedState = ApplyIssuedRecoveryAuthority(
             state,
             request.Kind,
@@ -982,6 +1076,7 @@ internal static class FileTransferCoordinator
             transportEpochDecision,
             bridgeRecoveryDecision,
             recoveryLivenessLease);
+        acceptedState = ApplyIssuedRoutePublicationAuthority(acceptedState, routePublicationDecision);
 
         return ActionDecision(
             acceptedState,
@@ -998,7 +1093,9 @@ internal static class FileTransferCoordinator
             repairReplayDecision: repairReplayDecision,
             transportEpochDecision: transportEpochDecision,
             bridgeRecoveryDecision: bridgeRecoveryDecision,
-            recoveryLivenessLease: recoveryLivenessLease);
+            recoveryLivenessLease: recoveryLivenessLease,
+            routePublicationDecision: routePublicationDecision,
+            routePublicationToken: routePublicationDecision?.RoutePublicationToken);
     }
 
     public static LiveRouteEpoch StartLiveRouteEpoch(
@@ -1284,6 +1381,115 @@ internal static class FileTransferCoordinator
         if (state.IsTerminal)
         {
             rejectionReason = "transfer_terminal";
+            return false;
+        }
+
+        return true;
+    }
+
+    public static bool IsRoutePublicationTokenCurrent(
+        FileTransferCoordinatorState state,
+        RoutePublicationToken token,
+        out string rejectionReason)
+    {
+        rejectionReason = "current";
+        if (token.IsDefault)
+        {
+            rejectionReason = "route_publication_token_missing";
+            return false;
+        }
+
+        if (!string.Equals(token.SessionId, state.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(token.TransferId, state.TransferId, StringComparison.Ordinal) ||
+            token.Direction != state.Direction)
+        {
+            rejectionReason = "session_transfer_or_direction_mismatch";
+            return false;
+        }
+
+        if (state.IsTerminal)
+        {
+            rejectionReason = "transfer_terminal";
+            return false;
+        }
+
+        if (state.CurrentRoutePublicationToken is not { } current ||
+            current.PublicationGeneration != token.PublicationGeneration)
+        {
+            rejectionReason = "route_publication_generation_mismatch";
+            return false;
+        }
+
+        if (current.ActionKind != token.ActionKind ||
+            current.RouteCommitGeneration != token.RouteCommitGeneration ||
+            current.TargetRoute != token.TargetRoute ||
+            current.TargetProtocolVersion != token.TargetProtocolVersion ||
+            current.TargetTransport != token.TargetTransport)
+        {
+            rejectionReason = "route_publication_token_mismatch";
+            return false;
+        }
+
+        if (!IsRuntimeOwnerCurrent(state, token.RuntimeOwner, out rejectionReason))
+        {
+            return false;
+        }
+
+        if (token.Route != state.RouteSelection.Route ||
+            token.ProtocolVersion != state.RouteSelection.ProtocolVersion ||
+            !string.Equals(token.RouteToken, state.RouteSelection.TelemetryToken, StringComparison.Ordinal))
+        {
+            rejectionReason = "route_or_protocol_mismatch";
+            return false;
+        }
+
+        var expectedLiveRouteEpoch = state.CurrentLiveRouteEpoch?.EpochId ?? 0;
+        if (token.LiveRouteEpoch != expectedLiveRouteEpoch)
+        {
+            rejectionReason = "live_route_epoch_mismatch";
+            return false;
+        }
+
+        if (token.RuntimeGeneration != (state.CurrentRuntimeOwner?.RuntimeGeneration ?? 0))
+        {
+            rejectionReason = "runtime_generation_mismatch";
+            return false;
+        }
+
+        if (token.TerminalGeneration != state.TerminalGeneration)
+        {
+            rejectionReason = "terminal_generation_mismatch";
+            return false;
+        }
+
+        if (token.LegGeneration != (state.CurrentLeg?.Generation ?? 0))
+        {
+            rejectionReason = "leg_generation_mismatch";
+            return false;
+        }
+
+        if (token.ActionKind == FileTransferCoordinatorActionKind.RouteCommitPublication)
+        {
+            if (token.RouteCommitGeneration is not { } routeCommitGeneration ||
+                state.CurrentRouteCommit?.CommitGeneration != routeCommitGeneration)
+            {
+                rejectionReason = "route_commit_generation_mismatch";
+                return false;
+            }
+        }
+        else if (token.RouteCommitGeneration is { } routeCommitGeneration &&
+                 state.CurrentRouteCommit?.CommitGeneration != routeCommitGeneration)
+        {
+            rejectionReason = "route_commit_generation_mismatch";
+            return false;
+        }
+
+        if (!IsLegalRoutePublicationTarget(
+                token.TargetRoute,
+                token.TargetProtocolVersion,
+                token.TargetTransport,
+                out rejectionReason))
+        {
             return false;
         }
 
@@ -2186,6 +2392,108 @@ internal static class FileTransferCoordinator
             CurrentRecoveryLivenessLease = null,
         };
 
+    private static FileTransferCoordinatorState InvalidateRoutePublicationAuthority(FileTransferCoordinatorState state)
+        => state with { CurrentRoutePublicationToken = null };
+
+    private static RoutePublicationToken? IssueRoutePublicationToken(
+        FileTransferCoordinatorState state,
+        FileTransferCoordinatorActionRequest request,
+        int publicationGeneration)
+    {
+        if (state.CurrentRuntimeOwner is not { } owner ||
+            state.CurrentLeg is null)
+        {
+            return null;
+        }
+
+        var targetRoute = request.TargetRoute ?? state.RouteSelection.Route;
+        var targetProtocol = request.TargetProtocolVersion ?? state.RouteSelection.ProtocolVersion;
+        var targetTransport = request.TargetTransport is { } transport and not FileTransferTransportKind.Unknown
+            ? transport
+            : ExpectedRoutePublicationTransport(targetRoute);
+        var routeCommitGeneration = request.RouteCommitToken?.CommitGeneration ?? request.RouteCommitGeneration;
+        return new RoutePublicationToken(
+            state.SessionId,
+            state.TransferId,
+            state.Direction,
+            owner,
+            state.RouteSelection.Route,
+            state.RouteSelection.TelemetryToken,
+            state.RouteSelection.ProtocolVersion,
+            state.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            owner.RuntimeGeneration,
+            state.TerminalGeneration,
+            state.CurrentLeg.Generation,
+            routeCommitGeneration,
+            targetRoute,
+            targetProtocol,
+            targetTransport,
+            publicationGeneration,
+            request.Kind,
+            NormalizeReason(request.Reason));
+    }
+
+    private static RoutePublicationDecision? CreateRoutePublicationDecision(
+        FileTransferCoordinatorState state,
+        FileTransferCoordinatorActionKind kind,
+        bool accepted,
+        string rejectionReason,
+        RoutePublicationToken? routePublicationToken)
+    {
+        if (!IsRoutePublicationAuthorityAction(kind))
+        {
+            return null;
+        }
+
+        return new RoutePublicationDecision(
+            kind,
+            accepted,
+            rejectionReason,
+            state.RouteSelection.Route,
+            state.RouteSelection.TelemetryToken,
+            state.RouteSelection.ProtocolVersion,
+            state.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            state.CurrentRuntimeOwner?.RuntimeGeneration ?? 0,
+            state.TerminalGeneration,
+            state.CurrentLeg?.Generation ?? 0,
+            state.CurrentRouteCommit,
+            routePublicationToken);
+    }
+
+    private static RoutePublicationDecision CreateRoutePublicationDecision(
+        FileTransferCoordinatorState state,
+        FileTransferCoordinatorActionRequest request,
+        bool accepted,
+        string rejectionReason,
+        int publicationGeneration)
+    {
+        var token = accepted
+            ? IssueRoutePublicationToken(state, request, publicationGeneration)
+            : null;
+        return CreateRoutePublicationDecision(
+            state,
+            request.Kind,
+            accepted,
+            rejectionReason,
+            token)!.Value;
+    }
+
+    private static FileTransferCoordinatorState ApplyIssuedRoutePublicationAuthority(
+        FileTransferCoordinatorState state,
+        RoutePublicationDecision? routePublicationDecision)
+    {
+        if (routePublicationDecision?.RoutePublicationToken is not { } token)
+        {
+            return state;
+        }
+
+        return state with
+        {
+            CurrentRoutePublicationToken = token,
+            LastRoutePublicationGeneration = token.PublicationGeneration,
+        };
+    }
+
     private static FallbackControlPlaneToken? IssueFallbackControlPlaneToken(
         FileTransferCoordinatorState state,
         FileTransferControlPlaneKind controlPlaneKind,
@@ -2462,6 +2770,7 @@ internal static class FileTransferCoordinator
             LegHistory = legHistory,
             CurrentRuntimeUnlockAdmission = null,
             CurrentRouteCommit = null,
+            CurrentRoutePublicationToken = null,
         };
         nextState = InvalidateFallbackOwnership(nextState);
         nextState = nextState with
@@ -2521,6 +2830,7 @@ internal static class FileTransferCoordinator
             LegHistory = legHistory,
             CurrentRuntimeUnlockAdmission = null,
             CurrentRouteCommit = null,
+            CurrentRoutePublicationToken = null,
         };
         nextState = InvalidateFallbackOwnership(nextState);
         nextState = nextState with
@@ -2970,6 +3280,7 @@ internal static class FileTransferCoordinator
             {
                 CurrentRuntimeUnlockAdmission = null,
                 CurrentRouteCommit = null,
+                CurrentRoutePublicationToken = null,
             },
             reason);
 
@@ -3039,6 +3350,7 @@ internal static class FileTransferCoordinator
             CurrentRouteCommit = routeCommitToken,
             LastRouteCommitGeneration = commitGeneration,
             CurrentRuntimeUnlockAdmission = null,
+            CurrentRoutePublicationToken = null,
         };
         return transition with
         {
@@ -3091,6 +3403,7 @@ internal static class FileTransferCoordinator
                     : null,
                 CurrentRuntimeUnlockAdmission = null,
                 CurrentRouteCommit = null,
+                CurrentRoutePublicationToken = null,
             }),
             reason,
             mutatedLeg: leg);
@@ -3157,7 +3470,9 @@ internal static class FileTransferCoordinator
         RepairReplayDecision? repairReplayDecision = null,
         TransportEpochDecision? transportEpochDecision = null,
         BridgeRecoveryDecision? bridgeRecoveryDecision = null,
-        RecoveryLivenessLease? recoveryLivenessLease = null)
+        RecoveryLivenessLease? recoveryLivenessLease = null,
+        RoutePublicationDecision? routePublicationDecision = null,
+        RoutePublicationToken? routePublicationToken = null)
         => new(
             kind,
             accepted,
@@ -3177,7 +3492,14 @@ internal static class FileTransferCoordinator
             repairReplayDecision,
             transportEpochDecision,
             bridgeRecoveryDecision,
-            recoveryLivenessLease)
+            recoveryLivenessLease,
+            routePublicationDecision ?? CreateRoutePublicationDecision(
+                state,
+                kind,
+                accepted,
+                rejectionReason,
+                routePublicationToken),
+            routePublicationToken)
         {
             State = state,
         };
@@ -3238,6 +3560,71 @@ internal static class FileTransferCoordinator
         }
 
         return next;
+    }
+
+    private static bool ValidateRoutePublicationAction(
+        FileTransferCoordinatorState state,
+        FileTransferCoordinatorActionRequest request,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (!IsRoutePublicationAuthorityAction(request.Kind))
+        {
+            return true;
+        }
+
+        if (state.CurrentLeg is null)
+        {
+            rejectionReason = "leg_missing";
+            return false;
+        }
+
+        if (!IsLegalRoutePublicationTarget(
+                state.RouteSelection.Route,
+                state.RouteSelection.ProtocolVersion,
+                ExpectedRoutePublicationTransport(state.RouteSelection.Route),
+                out rejectionReason))
+        {
+            return false;
+        }
+
+        var targetRoute = request.TargetRoute ?? state.RouteSelection.Route;
+        var targetProtocolVersion = request.TargetProtocolVersion ?? state.RouteSelection.ProtocolVersion;
+        var targetTransport = request.TargetTransport is { } transport and not FileTransferTransportKind.Unknown
+            ? transport
+            : ExpectedRoutePublicationTransport(targetRoute);
+
+        if (!IsLegalRoutePublicationTarget(
+                targetRoute,
+                targetProtocolVersion,
+                targetTransport,
+                out rejectionReason))
+        {
+            return false;
+        }
+
+        if (request.Kind == FileTransferCoordinatorActionKind.RouteCommitPublication)
+        {
+            if (targetRoute != FileTransferRoute.FileTunaV4 ||
+                targetProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+                targetTransport != FileTransferTransportKind.Tuna)
+            {
+                rejectionReason = "route_commit_metadata_invalid";
+                return false;
+            }
+
+            return true;
+        }
+
+        if (targetRoute != state.RouteSelection.Route ||
+            targetProtocolVersion != state.RouteSelection.ProtocolVersion ||
+            targetTransport != ExpectedRoutePublicationTransport(state.RouteSelection.Route))
+        {
+            rejectionReason = "route_publication_target_mismatch";
+            return false;
+        }
+
+        return true;
     }
 
     private static bool ValidateFallbackOwnershipAction(
@@ -3640,8 +4027,54 @@ internal static class FileTransferCoordinator
 
     private static bool RequiresRuntimeOwner(FileTransferCoordinatorActionKind kind)
         => kind is not FileTransferCoordinatorActionKind.StartTransferLeg and
-                   not FileTransferCoordinatorActionKind.RoutePublication and
                    not FileTransferCoordinatorActionKind.RouteCommitPublication;
+
+    private static bool IsRoutePublicationAuthorityAction(FileTransferCoordinatorActionKind kind)
+        => kind is FileTransferCoordinatorActionKind.RoutePublication or
+                   FileTransferCoordinatorActionKind.RouteCommitPublication;
+
+    private static bool IsLegalRoutePublicationTarget(
+        FileTransferRoute route,
+        int protocolVersion,
+        FileTransferTransportKind transport,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (route == FileTransferRoute.FileTunaV4 &&
+            protocolVersion != FileTransferProtocol.ProtocolVersionV4)
+        {
+            rejectionReason = "file_tuna_v6_rejected";
+            return false;
+        }
+
+        var expectedProtocol = route switch
+        {
+            FileTransferRoute.RegularNknV4Fast => FileTransferProtocol.ProtocolVersionV4,
+            FileTransferRoute.FileTunaV4 => FileTransferProtocol.ProtocolVersionV4,
+            FileTransferRoute.PostTunaFallbackV6 => FileTransferProtocol.ProtocolVersionV6,
+            _ => 0,
+        };
+        if (protocolVersion != expectedProtocol)
+        {
+            rejectionReason = "target_route_protocol_mismatch";
+            return false;
+        }
+
+        var expectedTransport = ExpectedRoutePublicationTransport(route);
+        if (transport != FileTransferTransportKind.Unknown &&
+            transport != expectedTransport)
+        {
+            rejectionReason = "route_publication_target_mismatch";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static FileTransferTransportKind ExpectedRoutePublicationTransport(FileTransferRoute route)
+        => route == FileTransferRoute.FileTunaV4
+            ? FileTransferTransportKind.Tuna
+            : FileTransferTransportKind.RegularNkn;
 
     private static bool IsFallbackOwnershipAction(FileTransferCoordinatorActionKind kind)
         => kind is FileTransferCoordinatorActionKind.ControlPlaneSend or

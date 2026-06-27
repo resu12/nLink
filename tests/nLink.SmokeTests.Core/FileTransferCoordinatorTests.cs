@@ -1692,6 +1692,211 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void AuthorizeAction_RoutePublication_IssuesTokenForCurrentRegularRoute()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var started = StartRegular(regular);
+        var owner = started.State.CurrentRuntimeOwner!.Value;
+        var leg = started.State.CurrentLeg!;
+
+        var decision = FileTransferCoordinator.AuthorizeAction(
+            started.State,
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RoutePublication,
+                Source: "test",
+                Reason: "route_publication",
+                RuntimeOwner: owner,
+                Route: regular.Route,
+                ProtocolVersion: regular.ProtocolVersion,
+                LiveRouteEpoch: leg.LiveRouteEpochId,
+                LegGeneration: leg.Generation,
+                RuntimeGeneration: owner.RuntimeGeneration,
+                TerminalGeneration: started.State.TerminalGeneration));
+
+        Assert.True(decision.Accepted);
+        Assert.NotNull(decision.RoutePublicationToken);
+        Assert.NotNull(decision.RoutePublicationDecision);
+        Assert.Equal(FileTransferRoute.RegularNknV4Fast, decision.RoutePublicationToken!.Value.TargetRoute);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV4, decision.RoutePublicationToken.Value.TargetProtocolVersion);
+        Assert.Equal(FileTransferTransportKind.RegularNkn, decision.RoutePublicationToken.Value.TargetTransport);
+        Assert.True(FileTransferCoordinator.IsRoutePublicationTokenCurrent(
+            decision.State,
+            decision.RoutePublicationToken.Value,
+            out _));
+    }
+
+    [Fact]
+    public void AuthorizeAction_RoutePublication_IssuesTokenForCurrentFallbackRoute()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        var state = FallBack(
+            ActivateTuna(StartRegular(regular).State, tuna, committedChunk: 4).State,
+            fallback,
+            committedChunk: 4,
+            transportEpoch: 9).State;
+        var owner = state.CurrentRuntimeOwner!.Value;
+        var leg = state.CurrentLeg!;
+
+        var decision = FileTransferCoordinator.AuthorizeAction(
+            state,
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RoutePublication,
+                Source: "test",
+                Reason: "fallback_route_publication",
+                RuntimeOwner: owner,
+                Route: fallback.Route,
+                ProtocolVersion: fallback.ProtocolVersion,
+                LiveRouteEpoch: leg.LiveRouteEpochId,
+                LegGeneration: leg.Generation,
+                RuntimeGeneration: owner.RuntimeGeneration,
+                TerminalGeneration: state.TerminalGeneration,
+                TargetRoute: FileTransferRoute.PostTunaFallbackV6,
+                TargetProtocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                TargetTransport: FileTransferTransportKind.RegularNkn));
+
+        Assert.True(decision.Accepted);
+        Assert.NotNull(decision.RoutePublicationToken);
+        Assert.Equal(FileTransferRoute.PostTunaFallbackV6, decision.RoutePublicationToken!.Value.TargetRoute);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV6, decision.RoutePublicationToken.Value.TargetProtocolVersion);
+        Assert.Equal(FileTransferTransportKind.RegularNkn, decision.RoutePublicationToken.Value.TargetTransport);
+    }
+
+    [Fact]
+    public void AuthorizeAction_RoutePublication_RejectsTerminalState()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var terminal = FileTransferCoordinator.Apply(
+            CoordinatorEvent(FileTransferCoordinatorEventKind.Terminalized, regular, reason: "completed"),
+            StartRegular(regular).State);
+
+        var decision = FileTransferCoordinator.AuthorizeAction(
+            terminal.State,
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RoutePublication,
+                Source: "test",
+                Reason: "route_publication",
+                RuntimeOwner: terminal.State.CurrentRuntimeOwner));
+
+        Assert.False(decision.Accepted);
+        Assert.True(decision.TerminalMutationRejected);
+        Assert.Equal("terminal_state", decision.RejectionReason);
+        Assert.NotNull(decision.RoutePublicationDecision);
+        Assert.False(decision.RoutePublicationDecision!.Value.Accepted);
+    }
+
+    [Fact]
+    public void AuthorizeAction_RoutePublication_RejectsMissingRuntimeOwner()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var started = StartRegular(regular);
+
+        var decision = FileTransferCoordinator.AuthorizeAction(
+            started.State,
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RoutePublication,
+                Source: "test",
+                Reason: "route_publication"));
+
+        Assert.False(decision.Accepted);
+        Assert.Equal("runtime_owner_missing", decision.RejectionReason);
+    }
+
+    [Fact]
+    public void AuthorizeAction_RoutePublication_RejectsStaleRuntimeOwner()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var started = StartRegular(regular);
+        var oldOwner = started.State.CurrentRuntimeOwner!.Value;
+        var changed = ActivateTuna(started.State, tuna, committedChunk: 3);
+
+        var decision = FileTransferCoordinator.AuthorizeAction(
+            changed.State,
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RoutePublication,
+                Source: "test",
+                Reason: "route_publication",
+                RuntimeOwner: oldOwner));
+
+        Assert.False(decision.Accepted);
+        Assert.Equal("runtime_generation_mismatch", decision.RejectionReason);
+    }
+
+    [Fact]
+    public void AuthorizeAction_RoutePublication_RejectsRouteProtocolLiveEpochAndLegMismatch()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var started = StartRegular(regular);
+        var owner = started.State.CurrentRuntimeOwner!.Value;
+        var leg = started.State.CurrentLeg!;
+
+        var routeMismatch = FileTransferCoordinator.AuthorizeAction(
+            started.State,
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RoutePublication,
+                Source: "test",
+                Reason: "route_publication",
+                RuntimeOwner: owner,
+                Route: FileTransferRoute.FileTunaV4));
+        var protocolMismatch = FileTransferCoordinator.AuthorizeAction(
+            started.State,
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RoutePublication,
+                Source: "test",
+                Reason: "route_publication",
+                RuntimeOwner: owner,
+                ProtocolVersion: FileTransferProtocol.ProtocolVersionV6));
+        var liveEpochMismatch = FileTransferCoordinator.AuthorizeAction(
+            started.State,
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RoutePublication,
+                Source: "test",
+                Reason: "route_publication",
+                RuntimeOwner: owner,
+                LiveRouteEpoch: leg.LiveRouteEpochId + 1));
+        var legMismatch = FileTransferCoordinator.AuthorizeAction(
+            started.State,
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RoutePublication,
+                Source: "test",
+                Reason: "route_publication",
+                RuntimeOwner: owner,
+                LegGeneration: leg.Generation + 1));
+
+        Assert.False(routeMismatch.Accepted);
+        Assert.Equal("route_or_protocol_mismatch", routeMismatch.RejectionReason);
+        Assert.False(protocolMismatch.Accepted);
+        Assert.Equal("route_or_protocol_mismatch", protocolMismatch.RejectionReason);
+        Assert.False(liveEpochMismatch.Accepted);
+        Assert.Equal("live_route_epoch_mismatch", liveEpochMismatch.RejectionReason);
+        Assert.False(legMismatch.Accepted);
+        Assert.Equal("leg_generation_mismatch", legMismatch.RejectionReason);
+    }
+
+    [Fact]
+    public void AuthorizeAction_RoutePublication_RejectsFileTunaV6Target()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var started = StartRegular(regular);
+
+        var decision = FileTransferCoordinator.AuthorizeAction(
+            started.State,
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RoutePublication,
+                Source: "test",
+                Reason: "route_publication",
+                RuntimeOwner: started.State.CurrentRuntimeOwner,
+                TargetRoute: FileTransferRoute.FileTunaV4,
+                TargetProtocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                TargetTransport: FileTransferTransportKind.Tuna));
+
+        Assert.False(decision.Accepted);
+        Assert.Equal("file_tuna_v6_rejected", decision.RejectionReason);
+    }
+
+    [Fact]
     public void AuthorizeAction_RouteCommitPublication_RejectsMissingRouteCommitToken()
     {
         var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
@@ -1771,8 +1976,127 @@ public sealed class FileTransferCoordinatorTests
                 TargetTransport: FileTransferTransportKind.Tuna));
 
         Assert.True(accepted.Accepted);
+        Assert.NotNull(accepted.RoutePublicationToken);
+        Assert.NotNull(accepted.RoutePublicationDecision);
+        Assert.Equal(token.CommitGeneration, accepted.RoutePublicationToken!.Value.RouteCommitGeneration);
+        Assert.True(FileTransferCoordinator.IsRoutePublicationTokenCurrent(
+            accepted.State,
+            accepted.RoutePublicationToken.Value,
+            out _));
         Assert.False(rejectedTarget.Accepted);
         Assert.Equal("route_commit_metadata_invalid", rejectedTarget.RejectionReason);
+    }
+
+    [Fact]
+    public void AuthorizeAction_RouteCommitPublication_RejectsStaleRouteCommitTokenAfterOwnerTerminalOrLiveEpochChange()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        var committed = CommitRuntimeUnlockToTuna(StartRegular(regular).State, tuna);
+        var token = committed.RouteCommitToken!.Value;
+        var ownerChanged = FallBack(committed.State, fallback, committedChunk: 4, transportEpoch: 9).State;
+        var terminal = FileTransferCoordinator.Apply(
+            CoordinatorEvent(FileTransferCoordinatorEventKind.Terminalized, tuna, reason: "completed"),
+            committed.State).State;
+        var liveEpochChanged = committed.State with
+        {
+            CurrentLiveRouteEpoch = FileTransferCoordinator.StartLiveRouteEpoch(
+                committed.State.CurrentLiveRouteEpoch?.EpochId ?? 0,
+                committed.State.RouteSelection,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                "test_live_epoch_change"),
+        };
+
+        var ownerRejected = FileTransferCoordinator.AuthorizeAction(
+            ownerChanged,
+            RouteCommitPublicationRequest(token));
+        var terminalRejected = FileTransferCoordinator.AuthorizeAction(
+            terminal,
+            RouteCommitPublicationRequest(token));
+        var liveEpochRejected = FileTransferCoordinator.AuthorizeAction(
+            liveEpochChanged,
+            RouteCommitPublicationRequest(token));
+
+        Assert.False(ownerRejected.Accepted);
+        Assert.Equal("runtime_generation_mismatch", ownerRejected.RejectionReason);
+        Assert.False(terminalRejected.Accepted);
+        Assert.Equal("terminal_state", terminalRejected.RejectionReason);
+        Assert.False(liveEpochRejected.Accepted);
+        Assert.Equal("live_route_epoch_mismatch", liveEpochRejected.RejectionReason);
+    }
+
+    [Fact]
+    public void IsRoutePublicationTokenCurrent_RejectsAfterTerminalization()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var started = StartRegular(regular);
+        var publication = FileTransferCoordinator.AuthorizeAction(
+            started.State,
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RoutePublication,
+                Source: "test",
+                Reason: "route_publication",
+                RuntimeOwner: started.State.CurrentRuntimeOwner));
+        var terminal = FileTransferCoordinator.Apply(
+            CoordinatorEvent(FileTransferCoordinatorEventKind.Terminalized, regular, reason: "completed"),
+            publication.State);
+
+        var isCurrent = FileTransferCoordinator.IsRoutePublicationTokenCurrent(
+            terminal.State,
+            publication.RoutePublicationToken!.Value,
+            out var rejectionReason);
+
+        Assert.False(isCurrent);
+        Assert.Equal("transfer_terminal", rejectionReason);
+    }
+
+    [Fact]
+    public void IsRoutePublicationTokenCurrent_RejectsAfterRouteTransitionOrNewLeg()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var started = StartRegular(regular);
+        var publication = FileTransferCoordinator.AuthorizeAction(
+            started.State,
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RoutePublication,
+                Source: "test",
+                Reason: "route_publication",
+                RuntimeOwner: started.State.CurrentRuntimeOwner));
+        var transitioned = ActivateTuna(publication.State, tuna, committedChunk: 3);
+
+        var isCurrent = FileTransferCoordinator.IsRoutePublicationTokenCurrent(
+            transitioned.State,
+            publication.RoutePublicationToken!.Value,
+            out var rejectionReason);
+
+        Assert.False(isCurrent);
+        Assert.Equal("route_publication_generation_mismatch", rejectionReason);
+    }
+
+    [Fact]
+    public void Apply_Terminalized_InvalidatesRoutePublicationToken()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var started = StartRegular(regular);
+        var publication = FileTransferCoordinator.AuthorizeAction(
+            started.State,
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RoutePublication,
+                Source: "test",
+                Reason: "route_publication",
+                RuntimeOwner: started.State.CurrentRuntimeOwner));
+        var terminal = FileTransferCoordinator.Apply(
+            CoordinatorEvent(FileTransferCoordinatorEventKind.Terminalized, regular, reason: "completed"),
+            publication.State);
+
+        Assert.Null(terminal.State.CurrentRoutePublicationToken);
+        Assert.False(FileTransferCoordinator.IsRoutePublicationTokenCurrent(
+            terminal.State,
+            publication.RoutePublicationToken!.Value,
+            out _));
     }
 
     [Fact]
@@ -2731,6 +3055,49 @@ public sealed class FileTransferCoordinatorTests
                     owner)),
             nextState);
     }
+
+    private static FileTransferCoordinatorDecision CommitRuntimeUnlockToTuna(
+        FileTransferCoordinatorState state,
+        FileTransferRouteSelection tuna)
+    {
+        var admission = RequestRuntimeUnlockAdmission(state, state.CurrentRuntimeOwner);
+        var admissionToken = admission.RuntimeUnlockAdmissionDecision!.Value.AdmissionToken!.Value;
+        var transaction = BuildCommitReadyRuntimeUnlockTransaction(admission.State);
+        var proof = WithCurrentTunaLease(
+            RuntimeUnlockTransaction.CreateRouteCommitProof(transaction, "answer_received", admissionToken));
+        return FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested,
+                tuna,
+                FileTransferTransportHandoffKind.NormalToTunaActivation,
+                FileTransferTransportKind.Tuna,
+                "runtime_unlock_commit",
+                FileTransferLegState.Active,
+                canSendData: true,
+                runtimeUnlockCommitProof: proof),
+            admission.State);
+    }
+
+    private static FileTransferCoordinatorActionRequest RouteCommitPublicationRequest(RouteCommitToken token)
+        => new(
+            FileTransferCoordinatorActionKind.RouteCommitPublication,
+            Source: "test",
+            Reason: "route_publication",
+            Route: token.Route,
+            ProtocolVersion: token.ProtocolVersion,
+            LiveRouteEpoch: token.LiveRouteEpoch,
+            LegGeneration: token.LegGeneration,
+            RouteCommitToken: token,
+            RuntimeUnlockTransactionGeneration: token.TransactionGeneration,
+            RuntimeUnlockOfferGeneration: token.OfferGeneration,
+            RuntimeUnlockTunaPathLeaseGeneration: token.TunaPathLeaseGeneration,
+            RuntimeUnlockTunaPathLeaseListenerRunId: token.TunaPathLeaseListenerRunId,
+            RuntimeUnlockProbeId: token.SamePathTunaProbeAckId,
+            RuntimeUnlockSamePathTunaProbeAckId: token.SamePathTunaProbeAckId,
+            RouteCommitGeneration: token.CommitGeneration,
+            TargetRoute: FileTransferRoute.FileTunaV4,
+            TargetProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
+            TargetTransport: FileTransferTransportKind.Tuna);
 
     private static RuntimeUnlockRouteCommitProof WithCurrentTunaLease(
         RuntimeUnlockRouteCommitProof proof,

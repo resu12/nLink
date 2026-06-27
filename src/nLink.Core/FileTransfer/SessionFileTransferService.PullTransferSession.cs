@@ -1231,11 +1231,8 @@ public sealed partial class SessionFileTransferService
         context.V6SenderPumpLastWakeReason = "recovered_regular_nkn_epoch_restart_suppressed";
         context.SparseSenderPumpLastWakeReason = "recovered_regular_nkn_epoch_restart_suppressed";
         context.SignalSparseSenderPump();
-        LogRecoveredRegularNknLiveRouteEpochAfterSuppressedRestart(
-            FileTransferDirection.Outbound,
-            context.TransferId,
-            context.SessionId,
-            context.CurrentLiveRouteEpoch,
+        TryPublishRecoveredRegularNknLiveRouteEpochAfterSuppressedRestartLocked(
+            context,
             reason);
 
         LocalOperationalLog.Info(
@@ -1279,11 +1276,8 @@ public sealed partial class SessionFileTransferService
         context.PullTimeoutStreak = 0;
         context.PullFirstChunkTimeoutCount = 0;
         context.PullRecoverySinceUtc = null;
-        LogRecoveredRegularNknLiveRouteEpochAfterSuppressedRestart(
-            FileTransferDirection.Inbound,
-            context.TransferId,
-            context.SessionId,
-            context.CurrentLiveRouteEpoch,
+        TryPublishRecoveredRegularNknLiveRouteEpochAfterSuppressedRestartLocked(
+            context,
             reason);
 
         LocalOperationalLog.Info(
@@ -1341,13 +1335,11 @@ public sealed partial class SessionFileTransferService
             $"event=filetransfer_v6_epoch_recovered_restart_snapshot_published; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; recovered_transport_epoch={recoveredTransportEpoch}; recovered_handoff_kind={FormatFileTransferTransportHandoffKind(recoveredHandoffKind)}; requested_handoff_kind={FormatFileTransferTransportHandoffKind(requestedHandoffKind)}; requested_target_transport={FormatFileTransferTransportKind(requestedTargetTransport)}; reason={FormatProtocolLogValue(reason)}");
     }
 
-    private static void LogRecoveredRegularNknLiveRouteEpochAfterSuppressedRestart(
-        FileTransferDirection direction,
-        string transferId,
-        string sessionId,
-        LiveRouteEpoch? epoch,
+    private bool TryPublishRecoveredRegularNknLiveRouteEpochAfterSuppressedRestartLocked(
+        OutboundTransferContext context,
         string reason)
     {
+        var epoch = context.CurrentLiveRouteEpoch;
         if (epoch is null ||
             !epoch.RouteSelection.RuntimeDescriptor.UsesPostTunaFallbackV6Runtime ||
             epoch.HandoffKind != FileTransferTransportHandoffKind.TunaToNormalFallback ||
@@ -1355,14 +1347,33 @@ public sealed partial class SessionFileTransferService
             string.Equals(epoch.State, "recovered", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(epoch.State, "terminal", StringComparison.OrdinalIgnoreCase))
         {
-            return;
+            return false;
         }
 
-        LogLiveRouteEpochRecovered(
-            direction,
-            transferId,
-            sessionId,
-            epoch,
+        return TryPublishLiveRouteEpochRecoveredIfAuthorizedLocked(
+            context,
+            "suppressed_restart_live_route_epoch_recovered",
+            reason);
+    }
+
+    private bool TryPublishRecoveredRegularNknLiveRouteEpochAfterSuppressedRestartLocked(
+        InboundTransferContext context,
+        string reason)
+    {
+        var epoch = context.CurrentLiveRouteEpoch;
+        if (epoch is null ||
+            !epoch.RouteSelection.RuntimeDescriptor.UsesPostTunaFallbackV6Runtime ||
+            epoch.HandoffKind != FileTransferTransportHandoffKind.TunaToNormalFallback ||
+            epoch.TargetTransport != FileTransferTransportKind.RegularNkn ||
+            string.Equals(epoch.State, "recovered", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(epoch.State, "terminal", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return TryPublishLiveRouteEpochRecoveredIfAuthorizedLocked(
+            context,
+            "suppressed_restart_live_route_epoch_recovered",
             reason);
     }
 
@@ -1985,36 +1996,22 @@ public sealed partial class SessionFileTransferService
         context.NegotiatedDataProtocolVersion = routeSelection.ProtocolVersion;
         ApplyFileTransferRuntimeProfileSelectionLocked(context, runtimeSelection);
         context.StatusMessage = "Switching to regular NKN fallback.";
+        StartOutboundPostTunaRecoveryWithSafetyReplayLocked(context, reason);
 
-        LogFileTransferRouteTransitioned(
-            FileTransferDirection.Outbound,
-            context.TransferId,
-            context.SessionId,
-            previousRouteSelection,
-            routeSelection,
-            reason);
-        LogFileTransferRouteSelected(
-            FileTransferDirection.Outbound,
-            context.TransferId,
-            context.SessionId,
-            routeSelection,
-            routeInput,
-            liveRouteEpoch.EpochId);
-        NotifyFileTransferRouteHintObserver(
-            FileTransferDirection.Outbound,
-            context.TransferId,
-            context.SessionId,
-            routeSelection,
-            liveRouteEpoch.EpochId,
-            "service_live_route_transition");
-        LogLiveRouteEpochStarted(
-            FileTransferDirection.Outbound,
-            context.TransferId,
-            context.SessionId,
-            liveRouteEpoch,
-            previousRouteSelection);
+        if (!TryPublishRouteTransitionedIfAuthorizedLocked(context, previousRouteSelection, "fallback_route_transition", reason) ||
+            !TryPublishRouteSelectedIfAuthorizedLocked(context, routeInput, "fallback_route_selected", reason) ||
+            !TryPublishRouteHintIfAuthorizedLocked(context, "fallback_route_hint", reason, "service_live_route_transition") ||
+            !TryPublishLiveRouteEpochStartedIfAuthorizedLocked(context, previousRouteSelection, "fallback_live_route_epoch_started", reason))
+        {
+            return false;
+        }
+
         LogV6Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Outbound, routeSelection, liveRouteEpoch.EpochId);
-        LogFileTransferRuntimeStarted(context.TransferId, context.SessionId, FileTransferDirection.Outbound, "sender", routeSelection, liveRouteEpoch.EpochId);
+        if (!TryPublishRuntimeStartedIfAuthorizedLocked(context, "sender", "fallback_runtime_started", reason))
+        {
+            return false;
+        }
+
         LogFileTransferBridgeRecoveryPolicySelected(
             context.TransferId,
             context.SessionId,
@@ -2022,7 +2019,6 @@ public sealed partial class SessionFileTransferService
             runtimeSelection,
             routeSelection,
             liveRouteEpoch.EpochId);
-        StartOutboundPostTunaRecoveryWithSafetyReplayLocked(context, reason);
         return true;
     }
 
@@ -2066,36 +2062,23 @@ public sealed partial class SessionFileTransferService
         context.NegotiatedDataProtocolVersion = routeSelection.ProtocolVersion;
         ApplyFileTransferRuntimeProfileSelectionLocked(context, runtimeSelection);
         context.StatusMessage = "Switching to regular NKN fallback.";
+        EnsureInboundV6DestinationModeForLivePostTunaFallbackLocked(context, reason);
+        StartInboundPostTunaRecoveryLocked(context, reason);
 
-        LogFileTransferRouteTransitioned(
-            FileTransferDirection.Inbound,
-            context.TransferId,
-            context.SessionId,
-            previousRouteSelection,
-            routeSelection,
-            reason);
-        LogFileTransferRouteSelected(
-            FileTransferDirection.Inbound,
-            context.TransferId,
-            context.SessionId,
-            routeSelection,
-            routeInput,
-            liveRouteEpoch.EpochId);
-        NotifyFileTransferRouteHintObserver(
-            FileTransferDirection.Inbound,
-            context.TransferId,
-            context.SessionId,
-            routeSelection,
-            liveRouteEpoch.EpochId,
-            "service_live_route_transition");
-        LogLiveRouteEpochStarted(
-            FileTransferDirection.Inbound,
-            context.TransferId,
-            context.SessionId,
-            liveRouteEpoch,
-            previousRouteSelection);
+        if (!TryPublishRouteTransitionedIfAuthorizedLocked(context, previousRouteSelection, "fallback_route_transition", reason) ||
+            !TryPublishRouteSelectedIfAuthorizedLocked(context, routeInput, "fallback_route_selected", reason) ||
+            !TryPublishRouteHintIfAuthorizedLocked(context, "fallback_route_hint", reason, "service_live_route_transition") ||
+            !TryPublishLiveRouteEpochStartedIfAuthorizedLocked(context, previousRouteSelection, "fallback_live_route_epoch_started", reason))
+        {
+            return false;
+        }
+
         LogV6Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Inbound, routeSelection, liveRouteEpoch.EpochId);
-        LogFileTransferRuntimeStarted(context.TransferId, context.SessionId, FileTransferDirection.Inbound, "receiver", routeSelection, liveRouteEpoch.EpochId);
+        if (!TryPublishRuntimeStartedIfAuthorizedLocked(context, "receiver", "fallback_runtime_started", reason))
+        {
+            return false;
+        }
+
         LogFileTransferBridgeRecoveryPolicySelected(
             context.TransferId,
             context.SessionId,
@@ -2103,8 +2086,6 @@ public sealed partial class SessionFileTransferService
             runtimeSelection,
             routeSelection,
             liveRouteEpoch.EpochId);
-        EnsureInboundV6DestinationModeForLivePostTunaFallbackLocked(context, reason);
-        StartInboundPostTunaRecoveryLocked(context, reason);
         return true;
     }
 
@@ -2148,36 +2129,23 @@ public sealed partial class SessionFileTransferService
         context.NegotiatedDataProtocolVersion = routeSelection.ProtocolVersion;
         ApplyFileTransferRuntimeProfileSelectionLocked(context, runtimeSelection);
         context.StatusMessage = "Switching to regular NKN fallback.";
+        EnsureInboundV6DestinationModeForLivePostTunaFallbackLocked(context, reason);
+        StartInboundPostTunaRecoveryLocked(context, reason);
 
-        LogFileTransferRouteTransitioned(
-            FileTransferDirection.Inbound,
-            context.TransferId,
-            context.SessionId,
-            previousRouteSelection,
-            routeSelection,
-            reason);
-        LogFileTransferRouteSelected(
-            FileTransferDirection.Inbound,
-            context.TransferId,
-            context.SessionId,
-            routeSelection,
-            routeInput,
-            liveRouteEpoch.EpochId);
-        NotifyFileTransferRouteHintObserver(
-            FileTransferDirection.Inbound,
-            context.TransferId,
-            context.SessionId,
-            routeSelection,
-            liveRouteEpoch.EpochId,
-            "service_live_route_transition");
-        LogLiveRouteEpochStarted(
-            FileTransferDirection.Inbound,
-            context.TransferId,
-            context.SessionId,
-            liveRouteEpoch,
-            previousRouteSelection);
+        if (!TryPublishRouteTransitionedIfAuthorizedLocked(context, previousRouteSelection, "fallback_route_transition", reason) ||
+            !TryPublishRouteSelectedIfAuthorizedLocked(context, routeInput, "fallback_route_selected", reason) ||
+            !TryPublishRouteHintIfAuthorizedLocked(context, "fallback_route_hint", reason, "service_live_route_transition") ||
+            !TryPublishLiveRouteEpochStartedIfAuthorizedLocked(context, previousRouteSelection, "fallback_live_route_epoch_started", reason))
+        {
+            return false;
+        }
+
         LogV6Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Inbound, routeSelection, liveRouteEpoch.EpochId);
-        LogFileTransferRuntimeStarted(context.TransferId, context.SessionId, FileTransferDirection.Inbound, "receiver", routeSelection, liveRouteEpoch.EpochId);
+        if (!TryPublishRuntimeStartedIfAuthorizedLocked(context, "receiver", "fallback_runtime_started", reason))
+        {
+            return false;
+        }
+
         LogFileTransferBridgeRecoveryPolicySelected(
             context.TransferId,
             context.SessionId,
@@ -2185,8 +2153,6 @@ public sealed partial class SessionFileTransferService
             runtimeSelection,
             routeSelection,
             liveRouteEpoch.EpochId);
-        EnsureInboundV6DestinationModeForLivePostTunaFallbackLocked(context, reason);
-        StartInboundPostTunaRecoveryLocked(context, reason);
         return true;
     }
 
@@ -2799,7 +2765,7 @@ public sealed partial class SessionFileTransferService
             RetireRuntimeOwnedWorkersLocked(context, owner, reason);
         }
 
-        if (!TryAuthorizeRuntimeUnlockRoutePublicationLocked(context, routeCommitToken, reason, out rejectionReason))
+        if (!TryAuthorizeRuntimeUnlockRoutePublicationLocked(context, routeCommitToken, reason, out _, out rejectionReason))
         {
             return false;
         }
@@ -2908,7 +2874,7 @@ public sealed partial class SessionFileTransferService
             RetireRuntimeOwnedWorkersLocked(context, owner, reason);
         }
 
-        if (!TryAuthorizeRuntimeUnlockRoutePublicationLocked(context, routeCommitToken, reason, out rejectionReason))
+        if (!TryAuthorizeRuntimeUnlockRoutePublicationLocked(context, routeCommitToken, reason, out _, out rejectionReason))
         {
             return false;
         }
@@ -3004,33 +2970,17 @@ public sealed partial class SessionFileTransferService
         OutboundTransferContext context,
         RouteCommitToken routeCommitToken,
         string reason,
+        out RoutePublicationToken routePublicationToken,
         out string rejectionReason)
     {
-        var decision = FileTransferCoordinator.AuthorizeAction(
-            CreateCoordinatorStateLocked(context),
-            new FileTransferCoordinatorActionRequest(
+        if (!TryAuthorizeRoutePublicationLocked(
+                context,
                 FileTransferCoordinatorActionKind.RouteCommitPublication,
-                Source: "runtime_unlock_route_publication",
-                Reason: reason,
-                Route: routeCommitToken.Route,
-                ProtocolVersion: routeCommitToken.ProtocolVersion,
-                LiveRouteEpoch: routeCommitToken.LiveRouteEpoch,
-                LegGeneration: routeCommitToken.LegGeneration,
-                RuntimeUnlockAdmissionToken: routeCommitToken.RuntimeUnlockAdmission,
-                RouteCommitToken: routeCommitToken,
-                RuntimeUnlockTransactionGeneration: routeCommitToken.TransactionGeneration,
-                RuntimeUnlockOfferGeneration: routeCommitToken.OfferGeneration,
-                RuntimeUnlockTunaPathLeaseGeneration: routeCommitToken.TunaPathLeaseGeneration,
-                RuntimeUnlockTunaPathLeaseListenerRunId: routeCommitToken.TunaPathLeaseListenerRunId,
-                RuntimeUnlockProbeId: routeCommitToken.SamePathTunaProbeAckId,
-                RuntimeUnlockProbeAcked: true,
-                RuntimeUnlockSamePathTunaProbeAckId: routeCommitToken.SamePathTunaProbeAckId,
-                RouteCommitGeneration: routeCommitToken.CommitGeneration,
-                TargetRoute: routeCommitToken.TargetRoute,
-                TargetProtocolVersion: routeCommitToken.TargetProtocolVersion,
-                TargetTransport: routeCommitToken.TargetTransport));
-        rejectionReason = decision.Accepted ? "current" : decision.RejectionReason;
-        if (!decision.Accepted)
+                "runtime_unlock_route_publication",
+                reason,
+                routeCommitToken,
+                out routePublicationToken,
+                out rejectionReason))
         {
             LogRuntimeUnlockCallbackRejected(
                 FileTransferDirection.Outbound,
@@ -3039,7 +2989,7 @@ public sealed partial class SessionFileTransferService
                 FileTransferCoordinatorActionKind.RouteCommitPublication,
                 "runtime_unlock_route_publication",
                 reason,
-                decision.RejectionReason,
+                rejectionReason,
                 context.CurrentRuntimeOwner,
                 routeCommitToken.RuntimeOwner,
                 routeCommitToken.RuntimeUnlockAdmission,
@@ -3055,48 +3005,33 @@ public sealed partial class SessionFileTransferService
                 routeCommitToken.TargetRoute,
                 routeCommitToken.TargetProtocolVersion,
                 routeCommitToken.TargetTransport,
-                decision.CurrentRoute,
-                decision.CurrentProtocolVersion,
-                decision.CurrentLiveRouteEpoch,
-                decision.CurrentRuntimeGeneration,
-                decision.CurrentTerminalGeneration,
-                decision.CurrentLegGeneration);
+                context.RouteSelection.Route,
+                context.RouteSelection.ProtocolVersion,
+                context.CurrentLiveRouteEpoch?.EpochId ?? 0,
+                context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0,
+                context.TerminalGeneration,
+                context.CurrentTransferLeg?.Generation ?? 0);
+            return false;
         }
 
-        return decision.Accepted;
+        return true;
     }
 
     private bool TryAuthorizeRuntimeUnlockRoutePublicationLocked(
         InboundTransferContext context,
         RouteCommitToken routeCommitToken,
         string reason,
+        out RoutePublicationToken routePublicationToken,
         out string rejectionReason)
     {
-        var decision = FileTransferCoordinator.AuthorizeAction(
-            CreateCoordinatorStateLocked(context),
-            new FileTransferCoordinatorActionRequest(
+        if (!TryAuthorizeRoutePublicationLocked(
+                context,
                 FileTransferCoordinatorActionKind.RouteCommitPublication,
-                Source: "runtime_unlock_route_publication",
-                Reason: reason,
-                Route: routeCommitToken.Route,
-                ProtocolVersion: routeCommitToken.ProtocolVersion,
-                LiveRouteEpoch: routeCommitToken.LiveRouteEpoch,
-                LegGeneration: routeCommitToken.LegGeneration,
-                RuntimeUnlockAdmissionToken: routeCommitToken.RuntimeUnlockAdmission,
-                RouteCommitToken: routeCommitToken,
-                RuntimeUnlockTransactionGeneration: routeCommitToken.TransactionGeneration,
-                RuntimeUnlockOfferGeneration: routeCommitToken.OfferGeneration,
-                RuntimeUnlockTunaPathLeaseGeneration: routeCommitToken.TunaPathLeaseGeneration,
-                RuntimeUnlockTunaPathLeaseListenerRunId: routeCommitToken.TunaPathLeaseListenerRunId,
-                RuntimeUnlockProbeId: routeCommitToken.SamePathTunaProbeAckId,
-                RuntimeUnlockProbeAcked: true,
-                RuntimeUnlockSamePathTunaProbeAckId: routeCommitToken.SamePathTunaProbeAckId,
-                RouteCommitGeneration: routeCommitToken.CommitGeneration,
-                TargetRoute: routeCommitToken.TargetRoute,
-                TargetProtocolVersion: routeCommitToken.TargetProtocolVersion,
-                TargetTransport: routeCommitToken.TargetTransport));
-        rejectionReason = decision.Accepted ? "current" : decision.RejectionReason;
-        if (!decision.Accepted)
+                "runtime_unlock_route_publication",
+                reason,
+                routeCommitToken,
+                out routePublicationToken,
+                out rejectionReason))
         {
             LogRuntimeUnlockCallbackRejected(
                 FileTransferDirection.Inbound,
@@ -3105,7 +3040,7 @@ public sealed partial class SessionFileTransferService
                 FileTransferCoordinatorActionKind.RouteCommitPublication,
                 "runtime_unlock_route_publication",
                 reason,
-                decision.RejectionReason,
+                rejectionReason,
                 context.CurrentRuntimeOwner,
                 routeCommitToken.RuntimeOwner,
                 routeCommitToken.RuntimeUnlockAdmission,
@@ -3121,15 +3056,16 @@ public sealed partial class SessionFileTransferService
                 routeCommitToken.TargetRoute,
                 routeCommitToken.TargetProtocolVersion,
                 routeCommitToken.TargetTransport,
-                decision.CurrentRoute,
-                decision.CurrentProtocolVersion,
-                decision.CurrentLiveRouteEpoch,
-                decision.CurrentRuntimeGeneration,
-                decision.CurrentTerminalGeneration,
-                decision.CurrentLegGeneration);
+                context.RouteSelection.Route,
+                context.RouteSelection.ProtocolVersion,
+                context.CurrentLiveRouteEpoch?.EpochId ?? 0,
+                context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0,
+                context.TerminalGeneration,
+                context.CurrentTransferLeg?.Generation ?? 0);
+            return false;
         }
 
-        return decision.Accepted;
+        return true;
     }
 
     private void PublishRuntimeUnlockRouteCommitResultIfAuthorizedLocked(
@@ -3246,35 +3182,20 @@ public sealed partial class SessionFileTransferService
         context.StatusMessage = GetOutboundResumeStatusMessage(context.State);
         context.SparseSenderPumpLastWakeReason = "live_route_tuna_activated";
 
-        LogFileTransferRouteTransitioned(
-            FileTransferDirection.Outbound,
-            context.TransferId,
-            context.SessionId,
-            previousRouteSelection,
-            routeSelection,
-            reason);
-        LogFileTransferRouteSelected(
-            FileTransferDirection.Outbound,
-            context.TransferId,
-            context.SessionId,
-            routeSelection,
-            routeInput,
-            liveRouteEpoch.EpochId);
-        NotifyFileTransferRouteHintObserver(
-            FileTransferDirection.Outbound,
-            context.TransferId,
-            context.SessionId,
-            routeSelection,
-            liveRouteEpoch.EpochId,
-            "service_live_route_transition");
-        LogLiveRouteEpochStarted(
-            FileTransferDirection.Outbound,
-            context.TransferId,
-            context.SessionId,
-            liveRouteEpoch,
-            previousRouteSelection);
+        if (!TryPublishRouteTransitionedIfAuthorizedLocked(context, previousRouteSelection, "runtime_unlock_route_transition", reason, routeCommitToken) ||
+            !TryPublishRouteSelectedIfAuthorizedLocked(context, routeInput, "runtime_unlock_route_selected", reason, routeCommitToken) ||
+            !TryPublishRouteHintIfAuthorizedLocked(context, "runtime_unlock_route_hint", reason, "service_live_route_transition", routeCommitToken: routeCommitToken) ||
+            !TryPublishLiveRouteEpochStartedIfAuthorizedLocked(context, previousRouteSelection, "runtime_unlock_live_route_epoch_started", reason, routeCommitToken))
+        {
+            return false;
+        }
+
         LogV4Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Outbound, routeSelection, liveRouteEpoch.EpochId);
-        LogFileTransferRuntimeStarted(context.TransferId, context.SessionId, FileTransferDirection.Outbound, "sender", routeSelection, liveRouteEpoch.EpochId);
+        if (!TryPublishRuntimeStartedIfAuthorizedLocked(context, "sender", "runtime_unlock_runtime_started", reason, routeCommitToken))
+        {
+            return false;
+        }
+
         LogFileTransferBridgeRecoveryPolicySelected(
             context.TransferId,
             context.SessionId,
@@ -3282,12 +3203,10 @@ public sealed partial class SessionFileTransferService
             runtimeSelection,
             routeSelection,
             liveRouteEpoch.EpochId);
-        LogLiveRouteEpochRecovered(
-            FileTransferDirection.Outbound,
-            context.TransferId,
-            context.SessionId,
-            liveRouteEpoch,
-            reason);
+        if (!TryPublishLiveRouteEpochRecoveredIfAuthorizedLocked(context, "runtime_unlock_live_route_epoch_recovered", reason, routeCommitToken))
+        {
+            return false;
+        }
         return true;
     }
 
@@ -3336,35 +3255,20 @@ public sealed partial class SessionFileTransferService
         ResetInboundRegularNknV4StateForFileTunaV4Locked(context);
         context.StatusMessage = GetInboundResumeStatusMessage(context.State);
 
-        LogFileTransferRouteTransitioned(
-            FileTransferDirection.Inbound,
-            context.TransferId,
-            context.SessionId,
-            previousRouteSelection,
-            routeSelection,
-            reason);
-        LogFileTransferRouteSelected(
-            FileTransferDirection.Inbound,
-            context.TransferId,
-            context.SessionId,
-            routeSelection,
-            routeInput,
-            liveRouteEpoch.EpochId);
-        NotifyFileTransferRouteHintObserver(
-            FileTransferDirection.Inbound,
-            context.TransferId,
-            context.SessionId,
-            routeSelection,
-            liveRouteEpoch.EpochId,
-            "service_live_route_transition");
-        LogLiveRouteEpochStarted(
-            FileTransferDirection.Inbound,
-            context.TransferId,
-            context.SessionId,
-            liveRouteEpoch,
-            previousRouteSelection);
+        if (!TryPublishRouteTransitionedIfAuthorizedLocked(context, previousRouteSelection, "runtime_unlock_route_transition", reason, routeCommitToken) ||
+            !TryPublishRouteSelectedIfAuthorizedLocked(context, routeInput, "runtime_unlock_route_selected", reason, routeCommitToken) ||
+            !TryPublishRouteHintIfAuthorizedLocked(context, "runtime_unlock_route_hint", reason, "service_live_route_transition", routeCommitToken: routeCommitToken) ||
+            !TryPublishLiveRouteEpochStartedIfAuthorizedLocked(context, previousRouteSelection, "runtime_unlock_live_route_epoch_started", reason, routeCommitToken))
+        {
+            return false;
+        }
+
         LogV4Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Inbound, routeSelection, liveRouteEpoch.EpochId);
-        LogFileTransferRuntimeStarted(context.TransferId, context.SessionId, FileTransferDirection.Inbound, "receiver", routeSelection, liveRouteEpoch.EpochId);
+        if (!TryPublishRuntimeStartedIfAuthorizedLocked(context, "receiver", "runtime_unlock_runtime_started", reason, routeCommitToken))
+        {
+            return false;
+        }
+
         LogFileTransferBridgeRecoveryPolicySelected(
             context.TransferId,
             context.SessionId,
@@ -3372,12 +3276,10 @@ public sealed partial class SessionFileTransferService
             runtimeSelection,
             routeSelection,
             liveRouteEpoch.EpochId);
-        LogLiveRouteEpochRecovered(
-            FileTransferDirection.Inbound,
-            context.TransferId,
-            context.SessionId,
-            liveRouteEpoch,
-            reason);
+        if (!TryPublishLiveRouteEpochRecoveredIfAuthorizedLocked(context, "runtime_unlock_live_route_epoch_recovered", reason, routeCommitToken))
+        {
+            return false;
+        }
         return true;
     }
 
@@ -3476,35 +3378,20 @@ public sealed partial class SessionFileTransferService
         context.StatusMessage = GetOutboundResumeStatusMessage(context.State);
         context.SparseSenderPumpLastWakeReason = "live_route_tuna_reactivated";
 
-        LogFileTransferRouteTransitioned(
-            FileTransferDirection.Outbound,
-            context.TransferId,
-            context.SessionId,
-            previousRouteSelection,
-            routeSelection,
-            reason);
-        LogFileTransferRouteSelected(
-            FileTransferDirection.Outbound,
-            context.TransferId,
-            context.SessionId,
-            routeSelection,
-            routeInput,
-            liveRouteEpoch.EpochId);
-        NotifyFileTransferRouteHintObserver(
-            FileTransferDirection.Outbound,
-            context.TransferId,
-            context.SessionId,
-            routeSelection,
-            liveRouteEpoch.EpochId,
-            "service_live_route_transition");
-        LogLiveRouteEpochStarted(
-            FileTransferDirection.Outbound,
-            context.TransferId,
-            context.SessionId,
-            liveRouteEpoch,
-            previousRouteSelection);
+        if (!TryPublishRouteTransitionedIfAuthorizedLocked(context, previousRouteSelection, "runtime_unlock_route_transition", reason, routeCommitToken) ||
+            !TryPublishRouteSelectedIfAuthorizedLocked(context, routeInput, "runtime_unlock_route_selected", reason, routeCommitToken) ||
+            !TryPublishRouteHintIfAuthorizedLocked(context, "runtime_unlock_route_hint", reason, "service_live_route_transition", routeCommitToken: routeCommitToken) ||
+            !TryPublishLiveRouteEpochStartedIfAuthorizedLocked(context, previousRouteSelection, "runtime_unlock_live_route_epoch_started", reason, routeCommitToken))
+        {
+            return false;
+        }
+
         LogV4Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Outbound, routeSelection, liveRouteEpoch.EpochId);
-        LogFileTransferRuntimeStarted(context.TransferId, context.SessionId, FileTransferDirection.Outbound, "sender", routeSelection, liveRouteEpoch.EpochId);
+        if (!TryPublishRuntimeStartedIfAuthorizedLocked(context, "sender", "runtime_unlock_runtime_started", reason, routeCommitToken))
+        {
+            return false;
+        }
+
         LogFileTransferBridgeRecoveryPolicySelected(
             context.TransferId,
             context.SessionId,
@@ -3512,12 +3399,10 @@ public sealed partial class SessionFileTransferService
             runtimeSelection,
             routeSelection,
             liveRouteEpoch.EpochId);
-        LogLiveRouteEpochRecovered(
-            FileTransferDirection.Outbound,
-            context.TransferId,
-            context.SessionId,
-            liveRouteEpoch,
-            reason);
+        if (!TryPublishLiveRouteEpochRecoveredIfAuthorizedLocked(context, "runtime_unlock_live_route_epoch_recovered", reason, routeCommitToken))
+        {
+            return false;
+        }
         return true;
     }
 
@@ -3566,35 +3451,20 @@ public sealed partial class SessionFileTransferService
         ResetInboundPostTunaFallbackStateForFileTunaV4Locked(context);
         context.StatusMessage = GetInboundResumeStatusMessage(context.State);
 
-        LogFileTransferRouteTransitioned(
-            FileTransferDirection.Inbound,
-            context.TransferId,
-            context.SessionId,
-            previousRouteSelection,
-            routeSelection,
-            reason);
-        LogFileTransferRouteSelected(
-            FileTransferDirection.Inbound,
-            context.TransferId,
-            context.SessionId,
-            routeSelection,
-            routeInput,
-            liveRouteEpoch.EpochId);
-        NotifyFileTransferRouteHintObserver(
-            FileTransferDirection.Inbound,
-            context.TransferId,
-            context.SessionId,
-            routeSelection,
-            liveRouteEpoch.EpochId,
-            "service_live_route_transition");
-        LogLiveRouteEpochStarted(
-            FileTransferDirection.Inbound,
-            context.TransferId,
-            context.SessionId,
-            liveRouteEpoch,
-            previousRouteSelection);
+        if (!TryPublishRouteTransitionedIfAuthorizedLocked(context, previousRouteSelection, "runtime_unlock_route_transition", reason, routeCommitToken) ||
+            !TryPublishRouteSelectedIfAuthorizedLocked(context, routeInput, "runtime_unlock_route_selected", reason, routeCommitToken) ||
+            !TryPublishRouteHintIfAuthorizedLocked(context, "runtime_unlock_route_hint", reason, "service_live_route_transition", routeCommitToken: routeCommitToken) ||
+            !TryPublishLiveRouteEpochStartedIfAuthorizedLocked(context, previousRouteSelection, "runtime_unlock_live_route_epoch_started", reason, routeCommitToken))
+        {
+            return false;
+        }
+
         LogV4Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Inbound, routeSelection, liveRouteEpoch.EpochId);
-        LogFileTransferRuntimeStarted(context.TransferId, context.SessionId, FileTransferDirection.Inbound, "receiver", routeSelection, liveRouteEpoch.EpochId);
+        if (!TryPublishRuntimeStartedIfAuthorizedLocked(context, "receiver", "runtime_unlock_runtime_started", reason, routeCommitToken))
+        {
+            return false;
+        }
+
         LogFileTransferBridgeRecoveryPolicySelected(
             context.TransferId,
             context.SessionId,
@@ -3602,12 +3472,10 @@ public sealed partial class SessionFileTransferService
             runtimeSelection,
             routeSelection,
             liveRouteEpoch.EpochId);
-        LogLiveRouteEpochRecovered(
-            FileTransferDirection.Inbound,
-            context.TransferId,
-            context.SessionId,
-            liveRouteEpoch,
-            reason);
+        if (!TryPublishLiveRouteEpochRecoveredIfAuthorizedLocked(context, "runtime_unlock_live_route_epoch_recovered", reason, routeCommitToken))
+        {
+            return false;
+        }
         return true;
     }
 
