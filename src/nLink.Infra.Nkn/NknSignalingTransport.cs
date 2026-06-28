@@ -62,6 +62,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         string TargetRouteToken,
         int TargetProtocolVersion,
         FileTransferTransportKind TargetTransport,
+        string RoutePublicationActionKind,
         string CoordinatorDecisionReason,
         DateTimeOffset RecordedUtc);
 

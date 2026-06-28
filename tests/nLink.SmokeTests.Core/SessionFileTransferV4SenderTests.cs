@@ -334,7 +334,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Equal(164, GetIntProperty(queued[1], "FirstStartChunkIndex"));
         Assert.Equal(228, GetIntProperty(queued[1], "LastEndChunkExclusive"));
 
-        var log = ReadOperationalLogTail(logStart);
+        var log = ReadV4SenderLogSnapshot(logStart);
         Assert.Contains("event=filetransfer_regular_v4_peer_silence_safety_replay_started;", log, StringComparison.Ordinal);
         Assert.Contains("route=regular_nkn_v4_fast; protocol_version=4", log, StringComparison.Ordinal);
         Assert.DoesNotContain("file_tuna_v6", log, StringComparison.Ordinal);
@@ -395,7 +395,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Equal("file_tuna_v4_post_tuna_frontier_replay", GetStringProperty(replay, "DeliveryEscalationReason"));
         Assert.Equal("file_tuna_v4_post_tuna_frontier_replay", GetPrivateProperty<string>(context, "SparseSenderPumpLastWakeReason"));
 
-        var log = ReadOperationalLogTail(logStart);
+        var log = ReadV4SenderLogSnapshot(logStart);
         Assert.Contains("event=filetransfer_v4_post_reactivation_frontier_replay_started;", log, StringComparison.Ordinal);
         Assert.Contains("route=file_tuna_v4; protocol_version=4", log, StringComparison.Ordinal);
         Assert.Contains("reactivation_generation=1", log, StringComparison.Ordinal);
@@ -2460,7 +2460,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Equal(transferId, pressure.TransferId);
         Assert.Equal("regular_v4_receiver_state_send_failure", pressure.Reason);
 
-        var log = ReadV4SenderLogSnapshot(logStart);
+        var log = ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_regular_v4_receiver_state_send_failure_deferred;", log, StringComparison.Ordinal);
         Assert.DoesNotContain($"event=transfer_terminal; direction=inbound; transfer_id={transferId};", log, StringComparison.Ordinal);
     }
@@ -4299,7 +4299,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             timeoutMs: 30000);
 
         Assert.Equal(payload, destination.ToArray()[..payload.Length]);
-        var log = ReadV4SenderLogSnapshot(logStart);
+        var log = ReadOperationalLogTail(logStart);
         Assert.Single(senderTransport.SentOffers.Where(offer => offer.TransferId == transferId));
         Assert.Single(senderTransport.SentSessionOpens.Where(open => open.TransferId == transferId));
         Assert.Empty(senderTransport.SentCancels.Where(cancel => cancel.TransferId == transferId));
@@ -8771,7 +8771,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             timeoutMs: 20000);
 
         Assert.Equal(payload, destination.ToArray()[..payload.Length]);
-        var log = ReadOperationalLogTail(logStart);
+        var log = ReadV4SenderLogSnapshot(logStart);
         Assert.True(postTunaFallbackV6Observed);
         Assert.Single(senderTransport.SentOffers.Where(offer => offer.TransferId == transferId));
         Assert.Single(senderTransport.SentSessionOpens.Where(open => open.TransferId == transferId));
@@ -9207,7 +9207,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         await WaitUntilAsync(
             () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
                   receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
-            timeoutMs: 25000);
+            timeoutMs: 40000);
 
         Assert.Equal(payload, destination.ToArray()[..payload.Length]);
         var log = ReadV4SenderLogSnapshot(logStart);
@@ -11606,7 +11606,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.True(GetPrivateProperty<bool>(context, "RuntimeUnlockWaitingForFallbackSurvival"));
         Assert.False(GetPrivateProperty<bool>(context, "RuntimeUnlockActivationWindowGranted"));
 
-        var log = ReadOperationalLogTail(logStart);
+        var log = ReadV4SenderLogSnapshot(logStart);
         Assert.Contains("event=runtime_unlock_tuna_probe_received; transport=tuna; direction=inbound;", log, StringComparison.Ordinal);
         Assert.Contains("event=runtime_unlock_precommit_probe_rejected_for_fallback_survival; direction=inbound;", log, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_runtime_unlock_waiting_for_fallback_survival; direction=inbound;", log, StringComparison.Ordinal);

@@ -3876,12 +3876,7 @@ function Wait-TunaGuiDiagnosticReadinessBeforeMeasuredTransfer {
 
     try {
         return [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $Bookmark -NeedleSets @(
-            @('event=tuna_path_lease_listener_ready', 'current=1'),
-            @('event=runtime_unlock_transaction_listener_ready', 'tuna_path_lease_current=1', 'tuna_path_lease_state=listenerready'),
-            @('event=runtime_unlock_transaction_offer_generation_created', 'tuna_path_lease_current=1', 'tuna_path_lease_state=listenerready'),
-            @('event=runtime_unlock_transaction_answer_received', 'peer_visible_proof=1', 'answer_received=1'),
-            @('event=tuna_acceleration_answer_ack_received'),
-            @('event=tuna_acceleration_negotiated')
+            @('event=runtime_unlock_transaction_answer_received', 'peer_visible_proof=1', 'answer_received=1', 'tuna_path_lease_current=1', 'tuna_path_lease_state=listenerready')
         ) -TimeoutMs $TimeoutMs -Description 'diagnostic Tuna readiness before measured GUI file transfer')
     }
     catch {
@@ -3983,6 +3978,52 @@ function Wait-TunaGuiFileTunaV4PublicationAfterBookmark {
     }
 
     return $line
+}
+
+function Test-TunaGuiPeerVisibleFileTunaV4DataPathLine {
+    param([string]$Line)
+
+    if ([string]::IsNullOrWhiteSpace($Line)) {
+        return $false
+    }
+
+    $fields = ConvertFrom-GuiSmokeSemicolonFields -Message $Line
+    if (-not (Test-GuiSmokeFieldEquals -Fields $fields -Name 'event' -Expected 'filetransfer_tuna_data_path_peer_visible')) {
+        return $false
+    }
+
+    if (-not (Test-GuiSmokeFieldEquals -Fields $fields -Name 'route' -Expected 'file_tuna_v4') -or
+        -not (Test-GuiSmokeFieldEquals -Fields $fields -Name 'target_route' -Expected 'file_tuna_v4') -or
+        -not (Test-GuiSmokeFieldEquals -Fields $fields -Name 'target_transport' -Expected 'tuna') -or
+        -not (Test-GuiSmokeFieldEquals -Fields $fields -Name 'actual_transport' -Expected 'tuna')) {
+        return $false
+    }
+
+    $protocolVersion = ConvertTo-GuiSmokeInt -Value (Get-GuiSmokeFieldValue -Fields $fields -Name 'protocol_version' -Default '-1') -Default -1
+    $targetProtocolVersion = ConvertTo-GuiSmokeInt -Value (Get-GuiSmokeFieldValue -Fields $fields -Name 'target_protocol_version' -Default '-1') -Default -1
+    if ($protocolVersion -ne 4 -or $targetProtocolVersion -ne 4) {
+        return $false
+    }
+
+    foreach ($requiredGenerationField in @('route_publication_generation', 'runtime_generation', 'terminal_generation', 'leg_generation')) {
+        if (-not $fields.ContainsKey($requiredGenerationField)) {
+            return $false
+        }
+    }
+
+    $routePublicationGeneration = ConvertTo-GuiSmokeInt -Value (Get-GuiSmokeFieldValue -Fields $fields -Name 'route_publication_generation' -Default '-1') -Default -1
+    return $routePublicationGeneration -gt 0
+}
+
+function Get-TunaGuiPeerVisibleFileTunaV4PayloadBytes {
+    param([string]$Line)
+
+    if (-not (Test-TunaGuiPeerVisibleFileTunaV4DataPathLine -Line $Line)) {
+        return -1L
+    }
+
+    $fields = ConvertFrom-GuiSmokeSemicolonFields -Message $Line
+    return [Math]::Max(0L, (Get-GuiSmokeInt64FieldValue -Fields $fields -Name 'payload_bytes'))
 }
 
 function Unlock-TunaFromSessionHeader {
@@ -4686,13 +4727,8 @@ function Wait-TunaGuiAcceleratedFilePayloadBeforeFault {
 
         for ($lineIndex = $processedLineCount; $lineIndex -lt $lines.Count; $lineIndex++) {
             $line = $lines[$lineIndex]
-            if ($line.IndexOf('event=tuna_accelerated_file_frame_sent', [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
-            if ($line.IndexOf('channel=bulk', [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
-
-            $fields = ConvertFrom-GuiSmokeSemicolonFields -Message $line
-            $payloadText = Get-GuiSmokeFieldValue -Fields $fields -Name 'payload_bytes' -Default '-1'
-            $payloadBytes = -1L
-            if ([long]::TryParse($payloadText, [ref]$payloadBytes)) {
+            $payloadBytes = Get-TunaGuiPeerVisibleFileTunaV4PayloadBytes -Line $line
+            if ($payloadBytes -ge 0L) {
                 $lastFramePayloadBytes = [Math]::Max($lastFramePayloadBytes, $payloadBytes)
                 if ($payloadBytes -ge $MinimumFramePayloadBytes) {
                     $totalPayloadBytes += $payloadBytes
@@ -4736,16 +4772,11 @@ function Wait-TunaGuiLiveSwitchOffTransferProgressBeforeFault {
 
         for ($lineIndex = $processedLineCount; $lineIndex -lt $lines.Count; $lineIndex++) {
             $line = $lines[$lineIndex]
-            if ($line.IndexOf('event=tuna_accelerated_file_frame_sent', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
-                $line.IndexOf('channel=bulk', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                $fields = ConvertFrom-GuiSmokeSemicolonFields -Message $line
-                $payloadText = Get-GuiSmokeFieldValue -Fields $fields -Name 'payload_bytes' -Default '-1'
-                $payloadBytes = -1L
-                if ([long]::TryParse($payloadText, [ref]$payloadBytes)) {
-                    $lastFramePayloadBytes = [Math]::Max($lastFramePayloadBytes, $payloadBytes)
-                    if ($payloadBytes -ge $MinimumFramePayloadBytes) {
-                        $acceleratedPayloadBytes += $payloadBytes
-                    }
+            $peerVisiblePayloadBytes = Get-TunaGuiPeerVisibleFileTunaV4PayloadBytes -Line $line
+            if ($peerVisiblePayloadBytes -ge 0L) {
+                $lastFramePayloadBytes = [Math]::Max($lastFramePayloadBytes, $peerVisiblePayloadBytes)
+                if ($peerVisiblePayloadBytes -ge $MinimumFramePayloadBytes) {
+                    $acceleratedPayloadBytes += $peerVisiblePayloadBytes
                 }
             }
 
@@ -4819,16 +4850,11 @@ function Wait-TunaGuiLiveSwitchOffTransferProgressOrEarlyFallbackBeforeFault {
                 }
             }
 
-            if ($line.IndexOf('event=tuna_accelerated_file_frame_sent', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
-                $line.IndexOf('channel=bulk', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                $fields = ConvertFrom-GuiSmokeSemicolonFields -Message $line
-                $payloadText = Get-GuiSmokeFieldValue -Fields $fields -Name 'payload_bytes' -Default '-1'
-                $payloadBytes = -1L
-                if ([long]::TryParse($payloadText, [ref]$payloadBytes)) {
-                    $lastFramePayloadBytes = [Math]::Max($lastFramePayloadBytes, $payloadBytes)
-                    if ($payloadBytes -ge $MinimumFramePayloadBytes) {
-                        $acceleratedPayloadBytes += $payloadBytes
-                    }
+            $peerVisiblePayloadBytes = Get-TunaGuiPeerVisibleFileTunaV4PayloadBytes -Line $line
+            if ($peerVisiblePayloadBytes -ge 0L) {
+                $lastFramePayloadBytes = [Math]::Max($lastFramePayloadBytes, $peerVisiblePayloadBytes)
+                if ($peerVisiblePayloadBytes -ge $MinimumFramePayloadBytes) {
+                    $acceleratedPayloadBytes += $peerVisiblePayloadBytes
                 }
             }
 
@@ -5047,19 +5073,11 @@ function Get-TunaGuiEvidenceSummary {
             $summary.tunaNegotiated = $true
         }
 
-        if (($line.IndexOf('event=tuna_path_lease_listener_ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
-                $line.IndexOf('current=1', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -or
-            ($line.IndexOf('event=runtime_unlock_transaction_listener_ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
-                $line.IndexOf('tuna_path_lease_current=1', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
-                $line.IndexOf('tuna_path_lease_state=listenerready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -or
-            ($line.IndexOf('event=runtime_unlock_transaction_offer_generation_created', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
-                $line.IndexOf('tuna_path_lease_current=1', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
-                $line.IndexOf('tuna_path_lease_state=listenerready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -or
-            ($line.IndexOf('event=runtime_unlock_transaction_answer_received', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+        if (($line.IndexOf('event=runtime_unlock_transaction_answer_received', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
                 $line.IndexOf('peer_visible_proof=1', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
-                $line.IndexOf('answer_received=1', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -or
-            $line.IndexOf('event=tuna_acceleration_answer_ack_received', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-            $line.IndexOf('event=tuna_acceleration_negotiated', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $line.IndexOf('answer_received=1', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                $line.IndexOf('tuna_path_lease_current=1', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                $line.IndexOf('tuna_path_lease_state=listenerready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0)) {
             $summary.diagnosticTunaReadinessObserved = $true
         }
 
@@ -5174,7 +5192,8 @@ function Get-TunaGuiEvidenceSummary {
             else { $summary.transportFailedBeforeTerminalCount++ }
         }
 
-        if ($eventName -eq 'tuna_accelerated_file_frame_sent') {
+        if ($eventName -eq 'filetransfer_tuna_data_path_peer_visible' -and
+            (Test-TunaGuiPeerVisibleFileTunaV4DataPathLine -Line $line)) {
             $summary.tunaAcceleratedFileFrameCount++
             $summary.tunaAcceleratedFilePayloadBytes += [Math]::Max(0L, (Get-GuiSmokeInt64FieldValue -Fields $fields -Name 'payload_bytes'))
         }
@@ -6266,6 +6285,10 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         Write-Host "[GUI Smoke][filetransfer_tuna] Starting second transfer after live reactivation; expecting file_tuna_v4 protocol 4." -ForegroundColor DarkGray
 
         try {
+            $secondDiagnosticReadinessLine = [string](Wait-TunaGuiDiagnosticReadinessBeforeMeasuredTransfer -Bookmark $secondBookmark -TimeoutMs ([Math]::Min(60000, $StartupTimeoutMs)))
+            $observedEvidenceLines.Add($secondDiagnosticReadinessLine) | Out-Null
+            $diagnosticTunaReadinessObserved = $true
+
             $secondSendButton = Wait-TunaGuiSecondTransferReadinessOrThrow -Window $senderWindow -Bookmark $bookmark -TimeoutMs ([Math]::Min(60000, $StartupTimeoutMs)) -RouteMode $RouteMode -SenderRole $expectedOutboundRole
             Click-Element $secondSendButton
 

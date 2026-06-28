@@ -11004,7 +11004,13 @@ public sealed partial class NknSignalingTransport
         }
         else if (!IsFileTransferTunaActivationBridgeRecoveryActive())
         {
-            ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed("recovery_already_settled");
+            var recoverySettleTrigger = string.Equals(
+                SanitizeLogToken(recoveryReason),
+                "regular_v4_receive_recovery_pending",
+                StringComparison.Ordinal)
+                ? "regular_v4_receive_recovery_pending"
+                : "recovery_already_settled";
+            ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed(recoverySettleTrigger);
         }
         else
         {
@@ -11186,7 +11192,18 @@ public sealed partial class NknSignalingTransport
         return normalizedTrigger.Contains("receive_resumed", StringComparison.OrdinalIgnoreCase) ||
                normalizedTrigger.Contains("receive_stall_recovery_completed", StringComparison.OrdinalIgnoreCase) ||
                normalizedTrigger.Contains("receive_stall_recovery_exhausted", StringComparison.OrdinalIgnoreCase) ||
-               normalizedTrigger.Contains("regular_v4_receive_proof", StringComparison.OrdinalIgnoreCase);
+               normalizedTrigger.Contains("regular_v4_receive_proof", StringComparison.OrdinalIgnoreCase) ||
+               normalizedTrigger.Contains("recovery_already_settled", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsExplicitRegularV4RecoverySettlementTrigger(string settlementTrigger)
+    {
+        var normalizedTrigger = SanitizeLogToken(settlementTrigger);
+        return normalizedTrigger.Contains("receive_resumed", StringComparison.OrdinalIgnoreCase) ||
+               normalizedTrigger.Contains("receive_stall_recovery_completed", StringComparison.OrdinalIgnoreCase) ||
+               normalizedTrigger.Contains("receive_stall_recovery_exhausted", StringComparison.OrdinalIgnoreCase) ||
+               normalizedTrigger.Contains("regular_v4_receive_proof", StringComparison.OrdinalIgnoreCase) ||
+               normalizedTrigger.Contains("recovery_already_settled", StringComparison.OrdinalIgnoreCase);
     }
 
     private bool ResolveRuntimeUnlockRetryBlockedByRegularV4Recovery(
@@ -12459,7 +12476,11 @@ public sealed partial class NknSignalingTransport
                 "NKN.Tuna",
                 $"event=tuna_acceleration_runtime_unlock_retry_after_recovery_deferred_for_regular_v4_receive_proof; session_id={SanitizeLogToken(stateSnapshot.SessionId)}; retired_generation={stateSnapshot.RetiredOfferGeneration}; retry_reason={SanitizeLogToken(stateSnapshot.RetryReason)}; recovery_reason={SanitizeLogToken(stateSnapshot.RecoveryReason)}; trigger={SanitizeLogToken(trigger)}; liveness_state={SanitizeLogToken(regularV4DeferReason)}");
             LogRuntimeUnlockRecoveryContract("session_recovery_contract_recovery_settled", stateSnapshot.SessionId);
-            ResolveRuntimeUnlockRetryBlockedByRegularV4Recovery(regularV4LivenessSnapshot, trigger);
+            if (IsExplicitRegularV4RecoverySettlementTrigger(trigger))
+            {
+                ResolveRuntimeUnlockRetryBlockedByRegularV4Recovery(regularV4LivenessSnapshot, trigger);
+            }
+
             return;
         }
 
@@ -13825,12 +13846,17 @@ public sealed partial class NknSignalingTransport
         var queueObservedReason = requireObservedSend
             ? queueAcceptedAsObservedReason?.Invoke()
             : null;
+        RuntimeUnlockRecoveryRetryState? retryAuthorityStateForSend = null;
         if (requireObservedSend &&
             IsTunaActivationOfferSendPurpose(purpose) &&
-            TryGetRuntimeUnlockRetryAuthorityForCurrentOffer(out _))
+            TryGetRuntimeUnlockRetryAuthorityForCurrentOffer(out retryAuthorityStateForSend))
         {
             MarkRuntimeUnlockRecoveryContractAuthoritySendStarted(purpose);
         }
+
+        var controlSendLogSessionId = !string.IsNullOrWhiteSpace(activationSessionId)
+            ? activationSessionId
+            : retryAuthorityStateForSend?.SessionId;
 
         var isAtomicRegularV4RuntimeUnlockOfferWindow = requireObservedSend &&
             observedSendFallbackAsync is not null &&
@@ -14003,6 +14029,7 @@ public sealed partial class NknSignalingTransport
         var observedSend = await WaitForFirstSuccessfulAccelerationControlSendAsync(
                 attempts,
                 purpose,
+                controlSendLogSessionId,
                 preferPriorityObservedLane || preferBulkObservedLane)
             .ConfigureAwait(false);
         if (!observedSend.Succeeded &&
@@ -14720,6 +14747,7 @@ public sealed partial class NknSignalingTransport
     private static async Task<AccelerationControlSendResult> WaitForFirstSuccessfulAccelerationControlSendAsync(
         List<AccelerationControlSendAttempt> attempts,
         string purpose,
+        string? sessionId,
         bool preferPreferredObservedLane = false)
     {
         if (attempts.Count == 0)
@@ -14768,7 +14796,7 @@ public sealed partial class NknSignalingTransport
                                 waitingForPreferredLaneLogged = true;
                                 LocalOperationalLog.Info(
                                     "NKN.Tuna",
-                                    $"event=tuna_acceleration_control_send_waiting_for_preferred_bulk_observed_lane; purpose={SanitizeLogToken(purpose)}; fallback_lane={SanitizeLogToken(result.ObservedLane ?? "(none)")}; wait_ms={(long)waitTimeout.TotalMilliseconds}");
+                                    $"event=tuna_acceleration_control_send_waiting_for_preferred_bulk_observed_lane; purpose={SanitizeLogToken(purpose)}; session_id={SanitizeLogToken(sessionId ?? "none")}; fallback_lane={SanitizeLogToken(result.ObservedLane ?? "(none)")}; wait_ms={(long)waitTimeout.TotalMilliseconds}");
                             }
 
                             continue;
@@ -14776,7 +14804,7 @@ public sealed partial class NknSignalingTransport
 
                         LocalOperationalLog.Warn(
                             "NKN.Tuna",
-                            $"event=tuna_acceleration_control_send_preferred_bulk_observed_lane_unavailable; purpose={SanitizeLogToken(purpose)}; fallback_lane={SanitizeLogToken(result.ObservedLane ?? "(none)")}; reason=preferred_attempts_completed");
+                            $"event=tuna_acceleration_control_send_preferred_bulk_observed_lane_unavailable; purpose={SanitizeLogToken(purpose)}; session_id={SanitizeLogToken(sessionId ?? "none")}; fallback_lane={SanitizeLogToken(result.ObservedLane ?? "(none)")}; reason=preferred_attempts_completed");
                         return result;
                     }
 
@@ -14784,7 +14812,7 @@ public sealed partial class NknSignalingTransport
                     {
                         LocalOperationalLog.Info(
                             "NKN.Tuna",
-                            $"event=tuna_acceleration_control_send_preferred_bulk_observed_lane_selected; purpose={SanitizeLogToken(purpose)}; observed_lane={SanitizeLogToken(result.ObservedLane ?? "(none)")}");
+                            $"event=tuna_acceleration_control_send_preferred_bulk_observed_lane_selected; purpose={SanitizeLogToken(purpose)}; session_id={SanitizeLogToken(sessionId ?? "none")}; observed_lane={SanitizeLogToken(result.ObservedLane ?? "(none)")}");
                     }
 
                     return result;
@@ -14803,7 +14831,7 @@ public sealed partial class NknSignalingTransport
             {
                 LocalOperationalLog.Warn(
                     "NKN.Tuna",
-                    $"event=tuna_acceleration_control_send_preferred_bulk_observed_lane_unavailable; purpose={SanitizeLogToken(purpose)}; fallback_lane={SanitizeLogToken(fallbackObservedSend.Value.ObservedLane ?? "(none)")}; reason=preferred_attempts_failed");
+                    $"event=tuna_acceleration_control_send_preferred_bulk_observed_lane_unavailable; purpose={SanitizeLogToken(purpose)}; session_id={SanitizeLogToken(sessionId ?? "none")}; fallback_lane={SanitizeLogToken(fallbackObservedSend.Value.ObservedLane ?? "(none)")}; reason=preferred_attempts_failed");
                 return fallbackObservedSend.Value;
             }
         }

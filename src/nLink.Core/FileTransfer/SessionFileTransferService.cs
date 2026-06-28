@@ -13224,6 +13224,55 @@ public sealed partial class SessionFileTransferService : IDisposable
         return $"; route_publication_generation={token.PublicationGeneration}; runtime_generation={token.RuntimeGeneration}; terminal_generation={token.TerminalGeneration}; leg_generation={token.LegGeneration}; route_commit_generation={routeCommitGeneration}; target_route={targetRoute}; target_protocol_version={token.TargetProtocolVersion}; target_transport={FormatFileTransferTransportKind(token.TargetTransport)}; route_publication_action_kind={FormatProtocolLogValue(token.ActionKind.ToString())}; coordinator_decision_reason={FormatProtocolLogValue(coordinatorDecisionReason ?? token.Reason)}";
     }
 
+    private static string FormatV4DataPathAuthoritySuffix(OutboundTransferContext context, string source)
+    {
+        var token = context.CurrentRoutePublicationToken;
+        var route = context.RouteSelection;
+        var liveRouteEpoch = token is { IsDefault: false }
+            ? token.Value.LiveRouteEpoch
+            : context.CurrentLiveRouteEpoch?.EpochId ?? context.CurrentTransferLeg?.LiveRouteEpochId ?? 0;
+        var runtimeGeneration = token is { IsDefault: false }
+            ? token.Value.RuntimeGeneration
+            : context.CurrentRuntimeOwner?.RuntimeGeneration ?? context.LastRuntimeOwnerGeneration;
+        var terminalGeneration = token is { IsDefault: false }
+            ? token.Value.TerminalGeneration
+            : context.TerminalGeneration;
+        var legGeneration = token is { IsDefault: false }
+            ? token.Value.LegGeneration
+            : context.CurrentTransferLeg?.Generation ?? context.LastTransferLegGeneration;
+        var routePublicationGeneration = token is { IsDefault: false }
+            ? token.Value.PublicationGeneration
+            : 0;
+        var routeCommitGeneration = token is { IsDefault: false }
+            ? token.Value.RouteCommitGeneration ?? 0
+            : 0;
+        var targetRoute = token is { IsDefault: false }
+            ? FileTransferRouteResolver.Resolve(token.Value.TargetRoute).TelemetryToken
+            : route.TelemetryToken;
+        var targetProtocolVersion = token is { IsDefault: false }
+            ? token.Value.TargetProtocolVersion
+            : route.ProtocolVersion;
+        var targetTransport = token is { IsDefault: false }
+            ? token.Value.TargetTransport
+            : ResolveRoutePublicationTargetTransport(route.Route);
+        var actionKind = token is { IsDefault: false }
+            ? token.Value.ActionKind.ToString()
+            : "none";
+        var coordinatorReason = token is { IsDefault: false }
+            ? token.Value.Reason
+            : "route_publication_authority_missing";
+
+        if (route.Route == FileTransferRoute.FileTunaV4 &&
+            (token is not { IsDefault: false }))
+        {
+            LocalOperationalLog.Warn(
+                "FileTransferService",
+                $"event=filetransfer_tuna_data_path_proof_missing_authority; direction=outbound; transfer_id={context.TransferId}; session_id={FormatProtocolLogValue(context.SessionId)}; source={FormatProtocolLogValue(source)}; route={route.TelemetryToken}; protocol_version={route.ProtocolVersion}; live_route_epoch={liveRouteEpoch}; runtime_generation={runtimeGeneration}; terminal_generation={terminalGeneration}; leg_generation={legGeneration}; route_publication_generation=0; route_commit_generation=0; target_route={route.TelemetryToken}; target_protocol_version={route.ProtocolVersion}; target_transport={FormatFileTransferTransportKind(targetTransport)}; intended_target_transport={FormatFileTransferTransportKind(targetTransport)}; route_publication_action_kind=none; coordinator_decision_reason=route_publication_authority_missing");
+        }
+
+        return $"; direction=outbound; route={route.TelemetryToken}; protocol_version={route.ProtocolVersion}; live_route_epoch={liveRouteEpoch}; runtime_generation={runtimeGeneration}; terminal_generation={terminalGeneration}; leg_generation={legGeneration}; route_publication_generation={routePublicationGeneration}; route_commit_generation={routeCommitGeneration}; target_route={targetRoute}; target_protocol_version={targetProtocolVersion}; target_transport={FormatFileTransferTransportKind(targetTransport)}; intended_target_transport={FormatFileTransferTransportKind(targetTransport)}; route_publication_action_kind={FormatProtocolLogValue(actionKind)}; coordinator_decision_reason={FormatProtocolLogValue(coordinatorReason)}";
+    }
+
     private static FileTransferRoutePublicationAuthority? CreateRoutePublicationAuthority(
         RoutePublicationToken? routePublicationToken,
         string? coordinatorDecisionReason)

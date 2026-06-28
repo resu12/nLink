@@ -1185,13 +1185,14 @@ function Get-FileTransferInvariantCombinedGateResult {
         $RuntimeOwner = $null,
         $StaleRejectedActionEffect = $null,
         $FallbackRuntimeUnlockSeparation = $null,
-        $PublicationAuthorityFieldCoverage = $null
+        $PublicationAuthorityFieldCoverage = $null,
+        $FileTunaV4DataPathProof = $null
     )
 
     $findings = New-Object System.Collections.Generic.List[string]
     $evidence = New-Object System.Collections.Generic.List[object]
     $failureClass = 'none'
-    foreach ($result in @($RouteLaw, $TerminalLifecycle, $ControlPriority, $RuntimeOwner, $StaleRejectedActionEffect, $FallbackRuntimeUnlockSeparation, $PublicationAuthorityFieldCoverage)) {
+    foreach ($result in @($RouteLaw, $TerminalLifecycle, $ControlPriority, $RuntimeOwner, $StaleRejectedActionEffect, $FallbackRuntimeUnlockSeparation, $PublicationAuthorityFieldCoverage, $FileTunaV4DataPathProof)) {
         if ($null -eq $result) {
             continue
         }
@@ -3890,6 +3891,181 @@ function Test-FileTransferPublicationAuthorityFieldValue {
     return $true
 }
 
+function Test-FileTransferFileTunaV4DataPathEvent {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    return (Get-FileTransferEventField -Event $Event -Name 'route' -Default '') -eq 'file_tuna_v4' -and
+        (Get-FileTransferEventField -Event $Event -Name 'protocol_version' -Default '') -eq '4' -and
+        (Get-FileTransferEventField -Event $Event -Name 'target_transport' -Default '') -eq 'tuna' -and
+        (Get-FileTransferEventInt64Field -Event $Event -Name 'route_publication_generation' -Default 0) -gt 0
+}
+
+function Test-FileTransferFileTunaV4DataPathIntentEvent {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    if ($Event.EventName -ne 'filetransfer_v4_chunk_batch_sent' -and
+        $Event.EventName -ne 'filetransfer_v4_repair_sent') {
+        return $false
+    }
+
+    if (-not (Test-FileTransferFileTunaV4DataPathEvent -Event $Event)) {
+        return $false
+    }
+
+    $rawBytes = Get-FileTransferEventInt64Field -Event $Event -Name 'raw_bytes' -Default 0
+    $sentChunkCount = Get-FileTransferEventInt64Field -Event $Event -Name 'sent_chunk_count' -Default 0
+    $batchChunkCount = Get-FileTransferEventInt64Field -Event $Event -Name 'batch_chunk_count' -Default 0
+    return $rawBytes -gt 0 -or $sentChunkCount -gt 0 -or $batchChunkCount -gt 0
+}
+
+function Test-FileTransferFileTunaV4DataPathActualEvent {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    if ($Event.EventName -ne 'filetransfer_data_path_send_result' -and
+        $Event.EventName -ne 'filetransfer_data_path_receive_result' -and
+        $Event.EventName -ne 'filetransfer_tuna_data_path_peer_visible' -and
+        $Event.EventName -ne 'filetransfer_tuna_data_path_mismatch') {
+        return $false
+    }
+
+    return Test-FileTransferFileTunaV4DataPathEvent -Event $Event
+}
+
+function Test-FileTransferFileTunaV4DataPathScopeMatches {
+    param(
+        [Parameter(Mandatory = $true)]$Intent,
+        [Parameter(Mandatory = $true)]$Actual
+    )
+
+    foreach ($fieldName in @('transfer_id', 'session_id', 'route_publication_generation', 'runtime_generation', 'terminal_generation', 'leg_generation', 'live_route_epoch')) {
+        $intentValue = Get-FileTransferEventField -Event $Intent -Name $fieldName -Default ''
+        if ([string]::IsNullOrWhiteSpace($intentValue)) {
+            continue
+        }
+
+        $actualValue = Get-FileTransferEventField -Event $Actual -Name $fieldName -Default ''
+        if ([string]::IsNullOrWhiteSpace($actualValue) -or
+            -not [string]::Equals($intentValue, $actualValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Test-FileTransferFileTunaV4DataPathSendShapeMatches {
+    param(
+        [Parameter(Mandatory = $true)]$Intent,
+        [Parameter(Mandatory = $true)]$Actual
+    )
+
+    $proofDirection = Get-FileTransferEventField -Event $Actual -Name 'proof_direction' -Default ''
+    if ($proofDirection -ne 'receive') {
+        return $false
+    }
+
+    $intentBatchChunkCount = Get-FileTransferEventInt64Field -Event $Intent -Name 'batch_chunk_count' -Default 0
+    $intentSentChunkCount = Get-FileTransferEventInt64Field -Event $Intent -Name 'sent_chunk_count' -Default 0
+    $actualBatchChunkCount = Get-FileTransferEventInt64Field -Event $Actual -Name 'batch_chunk_count' -Default 0
+    if ($actualBatchChunkCount -gt 0) {
+        if ($intentBatchChunkCount -gt 0 -and $intentBatchChunkCount -ne $actualBatchChunkCount) {
+            return $false
+        }
+
+        if ($intentSentChunkCount -gt 0 -and $intentSentChunkCount -ne $actualBatchChunkCount) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Get-FileTransferFileTunaV4DataPathProof {
+    param([Parameter(Mandatory = $true)]$Summary)
+
+    [object[]]$events = @()
+    if ($null -ne $Summary.PSObject.Properties['AllEvents']) {
+        $events = @($Summary.AllEvents)
+    }
+    if ($events.Count -eq 0) {
+        $events = @($Summary.GlobalEvents + $Summary.TransferEvents)
+    }
+
+    $events = @($events | Sort-Object Sequence)
+    [object[]]$intentEvents = @($events | Where-Object { Test-FileTransferFileTunaV4DataPathIntentEvent -Event $_ })
+    [object[]]$actualEvents = @($events | Where-Object { Test-FileTransferFileTunaV4DataPathActualEvent -Event $_ })
+    [object[]]$mismatchEvents = @($actualEvents | Where-Object {
+            $_.EventName -eq 'filetransfer_tuna_data_path_mismatch' -or
+            (Get-FileTransferEventField -Event $_ -Name 'actual_transport' -Default '') -eq 'regular_nkn' -or
+            (Get-FileTransferEventField -Event $_ -Name 'delivery_transport' -Default '') -eq 'regular_nkn'
+        })
+    [object[]]$tunaActualEvents = @($actualEvents | Where-Object {
+            (Get-FileTransferEventField -Event $_ -Name 'actual_transport' -Default '') -eq 'tuna' -or
+            (Get-FileTransferEventField -Event $_ -Name 'delivery_transport' -Default '') -eq 'tuna'
+        })
+    [object[]]$peerVisibleEvents = @($actualEvents | Where-Object { $_.EventName -eq 'filetransfer_tuna_data_path_peer_visible' })
+
+    $findings = New-Object System.Collections.Generic.List[string]
+    $evidence = New-Object System.Collections.Generic.List[object]
+    $missingActualProofCount = 0
+    $usedPeerVisibleEventIndexes = New-Object 'System.Collections.Generic.HashSet[int]'
+
+    foreach ($intent in @($intentEvents)) {
+        $matchedPeerVisibleIndex = -1
+        for ($peerVisibleIndex = 0; $peerVisibleIndex -lt $peerVisibleEvents.Count; $peerVisibleIndex++) {
+            if ($usedPeerVisibleEventIndexes.Contains([int]$peerVisibleIndex)) {
+                continue
+            }
+
+            $peerVisible = $peerVisibleEvents[$peerVisibleIndex]
+            if ($null -ne $intent.PSObject.Properties['Sequence'] -and
+                $null -ne $peerVisible.PSObject.Properties['Sequence'] -and
+                [int64]$peerVisible.Sequence -lt [int64]$intent.Sequence) {
+                continue
+            }
+
+            if ((Test-FileTransferFileTunaV4DataPathScopeMatches -Intent $intent -Actual $peerVisible) -and
+                (Test-FileTransferFileTunaV4DataPathSendShapeMatches -Intent $intent -Actual $peerVisible)) {
+                $matchedPeerVisibleIndex = $peerVisibleIndex
+                break
+            }
+        }
+
+        if ($matchedPeerVisibleIndex -ge 0) {
+            [void]$usedPeerVisibleEventIndexes.Add([int]$matchedPeerVisibleIndex)
+        }
+        else {
+            $missingActualProofCount++
+            $findings.Add(("file_tuna_v4 V4 send intent had no matching peer-visible Tuna data-path proof: intent={0}" -f (Format-FileTransferEvidenceLine -Event $intent))) | Out-Null
+            $evidence.Add($intent) | Out-Null
+        }
+    }
+
+    foreach ($mismatch in @($mismatchEvents)) {
+        $findings.Add(("file_tuna_v4 V4 data path resolved to regular NKN: effect={0}" -f (Format-FileTransferEvidenceLine -Event $mismatch))) | Out-Null
+        $evidence.Add($mismatch) | Out-Null
+    }
+
+    $peerVisiblePayloadBytes = 0L
+    foreach ($event in @($peerVisibleEvents)) {
+        $peerVisiblePayloadBytes += Get-FileTransferEventInt64Field -Event $event -Name 'payload_bytes' -Default 0
+    }
+
+    $verdict = if ($intentEvents.Count -eq 0 -and $actualEvents.Count -eq 0) { 'none' } elseif ($findings.Count -eq 0) { 'pass' } else { 'fail' }
+    return [pscustomobject]@{
+        Verdict = $verdict
+        FailureClass = if ($verdict -eq 'fail') { 'file_tuna_data_path_mismatch' } else { 'none' }
+        IntendedSendCount = [int]$intentEvents.Count
+        ActualTunaSendCount = [int]$tunaActualEvents.Count
+        ActualRegularNknSendCount = [int]$mismatchEvents.Count
+        MismatchCount = [int]$mismatchEvents.Count
+        MissingActualProofCount = [int]$missingActualProofCount
+        PeerVisiblePayloadBytes = [long]$peerVisiblePayloadBytes
+        Findings = $findings
+        EvidenceEvents = @($evidence.ToArray() | Select-Object -First 20)
+    }
+}
+
 function Get-FileTransferPublicationAuthorityFieldCoverageProof {
     param([Parameter(Mandatory = $true)]$Summary)
 
@@ -4365,6 +4541,7 @@ function New-FileTransferRouteConsistencySummaryLines {
     $staleRejectedActionEffectProof = Get-FileTransferStaleRejectedActionEffectProof -Summary $Summary
     $fallbackRuntimeUnlockSeparationProof = Get-FileTransferFallbackRuntimeUnlockSeparationProof -Summary $Summary
     $publicationAuthorityFieldCoverageProof = Get-FileTransferPublicationAuthorityFieldCoverageProof -Summary $Summary
+    $fileTunaV4DataPathProof = Get-FileTransferFileTunaV4DataPathProof -Summary $Summary
     [object[]]$fallbackAuthoritySequence = @($fallbackAuthorityProof.Sequence)
 
     $lines = New-Object System.Collections.Generic.List[string]
@@ -4475,6 +4652,13 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("publication_authority_field_coverage_verdict={0}" -f $publicationAuthorityFieldCoverageProof.Verdict)) | Out-Null
     $lines.Add(("publication_authority_checked_event_count={0}" -f $publicationAuthorityFieldCoverageProof.CheckedEventCount)) | Out-Null
     $lines.Add(("publication_authority_missing_field_count={0}" -f $publicationAuthorityFieldCoverageProof.MissingFieldCount)) | Out-Null
+    $lines.Add(("file_tuna_v4_data_path_proof_verdict={0}" -f $fileTunaV4DataPathProof.Verdict)) | Out-Null
+    $lines.Add(("file_tuna_v4_intended_send_count={0}" -f $fileTunaV4DataPathProof.IntendedSendCount)) | Out-Null
+    $lines.Add(("file_tuna_v4_tuna_send_result_count={0}" -f $fileTunaV4DataPathProof.ActualTunaSendCount)) | Out-Null
+    $lines.Add(("file_tuna_v4_regular_nkn_send_result_count={0}" -f $fileTunaV4DataPathProof.ActualRegularNknSendCount)) | Out-Null
+    $lines.Add(("file_tuna_v4_data_path_mismatch_count={0}" -f $fileTunaV4DataPathProof.MismatchCount)) | Out-Null
+    $lines.Add(("file_tuna_v4_data_path_missing_actual_proof_count={0}" -f $fileTunaV4DataPathProof.MissingActualProofCount)) | Out-Null
+    $lines.Add(("file_tuna_v4_peer_visible_tuna_payload_bytes={0}" -f $fileTunaV4DataPathProof.PeerVisiblePayloadBytes)) | Out-Null
     $lines.Add(("fallback_runtime_unlock_separation_verdict={0}" -f $fallbackRuntimeUnlockSeparationProof.Verdict)) | Out-Null
     $lines.Add(("runtime_fallback_separation_verdict={0}" -f $fallbackRuntimeUnlockSeparationProof.Verdict)) | Out-Null
     $lines.Add(("runtime_fallback_arbitration_verdict={0}" -f $fallbackRuntimeUnlockSeparationProof.Verdict)) | Out-Null
@@ -4597,6 +4781,19 @@ function New-FileTransferRouteConsistencySummaryLines {
         foreach ($finding in @($staleRejectedActionEffectProof.Findings)) {
             $staleEffectIndex++
             $lines.Add(("stale_rejected_action_effect.{0}={1}" -f $staleEffectIndex, $finding)) | Out-Null
+        }
+    }
+    else {
+        $lines.Add('(none)') | Out-Null
+    }
+
+    $lines.Add('') | Out-Null
+    $lines.Add('file_tuna_v4_data_path_findings:') | Out-Null
+    if ($fileTunaV4DataPathProof.Findings.Count -gt 0) {
+        $dataPathIndex = 0
+        foreach ($finding in @($fileTunaV4DataPathProof.Findings)) {
+            $dataPathIndex++
+            $lines.Add(("file_tuna_v4_data_path.{0}={1}" -f $dataPathIndex, $finding)) | Out-Null
         }
     }
     else {
@@ -6960,6 +7157,7 @@ function Get-FileTransferRecoveryFailureClassification {
     $staleRejectedActionEffectProof = Get-FileTransferStaleRejectedActionEffectProof -Summary $Summary
     $fallbackRuntimeUnlockSeparationProof = Get-FileTransferFallbackRuntimeUnlockSeparationProof -Summary $Summary
     $publicationAuthorityFieldCoverageProof = Get-FileTransferPublicationAuthorityFieldCoverageProof -Summary $Summary
+    $fileTunaV4DataPathProof = Get-FileTransferFileTunaV4DataPathProof -Summary $Summary
 
     $routeChanges = New-Object System.Collections.Generic.List[string]
     $lastRoute = ''
@@ -6986,6 +7184,9 @@ function Get-FileTransferRecoveryFailureClassification {
     $class = '(none)'
     if ($publicationAuthorityFieldCoverageProof.Verdict -eq 'fail') {
         $class = 'publication_authority_missing'
+    }
+    elseif ($fileTunaV4DataPathProof.Verdict -eq 'fail') {
+        $class = 'file_tuna_data_path_mismatch'
     }
     elseif ($staleRejectedActionEffectProof.Verdict -eq 'fail') {
         $class = 'stale_rejected_action_effect'
@@ -7514,6 +7715,7 @@ function New-FileTransferInvariantLedgerObject {
     $staleRejectedActionEffectProof = Get-FileTransferStaleRejectedActionEffectProof -Summary $Summary
     $fallbackRuntimeUnlockSeparationProof = Get-FileTransferFallbackRuntimeUnlockSeparationProof -Summary $Summary
     $publicationAuthorityFieldCoverageProof = Get-FileTransferPublicationAuthorityFieldCoverageProof -Summary $Summary
+    $fileTunaV4DataPathProof = Get-FileTransferFileTunaV4DataPathProof -Summary $Summary
     $recoveryClassification = Get-FileTransferRecoveryFailureClassification -Summary $Summary
 
     $shaOk = Get-FileTransferInvariantShaOk -TerminalEvents @($Summary.TerminalEvents) -GateVerdict $GateResult.Verdict
@@ -7524,7 +7726,7 @@ function New-FileTransferInvariantLedgerObject {
     $terminalLifecycle = Get-FileTransferInvariantTerminalLifecycleResult -Summary $Summary -LateFrameClassification $lateFrameClassification
     $controlPriority = Get-FileTransferInvariantControlPriorityResult -Summary $Summary
     $runtimeOwner = Get-FileTransferInvariantRuntimeOwnerResult -Summary $Summary
-    $combinedInvariant = Get-FileTransferInvariantCombinedGateResult -RouteLaw $routeLaw -TerminalLifecycle $terminalLifecycle -ControlPriority $controlPriority -RuntimeOwner $runtimeOwner -StaleRejectedActionEffect $staleRejectedActionEffectProof -FallbackRuntimeUnlockSeparation $fallbackRuntimeUnlockSeparationProof -PublicationAuthorityFieldCoverage $publicationAuthorityFieldCoverageProof
+    $combinedInvariant = Get-FileTransferInvariantCombinedGateResult -RouteLaw $routeLaw -TerminalLifecycle $terminalLifecycle -ControlPriority $controlPriority -RuntimeOwner $runtimeOwner -StaleRejectedActionEffect $staleRejectedActionEffectProof -FallbackRuntimeUnlockSeparation $fallbackRuntimeUnlockSeparationProof -PublicationAuthorityFieldCoverage $publicationAuthorityFieldCoverageProof -FileTunaV4DataPathProof $fileTunaV4DataPathProof
 
     $maxLiveEpoch = -1L
     foreach ($event in @($Summary.TransferEvents)) {
@@ -7613,6 +7815,13 @@ function New-FileTransferInvariantLedgerObject {
         publication_authority_field_coverage_verdict = $publicationAuthorityFieldCoverageProof.Verdict
         publication_authority_checked_event_count = [string]$publicationAuthorityFieldCoverageProof.CheckedEventCount
         publication_authority_missing_field_count = [string]$publicationAuthorityFieldCoverageProof.MissingFieldCount
+        file_tuna_v4_data_path_proof_verdict = $fileTunaV4DataPathProof.Verdict
+        file_tuna_v4_intended_send_count = [string]$fileTunaV4DataPathProof.IntendedSendCount
+        file_tuna_v4_tuna_send_result_count = [string]$fileTunaV4DataPathProof.ActualTunaSendCount
+        file_tuna_v4_regular_nkn_send_result_count = [string]$fileTunaV4DataPathProof.ActualRegularNknSendCount
+        file_tuna_v4_data_path_mismatch_count = [string]$fileTunaV4DataPathProof.MismatchCount
+        file_tuna_v4_data_path_missing_actual_proof_count = [string]$fileTunaV4DataPathProof.MissingActualProofCount
+        file_tuna_v4_peer_visible_tuna_payload_bytes = [string]$fileTunaV4DataPathProof.PeerVisiblePayloadBytes
         invariant_failure_class = $combinedInvariant.FailureClass
         goodput_bytes_per_second = $goodput
         recovery_failure_class = $recoveryClassification.Class
@@ -7710,12 +7919,13 @@ function Write-FileTransferDiagnosticsArtifacts {
     $staleRejectedActionEffectProof = Get-FileTransferStaleRejectedActionEffectProof -Summary $Summary
     $fallbackRuntimeUnlockSeparationProof = Get-FileTransferFallbackRuntimeUnlockSeparationProof -Summary $Summary
     $publicationAuthorityFieldCoverageProof = Get-FileTransferPublicationAuthorityFieldCoverageProof -Summary $Summary
+    $fileTunaV4DataPathProof = Get-FileTransferFileTunaV4DataPathProof -Summary $Summary
     $invariantLedger = New-FileTransferInvariantLedgerObject -ArtifactDir $ArtifactDir -Summary $Summary -GateResult $GateResult -LiveRouteProofMode $LiveRouteProofMode
     $releaseRouteLaw = Get-FileTransferInvariantRouteLawResult -Summary $Summary
     $terminalLifecycleInvariant = Get-FileTransferInvariantTerminalLifecycleResult -Summary $Summary -LateFrameClassification $invariantLedger.late_frame_classification
     $controlPriorityInvariant = Get-FileTransferInvariantControlPriorityResult -Summary $Summary
     $runtimeOwnerInvariant = Get-FileTransferInvariantRuntimeOwnerResult -Summary $Summary
-    $combinedInvariant = Get-FileTransferInvariantCombinedGateResult -RouteLaw $releaseRouteLaw -TerminalLifecycle $terminalLifecycleInvariant -ControlPriority $controlPriorityInvariant -RuntimeOwner $runtimeOwnerInvariant -StaleRejectedActionEffect $staleRejectedActionEffectProof -FallbackRuntimeUnlockSeparation $fallbackRuntimeUnlockSeparationProof -PublicationAuthorityFieldCoverage $publicationAuthorityFieldCoverageProof
+    $combinedInvariant = Get-FileTransferInvariantCombinedGateResult -RouteLaw $releaseRouteLaw -TerminalLifecycle $terminalLifecycleInvariant -ControlPriority $controlPriorityInvariant -RuntimeOwner $runtimeOwnerInvariant -StaleRejectedActionEffect $staleRejectedActionEffectProof -FallbackRuntimeUnlockSeparation $fallbackRuntimeUnlockSeparationProof -PublicationAuthorityFieldCoverage $publicationAuthorityFieldCoverageProof -FileTunaV4DataPathProof $fileTunaV4DataPathProof
 
     $effectiveVerdict = $GateResult.Verdict
     $effectiveGateStatus = $GateResult.GateStatus
@@ -7771,6 +7981,13 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("publication_authority_field_coverage_verdict={0}" -f $publicationAuthorityFieldCoverageProof.Verdict),
         ("publication_authority_checked_event_count={0}" -f $publicationAuthorityFieldCoverageProof.CheckedEventCount),
         ("publication_authority_missing_field_count={0}" -f $publicationAuthorityFieldCoverageProof.MissingFieldCount),
+        ("file_tuna_v4_data_path_proof_verdict={0}" -f $fileTunaV4DataPathProof.Verdict),
+        ("file_tuna_v4_intended_send_count={0}" -f $fileTunaV4DataPathProof.IntendedSendCount),
+        ("file_tuna_v4_tuna_send_result_count={0}" -f $fileTunaV4DataPathProof.ActualTunaSendCount),
+        ("file_tuna_v4_regular_nkn_send_result_count={0}" -f $fileTunaV4DataPathProof.ActualRegularNknSendCount),
+        ("file_tuna_v4_data_path_mismatch_count={0}" -f $fileTunaV4DataPathProof.MismatchCount),
+        ("file_tuna_v4_data_path_missing_actual_proof_count={0}" -f $fileTunaV4DataPathProof.MissingActualProofCount),
+        ("file_tuna_v4_peer_visible_tuna_payload_bytes={0}" -f $fileTunaV4DataPathProof.PeerVisiblePayloadBytes),
         ("invariant_failure_class={0}" -f $combinedInvariant.FailureClass),
         ("fallback_consumed={0}" -f $invariantLedger.fallback_consumed),
         ("stale_route_worker_activity_count={0}" -f $invariantLedger.stale_route_worker_activity_count),

@@ -209,6 +209,33 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public void RunFileTransferTunaGuiSmoke_PreactivationReadinessRequiresAnswerReceivedWithCurrentLease()
+    {
+        var repoRoot = FindRepoRoot();
+        var scriptPath = Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1");
+        var scriptText = File.ReadAllText(scriptPath);
+        var readinessBody = ExtractPowerShellFunctionBody(scriptText, "Wait-TunaGuiDiagnosticReadinessBeforeMeasuredTransfer", "Test-GuiSmokeFieldEquals");
+        var summaryBody = ExtractPowerShellFunctionBody(scriptText, "Get-TunaGuiEvidenceSummary", "Invoke-FileTransferTunaPostFallbackPrecondition");
+        var cycleBody = ExtractPowerShellFunctionBody(scriptText, "Invoke-FileTransferTunaHandoffFallbackCycle", "Wait-FileTransferTerminalOrProgressBeforeAction");
+
+        Assert.Contains("'event=runtime_unlock_transaction_answer_received', 'peer_visible_proof=1', 'answer_received=1', 'tuna_path_lease_current=1', 'tuna_path_lease_state=listenerready'", readinessBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("'event=tuna_path_lease_listener_ready', 'current=1'", readinessBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("'event=runtime_unlock_transaction_listener_ready'", readinessBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("'event=runtime_unlock_transaction_offer_generation_created'", readinessBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("'event=tuna_acceleration_answer_ack_received'", readinessBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("'event=tuna_acceleration_negotiated'", readinessBody, StringComparison.Ordinal);
+
+        Assert.Contains("event=runtime_unlock_transaction_answer_received", summaryBody, StringComparison.Ordinal);
+        Assert.Contains("tuna_path_lease_current=1", summaryBody, StringComparison.Ordinal);
+        Assert.Contains("tuna_path_lease_state=listenerready", summaryBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=tuna_path_lease_listener_ready", summaryBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=tuna_acceleration_answer_ack_received", summaryBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("-or $line.IndexOf('event=tuna_acceleration_negotiated'", summaryBody, StringComparison.Ordinal);
+
+        Assert.Contains("$secondDiagnosticReadinessLine = [string](Wait-TunaGuiDiagnosticReadinessBeforeMeasuredTransfer -Bookmark $secondBookmark", cycleBody, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void RunFileTransferTunaGuiSmoke_UsesArtifactLocalNknIdentitiesAndEmptyLogClassification()
     {
         var repoRoot = FindRepoRoot();
@@ -263,6 +290,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("Resolve-TunaGuiLiveSwitchOffMinimumPeerVisiblePayloadBytes", guiText, StringComparison.Ordinal);
         Assert.Contains("NLINK_TUNA_GUI_LIVE_SWITCH_OFF_MIN_PEER_VISIBLE_PAYLOAD_BYTES", guiText, StringComparison.Ordinal);
         Assert.Contains("filetransfer_tuna_gui_live_switch_off_progress_gate_satisfied", guiText, StringComparison.Ordinal);
+        Assert.Contains("Test-TunaGuiPeerVisibleFileTunaV4DataPathLine", guiText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer_tuna_data_path_peer_visible", guiText, StringComparison.Ordinal);
+        Assert.Contains("actual_transport", guiText, StringComparison.Ordinal);
+        Assert.Contains("route_publication_generation", guiText, StringComparison.Ordinal);
         Assert.Contains("mode=peer_visible_payload", guiText, StringComparison.Ordinal);
         Assert.Contains("-MinimumPeerVisiblePayloadBytes $liveSwitchOffMinimumPeerVisiblePayloadBytes", guiText, StringComparison.Ordinal);
         Assert.DoesNotContain("@('event=filetransfer_route_selected', (\"route={0}\" -f $Route)", guiText, StringComparison.Ordinal);
