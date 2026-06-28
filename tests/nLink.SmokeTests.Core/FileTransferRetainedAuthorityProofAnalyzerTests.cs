@@ -496,6 +496,62 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
     }
 
     [Fact]
+    [Trait("RetainedAuthorityProofSuite", "StaleRejectedActionEffectIsolation")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_PendingPreCommitProbeRejectedWithoutMatchingEffect_Passes()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_pending_precommit_rejected_pass";
+        var lines = BuildAuthorityProofFixture(
+            transferId,
+            PendingPreCommitProbeRejectedMessage(transferId));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("pass", route["stale_rejected_action_effect_isolation_verdict"]);
+        Assert.Equal("1", route["stale_rejected_action_count"]);
+        Assert.Equal("0", route["stale_rejected_action_forbidden_effect_count"]);
+        Assert.Equal("0", route["stale_rejected_control_plane_effect_count"]);
+        Assert.Equal("0", route["stale_rejected_unknown_action_count"]);
+    }
+
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "StaleRejectedActionEffectIsolation")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_PendingPreCommitProbeRejectedFollowedByMatchingProbeEffect_Fails()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_pending_precommit_rejected_fail";
+        var lines = BuildAuthorityProofFixture(
+            transferId,
+            PendingPreCommitProbeRejectedMessage(transferId),
+            RuntimeUnlockForbiddenEffectMessage("control_plane", transferId));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("fail", route["stale_rejected_action_effect_isolation_verdict"]);
+        Assert.Equal("1", route["stale_rejected_action_count"]);
+        Assert.Equal("1", route["stale_rejected_action_forbidden_effect_count"]);
+        Assert.Equal("1", route["stale_rejected_control_plane_effect_count"]);
+        Assert.Equal("0", route["stale_rejected_unknown_action_count"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("stale_rejected_action_effect", verdict["acceptance_failure_class"]);
+        Assert.Equal("stale_rejected_action_effect", verdict["recovery_failure_class"]);
+    }
+
+    [Fact]
     [Trait("RetainedAuthorityProofSuite", "RuntimeUnlockFallbackUnavailableCoordinatorDenial")]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_FallbackUnavailableWithPriorCoordinatorDenial_Passes()
@@ -910,6 +966,9 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
 
     private static string RuntimeUnlockCallbackRejectedMessage(string actionKind, string transferId)
         => $"event=filetransfer_runtime_unlock_callback_rejected; direction=outbound; transfer_id={transferId}; session_id=sess_a; action_kind={actionKind}; source=phase2c_fixture; attempted_action=runtime_unlock_callback; rejection_reason=runtime_generation_mismatch; reason=runtime_unlock_callback; current_route=regular_nkn_v4_fast; current_protocol_version=4; current_live_route_epoch=2; current_runtime_generation=2; current_terminal_generation=0; current_leg_generation=3; attempted_route=file_tuna_v4; attempted_protocol_version=4; attempted_live_route_epoch=1; attempted_runtime_generation=1; attempted_terminal_generation=0; attempted_leg_generation=2; transaction_generation=11; offer_generation=12; tuna_path_lease_generation=13; probe_id=probe-12; same_path_tuna_probe_ack_id=probe-12; route_commit_generation=4; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; admission_generation=5; route_commit_token_generation=4";
+
+    private static string PendingPreCommitProbeRejectedMessage(string transferId)
+        => $"event=filetransfer_runtime_unlock_precommit_probe_pending_rejected; direction=outbound; transfer_id={transferId}; session_id=sess_a; source=runtime_unlock_precommit_probe_pending; reason=runtime_unlock_pending_precommit_probe_offer_generation_mismatch; rejection_reason=runtime_unlock_pending_precommit_probe_offer_generation_mismatch; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; runtime_generation=1; terminal_generation=0; leg_generation=2; admission_generation=5; pending_probe_generation=6; transaction_generation=11; offer_generation=12; tuna_path_lease_generation=13; tuna_path_lease_listener_run_id=listener-start-13; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; handoff_kind=normal_to_tuna_activation";
 
     private static string FallbackAuthorityRejectedMessage(string subfamily, string actionKind, string transferId)
         => $"event=filetransfer_coordinator_leg_mutation_rejected; direction=outbound; transfer_id={transferId}; session_id=sess_a; action_kind={actionKind}; attempted_action={FallbackAttemptedAction(subfamily)}; rejection_reason=runtime_generation_mismatch; current_route=file_tuna_v4; current_protocol_version=4; current_live_route_epoch=2; current_runtime_generation=2; current_terminal_generation=0; current_leg_generation=3; current_transport_epoch=8; current_bridge_recovery_generation=2; current_checkpoint_request_id=checkpoint-b; current_checkpoint_generation=12; current_control_plane_token_generation=5; current_checkpoint_lease_generation=6; current_pressure_generation=7; attempted_route=regular_nkn_v4_fast; attempted_protocol_version=4; attempted_live_route_epoch=0; attempted_runtime_generation=1; attempted_terminal_generation=0; attempted_leg_generation=2; attempted_transport_epoch=7; attempted_bridge_recovery_generation=1; attempted_checkpoint_request_id=checkpoint-a; attempted_checkpoint_generation=11; attempted_control_plane_token_generation=4; attempted_checkpoint_lease_generation=5; attempted_pressure_generation=6; reason=phase3c_fixture";

@@ -1806,6 +1806,153 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void RuntimeUnlockPreCommitProbePending_AcceptsCurrentAuthorityAndReplays()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var started = StartRegular(regular);
+        var admission = RequestRuntimeUnlockAdmission(started.State, started.State.CurrentRuntimeOwner);
+        var token = admission.RuntimeUnlockAdmissionDecision!.Value.AdmissionToken!.Value;
+        var pending = PendingPreCommitProbeRequest(admission.State, token);
+
+        var recorded = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.RuntimeUnlockPreCommitProbePending,
+                admission.State.RouteSelection,
+                reason: "precommit_probe_pending",
+                runtimeUnlockPendingPreCommitProbeRequest: pending),
+            admission.State);
+
+        Assert.True(recorded.RuntimeUnlockPendingPreCommitProbeDecision!.Value.Accepted);
+        Assert.NotNull(recorded.State.CurrentRuntimeUnlockPendingPreCommitProbe);
+
+        var current = recorded.State.CurrentRuntimeUnlockPendingPreCommitProbe!.Value;
+        var replay = FileTransferCoordinator.AuthorizeAction(
+            recorded.State,
+            PendingPreCommitProbeReplayAction(current));
+
+        Assert.True(replay.Accepted);
+        Assert.True(replay.RuntimeUnlockPendingPreCommitProbeDecision!.Value.Accepted);
+
+        var replayed = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.RuntimeUnlockPreCommitProbeReplayed,
+                replay.State.RouteSelection,
+                reason: "precommit_probe_replayed",
+                runtimeUnlockPendingPreCommitProbeRequest: current),
+            replay.State);
+        var retired = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.RuntimeUnlockPreCommitProbeRetired,
+                replayed.State.RouteSelection,
+                reason: "precommit_probe_replayed",
+                runtimeUnlockPendingPreCommitProbeRequest: current),
+            replayed.State);
+
+        Assert.Null(retired.State.CurrentRuntimeUnlockPendingPreCommitProbe);
+    }
+
+    [Fact]
+    public void RuntimeUnlockPreCommitProbePending_RejectsInvalidTarget()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var started = StartRegular(regular);
+        var admission = RequestRuntimeUnlockAdmission(started.State, started.State.CurrentRuntimeOwner);
+        var token = admission.RuntimeUnlockAdmissionDecision!.Value.AdmissionToken!.Value;
+        var pending = PendingPreCommitProbeRequest(
+            admission.State,
+            token,
+            targetRoute: FileTransferRoute.FileTunaV4,
+            targetProtocolVersion: FileTransferProtocol.ProtocolVersionV6,
+            targetTransport: FileTransferTransportKind.Tuna);
+
+        var decision = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.RuntimeUnlockPreCommitProbePending,
+                admission.State.RouteSelection,
+                reason: "precommit_probe_pending",
+                runtimeUnlockPendingPreCommitProbeRequest: pending),
+            admission.State);
+
+        Assert.False(decision.RuntimeUnlockPendingPreCommitProbeDecision!.Value.Accepted);
+        Assert.Equal("route_commit_metadata_invalid", decision.RuntimeUnlockPendingPreCommitProbeDecision!.Value.RejectionReason);
+        Assert.Null(decision.State.CurrentRuntimeUnlockPendingPreCommitProbe);
+    }
+
+    [Fact]
+    public void AuthorizeAction_RuntimeUnlockPendingPreCommitProbeReplay_RejectsStaleOwner()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var started = StartRegular(regular);
+        var admission = RequestRuntimeUnlockAdmission(started.State, started.State.CurrentRuntimeOwner);
+        var token = admission.RuntimeUnlockAdmissionDecision!.Value.AdmissionToken!.Value;
+        var recorded = RecordPendingPreCommitProbe(admission.State, token);
+        var pending = recorded.State.CurrentRuntimeUnlockPendingPreCommitProbe!.Value;
+        var changed = ActivateTuna(recorded.State, tuna, committedChunk: 1);
+
+        var decision = FileTransferCoordinator.AuthorizeAction(
+            changed.State,
+            PendingPreCommitProbeReplayAction(pending));
+
+        Assert.False(decision.Accepted);
+        Assert.Equal("runtime_generation_mismatch", decision.RejectionReason);
+    }
+
+    [Fact]
+    public void AuthorizeAction_RuntimeUnlockPendingPreCommitProbeReplay_RejectsMetadataMismatch()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var started = StartRegular(regular);
+        var admission = RequestRuntimeUnlockAdmission(started.State, started.State.CurrentRuntimeOwner);
+        var token = admission.RuntimeUnlockAdmissionDecision!.Value.AdmissionToken!.Value;
+        var recorded = RecordPendingPreCommitProbe(admission.State, token);
+        var pending = recorded.State.CurrentRuntimeUnlockPendingPreCommitProbe!.Value;
+        var staleAttempt = pending with { OfferGeneration = pending.OfferGeneration + 1 };
+
+        var decision = FileTransferCoordinator.AuthorizeAction(
+            recorded.State,
+            PendingPreCommitProbeReplayAction(staleAttempt));
+
+        Assert.False(decision.Accepted);
+        Assert.Equal("runtime_unlock_offer_generation_mismatch", decision.RejectionReason);
+    }
+
+    [Fact]
+    public void RuntimeUnlockPreCommitProbePending_InvalidatedByTerminalAndRouteCommit()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var started = StartRegular(regular);
+        var admission = RequestRuntimeUnlockAdmission(started.State, started.State.CurrentRuntimeOwner);
+        var token = admission.RuntimeUnlockAdmissionDecision!.Value.AdmissionToken!.Value;
+        var recorded = RecordPendingPreCommitProbe(admission.State, token);
+        var pending = recorded.State.CurrentRuntimeUnlockPendingPreCommitProbe!.Value;
+
+        var terminal = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.Terminalized,
+                recorded.State.RouteSelection,
+                reason: "completed"),
+            recorded.State);
+
+        Assert.Null(terminal.State.CurrentRuntimeUnlockPendingPreCommitProbe);
+        Assert.False(FileTransferCoordinator.IsRuntimeUnlockPendingPreCommitProbeRequestCurrent(
+            terminal.State,
+            pending,
+            out var terminalReason));
+        Assert.Equal("transfer_terminal", terminalReason);
+
+        var committed = CommitRuntimeUnlockToTuna(recorded.State, tuna);
+
+        Assert.Null(committed.State.CurrentRuntimeUnlockPendingPreCommitProbe);
+        Assert.False(FileTransferCoordinator.IsRuntimeUnlockPendingPreCommitProbeRequestCurrent(
+            committed.State,
+            pending,
+            out var commitReason));
+        Assert.Equal("runtime_unlock_pending_precommit_probe_generation_mismatch", commitReason);
+    }
+
+    [Fact]
     public void AuthorizeAction_RoutePublication_IssuesTokenForCurrentRegularRoute()
     {
         var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
@@ -3192,6 +3339,74 @@ public sealed class FileTransferCoordinatorTests
             admission.State);
     }
 
+    private static FileTransferCoordinatorDecision RecordPendingPreCommitProbe(
+        FileTransferCoordinatorState state,
+        RuntimeUnlockAdmissionToken token)
+        => FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.RuntimeUnlockPreCommitProbePending,
+                state.RouteSelection,
+                reason: "precommit_probe_pending",
+                runtimeUnlockPendingPreCommitProbeRequest: PendingPreCommitProbeRequest(state, token)),
+            state);
+
+    private static RuntimeUnlockPendingPreCommitProbeRequest PendingPreCommitProbeRequest(
+        FileTransferCoordinatorState state,
+        RuntimeUnlockAdmissionToken token,
+        FileTransferRoute targetRoute = FileTransferRoute.FileTunaV4,
+        int targetProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+        FileTransferTransportKind targetTransport = FileTransferTransportKind.Tuna)
+    {
+        var owner = state.CurrentRuntimeOwner!.Value;
+        var leg = state.CurrentLeg!;
+        return new RuntimeUnlockPendingPreCommitProbeRequest(
+            state.SessionId,
+            state.TransferId,
+            state.Direction,
+            owner,
+            token,
+            state.RouteSelection.Route,
+            state.RouteSelection.TelemetryToken,
+            state.RouteSelection.ProtocolVersion,
+            leg.LiveRouteEpochId,
+            owner.RuntimeGeneration,
+            state.TerminalGeneration,
+            leg.Generation,
+            TransactionGeneration: 21,
+            OfferGeneration: 22,
+            TunaPathLeaseGeneration: 23,
+            TunaPathLeaseListenerRunId: "listener-start-23",
+            TargetRoute: targetRoute,
+            TargetProtocolVersion: targetProtocolVersion,
+            TargetTransport: targetTransport,
+            HandoffKind: FileTransferTransportHandoffKind.NormalToTunaActivation,
+            PendingGeneration: 0,
+            Reason: "precommit_probe_pending");
+    }
+
+    private static FileTransferCoordinatorActionRequest PendingPreCommitProbeReplayAction(
+        RuntimeUnlockPendingPreCommitProbeRequest pending)
+        => new(
+            FileTransferCoordinatorActionKind.RuntimeUnlockPendingPreCommitProbeReplay,
+            Source: "test",
+            Reason: "precommit_probe_replay",
+            RuntimeOwner: pending.RuntimeOwner,
+            Route: pending.Route,
+            ProtocolVersion: pending.ProtocolVersion,
+            LiveRouteEpoch: pending.LiveRouteEpoch,
+            LegGeneration: pending.LegGeneration,
+            RuntimeGeneration: pending.RuntimeGeneration,
+            TerminalGeneration: pending.TerminalGeneration,
+            RuntimeUnlockAdmissionToken: pending.AdmissionToken,
+            RuntimeUnlockTransactionGeneration: pending.TransactionGeneration,
+            RuntimeUnlockOfferGeneration: pending.OfferGeneration,
+            RuntimeUnlockTunaPathLeaseGeneration: pending.TunaPathLeaseGeneration,
+            RuntimeUnlockTunaPathLeaseListenerRunId: pending.TunaPathLeaseListenerRunId,
+            TargetRoute: pending.TargetRoute,
+            TargetProtocolVersion: pending.TargetProtocolVersion,
+            TargetTransport: pending.TargetTransport,
+            RuntimeUnlockPendingPreCommitProbeRequest: pending);
+
     private static FileTransferCoordinatorActionRequest RouteCommitPublicationRequest(RouteCommitToken token)
         => new(
             FileTransferCoordinatorActionKind.RouteCommitPublication,
@@ -3487,7 +3702,8 @@ public sealed class FileTransferCoordinatorTests
         FallbackTailYieldKind fallbackTailYieldKind = FallbackTailYieldKind.Unknown,
         FileTransferInitialTunaReadinessEvidence? initialTunaReadinessEvidence = null,
         bool allowInitialRouteFallback = false,
-        FileTransferRouteSelection? initialRouteFallbackSelection = null)
+        FileTransferRouteSelection? initialRouteFallbackSelection = null,
+        RuntimeUnlockPendingPreCommitProbeRequest? runtimeUnlockPendingPreCommitProbeRequest = null)
         => new(
             kind,
             routeSelection,
@@ -3515,5 +3731,6 @@ public sealed class FileTransferCoordinatorTests
             FallbackTailYieldKind: fallbackTailYieldKind,
             InitialTunaReadinessEvidence: initialTunaReadinessEvidence,
             AllowInitialRouteFallback: allowInitialRouteFallback,
-            InitialRouteFallbackSelection: initialRouteFallbackSelection);
+            InitialRouteFallbackSelection: initialRouteFallbackSelection,
+            RuntimeUnlockPendingPreCommitProbeRequest: runtimeUnlockPendingPreCommitProbeRequest);
 }

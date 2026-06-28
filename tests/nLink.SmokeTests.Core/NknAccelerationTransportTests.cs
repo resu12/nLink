@@ -4505,6 +4505,162 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockPreCommitProbeLaunchWithoutDataSession_WaitsAndDoesNotFailTransaction()
+    {
+        FakeNknClient.ResetNetwork();
+        var previousHelpeePriorityDelay = NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
+        var previousProbeStartTimeout = NknSignalingTransport.RuntimeUnlockPreCommitProbeStartTimeoutOverrideForTests;
+        NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = TimeSpan.Zero;
+        NknSignalingTransport.RuntimeUnlockPreCommitProbeStartTimeoutOverrideForTests = TimeSpan.FromMilliseconds(150);
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime.unlock.pending.no-data.address");
+            var hostLane = new RetryableTunaAccelerationSession(canListen: true, failedDialAttemptsBeforeSuccess: 0);
+
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-pending-no-data-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                hostLane);
+
+            var logStart = GetOperationalLogLength();
+            const string sessionId = "session_runtime_unlock_pending_no_data_session";
+            const string transferId = "transfer_runtime_unlock_pending_no_data_session";
+            var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var snapshot = RuntimeUnlockTransactionSnapshot.Idle with
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                TransactionGeneration = 7,
+                OfferGeneration = 8,
+                State = RuntimeUnlockTransactionState.AnswerReceived,
+                CreatedUtcMs = nowMs,
+                UpdatedUtcMs = nowMs,
+                DeadlineUtcMs = nowMs + 30_000,
+                PeerReceived = true,
+                AnswerReceived = true,
+                PathProbeState = RuntimeUnlockPathProbeState.None,
+                TunaPathLeaseGeneration = 9,
+                TunaPathLeaseState = RuntimeUnlockTunaPathLeaseState.ListenerReady,
+                TunaPathLeaseListenerRunId = "listener-start-9",
+                TunaPathLeaseCurrent = true,
+            };
+            InvokePrivateMethod(
+                host,
+                "RequestRuntimeUnlockPreCommitProbeLaunch",
+                sessionId,
+                NknAccelerationLaneKind.File,
+                "unit_test_no_data_session",
+                snapshot);
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=runtime_unlock_precommit_probe_launch_waiting_for_data_session;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(5));
+            await Task.Delay(250, cts.Token);
+
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=runtime_unlock_precommit_probe_launch_requested;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_precommit_probe_launch_waiting_for_data_session;", logTail, StringComparison.Ordinal);
+            Assert.Contains($"session_id={sessionId}", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_precommit_probe_start_timeout;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("failure_reason=runtime_unlock_probe_start_timeout", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_activation_failed_regular_v4_resumed;", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = previousHelpeePriorityDelay;
+            NknSignalingTransport.RuntimeUnlockPreCommitProbeStartTimeoutOverrideForTests = previousProbeStartTimeout;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockPreCommitProbeLaunchWithDifferentTransferDataSession_WaitsAndDoesNotFailTransaction()
+    {
+        FakeNknClient.ResetNetwork();
+        var previousHelpeePriorityDelay = NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
+        var previousProbeStartTimeout = NknSignalingTransport.RuntimeUnlockPreCommitProbeStartTimeoutOverrideForTests;
+        NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = TimeSpan.Zero;
+        NknSignalingTransport.RuntimeUnlockPreCommitProbeStartTimeoutOverrideForTests = TimeSpan.FromMilliseconds(150);
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime.unlock.pending.other-transfer.address");
+            var hostLane = new RetryableTunaAccelerationSession(canListen: true, failedDialAttemptsBeforeSuccess: 0);
+
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-pending-other-transfer-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                hostLane);
+
+            const string sessionId = "session_runtime_unlock_pending_other_transfer";
+            const string transferId = "transfer_runtime_unlock_pending_other_transfer";
+            using var unrelatedDataSession = await host.OpenFileTransferDataSessionAsync(
+                sessionId,
+                "transfer_runtime_unlock_pending_other_transfer_unrelated",
+                cts.Token);
+            var logStart = GetOperationalLogLength();
+            var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var snapshot = RuntimeUnlockTransactionSnapshot.Idle with
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                TransactionGeneration = 7,
+                OfferGeneration = 8,
+                State = RuntimeUnlockTransactionState.AnswerReceived,
+                CreatedUtcMs = nowMs,
+                UpdatedUtcMs = nowMs,
+                DeadlineUtcMs = nowMs + 30_000,
+                PeerReceived = true,
+                AnswerReceived = true,
+                PathProbeState = RuntimeUnlockPathProbeState.None,
+                TunaPathLeaseGeneration = 9,
+                TunaPathLeaseState = RuntimeUnlockTunaPathLeaseState.ListenerReady,
+                TunaPathLeaseListenerRunId = "listener-start-9",
+                TunaPathLeaseCurrent = true,
+            };
+            InvokePrivateMethod(
+                host,
+                "RequestRuntimeUnlockPreCommitProbeLaunch",
+                sessionId,
+                NknAccelerationLaneKind.File,
+                "unit_test_other_transfer_data_session",
+                snapshot);
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=runtime_unlock_precommit_probe_launch_waiting_for_data_session;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(5));
+            await Task.Delay(250, cts.Token);
+
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=runtime_unlock_precommit_probe_launch_requested;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_precommit_probe_launch_waiting_for_data_session;", logTail, StringComparison.Ordinal);
+            Assert.Contains($"session_id={sessionId}", logTail, StringComparison.Ordinal);
+            Assert.Contains($"transfer_id={transferId}", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_precommit_probe_launch_timeout_armed_for_data_session;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_precommit_probe_start_timeout;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("failure_reason=runtime_unlock_probe_start_timeout", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_activation_failed_regular_v4_resumed;", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = previousHelpeePriorityDelay;
+            NknSignalingTransport.RuntimeUnlockPreCommitProbeStartTimeoutOverrideForTests = previousProbeStartTimeout;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task TransportAccelerationOffer_UsesBulkBypassWhenControlSendIsBlocked()
     {
         FakeNknClient.ResetNetwork();

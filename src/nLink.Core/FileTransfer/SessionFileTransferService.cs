@@ -3360,6 +3360,17 @@ public sealed partial class SessionFileTransferService : IDisposable
                 LocalOperationalLog.Info(
                     "FileTransferService",
                     $"event=filetransfer_transport_rebind_skipped_for_tuna_activation; direction=outbound; transfer_id={outboundToResume.TransferId}; session_id={outboundToResume.SessionId}; reason={FormatProtocolLogValue(effectiveReason)}; route={FormatProtocolLogValue(outboundToResume.RouteSelection.TelemetryToken)}; protocol_version={outboundToResume.NegotiatedDataProtocolVersion}");
+                lock (gate)
+                {
+                    if (ReferenceEquals(outboundTransfer, outboundToResume) &&
+                        !outboundToResume.IsTerminal)
+                    {
+                        TryReplayOutboundRuntimeUnlockPendingPreCommitProbeLocked(
+                            outboundToResume,
+                            effectiveReason);
+                    }
+                }
+
                 SignalOutboundSparseSenderPump(outboundToResume);
             }
             else if (outboundActivationPauseResumed)
@@ -3463,6 +3474,16 @@ public sealed partial class SessionFileTransferService : IDisposable
                 LocalOperationalLog.Info(
                     "FileTransferService",
                     $"event=filetransfer_transport_rebind_skipped_for_tuna_activation; direction=inbound; transfer_id={inboundToResume.TransferId}; session_id={inboundToResume.SessionId}; reason={FormatProtocolLogValue(effectiveReason)}; route={FormatProtocolLogValue(inboundToResume.RouteSelection.TelemetryToken)}; protocol_version={inboundToResume.NegotiatedDataProtocolVersion}");
+                lock (gate)
+                {
+                    if (ReferenceEquals(inboundTransfer, inboundToResume) &&
+                        !inboundToResume.IsTerminal)
+                    {
+                        TryReplayInboundRuntimeUnlockPendingPreCommitProbeLocked(
+                            inboundToResume,
+                            effectiveReason);
+                    }
+                }
             }
             else if (inboundActivationPauseResumed)
             {
@@ -4848,7 +4869,9 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.CurrentRecoveryLivenessLease,
             context.LastRecoveryLivenessLeaseGeneration,
             context.CurrentRoutePublicationToken,
-            context.LastRoutePublicationGeneration);
+            context.LastRoutePublicationGeneration,
+            context.RuntimeUnlockPendingPreCommitProbe,
+            context.LastRuntimeUnlockPendingPreCommitProbeGeneration);
 
     private static void ApplyCoordinatorDecisionToContextLocked(
         OutboundTransferContext context,
@@ -4887,6 +4910,9 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.LastRecoveryLivenessLeaseGeneration = decision.State.LastRecoveryLivenessLeaseGeneration;
         context.CurrentRoutePublicationToken = decision.State.CurrentRoutePublicationToken;
         context.LastRoutePublicationGeneration = decision.State.LastRoutePublicationGeneration;
+        context.RuntimeUnlockPendingPreCommitProbe = decision.State.CurrentRuntimeUnlockPendingPreCommitProbe;
+        context.LastRuntimeUnlockPendingPreCommitProbeGeneration =
+            decision.State.LastRuntimeUnlockPendingPreCommitProbeGeneration;
         var legHistory = decision.State.LegHistory.ToList();
         context.TransferLegHistory.Clear();
         context.TransferLegHistory.AddRange(legHistory);
@@ -4929,6 +4955,9 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.LastRecoveryLivenessLeaseGeneration = decision.State.LastRecoveryLivenessLeaseGeneration;
         context.CurrentRoutePublicationToken = decision.State.CurrentRoutePublicationToken;
         context.LastRoutePublicationGeneration = decision.State.LastRoutePublicationGeneration;
+        context.RuntimeUnlockPendingPreCommitProbe = decision.State.CurrentRuntimeUnlockPendingPreCommitProbe;
+        context.LastRuntimeUnlockPendingPreCommitProbeGeneration =
+            decision.State.LastRuntimeUnlockPendingPreCommitProbeGeneration;
         var legHistory = decision.State.LegHistory.ToList();
         context.TransferLegHistory.Clear();
         context.TransferLegHistory.AddRange(legHistory);
@@ -4948,6 +4977,9 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.LastRecoveryLivenessLeaseGeneration = decision.State.LastRecoveryLivenessLeaseGeneration;
         context.CurrentRoutePublicationToken = decision.State.CurrentRoutePublicationToken;
         context.LastRoutePublicationGeneration = decision.State.LastRoutePublicationGeneration;
+        context.RuntimeUnlockPendingPreCommitProbe = decision.State.CurrentRuntimeUnlockPendingPreCommitProbe;
+        context.LastRuntimeUnlockPendingPreCommitProbeGeneration =
+            decision.State.LastRuntimeUnlockPendingPreCommitProbeGeneration;
     }
 
     private static void ApplyCoordinatorActionDecisionToContextLocked(
@@ -4964,6 +4996,9 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.LastRecoveryLivenessLeaseGeneration = decision.State.LastRecoveryLivenessLeaseGeneration;
         context.CurrentRoutePublicationToken = decision.State.CurrentRoutePublicationToken;
         context.LastRoutePublicationGeneration = decision.State.LastRoutePublicationGeneration;
+        context.RuntimeUnlockPendingPreCommitProbe = decision.State.CurrentRuntimeUnlockPendingPreCommitProbe;
+        context.LastRuntimeUnlockPendingPreCommitProbeGeneration =
+            decision.State.LastRuntimeUnlockPendingPreCommitProbeGeneration;
     }
 
     private static FileTransferCoordinatorState CreateCoordinatorStateLocked(InboundTransferContext context)
@@ -5003,7 +5038,9 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.CurrentRecoveryLivenessLease,
             context.LastRecoveryLivenessLeaseGeneration,
             context.CurrentRoutePublicationToken,
-            context.LastRoutePublicationGeneration);
+            context.LastRoutePublicationGeneration,
+            context.RuntimeUnlockPendingPreCommitProbe,
+            context.LastRuntimeUnlockPendingPreCommitProbeGeneration);
 
     private static bool TryCaptureRuntimeOwnerLocked(
         OutboundTransferContext context,
@@ -14040,6 +14077,10 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public RuntimeUnlockPeerPreCommitProbeState? RuntimeUnlockPendingPeerPreCommitProbe { get; set; }
 
+        public RuntimeUnlockPendingPreCommitProbeRequest? RuntimeUnlockPendingPreCommitProbe { get; set; }
+
+        public int LastRuntimeUnlockPendingPreCommitProbeGeneration { get; set; }
+
         public FileTransferRuntimeProfile RuntimeProfile { get; set; }
 
         public FileTransferBridgeRecoveryPolicy BridgeRecoveryPolicy { get; set; } =
@@ -14906,6 +14947,10 @@ public sealed partial class SessionFileTransferService : IDisposable
         public DateTimeOffset? RuntimeUnlockActivationWindowGrantedUtc { get; set; }
 
         public RuntimeUnlockPeerPreCommitProbeState? RuntimeUnlockPendingPeerPreCommitProbe { get; set; }
+
+        public RuntimeUnlockPendingPreCommitProbeRequest? RuntimeUnlockPendingPreCommitProbe { get; set; }
+
+        public int LastRuntimeUnlockPendingPreCommitProbeGeneration { get; set; }
 
         public FileTransferRuntimeProfile RuntimeProfile { get; set; }
 

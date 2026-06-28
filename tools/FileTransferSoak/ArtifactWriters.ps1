@@ -3500,14 +3500,17 @@ function Test-FileTransferStaleRejectedProofAuthorityMatches {
     }
 
     if (-not $matchedStaleAuthority -and
-        $Rejection.EventName -eq 'filetransfer_runtime_unlock_callback_rejected') {
+        $Rejection.EventName -in @(
+            'filetransfer_runtime_unlock_callback_rejected',
+            'filetransfer_runtime_unlock_precommit_probe_pending_rejected')) {
         $runtimeUnlockFields = @(
             @('transaction_generation'),
             @('offer_generation'),
             @('tuna_path_lease_generation'),
             @('probe_id'),
             @('same_path_tuna_probe_ack_id'),
-            @('route_commit_generation')
+            @('route_commit_generation'),
+            @('pending_probe_generation')
         )
 
         $matchedRuntimeUnlockAuthority = $false
@@ -3978,6 +3981,7 @@ function Get-FileTransferStaleRejectedActionEffectProof {
             $_.EventName -eq 'filetransfer_runtime_owner_stale_update_rejected' -or
             $_.EventName -eq 'filetransfer_coordinator_leg_mutation_rejected' -or
             $_.EventName -eq 'filetransfer_runtime_unlock_callback_rejected' -or
+            $_.EventName -eq 'filetransfer_runtime_unlock_precommit_probe_pending_rejected' -or
             $_.EventName -eq 'filetransfer_recovery_authority_rejected' -or
             $_.EventName -eq 'filetransfer_route_publication_rejected' -or
             $_.EventName -eq 'filetransfer_route_hint_ignored_missing_publication_authority' -or
@@ -4131,6 +4135,7 @@ function Test-FileTransferRuntimeUnlockCoordinatorDenialEvent {
     if ($Event.EventName -in @(
             'filetransfer_runtime_unlock_admission_denied',
             'filetransfer_runtime_unlock_callback_rejected',
+            'filetransfer_runtime_unlock_precommit_probe_pending_rejected',
             'filetransfer_runtime_unlock_route_commit_rejected')) {
         return $true
     }

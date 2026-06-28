@@ -1831,6 +1831,71 @@ public sealed partial class NknSignalingTransport
         return true;
     }
 
+    private void TryScheduleRuntimeUnlockPreCommitProbeStartTimeoutForFileTransferSession(
+        TransportFileTransferDataSession session,
+        string trigger)
+    {
+        if (session.IsDisposed)
+        {
+            return;
+        }
+
+        lock (gate)
+        {
+            if (!fileTransferDataSessions.TryGetValue(session.TransferId, out var current) ||
+                !ReferenceEquals(current, session))
+            {
+                return;
+            }
+        }
+
+        long transactionGeneration;
+        long offerGeneration;
+        long launchGeneration;
+        long tunaPathLeaseGeneration;
+        lock (accelerationGate)
+        {
+            if (runtimeUnlockPreCommitProbeLaunchTimeoutScheduled ||
+                !string.Equals(runtimeUnlockPreCommitProbeLaunchSessionId, session.SessionId, StringComparison.Ordinal) ||
+                !string.Equals(runtimeUnlockPreCommitProbeLaunchTransferId, session.TransferId, StringComparison.Ordinal) ||
+                runtimeUnlockPreCommitProbeLaunchTransactionGeneration <= 0 ||
+                runtimeUnlockPreCommitProbeLaunchOfferGeneration <= 0)
+            {
+                return;
+            }
+
+            var current = runtimeUnlockTransactionState;
+            if (current.IsTerminal ||
+                current.TransactionGeneration != runtimeUnlockPreCommitProbeLaunchTransactionGeneration ||
+                current.OfferGeneration != runtimeUnlockPreCommitProbeLaunchOfferGeneration ||
+                !string.Equals(current.SessionId, session.SessionId, StringComparison.Ordinal) ||
+                !RuntimeUnlockTransactionTransferMatches(current.TransferId, session.TransferId) ||
+                current.PathProbeState != RuntimeUnlockPathProbeState.None ||
+                !current.HasPeerVisibleProof ||
+                !current.AnswerReceived ||
+                IsRuntimeUnlockResponderWaitingForPeerProbe(current))
+            {
+                return;
+            }
+
+            runtimeUnlockPreCommitProbeLaunchTimeoutScheduled = true;
+            transactionGeneration = runtimeUnlockPreCommitProbeLaunchTransactionGeneration;
+            offerGeneration = runtimeUnlockPreCommitProbeLaunchOfferGeneration;
+            launchGeneration = runtimeUnlockPreCommitProbeLaunchGeneration;
+            tunaPathLeaseGeneration = current.TunaPathLeaseGeneration;
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_precommit_probe_launch_timeout_armed_for_data_session; session_id={SanitizeLogToken(session.SessionId)}; transfer_id={SanitizeLogToken(session.TransferId)}; transaction_generation={transactionGeneration}; offer_generation={offerGeneration}; tuna_path_lease_generation={tunaPathLeaseGeneration}; trigger={SanitizeLogToken(trigger)}");
+        ScheduleRuntimeUnlockPreCommitProbeStartTimeout(
+            session.SessionId,
+            session.TransferId,
+            transactionGeneration,
+            offerGeneration,
+            launchGeneration);
+    }
+
     private static bool IsTunaActivationNegotiationAvailabilityReason(string? reason)
         => string.Equals(reason, "tuna_activation_negotiating", StringComparison.OrdinalIgnoreCase);
 
@@ -6964,6 +7029,8 @@ public sealed partial class NknSignalingTransport
                 {
                     owner.TryRequestCurrentTunaActivationHandoffForFileTransferSession(this, "subscriber_added");
                 }
+
+                owner.TryScheduleRuntimeUnlockPreCommitProbeStartTimeoutForFileTransferSession(this, "subscriber_added");
             }
             remove => availabilityChanged -= value;
         }

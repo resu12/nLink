@@ -19,6 +19,9 @@ internal enum FileTransferCoordinatorEventKind
     RuntimeUnlockAdmission,
     RuntimeUnlockAdmissionRetired,
     RuntimeUnlockFallbackSurvivalUpdated,
+    RuntimeUnlockPreCommitProbePending,
+    RuntimeUnlockPreCommitProbeReplayed,
+    RuntimeUnlockPreCommitProbeRetired,
     RuntimeUnlockCommitRequested,
     Terminalized,
 }
@@ -48,6 +51,7 @@ internal enum FileTransferCoordinatorActionKind
     RuntimeUnlockAnswerCallback,
     RuntimeUnlockProbeStart,
     RuntimeUnlockProbeAck,
+    RuntimeUnlockPendingPreCommitProbeReplay,
     RuntimeUnlockTransactionCallback,
     RouteCommitPublication,
     TransportEpochAdoption,
@@ -184,6 +188,47 @@ internal readonly record struct RuntimeUnlockAdmissionRequest(
     string Reason,
     RuntimeOwnerToken? RuntimeOwner,
     bool TransactionFailed = false);
+
+internal readonly record struct RuntimeUnlockPendingPreCommitProbeRequest(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    RuntimeOwnerToken RuntimeOwner,
+    RuntimeUnlockAdmissionToken AdmissionToken,
+    FileTransferRoute Route,
+    string RouteToken,
+    int ProtocolVersion,
+    int LiveRouteEpoch,
+    int RuntimeGeneration,
+    int TerminalGeneration,
+    int LegGeneration,
+    long TransactionGeneration,
+    long OfferGeneration,
+    long TunaPathLeaseGeneration,
+    string? TunaPathLeaseListenerRunId,
+    FileTransferRoute TargetRoute,
+    int TargetProtocolVersion,
+    FileTransferTransportKind TargetTransport,
+    FileTransferTransportHandoffKind HandoffKind,
+    int PendingGeneration,
+    string Reason)
+{
+    public bool IsDefault => PendingGeneration <= 0 ||
+                             RuntimeOwner.IsDefault ||
+                             AdmissionToken.IsDefault;
+}
+
+internal readonly record struct RuntimeUnlockPendingPreCommitProbeDecision(
+    bool Accepted,
+    string RejectionReason,
+    FileTransferRoute CurrentRoute,
+    string CurrentRouteToken,
+    int CurrentProtocolVersion,
+    int CurrentLiveRouteEpoch,
+    int CurrentRuntimeGeneration,
+    int CurrentTerminalGeneration,
+    int CurrentLegGeneration,
+    RuntimeUnlockPendingPreCommitProbeRequest? PendingRequest);
 
 internal readonly record struct RouteCommitToken(
     string SessionId,
@@ -452,7 +497,9 @@ internal sealed record FileTransferCoordinatorState(
     RecoveryLivenessLease? CurrentRecoveryLivenessLease = null,
     int LastRecoveryLivenessLeaseGeneration = 0,
     RoutePublicationToken? CurrentRoutePublicationToken = null,
-    int LastRoutePublicationGeneration = 0)
+    int LastRoutePublicationGeneration = 0,
+    RuntimeUnlockPendingPreCommitProbeRequest? CurrentRuntimeUnlockPendingPreCommitProbe = null,
+    int LastRuntimeUnlockPendingPreCommitProbeGeneration = 0)
 {
     public FileTransferRouteRuntimeDescriptor RouteRuntime => RouteSelection.RuntimeDescriptor;
 }
@@ -486,7 +533,8 @@ internal readonly record struct FileTransferCoordinatorEvent(
     FallbackTailYieldKind FallbackTailYieldKind = FallbackTailYieldKind.Unknown,
     FileTransferInitialTunaReadinessEvidence? InitialTunaReadinessEvidence = null,
     bool AllowInitialRouteFallback = false,
-    FileTransferRouteSelection? InitialRouteFallbackSelection = null);
+    FileTransferRouteSelection? InitialRouteFallbackSelection = null,
+    RuntimeUnlockPendingPreCommitProbeRequest? RuntimeUnlockPendingPreCommitProbeRequest = null);
 
 internal readonly record struct FileTransferCoordinatorActionRequest(
     FileTransferCoordinatorActionKind Kind,
@@ -529,7 +577,8 @@ internal readonly record struct FileTransferCoordinatorActionRequest(
     int? RecoveryDecisionGeneration = null,
     int? RuntimeGeneration = null,
     int? TerminalGeneration = null,
-    RoutePublicationToken? RoutePublicationToken = null);
+    RoutePublicationToken? RoutePublicationToken = null,
+    RuntimeUnlockPendingPreCommitProbeRequest? RuntimeUnlockPendingPreCommitProbeRequest = null);
 
 internal readonly record struct FileTransferCoordinatorActionDecision(
     FileTransferCoordinatorActionKind Kind,
@@ -552,7 +601,9 @@ internal readonly record struct FileTransferCoordinatorActionDecision(
     BridgeRecoveryDecision? BridgeRecoveryDecision = null,
     RecoveryLivenessLease? RecoveryLivenessLease = null,
     RoutePublicationDecision? RoutePublicationDecision = null,
-    RoutePublicationToken? RoutePublicationToken = null)
+    RoutePublicationToken? RoutePublicationToken = null,
+    RuntimeUnlockPendingPreCommitProbeDecision? RuntimeUnlockPendingPreCommitProbeDecision = null,
+    RuntimeUnlockPendingPreCommitProbeRequest? RuntimeUnlockPendingPreCommitProbeRequest = null)
 {
     public FileTransferCoordinatorState State { get; init; } = null!;
 }
@@ -579,7 +630,8 @@ internal sealed record FileTransferCoordinatorDecision(
     FallbackControlPlanePressureToken? FallbackControlPlanePressureToken = null,
     FallbackTailYieldDecision? FallbackTailYieldDecision = null,
     bool ControlPlanePeerVisibleProofAccepted = false,
-    InitialTunaRouteSelectionDecision? InitialTunaRouteSelectionDecision = null);
+    InitialTunaRouteSelectionDecision? InitialTunaRouteSelectionDecision = null,
+    RuntimeUnlockPendingPreCommitProbeDecision? RuntimeUnlockPendingPreCommitProbeDecision = null);
 
 internal readonly record struct RuntimeOwnerToken(
     string SessionId,
@@ -726,6 +778,9 @@ internal static class FileTransferCoordinator
             FileTransferCoordinatorEventKind.RuntimeUnlockFallbackSurvivalUpdated => UpdateRuntimeUnlockFallbackSurvival(coordinatorEvent, state, reason),
             FileTransferCoordinatorEventKind.RuntimeUnlockAdmission => ApplyRuntimeUnlockAdmission(coordinatorEvent, state, reason),
             FileTransferCoordinatorEventKind.RuntimeUnlockAdmissionRetired => RetireRuntimeUnlockAdmission(state, reason),
+            FileTransferCoordinatorEventKind.RuntimeUnlockPreCommitProbePending => ApplyRuntimeUnlockPreCommitProbePending(coordinatorEvent, state, reason),
+            FileTransferCoordinatorEventKind.RuntimeUnlockPreCommitProbeReplayed => ApplyRuntimeUnlockPreCommitProbeReplayed(coordinatorEvent, state, reason),
+            FileTransferCoordinatorEventKind.RuntimeUnlockPreCommitProbeRetired => RetireRuntimeUnlockPreCommitProbe(coordinatorEvent, state, reason),
             FileTransferCoordinatorEventKind.RuntimeUnlockCommitRequested => ApplyRuntimeUnlockCommit(coordinatorEvent, state, reason),
             FileTransferCoordinatorEventKind.Terminalized => Terminalize(state, reason),
             _ => PassThrough(state, reason),
@@ -751,6 +806,7 @@ internal static class FileTransferCoordinator
               request.RuntimeOwner ??
               request.RuntimeUnlockAdmissionToken?.RuntimeOwner ??
               request.RoutePublicationToken?.RuntimeOwner ??
+              request.RuntimeUnlockPendingPreCommitProbeRequest?.RuntimeOwner ??
               request.FallbackControlPlaneToken?.RuntimeOwner ??
               request.FallbackCheckpointLease?.RuntimeOwner ??
               request.FallbackControlPlanePressureToken?.RuntimeOwner ??
@@ -759,6 +815,7 @@ internal static class FileTransferCoordinator
               request.RuntimeUnlockAdmissionToken?.RuntimeOwner ??
               request.RouteCommitToken?.RuntimeOwner ??
               request.RoutePublicationToken?.RuntimeOwner ??
+              request.RuntimeUnlockPendingPreCommitProbeRequest?.RuntimeOwner ??
               request.FallbackControlPlaneToken?.RuntimeOwner ??
               request.FallbackCheckpointLease?.RuntimeOwner ??
               request.FallbackControlPlanePressureToken?.RuntimeOwner ??
@@ -967,6 +1024,15 @@ internal static class FileTransferCoordinator
                 callbackRejectionReason);
         }
 
+        if (!ValidateRuntimeUnlockPendingPreCommitProbeAction(state, request, out var pendingProbeRejectionReason))
+        {
+            return ActionDecision(
+                state,
+                request.Kind,
+                accepted: false,
+                pendingProbeRejectionReason);
+        }
+
         if (!ValidateRoutePublicationAction(state, request, out var publicationRejectionReason))
         {
             return ActionDecision(
@@ -1085,6 +1151,14 @@ internal static class FileTransferCoordinator
                 rejectionReason: "accepted",
                 Math.Max(1, state.LastRoutePublicationGeneration + 1))
             : (RoutePublicationDecision?)null;
+        var pendingPreCommitProbeDecision =
+            request.Kind == FileTransferCoordinatorActionKind.RuntimeUnlockPendingPreCommitProbeReplay
+                ? CreateRuntimeUnlockPendingPreCommitProbeDecision(
+                    state,
+                    accepted: true,
+                    rejectionReason: "accepted",
+                    request.RuntimeUnlockPendingPreCommitProbeRequest)
+                : (RuntimeUnlockPendingPreCommitProbeDecision?)null;
 
         var acceptedState = ApplyIssuedRecoveryAuthority(
             state,
@@ -1112,7 +1186,9 @@ internal static class FileTransferCoordinator
             bridgeRecoveryDecision: bridgeRecoveryDecision,
             recoveryLivenessLease: recoveryLivenessLease,
             routePublicationDecision: routePublicationDecision,
-            routePublicationToken: routePublicationDecision?.RoutePublicationToken);
+            routePublicationToken: routePublicationDecision?.RoutePublicationToken,
+            runtimeUnlockPendingPreCommitProbeDecision: pendingPreCommitProbeDecision,
+            runtimeUnlockPendingPreCommitProbeRequest: pendingPreCommitProbeDecision?.PendingRequest);
     }
 
     public static LiveRouteEpoch StartLiveRouteEpoch(
@@ -1322,6 +1398,95 @@ internal static class FileTransferCoordinator
         if (token.LegGeneration != (state.CurrentLeg?.Generation ?? 0))
         {
             rejectionReason = "leg_generation_mismatch";
+            return false;
+        }
+
+        return true;
+    }
+
+    public static bool IsRuntimeUnlockPendingPreCommitProbeRequestCurrent(
+        FileTransferCoordinatorState state,
+        RuntimeUnlockPendingPreCommitProbeRequest request,
+        out string rejectionReason)
+    {
+        rejectionReason = "current";
+        if (request.IsDefault)
+        {
+            rejectionReason = "runtime_unlock_pending_precommit_probe_missing";
+            return false;
+        }
+
+        if (!string.Equals(request.SessionId, state.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(request.TransferId, state.TransferId, StringComparison.Ordinal) ||
+            request.Direction != state.Direction)
+        {
+            rejectionReason = "session_transfer_or_direction_mismatch";
+            return false;
+        }
+
+        if (state.IsTerminal)
+        {
+            rejectionReason = "transfer_terminal";
+            return false;
+        }
+
+        if (state.CurrentRuntimeUnlockPendingPreCommitProbe is not { } current ||
+            current.PendingGeneration != request.PendingGeneration)
+        {
+            rejectionReason = "runtime_unlock_pending_precommit_probe_generation_mismatch";
+            return false;
+        }
+
+        if (!IsRuntimeOwnerCurrent(state, request.RuntimeOwner, out rejectionReason))
+        {
+            return false;
+        }
+
+        if (!IsRuntimeUnlockAdmissionTokenCurrent(state, request.AdmissionToken, out rejectionReason))
+        {
+            return false;
+        }
+
+        if (request.Route != state.RouteSelection.Route ||
+            request.ProtocolVersion != state.RouteSelection.ProtocolVersion ||
+            !string.Equals(request.RouteToken, state.RouteSelection.TelemetryToken, StringComparison.Ordinal))
+        {
+            rejectionReason = "route_or_protocol_mismatch";
+            return false;
+        }
+
+        var expectedLiveRouteEpoch = state.CurrentLiveRouteEpoch?.EpochId ?? 0;
+        if (request.LiveRouteEpoch != expectedLiveRouteEpoch)
+        {
+            rejectionReason = "live_route_epoch_mismatch";
+            return false;
+        }
+
+        if (request.RuntimeGeneration != (state.CurrentRuntimeOwner?.RuntimeGeneration ?? 0))
+        {
+            rejectionReason = "runtime_generation_mismatch";
+            return false;
+        }
+
+        if (request.TerminalGeneration != state.TerminalGeneration)
+        {
+            rejectionReason = "terminal_generation_mismatch";
+            return false;
+        }
+
+        if (request.LegGeneration != (state.CurrentLeg?.Generation ?? 0))
+        {
+            rejectionReason = "leg_generation_mismatch";
+            return false;
+        }
+
+        if (!RuntimeUnlockPendingPreCommitProbeMetadataIsValid(request, out rejectionReason))
+        {
+            return false;
+        }
+
+        if (!RuntimeUnlockPendingPreCommitProbeMetadataMatches(current, request, out rejectionReason))
+        {
             return false;
         }
 
@@ -2412,6 +2577,254 @@ internal static class FileTransferCoordinator
     private static FileTransferCoordinatorState InvalidateRoutePublicationAuthority(FileTransferCoordinatorState state)
         => state with { CurrentRoutePublicationToken = null };
 
+    private static RuntimeUnlockPendingPreCommitProbeDecision? CreateRuntimeUnlockPendingPreCommitProbeDecision(
+        FileTransferCoordinatorState state,
+        bool accepted,
+        string rejectionReason,
+        RuntimeUnlockPendingPreCommitProbeRequest? pendingRequest)
+    {
+        if (pendingRequest is null)
+        {
+            return null;
+        }
+
+        return new RuntimeUnlockPendingPreCommitProbeDecision(
+            accepted,
+            rejectionReason,
+            state.RouteSelection.Route,
+            state.RouteSelection.TelemetryToken,
+            state.RouteSelection.ProtocolVersion,
+            state.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            state.CurrentRuntimeOwner?.RuntimeGeneration ?? 0,
+            state.TerminalGeneration,
+            state.CurrentLeg?.Generation ?? 0,
+            pendingRequest);
+    }
+
+    private static bool ValidateRuntimeUnlockPendingPreCommitProbeRequest(
+        FileTransferCoordinatorState state,
+        RuntimeUnlockPendingPreCommitProbeRequest request,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (state.IsTerminal)
+        {
+            rejectionReason = "transfer_terminal";
+            return false;
+        }
+
+        if (!string.Equals(request.SessionId, state.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(request.TransferId, state.TransferId, StringComparison.Ordinal) ||
+            request.Direction != state.Direction)
+        {
+            rejectionReason = "session_transfer_or_direction_mismatch";
+            return false;
+        }
+
+        if (!IsRuntimeOwnerCurrent(state, request.RuntimeOwner, out rejectionReason))
+        {
+            return false;
+        }
+
+        if (!IsRuntimeUnlockAdmissionTokenCurrent(state, request.AdmissionToken, out rejectionReason))
+        {
+            return false;
+        }
+
+        if (request.Route != state.RouteSelection.Route ||
+            request.ProtocolVersion != state.RouteSelection.ProtocolVersion ||
+            !string.Equals(request.RouteToken, state.RouteSelection.TelemetryToken, StringComparison.Ordinal))
+        {
+            rejectionReason = "route_or_protocol_mismatch";
+            return false;
+        }
+
+        if (request.LiveRouteEpoch != (state.CurrentLiveRouteEpoch?.EpochId ?? 0))
+        {
+            rejectionReason = "live_route_epoch_mismatch";
+            return false;
+        }
+
+        if (request.RuntimeGeneration != (state.CurrentRuntimeOwner?.RuntimeGeneration ?? 0))
+        {
+            rejectionReason = "runtime_generation_mismatch";
+            return false;
+        }
+
+        if (request.TerminalGeneration != state.TerminalGeneration)
+        {
+            rejectionReason = "terminal_generation_mismatch";
+            return false;
+        }
+
+        if (request.LegGeneration != (state.CurrentLeg?.Generation ?? 0))
+        {
+            rejectionReason = "leg_generation_mismatch";
+            return false;
+        }
+
+        return RuntimeUnlockPendingPreCommitProbeMetadataIsValid(request, out rejectionReason);
+    }
+
+    private static bool ValidateRuntimeUnlockPendingPreCommitProbeAction(
+        FileTransferCoordinatorState state,
+        FileTransferCoordinatorActionRequest request,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (request.Kind != FileTransferCoordinatorActionKind.RuntimeUnlockPendingPreCommitProbeReplay)
+        {
+            return true;
+        }
+
+        if (request.RuntimeUnlockPendingPreCommitProbeRequest is not { } pendingRequest)
+        {
+            rejectionReason = "runtime_unlock_pending_precommit_probe_missing";
+            return false;
+        }
+
+        if (!IsRuntimeUnlockPendingPreCommitProbeRequestCurrent(state, pendingRequest, out rejectionReason))
+        {
+            return false;
+        }
+
+        if (request.RuntimeUnlockTransactionGeneration is { } transactionGeneration &&
+            pendingRequest.TransactionGeneration != transactionGeneration)
+        {
+            rejectionReason = "runtime_unlock_transaction_generation_mismatch";
+            return false;
+        }
+
+        if (request.RuntimeUnlockOfferGeneration is { } offerGeneration &&
+            pendingRequest.OfferGeneration != offerGeneration)
+        {
+            rejectionReason = "runtime_unlock_offer_generation_mismatch";
+            return false;
+        }
+
+        if (request.RuntimeUnlockTunaPathLeaseGeneration is { } leaseGeneration &&
+            pendingRequest.TunaPathLeaseGeneration != leaseGeneration)
+        {
+            rejectionReason = "runtime_unlock_tuna_path_lease_generation_mismatch";
+            return false;
+        }
+
+        if (request.RuntimeUnlockTunaPathLeaseListenerRunId is { } listenerRunId &&
+            !string.Equals(pendingRequest.TunaPathLeaseListenerRunId, listenerRunId, StringComparison.Ordinal))
+        {
+            rejectionReason = "runtime_unlock_tuna_path_lease_listener_mismatch";
+            return false;
+        }
+
+        if (request.TargetRoute is { } targetRoute && pendingRequest.TargetRoute != targetRoute)
+        {
+            rejectionReason = "route_commit_metadata_invalid";
+            return false;
+        }
+
+        if (request.TargetProtocolVersion is { } targetProtocol && pendingRequest.TargetProtocolVersion != targetProtocol)
+        {
+            rejectionReason = "route_commit_metadata_invalid";
+            return false;
+        }
+
+        if (request.TargetTransport is { } targetTransport && pendingRequest.TargetTransport != targetTransport)
+        {
+            rejectionReason = "route_commit_metadata_invalid";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool RuntimeUnlockPendingPreCommitProbeMetadataIsValid(
+        RuntimeUnlockPendingPreCommitProbeRequest request,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (request.TransactionGeneration <= 0)
+        {
+            rejectionReason = "runtime_unlock_transaction_generation_missing";
+            return false;
+        }
+
+        if (request.OfferGeneration <= 0)
+        {
+            rejectionReason = "runtime_unlock_offer_generation_missing";
+            return false;
+        }
+
+        if (request.TunaPathLeaseGeneration <= 0)
+        {
+            rejectionReason = "runtime_unlock_tuna_path_lease_generation_missing";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(request.TunaPathLeaseListenerRunId))
+        {
+            rejectionReason = "runtime_unlock_tuna_path_lease_listener_missing";
+            return false;
+        }
+
+        if (request.TargetRoute != FileTransferRoute.FileTunaV4 ||
+            request.TargetProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+            request.TargetTransport != FileTransferTransportKind.Tuna)
+        {
+            rejectionReason = "route_commit_metadata_invalid";
+            return false;
+        }
+
+        if (request.HandoffKind != FileTransferTransportHandoffKind.NormalToTunaActivation)
+        {
+            rejectionReason = "runtime_unlock_handoff_kind_mismatch";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool RuntimeUnlockPendingPreCommitProbeMetadataMatches(
+        RuntimeUnlockPendingPreCommitProbeRequest current,
+        RuntimeUnlockPendingPreCommitProbeRequest attempted,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (current.TransactionGeneration != attempted.TransactionGeneration)
+        {
+            rejectionReason = "runtime_unlock_transaction_generation_mismatch";
+            return false;
+        }
+
+        if (current.OfferGeneration != attempted.OfferGeneration)
+        {
+            rejectionReason = "runtime_unlock_offer_generation_mismatch";
+            return false;
+        }
+
+        if (current.TunaPathLeaseGeneration != attempted.TunaPathLeaseGeneration)
+        {
+            rejectionReason = "runtime_unlock_tuna_path_lease_generation_mismatch";
+            return false;
+        }
+
+        if (!string.Equals(current.TunaPathLeaseListenerRunId, attempted.TunaPathLeaseListenerRunId, StringComparison.Ordinal))
+        {
+            rejectionReason = "runtime_unlock_tuna_path_lease_listener_mismatch";
+            return false;
+        }
+
+        if (current.TargetRoute != attempted.TargetRoute ||
+            current.TargetProtocolVersion != attempted.TargetProtocolVersion ||
+            current.TargetTransport != attempted.TargetTransport ||
+            current.HandoffKind != attempted.HandoffKind)
+        {
+            rejectionReason = "route_commit_metadata_invalid";
+            return false;
+        }
+
+        return true;
+    }
+
     private static RoutePublicationToken? IssueRoutePublicationToken(
         FileTransferCoordinatorState state,
         FileTransferCoordinatorActionRequest request,
@@ -2866,6 +3279,7 @@ internal static class FileTransferCoordinator
             CurrentRuntimeUnlockAdmission = null,
             CurrentRouteCommit = null,
             CurrentRoutePublicationToken = null,
+            CurrentRuntimeUnlockPendingPreCommitProbe = null,
         };
         nextState = InvalidateFallbackOwnership(nextState);
         nextState = nextState with
@@ -3002,6 +3416,7 @@ internal static class FileTransferCoordinator
             CurrentRuntimeUnlockAdmission = null,
             CurrentRouteCommit = null,
             CurrentRoutePublicationToken = null,
+            CurrentRuntimeUnlockPendingPreCommitProbe = null,
         };
         nextState = InvalidateFallbackOwnership(nextState);
         nextState = nextState with
@@ -3443,6 +3858,123 @@ internal static class FileTransferCoordinator
             runtimeUnlockAdmissionDecision: admission);
     }
 
+    private static FileTransferCoordinatorDecision ApplyRuntimeUnlockPreCommitProbePending(
+        FileTransferCoordinatorEvent coordinatorEvent,
+        FileTransferCoordinatorState state,
+        string reason)
+    {
+        if (coordinatorEvent.RuntimeUnlockPendingPreCommitProbeRequest is not { } pendingRequest)
+        {
+            return MutationRejected(state, reason, "runtime_unlock_pending_precommit_probe_missing");
+        }
+
+        if (!ValidateRuntimeUnlockPendingPreCommitProbeRequest(state, pendingRequest, out var rejectionReason))
+        {
+            return Decision(
+                state,
+                reason,
+                runtimeUnlockPendingPreCommitProbeDecision:
+                    CreateRuntimeUnlockPendingPreCommitProbeDecision(
+                        state,
+                        accepted: false,
+                        rejectionReason: rejectionReason,
+                        pendingRequest: pendingRequest));
+        }
+
+        var existing = state.CurrentRuntimeUnlockPendingPreCommitProbe;
+        var acceptedRequest =
+            existing is { } current &&
+            IsRuntimeUnlockPendingPreCommitProbeRequestCurrent(state, current, out _) &&
+            RuntimeUnlockPendingPreCommitProbeMetadataMatches(current, pendingRequest, out _)
+                ? current
+                : pendingRequest with
+                {
+                    PendingGeneration = Math.Max(1, state.LastRuntimeUnlockPendingPreCommitProbeGeneration + 1),
+                    Reason = NormalizeReason(reason),
+                };
+        var nextState = state with
+        {
+            CurrentRuntimeUnlockPendingPreCommitProbe = acceptedRequest,
+            LastRuntimeUnlockPendingPreCommitProbeGeneration = Math.Max(
+                state.LastRuntimeUnlockPendingPreCommitProbeGeneration,
+                acceptedRequest.PendingGeneration),
+        };
+        return Decision(
+            nextState,
+            reason,
+            runtimeUnlockPendingPreCommitProbeDecision:
+                CreateRuntimeUnlockPendingPreCommitProbeDecision(
+                    nextState,
+                    accepted: true,
+                    rejectionReason: "accepted",
+                    pendingRequest: acceptedRequest));
+    }
+
+    private static FileTransferCoordinatorDecision ApplyRuntimeUnlockPreCommitProbeReplayed(
+        FileTransferCoordinatorEvent coordinatorEvent,
+        FileTransferCoordinatorState state,
+        string reason)
+    {
+        if (coordinatorEvent.RuntimeUnlockPendingPreCommitProbeRequest is not { } pendingRequest)
+        {
+            return MutationRejected(state, reason, "runtime_unlock_pending_precommit_probe_missing");
+        }
+
+        if (!IsRuntimeUnlockPendingPreCommitProbeRequestCurrent(state, pendingRequest, out var rejectionReason))
+        {
+            return Decision(
+                state,
+                reason,
+                runtimeUnlockPendingPreCommitProbeDecision:
+                    CreateRuntimeUnlockPendingPreCommitProbeDecision(
+                        state,
+                        accepted: false,
+                        rejectionReason: rejectionReason,
+                        pendingRequest: pendingRequest));
+        }
+
+        return Decision(
+            state,
+            reason,
+            runtimeUnlockPendingPreCommitProbeDecision:
+                CreateRuntimeUnlockPendingPreCommitProbeDecision(
+                    state,
+                    accepted: true,
+                    rejectionReason: "accepted",
+                    pendingRequest: pendingRequest));
+    }
+
+    private static FileTransferCoordinatorDecision RetireRuntimeUnlockPreCommitProbe(
+        FileTransferCoordinatorEvent coordinatorEvent,
+        FileTransferCoordinatorState state,
+        string reason)
+    {
+        if (coordinatorEvent.RuntimeUnlockPendingPreCommitProbeRequest is { } pendingRequest &&
+            !IsRuntimeUnlockPendingPreCommitProbeRequestCurrent(state, pendingRequest, out var rejectionReason))
+        {
+            return Decision(
+                state,
+                reason,
+                runtimeUnlockPendingPreCommitProbeDecision:
+                    CreateRuntimeUnlockPendingPreCommitProbeDecision(
+                        state,
+                        accepted: false,
+                        rejectionReason: rejectionReason,
+                        pendingRequest: pendingRequest));
+        }
+
+        return Decision(
+            state with { CurrentRuntimeUnlockPendingPreCommitProbe = null },
+            reason,
+            runtimeUnlockPendingPreCommitProbeDecision:
+                CreateRuntimeUnlockPendingPreCommitProbeDecision(
+                    state,
+                    accepted: true,
+                    rejectionReason: "accepted",
+                    pendingRequest: coordinatorEvent.RuntimeUnlockPendingPreCommitProbeRequest ??
+                        state.CurrentRuntimeUnlockPendingPreCommitProbe));
+    }
+
     private static FileTransferCoordinatorDecision RetireRuntimeUnlockAdmission(
         FileTransferCoordinatorState state,
         string reason)
@@ -3452,6 +3984,7 @@ internal static class FileTransferCoordinator
                 CurrentRuntimeUnlockAdmission = null,
                 CurrentRouteCommit = null,
                 CurrentRoutePublicationToken = null,
+                CurrentRuntimeUnlockPendingPreCommitProbe = null,
             },
             reason);
 
@@ -3522,6 +4055,7 @@ internal static class FileTransferCoordinator
             LastRouteCommitGeneration = commitGeneration,
             CurrentRuntimeUnlockAdmission = null,
             CurrentRoutePublicationToken = null,
+            CurrentRuntimeUnlockPendingPreCommitProbe = null,
         };
         return transition with
         {
@@ -3575,6 +4109,7 @@ internal static class FileTransferCoordinator
                 CurrentRuntimeUnlockAdmission = null,
                 CurrentRouteCommit = null,
                 CurrentRoutePublicationToken = null,
+                CurrentRuntimeUnlockPendingPreCommitProbe = null,
             }),
             reason,
             mutatedLeg: leg);
@@ -3610,7 +4145,8 @@ internal static class FileTransferCoordinator
         FallbackControlPlanePressureToken? fallbackControlPlanePressureToken = null,
         FallbackTailYieldDecision? fallbackTailYieldDecision = null,
         bool controlPlanePeerVisibleProofAccepted = false,
-        InitialTunaRouteSelectionDecision? initialTunaRouteSelectionDecision = null)
+        InitialTunaRouteSelectionDecision? initialTunaRouteSelectionDecision = null,
+        RuntimeUnlockPendingPreCommitProbeDecision? runtimeUnlockPendingPreCommitProbeDecision = null)
         => new(
             state,
             RouteChanged: false,
@@ -3629,7 +4165,8 @@ internal static class FileTransferCoordinator
             FallbackControlPlanePressureToken: fallbackControlPlanePressureToken,
             FallbackTailYieldDecision: fallbackTailYieldDecision,
             ControlPlanePeerVisibleProofAccepted: controlPlanePeerVisibleProofAccepted,
-            InitialTunaRouteSelectionDecision: initialTunaRouteSelectionDecision);
+            InitialTunaRouteSelectionDecision: initialTunaRouteSelectionDecision,
+            RuntimeUnlockPendingPreCommitProbeDecision: runtimeUnlockPendingPreCommitProbeDecision);
 
     private static FileTransferCoordinatorActionDecision ActionDecision(
         FileTransferCoordinatorState state,
@@ -3647,7 +4184,9 @@ internal static class FileTransferCoordinator
         BridgeRecoveryDecision? bridgeRecoveryDecision = null,
         RecoveryLivenessLease? recoveryLivenessLease = null,
         RoutePublicationDecision? routePublicationDecision = null,
-        RoutePublicationToken? routePublicationToken = null)
+        RoutePublicationToken? routePublicationToken = null,
+        RuntimeUnlockPendingPreCommitProbeDecision? runtimeUnlockPendingPreCommitProbeDecision = null,
+        RuntimeUnlockPendingPreCommitProbeRequest? runtimeUnlockPendingPreCommitProbeRequest = null)
         => new(
             kind,
             accepted,
@@ -3674,7 +4213,13 @@ internal static class FileTransferCoordinator
                 accepted,
                 rejectionReason,
                 routePublicationToken),
-            routePublicationToken)
+            routePublicationToken,
+            runtimeUnlockPendingPreCommitProbeDecision ?? CreateRuntimeUnlockPendingPreCommitProbeDecision(
+                state,
+                accepted,
+                rejectionReason,
+                runtimeUnlockPendingPreCommitProbeRequest),
+            runtimeUnlockPendingPreCommitProbeRequest)
         {
             State = state,
         };
@@ -4346,6 +4891,7 @@ internal static class FileTransferCoordinator
                    FileTransferCoordinatorActionKind.RuntimeUnlockAnswerCallback or
                    FileTransferCoordinatorActionKind.RuntimeUnlockProbeStart or
                    FileTransferCoordinatorActionKind.RuntimeUnlockProbeAck or
+                   FileTransferCoordinatorActionKind.RuntimeUnlockPendingPreCommitProbeReplay or
                    FileTransferCoordinatorActionKind.RuntimeUnlockTransactionCallback;
 
     private static bool RequiresRouteCommitToken(FileTransferCoordinatorActionKind kind)
