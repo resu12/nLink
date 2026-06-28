@@ -11285,29 +11285,30 @@ public sealed partial class NknSignalingTransport
                 state.AuthorityFailureReason = decisionReason;
                 state.ContractState = SessionRecoveryContractState.Failed;
                 rejectedState = state;
-                return true;
             }
-
-            ClearRuntimeUnlockRetryBlockedByRegularV4ReceiveRecoveryUnsafe(state);
-            state.Settled = true;
-            state.RetryQueued = true;
-            state.RetryDispatching = false;
-            state.RetryDispatched = false;
-            state.RetryAuthorityPending = false;
-            state.RetryAuthorityGranted = false;
-            state.ObservedSendPending = false;
-            state.ObservedSendDeadlineUtcMs = 0;
-            state.AuthorizedObservedLane = null;
-            if (!livenessSnapshot.ReceiveProofObserved)
+            else
             {
-                state.AuthorityFailureReason = RuntimeUnlockRegularV4AuthorityProbeReason;
-            }
+                ClearRuntimeUnlockRetryBlockedByRegularV4ReceiveRecoveryUnsafe(state);
+                state.Settled = true;
+                state.RetryQueued = true;
+                state.RetryDispatching = false;
+                state.RetryDispatched = false;
+                state.RetryAuthorityPending = false;
+                state.RetryAuthorityGranted = false;
+                state.ObservedSendPending = false;
+                state.ObservedSendDeadlineUtcMs = 0;
+                state.AuthorizedObservedLane = null;
+                if (!livenessSnapshot.ReceiveProofObserved)
+                {
+                    state.AuthorityFailureReason = RuntimeUnlockRegularV4AuthorityProbeReason;
+                }
 
-            queuedBehindActiveNegotiation = Volatile.Read(ref accelerationNegotiationScheduled) != 0;
-            state.QueuedBehindActiveNegotiation = queuedBehindActiveNegotiation;
-            GrantRuntimeUnlockRecoveryContractRetryAuthorityUnsafe(state);
-            state.ContractState = SessionRecoveryContractState.RetryQueued;
-            releasedState = state;
+                queuedBehindActiveNegotiation = Volatile.Read(ref accelerationNegotiationScheduled) != 0;
+                state.QueuedBehindActiveNegotiation = queuedBehindActiveNegotiation;
+                GrantRuntimeUnlockRecoveryContractRetryAuthorityUnsafe(state);
+                state.ContractState = SessionRecoveryContractState.RetryQueued;
+                releasedState = state;
+            }
         }
 
         if (rejectedState is not null)

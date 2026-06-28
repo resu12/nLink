@@ -111,6 +111,81 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
     }
 
     [Fact]
+    public async Task FirstMeasuredTransfer_WithFreshTunaReadiness_StartsAndPublishesFileTunaV4ThroughCoordinator()
+    {
+        const string transferId = "transfer_protocol_first_file_tuna_v4_ready";
+        var payload = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 };
+        var logStart = GetOperationalLogLength();
+        using var senderTransport = new LoopbackFileTransferTransport("session_protocol_first_file_tuna_v4_ready");
+        using var receiverTransport = new LoopbackFileTransferTransport("session_protocol_first_file_tuna_v4_ready");
+        senderTransport.SeedInitialTunaReadinessEvidenceForTests(transferId, FileTransferDirection.Outbound);
+        receiverTransport.SeedInitialTunaReadinessEvidenceForTests(transferId, FileTransferDirection.Inbound);
+        senderTransport.Connect(receiverTransport);
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+        using var destination = new NonDisposingMemoryStream();
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("first-file-tuna-ready.bin", payload.Length, transferId),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+        await receiver.AcceptIncomingTransferAsync(
+            transferId,
+            (_, _) => Task.FromResult<Stream>(destination),
+            CancellationToken.None);
+        await WaitUntilAsync(
+            () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+                  receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
+            TimeSpan.FromSeconds(10));
+
+        Assert.Equal(payload, destination.ToArray()[..payload.Length]);
+        var offer = Assert.Single(senderTransport.SentOffers);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV4, offer.PreferredDataProtocolVersion);
+        Assert.Equal(FileTransferRouteResolver.FileTunaV4Token, offer.FileTransferRoute);
+
+        var logTail = ReadOperationalLogTail(logStart);
+        Assert.DoesNotContain("event=filetransfer_initial_tuna_route_selection_denied;", logTail, StringComparison.Ordinal);
+        var initialTunaGranted = FindTransferLogLine(
+            logTail,
+            "event=filetransfer_initial_tuna_route_selection_granted; direction=outbound;",
+            transferId);
+        Assert.Contains("requested_route=file_tuna_v4; requested_protocol_version=4", initialTunaGranted, StringComparison.Ordinal);
+        Assert.Contains("selected_route=file_tuna_v4; selected_protocol_version=4", initialTunaGranted, StringComparison.Ordinal);
+        Assert.Contains("requested_transport=tuna", initialTunaGranted, StringComparison.Ordinal);
+        Assert.Contains("peer_visible_proof=1", initialTunaGranted, StringComparison.Ordinal);
+        Assert.Contains("answer_received=1", initialTunaGranted, StringComparison.Ordinal);
+
+        var outboundRouteSelected = FindTransferLogLine(
+            logTail,
+            "event=filetransfer_route_selected; direction=outbound;",
+            transferId);
+        Assert.Contains("route=file_tuna_v4; protocol_version=4", outboundRouteSelected, StringComparison.Ordinal);
+        AssertPublicationAuthorityFields(
+            outboundRouteSelected,
+            route: FileTransferRouteResolver.FileTunaV4Token,
+            protocolVersion: FileTransferProtocol.ProtocolVersionV4,
+            targetTransport: "tuna");
+        Assert.Contains("route_commit_generation=0", outboundRouteSelected, StringComparison.Ordinal);
+
+        var outboundRuntimeStarted = FindTransferLogLine(
+            logTail,
+            "event=filetransfer_runtime_started; direction=outbound; role=sender;",
+            transferId);
+        Assert.Contains("route=file_tuna_v4; protocol_version=4", outboundRuntimeStarted, StringComparison.Ordinal);
+        AssertPublicationAuthorityFields(
+            outboundRuntimeStarted,
+            route: FileTransferRouteResolver.FileTunaV4Token,
+            protocolVersion: FileTransferProtocol.ProtocolVersionV4,
+            targetTransport: "tuna");
+
+        Assert.DoesNotContain("route_publication_action_kind=RouteCommitPublication", logTail, StringComparison.Ordinal);
+        Assert.DoesNotContain("file_tuna_v6", logTail, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task OutboundOffer_OnActiveFileTunaTransportWithoutReadinessEvidence_AdvertisesRegularV4()
     {
         const string transferId = "transfer_protocol_offer_file_tuna_v4_active_only";
@@ -728,5 +803,37 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
         {
             transport.IsDiagnosticRegularNknV6RouteEnabled = true;
         }
+    }
+
+    private static string FindTransferLogLine(string logText, string eventPrefix, string transferId)
+    {
+        var matchingLines = logText
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Where(line => line.Contains(eventPrefix, StringComparison.Ordinal))
+            .ToArray();
+        var line = matchingLines.SingleOrDefault(line => line.Contains($"transfer_id={transferId}", StringComparison.Ordinal)) ??
+                   matchingLines.SingleOrDefault(line => line.Contains("route=file_tuna_v4; protocol_version=4", StringComparison.Ordinal)) ??
+                   matchingLines.SingleOrDefault(line => line.Contains("selected_route=file_tuna_v4; selected_protocol_version=4", StringComparison.Ordinal));
+        Assert.False(string.IsNullOrWhiteSpace(line), $"Missing log line '{eventPrefix}' for transfer '{transferId}'." + Environment.NewLine + logText);
+        return line!;
+    }
+
+    private static void AssertPublicationAuthorityFields(
+        string logLine,
+        string route,
+        int protocolVersion,
+        string targetTransport)
+    {
+        Assert.Contains("live_route_epoch=", logLine, StringComparison.Ordinal);
+        Assert.Contains("route_publication_generation=", logLine, StringComparison.Ordinal);
+        Assert.Contains("runtime_generation=", logLine, StringComparison.Ordinal);
+        Assert.Contains("terminal_generation=", logLine, StringComparison.Ordinal);
+        Assert.Contains("leg_generation=", logLine, StringComparison.Ordinal);
+        Assert.Contains("route_commit_generation=", logLine, StringComparison.Ordinal);
+        Assert.Contains($"target_route={route}", logLine, StringComparison.Ordinal);
+        Assert.Contains($"target_protocol_version={protocolVersion}", logLine, StringComparison.Ordinal);
+        Assert.Contains($"target_transport={targetTransport}", logLine, StringComparison.Ordinal);
+        Assert.Contains("route_publication_action_kind=RoutePublication", logLine, StringComparison.Ordinal);
+        Assert.Contains("coordinator_decision_reason=accepted", logLine, StringComparison.Ordinal);
     }
 }

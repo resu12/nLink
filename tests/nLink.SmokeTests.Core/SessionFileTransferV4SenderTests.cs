@@ -1554,6 +1554,189 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
+    public async Task RuntimeUnlockPreCommitProbe_PendingNoDataSession_ReplaysAfterDataSessionAttach()
+    {
+        const string transferId = "transfer_runtime_unlock_precommit_pending_replay";
+        var sessionId = $"session_{transferId}";
+        var serviceType = typeof(SessionFileTransferService);
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport(sessionId)
+        {
+            RuntimeUnlockRouteCommitSnapshot = new RuntimeUnlockRouteCommitSnapshot(
+                sessionId,
+                transferId,
+                TransactionGeneration: 3,
+                OfferGeneration: 4,
+                PeerVisibleProof: true,
+                PeerReceived: true,
+                AnswerReceived: true,
+                TargetRoute: FileTransferRoute.FileTunaV4,
+                ProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
+                HandoffKind: FileTransferTransportHandoffKind.NormalToTunaActivation,
+                TargetTransport: FileTransferTransportKind.Tuna,
+                TransactionState: RuntimeUnlockTransactionState.AnswerReceived.ToString(),
+                Reason: "test_pending_replay",
+                TunaPathLeaseRequired: true,
+                TunaPathLeaseGeneration: 5,
+                TunaPathLeaseState: RuntimeUnlockTunaPathLeaseState.ListenerReady.ToString(),
+                TunaPathLeaseListenerRunId: "listener-start-5",
+                TunaPathLeaseCurrent: true)
+        };
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 100,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        SeedRuntimeUnlockAdmissionForTest(
+            context,
+            FileTransferDirection.Outbound,
+            "test_pending_replay");
+        serviceType
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var handled = Assert.IsType<bool>(serviceType
+            .GetMethod("TryStartOutboundRuntimeUnlockPreCommitProbeOrWaitForFallbackLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "tuna_activation_negotiated", "runtime_unlock_probe_missing"])!);
+
+        Assert.True(handled);
+        await WaitUntilAsync(
+            () => GetPrivatePropertyValue(context, "RuntimeUnlockPendingPreCommitProbe") is not null,
+            timeoutMs: 2000);
+
+        var dataSession = new RecordingDataSession(sessionId, transferId);
+        serviceType
+            .GetMethod("ReplaceOutboundDataSessionLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, dataSession]);
+
+        await WaitUntilAsync(
+            () => ReadOperationalLogTail(logStart).Contains("event=runtime_unlock_precommit_probe_sent; direction=outbound;", StringComparison.Ordinal),
+            timeoutMs: 5000);
+
+        Assert.Null(GetPrivatePropertyValue(context, "RuntimeUnlockPendingPreCommitProbe"));
+        Assert.Single(dataSession.SentFrames.OfType<FileTransferRuntimeUnlockPreCommitProbeFrame>());
+        Assert.Equal(
+            1,
+            transport.RuntimeUnlockProbeEvents.Count(static item =>
+                item.StartsWith("started:runtime-unlock-precommit:3:4:", StringComparison.Ordinal)));
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Equal(
+            1,
+            log.Split("event=filetransfer_runtime_unlock_precommit_probe_replayed; direction=outbound;", StringSplitOptions.None).Length - 1);
+        Assert.Equal(
+            1,
+            log.Split("event=runtime_unlock_precommit_probe_started; direction=outbound;", StringSplitOptions.None).Length - 1);
+        Assert.Equal(
+            1,
+            log.Split("event=runtime_unlock_precommit_probe_sent; direction=outbound;", StringSplitOptions.None).Length - 1);
+        Assert.DoesNotContain("event=runtime_unlock_precommit_probe_failed; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=runtime_unlock_precommit_probe_start_timeout;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=tuna_activation_failed_regular_v4_resumed;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_route_transitioned; direction=outbound;", log, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("runtime_owner", "runtime_generation_mismatch")]
+    [InlineData("terminal", "terminal_state")]
+    [InlineData("leg_generation", "leg_generation_mismatch")]
+    public async Task RuntimeUnlockPreCommitProbe_StalePendingAfterOwnerTerminalOrLegChange_LogsRejectionOnly(
+        string invalidation,
+        string expectedRejectionReason)
+    {
+        var transferId = "transfer_runtime_unlock_precommit_pending_stale_" + invalidation;
+        var sessionId = $"session_{transferId}";
+        var serviceType = typeof(SessionFileTransferService);
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport(sessionId)
+        {
+            RuntimeUnlockRouteCommitSnapshot = new RuntimeUnlockRouteCommitSnapshot(
+                sessionId,
+                transferId,
+                TransactionGeneration: 3,
+                OfferGeneration: 4,
+                PeerVisibleProof: true,
+                PeerReceived: true,
+                AnswerReceived: true,
+                TargetRoute: FileTransferRoute.FileTunaV4,
+                ProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
+                HandoffKind: FileTransferTransportHandoffKind.NormalToTunaActivation,
+                TargetTransport: FileTransferTransportKind.Tuna,
+                TransactionState: RuntimeUnlockTransactionState.AnswerReceived.ToString(),
+                Reason: "test_pending_stale",
+                TunaPathLeaseRequired: true,
+                TunaPathLeaseGeneration: 5,
+                TunaPathLeaseState: RuntimeUnlockTunaPathLeaseState.ListenerReady.ToString(),
+                TunaPathLeaseListenerRunId: "listener-start-5",
+                TunaPathLeaseCurrent: true)
+        };
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 100,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        SeedRuntimeUnlockAdmissionForTest(
+            context,
+            FileTransferDirection.Outbound,
+            "test_pending_stale");
+        serviceType
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var handled = Assert.IsType<bool>(serviceType
+            .GetMethod("TryStartOutboundRuntimeUnlockPreCommitProbeOrWaitForFallbackLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "tuna_activation_negotiated", "runtime_unlock_probe_missing"])!);
+
+        Assert.True(handled);
+        await WaitUntilAsync(
+            () => GetPrivatePropertyValue(context, "RuntimeUnlockPendingPreCommitProbe") is not null,
+            timeoutMs: 2000);
+
+        InvalidatePendingPreCommitProbeAuthorityForTest(context, invalidation);
+
+        var dataSession = new RecordingDataSession(sessionId, transferId);
+        serviceType
+            .GetMethod("ReplaceOutboundDataSessionLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, dataSession]);
+
+        await WaitUntilAsync(
+            () => ReadOperationalLogTail(logStart).Contains(
+                $"event=filetransfer_runtime_unlock_precommit_probe_pending_rejected; direction=outbound; transfer_id={transferId}",
+                StringComparison.Ordinal),
+            timeoutMs: 2000);
+
+        Assert.Empty(dataSession.SentFrames);
+        Assert.Empty(transport.RuntimeUnlockProbeEvents);
+        Assert.Empty(transport.RuntimeUnlockRouteCommitResults);
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_runtime_unlock_precommit_probe_pending_rejected; direction=outbound;", log, StringComparison.Ordinal);
+        if (string.Equals(expectedRejectionReason, "transfer_terminal", StringComparison.Ordinal))
+        {
+            Assert.True(
+                log.Contains("rejection_reason=transfer_terminal", StringComparison.Ordinal) ||
+                log.Contains("rejection_reason=terminal_generation_mismatch", StringComparison.Ordinal),
+                log);
+        }
+        else
+        {
+            Assert.Contains($"rejection_reason={expectedRejectionReason}", log, StringComparison.Ordinal);
+        }
+
+        Assert.DoesNotContain("event=runtime_unlock_precommit_probe_started; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=runtime_unlock_precommit_probe_sent; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_route_transitioned; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_route_selected; direction=outbound; route=file_tuna_v4", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_route_hint_authorized_publication_accepted;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=tuna_activation_failed_regular_v4_resumed;", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task PrimaryRegularNknV4Fast_CompletesEndToEnd_WithSparseReceiverIntegrity()
     {
         const string transferId = "transfer_v4_sender_e2e";
@@ -1609,6 +1792,49 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Contains("raw_bytes_sent_total=", transferLog, StringComparison.Ordinal);
         Assert.Contains("raw_batch_bytes_received_total=", transferLog, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_primary_regular_nkn_bulk_v6_selected", transferLog, StringComparison.Ordinal);
+    }
+
+    private static void InvalidatePendingPreCommitProbeAuthorityForTest(object context, string invalidation)
+    {
+        switch (invalidation)
+        {
+            case "runtime_owner":
+            {
+                var routeSelection = GetPrivateProperty<FileTransferRouteSelection>(context, "RouteSelection");
+                var sessionId = GetPrivateProperty<string>(context, "SessionId");
+                var transferId = GetPrivateProperty<string>(context, "TransferId");
+                var liveRouteEpoch = (LiveRouteEpoch)GetPrivatePropertyValue(context, "CurrentLiveRouteEpoch")!;
+                SetPrivateProperty(
+                    context,
+                    "CurrentRuntimeOwner",
+                    CreateRuntimeOwner(
+                        sessionId,
+                        transferId,
+                        routeSelection,
+                        liveRouteEpoch.EpochId,
+                        runtimeGeneration: 2,
+                        "test_pending_stale_runtime_owner",
+                        FileTransferDirection.Outbound));
+                SetPrivateProperty(context, "LastRuntimeOwnerGeneration", 2);
+                break;
+            }
+
+            case "terminal":
+                SetPrivateProperty(context, "State", FileTransferTransferState.Completed);
+                break;
+
+            case "leg_generation":
+            {
+                var leg = (FileTransferLeg)GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
+                var newGeneration = leg.Generation + 1;
+                SetPrivateProperty(leg, "Generation", newGeneration);
+                SetPrivateProperty(context, "LastTransferLegGeneration", newGeneration);
+                break;
+            }
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(invalidation), invalidation, "Unknown stale pending probe invalidation.");
+        }
     }
 
     private static RuntimeOwnerToken CreateRuntimeOwner(
