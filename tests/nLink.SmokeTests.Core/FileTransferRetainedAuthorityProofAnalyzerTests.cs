@@ -552,6 +552,62 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
     }
 
     [Fact]
+    [Trait("RetainedAuthorityProofSuite", "StaleRejectedActionEffectIsolation")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RegularV4RecoveryRetryRejectedWithoutMatchingEffect_Passes()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_regular_v4_recovery_retry_rejected_pass";
+        var lines = BuildAuthorityProofFixture(
+            transferId,
+            RegularV4RecoveryRetryRejectedMessage(transferId));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("pass", route["stale_rejected_action_effect_isolation_verdict"]);
+        Assert.Equal("1", route["stale_rejected_action_count"]);
+        Assert.Equal("0", route["stale_rejected_action_forbidden_effect_count"]);
+        Assert.Equal("0", route["stale_rejected_control_plane_effect_count"]);
+        Assert.Equal("0", route["stale_rejected_unknown_action_count"]);
+    }
+
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "StaleRejectedActionEffectIsolation")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RegularV4RecoveryRetryRejectedFollowedByMatchingRetrySchedule_Fails()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_regular_v4_recovery_retry_rejected_fail";
+        var lines = BuildAuthorityProofFixture(
+            transferId,
+            RegularV4RecoveryRetryRejectedMessage(transferId),
+            RegularV4RecoveryRetryScheduledEffectMessage(transferId));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("fail", route["stale_rejected_action_effect_isolation_verdict"]);
+        Assert.Equal("1", route["stale_rejected_action_count"]);
+        Assert.Equal("1", route["stale_rejected_action_forbidden_effect_count"]);
+        Assert.Equal("1", route["stale_rejected_control_plane_effect_count"]);
+        Assert.Equal("0", route["stale_rejected_unknown_action_count"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("stale_rejected_action_effect", verdict["acceptance_failure_class"]);
+        Assert.Equal("stale_rejected_action_effect", verdict["recovery_failure_class"]);
+    }
+
+    [Fact]
     [Trait("RetainedAuthorityProofSuite", "RuntimeUnlockFallbackUnavailableCoordinatorDenial")]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_FallbackUnavailableWithPriorCoordinatorDenial_Passes()
@@ -969,6 +1025,12 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
 
     private static string PendingPreCommitProbeRejectedMessage(string transferId)
         => $"event=filetransfer_runtime_unlock_precommit_probe_pending_rejected; direction=outbound; transfer_id={transferId}; session_id=sess_a; source=runtime_unlock_precommit_probe_pending; reason=runtime_unlock_pending_precommit_probe_offer_generation_mismatch; rejection_reason=runtime_unlock_pending_precommit_probe_offer_generation_mismatch; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; runtime_generation=1; terminal_generation=0; leg_generation=2; admission_generation=5; pending_probe_generation=6; transaction_generation=11; offer_generation=12; tuna_path_lease_generation=13; tuna_path_lease_listener_run_id=listener-start-13; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; handoff_kind=normal_to_tuna_activation";
+
+    private static string RegularV4RecoveryRetryRejectedMessage(string transferId)
+        => $"event=runtime_unlock_retry_rejected_after_regular_v4_receive_recovery; direction=outbound; transfer_id={transferId}; session_id=sess_a; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=session_liveness_timeout_pending; retired_generation=11; current_retired_generation=11; contract_generation=7; current_contract_generation=7; offer_generation=11; current_offer_generation=11; route=regular_nkn_v4_fast; current_route=file_tuna_v4; protocol_version=4; current_protocol_version=4; live_route_epoch=0; current_live_route_epoch=2; regular_v4_liveness_generation=1; current_regular_v4_liveness_generation=1; bridge_decision_generation=3; current_bridge_decision_generation=3; blocker_reason=regular_v4_bridge_recovery_completed_awaiting_filetransfer_proof; settlement_trigger=regular_v4_recovery_superseded_by_route_hint; decision_reason=regular_v4_route_superseded";
+
+    private static string RegularV4RecoveryRetryScheduledEffectMessage(string transferId)
+        => $"event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled; direction=outbound; transfer_id={transferId}; session_id=sess_a; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=session_liveness_timeout_pending; retired_generation=11; contract_generation=7; offer_generation=11; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; regular_v4_liveness_generation=1; bridge_decision_generation=3; trigger=stale_regular_v4_recovery_settlement; queued_behind_active_negotiation=0";
 
     private static string FallbackAuthorityRejectedMessage(string subfamily, string actionKind, string transferId)
         => $"event=filetransfer_coordinator_leg_mutation_rejected; direction=outbound; transfer_id={transferId}; session_id=sess_a; action_kind={actionKind}; attempted_action={FallbackAttemptedAction(subfamily)}; rejection_reason=runtime_generation_mismatch; current_route=file_tuna_v4; current_protocol_version=4; current_live_route_epoch=2; current_runtime_generation=2; current_terminal_generation=0; current_leg_generation=3; current_transport_epoch=8; current_bridge_recovery_generation=2; current_checkpoint_request_id=checkpoint-b; current_checkpoint_generation=12; current_control_plane_token_generation=5; current_checkpoint_lease_generation=6; current_pressure_generation=7; attempted_route=regular_nkn_v4_fast; attempted_protocol_version=4; attempted_live_route_epoch=0; attempted_runtime_generation=1; attempted_terminal_generation=0; attempted_leg_generation=2; attempted_transport_epoch=7; attempted_bridge_recovery_generation=1; attempted_checkpoint_request_id=checkpoint-a; attempted_checkpoint_generation=11; attempted_control_plane_token_generation=4; attempted_checkpoint_lease_generation=5; attempted_pressure_generation=6; reason=phase3c_fixture";

@@ -3277,6 +3277,10 @@ function Get-FileTransferStaleRejectedProofActionFamily {
         return 'route_publication'
     }
 
+    if ($Event.EventName -eq 'runtime_unlock_retry_rejected_after_regular_v4_receive_recovery') {
+        return 'control_plane'
+    }
+
     $actionKind = Get-FileTransferStaleRejectedProofFirstField -Event $Event -Names @('action_kind')
     if (Test-FileTransferStaleRejectedProofMeaningfulValue -Value $actionKind) {
         switch ($actionKind.ToLowerInvariant()) {
@@ -3469,7 +3473,12 @@ function Test-FileTransferStaleRejectedProofAuthorityMatches {
         [pscustomobject]@{ Stale = @('attempted_route_commit_generation', 'route_commit_generation'); Current = @('current_route_commit_generation'); Effect = @('route_commit_generation') },
         [pscustomobject]@{ Stale = @('attempted_target_route', 'target_route'); Current = @('current_target_route'); Effect = @('target_route') },
         [pscustomobject]@{ Stale = @('attempted_target_protocol_version', 'target_protocol_version'); Current = @('current_target_protocol_version'); Effect = @('target_protocol_version') },
-        [pscustomobject]@{ Stale = @('attempted_target_transport', 'target_transport'); Current = @('current_target_transport'); Effect = @('target_transport') }
+        [pscustomobject]@{ Stale = @('attempted_target_transport', 'target_transport'); Current = @('current_target_transport'); Effect = @('target_transport') },
+        [pscustomobject]@{ Stale = @('attempted_contract_generation', 'contract_generation'); Current = @('current_contract_generation'); Effect = @('contract_generation') },
+        [pscustomobject]@{ Stale = @('attempted_offer_generation', 'offer_generation'); Current = @('current_offer_generation'); Effect = @('offer_generation') },
+        [pscustomobject]@{ Stale = @('attempted_retired_generation', 'retired_generation', 'retired_offer_generation'); Current = @('current_retired_generation', 'current_retired_offer_generation'); Effect = @('retired_generation', 'retired_offer_generation') },
+        [pscustomobject]@{ Stale = @('attempted_regular_v4_liveness_generation', 'regular_v4_liveness_generation'); Current = @('current_regular_v4_liveness_generation'); Effect = @('regular_v4_liveness_generation') },
+        [pscustomobject]@{ Stale = @('attempted_bridge_decision_generation', 'bridge_decision_generation'); Current = @('current_bridge_decision_generation'); Effect = @('bridge_decision_generation') }
     )
 
     $matchedStaleAuthority = $false
@@ -3713,7 +3722,12 @@ function Test-FileTransferStaleRejectedProofForbiddenEffect {
                 'runtime_unlock_paired_commit_confirmed',
                 'runtime_unlock_paired_commit_aborted',
                 'runtime_unlock_fallback_unavailable_suppressed',
-                'filetransfer_runtime_unlock_marked_fallback_unavailable')
+                'filetransfer_runtime_unlock_marked_fallback_unavailable',
+                'runtime_unlock_retry_released_after_regular_v4_receive_recovery',
+                'tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled',
+                'tuna_acceleration_retry_scheduled',
+                'runtime_unlock_offer_dispatched_after_listener_rearm',
+                'tuna_acceleration_activation_offer_not_observed')
         }
         'route_publication' {
             return $name -in @(
@@ -3982,6 +3996,7 @@ function Get-FileTransferStaleRejectedActionEffectProof {
             $_.EventName -eq 'filetransfer_coordinator_leg_mutation_rejected' -or
             $_.EventName -eq 'filetransfer_runtime_unlock_callback_rejected' -or
             $_.EventName -eq 'filetransfer_runtime_unlock_precommit_probe_pending_rejected' -or
+            $_.EventName -eq 'runtime_unlock_retry_rejected_after_regular_v4_receive_recovery' -or
             $_.EventName -eq 'filetransfer_recovery_authority_rejected' -or
             $_.EventName -eq 'filetransfer_route_publication_rejected' -or
             $_.EventName -eq 'filetransfer_route_hint_ignored_missing_publication_authority' -or
@@ -4136,6 +4151,7 @@ function Test-FileTransferRuntimeUnlockCoordinatorDenialEvent {
             'filetransfer_runtime_unlock_admission_denied',
             'filetransfer_runtime_unlock_callback_rejected',
             'filetransfer_runtime_unlock_precommit_probe_pending_rejected',
+            'runtime_unlock_retry_rejected_after_regular_v4_receive_recovery',
             'filetransfer_runtime_unlock_route_commit_rejected')) {
         return $true
     }
