@@ -805,6 +805,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
 
         protected sealed class LoopbackDataSession :
             IFileTransferDataSession,
+            IFileTransferDataPathAuthoritySession,
             IFileTransferRuntimeUnlockTunaProbeSender
         {
             private readonly LoopbackFileTransferTransport owner;
@@ -823,6 +824,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             public string SessionId { get; }
             public string TransferId { get; }
             public bool IsAvailable => Volatile.Read(ref available) != 0;
+            public ConcurrentQueue<FileTransferDataPathSendAuthority> SentDataPathSendAuthorities { get; } = [];
 
             public event EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? AvailabilityChanged;
             public async ValueTask<FileTransferDataFrame> ReceiveAsync(CancellationToken ct)
@@ -862,6 +864,47 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                 }
 
                 return owner.DeliverDataFrameToPeerAsync(frame, frame is FileTransferChunkBatchFrameV4, ct);
+            }
+
+            public Task SendAsync(
+                FileTransferDataFrame frame,
+                FileTransferDataPathSendAuthority authority,
+                CancellationToken ct)
+            {
+                ArgumentNullException.ThrowIfNull(frame);
+                if (!string.Equals(authority.SessionId, SessionId, StringComparison.Ordinal) ||
+                    !string.Equals(authority.SessionId, frame.SessionId, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException("Loopback file-transfer data path authority session mismatch.");
+                }
+
+                if (!string.Equals(authority.TransferId, TransferId, StringComparison.Ordinal) ||
+                    !string.Equals(authority.TransferId, frame.TransferId, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException("Loopback file-transfer data path authority transfer mismatch.");
+                }
+
+                if (authority.RoutePublicationGeneration <= 0 ||
+                    authority.RuntimeGeneration <= 0 ||
+                    authority.LegGeneration <= 0)
+                {
+                    throw new InvalidOperationException("Loopback file-transfer data path authority is not current.");
+                }
+
+                var transportKind = authority.TargetTransport == FileTransferTransportKind.Unknown
+                    ? FileTransferTransportKind.RegularNkn
+                    : authority.TargetTransport;
+                SentDataPathSendAuthorities.Enqueue(authority);
+                if (owner.peer is { } peerTransport)
+                {
+                    peerTransport.NextDataFrameTransportKind = transportKind;
+                }
+                else
+                {
+                    owner.NextDataFrameTransportKind = transportKind;
+                }
+
+                return SendAsync(frame, ct);
             }
 
             public Task SendRuntimeUnlockTunaPreCommitProbeAsync(

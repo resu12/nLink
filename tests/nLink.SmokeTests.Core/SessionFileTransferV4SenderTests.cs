@@ -4145,6 +4145,8 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         var payload = Enumerable.Range(0, 1_572_864).Select(static index => (byte)(index % 239)).ToArray();
         var allowFrontierChunk = 0;
         var blockPostReenableV4Chunks = 0;
+        var routeProofLog = string.Empty;
+        void CaptureRouteProofLog() => routeProofLog += ReadOperationalLogTail(logStart) + Environment.NewLine;
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
         senderTransport.OutboundDataFrameDeliveryOverrideAsync = async (_, frame, ct) =>
@@ -4231,6 +4233,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 "live_route_epoch=1; previous_route=regular_nkn_v4_fast; route=file_tuna_v4",
                 StringComparison.Ordinal),
             timeoutMs: 10000);
+        CaptureRouteProofLog();
 
         senderTransport.IsFileTunaActiveForRouteSelection = false;
         senderTransport.IsPostTunaFileFallbackActiveForRouteSelection = true;
@@ -4245,6 +4248,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 "live_route_epoch=2; previous_route=file_tuna_v4; route=post_tuna_fallback_v6",
                 StringComparison.Ordinal),
             timeoutMs: 5000);
+        CaptureRouteProofLog();
         Volatile.Write(ref allowFrontierChunk, 1);
         senderTransport.SetConnectedDataSessionsAvailableForTests("transport_recovered");
         await WaitUntilAsync(
@@ -4255,6 +4259,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 "live_route_epoch=2; route=post_tuna_fallback_v6",
                 StringComparison.Ordinal),
             timeoutMs: 20000);
+        CaptureRouteProofLog();
 
         Volatile.Write(ref blockPostReenableV4Chunks, 1);
         SeedCurrentFallbackTailYieldAuthorityForTest(sender, "outboundTransfer");
@@ -4276,6 +4281,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 "live_route_epoch=3; previous_route=post_tuna_fallback_v6; route=file_tuna_v4",
                 StringComparison.Ordinal),
             timeoutMs: 10000);
+        CaptureRouteProofLog();
 
         senderTransport.IsFileTunaActiveForRouteSelection = false;
         senderTransport.IsPostTunaFileFallbackActiveForRouteSelection = true;
@@ -4290,6 +4296,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 "live_route_epoch=4; previous_route=file_tuna_v4; route=post_tuna_fallback_v6",
                 StringComparison.Ordinal),
             timeoutMs: 5000);
+        CaptureRouteProofLog();
         Volatile.Write(ref blockPostReenableV4Chunks, 0);
         receiverTransport.SetConnectedDataSessionsAvailableForTests("transport_recovered");
 
@@ -4300,25 +4307,27 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
         Assert.Equal(payload, destination.ToArray()[..payload.Length]);
         var log = ReadOperationalLogTail(logStart);
+        CaptureRouteProofLog();
+        var routeProofLogText = routeProofLog + Environment.NewLine + log;
         Assert.Single(senderTransport.SentOffers.Where(offer => offer.TransferId == transferId));
         Assert.Single(senderTransport.SentSessionOpens.Where(open => open.TransferId == transferId));
         Assert.Empty(senderTransport.SentCancels.Where(cancel => cancel.TransferId == transferId));
         Assert.Empty(receiverTransport.SentCancels.Where(cancel => cancel.TransferId == transferId));
         AssertLiveRouteEpochProofSequence(
-            log,
+            routeProofLogText,
             (1, "regular_nkn_v4_fast", "file_tuna_v4", FileTransferProtocol.ProtocolVersionV4, "normal_to_tuna_activation", "tuna"),
             (2, "file_tuna_v4", "post_tuna_fallback_v6", FileTransferProtocol.ProtocolVersionV6, "tuna_to_normal_fallback", "regular_nkn"),
             (3, "post_tuna_fallback_v6", "file_tuna_v4", FileTransferProtocol.ProtocolVersionV4, "normal_to_tuna_activation", "tuna"),
             (4, "file_tuna_v4", "post_tuna_fallback_v6", FileTransferProtocol.ProtocolVersionV6, "tuna_to_normal_fallback", "regular_nkn"));
-        Assert.Contains("live_route_epoch=1; previous_route=regular_nkn_v4_fast; route=file_tuna_v4", log, StringComparison.Ordinal);
-        Assert.Contains("live_route_epoch=2; previous_route=file_tuna_v4; route=post_tuna_fallback_v6", log, StringComparison.Ordinal);
-        Assert.Contains("live_route_epoch=3; previous_route=post_tuna_fallback_v6; route=file_tuna_v4", log, StringComparison.Ordinal);
-        Assert.Contains("live_route_epoch=4; previous_route=file_tuna_v4; route=post_tuna_fallback_v6", log, StringComparison.Ordinal);
-        Assert.Contains("handoff_kind=normal_to_tuna_activation", log, StringComparison.Ordinal);
-        Assert.Contains("handoff_kind=tuna_to_normal_fallback", log, StringComparison.Ordinal);
-        Assert.Contains("target_transport=tuna", log, StringComparison.Ordinal);
-        Assert.Contains("target_transport=regular_nkn", log, StringComparison.Ordinal);
-        Assert.DoesNotContain("file_tuna_v6", log, StringComparison.Ordinal);
+        Assert.Contains("live_route_epoch=1; previous_route=regular_nkn_v4_fast; route=file_tuna_v4", routeProofLogText, StringComparison.Ordinal);
+        Assert.Contains("live_route_epoch=2; previous_route=file_tuna_v4; route=post_tuna_fallback_v6", routeProofLogText, StringComparison.Ordinal);
+        Assert.Contains("live_route_epoch=3; previous_route=post_tuna_fallback_v6; route=file_tuna_v4", routeProofLogText, StringComparison.Ordinal);
+        Assert.Contains("live_route_epoch=4; previous_route=file_tuna_v4; route=post_tuna_fallback_v6", routeProofLogText, StringComparison.Ordinal);
+        Assert.Contains("handoff_kind=normal_to_tuna_activation", routeProofLogText, StringComparison.Ordinal);
+        Assert.Contains("handoff_kind=tuna_to_normal_fallback", routeProofLogText, StringComparison.Ordinal);
+        Assert.Contains("target_transport=tuna", routeProofLogText, StringComparison.Ordinal);
+        Assert.Contains("target_transport=regular_nkn", routeProofLogText, StringComparison.Ordinal);
+        Assert.DoesNotContain("file_tuna_v6", routeProofLogText, StringComparison.Ordinal);
         Assert.False(senderTransport.IsPostTunaFileFallbackActiveForRouteSelection);
         Assert.False(receiverTransport.IsPostTunaFileFallbackActiveForRouteSelection);
 

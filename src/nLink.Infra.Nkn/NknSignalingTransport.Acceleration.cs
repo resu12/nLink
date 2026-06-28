@@ -7837,7 +7837,11 @@ public sealed partial class NknSignalingTransport
                         {
                             try
                             {
-                                MarkRuntimeUnlockRecoveryContractRetryDispatched(reason);
+                                if (!MarkRuntimeUnlockRecoveryContractRetryDispatched(reason))
+                                {
+                                    return;
+                                }
+
                                 await TrySendAccelerationOfferAsync(
                                         reason,
                                         ResolvePayerDecisionIdForNegotiation(reason),
@@ -7880,7 +7884,11 @@ public sealed partial class NknSignalingTransport
             {
                 try
                 {
-                    MarkRuntimeUnlockRecoveryContractRetryDispatched(reason);
+                    if (!MarkRuntimeUnlockRecoveryContractRetryDispatched(reason))
+                    {
+                        return;
+                    }
+
                     await TrySendAccelerationOfferAsync(reason, payerDecisionId, CancellationToken.None).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
@@ -10227,11 +10235,11 @@ public sealed partial class NknSignalingTransport
             "regular_v4_receive_recovery_pending",
             StringComparison.Ordinal);
 
-    private void MarkRuntimeUnlockRecoveryContractRetryDispatched(string reason)
+    private bool MarkRuntimeUnlockRecoveryContractRetryDispatched(string reason)
     {
         if (!IsRuntimeUnlockActivationReason(reason))
         {
-            return;
+            return true;
         }
 
         RuntimeUnlockRecoveryRetryState? stateSnapshot = null;
@@ -10240,11 +10248,20 @@ public sealed partial class NknSignalingTransport
         var dispatchAuthorityGranted = false;
         var dispatchDecisionReason = "retry_dispatch_reacquired";
         var sessionId = currentSessionSecurityState.SessionId?.Value;
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId)
+            ? string.Empty
+            : sessionId.Trim();
         string? transferId = null;
         var expectedLiveRouteEpoch = 0;
         lock (accelerationGate)
         {
             var state = runtimeUnlockRecoveryRetryState;
+            if (state is { DispatchAuthorityRejected: true } &&
+                string.Equals(state.SessionId, normalizedSessionId, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
             if (state is not null &&
                 state.ContractState is not (SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed) &&
                 !state.RetryObserved &&
@@ -10272,7 +10289,7 @@ public sealed partial class NknSignalingTransport
                 state.RetryObserved ||
                 state.ContractState is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed)
             {
-                return;
+                return state?.DispatchAuthorityRejected != true;
             }
 
             var requiresDispatchProof = RequiresRuntimeUnlockRetryDispatchProof(state);
@@ -10317,7 +10334,7 @@ public sealed partial class NknSignalingTransport
                 rejectedState,
                 rejectedState.DispatchDecisionReason ?? dispatchAuthorityRejectionReason);
             LogRuntimeUnlockRecoveryContract("session_recovery_contract_failed", rejectedState.SessionId);
-            return;
+            return false;
         }
 
         if (authorityGranted)
@@ -10334,6 +10351,7 @@ public sealed partial class NknSignalingTransport
         }
 
         LogRuntimeUnlockRecoveryContract("session_recovery_contract_retry_dispatched", stateSnapshot!.SessionId);
+        return true;
     }
 
     private bool HasPendingOutboundAccelerationOffer()
@@ -12803,7 +12821,9 @@ public sealed partial class NknSignalingTransport
         lock (accelerationGate)
         {
             var state = runtimeUnlockRecoveryRetryState;
-            if (state is null || state.RetryQueued)
+            if (state is null ||
+                state.RetryQueued ||
+                state.ContractState is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed)
             {
                 return;
             }

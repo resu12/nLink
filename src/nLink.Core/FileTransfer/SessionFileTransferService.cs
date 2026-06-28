@@ -1163,11 +1163,18 @@ public sealed partial class SessionFileTransferService : IDisposable
         {
             if (ReferenceEquals(outboundTransfer, context) && !context.IsTerminal)
             {
-                TryPublishRouteSelectedIfAuthorizedLocked(
+                if (TryPublishRouteSelectedIfAuthorizedLocked(
                     context,
                     routeInput,
                     "new_transfer",
-                    "new_transfer");
+                    "new_transfer"))
+                {
+                    TryPublishRouteHintIfAuthorizedLocked(
+                        context,
+                        "new_transfer_route_hint",
+                        "new_transfer",
+                        "service_initial_route_publication");
+                }
             }
         }
         RaiseTransferChanged(CreateSnapshot());
@@ -2596,11 +2603,18 @@ public sealed partial class SessionFileTransferService : IDisposable
             {
                 if (ReferenceEquals(inboundTransfer, incoming) && !incoming.IsTerminal)
                 {
-                    TryPublishRouteSelectedIfAuthorizedLocked(
+                    if (TryPublishRouteSelectedIfAuthorizedLocked(
                         incoming,
                         routeInput,
                         "offer_received",
-                        "offer_received");
+                        "offer_received"))
+                    {
+                        TryPublishRouteHintIfAuthorizedLocked(
+                            incoming,
+                            "offer_received_route_hint",
+                            "offer_received",
+                            "service_initial_route_publication");
+                    }
                 }
             }
             LogTransferInfo(
@@ -13299,6 +13313,54 @@ public sealed partial class SessionFileTransferService : IDisposable
             token.TargetTransport,
             token.ActionKind.ToString(),
             coordinatorDecisionReason ?? token.Reason);
+    }
+
+    private static FileTransferDataPathSendAuthority? CreateDataPathSendAuthority(
+        RoutePublicationToken? routePublicationToken,
+        string? coordinatorDecisionReason)
+    {
+        if (routePublicationToken is not { } token || token.IsDefault)
+        {
+            return null;
+        }
+
+        return new FileTransferDataPathSendAuthority(
+            token.SessionId,
+            token.TransferId,
+            token.Direction,
+            token.RouteToken,
+            token.ProtocolVersion,
+            token.LiveRouteEpoch,
+            token.RuntimeGeneration,
+            token.TerminalGeneration,
+            token.LegGeneration,
+            token.PublicationGeneration,
+            token.RouteCommitGeneration,
+            FileTransferRouteResolver.Resolve(token.TargetRoute).TelemetryToken,
+            token.TargetProtocolVersion,
+            token.TargetTransport,
+            token.ActionKind.ToString(),
+            coordinatorDecisionReason ?? token.Reason);
+    }
+
+    private static FileTransferDataPathSendAuthority? CreateV4DataPathSendAuthorityLocked(
+        OutboundTransferContext context,
+        string source)
+    {
+        var authority = CreateDataPathSendAuthority(
+            context.CurrentRoutePublicationToken,
+            context.CurrentRoutePublicationToken?.Reason);
+        if (authority is not null)
+        {
+            return authority;
+        }
+
+        if (context.RouteSelection.Route == FileTransferRoute.FileTunaV4)
+        {
+            _ = FormatV4DataPathAuthoritySuffix(context, source);
+        }
+
+        return null;
     }
 
     private static FileTransferTransportKind ResolveRoutePublicationTargetTransport(FileTransferRoute route)

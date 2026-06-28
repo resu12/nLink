@@ -7586,6 +7586,7 @@ public sealed partial class SessionFileTransferService
                 var scheduleStarted = Stopwatch.GetTimestamp();
                 Task sendTask;
                 CancellationTokenSource? sendCts = null;
+                FileTransferDataPathSendAuthority? sendAuthority = null;
                 try
                 {
                     var sendToken = context.LifetimeCts.Token;
@@ -7596,7 +7597,48 @@ public sealed partial class SessionFileTransferService
                         sendToken = sendCts.Token;
                     }
 
-                    sendTask = dataSession.SendAsync(prepared.Frame, sendToken);
+                    IFileTransferDataPathAuthoritySession? authoritySession = null;
+                    Exception? sendException = null;
+                    lock (gate)
+                    {
+                        if (!ReferenceEquals(outboundTransfer, context) ||
+                            context.IsTerminal)
+                        {
+                            sendException = new OperationCanceledException(sendToken);
+                        }
+                        else
+                        {
+                            sendAuthority = CreateV4DataPathSendAuthorityLocked(context, "v4_transport_send");
+                            if (context.RouteSelection.Route == FileTransferRoute.FileTunaV4 &&
+                                sendAuthority is null)
+                            {
+                                sendException = new InvalidOperationException("File Tuna V4 data path authority is missing.");
+                            }
+                            else if (sendAuthority is not null &&
+                                     dataSession is IFileTransferDataPathAuthoritySession candidateAuthoritySession)
+                            {
+                                authoritySession = candidateAuthoritySession;
+                            }
+                            else if (context.RouteSelection.Route == FileTransferRoute.FileTunaV4)
+                            {
+                                sendException = new InvalidOperationException("File Tuna V4 data path authority session is required.");
+                            }
+                        }
+                    }
+
+                    if (sendException is not null)
+                    {
+                        sendTask = Task.FromException(sendException);
+                    }
+                    else if (sendAuthority is not null &&
+                             authoritySession is not null)
+                    {
+                        sendTask = authoritySession.SendAsync(prepared.Frame, sendAuthority, sendToken);
+                    }
+                    else
+                    {
+                        sendTask = dataSession.SendAsync(prepared.Frame, sendToken);
+                    }
                 }
                 catch (Exception ex)
                 {

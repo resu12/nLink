@@ -216,6 +216,24 @@ public sealed record FileTransferRoutePublicationAuthority(
     string RoutePublicationActionKind,
     string CoordinatorDecisionReason);
 
+public sealed record FileTransferDataPathSendAuthority(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    string RouteToken,
+    int ProtocolVersion,
+    int LiveRouteEpoch,
+    int RuntimeGeneration,
+    int TerminalGeneration,
+    long LegGeneration,
+    int RoutePublicationGeneration,
+    int? RouteCommitGeneration,
+    string TargetRouteToken,
+    int TargetProtocolVersion,
+    FileTransferTransportKind TargetTransport,
+    string RoutePublicationActionKind,
+    string CoordinatorDecisionReason);
+
 public sealed record FileTransferRouteHintNotification(
     string SessionId,
     string TransferId,
@@ -422,6 +440,11 @@ public interface IFileTransferDataSession : IDisposable
     ValueTask<FileTransferReceivedDataFrame> ReceiveWithMetadataAsync(CancellationToken ct);
 
     Task SendAsync(FileTransferDataFrame frame, CancellationToken ct);
+}
+
+public interface IFileTransferDataPathAuthoritySession
+{
+    Task SendAsync(FileTransferDataFrame frame, FileTransferDataPathSendAuthority authority, CancellationToken ct);
 }
 
 public interface IFileTransferRuntimeUnlockPreCommitProbeAckAuthorizer

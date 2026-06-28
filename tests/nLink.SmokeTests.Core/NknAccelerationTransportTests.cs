@@ -113,7 +113,14 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 transferId,
                 FileTransferRouteResolver.RegularNknV4FastToken,
                 FileTransferProtocol.ProtocolVersionV4,
-                "test_regular_route");
+                "test_regular_route",
+                false,
+                "unknown",
+                "unknown",
+                false,
+                0L,
+                null,
+                0);
 
             var logStart = GetOperationalLogLength();
             InvokePrivateMethod(host, "MarkFileTransferTunaActivationBridgeRecoveryStarted", "runtime_unlock_offer_send_not_observed");
@@ -17377,6 +17384,191 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             InvokePrivateMethod(helper, "NotifyTransportAccelerationStateChanged", "runtime_unlock_test_paired_commit_confirmed");
             Assert.True(accelerationStatus.IsTransportAccelerationActive);
             Assert.False(helper.IsFileTunaActiveForRouteSelection);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AuthorizedFileTunaV4DataPathSend_UsesTunaTransportAndLogsAuthority()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.file-tuna-v4-authorized-data.address");
+            var helperClient = new FakeNknClient("helper.file-tuna-v4-authorized-data.address");
+            var fakeLane = new FakeNknAccelerationLane(isAvailable: true);
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-file-tuna-v4-authorized-data-id", hostClient.Address));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-file-tuna-v4-authorized-data-id", helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                fakeLane);
+
+            var rawNknDataFrames = new ConcurrentQueue<NknIncomingMessage>();
+            hostClient.MessageReceived += (_, e) =>
+            {
+                if (!e.IsTopic &&
+                    EnvelopeCodec.TryDeserialize(e.Payload, out var env) &&
+                    env.Type == MsgType.FileTransferDataFrame)
+                {
+                    rawNknDataFrames.Enqueue(e);
+                }
+            };
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_file_tuna_v4_authorized_data";
+            var dataSession = await helper.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            var authoritySession = Assert.IsAssignableFrom<IFileTransferDataPathAuthoritySession>(dataSession);
+            helper.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, sessionId);
+            var authority = new FileTransferDataPathSendAuthority(
+                sessionId,
+                transferId,
+                FileTransferDirection.Outbound,
+                FileTransferRouteResolver.FileTunaV4Token,
+                FileTransferProtocol.ProtocolVersionV4,
+                LiveRouteEpoch: 7,
+                RuntimeGeneration: 11,
+                TerminalGeneration: 0,
+                LegGeneration: 13,
+                RoutePublicationGeneration: 17,
+                RouteCommitGeneration: 0,
+                TargetRouteToken: FileTransferRouteResolver.FileTunaV4Token,
+                TargetProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
+                TargetTransport: FileTransferTransportKind.Tuna,
+                RoutePublicationActionKind: "RoutePublication",
+                CoordinatorDecisionReason: "accepted");
+
+            var logStart = GetOperationalLogLength();
+            await authoritySession.SendAsync(
+                new FileTransferChunkBatchFrameV4
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    StartChunkIndex = 0,
+                    ChunkCount = 1,
+                    DataSegments = new[] { new byte[1024] },
+                    BatchProfile = "v4_default_21k",
+                },
+                authority,
+                cts.Token);
+
+            Assert.Single(fakeLane.Sent);
+            Assert.Empty(rawNknDataFrames);
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=filetransfer_data_path_send_result;", logTail, StringComparison.Ordinal);
+            Assert.Contains("route=file_tuna_v4", logTail, StringComparison.Ordinal);
+            Assert.Contains("protocol_version=4", logTail, StringComparison.Ordinal);
+            Assert.Contains("actual_transport=tuna", logTail, StringComparison.Ordinal);
+            Assert.Contains("target_transport=tuna", logTail, StringComparison.Ordinal);
+            Assert.Contains("route_publication_generation=17", logTail, StringComparison.Ordinal);
+            Assert.Contains("runtime_generation=11", logTail, StringComparison.Ordinal);
+            Assert.Contains("terminal_generation=0", logTail, StringComparison.Ordinal);
+            Assert.Contains("leg_generation=13", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_tuna_data_path_mismatch;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_required_tuna_bulk_send_not_observed;", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AuthorizedFileTunaV4DataPathSend_DoesNotFallbackToRegularNknWhenTunaUnavailable()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.file-tuna-v4-required-no-fallback.address");
+            var helperClient = new FakeNknClient("helper.file-tuna-v4-required-no-fallback.address");
+            var fakeLane = new FakeNknAccelerationLane(isAvailable: false);
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-file-tuna-v4-required-no-fallback-id", hostClient.Address));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-file-tuna-v4-required-no-fallback-id", helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                fakeLane);
+
+            var rawNknDataFrames = new ConcurrentQueue<NknIncomingMessage>();
+            hostClient.MessageReceived += (_, e) =>
+            {
+                if (!e.IsTopic &&
+                    EnvelopeCodec.TryDeserialize(e.Payload, out var env) &&
+                    env.Type == MsgType.FileTransferDataFrame)
+                {
+                    rawNknDataFrames.Enqueue(e);
+                }
+            };
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_file_tuna_v4_required_no_fallback";
+            var dataSession = await helper.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            var authoritySession = Assert.IsAssignableFrom<IFileTransferDataPathAuthoritySession>(dataSession);
+            helper.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, sessionId);
+            var authority = new FileTransferDataPathSendAuthority(
+                sessionId,
+                transferId,
+                FileTransferDirection.Outbound,
+                FileTransferRouteResolver.FileTunaV4Token,
+                FileTransferProtocol.ProtocolVersionV4,
+                LiveRouteEpoch: 7,
+                RuntimeGeneration: 11,
+                TerminalGeneration: 0,
+                LegGeneration: 13,
+                RoutePublicationGeneration: 17,
+                RouteCommitGeneration: 0,
+                TargetRouteToken: FileTransferRouteResolver.FileTunaV4Token,
+                TargetProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
+                TargetTransport: FileTransferTransportKind.Tuna,
+                RoutePublicationActionKind: "RoutePublication",
+                CoordinatorDecisionReason: "accepted");
+
+            var logStart = GetOperationalLogLength();
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                authoritySession.SendAsync(
+                    new FileTransferChunkBatchFrameV4
+                    {
+                        SessionId = sessionId,
+                        TransferId = transferId,
+                        StartChunkIndex = 0,
+                        ChunkCount = 1,
+                        DataSegments = new[] { new byte[1024] },
+                        BatchProfile = "v4_default_21k",
+                    },
+                    authority,
+                    cts.Token));
+
+            Assert.Empty(fakeLane.Sent);
+            Assert.Empty(rawNknDataFrames);
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=filetransfer_required_tuna_bulk_send_not_observed;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_data_path_send_result;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_fallback_nkn_frame_sent;", logTail, StringComparison.Ordinal);
         }
         finally
         {
