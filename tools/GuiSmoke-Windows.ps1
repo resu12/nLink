@@ -2853,6 +2853,15 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $phase = 'live_toggle_window'
         $reason = 'transfer_completed_before_same_transfer_reactivation'
     }
+    elseif ($ErrorMessage.IndexOf('completed_before_fault_injection', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $ErrorMessage.IndexOf('transfer_completed_before_fault_injection', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        $phase = 'completed_before_fault_injection'
+        $reason = 'transfer_completed_before_fault_injection'
+    }
+    elseif ($ErrorMessage.IndexOf('Timed out waiting for receiver-committed Tuna file progress', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        $phase = 'fault_progress_gate'
+        $reason = 'receiver_committed_or_tuna_payload_progress_missing'
+    }
     elseif ($ErrorMessage.IndexOf('Timed out waiting for helpee invite to become ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $ErrorMessage.IndexOf('Timed out waiting for helpee request flow to become ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         $phase = 'preactivation_readiness'
@@ -4026,6 +4035,99 @@ function Get-TunaGuiPeerVisibleFileTunaV4PayloadBytes {
     return [Math]::Max(0L, (Get-GuiSmokeInt64FieldValue -Fields $fields -Name 'payload_bytes'))
 }
 
+function Get-TunaGuiCompletedTerminalFromLogLine {
+    param([string]$Line)
+
+    if ([string]::IsNullOrWhiteSpace($Line) -or
+        ($Line.IndexOf('_terminal', [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+         $Line.IndexOf('event=transfer_terminal', [System.StringComparison]::OrdinalIgnoreCase) -lt 0)) {
+        return $null
+    }
+
+    $fields = ConvertFrom-GuiSmokeSemicolonFields -Message $Line
+    $eventName = Get-GuiSmokeFieldValue -Fields $fields -Name 'event' -Default ''
+    $direction = Get-GuiSmokeFileTransferTerminalDirection -EventName $eventName -Fields $fields
+    if ([string]::IsNullOrWhiteSpace($direction)) {
+        return $null
+    }
+
+    Set-GuiSmokeFileTransferTerminalDefaults -Fields $fields
+    $state = Get-GuiSmokeFieldValue -Fields $fields -Name 'state' -Default ''
+    $errorCode = Get-GuiSmokeFieldValue -Fields $fields -Name 'error_code' -Default '(none)'
+    if (-not [string]::Equals($state, 'Completed', [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals($errorCode, '(none)', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $null
+    }
+
+    return [pscustomobject]@{
+        Direction = $direction
+        TransferId = Get-GuiSmokeFieldValue -Fields $fields -Name 'transfer_id' -Default '(unknown)'
+        Line = $Line
+    }
+}
+
+function Add-TunaGuiCompletedTerminalToTracker {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$InboundCompletedByTransfer,
+        [Parameter(Mandatory = $true)][hashtable]$OutboundCompletedByTransfer,
+        [Parameter(Mandatory = $true)]$Terminal
+    )
+
+    $transferId = [string]$Terminal.TransferId
+    if ([string]::IsNullOrWhiteSpace($transferId) -or
+        [string]::Equals($transferId, '(unknown)', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $null
+    }
+
+    $direction = [string]$Terminal.Direction
+    if ([string]::Equals($direction, 'inbound', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $InboundCompletedByTransfer[$transferId] = $true
+    }
+    elseif ([string]::Equals($direction, 'outbound', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $OutboundCompletedByTransfer[$transferId] = $true
+    }
+
+    if ($InboundCompletedByTransfer.ContainsKey($transferId) -and
+        $OutboundCompletedByTransfer.ContainsKey($transferId)) {
+        return $transferId
+    }
+
+    return $null
+}
+
+function New-TunaGuiLiveSwitchOffProgressGateResult {
+    param(
+        [Parameter(Mandatory = $true)][string]$Kind,
+        [Parameter(Mandatory = $true)][string]$Mode,
+        [Parameter(Mandatory = $true)][string]$Line,
+        [long]$CommittedBytes = 0,
+        [long]$MinimumCommittedBytes = 0,
+        [long]$AcceleratedPayloadBytes = 0,
+        [long]$MinimumPeerVisiblePayloadBytes = 0,
+        [long]$LastFramePayloadBytes = -1,
+        [long]$ElapsedMs = 0,
+        [string]$TransferId = '(unknown)'
+    )
+
+    $peerVisibleObserved = $AcceleratedPayloadBytes -gt 0L
+    return [pscustomobject]@{
+        Kind = $Kind
+        Mode = $Mode
+        Line = $Line
+        CommittedBytes = $CommittedBytes
+        MinimumCommittedBytes = $MinimumCommittedBytes
+        ReceiverCommittedProgressObserved = $CommittedBytes -ge $MinimumCommittedBytes -and $MinimumCommittedBytes -gt 0
+        AcceleratedPayloadBytes = $AcceleratedPayloadBytes
+        MinimumPeerVisiblePayloadBytes = $MinimumPeerVisiblePayloadBytes
+        PeerVisibleTunaPayloadObserved = $peerVisibleObserved
+        LastFramePayloadBytes = $LastFramePayloadBytes
+        ElapsedMs = $ElapsedMs
+        TerminalCompletedBeforeFault = [string]::Equals($Kind, 'completed_before_fault', [System.StringComparison]::OrdinalIgnoreCase)
+        DataPathProofMissing = (-not $peerVisibleObserved)
+        TransferId = $TransferId
+    }
+}
+
 function Unlock-TunaFromSessionHeader {
     param(
         [Parameter(Mandatory = $true)]$Process,
@@ -4764,6 +4866,10 @@ function Wait-TunaGuiLiveSwitchOffTransferProgressBeforeFault {
     $lastFramePayloadBytes = -1L
     $maxCommittedBytes = 0L
     $bestProgressLine = ''
+    $terminalInboundCompletedByTransfer = @{}
+    $terminalOutboundCompletedByTransfer = @{}
+    $terminalPairCompleted = $false
+    $terminalTransferId = '(unknown)'
     while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
         $lines = @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)
         if ($lines.Count -lt $processedLineCount) {
@@ -4772,6 +4878,15 @@ function Wait-TunaGuiLiveSwitchOffTransferProgressBeforeFault {
 
         for ($lineIndex = $processedLineCount; $lineIndex -lt $lines.Count; $lineIndex++) {
             $line = $lines[$lineIndex]
+            $terminal = Get-TunaGuiCompletedTerminalFromLogLine -Line $line
+            if ($null -ne $terminal) {
+                $completedTransferId = Add-TunaGuiCompletedTerminalToTracker -InboundCompletedByTransfer $terminalInboundCompletedByTransfer -OutboundCompletedByTransfer $terminalOutboundCompletedByTransfer -Terminal $terminal
+                if (-not [string]::IsNullOrWhiteSpace($completedTransferId)) {
+                    $terminalPairCompleted = $true
+                    $terminalTransferId = $completedTransferId
+                }
+            }
+
             $peerVisiblePayloadBytes = Get-TunaGuiPeerVisibleFileTunaV4PayloadBytes -Line $line
             if ($peerVisiblePayloadBytes -ge 0L) {
                 $lastFramePayloadBytes = [Math]::Max($lastFramePayloadBytes, $peerVisiblePayloadBytes)
@@ -4793,14 +4908,20 @@ function Wait-TunaGuiLiveSwitchOffTransferProgressBeforeFault {
         }
         $processedLineCount = $lines.Count
 
+        if ($terminalPairCompleted) {
+            $line = "[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_switch_off_completed_before_fault; mode=completed_before_fault; committed_bytes={1}; minimum_committed_bytes={2}; accelerated_payload_bytes={3}; minimum_peer_visible_payload_bytes={4}; peer_visible_tuna_payload_observed={5}; data_path_proof_missing={6}; fault_injected=0; transfer_id={7}; elapsed_ms={8}; reason=transfer_completed_before_fault_injection" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $maxCommittedBytes, $MinimumCommittedBytes, $acceleratedPayloadBytes, $MinimumPeerVisiblePayloadBytes, ($(if ($acceleratedPayloadBytes -gt 0L) { 1 } else { 0 })), ($(if ($acceleratedPayloadBytes -gt 0L) { 0 } else { 1 })), $terminalTransferId, $sw.ElapsedMilliseconds
+            return New-TunaGuiLiveSwitchOffProgressGateResult -Kind 'completed_before_fault' -Mode 'completed_before_fault' -Line $line -CommittedBytes $maxCommittedBytes -MinimumCommittedBytes $MinimumCommittedBytes -AcceleratedPayloadBytes $acceleratedPayloadBytes -MinimumPeerVisiblePayloadBytes $MinimumPeerVisiblePayloadBytes -LastFramePayloadBytes $lastFramePayloadBytes -ElapsedMs $sw.ElapsedMilliseconds -TransferId $terminalTransferId
+        }
+
         if ($sw.ElapsedMilliseconds -ge $MinimumElapsedMs) {
-            if ($acceleratedPayloadBytes -gt 0L -and
-                $maxCommittedBytes -ge $MinimumCommittedBytes) {
-                return "[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_switch_off_progress_gate_satisfied; mode=receiver_committed; committed_bytes={1}; minimum_committed_bytes={2}; accelerated_payload_bytes={3}; minimum_peer_visible_payload_bytes={4}; elapsed_ms={5}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $maxCommittedBytes, $MinimumCommittedBytes, $acceleratedPayloadBytes, $MinimumPeerVisiblePayloadBytes, $sw.ElapsedMilliseconds
+            if ($maxCommittedBytes -ge $MinimumCommittedBytes) {
+                $line = "[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_switch_off_progress_gate_satisfied; mode=receiver_committed; committed_bytes={1}; minimum_committed_bytes={2}; receiver_committed_progress_observed=1; accelerated_payload_bytes={3}; minimum_peer_visible_payload_bytes={4}; peer_visible_tuna_payload_observed={5}; data_path_proof_missing={6}; elapsed_ms={7}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $maxCommittedBytes, $MinimumCommittedBytes, $acceleratedPayloadBytes, $MinimumPeerVisiblePayloadBytes, ($(if ($acceleratedPayloadBytes -gt 0L) { 1 } else { 0 })), ($(if ($acceleratedPayloadBytes -gt 0L) { 0 } else { 1 })), $sw.ElapsedMilliseconds
+                return New-TunaGuiLiveSwitchOffProgressGateResult -Kind 'progress' -Mode 'receiver_committed' -Line $line -CommittedBytes $maxCommittedBytes -MinimumCommittedBytes $MinimumCommittedBytes -AcceleratedPayloadBytes $acceleratedPayloadBytes -MinimumPeerVisiblePayloadBytes $MinimumPeerVisiblePayloadBytes -LastFramePayloadBytes $lastFramePayloadBytes -ElapsedMs $sw.ElapsedMilliseconds
             }
 
             if ($acceleratedPayloadBytes -ge $MinimumPeerVisiblePayloadBytes) {
-                return "[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_switch_off_progress_gate_satisfied; mode=peer_visible_payload; committed_bytes={1}; minimum_committed_bytes={2}; accelerated_payload_bytes={3}; minimum_peer_visible_payload_bytes={4}; last_frame_payload_bytes={5}; elapsed_ms={6}; reason=bounded_tuna_bulk_payload_before_fault" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $maxCommittedBytes, $MinimumCommittedBytes, $acceleratedPayloadBytes, $MinimumPeerVisiblePayloadBytes, $lastFramePayloadBytes, $sw.ElapsedMilliseconds
+                $line = "[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_switch_off_progress_gate_satisfied; mode=peer_visible_payload; committed_bytes={1}; minimum_committed_bytes={2}; receiver_committed_progress_observed={3}; accelerated_payload_bytes={4}; minimum_peer_visible_payload_bytes={5}; peer_visible_tuna_payload_observed=1; data_path_proof_missing=0; last_frame_payload_bytes={6}; elapsed_ms={7}; reason=bounded_tuna_bulk_payload_before_fault" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $maxCommittedBytes, $MinimumCommittedBytes, ($(if ($maxCommittedBytes -ge $MinimumCommittedBytes) { 1 } else { 0 })), $acceleratedPayloadBytes, $MinimumPeerVisiblePayloadBytes, $lastFramePayloadBytes, $sw.ElapsedMilliseconds
+                return New-TunaGuiLiveSwitchOffProgressGateResult -Kind 'peer_visible_payload' -Mode 'peer_visible_payload' -Line $line -CommittedBytes $maxCommittedBytes -MinimumCommittedBytes $MinimumCommittedBytes -AcceleratedPayloadBytes $acceleratedPayloadBytes -MinimumPeerVisiblePayloadBytes $MinimumPeerVisiblePayloadBytes -LastFramePayloadBytes $lastFramePayloadBytes -ElapsedMs $sw.ElapsedMilliseconds
             }
         }
 
@@ -4827,6 +4948,10 @@ function Wait-TunaGuiLiveSwitchOffTransferProgressOrEarlyFallbackBeforeFault {
     $lastFramePayloadBytes = -1L
     $maxCommittedBytes = 0L
     $bestProgressLine = ''
+    $terminalInboundCompletedByTransfer = @{}
+    $terminalOutboundCompletedByTransfer = @{}
+    $terminalPairCompleted = $false
+    $terminalTransferId = '(unknown)'
     while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
         $lines = @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)
         if ($lines.Count -lt $processedLineCount) {
@@ -4835,6 +4960,15 @@ function Wait-TunaGuiLiveSwitchOffTransferProgressOrEarlyFallbackBeforeFault {
 
         for ($lineIndex = $processedLineCount; $lineIndex -lt $lines.Count; $lineIndex++) {
             $line = [string]$lines[$lineIndex]
+            $terminal = Get-TunaGuiCompletedTerminalFromLogLine -Line $line
+            if ($null -ne $terminal) {
+                $completedTransferId = Add-TunaGuiCompletedTerminalToTracker -InboundCompletedByTransfer $terminalInboundCompletedByTransfer -OutboundCompletedByTransfer $terminalOutboundCompletedByTransfer -Terminal $terminal
+                if (-not [string]::IsNullOrWhiteSpace($completedTransferId)) {
+                    $terminalPairCompleted = $true
+                    $terminalTransferId = $completedTransferId
+                }
+            }
+
             if ($line.IndexOf('event=filetransfer_live_route_epoch_started', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
                 $line.IndexOf('route=post_tuna_fallback_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
                 $line.IndexOf('protocol_version=6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
@@ -4871,28 +5005,35 @@ function Wait-TunaGuiLiveSwitchOffTransferProgressOrEarlyFallbackBeforeFault {
         }
         $processedLineCount = $lines.Count
 
+        if ($terminalPairCompleted) {
+            $line = "[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_switch_off_completed_before_fault; mode=completed_before_fault; committed_bytes={1}; minimum_committed_bytes={2}; accelerated_payload_bytes={3}; minimum_peer_visible_payload_bytes={4}; peer_visible_tuna_payload_observed={5}; data_path_proof_missing={6}; fault_injected=0; transfer_id={7}; elapsed_ms={8}; reason=transfer_completed_before_fault_injection" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $maxCommittedBytes, $MinimumCommittedBytes, $acceleratedPayloadBytes, $MinimumPeerVisiblePayloadBytes, ($(if ($acceleratedPayloadBytes -gt 0L) { 1 } else { 0 })), ($(if ($acceleratedPayloadBytes -gt 0L) { 0 } else { 1 })), $terminalTransferId, $sw.ElapsedMilliseconds
+            return New-TunaGuiLiveSwitchOffProgressGateResult -Kind 'completed_before_fault' -Mode 'completed_before_fault' -Line $line -CommittedBytes $maxCommittedBytes -MinimumCommittedBytes $MinimumCommittedBytes -AcceleratedPayloadBytes $acceleratedPayloadBytes -MinimumPeerVisiblePayloadBytes $MinimumPeerVisiblePayloadBytes -LastFramePayloadBytes $lastFramePayloadBytes -ElapsedMs $sw.ElapsedMilliseconds -TransferId $terminalTransferId
+        }
+
         if ($sw.ElapsedMilliseconds -ge $MinimumElapsedMs) {
-            if ($acceleratedPayloadBytes -gt 0L -and
-                $maxCommittedBytes -ge $MinimumCommittedBytes) {
+            if ($maxCommittedBytes -ge $MinimumCommittedBytes) {
+                $line = "[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_switch_off_progress_gate_satisfied; mode=receiver_committed; committed_bytes={1}; minimum_committed_bytes={2}; receiver_committed_progress_observed=1; accelerated_payload_bytes={3}; minimum_peer_visible_payload_bytes={4}; peer_visible_tuna_payload_observed={5}; data_path_proof_missing={6}; elapsed_ms={7}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $maxCommittedBytes, $MinimumCommittedBytes, $acceleratedPayloadBytes, $MinimumPeerVisiblePayloadBytes, ($(if ($acceleratedPayloadBytes -gt 0L) { 1 } else { 0 })), ($(if ($acceleratedPayloadBytes -gt 0L) { 0 } else { 1 })), $sw.ElapsedMilliseconds
                 return [pscustomobject]@{
                     Kind = 'progress'
-                    Line = ("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_switch_off_progress_gate_satisfied; mode=receiver_committed; committed_bytes={1}; minimum_committed_bytes={2}; accelerated_payload_bytes={3}; minimum_peer_visible_payload_bytes={4}; elapsed_ms={5}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $maxCommittedBytes, $MinimumCommittedBytes, $acceleratedPayloadBytes, $MinimumPeerVisiblePayloadBytes, $sw.ElapsedMilliseconds)
+                    Mode = 'receiver_committed'
+                    Line = $line
                     CommittedBytes = $maxCommittedBytes
+                    MinimumCommittedBytes = $MinimumCommittedBytes
+                    ReceiverCommittedProgressObserved = $true
                     AcceleratedPayloadBytes = $acceleratedPayloadBytes
+                    MinimumPeerVisiblePayloadBytes = $MinimumPeerVisiblePayloadBytes
+                    PeerVisibleTunaPayloadObserved = $acceleratedPayloadBytes -gt 0L
                     LastFramePayloadBytes = $lastFramePayloadBytes
                     ElapsedMs = $sw.ElapsedMilliseconds
+                    TerminalCompletedBeforeFault = $false
+                    DataPathProofMissing = $acceleratedPayloadBytes -le 0L
+                    TransferId = '(unknown)'
                 }
             }
 
             if ($acceleratedPayloadBytes -ge $MinimumPeerVisiblePayloadBytes) {
-                return [pscustomobject]@{
-                    Kind = 'peer_visible_payload'
-                    Line = ("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_switch_off_progress_gate_satisfied; mode=peer_visible_payload; committed_bytes={1}; minimum_committed_bytes={2}; accelerated_payload_bytes={3}; minimum_peer_visible_payload_bytes={4}; last_frame_payload_bytes={5}; elapsed_ms={6}; reason=bounded_tuna_bulk_payload_before_fault" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $maxCommittedBytes, $MinimumCommittedBytes, $acceleratedPayloadBytes, $MinimumPeerVisiblePayloadBytes, $lastFramePayloadBytes, $sw.ElapsedMilliseconds)
-                    CommittedBytes = $maxCommittedBytes
-                    AcceleratedPayloadBytes = $acceleratedPayloadBytes
-                    LastFramePayloadBytes = $lastFramePayloadBytes
-                    ElapsedMs = $sw.ElapsedMilliseconds
-                }
+                $line = "[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_switch_off_progress_gate_satisfied; mode=peer_visible_payload; committed_bytes={1}; minimum_committed_bytes={2}; receiver_committed_progress_observed={3}; accelerated_payload_bytes={4}; minimum_peer_visible_payload_bytes={5}; peer_visible_tuna_payload_observed=1; data_path_proof_missing=0; last_frame_payload_bytes={6}; elapsed_ms={7}; reason=bounded_tuna_bulk_payload_before_fault" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $maxCommittedBytes, $MinimumCommittedBytes, ($(if ($maxCommittedBytes -ge $MinimumCommittedBytes) { 1 } else { 0 })), $acceleratedPayloadBytes, $MinimumPeerVisiblePayloadBytes, $lastFramePayloadBytes, $sw.ElapsedMilliseconds
+                return New-TunaGuiLiveSwitchOffProgressGateResult -Kind 'peer_visible_payload' -Mode 'peer_visible_payload' -Line $line -CommittedBytes $maxCommittedBytes -MinimumCommittedBytes $MinimumCommittedBytes -AcceleratedPayloadBytes $acceleratedPayloadBytes -MinimumPeerVisiblePayloadBytes $MinimumPeerVisiblePayloadBytes -LastFramePayloadBytes $lastFramePayloadBytes -ElapsedMs $sw.ElapsedMilliseconds
             }
         }
 
@@ -5004,7 +5145,14 @@ function Get-TunaGuiEvidenceSummary {
     $summary = [ordered]@{
         tunaNegotiated = $false
         diagnosticTunaReadinessObserved = $false
+        routePublicationObserved = $false
         fileTunaV4PublicationObserved = $false
+        receiverCommittedProgressObserved = $false
+        peerVisibleTunaPayloadObserved = $false
+        terminalCompletedBeforeFault = $false
+        faultInjected = $false
+        dataPathProofMissing = $false
+        missingTunaDataPathProof = $false
         activationEpochStarted = $false
         activationEpochRecovered = $false
         fallbackEpochStarted = $false
@@ -5082,7 +5230,37 @@ function Get-TunaGuiEvidenceSummary {
         }
 
         if (Test-TunaGuiAuthorizedFileTunaV4PublicationLine -Line $line) {
+            $summary.routePublicationObserved = $true
             $summary.fileTunaV4PublicationObserved = $true
+        }
+
+        if ($eventName -eq 'filetransfer_tuna_gui_live_switch_off_progress_gate_satisfied') {
+            $mode = Get-GuiSmokeFieldValue -Fields $fields -Name 'mode' -Default ''
+            if ([string]::Equals($mode, 'receiver_committed', [System.StringComparison]::OrdinalIgnoreCase) -or
+                (Get-GuiSmokeFieldValue -Fields $fields -Name 'receiver_committed_progress_observed' -Default '0') -eq '1') {
+                $summary.receiverCommittedProgressObserved = $true
+            }
+
+            if ((Get-GuiSmokeFieldValue -Fields $fields -Name 'peer_visible_tuna_payload_observed' -Default '0') -eq '1') {
+                $summary.peerVisibleTunaPayloadObserved = $true
+            }
+
+            if ((Get-GuiSmokeFieldValue -Fields $fields -Name 'data_path_proof_missing' -Default '0') -eq '1') {
+                $summary.dataPathProofMissing = $true
+                $summary.missingTunaDataPathProof = $true
+            }
+        }
+
+        if ($eventName -eq 'filetransfer_tuna_gui_live_switch_off_completed_before_fault') {
+            $summary.terminalCompletedBeforeFault = $true
+            if ((Get-GuiSmokeFieldValue -Fields $fields -Name 'data_path_proof_missing' -Default '0') -eq '1') {
+                $summary.dataPathProofMissing = $true
+                $summary.missingTunaDataPathProof = $true
+            }
+        }
+
+        if ($eventName -eq 'filetransfer_tuna_gui_live_switch_off_fault_injected') {
+            $summary.faultInjected = $true
         }
 
         if ($line.IndexOf('event=filetransfer_v6_epoch_started', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
@@ -5194,6 +5372,7 @@ function Get-TunaGuiEvidenceSummary {
 
         if ($eventName -eq 'filetransfer_tuna_data_path_peer_visible' -and
             (Test-TunaGuiPeerVisibleFileTunaV4DataPathLine -Line $line)) {
+            $summary.peerVisibleTunaPayloadObserved = $true
             $summary.tunaAcceleratedFileFrameCount++
             $summary.tunaAcceleratedFilePayloadBytes += [Math]::Max(0L, (Get-GuiSmokeInt64FieldValue -Fields $fields -Name 'payload_bytes'))
         }
@@ -5513,6 +5692,12 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     $liveSwitchOffMinimumCommittedBytes = 0L
     $liveSwitchOffMinimumPeerVisiblePayloadBytes = 0L
     $liveSwitchOffMinimumElapsedMs = 0
+    $liveSwitchOffRoutePublicationObserved = $false
+    $liveSwitchOffReceiverCommittedProgressObserved = $false
+    $liveSwitchOffPeerVisibleTunaPayloadObserved = $false
+    $liveSwitchOffTerminalCompletedBeforeFault = $false
+    $liveSwitchOffFaultInjected = $false
+    $liveSwitchOffDataPathProofMissing = $false
 
     if ($RouteMode -eq 'preactivated' -or $RouteMode -eq 'post-fallback' -or $RouteMode -eq 'v4-restart-v6-fallback' -or $RouteMode -eq 'live-v4-switch-off' -or $RouteMode -eq 'live-multi-toggle' -or $RouteMode -eq 'live-reactivation-second-transfer') {
         $preconditionBookmark = Get-AppLogBookmark
@@ -5615,6 +5800,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         $routeLine = [string](Wait-TunaGuiFileTunaV4PublicationAfterBookmark -Bookmark $bookmark -TimeoutMs 90000 -Description 'live V4 switch-off coordinator-authorized file Tuna V4 publication' -ActionKind 'RoutePublication' -RequireZeroRouteCommitGeneration $true)
         $observedEvidenceLines.Add($routeLine) | Out-Null
         $fileTunaV4PublicationObserved = $true
+        $liveSwitchOffRoutePublicationObserved = $true
 
         $liveSwitchOffMinimumCommittedBytes = Resolve-TunaGuiLiveSwitchOffMinimumCommittedBytes -PayloadSizeBytes $PayloadSizeBytes
         $liveSwitchOffMinimumFaultPayloadBytes = $liveSwitchOffMinimumCommittedBytes
@@ -5623,25 +5809,38 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_switch_off_fault_threshold; minimum_committed_bytes={1}; minimum_peer_visible_payload_bytes={2}; minimum_elapsed_ms={3}; payload_bytes={4}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $liveSwitchOffMinimumCommittedBytes, $liveSwitchOffMinimumPeerVisiblePayloadBytes, $liveSwitchOffMinimumElapsedMs, $PayloadSizeBytes)) | Out-Null
         Write-Host ("[GUI Smoke][filetransfer_tuna] Waiting for receiver commit >= {0} byte(s) or peer-visible Tuna payload >= {1} byte(s), elapsed >= {2} ms before live switch-off fault." -f $liveSwitchOffMinimumCommittedBytes, $liveSwitchOffMinimumPeerVisiblePayloadBytes, $liveSwitchOffMinimumElapsedMs) -ForegroundColor DarkGray
 
-        $progressLine = [string](Wait-TunaGuiLiveSwitchOffTransferProgressBeforeFault -Bookmark $bookmark -MinimumCommittedBytes $liveSwitchOffMinimumCommittedBytes -MinimumPeerVisiblePayloadBytes $liveSwitchOffMinimumPeerVisiblePayloadBytes -MinimumElapsedMs $liveSwitchOffMinimumElapsedMs -MinimumFramePayloadBytes 16384L -TimeoutMs 90000 -PollIntervalMs 25)
+        $progressResult = Wait-TunaGuiLiveSwitchOffTransferProgressBeforeFault -Bookmark $bookmark -MinimumCommittedBytes $liveSwitchOffMinimumCommittedBytes -MinimumPeerVisiblePayloadBytes $liveSwitchOffMinimumPeerVisiblePayloadBytes -MinimumElapsedMs $liveSwitchOffMinimumElapsedMs -MinimumFramePayloadBytes 16384L -TimeoutMs 90000 -PollIntervalMs 25
+        $progressLine = [string]$progressResult.Line
         $observedEvidenceLines.Add($progressLine) | Out-Null
+        $liveSwitchOffReceiverCommittedProgressObserved = $liveSwitchOffReceiverCommittedProgressObserved -or [bool]$progressResult.ReceiverCommittedProgressObserved
+        $liveSwitchOffPeerVisibleTunaPayloadObserved = $liveSwitchOffPeerVisibleTunaPayloadObserved -or [bool]$progressResult.PeerVisibleTunaPayloadObserved
+        $liveSwitchOffDataPathProofMissing = $liveSwitchOffDataPathProofMissing -or [bool]$progressResult.DataPathProofMissing
+        $liveSwitchOffTerminalCompletedBeforeFault = [bool]$progressResult.TerminalCompletedBeforeFault
+        if ($liveSwitchOffTerminalCompletedBeforeFault) {
+            $firstTransferTerminalBeforeFallbackSwitchOff = $true
+            $firstTransferTerminalBeforeFallbackSwitchOffTransferId = [string]$progressResult.TransferId
+        }
 
-        Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode
-        $fallbackStartedLine = Wait-TunaGuiLiveRouteEpochStarted -Bookmark $bookmark -Route 'post_tuna_fallback_v6' -ProtocolVersion 6 -HandoffKind 'tuna_to_normal_fallback' -TargetTransport 'regular_nkn' -Description 'live switch-off post-Tuna fallback route epoch started'
-        $observedEvidenceLines.Add($fallbackStartedLine) | Out-Null
-        Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'off_started' -Line $fallbackStartedLine
-        $fallbackEpochStartedObserved = $true
+        if (-not $liveSwitchOffTerminalCompletedBeforeFault) {
+            Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode
+            $liveSwitchOffFaultInjected = $true
+            $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_switch_off_fault_injected; route_mode={1}; fault_mode={2}; receiver_committed_progress_observed={3}; peer_visible_tuna_payload_observed={4}; data_path_proof_missing={5}; committed_bytes={6}; accelerated_payload_bytes={7}; elapsed_ms={8}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $RouteMode, $FaultMode, ($(if ($liveSwitchOffReceiverCommittedProgressObserved) { 1 } else { 0 })), ($(if ($liveSwitchOffPeerVisibleTunaPayloadObserved) { 1 } else { 0 })), ($(if ($liveSwitchOffDataPathProofMissing) { 1 } else { 0 })), $progressResult.CommittedBytes, $progressResult.AcceleratedPayloadBytes, $progressResult.ElapsedMs)) | Out-Null
+            $fallbackStartedLine = Wait-TunaGuiLiveRouteEpochStarted -Bookmark $bookmark -Route 'post_tuna_fallback_v6' -ProtocolVersion 6 -HandoffKind 'tuna_to_normal_fallback' -TargetTransport 'regular_nkn' -Description 'live switch-off post-Tuna fallback route epoch started'
+            $observedEvidenceLines.Add($fallbackStartedLine) | Out-Null
+            Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'off_started' -Line $fallbackStartedLine
+            $fallbackEpochStartedObserved = $true
 
-        $fallbackRouteLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
-            @('event=filetransfer_route_selected', 'route=post_tuna_fallback_v6', 'protocol_version=6'),
-            @('event=filetransfer_protocol_negotiated', 'route=post_tuna_fallback_v6', 'protocol_version=6')
-        ) -TimeoutMs 90000 -Description 'live switch-off post-Tuna fallback V6 route')
-        $observedEvidenceLines.Add($fallbackRouteLine) | Out-Null
+            $fallbackRouteLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
+                @('event=filetransfer_route_selected', 'route=post_tuna_fallback_v6', 'protocol_version=6'),
+                @('event=filetransfer_protocol_negotiated', 'route=post_tuna_fallback_v6', 'protocol_version=6')
+            ) -TimeoutMs 90000 -Description 'live switch-off post-Tuna fallback V6 route')
+            $observedEvidenceLines.Add($fallbackRouteLine) | Out-Null
 
-        $fallbackResolutionLine = Wait-TunaGuiLiveRouteEpochRecovered -Bookmark $bookmark -Route 'post_tuna_fallback_v6' -ProtocolVersion 6 -HandoffKind 'tuna_to_normal_fallback' -TargetTransport 'regular_nkn' -Description 'live switch-off post-Tuna fallback route epoch recovered' -AfterLine $fallbackStartedLine
-        $observedEvidenceLines.Add($fallbackResolutionLine) | Out-Null
-        Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'off_recovered' -Line $fallbackResolutionLine
-        $fallbackEpochRecoveredObserved = $true
+            $fallbackResolutionLine = Wait-TunaGuiLiveRouteEpochRecovered -Bookmark $bookmark -Route 'post_tuna_fallback_v6' -ProtocolVersion 6 -HandoffKind 'tuna_to_normal_fallback' -TargetTransport 'regular_nkn' -Description 'live switch-off post-Tuna fallback route epoch recovered' -AfterLine $fallbackStartedLine
+            $observedEvidenceLines.Add($fallbackResolutionLine) | Out-Null
+            Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'off_recovered' -Line $fallbackResolutionLine
+            $fallbackEpochRecoveredObserved = $true
+        }
     }
     elseif ($RouteMode -eq 'live-multi-toggle' -or $RouteMode -eq 'live-reactivation-second-transfer' -or $RouteMode -eq 'live-regular-activation-cycle') {
         if ($FaultMode -eq 'none') {
@@ -5670,6 +5869,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
             $routeLine = [string](Wait-TunaGuiFileTunaV4PublicationAfterBookmark -Bookmark $bookmark -TimeoutMs 90000 -Description $routeDescription -ActionKind 'RoutePublication' -RequireZeroRouteCommitGeneration $true)
             $observedEvidenceLines.Add($routeLine) | Out-Null
             $fileTunaV4PublicationObserved = $true
+            $liveSwitchOffRoutePublicationObserved = $true
         }
 
         $liveSwitchOffMinimumCommittedBytes = Resolve-TunaGuiLiveSwitchOffMinimumCommittedBytes -PayloadSizeBytes $PayloadSizeBytes
@@ -5698,6 +5898,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 Write-Host ("[GUI Smoke][filetransfer_tuna] Live toggle step {0}/{1}: switching Tuna off after transfer progress." -f $stepNumber, $sequence.Count) -ForegroundColor DarkGray
                 $earlyFallbackStartedLine = $null
                 $earlyFallbackAccepted = $false
+                $progressResult = $null
                 if ($stepIndex -eq 0) {
                     if ($RouteMode -eq 'live-reactivation-second-transfer') {
                         $progressResult = Wait-TunaGuiLiveSwitchOffTransferProgressOrEarlyFallbackBeforeFault -Bookmark $bookmark -MinimumCommittedBytes $liveSwitchOffMinimumCommittedBytes -MinimumPeerVisiblePayloadBytes $liveSwitchOffMinimumPeerVisiblePayloadBytes -MinimumElapsedMs $liveSwitchOffMinimumElapsedMs -MinimumFramePayloadBytes 16384L -TimeoutMs 90000 -PollIntervalMs 25
@@ -5709,7 +5910,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                         }
                     }
                     else {
-                        $progressLine = [string](Wait-TunaGuiLiveSwitchOffTransferProgressBeforeFault -Bookmark $bookmark -MinimumCommittedBytes $liveSwitchOffMinimumCommittedBytes -MinimumPeerVisiblePayloadBytes $liveSwitchOffMinimumPeerVisiblePayloadBytes -MinimumElapsedMs $liveSwitchOffMinimumElapsedMs -MinimumFramePayloadBytes 16384L -TimeoutMs 90000 -PollIntervalMs 25)
+                        $progressResult = Wait-TunaGuiLiveSwitchOffTransferProgressBeforeFault -Bookmark $bookmark -MinimumCommittedBytes $liveSwitchOffMinimumCommittedBytes -MinimumPeerVisiblePayloadBytes $liveSwitchOffMinimumPeerVisiblePayloadBytes -MinimumElapsedMs $liveSwitchOffMinimumElapsedMs -MinimumFramePayloadBytes 16384L -TimeoutMs 90000 -PollIntervalMs 25
+                        $progressLine = [string]$progressResult.Line
                     }
                 }
                 elseif ($RouteMode -eq 'live-regular-activation-cycle' -and
@@ -5729,11 +5931,26 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 }
 
                 $observedEvidenceLines.Add($progressLine) | Out-Null
+                if ($null -ne $progressResult -and
+                    -not [string]::Equals([string]$progressResult.Kind, 'early_fallback', [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $liveSwitchOffReceiverCommittedProgressObserved = $liveSwitchOffReceiverCommittedProgressObserved -or [bool]$progressResult.ReceiverCommittedProgressObserved
+                    $liveSwitchOffPeerVisibleTunaPayloadObserved = $liveSwitchOffPeerVisibleTunaPayloadObserved -or [bool]$progressResult.PeerVisibleTunaPayloadObserved
+                    $liveSwitchOffDataPathProofMissing = $liveSwitchOffDataPathProofMissing -or [bool]$progressResult.DataPathProofMissing
+                    if ([bool]$progressResult.TerminalCompletedBeforeFault) {
+                        $liveSwitchOffTerminalCompletedBeforeFault = $true
+                        $firstTransferTerminalBeforeFallbackSwitchOff = $true
+                        $firstTransferTerminalBeforeFallbackSwitchOffTransferId = [string]$progressResult.TransferId
+                        Write-TunaGuiMilestoneEvidence -ArtifactDir $ArtifactDir -ObservedEvidenceLines $observedEvidenceLines
+                        break
+                    }
+                }
                 $lastActivationPayloadBookmark = $null
                 $stepBookmark = if ($earlyFallbackAccepted) { $bookmark } else { Get-AppLogBookmark }
                 $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step; step={1}; action=off; early_fallback={2}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber, ($(if ($earlyFallbackAccepted) { 1 } else { 0 })))) | Out-Null
                 if (-not $earlyFallbackAccepted) {
                     Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode
+                    $liveSwitchOffFaultInjected = $true
+                    $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_switch_off_fault_injected; route_mode={1}; step={2}; fault_mode={3}; receiver_committed_progress_observed={4}; peer_visible_tuna_payload_observed={5}; data_path_proof_missing={6}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $RouteMode, $stepNumber, $FaultMode, ($(if ($liveSwitchOffReceiverCommittedProgressObserved) { 1 } else { 0 })), ($(if ($liveSwitchOffPeerVisibleTunaPayloadObserved) { 1 } else { 0 })), ($(if ($liveSwitchOffDataPathProofMissing) { 1 } else { 0 })))) | Out-Null
                 }
 
                 $fallbackStartedLine = if ($earlyFallbackAccepted) {
@@ -6135,7 +6352,19 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     $evidence = Get-TunaGuiEvidenceSummary -Bookmark $bookmark
     if ($tunaNegotiatedObserved) { $evidence.tunaNegotiated = $true }
     if ($diagnosticTunaReadinessObserved) { $evidence.diagnosticTunaReadinessObserved = $true }
-    if ($fileTunaV4PublicationObserved) { $evidence.fileTunaV4PublicationObserved = $true }
+    if ($fileTunaV4PublicationObserved) {
+        $evidence.routePublicationObserved = $true
+        $evidence.fileTunaV4PublicationObserved = $true
+    }
+    if ($liveSwitchOffRoutePublicationObserved) { $evidence.routePublicationObserved = $true }
+    if ($liveSwitchOffReceiverCommittedProgressObserved) { $evidence.receiverCommittedProgressObserved = $true }
+    if ($liveSwitchOffPeerVisibleTunaPayloadObserved) { $evidence.peerVisibleTunaPayloadObserved = $true }
+    if ($liveSwitchOffTerminalCompletedBeforeFault) { $evidence.terminalCompletedBeforeFault = $true }
+    if ($liveSwitchOffFaultInjected) { $evidence.faultInjected = $true }
+    if ($liveSwitchOffDataPathProofMissing) {
+        $evidence.dataPathProofMissing = $true
+        $evidence.missingTunaDataPathProof = $true
+    }
     if ($activationEpochStartedObserved) { $evidence.activationEpochStarted = $true }
     if ($activationEpochRecoveredObserved) { $evidence.activationEpochRecovered = $true }
     if ($fallbackEpochStartedObserved) { $evidence.fallbackEpochStarted = $true }
@@ -6206,6 +6435,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         goodputBytesPerSecond = $goodputBytesPerSecond
         completed = $completed
         integrityOk = $integrityOk
+        failurePhase = if ($liveSwitchOffTerminalCompletedBeforeFault) { 'completed_before_fault_injection' } else { 'none' }
+        failureReason = if ($liveSwitchOffTerminalCompletedBeforeFault) { 'transfer_completed_before_fault_injection' } else { 'none' }
         inboundState = $inboundState
         outboundState = $outboundState
         inboundErrorCode = $inboundError
@@ -6235,6 +6466,13 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         liveSwitchOffMinimumCommittedBytes = $liveSwitchOffMinimumCommittedBytes
         liveSwitchOffMinimumPeerVisiblePayloadBytes = $liveSwitchOffMinimumPeerVisiblePayloadBytes
         liveSwitchOffMinimumElapsedMs = $liveSwitchOffMinimumElapsedMs
+        routePublicationObserved = [bool]$evidence.routePublicationObserved
+        receiverCommittedProgressObserved = [bool]$evidence.receiverCommittedProgressObserved
+        peerVisibleTunaPayloadObserved = [bool]$evidence.peerVisibleTunaPayloadObserved
+        terminalCompletedBeforeFault = [bool]$evidence.terminalCompletedBeforeFault
+        faultInjected = [bool]$evidence.faultInjected
+        dataPathProofMissing = [bool]$evidence.dataPathProofMissing
+        missingTunaDataPathProof = [bool]$evidence.missingTunaDataPathProof
         liveRouteEpochs = $liveRouteEpochArray
         liveRouteEpochSequence = $liveRouteEpochSequence
         liveRouteEpochRouteChanges = @($liveRouteEpochRouteChanges.ToArray())
@@ -6261,7 +6499,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     }
 
     $secondTransferProofOk = $false
-    if ($RouteMode -eq 'live-reactivation-second-transfer') {
+    if ($RouteMode -eq 'live-reactivation-second-transfer' -and -not $liveSwitchOffTerminalCompletedBeforeFault) {
         $secondPayloadBytes = 16777216L
         $postTerminalQuietBookmark = Get-AppLogBookmark
         $postTerminalQuiet = Wait-TunaGuiSecondTransferPostTerminalQuietWindowOrThrow `
@@ -6437,6 +6675,17 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
             throw "Tuna GUI preactivated no-fault transfer unexpectedly entered fallback. Summary: $($evidence | ConvertTo-Json -Compress)"
         }
 
+    }
+    elseif ($liveSwitchOffTerminalCompletedBeforeFault -and
+        ($RouteMode -eq 'live-v4-switch-off' -or
+         $RouteMode -eq 'live-multi-toggle' -or
+         $RouteMode -eq 'live-reactivation-second-transfer')) {
+        $joinedRouteSequence = ($liveRouteEpochRouteChanges.ToArray() -join ',')
+        if (-not $evidence.fileTunaV4PublicationObserved -or
+            -not $completed -or
+            -not $integrityOk) {
+            throw "Tuna GUI live switch-off completed before fault injection but did not prove clean terminal file_tuna_v4 publication/integrity. route_mode=$RouteMode sequence=$joinedRouteSequence Summary: $($evidence | ConvertTo-Json -Compress)"
+        }
     }
     elseif ($RouteMode -eq 'live-v4-switch-off') {
         $joinedRouteSequence = ($liveRouteEpochRouteChanges.ToArray() -join ',')

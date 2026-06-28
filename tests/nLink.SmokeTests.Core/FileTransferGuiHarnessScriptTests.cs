@@ -294,8 +294,27 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("filetransfer_tuna_data_path_peer_visible", guiText, StringComparison.Ordinal);
         Assert.Contains("actual_transport", guiText, StringComparison.Ordinal);
         Assert.Contains("route_publication_generation", guiText, StringComparison.Ordinal);
+        Assert.Contains("routePublicationObserved", guiText, StringComparison.Ordinal);
+        Assert.Contains("receiverCommittedProgressObserved", guiText, StringComparison.Ordinal);
+        Assert.Contains("peerVisibleTunaPayloadObserved", guiText, StringComparison.Ordinal);
+        Assert.Contains("terminalCompletedBeforeFault", guiText, StringComparison.Ordinal);
+        Assert.Contains("faultInjected", guiText, StringComparison.Ordinal);
+        Assert.Contains("dataPathProofMissing", guiText, StringComparison.Ordinal);
+        Assert.Contains("missingTunaDataPathProof", guiText, StringComparison.Ordinal);
+        Assert.Contains("data_path_proof_missing=", guiText, StringComparison.Ordinal);
+        Assert.Contains("DataPathProofMissing = (-not $peerVisibleObserved)", guiText, StringComparison.Ordinal);
+        Assert.Contains("completed_before_fault_injection", guiText, StringComparison.Ordinal);
+        Assert.Contains("function Add-TunaGuiCompletedTerminalToTracker", guiText, StringComparison.Ordinal);
+        Assert.Contains("$InboundCompletedByTransfer.ContainsKey($transferId)", guiText, StringComparison.Ordinal);
+        Assert.Contains("elseif ($liveSwitchOffTerminalCompletedBeforeFault -and", guiText, StringComparison.Ordinal);
+        Assert.Contains("$RouteMode -eq 'live-multi-toggle'", guiText, StringComparison.Ordinal);
+        Assert.Contains("$RouteMode -eq 'live-reactivation-second-transfer' -and -not $liveSwitchOffTerminalCompletedBeforeFault", guiText, StringComparison.Ordinal);
         Assert.Contains("mode=peer_visible_payload", guiText, StringComparison.Ordinal);
+        Assert.Contains("mode=receiver_committed", guiText, StringComparison.Ordinal);
         Assert.Contains("-MinimumPeerVisiblePayloadBytes $liveSwitchOffMinimumPeerVisiblePayloadBytes", guiText, StringComparison.Ordinal);
+        Assert.Contains("Wait-TunaGuiFileTunaV4PublicationAfterBookmark -Bookmark $bookmark", guiText, StringComparison.Ordinal);
+        Assert.DoesNotContain("$acceleratedPayloadBytes -gt 0L -and", guiText, StringComparison.Ordinal);
+        Assert.DoesNotContain("tuna_acceleration_negotiated', 'route=file_tuna_v4", guiText, StringComparison.Ordinal);
         Assert.DoesNotContain("@('event=filetransfer_route_selected', (\"route={0}\" -f $Route)", guiText, StringComparison.Ordinal);
     }
 
