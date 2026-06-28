@@ -3925,6 +3925,36 @@ function Test-FileTransferFileTunaV4DataPathIntentEvent {
     return $rawBytes -gt 0 -or $sentChunkCount -gt 0 -or $batchChunkCount -gt 0
 }
 
+function Test-FileTransferFileTunaV4PayloadDataPathEvent {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    $rawBytes = Get-FileTransferEventInt64Field -Event $Event -Name 'raw_payload_bytes' -Default -1
+    if ($rawBytes -lt 0) {
+        $rawBytes = Get-FileTransferEventInt64Field -Event $Event -Name 'raw_bytes' -Default -1
+    }
+    if ($rawBytes -lt 0) {
+        $rawBytes = Get-FileTransferEventInt64Field -Event $Event -Name 'payload_bytes' -Default 0
+    }
+
+    $batchChunkCount = Get-FileTransferEventInt64Field -Event $Event -Name 'batch_chunk_count' -Default 0
+    if ($batchChunkCount -le 0) {
+        $batchChunkCount = Get-FileTransferEventInt64Field -Event $Event -Name 'sent_chunk_count' -Default 0
+    }
+
+    if ($rawBytes -le 0 -or $batchChunkCount -le 0) {
+        return $false
+    }
+
+    $frameType = Get-FileTransferEventField -Event $Event -Name 'frame_type' -Default ''
+    if ($frameType -eq 'filetransfer.chunk_batch.v4') {
+        return $true
+    }
+
+    $batchProfile = Get-FileTransferEventField -Event $Event -Name 'batch_profile' -Default ''
+    return -not [string]::IsNullOrWhiteSpace($batchProfile) -and
+        $batchProfile.StartsWith('v4_', [System.StringComparison]::OrdinalIgnoreCase)
+}
+
 function Test-FileTransferFileTunaV4DataPathActualEvent {
     param([Parameter(Mandatory = $true)]$Event)
 
@@ -3935,7 +3965,8 @@ function Test-FileTransferFileTunaV4DataPathActualEvent {
         return $false
     }
 
-    return Test-FileTransferFileTunaV4DataPathEvent -Event $Event
+    return (Test-FileTransferFileTunaV4DataPathEvent -Event $Event) -and
+        (Test-FileTransferFileTunaV4PayloadDataPathEvent -Event $Event)
 }
 
 function Test-FileTransferFileTunaV4DataPathScopeMatches {
@@ -3967,7 +3998,7 @@ function Test-FileTransferFileTunaV4DataPathSendShapeMatches {
     )
 
     $proofDirection = Get-FileTransferEventField -Event $Actual -Name 'proof_direction' -Default ''
-    if ($proofDirection -ne 'receive') {
+    if ($proofDirection -ne 'receive' -and $proofDirection -ne 'send') {
         return $false
     }
 
@@ -3975,11 +4006,15 @@ function Test-FileTransferFileTunaV4DataPathSendShapeMatches {
     $intentSentChunkCount = Get-FileTransferEventInt64Field -Event $Intent -Name 'sent_chunk_count' -Default 0
     $actualBatchChunkCount = Get-FileTransferEventInt64Field -Event $Actual -Name 'batch_chunk_count' -Default 0
     if ($actualBatchChunkCount -gt 0) {
-        if ($intentBatchChunkCount -gt 0 -and $intentBatchChunkCount -ne $actualBatchChunkCount) {
+        if ($Intent.EventName -eq 'filetransfer_v4_chunk_batch_sent' -and
+            $intentBatchChunkCount -gt 0 -and
+            $intentBatchChunkCount -ne $actualBatchChunkCount) {
             return $false
         }
 
-        if ($intentSentChunkCount -gt 0 -and $intentSentChunkCount -ne $actualBatchChunkCount) {
+        if ($Intent.EventName -eq 'filetransfer_v4_repair_sent' -and
+            $intentSentChunkCount -gt 0 -and
+            $actualBatchChunkCount -gt $intentSentChunkCount) {
             return $false
         }
     }
@@ -4018,6 +4053,55 @@ function Get-FileTransferFileTunaV4DataPathProof {
     $usedPeerVisibleEventIndexes = New-Object 'System.Collections.Generic.HashSet[int]'
 
     foreach ($intent in @($intentEvents)) {
+        if ($intent.EventName -eq 'filetransfer_v4_repair_sent') {
+            $requiredRepairChunkCount = Get-FileTransferEventInt64Field -Event $intent -Name 'sent_chunk_count' -Default 0
+            if ($requiredRepairChunkCount -le 0) {
+                $requiredRepairChunkCount = Get-FileTransferEventInt64Field -Event $intent -Name 'batch_chunk_count' -Default 0
+            }
+
+            $matchedRepairChunkCount = 0L
+            $matchedRepairPeerVisibleIndexes = New-Object 'System.Collections.Generic.List[int]'
+            for ($peerVisibleIndex = 0; $peerVisibleIndex -lt $peerVisibleEvents.Count; $peerVisibleIndex++) {
+                if ($usedPeerVisibleEventIndexes.Contains([int]$peerVisibleIndex)) {
+                    continue
+                }
+
+                $peerVisible = $peerVisibleEvents[$peerVisibleIndex]
+                if ($null -ne $intent.PSObject.Properties['Sequence'] -and
+                    $null -ne $peerVisible.PSObject.Properties['Sequence'] -and
+                    [int64]$peerVisible.Sequence -lt [int64]$intent.Sequence) {
+                    continue
+                }
+
+                if ((Test-FileTransferFileTunaV4DataPathScopeMatches -Intent $intent -Actual $peerVisible) -and
+                    (Test-FileTransferFileTunaV4DataPathSendShapeMatches -Intent $intent -Actual $peerVisible)) {
+                    $actualBatchChunkCount = Get-FileTransferEventInt64Field -Event $peerVisible -Name 'batch_chunk_count' -Default 0
+                    if ($actualBatchChunkCount -le 0) {
+                        continue
+                    }
+
+                    [void]$matchedRepairPeerVisibleIndexes.Add([int]$peerVisibleIndex)
+                    $matchedRepairChunkCount += $actualBatchChunkCount
+                    if ($requiredRepairChunkCount -gt 0 -and $matchedRepairChunkCount -ge $requiredRepairChunkCount) {
+                        break
+                    }
+                }
+            }
+
+            if ($requiredRepairChunkCount -gt 0 -and $matchedRepairChunkCount -ge $requiredRepairChunkCount) {
+                foreach ($peerVisibleIndex in @($matchedRepairPeerVisibleIndexes)) {
+                    [void]$usedPeerVisibleEventIndexes.Add([int]$peerVisibleIndex)
+                }
+            }
+            else {
+                $missingActualProofCount++
+                $findings.Add(("file_tuna_v4 V4 repair intent had insufficient peer-visible Tuna data-path proof: required_chunks={0}; matched_chunks={1}; intent={2}" -f $requiredRepairChunkCount, $matchedRepairChunkCount, (Format-FileTransferEvidenceLine -Event $intent))) | Out-Null
+                $evidence.Add($intent) | Out-Null
+            }
+
+            continue
+        }
+
         $matchedPeerVisibleIndex = -1
         for ($peerVisibleIndex = 0; $peerVisibleIndex -lt $peerVisibleEvents.Count; $peerVisibleIndex++) {
             if ($usedPeerVisibleEventIndexes.Contains([int]$peerVisibleIndex)) {

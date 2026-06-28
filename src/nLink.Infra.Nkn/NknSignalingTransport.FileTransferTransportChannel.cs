@@ -2377,6 +2377,15 @@ public sealed partial class NknSignalingTransport
                batchProfile.StartsWith("v4_", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool IsFileTransferV4PayloadDataPathFrame(
+        string? frameType,
+        string? batchProfile,
+        int rawPayloadBytes,
+        int batchChunkCount)
+        => rawPayloadBytes > 0 &&
+           batchChunkCount > 0 &&
+           IsFileTransferV4DataPathFrame(frameType, batchProfile);
+
     private static string ResolveFileTransferDataPathBatchProfile(FileTransferDataFrame? frame)
         => frame is FileTransferChunkBatchFrameV4 batch && !string.IsNullOrWhiteSpace(batch.BatchProfile)
             ? batch.BatchProfile
@@ -2449,10 +2458,17 @@ public sealed partial class NknSignalingTransport
               routeHint.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
               routeHint.TargetTransport == FileTransferTransportKind.Tuna;
         if (hasFileTunaV4Authority &&
-            IsFileTransferV4DataPathFrame(normalizedFrameType, normalizedBatchProfile))
+            IsFileTransferV4PayloadDataPathFrame(
+                normalizedFrameType,
+                normalizedBatchProfile,
+                rawPayloadBytes,
+                batchChunkCount))
         {
             if (actualTransport == FileTransferTransportKind.Tuna)
             {
+                LocalOperationalLog.Info(
+                    "SessionSecurity",
+                    $"event=filetransfer_tuna_data_path_peer_visible; transfer_id={SanitizeLogToken(transferId)}; session_id={SanitizeLogToken(sessionIdForLog)}; frame_type={SanitizeLogToken(normalizedFrameType)}; lane={SanitizeLogToken(lane)}; actual_transport=tuna; delivery_transport=tuna; payload_bytes={payloadBytes}; raw_payload_bytes={rawPayloadBytes}; transport_payload_bytes={transportPayloadBytes}; batch_chunk_count={batchChunkCount}; batch_profile={SanitizeLogToken(normalizedBatchProfile)}; delivery_result=sent; proof_direction=send{authoritySuffix}");
                 return;
             }
             else
@@ -2487,7 +2503,11 @@ public sealed partial class NknSignalingTransport
             routeHint.Route == FileTransferRoute.FileTunaV4 &&
             routeHint.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
             routeHint.TargetTransport == FileTransferTransportKind.Tuna &&
-            IsFileTransferV4DataPathFrame(frameType, batchProfile))
+            IsFileTransferV4PayloadDataPathFrame(
+                frameType,
+                batchProfile,
+                rawPayloadBytes,
+                batchChunkCount))
         {
             if (actualTransport == FileTransferTransportKind.Tuna)
             {

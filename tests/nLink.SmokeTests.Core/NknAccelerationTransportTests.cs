@@ -17478,6 +17478,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Contains("runtime_generation=11", logTail, StringComparison.Ordinal);
             Assert.Contains("terminal_generation=0", logTail, StringComparison.Ordinal);
             Assert.Contains("leg_generation=13", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_tuna_data_path_peer_visible;", logTail, StringComparison.Ordinal);
+            Assert.Contains("proof_direction=send", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_tuna_data_path_mismatch;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_required_tuna_bulk_send_not_observed;", logTail, StringComparison.Ordinal);
         }

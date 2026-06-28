@@ -158,6 +158,8 @@ public sealed partial class NknSignalingTransport
     private bool runtimeUnlockPreCommitProbeLaunchTimeoutScheduled;
     private long runtimeUnlockTunaPathLeaseNextGeneration;
     private RuntimeUnlockTunaPathLeaseSnapshot runtimeUnlockTunaPathLeaseState = RuntimeUnlockTunaPathLeaseSnapshot.None;
+    private long initialTunaReadinessNextGeneration;
+    private InitialTunaReadinessSnapshot? initialTunaReadinessState;
     private readonly HashSet<string> runtimeUnlockUncommittedFileAccelerationSuppressionLogKeys = new(StringComparer.Ordinal);
     private string? runtimeUnlockUncommittedFallbackFalloutSuppressionSessionId;
     private long runtimeUnlockUncommittedFallbackFalloutSuppressionExpiresUtcMs;
@@ -272,6 +274,31 @@ public sealed partial class NknSignalingTransport
         public string? RetiredReason { get; set; }
 
         public string? RetryReason { get; set; }
+    }
+
+    private sealed class InitialTunaReadinessSnapshot
+    {
+        public required long Generation { get; init; }
+
+        public required string SessionId { get; init; }
+
+        public required DateTimeOffset CapturedUtc { get; init; }
+
+        public required long OfferGeneration { get; init; }
+
+        public required long PayerDecisionId { get; init; }
+
+        public required long LeaseGeneration { get; init; }
+
+        public required string ListenerRunId { get; init; }
+
+        public required bool LeaseCurrent { get; init; }
+
+        public required bool ListenerReady { get; init; }
+
+        public required bool AnswerAckReceived { get; init; }
+
+        public required bool TunaNegotiatedObserved { get; init; }
     }
 
     private sealed class RuntimeUnlockRecoveryRetryState
@@ -4569,6 +4596,142 @@ public sealed partial class NknSignalingTransport
         }
     }
 
+    private void RecordInitialTunaReadinessAnswerReceived(
+        string? sessionId,
+        long offerGeneration,
+        long payerDecisionId,
+        string reason,
+        bool answerAckReceived)
+    {
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? string.Empty : sessionId.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedSessionId) ||
+            offerGeneration <= 0)
+        {
+            return;
+        }
+
+        InitialTunaReadinessSnapshot? snapshot;
+        string? ignoredReason = null;
+        lock (accelerationGate)
+        {
+            if (!TryCaptureInitialTunaReadinessLeaseUnsafe(
+                    normalizedSessionId,
+                    offerGeneration,
+                    payerDecisionId,
+                    out var leaseGeneration,
+                    out var listenerRunId,
+                    out var tunaNegotiatedObserved,
+                    out ignoredReason))
+            {
+                snapshot = null;
+            }
+            else
+            {
+                var generation = ++initialTunaReadinessNextGeneration;
+                snapshot = new InitialTunaReadinessSnapshot
+                {
+                    Generation = generation,
+                    SessionId = normalizedSessionId,
+                    CapturedUtc = DateTimeOffset.UtcNow,
+                    OfferGeneration = offerGeneration,
+                    PayerDecisionId = payerDecisionId,
+                    LeaseGeneration = leaseGeneration,
+                    ListenerRunId = listenerRunId,
+                    LeaseCurrent = true,
+                    ListenerReady = true,
+                    AnswerAckReceived = answerAckReceived,
+                    TunaNegotiatedObserved = tunaNegotiatedObserved,
+                };
+                initialTunaReadinessState = snapshot;
+            }
+        }
+
+        if (snapshot is null)
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=runtime_unlock_transaction_answer_received_ignored; session_id={SanitizeLogToken(normalizedSessionId)}; offer_generation={offerGeneration}; peer_visible_proof=1; peer_received=1; answer_received=1; initial_tuna_readiness=0; reason={SanitizeLogToken(reason)}; ignored_reason={SanitizeLogToken(ignoredReason ?? "initial_tuna_listener_or_lease_not_ready")}");
+            return;
+        }
+
+        LogInitialTunaReadinessAnswerReceived(snapshot, reason);
+    }
+
+    private bool TryCaptureInitialTunaReadinessLeaseUnsafe(
+        string sessionId,
+        long offerGeneration,
+        long payerDecisionId,
+        out long leaseGeneration,
+        out string listenerRunId,
+        out bool tunaNegotiatedObserved,
+        out string rejectionReason)
+    {
+        leaseGeneration = 0;
+        listenerRunId = string.Empty;
+        tunaNegotiatedObserved = false;
+        rejectionReason = "unknown";
+
+        if (accelerationLane is not INknTunaAccelerationSession tunaSession)
+        {
+            rejectionReason = "tuna_lane_missing";
+            return false;
+        }
+
+        if (!tunaSession.IsAvailable)
+        {
+            rejectionReason = "tuna_lane_unavailable";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(tunaSession.LocalTunaAddress))
+        {
+            rejectionReason = "tuna_listener_address_missing";
+            return false;
+        }
+
+        if (accelerationNegotiatedLanes == NknAccelerationLaneKind.None ||
+            string.IsNullOrWhiteSpace(accelerationSessionId) ||
+            !string.Equals(accelerationSessionId, sessionId, StringComparison.Ordinal))
+        {
+            rejectionReason = "tuna_session_not_negotiated";
+            return false;
+        }
+
+        leaseGeneration = payerDecisionId > 0 ? payerDecisionId : offerGeneration;
+        if (leaseGeneration <= 0)
+        {
+            rejectionReason = "tuna_lease_generation_missing";
+            return false;
+        }
+
+        var listenerRole = tunaSession.IsLocalPaidListenerActive ? "local-listener" : "peer-listener";
+        listenerRunId =
+            $"initial-tuna-{listenerRole}-{leaseGeneration.ToString(CultureInfo.InvariantCulture)}-{offerGeneration.ToString(CultureInfo.InvariantCulture)}";
+        tunaNegotiatedObserved = true;
+        return true;
+    }
+
+    private bool IsInitialTunaReadinessSnapshotCurrentUnsafe(
+        InitialTunaReadinessSnapshot snapshot,
+        string sessionId)
+        => snapshot.LeaseCurrent &&
+           snapshot.ListenerReady &&
+           accelerationLane is INknTunaAccelerationSession tunaSession &&
+           tunaSession.IsAvailable &&
+           !string.IsNullOrWhiteSpace(tunaSession.LocalTunaAddress) &&
+           accelerationNegotiatedLanes != NknAccelerationLaneKind.None &&
+           !string.IsNullOrWhiteSpace(accelerationSessionId) &&
+           string.Equals(accelerationSessionId, sessionId, StringComparison.Ordinal);
+
+    private void LogInitialTunaReadinessAnswerReceived(
+        InitialTunaReadinessSnapshot snapshot,
+        string reason)
+    {
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_transaction_answer_received; session_id={SanitizeLogToken(snapshot.SessionId)}; transaction_generation={snapshot.Generation}; offer_generation={snapshot.OfferGeneration}; state=answerreceived; peer_visible_proof=1; peer_received=1; answer_received=1; path_probe_id=(none); path_probe_state=none; path_probe_transport=unknown; path_probe_acked_utc_ms=0; path_probe_failure_reason=(none); route_commit_pending=0; route_committed=0; failure_reason=(none); retired_reason=(none); tuna_path_lease_generation={snapshot.LeaseGeneration}; tuna_path_lease_state={(snapshot.ListenerReady ? "listenerready" : "none")}; tuna_path_lease_current={(snapshot.LeaseCurrent ? 1 : 0)}; tuna_path_lease_listener_run_id={SanitizeLogToken(snapshot.ListenerRunId)}; tuna_path_lease_failure_reason=(none); answer_ack_received={(snapshot.AnswerAckReceived ? 1 : 0)}; initial_tuna_readiness=1; reason={SanitizeLogToken(reason)}");
+    }
+
     bool IFileTransferInitialTunaReadinessProvider.TryGetInitialTunaReadinessEvidence(
         string sessionId,
         string transferId,
@@ -4587,40 +4750,63 @@ public sealed partial class NknSignalingTransport
         lock (accelerationGate)
         {
             var state = runtimeUnlockTransactionState;
-            if (state.IsTerminal ||
-                !string.Equals(state.SessionId, normalizedSessionId, StringComparison.Ordinal) ||
-                (!string.IsNullOrWhiteSpace(state.TransferId) &&
-                 !string.Equals(state.TransferId, normalizedTransferId, StringComparison.Ordinal)))
+            if (!state.IsTerminal &&
+                string.Equals(state.SessionId, normalizedSessionId, StringComparison.Ordinal) &&
+                (string.IsNullOrWhiteSpace(state.TransferId) ||
+                 string.Equals(state.TransferId, normalizedTransferId, StringComparison.Ordinal)))
             {
-                return false;
+                var lease = runtimeUnlockTunaPathLeaseState;
+                var leaseMatches = RuntimeUnlockTunaPathLease.IsApplicableToOffer(
+                    lease,
+                    state.SessionId,
+                    state.TransactionGeneration,
+                    state.OfferGeneration);
+                var answerAckReceived =
+                    !string.IsNullOrWhiteSpace(pendingAccelerationAnswerAckNonce) &&
+                    IsRuntimeUnlockActivationReason(pendingAccelerationAnswerAckTrigger) &&
+                    string.Equals(pendingAccelerationAnswerAckSessionId, normalizedSessionId, StringComparison.Ordinal);
+                evidence = new FileTransferInitialTunaReadinessEvidence(
+                    normalizedSessionId,
+                    normalizedTransferId,
+                    direction,
+                    DateTimeOffset.UtcNow,
+                    leaseMatches ? lease.LeaseGeneration : state.TunaPathLeaseGeneration,
+                    leaseMatches ? lease.ListenerRunId : state.TunaPathLeaseListenerRunId,
+                    leaseMatches ? lease.IsCurrent : state.TunaPathLeaseCurrent,
+                    (leaseMatches ? lease.State : state.TunaPathLeaseState) == RuntimeUnlockTunaPathLeaseState.ListenerReady,
+                    state.OfferGeneration,
+                    state.HasPeerVisibleProof,
+                    state.AnswerReceived,
+                    answerAckReceived,
+                    !string.IsNullOrWhiteSpace(accelerationSessionId) &&
+                    string.Equals(accelerationSessionId, normalizedSessionId, StringComparison.Ordinal));
+                return true;
             }
 
-            var lease = runtimeUnlockTunaPathLeaseState;
-            var leaseMatches = RuntimeUnlockTunaPathLease.IsApplicableToOffer(
-                lease,
-                state.SessionId,
-                state.TransactionGeneration,
-                state.OfferGeneration);
-            var answerAckReceived =
-                !string.IsNullOrWhiteSpace(pendingAccelerationAnswerAckNonce) &&
-                IsRuntimeUnlockActivationReason(pendingAccelerationAnswerAckTrigger) &&
-                string.Equals(pendingAccelerationAnswerAckSessionId, normalizedSessionId, StringComparison.Ordinal);
-            evidence = new FileTransferInitialTunaReadinessEvidence(
-                normalizedSessionId,
-                normalizedTransferId,
-                direction,
-                DateTimeOffset.UtcNow,
-                leaseMatches ? lease.LeaseGeneration : state.TunaPathLeaseGeneration,
-                leaseMatches ? lease.ListenerRunId : state.TunaPathLeaseListenerRunId,
-                leaseMatches ? lease.IsCurrent : state.TunaPathLeaseCurrent,
-                (leaseMatches ? lease.State : state.TunaPathLeaseState) == RuntimeUnlockTunaPathLeaseState.ListenerReady,
-                state.OfferGeneration,
-                state.HasPeerVisibleProof,
-                state.AnswerReceived,
-                answerAckReceived,
-                !string.IsNullOrWhiteSpace(accelerationSessionId) &&
-                string.Equals(accelerationSessionId, normalizedSessionId, StringComparison.Ordinal));
-            return true;
+            if (initialTunaReadinessState is { } initial &&
+                string.Equals(initial.SessionId, normalizedSessionId, StringComparison.Ordinal) &&
+                IsInitialTunaReadinessSnapshotCurrentUnsafe(initial, normalizedSessionId))
+            {
+                evidence = new FileTransferInitialTunaReadinessEvidence(
+                    normalizedSessionId,
+                    normalizedTransferId,
+                    direction,
+                    initial.CapturedUtc,
+                    initial.LeaseGeneration,
+                    initial.ListenerRunId,
+                    initial.LeaseCurrent,
+                    initial.ListenerReady,
+                    initial.OfferGeneration,
+                    PeerVisibleProof: true,
+                    AnswerReceived: true,
+                    initial.AnswerAckReceived,
+                    initial.TunaNegotiatedObserved ||
+                    (!string.IsNullOrWhiteSpace(accelerationSessionId) &&
+                     string.Equals(accelerationSessionId, normalizedSessionId, StringComparison.Ordinal)));
+                return true;
+            }
+
+            return false;
         }
     }
 
@@ -8915,7 +9101,13 @@ public sealed partial class NknSignalingTransport
     }
 
     private static bool RequiresRuntimeUnlockRetryDispatchProof(RuntimeUnlockRecoveryRetryState state)
-        => state.DispatchAuthorityGranted || state.DispatchAuthorityRejected;
+        => state.DispatchAuthorityGranted ||
+           state.DispatchAuthorityRejected;
+
+    private static int GetRuntimeUnlockRetryExpectedDispatchLiveRouteEpoch(RuntimeUnlockRecoveryRetryState state)
+        => state.DispatchAuthorityGranted || state.DispatchAuthorityRejected
+            ? state.DispatchLiveRouteEpoch
+            : state.RegularV4RecoveryLiveRouteEpoch;
 
     private bool RejectRuntimeUnlockRetryDispatchAuthorityForCurrentContract(
         string? sessionId,
@@ -10269,9 +10461,7 @@ public sealed partial class NknSignalingTransport
             {
                 sessionId = state.SessionId;
                 transferId = state.TransferId;
-                expectedLiveRouteEpoch = RequiresRuntimeUnlockRetryDispatchProof(state)
-                    ? state.DispatchLiveRouteEpoch
-                    : state.RegularV4RecoveryLiveRouteEpoch;
+                expectedLiveRouteEpoch = GetRuntimeUnlockRetryExpectedDispatchLiveRouteEpoch(state);
             }
         }
 
@@ -10441,9 +10631,7 @@ public sealed partial class NknSignalingTransport
                 string.Equals(state.SessionId, normalizedSessionId, StringComparison.Ordinal))
             {
                 transferId = state.TransferId;
-                expectedLiveRouteEpoch = RequiresRuntimeUnlockRetryDispatchProof(state)
-                    ? state.DispatchLiveRouteEpoch
-                    : state.RegularV4RecoveryLiveRouteEpoch;
+                expectedLiveRouteEpoch = GetRuntimeUnlockRetryExpectedDispatchLiveRouteEpoch(state);
             }
         }
 
@@ -16310,6 +16498,12 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
+        RecordInitialTunaReadinessAnswerReceived(
+            answer.SessionId,
+            expectedOfferGeneration,
+            answer.PayerDecisionId,
+            "transport_acceleration_answer_received",
+            answerAckReceived: false);
         _ = Task.Run(
             () => SendAccelerationAnswerAckAsync(answer, validation.AcceptedLanes, CancellationToken.None),
             CancellationToken.None);
@@ -16378,6 +16572,7 @@ public sealed partial class NknSignalingTransport
 
         var pendingLanes = NknAccelerationLaneKind.None;
         var pendingPayerDecisionId = 0L;
+        var pendingAnswerAckGeneration = 0L;
         string? pendingTrigger = null;
         bool alreadyNegotiated;
         string? activationFailureReason = null;
@@ -16412,6 +16607,7 @@ public sealed partial class NknSignalingTransport
             {
                 pendingLanes = pendingAccelerationAnswerAckLanes;
                 pendingPayerDecisionId = pendingAccelerationAnswerAckPayerDecisionId;
+                pendingAnswerAckGeneration = pendingAccelerationAnswerAckGeneration;
                 pendingTrigger = pendingAccelerationAnswerAckTrigger;
                 if (pendingPayerDecisionId > 0 && ack.PayerDecisionId != pendingPayerDecisionId)
                 {
@@ -16459,6 +16655,12 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
+        RecordInitialTunaReadinessAnswerReceived(
+            ack.SessionId,
+            pendingAnswerAckGeneration,
+            ack.PayerDecisionId,
+            "transport_acceleration_answer_ack_received",
+            answerAckReceived: true);
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=tuna_acceleration_negotiated; session_id={ack.SessionId}; lanes={string.Join(",", ack.SupportedLanes)}; payer_decision_id={ack.PayerDecisionId}; handshake=answer_ack");
