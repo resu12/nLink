@@ -1817,7 +1817,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             {
                 RouteToken = FileTransferRouteResolver.RegularNknV4FastToken,
                 ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
-                LiveRouteEpoch = 0,
+                LiveRouteEpoch = 1,
                 AuthorityReason = "regular_v4_startup_local_only_no_ack",
             };
             InvokePrivateMethod(
@@ -2024,7 +2024,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             {
                 RouteToken = FileTransferRouteResolver.RegularNknV4FastToken,
                 ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
-                LiveRouteEpoch = 0,
+                LiveRouteEpoch = 1,
                 AuthorityReason = "regular_v4_startup_local_only_no_ack",
             };
             InvokePrivateMethod(
@@ -7146,7 +7146,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             {
                 RouteToken = FileTransferRouteResolver.RegularNknV4FastToken,
                 ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
-                LiveRouteEpoch = 0,
+                LiveRouteEpoch = 1,
                 AuthorityReason = "regular_v4_startup_local_only_no_ack",
             };
             var recoveryState = InvokePrivateMethod(
@@ -7248,7 +7248,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             {
                 RouteToken = FileTransferRouteResolver.RegularNknV4FastToken,
                 ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
-                LiveRouteEpoch = 0,
+                LiveRouteEpoch = 1,
                 AuthorityReason = "regular_v4_startup_local_only_no_ack",
             };
             var recoveryState = InvokePrivateMethod(
@@ -9986,7 +9986,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             {
                 RouteToken = FileTransferRouteResolver.RegularNknV4FastToken,
                 ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
-                LiveRouteEpoch = 0,
+                LiveRouteEpoch = 1,
                 AuthorityReason = "regular_v4_startup_local_only_no_ack",
             };
             InvokePrivateMethod(
@@ -10035,6 +10035,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 {
                     var tail = ReadOperationalLogTail(logStart);
                     return tail.Contains("event=runtime_unlock_retry_released_after_regular_v4_receive_recovery;", StringComparison.Ordinal) &&
+                           tail.Contains("event=runtime_unlock_retry_dispatch_authority_granted;", StringComparison.Ordinal) &&
                            tail.Contains("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", StringComparison.Ordinal);
                 },
                 TimeSpan.FromSeconds(3));
@@ -10045,6 +10046,139 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 releaseTail.Split("event=runtime_unlock_retry_released_after_regular_v4_receive_recovery;", StringSplitOptions.None).Length - 1);
             Assert.Contains("decision_reason=accepted", releaseTail, StringComparison.Ordinal);
             Assert.Contains("settlement_trigger=regular_v4_receive_proof_observed", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_retry_dispatch_authority_granted;", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("route=regular_nkn_v4_fast", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("protocol_version=4", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("live_route_epoch=1", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("runtime_generation=1", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("terminal_generation=0", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("leg_generation=1", releaseTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_authority_rejected;", releaseTail, StringComparison.Ordinal);
+
+            InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
+            InvokePrivateMethod(
+                host,
+                "MarkRuntimeUnlockRecoveryContractRetryObserved",
+                sessionId,
+                321L,
+                "bulk_queue_fallback");
+
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=runtime_unlock_retry_dispatch_observed;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(3));
+
+            var observedTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=runtime_unlock_retry_dispatch_authority_granted;", observedTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_retry_dispatch_observed;", observedTail, StringComparison.Ordinal);
+            Assert.Contains("decision_reason=retry_observed_reacquired", observedTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = previousHelpeePriorityDelay;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryBlockedByRegularV4Recovery_UnrelatedRouteHintDoesNotGrantDispatchAuthority()
+    {
+        FakeNknClient.ResetNetwork();
+        var previousHelpeePriorityDelay = NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
+        NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = TimeSpan.Zero;
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-regular-v4-unrelated-route.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-regular-v4-unrelated-route.address");
+            var hostLane = new RetryableTunaAccelerationSession(canListen: true, failedDialAttemptsBeforeSuccess: 0);
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-regular-v4-unrelated-route-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                hostLane);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-runtime-unlock-regular-v4-unrelated-route-id", helperClient.Address));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare);
+            const string transferId = "transfer_runtime_unlock_regular_v4_unrelated_route";
+            const string unrelatedTransferId = "transfer_runtime_unlock_regular_v4_unrelated_route_other";
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            InvokePrivateMethod(
+                host,
+                "TrackAuthorizedFileTransferRouteHintForTests",
+                unrelatedTransferId,
+                FileTransferRouteResolver.RegularNknV4FastToken,
+                FileTransferProtocol.ProtocolVersionV4,
+                "test_unrelated_regular_route");
+            var recoveryRequest = new FileTransferReceiveRecoveryRequest(
+                sessionId,
+                transferId,
+                FileTransferDirection.Outbound,
+                "session_liveness_timeout_pending")
+            {
+                RouteToken = FileTransferRouteResolver.RegularNknV4FastToken,
+                ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                LiveRouteEpoch = 1,
+                AuthorityReason = "regular_v4_startup_local_only_no_ack",
+            };
+            InvokePrivateMethod(
+                host,
+                "MarkFileTransferRegularV4RecoveryLivenessStarted",
+                recoveryRequest,
+                sessionId,
+                transferId,
+                "session_liveness_timeout_pending");
+            InvokePrivateMethod(host, "MarkFileTransferTunaActivationBridgeRecoveryStarted", "session_liveness_timeout_pending");
+
+            SetPrivateField(host, "accelerationNegotiationRetryAttempts", 0);
+            var logStart = GetOperationalLogLength();
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                324L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "session_liveness_timeout_pending");
+            InvokePrivateMethod(host, "MarkFileTransferTunaActivationBridgeRecoverySettled", "test_recovery_settled");
+
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=runtime_unlock_retry_blocked_by_regular_v4_receive_recovery;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(3));
+
+            InvokePrivateMethod(
+                host,
+                "MarkFileTransferRegularV4RecoveryLivenessReceiveProofReceived",
+                sessionId,
+                transferId,
+                "file_transfer_data_frame",
+                "control");
+
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=runtime_unlock_retry_dispatch_authority_rejected;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(3));
+
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=runtime_unlock_retry_released_after_regular_v4_receive_recovery;", tail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_retry_dispatch_authority_rejected;", tail, StringComparison.Ordinal);
+            Assert.Contains("decision_reason=missing_route_publication_authority", tail, StringComparison.Ordinal);
+            Assert.Contains("event=session_recovery_contract_failed;", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_authority_granted;", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", tail, StringComparison.Ordinal);
         }
         finally
         {
@@ -10100,7 +10234,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             {
                 RouteToken = FileTransferRouteResolver.RegularNknV4FastToken,
                 ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
-                LiveRouteEpoch = 0,
+                LiveRouteEpoch = 1,
                 AuthorityReason = "regular_v4_startup_local_only_no_ack",
             };
             InvokePrivateMethod(
@@ -10141,6 +10275,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 {
                     var tail = ReadOperationalLogTail(logStart);
                     return tail.Contains("event=runtime_unlock_retry_released_after_regular_v4_receive_recovery;", StringComparison.Ordinal) &&
+                           tail.Contains("event=runtime_unlock_retry_dispatch_authority_granted;", StringComparison.Ordinal) &&
                            tail.Contains("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", StringComparison.Ordinal);
                 },
                 TimeSpan.FromSeconds(3));
@@ -10151,6 +10286,14 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 releaseTail.Split("event=runtime_unlock_retry_released_after_regular_v4_receive_recovery;", StringSplitOptions.None).Length - 1);
             Assert.Contains("decision_reason=accepted", releaseTail, StringComparison.Ordinal);
             Assert.Contains("settlement_trigger=regular_v4_recovery_liveness_completed", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_retry_dispatch_authority_granted;", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("route=regular_nkn_v4_fast", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("protocol_version=4", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("live_route_epoch=1", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("runtime_generation=1", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("terminal_generation=0", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("leg_generation=1", releaseTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_authority_rejected;", releaseTail, StringComparison.Ordinal);
         }
         finally
         {
@@ -10206,7 +10349,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             {
                 RouteToken = FileTransferRouteResolver.RegularNknV4FastToken,
                 ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
-                LiveRouteEpoch = 0,
+                LiveRouteEpoch = 1,
                 AuthorityReason = "regular_v4_startup_local_only_no_ack",
             };
             InvokePrivateMethod(
@@ -10233,6 +10376,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                     var tail = ReadOperationalLogTail(logStart);
                     return tail.Contains("event=runtime_unlock_retry_blocked_by_regular_v4_receive_recovery;", StringComparison.Ordinal) &&
                            tail.Contains("event=runtime_unlock_retry_released_after_regular_v4_receive_recovery;", StringComparison.Ordinal) &&
+                           tail.Contains("event=runtime_unlock_retry_dispatch_authority_granted;", StringComparison.Ordinal) &&
                            tail.Contains("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", StringComparison.Ordinal);
                 },
                 TimeSpan.FromSeconds(3));
@@ -10243,7 +10387,15 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 releaseTail.Split("event=runtime_unlock_retry_released_after_regular_v4_receive_recovery;", StringSplitOptions.None).Length - 1);
             Assert.Contains("settlement_trigger=recovery_already_settled", releaseTail, StringComparison.Ordinal);
             Assert.Contains("decision_reason=accepted", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_retry_dispatch_authority_granted;", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("route=regular_nkn_v4_fast", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("protocol_version=4", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("live_route_epoch=1", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("runtime_generation=1", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("terminal_generation=0", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("leg_generation=1", releaseTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=runtime_unlock_retry_rejected_after_regular_v4_receive_recovery;", releaseTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_authority_rejected;", releaseTail, StringComparison.Ordinal);
         }
         finally
         {
@@ -10299,7 +10451,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             {
                 RouteToken = FileTransferRouteResolver.RegularNknV4FastToken,
                 ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
-                LiveRouteEpoch = 0,
+                LiveRouteEpoch = 1,
                 AuthorityReason = "regular_v4_startup_local_only_no_ack",
             };
             InvokePrivateMethod(

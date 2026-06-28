@@ -220,6 +220,126 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryReleaseWithoutDispatchOutcome_ClassifiesMissingDispatchProof()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                "transfer_runtime_unlock_dispatch_missing",
+                RuntimeUnlockRetryReleasedLine("transfer_runtime_unlock_dispatch_missing"),
+                RuntimeUnlockRetryScheduledLine("transfer_runtime_unlock_dispatch_missing"),
+                RuntimeUnlockRetryOfferGenerationLine()),
+            ["-LiveRouteProofMode", "None"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("runtime_unlock_retry_dispatch_missing", verdict["recovery_failure_class"]);
+        Assert.Equal("fail", verdict["runtime_unlock_retry_dispatch_proof_verdict"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_missing_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryReleaseWithDispatchGrantAndObserved_PassesDispatchProof()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                "transfer_runtime_unlock_dispatch_observed",
+                RuntimeUnlockRetryReleasedLine("transfer_runtime_unlock_dispatch_observed"),
+                RuntimeUnlockRetryDispatchGrantedLine("transfer_runtime_unlock_dispatch_observed"),
+                RuntimeUnlockRetryDispatchObservedLine("transfer_runtime_unlock_dispatch_observed")),
+            ["-LiveRouteProofMode", "None"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("(none)", verdict["recovery_failure_class"]);
+        Assert.Equal("pass", verdict["runtime_unlock_retry_dispatch_proof_verdict"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_authority_granted_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_observed_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_missing_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryReleaseWithDispatchRejection_PassesDispatchProof()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                "transfer_runtime_unlock_dispatch_rejected",
+                RuntimeUnlockRetryReleasedLine("transfer_runtime_unlock_dispatch_rejected"),
+                RuntimeUnlockRetryDispatchRejectedLine("transfer_runtime_unlock_dispatch_rejected")),
+            ["-LiveRouteProofMode", "None"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("(none)", verdict["recovery_failure_class"]);
+        Assert.Equal("pass", verdict["runtime_unlock_retry_dispatch_proof_verdict"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_authority_rejected_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_missing_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryReleaseWithMissingAuthorityRejection_PassesDispatchProof()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                "transfer_runtime_unlock_dispatch_missing_authority_rejected",
+                RuntimeUnlockRetryReleasedLine("transfer_runtime_unlock_dispatch_missing_authority_rejected"),
+                RuntimeUnlockRetryDispatchMissingAuthorityRejectedLine("transfer_runtime_unlock_dispatch_missing_authority_rejected"),
+                RuntimeUnlockRetryContractFailedMissingAuthorityLine("transfer_runtime_unlock_dispatch_missing_authority_rejected")),
+            ["-LiveRouteProofMode", "None"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("(none)", verdict["recovery_failure_class"]);
+        Assert.Equal("pass", verdict["runtime_unlock_retry_dispatch_proof_verdict"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_authority_rejected_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_missing_authority_after_release_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_missing_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryReleaseWithMissingAuthorityButNoRejection_ClassifiesMissingDispatchProof()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                "transfer_runtime_unlock_dispatch_missing_authority",
+                RuntimeUnlockRetryReleasedLine("transfer_runtime_unlock_dispatch_missing_authority"),
+                RuntimeUnlockRetryMissingAuthorityLine("transfer_runtime_unlock_dispatch_missing_authority")),
+            ["-LiveRouteProofMode", "None"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("runtime_unlock_retry_dispatch_missing", verdict["recovery_failure_class"]);
+        Assert.Equal("fail", verdict["runtime_unlock_retry_dispatch_proof_verdict"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_missing_authority_after_release_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_RuntimeUnlockRetryDispatchedButOfferObservationBlocked_ClassifiesNextBlocker()
     {
         if (!OperatingSystem.IsWindows())
@@ -706,4 +826,52 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal("tuna_path_lease_unavailable_at_answer", stability["recovery_failure_class"]);
         Assert.Equal("1", stability["runtime_unlock_answer_rejected_tuna_path_lease_unavailable_count"]);
     }
+
+    private static string[] BuildRuntimeUnlockRetryDispatchProofFixture(
+        string transferId,
+        params string[] middleMessages)
+    {
+        const string sessionId = "sess_runtime_unlock_dispatch_proof";
+        var lines = new List<string>
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id={sessionId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4; file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=conservative_nkn_startup", secondsOffset: 0),
+        };
+
+        for (var index = 0; index < middleMessages.Length; index++)
+        {
+            lines.Add(LogLine(middleMessages[index], secondsOffset: 20 + index));
+        }
+
+        lines.Add(LogLine($"event=file_transfer_inbound_terminal; role=Helper; session_id={sessionId}; transfer_id={transferId}; state=Completed; error_code=(none); sha256_match=1", secondsOffset: 89));
+        lines.Add(LogLine($"event=file_transfer_outbound_terminal; role=Helpee; session_id={sessionId}; transfer_id={transferId}; state=Completed; error_code=(none); sha256_match=1", secondsOffset: 90));
+        lines.Add(LogLine($"event=transfer_terminal; direction=outbound; transfer_id={transferId}; session_id={sessionId}; file_name_len=33; file_size_bytes=134217728; bytes_transferred=134217728; chunks_transferred=6242; chunk_count=6242; error_code=(none); reason=Completed.; saved_path=(none); route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4", secondsOffset: 91));
+        return lines.ToArray();
+    }
+
+    private static string RuntimeUnlockRetryReleasedLine(string transferId)
+        => $"event=runtime_unlock_retry_released_after_regular_v4_receive_recovery; direction=outbound; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=session_liveness_timeout_pending; retired_generation=11; contract_generation=7; offer_generation=11; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; regular_v4_liveness_generation=3; bridge_decision_generation=5; blocker_reason=regular_v4_bridge_recovery_completed_awaiting_filetransfer_proof; settlement_trigger=regular_v4_receive_proof_observed; decision_reason=accepted";
+
+    private static string RuntimeUnlockRetryScheduledLine(string transferId)
+        => $"event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled; direction=outbound; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=session_liveness_timeout_pending; retired_generation=11; contract_generation=7; offer_generation=11; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; regular_v4_liveness_generation=3; bridge_decision_generation=5; trigger=regular_v4_receive_proof_observed; queued_behind_active_negotiation=1";
+
+    private static string RuntimeUnlockRetryOfferGenerationLine()
+        => "event=runtime_unlock_transaction_offer_generation_created; session_id=sess_runtime_unlock_dispatch_proof; transaction_generation=4; offer_generation=12; state=offerpreparing; peer_visible_proof=0; peer_received=0; answer_received=0; route_commit_pending=0; route_committed=0; failure_reason=(none); retired_reason=(none); reason=runtime_unlock";
+
+    private static string RuntimeUnlockRetryDispatchGrantedLine(string transferId)
+        => $"event=runtime_unlock_retry_dispatch_authority_granted; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; contract_generation=7; retired_generation=11; offer_generation=12; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; runtime_generation=4; terminal_generation=0; leg_generation=9; regular_v4_liveness_generation=3; bridge_decision_generation=5; queued_behind_active_negotiation=1; decision_reason=regular_v4_recovery_released";
+
+    private static string RuntimeUnlockRetryDispatchObservedLine(string transferId)
+        => $"event=runtime_unlock_retry_dispatch_observed; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; contract_generation=7; retired_generation=11; offer_generation=12; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; runtime_generation=4; terminal_generation=0; leg_generation=9; regular_v4_liveness_generation=3; bridge_decision_generation=5; queued_behind_active_negotiation=1; decision_reason=retry_observed_send";
+
+    private static string RuntimeUnlockRetryDispatchRejectedLine(string transferId)
+        => $"event=runtime_unlock_retry_dispatch_authority_rejected; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; contract_generation=7; retired_generation=11; offer_generation=12; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; runtime_generation=4; terminal_generation=0; leg_generation=9; regular_v4_liveness_generation=3; bridge_decision_generation=5; queued_behind_active_negotiation=1; decision_reason=terminal_retry_contract";
+
+    private static string RuntimeUnlockRetryDispatchMissingAuthorityRejectedLine(string transferId)
+        => $"event=runtime_unlock_retry_dispatch_authority_rejected; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; contract_generation=7; retired_generation=11; offer_generation=12; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; runtime_generation=4; terminal_generation=0; leg_generation=9; regular_v4_liveness_generation=3; bridge_decision_generation=5; queued_behind_active_negotiation=1; decision_reason=missing_runtime_unlock_retry_authority";
+
+    private static string RuntimeUnlockRetryContractFailedMissingAuthorityLine(string transferId)
+        => $"event=session_recovery_contract_failed; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; contract_generation=7; offer_generation=12; retired_offer_generation=11; kind=runtime_unlock_activation; state=failed; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=session_liveness_timeout_pending; recovery_pending=0; recovery_settled=1; retry_required=0; retry_dispatching=0; retry_dispatched=0; retry_observed=0; queued_behind_active_negotiation=1; retry_authority_pending=0; retry_authority_granted=0; observed_send_pending=0; authority_attempt=1; authorized_observed_lane=(none); authority_failure_reason=missing_runtime_unlock_retry_authority";
+
+    private static string RuntimeUnlockRetryMissingAuthorityLine(string transferId)
+        => $"event=session_recovery_contract_retry_authority_observed; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; contract_generation=7; offer_generation=12; retired_offer_generation=11; kind=runtime_unlock_activation; state=retrydispatched; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=session_liveness_timeout_pending; recovery_pending=0; recovery_settled=1; retry_required=0; retry_dispatching=0; retry_dispatched=1; retry_observed=0; queued_behind_active_negotiation=1; retry_authority_pending=0; retry_authority_granted=0; observed_send_pending=1; authority_attempt=1; authorized_observed_lane=(none); authority_failure_reason=missing_runtime_unlock_retry_authority";
 }
