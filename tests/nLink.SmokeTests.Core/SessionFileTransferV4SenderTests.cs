@@ -12378,6 +12378,10 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Contains("event=runtime_unlock_tuna_probe_received; transport=tuna; direction=inbound;", log, StringComparison.Ordinal);
         Assert.Contains("event=runtime_unlock_tuna_probe_ack_received; transport=tuna; direction=inbound;", log, StringComparison.Ordinal);
         Assert.Contains("event=runtime_unlock_precommit_probe_acked; direction=inbound;", log, StringComparison.Ordinal);
+        Assert.Contains("event=runtime_unlock_precommit_probe_ack_sent; direction=inbound;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_runtime_unlock_callback_rejected; direction=inbound;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("rejection_reason=runtime_unlock_admission_missing", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("admission_generation=0", log, StringComparison.Ordinal);
         Assert.DoesNotContain("reason=probe_id_mismatch", log, StringComparison.Ordinal);
     }
 

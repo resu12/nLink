@@ -1095,6 +1095,44 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
     [Fact]
     [Trait("RetainedAuthorityProofSuite", "FileTunaV4DataPathProof")]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_FileTunaV4ReceiveSideRegularNknObservation_FailsEvenWhenSendProofExists()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_file_tuna_v4_receive_regular_observation_fail";
+        var lines = BuildFileTunaV4DataPathProofFixture(
+            transferId,
+            FileTunaV4DataPathIntentMessage(transferId),
+            FileTunaV4DataPathActualMessage(
+                transferId,
+                actualTransport: "regular_nkn",
+                eventName: "filetransfer_data_path_receive_result",
+                proofDirection: "receive"),
+            FileTunaV4DataPathActualMessage(
+                transferId,
+                actualTransport: "tuna",
+                eventName: "filetransfer_tuna_data_path_peer_visible",
+                proofDirection: "send"));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("fail", route["file_tuna_v4_data_path_proof_verdict"]);
+        Assert.Equal("1", route["file_tuna_v4_regular_nkn_send_result_count"]);
+        Assert.Equal("1", route["file_tuna_v4_data_path_mismatch_count"]);
+        Assert.Equal("0", route["file_tuna_v4_data_path_missing_actual_proof_count"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("file_tuna_data_path_mismatch", verdict["acceptance_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "FileTunaV4DataPathProof")]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_FileTunaV4ControlFramesOverRegularNkn_DoNotFailDataPathProof()
     {
         if (!OperatingSystem.IsWindows())
