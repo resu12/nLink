@@ -6169,27 +6169,6 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                             }
                             $firstTransferStatus.GetEnumerator() | ForEach-Object { "{0}={1}" -f $_.Key, $_.Value } | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-second-transfer-status.txt') -Encoding UTF8
                             $firstTransferStatus | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-second-transfer-status.json') -Encoding UTF8
-
-                            $summary['secondTransfer'] = [ordered]@{
-                                name = 'second_transfer_after_reactivation_file_tuna_v4'
-                                secondTransferStarted = $false
-                                transferId = '(none)'
-                                route = '(unknown)'
-                                protocolVersion = 0
-                                payloadBytes = 16777216L
-                                durationMs = 0D
-                                goodputBytesPerSecond = 0D
-                                completed = $false
-                                integrityOk = $false
-                                inboundState = '(not_started)'
-                                outboundState = '(not_started)'
-                                inboundErrorCode = '(not_started)'
-                                outboundErrorCode = '(not_started)'
-                                setupFailurePhase = 'first_transfer'
-                                setupFailureReason = 'first_transfer_reactivation_or_fallback_incomplete'
-                                error = 'First transfer did not prove same-transfer file_tuna_v4 reactivation or clean terminal completion before second-transfer start.'
-                            }
-                            $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json') -Encoding UTF8
                         }
                     }
 

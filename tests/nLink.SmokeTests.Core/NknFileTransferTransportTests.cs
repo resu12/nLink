@@ -1695,13 +1695,30 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                     RecoveryMode = "backfill_repair",
                 },
                 cts.Token);
+            await receiverRecoverySession.SendAsync(
+                new FileTransferFallbackTailYieldFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    TransportEpoch = 7,
+                    OwnerKey = $"{sessionId}|{transferId}|post_tuna_fallback_v6|6|4|5|2|7|(none)",
+                    Direction = "outbound",
+                    YieldGeneration = 1,
+                    LiveRouteEpoch = 4,
+                    FallbackLegGeneration = 5,
+                    BridgeRecoveryGeneration = 2,
+                    CommittedChunkIndex = 43,
+                    HighestObservedChunkIndex = 42,
+                    RecoveryMode = "fallback_tail_quiescent",
+                },
+                cts.Token);
 
             await CoreSmokeTestsBase.WaitUntilAsync(
                 () => rawControlMessages.Count >= 3 && rawBulkMessages.Count >= 3,
                 TimeSpan.FromSeconds(3.0));
 
             HashSet<string> deliveredTypes = [];
-            for (var i = 0; i < 6 && deliveredTypes.Count < 3; i++)
+            for (var i = 0; i < 8 && deliveredTypes.Count < 4; i++)
             {
                 var deliveredFrame = await senderRecoverySession.ReceiveAsync(cts.Token);
                 deliveredTypes.Add(deliveredFrame.Type);
@@ -1710,6 +1727,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             Assert.Contains(FileTransferProtocol.TransportEpochFrameTypeV6, deliveredTypes);
             Assert.Contains(FileTransferProtocol.FrontierRequestFrameTypeV6, deliveredTypes);
             Assert.Contains(FileTransferProtocol.RepairProofFrameTypeV6, deliveredTypes);
+            Assert.Contains(FileTransferProtocol.FallbackTailYieldFrameTypeV6, deliveredTypes);
             Assert.True(rawControlMessages.Count >= 3);
             Assert.True(rawBulkMessages.Count >= 3);
 
@@ -1717,6 +1735,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             Assert.Contains($"frame_type={FileTransferProtocol.TransportEpochFrameTypeV6}", logTail, StringComparison.Ordinal);
             Assert.Contains($"frame_type={FileTransferProtocol.FrontierRequestFrameTypeV6}", logTail, StringComparison.Ordinal);
             Assert.Contains($"frame_type={FileTransferProtocol.RepairProofFrameTypeV6}", logTail, StringComparison.Ordinal);
+            Assert.Contains($"frame_type={FileTransferProtocol.FallbackTailYieldFrameTypeV6}", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("reason=unsupported_data_frame_type", logTail, StringComparison.Ordinal);
         }
         finally

@@ -1985,7 +1985,7 @@ public sealed partial class NknSignalingTransport
         bool fallbackLegCanSendData = false,
         long fallbackLegGeneration = 0,
         string? fallbackCheckpointRequestId = null,
-        int liveRouteEpoch = -1)
+        int liveRouteEpoch = 0)
     {
         if (string.IsNullOrWhiteSpace(transferId) ||
             string.IsNullOrWhiteSpace(routeToken) ||
@@ -2025,7 +2025,7 @@ public sealed partial class NknSignalingTransport
         string routeToken,
         int protocolVersion,
         string source,
-        int liveRouteEpoch = -1)
+        int liveRouteEpoch = 0)
     {
         var targetTransport = string.Equals(routeToken, FileTransferRouteResolver.FileTunaV4Token, StringComparison.Ordinal)
             ? FileTransferTransportKind.Tuna
@@ -2038,7 +2038,7 @@ public sealed partial class NknSignalingTransport
             FileTransferDirection.Outbound,
             routeToken,
             protocolVersion,
-            liveRouteEpoch >= 0 ? liveRouteEpoch : generation,
+            liveRouteEpoch,
             generation,
             0,
             generation,
@@ -6363,6 +6363,7 @@ public sealed partial class NknSignalingTransport
             or FileTransferTransportProbeFrameV6
             or FileTransferRuntimeUnlockPreCommitProbeFrame
             or FileTransferRuntimeUnlockPreCommitProbeAckFrame
+            or FileTransferFallbackTailYieldFrameV6
             or FileTransferFrontierRequestFrameV6
             or FileTransferRepairProofFrameV6;
 
@@ -8624,6 +8625,7 @@ public sealed partial class NknSignalingTransport
             or FileTransferProtocol.TransportProbeFrameTypeV6
             or FileTransferProtocol.RuntimeUnlockPreCommitProbeFrameType
             or FileTransferProtocol.RuntimeUnlockPreCommitProbeAckFrameType
+            or FileTransferProtocol.FallbackTailYieldFrameTypeV6
             or FileTransferProtocol.FrontierRequestFrameTypeV6
             or FileTransferProtocol.RepairProofFrameTypeV6;
 

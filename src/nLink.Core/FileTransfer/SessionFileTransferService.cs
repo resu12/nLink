@@ -8426,13 +8426,20 @@ public sealed partial class SessionFileTransferService : IDisposable
         string reason)
     {
         var ownerKey = BuildFallbackOwnerKey(context.SessionId, context.TransferId, leg);
+        var preservePeerYield =
+            context.PeerFallbackTailYieldGranted &&
+            string.Equals(context.PeerFallbackTailYieldOwnerKey, ownerKey, StringComparison.Ordinal);
         if (!string.Equals(context.LocalFallbackTailYieldOwnerKey, ownerKey, StringComparison.Ordinal))
         {
             context.FallbackTailYieldGeneration++;
             context.LocalFallbackTailYieldOwnerKey = ownerKey;
             context.LocalFallbackTailYieldPeerVisible = false;
-            context.PeerFallbackTailYieldOwnerKey = null;
-            context.PeerFallbackTailYieldGranted = false;
+            if (!preservePeerYield)
+            {
+                context.PeerFallbackTailYieldOwnerKey = null;
+                context.PeerFallbackTailYieldGranted = false;
+            }
+
             context.PairedFallbackTailYieldGranted = false;
             context.FallbackTailYieldMismatchReason = null;
         }
@@ -8477,13 +8484,20 @@ public sealed partial class SessionFileTransferService : IDisposable
         string reason)
     {
         var ownerKey = BuildFallbackOwnerKey(context.SessionId, context.TransferId, leg);
+        var preservePeerYield =
+            context.PeerFallbackTailYieldGranted &&
+            string.Equals(context.PeerFallbackTailYieldOwnerKey, ownerKey, StringComparison.Ordinal);
         if (!string.Equals(context.LocalFallbackTailYieldOwnerKey, ownerKey, StringComparison.Ordinal))
         {
             context.FallbackTailYieldGeneration++;
             context.LocalFallbackTailYieldOwnerKey = ownerKey;
             context.LocalFallbackTailYieldPeerVisible = false;
-            context.PeerFallbackTailYieldOwnerKey = null;
-            context.PeerFallbackTailYieldGranted = false;
+            if (!preservePeerYield)
+            {
+                context.PeerFallbackTailYieldOwnerKey = null;
+                context.PeerFallbackTailYieldGranted = false;
+            }
+
             context.PairedFallbackTailYieldGranted = false;
             context.FallbackTailYieldMismatchReason = null;
         }

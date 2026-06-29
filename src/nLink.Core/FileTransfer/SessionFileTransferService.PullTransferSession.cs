@@ -2427,6 +2427,119 @@ public sealed partial class SessionFileTransferService
         return true;
     }
 
+    private bool EnsureOutboundRuntimeUnlockPreCommitProbeReadyForRouteCommitLocked(
+        OutboundTransferContext context,
+        string reason)
+    {
+        RuntimeUnlockRouteCommitSnapshot? snapshot = null;
+        if (transport is IRuntimeUnlockRouteCommitProofProvider proofProvider &&
+            proofProvider.TryGetRuntimeUnlockRouteCommitProof(context.SessionId, context.TransferId, out var currentSnapshot))
+        {
+            snapshot = currentSnapshot;
+            if (IsRuntimeUnlockSamePathProbeAcked(currentSnapshot))
+            {
+                return true;
+            }
+        }
+
+        var deferredAction = snapshot is { } current && IsRuntimeUnlockPreCommitProbeStarted(current)
+            ? "probe_already_started"
+            : "start_probe";
+        LogRuntimeUnlockRouteCommitDeferredProbeMissing(
+            FileTransferDirection.Outbound,
+            context.TransferId,
+            context.SessionId,
+            reason,
+            snapshot,
+            deferredAction);
+
+        if (!string.Equals(deferredAction, "probe_already_started", StringComparison.Ordinal))
+        {
+            TryStartOutboundRuntimeUnlockPreCommitProbeOrWaitForFallbackLocked(
+                context,
+                reason,
+                "runtime_unlock_probe_missing");
+        }
+
+        return false;
+    }
+
+    private bool EnsureInboundRuntimeUnlockPreCommitProbeReadyForRouteCommitLocked(
+        InboundTransferContext context,
+        string reason)
+    {
+        RuntimeUnlockRouteCommitSnapshot? snapshot = null;
+        if (transport is IRuntimeUnlockRouteCommitProofProvider proofProvider &&
+            proofProvider.TryGetRuntimeUnlockRouteCommitProof(context.SessionId, context.TransferId, out var currentSnapshot))
+        {
+            snapshot = currentSnapshot;
+            if (IsRuntimeUnlockSamePathProbeAcked(currentSnapshot))
+            {
+                return true;
+            }
+        }
+
+        var deferredAction = snapshot is { } current && IsRuntimeUnlockPreCommitProbeStarted(current)
+            ? "probe_already_started"
+            : "wait_for_peer_probe";
+        LogRuntimeUnlockRouteCommitDeferredProbeMissing(
+            FileTransferDirection.Inbound,
+            context.TransferId,
+            context.SessionId,
+            reason,
+            snapshot,
+            deferredAction);
+
+        if (!string.Equals(deferredAction, "probe_already_started", StringComparison.Ordinal))
+        {
+            TryStartInboundRuntimeUnlockPreCommitProbeOrWaitForFallbackLocked(
+                context,
+                reason,
+                "runtime_unlock_probe_missing");
+        }
+
+        return false;
+    }
+
+    private static bool IsRuntimeUnlockSamePathProbeAcked(RuntimeUnlockRouteCommitSnapshot snapshot)
+        => snapshot.TargetRoute == FileTransferRoute.FileTunaV4 &&
+           snapshot.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+           snapshot.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
+           snapshot.TargetTransport == FileTransferTransportKind.Tuna &&
+           string.Equals(snapshot.PathProbeState, RuntimeUnlockPathProbeState.Acked.ToString(), StringComparison.OrdinalIgnoreCase) &&
+           !string.IsNullOrWhiteSpace(snapshot.PathProbeId) &&
+           snapshot.PathProbeTransport == FileTransferTransportKind.Tuna;
+
+    private static bool IsRuntimeUnlockPreCommitProbeStarted(RuntimeUnlockRouteCommitSnapshot snapshot)
+        => string.Equals(snapshot.PathProbeState, RuntimeUnlockPathProbeState.Started.ToString(), StringComparison.OrdinalIgnoreCase) &&
+           !string.IsNullOrWhiteSpace(snapshot.PathProbeId);
+
+    private static void LogRuntimeUnlockRouteCommitDeferredProbeMissing(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        string reason,
+        RuntimeUnlockRouteCommitSnapshot? snapshot,
+        string deferredAction)
+    {
+        var targetRoute = snapshot is null
+            ? "(none)"
+            : FormatRuntimeUnlockCallbackRouteToken(snapshot.TargetRoute);
+        var targetTransport = snapshot is null
+            ? "(none)"
+            : FormatFileTransferTransportKind(snapshot.TargetTransport);
+        var handoffKind = snapshot is null
+            ? "(none)"
+            : FormatFileTransferTransportHandoffKind(snapshot.HandoffKind);
+        var pathProbeTransport = snapshot is null
+            ? "(none)"
+            : FormatFileTransferTransportKind(snapshot.PathProbeTransport);
+
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_runtime_unlock_route_commit_deferred_probe_missing; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; reason={FormatProtocolLogValue(reason)}; deferred_action={FormatProtocolLogValue(deferredAction)}; transaction_generation={snapshot?.TransactionGeneration ?? 0}; offer_generation={snapshot?.OfferGeneration ?? 0}; peer_visible_proof={(snapshot?.PeerVisibleProof == true ? 1 : 0)}; answer_received={(snapshot?.AnswerReceived == true ? 1 : 0)}; tuna_path_lease_generation={snapshot?.TunaPathLeaseGeneration ?? 0}; tuna_path_lease_current={(snapshot?.TunaPathLeaseCurrent == true ? 1 : 0)}; tuna_path_lease_state={FormatProtocolLogValue(snapshot?.TunaPathLeaseState ?? "(none)")}; tuna_path_lease_listener_run_id={FormatProtocolLogValue(snapshot?.TunaPathLeaseListenerRunId ?? "(none)")}; path_probe_state={FormatProtocolLogValue(snapshot?.PathProbeState ?? "(none)")}; path_probe_id={FormatProtocolLogValue(snapshot?.PathProbeId ?? "(none)")}; path_probe_transport={FormatProtocolLogValue(pathProbeTransport)}; path_probe_acked_utc_ms={snapshot?.PathProbeAckedUtcMs ?? 0}; target_route={FormatProtocolLogValue(targetRoute)}; target_protocol_version={snapshot?.ProtocolVersion ?? 0}; target_transport={FormatProtocolLogValue(targetTransport)}; handoff_kind={FormatProtocolLogValue(handoffKind)}");
+    }
+
     private void TryResumeOutboundRuntimeUnlockAfterFallbackSurvivalProofLocked(
         OutboundTransferContext context,
         string reason)
@@ -2437,8 +2550,7 @@ public sealed partial class SessionFileTransferService
         }
 
         var admission = RequestRuntimeUnlockAdmissionLocked(context, "fallback_survival_resume", reason);
-        if (!context.RuntimeUnlockWaitingForFallbackSurvival ||
-            context.IsTerminal ||
+        if (context.IsTerminal ||
             !context.RouteRuntime.UsesPostTunaFallbackV6Runtime ||
             !admission.Granted)
         {
@@ -2459,8 +2571,7 @@ public sealed partial class SessionFileTransferService
         }
 
         var admission = RequestRuntimeUnlockAdmissionLocked(context, "fallback_survival_resume", reason);
-        if (!context.RuntimeUnlockWaitingForFallbackSurvival ||
-            context.IsTerminal ||
+        if (context.IsTerminal ||
             !context.RouteRuntime.UsesPostTunaFallbackV6Runtime ||
             !admission.Granted)
         {
@@ -3161,6 +3272,11 @@ public sealed partial class SessionFileTransferService
             HandoffKind: FileTransferTransportHandoffKind.NormalToTunaActivation,
             TransportProfileKind: ResolveTransportProfileKind(transport));
         var routeSelection = FileTransferRouteResolver.Resolve(routeInput);
+        if (!EnsureOutboundRuntimeUnlockPreCommitProbeReadyForRouteCommitLocked(context, reason))
+        {
+            return true;
+        }
+
         if (!TryAcceptRuntimeUnlockRouteCommitLocked(context, routeSelection, reason, out _, out var routeCommitToken))
         {
             return false;
@@ -3236,6 +3352,11 @@ public sealed partial class SessionFileTransferService
             HandoffKind: FileTransferTransportHandoffKind.NormalToTunaActivation,
             TransportProfileKind: ResolveTransportProfileKind(transport));
         var routeSelection = FileTransferRouteResolver.Resolve(routeInput);
+        if (!EnsureInboundRuntimeUnlockPreCommitProbeReadyForRouteCommitLocked(context, reason))
+        {
+            return true;
+        }
+
         if (!TryAcceptRuntimeUnlockRouteCommitLocked(context, routeSelection, reason, out _, out var routeCommitToken))
         {
             return false;
@@ -3358,6 +3479,11 @@ public sealed partial class SessionFileTransferService
             HandoffKind: FileTransferTransportHandoffKind.NormalToTunaActivation,
             TransportProfileKind: ResolveTransportProfileKind(transport));
         var routeSelection = FileTransferRouteResolver.Resolve(routeInput);
+        if (!EnsureOutboundRuntimeUnlockPreCommitProbeReadyForRouteCommitLocked(context, reason))
+        {
+            return true;
+        }
+
         if (!TryAcceptRuntimeUnlockRouteCommitLocked(context, routeSelection, reason, out _, out var routeCommitToken))
         {
             return false;
@@ -3432,6 +3558,11 @@ public sealed partial class SessionFileTransferService
             HandoffKind: FileTransferTransportHandoffKind.NormalToTunaActivation,
             TransportProfileKind: ResolveTransportProfileKind(transport));
         var routeSelection = FileTransferRouteResolver.Resolve(routeInput);
+        if (!EnsureInboundRuntimeUnlockPreCommitProbeReadyForRouteCommitLocked(context, reason))
+        {
+            return true;
+        }
+
         if (!TryAcceptRuntimeUnlockRouteCommitLocked(context, routeSelection, reason, out _, out var routeCommitToken))
         {
             return false;

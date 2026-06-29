@@ -1682,12 +1682,18 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorState state,
         FallbackControlPlaneToken token,
         out string rejectionReason)
-        => IsFallbackControlPlaneTokenCurrent(state, token, allowNextGeneration: false, out rejectionReason);
+        => IsFallbackControlPlaneTokenCurrent(
+            state,
+            token,
+            allowNextGeneration: false,
+            allowIssuedGeneration: false,
+            out rejectionReason);
 
     private static bool IsFallbackControlPlaneTokenCurrent(
         FileTransferCoordinatorState state,
         FallbackControlPlaneToken token,
         bool allowNextGeneration,
+        bool allowIssuedGeneration,
         out string rejectionReason)
     {
         rejectionReason = "current";
@@ -1710,7 +1716,16 @@ internal static class FileTransferCoordinator
             return false;
         }
 
-        if (!allowNextGeneration)
+        if (allowIssuedGeneration)
+        {
+            if (token.TokenGeneration <= 0 ||
+                token.TokenGeneration > state.LastFallbackControlPlaneTokenGeneration)
+            {
+                rejectionReason = "fallback_control_plane_token_generation_mismatch";
+                return false;
+            }
+        }
+        else if (!allowNextGeneration)
         {
             if (state.CurrentFallbackControlPlaneToken is not { } current ||
                 current.TokenGeneration != token.TokenGeneration)
@@ -3696,7 +3711,12 @@ internal static class FileTransferCoordinator
         var token = coordinatorEvent.FallbackControlPlaneToken;
         if (token is { } suppliedToken)
         {
-            if (!IsFallbackControlPlaneTokenCurrent(state, suppliedToken, allowNextGeneration: true, out var tokenRejectionReason))
+            if (!IsFallbackControlPlaneTokenCurrent(
+                    state,
+                    suppliedToken,
+                    allowNextGeneration: true,
+                    allowIssuedGeneration: false,
+                    out var tokenRejectionReason))
             {
                 return MutationRejected(state, reason, tokenRejectionReason);
             }
@@ -3739,7 +3759,12 @@ internal static class FileTransferCoordinator
             return MutationRejected(state, reason, "fallback_control_plane_token_missing");
         }
 
-        if (!IsFallbackControlPlaneTokenCurrent(state, token, allowNextGeneration: false, out var tokenRejectionReason))
+        if (!IsFallbackControlPlaneTokenCurrent(
+                state,
+                token,
+                allowNextGeneration: false,
+                allowIssuedGeneration: true,
+                out var tokenRejectionReason))
         {
             return MutationRejected(state, reason, tokenRejectionReason);
         }
@@ -3751,10 +3776,14 @@ internal static class FileTransferCoordinator
                 : "control_plane_delivery_missing");
         }
 
+        var clearCurrentToken =
+            state.CurrentFallbackControlPlaneToken?.TokenGeneration == token.TokenGeneration;
         return Decision(
             state with
             {
-                CurrentFallbackControlPlaneToken = null,
+                CurrentFallbackControlPlaneToken = clearCurrentToken
+                    ? null
+                    : state.CurrentFallbackControlPlaneToken,
             },
             reason,
             fallbackControlPlaneToken: token,
@@ -4364,7 +4393,8 @@ internal static class FileTransferCoordinator
             return false;
         }
 
-        if (request.FallbackControlPlaneToken is { } controlPlaneToken &&
+        if (request.Kind != FileTransferCoordinatorActionKind.ControlPlaneSendCompletion &&
+            request.FallbackControlPlaneToken is { } controlPlaneToken &&
             !IsFallbackControlPlaneTokenCurrent(state, controlPlaneToken, out rejectionReason))
         {
             return false;
@@ -4387,6 +4417,16 @@ internal static class FileTransferCoordinator
             if (request.FallbackControlPlaneToken is null)
             {
                 rejectionReason = "fallback_control_plane_token_missing";
+                return false;
+            }
+
+            if (!IsFallbackControlPlaneTokenCurrent(
+                    state,
+                    request.FallbackControlPlaneToken.Value,
+                    allowNextGeneration: false,
+                    allowIssuedGeneration: true,
+                    out rejectionReason))
+            {
                 return false;
             }
 

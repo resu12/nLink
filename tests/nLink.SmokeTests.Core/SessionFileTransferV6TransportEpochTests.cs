@@ -2442,6 +2442,93 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
     }
 
     [Fact]
+    public void V6Epoch_InboundPostTunaFallbackDoesNotReuseStaleUnownedEpoch()
+    {
+        const string transferId = "transfer_v6_post_fallback_does_not_reuse_stale_epoch";
+        const string sessionId = "session_v6_post_fallback_does_not_reuse_stale_epoch";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        var context = CreateInboundPostTunaFallbackV6Context(
+            sessionId,
+            transferId,
+            "post-fallback-stale-unowned-epoch.bin",
+            fileSizeBytes: 256);
+        SetPrivateProperty(context, "State", FileTransferTransferState.Receiving);
+        SetPrivateProperty(context, "ChunkCount", 64);
+        SetPrivateProperty(context, "NextChunkIndex", 10);
+        SetPrivateProperty(context, "PullManifestReceived", true);
+        SetPrivateProperty(context, "V6ReceiverTransportEpoch", 2L);
+        SetPrivateProperty(context, "PullTransportRebindGeneration", 2);
+        SetV6DestinationMode(context, "SparseSeekable");
+
+        var serviceType = typeof(SessionFileTransferService);
+        serviceType
+            .GetField("inboundTransfer", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        var routeSelection = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        var leg = serviceType
+            .GetMethod("StartInboundTransferLegLocked", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!
+            .Invoke(
+                null,
+                [
+                    context,
+                    routeSelection,
+                    "current_fallback_leg",
+                    FileTransferLegState.CheckpointPending,
+                    false,
+                    false,
+                    null,
+                    null,
+                    null,
+                ])!;
+        var legTransportEpochProperty = leg.GetType()
+            .GetProperty("TransportEpochId", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)!;
+        SetPrivateProperty(leg, "TransportEpochId", 2L);
+
+        var epochType = typeof(SessionFileTransferService).Assembly.GetType("NLink.Core.FileTransfer.V6TransportEpoch");
+        Assert.NotNull(epochType);
+        var staleEpoch = Activator.CreateInstance(epochType!)!;
+        SetPrivateProperty(staleEpoch, "EpochId", 1L);
+        SetPrivateProperty(staleEpoch, "Kind", FileTransferTransportHandoffKind.TunaToNormalFallback);
+        SetPrivateProperty(staleEpoch, "SourceTransport", FileTransferTransportKind.Tuna);
+        SetPrivateProperty(staleEpoch, "TargetTransport", FileTransferTransportKind.RegularNkn);
+        SetPrivateProperty(staleEpoch, "Direction", FileTransferDirection.Inbound);
+        SetPrivateProperty(staleEpoch, "Reason", "stale_unowned_epoch");
+        SetPrivateProperty(staleEpoch, "State", V6TransportEpochState.TargetProofPending);
+        SetPrivateProperty(context, "V6TransportEpoch", staleEpoch);
+
+        serviceType
+            .GetMethod("StartInboundV6TransportEpochLocked", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    context,
+                    "transport_epoch",
+                    FileTransferTransportHandoffKind.TunaToNormalFallback,
+                    FileTransferTransportKind.RegularNkn,
+                ]);
+
+        Assert.Equal(2L, Assert.IsType<long>(legTransportEpochProperty.GetValue(leg)));
+
+        var currentEpoch = context.GetType()
+            .GetProperty("V6TransportEpoch", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(context);
+        Assert.NotNull(currentEpoch);
+        Assert.Equal(2L, Assert.IsType<long>(currentEpoch!.GetType()
+            .GetProperty("EpochId", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(currentEpoch)));
+
+        var logTail = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_v6_epoch_terminal; direction=inbound", logTail, StringComparison.Ordinal);
+        Assert.Contains("transport_epoch=1", logTail, StringComparison.Ordinal);
+        Assert.Contains("reason=superseded", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v6_epoch_started; direction=inbound", logTail, StringComparison.Ordinal);
+        Assert.Contains("transport_epoch=2", logTail, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_v6_epoch_reused; direction=inbound", logTail, StringComparison.Ordinal);
+        Assert.DoesNotContain("previous_transport_epoch=2; transport_epoch=1", logTail, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void V6Epoch_TunaActivationUnavailableControlSendFailureDefersForRecovery()
     {
         const string transferId = "transfer_v6_tuna_activation_unavailable_control_failure";

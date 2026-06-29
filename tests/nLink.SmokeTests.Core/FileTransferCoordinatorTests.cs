@@ -438,6 +438,101 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void FallbackControlPlaneSendCompletion_AcceptsIssuedTokenWithoutRetiringNewerCurrentToken()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        var fallbackDecision = FallBack(StartRegular(regular).State, fallback, committedChunk: 8, transportEpoch: 4);
+        var state = fallbackDecision.State;
+        var owner = state.CurrentRuntimeOwner!.Value;
+        var leg = state.CurrentLeg!;
+
+        var firstAuthorization = FileTransferCoordinator.AuthorizeAction(
+            state,
+            FallbackActionRequest(
+                FileTransferCoordinatorActionKind.ControlPlaneSend,
+                owner,
+                leg,
+                controlPlaneKind: FileTransferControlPlaneKind.FallbackTailYield,
+                controlPlanePurpose: "fallback_tail_yield"));
+        Assert.True(firstAuthorization.Accepted);
+        var firstStored = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.FallbackControlPlaneSendAuthorized,
+                fallback,
+                reason: "fallback_tail_yield",
+                state: leg.State,
+                canSendData: leg.CanSendData,
+                transportEpoch: leg.TransportEpochId,
+                bridgeRecoveryGeneration: leg.BridgeRecoveryGeneration,
+                fallbackControlPlaneToken: firstAuthorization.FallbackControlPlaneToken,
+                controlPlaneKind: FileTransferControlPlaneKind.FallbackTailYield,
+                controlPlanePurpose: "fallback_tail_yield"),
+            state);
+        var firstToken = firstStored.State.CurrentFallbackControlPlaneToken;
+        Assert.NotNull(firstToken);
+
+        var secondLeg = firstStored.State.CurrentLeg!;
+        var secondAuthorization = FileTransferCoordinator.AuthorizeAction(
+            firstStored.State,
+            FallbackActionRequest(
+                FileTransferCoordinatorActionKind.ControlPlaneSend,
+                owner,
+                secondLeg,
+                controlPlaneKind: FileTransferControlPlaneKind.FallbackCheckpointRequest,
+                controlPlanePurpose: "checkpoint_request"));
+        Assert.True(secondAuthorization.Accepted);
+        var secondStored = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.FallbackControlPlaneSendAuthorized,
+                fallback,
+                reason: "checkpoint_request",
+                state: secondLeg.State,
+                canSendData: secondLeg.CanSendData,
+                transportEpoch: secondLeg.TransportEpochId,
+                bridgeRecoveryGeneration: secondLeg.BridgeRecoveryGeneration,
+                fallbackControlPlaneToken: secondAuthorization.FallbackControlPlaneToken,
+                controlPlaneKind: FileTransferControlPlaneKind.FallbackCheckpointRequest,
+                controlPlanePurpose: "checkpoint_request"),
+            firstStored.State);
+        var secondToken = secondStored.State.CurrentFallbackControlPlaneToken;
+        Assert.NotNull(secondToken);
+        Assert.NotEqual(firstToken!.Value.TokenGeneration, secondToken!.Value.TokenGeneration);
+
+        var firstCompletionAuthorized = FileTransferCoordinator.AuthorizeAction(
+            secondStored.State,
+            FallbackActionRequest(
+                FileTransferCoordinatorActionKind.ControlPlaneSendCompletion,
+                owner,
+                secondStored.State.CurrentLeg!,
+                fallbackControlPlaneToken: firstToken,
+                controlPlaneKind: FileTransferControlPlaneKind.FallbackTailYield,
+                peerVisible: true,
+                acceptedAny: true));
+
+        Assert.True(firstCompletionAuthorized.Accepted);
+        Assert.True(firstCompletionAuthorized.ControlPlanePeerVisibleProofAccepted);
+
+        var firstCompleted = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.FallbackControlPlaneSendCompleted,
+                fallback,
+                reason: "fallback_tail_yield_completed",
+                state: secondStored.State.CurrentLeg!.State,
+                canSendData: secondStored.State.CurrentLeg.CanSendData,
+                transportEpoch: secondStored.State.CurrentLeg.TransportEpochId,
+                bridgeRecoveryGeneration: secondStored.State.CurrentLeg.BridgeRecoveryGeneration,
+                fallbackControlPlaneToken: firstToken,
+                controlPlaneKind: FileTransferControlPlaneKind.FallbackTailYield,
+                controlPlanePeerVisible: true,
+                controlPlaneAcceptedAny: true),
+            secondStored.State);
+
+        Assert.True(firstCompleted.ControlPlanePeerVisibleProofAccepted);
+        Assert.Equal(secondToken.Value.TokenGeneration, firstCompleted.State.CurrentFallbackControlPlaneToken?.TokenGeneration);
+    }
+
+    [Fact]
     public void FallbackControlPlaneSendCompletion_AcceptedAnyWithoutPeerVisibleIsNotProof()
     {
         var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
