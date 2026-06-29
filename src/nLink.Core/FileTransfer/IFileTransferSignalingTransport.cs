@@ -234,6 +234,17 @@ public sealed record FileTransferDataPathSendAuthority(
     string RoutePublicationActionKind,
     string CoordinatorDecisionReason);
 
+public sealed class FileTransferRequiredTunaBulkUnavailableException : InvalidOperationException
+{
+    public FileTransferRequiredTunaBulkUnavailableException(string reason)
+        : base("Required Tuna file-transfer bulk send was not observed.")
+    {
+        Reason = string.IsNullOrWhiteSpace(reason) ? "required_tuna_bulk_unavailable" : reason.Trim();
+    }
+
+    public string Reason { get; }
+}
+
 public sealed record FileTransferRouteHintNotification(
     string SessionId,
     string TransferId,
@@ -251,6 +262,26 @@ public sealed record FileTransferRouteHintNotification(
 public interface IFileTransferRouteHintObserver
 {
     void ObserveFileTransferRouteHint(FileTransferRouteHintNotification notification);
+}
+
+public sealed record RuntimeUnlockPreCommitProbeLaunchHoldNotification(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    long TransactionGeneration,
+    long OfferGeneration,
+    long TunaPathLeaseGeneration,
+    string Source,
+    string Reason,
+    string AdmissionReason,
+    int LiveRouteEpoch,
+    int RuntimeGeneration,
+    int TerminalGeneration,
+    long LegGeneration);
+
+public interface IRuntimeUnlockPreCommitProbeLaunchObserver
+{
+    void NotifyRuntimeUnlockPreCommitProbeLaunchHeld(RuntimeUnlockPreCommitProbeLaunchHoldNotification notification);
 }
 
 internal sealed record RuntimeUnlockRouteCommitSnapshot(
@@ -331,6 +362,7 @@ public interface IFileTransferSignalingTransport
     event EventHandler<FileTransferTransportEpochReceivedEventArgs>? FileTransferTransportEpochReceived;
     event EventHandler<FileTransferTransportProbeReceivedEventArgs>? FileTransferTransportProbeReceived;
     event EventHandler<FileTransferRepairProofReceivedEventArgs>? FileTransferRepairProofReceived;
+    event EventHandler<FileTransferFallbackTailYieldProofReceivedEventArgs>? FileTransferFallbackTailYieldProofReceived;
 
     Task SendFileTransferOfferAsync(FileTransferOfferV2 message, CancellationToken ct);
     Task SendFileTransferAcceptAsync(FileTransferAcceptV1 message, CancellationToken ct);
@@ -477,12 +509,30 @@ public sealed class FileTransferDataSessionAvailabilityChangedEventArgs : EventA
         bool requiresResumeRequest,
         FileTransferTransportHandoffKind handoffKind = FileTransferTransportHandoffKind.None,
         FileTransferTransportKind targetTransport = FileTransferTransportKind.Unknown)
+        : this(
+            isAvailable,
+            reason,
+            requiresResumeRequest,
+            handoffKind,
+            targetTransport,
+            runtimeUnlockPreCommitProbeSnapshot: null)
+    {
+    }
+
+    internal FileTransferDataSessionAvailabilityChangedEventArgs(
+        bool isAvailable,
+        string reason,
+        bool requiresResumeRequest,
+        FileTransferTransportHandoffKind handoffKind,
+        FileTransferTransportKind targetTransport,
+        RuntimeUnlockRouteCommitSnapshot? runtimeUnlockPreCommitProbeSnapshot)
     {
         IsAvailable = isAvailable;
         Reason = string.IsNullOrWhiteSpace(reason) ? "transport_state_changed" : reason.Trim();
         RequiresResumeRequest = requiresResumeRequest;
         HandoffKind = handoffKind;
         TargetTransport = targetTransport;
+        RuntimeUnlockPreCommitProbeSnapshot = runtimeUnlockPreCommitProbeSnapshot;
     }
 
     public bool IsAvailable { get; }
@@ -494,6 +544,8 @@ public sealed class FileTransferDataSessionAvailabilityChangedEventArgs : EventA
     public FileTransferTransportHandoffKind HandoffKind { get; }
 
     public FileTransferTransportKind TargetTransport { get; }
+
+    internal RuntimeUnlockRouteCommitSnapshot? RuntimeUnlockPreCommitProbeSnapshot { get; }
 }
 
 public sealed class FileTransferOfferReceivedEventArgs : EventArgs
@@ -648,6 +700,19 @@ public sealed class FileTransferRepairProofReceivedEventArgs : EventArgs
     }
 
     public FileTransferRepairProofV6 Message { get; }
+
+    public string? PeerId { get; }
+}
+
+public sealed class FileTransferFallbackTailYieldProofReceivedEventArgs : EventArgs
+{
+    public FileTransferFallbackTailYieldProofReceivedEventArgs(FileTransferFallbackTailYieldFrameV6 message, string? peerId)
+    {
+        Message = message ?? throw new ArgumentNullException(nameof(message));
+        PeerId = string.IsNullOrWhiteSpace(peerId) ? null : peerId.Trim();
+    }
+
+    public FileTransferFallbackTailYieldFrameV6 Message { get; }
 
     public string? PeerId { get; }
 }

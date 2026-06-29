@@ -324,6 +324,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         public event EventHandler<FileTransferTransportEpochReceivedEventArgs>? FileTransferTransportEpochReceived;
         public event EventHandler<FileTransferTransportProbeReceivedEventArgs>? FileTransferTransportProbeReceived;
         public event EventHandler<FileTransferRepairProofReceivedEventArgs>? FileTransferRepairProofReceived;
+        public event EventHandler<FileTransferFallbackTailYieldProofReceivedEventArgs>? FileTransferFallbackTailYieldProofReceived;
         public event EventHandler<TransportAccelerationStateChangedEventArgs>? TransportAccelerationStateChanged;
         public void Connect(LoopbackFileTransferTransport other)
         {
@@ -782,6 +783,12 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                 var transportKind = target.NextDataFrameTransportKind;
                 target.NextDataFrameTransportKind = FileTransferTransportKind.RegularNkn;
                 session.Deliver(frame, transportKind);
+                if (frame is FileTransferFallbackTailYieldFrameV6 yieldFrame)
+                {
+                    target.FileTransferFallbackTailYieldProofReceived?.Invoke(
+                        target,
+                        new FileTransferFallbackTailYieldProofReceivedEventArgs(yieldFrame, "loopback-peer"));
+                }
             }
             else
             {
@@ -798,7 +805,8 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             => frame is FileTransferReceiverStateFrameV6
                 or FileTransferFrontierRequestFrameV6
                 or FileTransferRepairProofFrameV6
-                or FileTransferTransportEpochFrameV6;
+                or FileTransferTransportEpochFrameV6
+                or FileTransferFallbackTailYieldFrameV6;
 
         private static bool IsV4FallbackRecoveryFrame(FileTransferDataFrame frame)
             => frame is FileTransferStateFrameV4 or FileTransferChunkBatchFrameV4;

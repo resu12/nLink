@@ -164,6 +164,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     public event EventHandler<FileTransferTransportEpochReceivedEventArgs>? FileTransferTransportEpochReceived;
     public event EventHandler<FileTransferTransportProbeReceivedEventArgs>? FileTransferTransportProbeReceived;
     public event EventHandler<FileTransferRepairProofReceivedEventArgs>? FileTransferRepairProofReceived;
+    public event EventHandler<FileTransferFallbackTailYieldProofReceivedEventArgs>? FileTransferFallbackTailYieldProofReceived;
 
     public bool LocalSupportsRemoteControl => LocalRemoteControlSupported;
     public string LocalPeerAddress => localPeerAddress;
@@ -2347,6 +2348,20 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         }
     }
 
+    private void SafeRaiseFileTransferFallbackTailYieldProofReceived(FileTransferFallbackTailYieldFrameV6 message)
+    {
+        LogFileTransferFrameEvent("received", FileTransferDataFrameType, message.TransferId);
+        try
+        {
+            FileTransferFallbackTailYieldProofReceived?.Invoke(
+                this,
+                new FileTransferFallbackTailYieldProofReceivedEventArgs(message, peerId: "devlocal-peer"));
+        }
+        catch
+        {
+        }
+    }
+
     private bool TryHandleFileTransferFrame(TransportFrame frame)
     {
         if (!IsFileTransferFrameType(frame.Type))
@@ -3905,6 +3920,10 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         }
 
         session.Deliver(frame);
+        if (frame is FileTransferFallbackTailYieldFrameV6 yieldFrame)
+        {
+            SafeRaiseFileTransferFallbackTailYieldProofReceived(yieldFrame);
+        }
     }
 
     private sealed class TransportFileTransferDataSession : IFileTransferDataSession

@@ -280,7 +280,8 @@ public sealed partial class SessionFileTransferService
         OutboundTransferContext context,
         RuntimeUnlockAdmissionToken admissionToken,
         string reason,
-        RuntimeUnlockPendingPreCommitProbeRequest? pendingReplay = null)
+        RuntimeUnlockPendingPreCommitProbeRequest? pendingReplay = null,
+        RuntimeUnlockRouteCommitSnapshot? acceptedSnapshot = null)
     {
         if (!FileTransferCoordinator.IsRuntimeUnlockAdmissionTokenCurrent(
                 CreateCoordinatorStateLocked(context),
@@ -316,6 +317,7 @@ public sealed partial class SessionFileTransferService
             runtimeOwner,
             admissionToken,
             pendingReplay,
+            acceptedSnapshot,
             context.LifetimeCts.Token,
             reason);
     }
@@ -324,7 +326,8 @@ public sealed partial class SessionFileTransferService
         InboundTransferContext context,
         RuntimeUnlockAdmissionToken admissionToken,
         string reason,
-        RuntimeUnlockPendingPreCommitProbeRequest? pendingReplay = null)
+        RuntimeUnlockPendingPreCommitProbeRequest? pendingReplay = null,
+        RuntimeUnlockRouteCommitSnapshot? acceptedSnapshot = null)
     {
         if (!FileTransferCoordinator.IsRuntimeUnlockAdmissionTokenCurrent(
                 CreateCoordinatorStateLocked(context),
@@ -360,6 +363,7 @@ public sealed partial class SessionFileTransferService
             runtimeOwner,
             admissionToken,
             pendingReplay,
+            acceptedSnapshot,
             context.LifetimeCts.Token,
             reason);
     }
@@ -372,6 +376,7 @@ public sealed partial class SessionFileTransferService
         RuntimeOwnerToken runtimeOwner,
         RuntimeUnlockAdmissionToken admissionToken,
         RuntimeUnlockPendingPreCommitProbeRequest? pendingReplay,
+        RuntimeUnlockRouteCommitSnapshot? acceptedSnapshot,
         CancellationToken ct,
         string reason)
     {
@@ -391,8 +396,7 @@ public sealed partial class SessionFileTransferService
             }
         }
 
-        if (transport is not IRuntimeUnlockRouteCommitProofProvider proofProvider ||
-            !proofProvider.TryGetRuntimeUnlockRouteCommitProof(sessionId, transferId, out var snapshot))
+        if (transport is not IRuntimeUnlockRouteCommitProofProvider proofProvider)
         {
             if (dataSession is not null && IsFallbackTailQuiescentRuntimeUnlockResumeReason(reason))
             {
@@ -433,6 +437,73 @@ public sealed partial class SessionFileTransferService
             return;
         }
 
+        RuntimeUnlockRouteCommitSnapshot snapshot;
+        if (acceptedSnapshot is { } suppliedSnapshot)
+        {
+            snapshot = suppliedSnapshot;
+        }
+        else if (!proofProvider.TryGetRuntimeUnlockRouteCommitProof(sessionId, transferId, out snapshot))
+        {
+            if (dataSession is not null && IsFallbackTailQuiescentRuntimeUnlockResumeReason(reason))
+            {
+                LogRuntimeUnlockPreCommitProbeWaitingForTransportProof(
+                    direction,
+                    transferId,
+                    sessionId,
+                    reason);
+                return;
+            }
+
+            if (dataSession is null)
+            {
+                LogRuntimeUnlockPreCommitProbePendingRejected(
+                    direction,
+                    transferId,
+                    sessionId,
+                    pendingReplay,
+                    runtimeOwner,
+                    admissionToken,
+                    transactionGeneration: 0,
+                    offerGeneration: 0,
+                    leaseGeneration: 0,
+                    listenerRunId: null,
+                    "proof_provider_unavailable");
+                return;
+            }
+
+            LogRuntimeUnlockPreCommitProbeFailed(
+                direction,
+                transferId,
+                sessionId,
+                transactionGeneration: 0,
+                offerGeneration: 0,
+                leaseGeneration: 0,
+                probeId: "(none)",
+                "proof_provider_unavailable");
+            return;
+        }
+
+        if (!TryValidateRuntimeUnlockPreCommitProbeSnapshotForContext(
+                snapshot,
+                sessionId,
+                transferId,
+                out var snapshotRejectionReason))
+        {
+            LogRuntimeUnlockPreCommitProbePendingRejected(
+                direction,
+                transferId,
+                sessionId,
+                pendingReplay,
+                runtimeOwner,
+                admissionToken,
+                snapshot.TransactionGeneration,
+                snapshot.OfferGeneration,
+                snapshot.TunaPathLeaseGeneration,
+                snapshot.TunaPathLeaseListenerRunId,
+                snapshotRejectionReason);
+            return;
+        }
+
         if (string.Equals(snapshot.PathProbeState, RuntimeUnlockPathProbeState.Started.ToString(), StringComparison.OrdinalIgnoreCase) &&
             !string.IsNullOrWhiteSpace(snapshot.PathProbeId))
         {
@@ -461,19 +532,10 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
-            LogRuntimeUnlockPreCommitProbeFailed(
+            LogRuntimeUnlockPreCommitProbeWaitingForTransportProof(
                 direction,
                 transferId,
                 sessionId,
-                snapshot.TransactionGeneration,
-                snapshot.OfferGeneration,
-                snapshot.TunaPathLeaseGeneration,
-                snapshot.PathProbeId ?? "(none)",
-                "snapshot_not_usable");
-            MarkRuntimeUnlockPreCommitProbeFailedFallbackResumedLocked(
-                direction,
-                sessionId,
-                transferId,
                 "snapshot_not_usable");
             return;
         }
@@ -769,9 +831,38 @@ public sealed partial class SessionFileTransferService
             return snapshot.PeerReceived && snapshot.AnswerReceived;
         }
 
-        return snapshot.TunaPathLeaseCurrent &&
+        return snapshot.PeerReceived &&
+               snapshot.AnswerReceived &&
+               snapshot.TunaPathLeaseCurrent &&
                snapshot.TunaPathLeaseGeneration > 0 &&
                string.Equals(snapshot.TunaPathLeaseState, RuntimeUnlockTunaPathLeaseState.ListenerReady.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool TryValidateRuntimeUnlockPreCommitProbeSnapshotForContext(
+        RuntimeUnlockRouteCommitSnapshot snapshot,
+        string sessionId,
+        string transferId,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (!string.Equals(snapshot.SessionId, sessionId, StringComparison.Ordinal) ||
+            (!string.IsNullOrWhiteSpace(snapshot.TransferId) &&
+             !string.Equals(snapshot.TransferId, transferId, StringComparison.Ordinal)))
+        {
+            rejectionReason = "session_or_transfer_mismatch";
+            return false;
+        }
+
+        if (snapshot.TargetRoute != FileTransferRoute.FileTunaV4 ||
+            snapshot.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+            snapshot.TargetTransport != FileTransferTransportKind.Tuna ||
+            snapshot.HandoffKind != FileTransferTransportHandoffKind.NormalToTunaActivation)
+        {
+            rejectionReason = "route_commit_metadata_invalid";
+            return false;
+        }
+
+        return true;
     }
 
     private static bool RuntimeUnlockPreCommitProbeSnapshotMatchesPending(
@@ -3863,6 +3954,36 @@ public sealed partial class SessionFileTransferService
         {
             TouchOutboundV6PeerLiveness(outboundRecovered, "repair_proof");
             SignalOutboundSparseSenderPump(outboundRecovered);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private Task HandleIncomingFallbackTailYieldProofAsync(FileTransferFallbackTailYieldFrameV6 message)
+    {
+        OutboundTransferContext? outbound = null;
+        InboundTransferContext? inbound = null;
+        lock (gate)
+        {
+            if (IsOutboundLifecycleMessageMatchLocked(message.SessionId, message.TransferId))
+            {
+                outbound = outboundTransfer;
+            }
+
+            if (IsInboundLifecycleMessageMatchLocked(message.SessionId, message.TransferId))
+            {
+                inbound = inboundTransfer;
+            }
+        }
+
+        if (outbound is not null)
+        {
+            ApplyOutboundFallbackTailYieldProof(outbound, message);
+        }
+
+        if (inbound is not null)
+        {
+            ApplyInboundFallbackTailYieldProof(inbound, message);
         }
 
         return Task.CompletedTask;

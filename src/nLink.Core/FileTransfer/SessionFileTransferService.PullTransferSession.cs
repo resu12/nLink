@@ -2377,6 +2377,28 @@ public sealed partial class SessionFileTransferService
         OutboundTransferContext context,
         string reason,
         string rejectionReason)
+        => TryStartOutboundRuntimeUnlockPreCommitProbeOrWaitForFallbackCoreLocked(
+            context,
+            reason,
+            rejectionReason,
+            null);
+
+    private bool TryStartOutboundRuntimeUnlockPreCommitProbeOrWaitForFallbackWithSnapshotLocked(
+        OutboundTransferContext context,
+        string reason,
+        string rejectionReason,
+        RuntimeUnlockRouteCommitSnapshot? snapshot)
+        => TryStartOutboundRuntimeUnlockPreCommitProbeOrWaitForFallbackCoreLocked(
+            context,
+            reason,
+            rejectionReason,
+            snapshot);
+
+    private bool TryStartOutboundRuntimeUnlockPreCommitProbeOrWaitForFallbackCoreLocked(
+        OutboundTransferContext context,
+        string reason,
+        string rejectionReason,
+        RuntimeUnlockRouteCommitSnapshot? snapshot)
     {
         var admission = RequestRuntimeUnlockAdmissionLocked(context, "precommit_probe_start", reason);
         if (!admission.Granted)
@@ -2389,11 +2411,24 @@ public sealed partial class SessionFileTransferService
                     FormatRuntimeUnlockFallbackAdmissionRejection(FileTransferDirection.Outbound, admission));
             }
 
+            NotifyRuntimeUnlockPreCommitProbeLaunchHeldByCoordinatorDenial(
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                admission,
+                snapshot,
+                "precommit_probe_start",
+                reason);
             return true;
         }
 
         GrantOutboundRuntimeUnlockActivationWindowLocked(context, admission, reason);
-        StartOutboundRuntimeUnlockPreCommitProbe(context, admission.AdmissionToken!.Value, reason);
+        StartOutboundRuntimeUnlockPreCommitProbe(
+            context,
+            admission.AdmissionToken!.Value,
+            reason,
+            pendingReplay: null,
+            acceptedSnapshot: snapshot);
         return true;
     }
 
@@ -2401,6 +2436,28 @@ public sealed partial class SessionFileTransferService
         InboundTransferContext context,
         string reason,
         string rejectionReason)
+        => TryStartInboundRuntimeUnlockPreCommitProbeOrWaitForFallbackCoreLocked(
+            context,
+            reason,
+            rejectionReason,
+            null);
+
+    private bool TryStartInboundRuntimeUnlockPreCommitProbeOrWaitForFallbackWithSnapshotLocked(
+        InboundTransferContext context,
+        string reason,
+        string rejectionReason,
+        RuntimeUnlockRouteCommitSnapshot? snapshot)
+        => TryStartInboundRuntimeUnlockPreCommitProbeOrWaitForFallbackCoreLocked(
+            context,
+            reason,
+            rejectionReason,
+            snapshot);
+
+    private bool TryStartInboundRuntimeUnlockPreCommitProbeOrWaitForFallbackCoreLocked(
+        InboundTransferContext context,
+        string reason,
+        string rejectionReason,
+        RuntimeUnlockRouteCommitSnapshot? snapshot)
     {
         var admission = RequestRuntimeUnlockAdmissionLocked(context, "precommit_probe_responder", reason);
         if (!admission.Granted)
@@ -2413,6 +2470,14 @@ public sealed partial class SessionFileTransferService
                     FormatRuntimeUnlockFallbackAdmissionRejection(FileTransferDirection.Inbound, admission));
             }
 
+            NotifyRuntimeUnlockPreCommitProbeLaunchHeldByCoordinatorDenial(
+                FileTransferDirection.Inbound,
+                context.TransferId,
+                context.SessionId,
+                admission,
+                snapshot,
+                "precommit_probe_responder",
+                reason);
             return true;
         }
 
@@ -2455,10 +2520,11 @@ public sealed partial class SessionFileTransferService
 
         if (!string.Equals(deferredAction, "probe_already_started", StringComparison.Ordinal))
         {
-            TryStartOutboundRuntimeUnlockPreCommitProbeOrWaitForFallbackLocked(
+            TryStartOutboundRuntimeUnlockPreCommitProbeOrWaitForFallbackWithSnapshotLocked(
                 context,
                 reason,
-                "runtime_unlock_probe_missing");
+                "runtime_unlock_probe_missing",
+                snapshot);
         }
 
         return false;
@@ -2492,13 +2558,48 @@ public sealed partial class SessionFileTransferService
 
         if (!string.Equals(deferredAction, "probe_already_started", StringComparison.Ordinal))
         {
-            TryStartInboundRuntimeUnlockPreCommitProbeOrWaitForFallbackLocked(
+            TryStartInboundRuntimeUnlockPreCommitProbeOrWaitForFallbackWithSnapshotLocked(
                 context,
                 reason,
-                "runtime_unlock_probe_missing");
+                "runtime_unlock_probe_missing",
+                snapshot);
         }
 
         return false;
+    }
+
+    private void NotifyRuntimeUnlockPreCommitProbeLaunchHeldByCoordinatorDenial(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        RuntimeUnlockAdmissionDecision admission,
+        RuntimeUnlockRouteCommitSnapshot? snapshot,
+        string source,
+        string reason)
+    {
+        if (transport is not IRuntimeUnlockPreCommitProbeLaunchObserver observer ||
+            snapshot is null ||
+            snapshot.TransactionGeneration <= 0 ||
+            snapshot.OfferGeneration <= 0)
+        {
+            return;
+        }
+
+        observer.NotifyRuntimeUnlockPreCommitProbeLaunchHeld(
+            new RuntimeUnlockPreCommitProbeLaunchHoldNotification(
+                sessionId,
+                transferId,
+                direction,
+                snapshot.TransactionGeneration,
+                snapshot.OfferGeneration,
+                snapshot.TunaPathLeaseGeneration,
+                source,
+                reason,
+                admission.Reason,
+                admission.CurrentLiveRouteEpoch,
+                admission.CurrentRuntimeGeneration,
+                admission.CurrentTerminalGeneration,
+                admission.CurrentLegGeneration));
     }
 
     private static bool IsRuntimeUnlockSamePathProbeAcked(RuntimeUnlockRouteCommitSnapshot snapshot)
@@ -4286,6 +4387,7 @@ public sealed partial class SessionFileTransferService
         context.SentAwaitingAck.Clear();
         context.PullV4SenderPumpRepairQueue.Clear();
         context.PullV4SenderPumpRepairQueuedChunkIndices.Clear();
+        var senderPipelineGeneration = context.ResetV6SenderPipelineCancellation();
         foreach (var repairState in context.PullV4SenderPumpRepairRequests.Values)
         {
             repairState.Queued = false;
@@ -4323,7 +4425,7 @@ public sealed partial class SessionFileTransferService
 
         LocalOperationalLog.Warn(
             "FileTransferService",
-            $"event=filetransfer_fallback_leg_recovery_generation_started; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; leg_generation={context.CurrentTransferLeg?.Generation ?? 0}; recovery_generation={generation}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? 0}; transport_epoch={context.V6TransportEpoch?.EpochId ?? generation}; frontier_chunk_index={frontier}; committed_chunk={committed}; cleared_priority_request_count={clearedPriorityRequestCount}; cleared_normal_request_count={clearedNormalRequestCount}; cleared_metadata_count={clearedMetadataCount}; cleared_in_flight_count={clearedInFlightCount}; cleared_awaiting_ack_count={clearedAwaitingAckCount}; cleared_repair_queue_count={clearedRepairQueueCount}; cleared_repair_queued_chunk_count={clearedRepairQueuedChunkCount}; old_credit_discarded=1");
+            $"event=filetransfer_fallback_leg_recovery_generation_started; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; leg_generation={context.CurrentTransferLeg?.Generation ?? 0}; recovery_generation={generation}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? 0}; transport_epoch={context.V6TransportEpoch?.EpochId ?? generation}; frontier_chunk_index={frontier}; committed_chunk={committed}; cleared_priority_request_count={clearedPriorityRequestCount}; cleared_normal_request_count={clearedNormalRequestCount}; cleared_metadata_count={clearedMetadataCount}; cleared_in_flight_count={clearedInFlightCount}; cleared_awaiting_ack_count={clearedAwaitingAckCount}; cleared_repair_queue_count={clearedRepairQueueCount}; cleared_repair_queued_chunk_count={clearedRepairQueuedChunkCount}; sender_pipeline_generation={senderPipelineGeneration}; old_credit_discarded=1");
     }
 
     private static void ResetInboundPostTunaFallbackLegOwnedStateLocked(

@@ -16,7 +16,7 @@ using NLink.Core.SessionSecurity;
 namespace NLink.Infra.Nkn;
 
 #pragma warning disable CS0067
-public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, IBridgeBootstrapReadinessSignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, ISessionLivenessSignalingTransport, ISessionRecoveryStateContract, ITransportAccelerationStatus, ITransportAccelerationControl, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IScreenShareTransportBackpressureProbe, IScreenShareTransportPolicyController, IFileTransferSignalingTransport, IFileTransferSessionContextProvider, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferControlPlaneDeliveryTransport, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferRecoveryLivenessState, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferPostTunaFallbackControlPlanePressureObserver, IFileTransferRouteCompletionObserver, IFileTransferRouteHintObserver, IFileTransferInitialTunaReadinessProvider, IRuntimeUnlockRouteCommitProofProvider, IAuthoritativeConnectedAddressSource
+public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, IBridgeBootstrapReadinessSignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, ISessionLivenessSignalingTransport, ISessionRecoveryStateContract, ITransportAccelerationStatus, ITransportAccelerationControl, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IScreenShareTransportBackpressureProbe, IScreenShareTransportPolicyController, IFileTransferSignalingTransport, IFileTransferSessionContextProvider, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferControlPlaneDeliveryTransport, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferRecoveryLivenessState, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferPostTunaFallbackControlPlanePressureObserver, IFileTransferRouteCompletionObserver, IFileTransferRouteHintObserver, IFileTransferInitialTunaReadinessProvider, IRuntimeUnlockRouteCommitProofProvider, IRuntimeUnlockPreCommitProbeLaunchObserver, IAuthoritativeConnectedAddressSource
 {
     private readonly record struct FileTransferV6TransportEpochKey(
         string SessionId,
@@ -38,7 +38,13 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         string Reason,
         FileTransferTransportHandoffKind HandoffKind,
         FileTransferTransportKind TargetTransport,
-        DateTimeOffset RecordedUtc);
+        DateTimeOffset RecordedUtc,
+        RuntimeUnlockRouteCommitSnapshot? RuntimeUnlockPreCommitProbeSnapshot = null);
+
+    private readonly record struct FileTransferRouteHintKey(
+        string SessionId,
+        string TransferId,
+        FileTransferDirection Direction);
 
     private readonly record struct FileTransferRouteHint(
         FileTransferRoute Route,
@@ -171,7 +177,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private readonly Dictionary<string, DateTimeOffset> fileTransferCancelEchoLastSent = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTimeOffset> fileTransferCompleteEchoLastSent = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TransportFileTransferDataSession> fileTransferDataSessions = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, FileTransferRouteHint> fileTransferRouteHints = new(StringComparer.Ordinal);
+    private readonly Dictionary<FileTransferRouteHintKey, FileTransferRouteHint> fileTransferRouteHints = new();
     private readonly Dictionary<string, FileTransferPostTunaFallbackRepairProofHint> fileTransferPostTunaFallbackRepairProofHints = new(StringComparer.Ordinal);
     private readonly HashSet<string> fileTransferPostTunaFallbackYieldRuntimeUnlockRetries = new(StringComparer.Ordinal);
     private int fileTransferRoutePublicationAuthorityForTestsGeneration;
@@ -455,6 +461,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     public event EventHandler<FileTransferTransportEpochReceivedEventArgs>? FileTransferTransportEpochReceived;
     public event EventHandler<FileTransferTransportProbeReceivedEventArgs>? FileTransferTransportProbeReceived;
     public event EventHandler<FileTransferRepairProofReceivedEventArgs>? FileTransferRepairProofReceived;
+    public event EventHandler<FileTransferFallbackTailYieldProofReceivedEventArgs>? FileTransferFallbackTailYieldProofReceived;
 
     internal event EventHandler<BridgeLifecycleEvent>? BridgeLifecycle;
     public event EventHandler<ScreenShareFrameCompletedEventArgs>? ScreenShareFrameCompleted;

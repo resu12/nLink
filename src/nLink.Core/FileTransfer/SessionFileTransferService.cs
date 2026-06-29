@@ -675,6 +675,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         transport.FileTransferTransportEpochReceived += OnFileTransferTransportEpochReceived;
         transport.FileTransferTransportProbeReceived += OnFileTransferTransportProbeReceived;
         transport.FileTransferRepairProofReceived += OnFileTransferRepairProofReceived;
+        transport.FileTransferFallbackTailYieldProofReceived += OnFileTransferFallbackTailYieldProofReceived;
 
         if (transport is ISignalingTransport lifecycleTransport)
         {
@@ -2260,6 +2261,9 @@ public sealed partial class SessionFileTransferService : IDisposable
     private void OnFileTransferRepairProofReceived(object? sender, FileTransferRepairProofReceivedEventArgs e)
         => RunHardPriorityInboundLifecycle("repair_proof", () => HandleIncomingRepairProofAsync(e.Message));
 
+    private void OnFileTransferFallbackTailYieldProofReceived(object? sender, FileTransferFallbackTailYieldProofReceivedEventArgs e)
+        => RunHardPriorityInboundLifecycle("fallback_tail_yield_proof", () => HandleIncomingFallbackTailYieldProofAsync(e.Message));
+
     private void OnTransportRejected(object? sender, EventArgs e)
         => RunHardPriorityInboundLifecycle("transport_rejected", HandleTransportRejectedAsync);
 
@@ -3379,9 +3383,20 @@ public sealed partial class SessionFileTransferService : IDisposable
                     if (ReferenceEquals(outboundTransfer, outboundToResume) &&
                         !outboundToResume.IsTerminal)
                     {
-                        TryReplayOutboundRuntimeUnlockPendingPreCommitProbeLocked(
-                            outboundToResume,
-                            effectiveReason);
+                        if (availability.RuntimeUnlockPreCommitProbeSnapshot is { } snapshot)
+                        {
+                            TryStartOutboundRuntimeUnlockPreCommitProbeOrWaitForFallbackWithSnapshotLocked(
+                                outboundToResume,
+                                effectiveReason,
+                                "runtime_unlock_probe_missing",
+                                snapshot);
+                        }
+                        else
+                        {
+                            TryReplayOutboundRuntimeUnlockPendingPreCommitProbeLocked(
+                                outboundToResume,
+                                effectiveReason);
+                        }
                     }
                 }
 
@@ -3493,9 +3508,20 @@ public sealed partial class SessionFileTransferService : IDisposable
                     if (ReferenceEquals(inboundTransfer, inboundToResume) &&
                         !inboundToResume.IsTerminal)
                     {
-                        TryReplayInboundRuntimeUnlockPendingPreCommitProbeLocked(
-                            inboundToResume,
-                            effectiveReason);
+                        if (availability.RuntimeUnlockPreCommitProbeSnapshot is { } snapshot)
+                        {
+                            TryStartInboundRuntimeUnlockPreCommitProbeOrWaitForFallbackWithSnapshotLocked(
+                                inboundToResume,
+                                effectiveReason,
+                                "runtime_unlock_probe_missing",
+                                snapshot);
+                        }
+                        else
+                        {
+                            TryReplayInboundRuntimeUnlockPendingPreCommitProbeLocked(
+                                inboundToResume,
+                                effectiveReason);
+                        }
                     }
                 }
             }
@@ -8386,8 +8412,75 @@ public sealed partial class SessionFileTransferService : IDisposable
         }
 
         var ownerKey = BuildFallbackOwnerKey(sessionId, transferId, leg!);
-        return string.Equals(localOwnerKey, ownerKey, StringComparison.Ordinal) &&
-               string.Equals(peerOwnerKey, ownerKey, StringComparison.Ordinal);
+        if (string.Equals(localOwnerKey, ownerKey, StringComparison.Ordinal) &&
+            string.Equals(peerOwnerKey, ownerKey, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return IsPairedFallbackTailYieldForCurrentLegAfterTransportEpochAdvance(
+            sessionId,
+            transferId,
+            leg!,
+            localOwnerKey,
+            peerOwnerKey);
+    }
+
+    private static bool IsPairedFallbackTailYieldForCurrentLegAfterTransportEpochAdvance(
+        string sessionId,
+        string transferId,
+        FileTransferLeg leg,
+        string? localOwnerKey,
+        string? peerOwnerKey)
+    {
+        if (string.IsNullOrWhiteSpace(localOwnerKey) ||
+            string.IsNullOrWhiteSpace(peerOwnerKey))
+        {
+            return false;
+        }
+
+        return IsFallbackTailYieldOwnerKeyForCurrentLegAfterTransportEpochAdvance(
+                   sessionId,
+                   transferId,
+                   leg,
+                   localOwnerKey) &&
+               IsFallbackTailYieldOwnerKeyForCurrentLegAfterTransportEpochAdvance(
+                   sessionId,
+                   transferId,
+                   leg,
+                   peerOwnerKey);
+    }
+
+    private static bool IsFallbackTailYieldOwnerKeyForCurrentLegAfterTransportEpochAdvance(
+        string sessionId,
+        string transferId,
+        FileTransferLeg leg,
+        string ownerKey)
+    {
+        var parts = ownerKey.Split('|');
+        if (parts.Length != 9)
+        {
+            return false;
+        }
+
+        var checkpointRequestId = string.IsNullOrWhiteSpace(leg.CheckpointRequestId)
+            ? "(none)"
+            : leg.CheckpointRequestId;
+        if (!string.Equals(parts[0], sessionId, StringComparison.Ordinal) ||
+            !string.Equals(parts[1], transferId, StringComparison.Ordinal) ||
+            !string.Equals(parts[2], leg.RouteSelection.TelemetryToken, StringComparison.Ordinal) ||
+            !string.Equals(parts[3], leg.ProtocolVersion.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal) ||
+            !string.Equals(parts[4], leg.LiveRouteEpochId.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal) ||
+            !string.Equals(parts[5], leg.Generation.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal) ||
+            !string.Equals(parts[6], leg.BridgeRecoveryGeneration.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal) ||
+            !string.Equals(parts[8], checkpointRequestId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return long.TryParse(parts[7], NumberStyles.Integer, CultureInfo.InvariantCulture, out var yieldedTransportEpoch) &&
+               yieldedTransportEpoch > 0 &&
+               yieldedTransportEpoch <= leg.TransportEpochId;
     }
 
     private static FileTransferFallbackTailYieldFrameV6 CreateFallbackTailYieldFrame(
@@ -8785,6 +8878,12 @@ public sealed partial class SessionFileTransferService : IDisposable
                 return;
             }
 
+            if (context.PeerFallbackTailYieldGranted &&
+                string.Equals(context.PeerFallbackTailYieldOwnerKey, frame.OwnerKey, StringComparison.Ordinal))
+            {
+                return;
+            }
+
             var currentLeg = context.CurrentTransferLeg;
             if (!TryAuthorizeRuntimeOwnerLegActionLocked(
                     context,
@@ -8851,6 +8950,12 @@ public sealed partial class SessionFileTransferService : IDisposable
                     out var reason))
             {
                 context.FallbackTailYieldMismatchReason = reason;
+                return;
+            }
+
+            if (context.PeerFallbackTailYieldGranted &&
+                string.Equals(context.PeerFallbackTailYieldOwnerKey, frame.OwnerKey, StringComparison.Ordinal))
+            {
                 return;
             }
 
@@ -8977,7 +9082,13 @@ public sealed partial class SessionFileTransferService : IDisposable
             !context.LocalFallbackTailYieldPeerVisible ||
             !context.PeerFallbackTailYieldGranted ||
             string.IsNullOrWhiteSpace(context.LocalFallbackTailYieldOwnerKey) ||
-            !string.Equals(context.LocalFallbackTailYieldOwnerKey, context.PeerFallbackTailYieldOwnerKey, StringComparison.Ordinal))
+            !IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg) ||
+            !IsPairedFallbackTailYieldForCurrentLegAfterTransportEpochAdvance(
+                context.SessionId,
+                context.TransferId,
+                context.CurrentTransferLeg!,
+                context.LocalFallbackTailYieldOwnerKey,
+                context.PeerFallbackTailYieldOwnerKey))
         {
             return;
         }
@@ -9009,12 +9120,19 @@ public sealed partial class SessionFileTransferService : IDisposable
             !context.LocalFallbackTailYieldPeerVisible ||
             !context.PeerFallbackTailYieldGranted ||
             string.IsNullOrWhiteSpace(context.LocalFallbackTailYieldOwnerKey) ||
-            !string.Equals(context.LocalFallbackTailYieldOwnerKey, context.PeerFallbackTailYieldOwnerKey, StringComparison.Ordinal))
+            !IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg) ||
+            !IsPairedFallbackTailYieldForCurrentLegAfterTransportEpochAdvance(
+                context.SessionId,
+                context.TransferId,
+                context.CurrentTransferLeg!,
+                context.LocalFallbackTailYieldOwnerKey,
+                context.PeerFallbackTailYieldOwnerKey))
         {
             return;
         }
 
         context.PairedFallbackTailYieldGranted = true;
+        ClearInboundPostTunaFallbackPressureDiagnosticLocked(context);
         LogFileTransferFallbackTailPairedYieldGranted(
             FileTransferDirection.Inbound,
             context.TransferId,
@@ -10854,6 +10972,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         IFileTransferPostTunaFallbackControlPlanePressureObserver? observer;
         var clearProgressPressure = IsInboundPostTunaFallbackProgressOnlyControlPlane(request);
         var shouldObservePressure = true;
+        var clearPairedYieldPressure = false;
         lock (gate)
         {
             if (!TryValidateInboundFallbackControlPlaneSendLocked(
@@ -10866,7 +10985,13 @@ public sealed partial class SessionFileTransferService : IDisposable
             }
 
             observer = transport as IFileTransferPostTunaFallbackControlPlanePressureObserver;
-            if (clearProgressPressure)
+            if (HasPairedFallbackTailYieldForCurrentOwner(context))
+            {
+                ClearInboundPostTunaFallbackPressureDiagnosticLocked(context);
+                shouldObservePressure = false;
+                clearPairedYieldPressure = true;
+            }
+            else if (clearProgressPressure)
             {
                 if (!TryAuthorizeRuntimeOwnerLegActionLocked(
                         context,
@@ -10912,6 +11037,14 @@ public sealed partial class SessionFileTransferService : IDisposable
             observer?.ClearPostTunaFallbackControlPlanePressure(
                 context.TransferId,
                 "receiver_state_progress");
+            return;
+        }
+
+        if (clearPairedYieldPressure)
+        {
+            observer?.ClearPostTunaFallbackControlPlanePressure(
+                context.TransferId,
+                "fallback_tail_paired_yield");
             return;
         }
 

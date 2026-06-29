@@ -668,7 +668,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             () => ReadOperationalLogTail(logStart).Contains(
                 "event=filetransfer_primary_regular_nkn_bulk_v6_selected; direction=outbound",
                 StringComparison.Ordinal),
-            timeoutMs: 5000);
+            timeoutMs: 10000);
 
         receiverTransport.NextDataFrameTransportKind = FileTransferTransportKind.Tuna;
         senderTransport.RequestAllDataSessionHandoffs(

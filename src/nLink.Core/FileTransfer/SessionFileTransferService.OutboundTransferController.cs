@@ -1124,6 +1124,7 @@ public sealed partial class SessionFileTransferService
             previousTransport.FileTransferTransportEpochReceived -= OnFileTransferTransportEpochReceived;
             previousTransport.FileTransferTransportProbeReceived -= OnFileTransferTransportProbeReceived;
             previousTransport.FileTransferRepairProofReceived -= OnFileTransferRepairProofReceived;
+            previousTransport.FileTransferFallbackTailYieldProofReceived -= OnFileTransferFallbackTailYieldProofReceived;
         }
 
         if (previousLifecycle is not null)

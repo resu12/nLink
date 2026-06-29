@@ -4455,6 +4455,24 @@ function Add-TunaGuiLiveRouteEpochObservation {
     }) | Out-Null
 }
 
+function Get-TunaGuiLiveRouteEpochRouteChanges {
+    param([Parameter(Mandatory = $true)]$Observations)
+
+    $sequence = @($Observations.ToArray() |
+        Sort-Object { [int]$_['order'] } |
+        ForEach-Object { [string]($_['route']) } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_ -ne '(unknown)' })
+    $changes = New-Object System.Collections.Generic.List[string]
+    foreach ($route in $sequence) {
+        if ($changes.Count -eq 0 -or
+            -not [string]::Equals($changes[$changes.Count - 1], $route, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $changes.Add($route) | Out-Null
+        }
+    }
+
+    return @($changes.ToArray())
+}
+
 function Get-TunaGuiLiveRouteExpectation {
     param([Parameter(Mandatory = $true)][string]$Route)
 
@@ -6084,7 +6102,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                                 $terminalProbeOutboundError -eq '(none)') {
                                 $firstTransferTerminalBeforeLiveReactivation = $true
                                 $firstTransferTerminalBeforeLiveReactivationTransferId = [string]$terminalProbe.TransferId
-                                $terminalRouteSequence = ($liveRouteEpochRouteChanges.ToArray() -join ',')
+                                $terminalRouteSequence = ((Get-TunaGuiLiveRouteEpochRouteChanges -Observations $liveRouteEpochObservations) -join ',')
                                 $terminalFallbackPrefixObserved = $fallbackEpochRecoveredObserved -or $terminalRouteSequence.StartsWith('file_tuna_v4,post_tuna_fallback_v6', [System.StringComparison]::Ordinal)
                                 $terminalBeforeActivationEvent = if ($terminalFallbackPrefixObserved) {
                                     'filetransfer_tuna_gui_live_reactivation_first_transfer_terminal_before_activation'
@@ -6129,7 +6147,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                                 (Test-TunaGuiTransferTerminalAfterBookmark -Bookmark $bookmark)) {
                                 $firstTransferTerminalBeforeLiveReactivation = $true
                                 $firstTransferTerminalBeforeLiveReactivationTransferId = '(terminal-log)'
-                                $terminalRouteSequence = ($liveRouteEpochRouteChanges.ToArray() -join ',')
+                                $terminalRouteSequence = ((Get-TunaGuiLiveRouteEpochRouteChanges -Observations $liveRouteEpochObservations) -join ',')
                                 $terminalFallbackPrefixObserved = $fallbackEpochRecoveredObserved -or $terminalRouteSequence.StartsWith('file_tuna_v4,post_tuna_fallback_v6', [System.StringComparison]::Ordinal)
                                 $terminalBeforeActivationEvent = if ($terminalFallbackPrefixObserved) {
                                     'filetransfer_tuna_gui_live_reactivation_first_transfer_terminal_before_activation'
@@ -6395,11 +6413,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     $liveRouteEpochArray = @($liveRouteEpochObservations.ToArray())
     $liveRouteEpochSequence = @($liveRouteEpochArray | ForEach-Object { [string]($_['route']) } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_ -ne '(unknown)' })
     $liveRouteEpochRouteChanges = New-Object System.Collections.Generic.List[string]
-    foreach ($route in $liveRouteEpochSequence) {
-        if ($liveRouteEpochRouteChanges.Count -eq 0 -or
-            -not [string]::Equals($liveRouteEpochRouteChanges[$liveRouteEpochRouteChanges.Count - 1], $route, [System.StringComparison]::OrdinalIgnoreCase)) {
-            $liveRouteEpochRouteChanges.Add($route) | Out-Null
-        }
+    foreach ($route in @(Get-TunaGuiLiveRouteEpochRouteChanges -Observations $liveRouteEpochObservations)) {
+        $liveRouteEpochRouteChanges.Add($route) | Out-Null
     }
     $summary = [ordered]@{
         event = 'filetransfer_tuna_gui_handoff_fallback_summary'

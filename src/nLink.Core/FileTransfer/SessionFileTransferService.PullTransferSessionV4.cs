@@ -25,6 +25,7 @@ public sealed partial class SessionFileTransferService
         => ShouldUseV6SparseCreditEnvelope(context)
             ? FileTransferProtocol.IsV6DataFrame(frame)
             : FileTransferProtocol.IsV4DataFrame(frame) ||
+              ShouldAcceptCurrentPostTunaFallbackV6RuntimeFrame(context, frame) ||
               ShouldAcceptLiveRouteV6ProbeFrame(context, frame);
 
     private static bool ShouldAcceptSparseCreditRuntimeDataFrame(
@@ -33,7 +34,36 @@ public sealed partial class SessionFileTransferService
         => ShouldUseV6SparseCreditEnvelope(context)
             ? FileTransferProtocol.IsV6DataFrame(frame)
             : FileTransferProtocol.IsV4DataFrame(frame) ||
+              ShouldAcceptCurrentPostTunaFallbackV6RuntimeFrame(context, frame) ||
               ShouldAcceptLiveRouteV6ProbeFrame(context, frame);
+
+    private static bool ShouldAcceptCurrentPostTunaFallbackV6RuntimeFrame(
+        OutboundTransferContext context,
+        FileTransferDataFrame frame)
+        => FileTransferProtocol.IsV6DataFrame(frame) &&
+           context.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6 &&
+           context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
+           IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg);
+
+    private static bool ShouldAcceptCurrentPostTunaFallbackV6RuntimeFrame(
+        InboundTransferContext context,
+        FileTransferDataFrame frame)
+        => FileTransferProtocol.IsV6DataFrame(frame) &&
+           context.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6 &&
+           context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
+           IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg);
+
+    private bool ShouldKeepOutboundV4ReceiveLoopAliveAfterSenderPumpCompleted(OutboundTransferContext context)
+    {
+        lock (gate)
+        {
+            return ReferenceEquals(outboundTransfer, context) &&
+                   !context.IsTerminal &&
+                   context.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6 &&
+                   context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
+                   IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg);
+        }
+    }
 
     private static bool ShouldAcceptLiveRouteV6ProbeFrame(OutboundTransferContext context, FileTransferDataFrame frame)
         => frame is FileTransferTransportProbeFrameV6 &&
@@ -596,6 +626,15 @@ public sealed partial class SessionFileTransferService
                         {
                             LogPrimaryRegularNknBulkV6State(context, PrimaryRegularNknBulkV6State.Failed, "sender_pump_completed");
                         }
+                    }
+
+                    if (ShouldKeepOutboundV4ReceiveLoopAliveAfterSenderPumpCompleted(context))
+                    {
+                        LocalOperationalLog.Info(
+                            "FileTransferService",
+                            $"event=filetransfer_v4_receive_loop_kept_alive_after_sender_pump_completed; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.NegotiatedDataProtocolVersion}; reason=post_tuna_fallback_survival");
+                        senderPumpTask = Task.Delay(Timeout.InfiniteTimeSpan, CancellationToken.None);
+                        continue;
                     }
 
                     return;
@@ -3548,6 +3587,68 @@ public sealed partial class SessionFileTransferService
         return IsTunaActivationNegotiationDataSessionUnavailableException(ex.InnerException);
     }
 
+    private static bool IsRequiredTunaBulkUnavailableForTunaFallback(Exception? ex, out string reason)
+    {
+        reason = string.Empty;
+        if (ex is null)
+        {
+            return false;
+        }
+
+        if (ex is FileTransferRequiredTunaBulkUnavailableException unavailable &&
+            IsRequiredTunaBulkUnavailableFallbackReason(unavailable.Reason))
+        {
+            reason = unavailable.Reason;
+            return true;
+        }
+
+        if (ex is AggregateException aggregate)
+        {
+            foreach (var inner in aggregate.InnerExceptions)
+            {
+                if (IsRequiredTunaBulkUnavailableForTunaFallback(inner, out reason))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        return IsRequiredTunaBulkUnavailableForTunaFallback(ex.InnerException, out reason);
+    }
+
+    private static bool IsRequiredTunaBulkUnavailableFallbackReason(string? reason)
+    {
+        var normalized = NormalizeReason(reason);
+        return normalized is "header_switch_off" or
+            "remote_header_switch_off" or
+            "runtime_disabled" or
+            "wallet_unlinked" or
+            "cap_reached" or
+            "listener_exit" or
+            "listener_exited" or
+            "sidecar_exit" or
+            "sidecar_exited" or
+            "ipc_disconnect" or
+            "send_failure" or
+            "remote_closed" or
+            "remote_remote_closed" or
+            "sidecar_remote_closed" or
+            "remote_sidecar_remote_closed" or
+            "tuna_fallback_to_nkn" or
+            "tuna_unavailable_before_send" or
+            "tuna_send_invalidated_after_queue" or
+            "tuna_send_rejected" or
+            "tuna_send_failed" or
+            "transport_disconnected" or
+            "transport_recovered_unproven" or
+            "transport_probe_unproven" ||
+            normalized?.StartsWith("header_switch_off_", StringComparison.OrdinalIgnoreCase) == true ||
+            normalized?.StartsWith("remote_header_switch_off_", StringComparison.OrdinalIgnoreCase) == true ||
+            normalized?.StartsWith("helper_switch_off_", StringComparison.OrdinalIgnoreCase) == true;
+    }
+
     private static bool IsRecentRecoveredTunaActivationCancellationLocked(
         OutboundTransferContext context,
         bool dataSessionAvailable,
@@ -3618,6 +3719,46 @@ public sealed partial class SessionFileTransferService
         pauseReason = context.PullTransportPauseReason ?? pauseReason;
         rebindGeneration = context.PullTransportRebindGeneration;
         MarkOutboundV4SenderPumpTransportPausedLocked(context);
+        return true;
+    }
+
+    private bool TryDeferOutboundV4SendForFileTunaFallbackHandoffLocked(
+        OutboundTransferContext context,
+        Exception sendException,
+        out string pauseReason,
+        out int rebindGeneration)
+    {
+        pauseReason = "transport_paused";
+        rebindGeneration = context.PullTransportRebindGeneration;
+
+        if (!ReferenceEquals(outboundTransfer, context) ||
+            context.IsTerminal ||
+            context.RouteSelection.Route != FileTransferRoute.FileTunaV4 ||
+            !context.RouteRuntime.UsesFileTunaV4Runtime ||
+            !IsRequiredTunaBulkUnavailableForTunaFallback(sendException, out var fallbackReason))
+        {
+            return false;
+        }
+
+        pauseReason = fallbackReason;
+        if (!context.PullTransportPaused)
+        {
+            _ = TryPauseOutboundTransportLocked(
+                context,
+                fallbackReason,
+                requiresResumeRequest: true);
+        }
+        else if (string.IsNullOrWhiteSpace(context.PullTransportPauseReason))
+        {
+            context.PullTransportPauseReason = fallbackReason;
+            context.PullTransportLastPauseReason = fallbackReason;
+        }
+
+        pauseReason = context.PullTransportPauseReason ?? pauseReason;
+        rebindGeneration = context.PullTransportRebindGeneration;
+        MarkOutboundV4SenderPumpTransportPausedLocked(
+            context,
+            "filetransfer_v4_sender_pump_paused_for_file_tuna_v4_fallback_handoff");
         return true;
     }
 
@@ -7408,6 +7549,7 @@ public sealed partial class SessionFileTransferService
                 if (sendException is not null)
                 {
                     var deferredForTransportPause = false;
+                    var deferredForFileTunaFallbackHandoff = false;
                     var activationPauseStarted = false;
                     var activationPauseAlreadyRecovered = false;
                     string pauseReason = "transport_paused";
@@ -7438,6 +7580,18 @@ public sealed partial class SessionFileTransferService
                             completedWithoutTransportPause = false;
                             transportStopReason = pauseReason;
                         }
+                        else if (TryDeferOutboundV4SendForFileTunaFallbackHandoffLocked(
+                                     context,
+                                     sendException,
+                                     out pauseReason,
+                                     out rebindGeneration))
+                        {
+                            deferredForTransportPause = true;
+                            deferredForFileTunaFallbackHandoff = true;
+                            stopForTransportPause = true;
+                            completedWithoutTransportPause = false;
+                            transportStopReason = pauseReason;
+                        }
                     }
 
                     if (deferredForTransportPause)
@@ -7451,6 +7605,8 @@ public sealed partial class SessionFileTransferService
 
                         var eventName = activationPauseAlreadyRecovered
                             ? "filetransfer_v4_transport_send_failure_deferred_for_recovered_tuna_activation_pause"
+                            : deferredForFileTunaFallbackHandoff
+                            ? "filetransfer_v4_transport_send_failure_deferred_for_file_tuna_v4_fallback_handoff"
                             : ShouldPauseOutboundV4SenderPumpForV6RegularNknSparseRuntimeLocked(context)
                             ? "filetransfer_v4_transport_send_failure_deferred_for_v6_regular_nkn_sparse_runtime"
                             : ShouldPauseOutboundV4SenderPumpForRegularNknV4ReceiveStallRecoveryLocked(context)

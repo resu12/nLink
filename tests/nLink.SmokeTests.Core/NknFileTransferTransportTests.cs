@@ -1593,9 +1593,11 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             using NknSignalingTransport helper = new NknSignalingTransport(helperClient, options, new NknIdentity("helper-v6-recovery-id", helperClient.Address));
 
             string sessionId = await CoreSmokeTestsBase.ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_nkn_v6_recovery_frames";
             TaskCompletionSource<FileTransferOfferV2> offerReceived = new TaskCompletionSource<FileTransferOfferV2>(TaskCreationOptions.RunContinuationsAsynchronously);
             TaskCompletionSource<FileTransferAcceptV1> acceptReceived = new TaskCompletionSource<FileTransferAcceptV1>(TaskCreationOptions.RunContinuationsAsynchronously);
             TaskCompletionSource<FileTransferSessionOpenV2> sessionOpenReceived = new TaskCompletionSource<FileTransferSessionOpenV2>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<FileTransferFallbackTailYieldFrameV6> fallbackTailYieldReceived = new TaskCompletionSource<FileTransferFallbackTailYieldFrameV6>(TaskCreationOptions.RunContinuationsAsynchronously);
             host.FileTransferOfferReceived += delegate (object? _, FileTransferOfferReceivedEventArgs e)
             {
                 offerReceived.TrySetResult(e.Message);
@@ -1608,8 +1610,14 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             {
                 sessionOpenReceived.TrySetResult(e.Message);
             };
+            helper.FileTransferFallbackTailYieldProofReceived += delegate (object? _, FileTransferFallbackTailYieldProofReceivedEventArgs e)
+            {
+                if (string.Equals(e.Message.TransferId, transferId, StringComparison.Ordinal))
+                {
+                    fallbackTailYieldReceived.TrySetResult(e.Message);
+                }
+            };
 
-            const string transferId = "transfer_nkn_v6_recovery_frames";
             await helper.SendFileTransferOfferAsync(
                 new FileTransferOfferV2
                 {
@@ -1728,6 +1736,9 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             Assert.Contains(FileTransferProtocol.FrontierRequestFrameTypeV6, deliveredTypes);
             Assert.Contains(FileTransferProtocol.RepairProofFrameTypeV6, deliveredTypes);
             Assert.Contains(FileTransferProtocol.FallbackTailYieldFrameTypeV6, deliveredTypes);
+            var fallbackTailYield = await fallbackTailYieldReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+            Assert.Equal(FileTransferProtocol.FallbackTailYieldFrameTypeV6, fallbackTailYield.Type);
+            Assert.Equal(5, fallbackTailYield.FallbackLegGeneration);
             Assert.True(rawControlMessages.Count >= 3);
             Assert.True(rawBulkMessages.Count >= 3);
 
@@ -2492,7 +2503,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             "Deliver",
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         Assert.NotNull(deliver);
-        deliver.Invoke(session, [frame, channel, FileTransferTransportKind.RegularNkn]);
+        deliver.Invoke(session, [frame, channel, FileTransferTransportKind.RegularNkn, "direct-test-peer"]);
     }
 
     [Trait("Category", "Smoke")]
