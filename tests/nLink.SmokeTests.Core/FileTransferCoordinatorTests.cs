@@ -677,6 +677,9 @@ public sealed class FileTransferCoordinatorTests
         Assert.NotNull(quiescent.FallbackTailYieldDecision);
         Assert.True(quiescent.FallbackTailYieldDecision!.Value.Accepted);
         Assert.Equal(FallbackTailYieldKind.Quiescent, quiescent.FallbackTailYieldDecision.Value.YieldKind);
+        Assert.Equal("(none)", quiescent.FallbackTailYieldDecision.Value.CheckpointRequestIdSnapshot);
+        Assert.EndsWith("|(none)", quiescent.FallbackTailYieldDecision.Value.OwnerKey, StringComparison.Ordinal);
+        Assert.DoesNotContain("checkpoint:tail", quiescent.FallbackTailYieldDecision.Value.OwnerKey, StringComparison.Ordinal);
 
         var failed = FileTransferCoordinator.AuthorizeAction(
             accepted.State,
@@ -687,6 +690,7 @@ public sealed class FileTransferCoordinatorTests
                 fallbackTailYieldKind: FallbackTailYieldKind.Failed));
         Assert.True(failed.Accepted);
         Assert.Equal(FallbackTailYieldKind.Failed, failed.FallbackTailYieldDecision!.Value.YieldKind);
+        Assert.Equal("(none)", failed.FallbackTailYieldDecision.Value.CheckpointRequestIdSnapshot);
 
         var staleTransport = FileTransferCoordinator.AuthorizeAction(
             accepted.State,

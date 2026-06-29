@@ -372,6 +372,8 @@ internal readonly record struct FallbackTailYieldDecision(
     FallbackTailYieldKind YieldKind,
     string Reason,
     int YieldGeneration,
+    string OwnerKey,
+    string CheckpointRequestIdSnapshot,
     FileTransferRoute CurrentRoute,
     int CurrentProtocolVersion,
     int CurrentLiveRouteEpoch,
@@ -3049,19 +3051,66 @@ internal static class FileTransferCoordinator
         FallbackTailYieldKind yieldKind,
         string reason,
         int yieldGeneration)
-        => new(
+    {
+        var leg = state.CurrentLeg;
+        var checkpointSnapshot = NormalizeFallbackTailYieldCheckpointRequestId(state.CurrentFallbackCheckpointLease);
+        var ownerKey = leg is null
+            ? string.Empty
+            : BuildFallbackTailYieldOwnerKey(
+                state.SessionId,
+                state.TransferId,
+                state.RouteSelection.TelemetryToken,
+                state.RouteSelection.ProtocolVersion,
+                state.CurrentLiveRouteEpoch?.EpochId ?? leg.LiveRouteEpochId,
+                leg.Generation,
+                leg.BridgeRecoveryGeneration,
+                leg.TransportEpochId,
+                checkpointSnapshot);
+
+        return new FallbackTailYieldDecision(
             accepted,
             yieldKind,
             NormalizeReason(reason),
             yieldGeneration,
+            ownerKey,
+            checkpointSnapshot,
             state.RouteSelection.Route,
             state.RouteSelection.ProtocolVersion,
             state.CurrentLiveRouteEpoch?.EpochId ?? 0,
             state.CurrentRuntimeOwner?.RuntimeGeneration ?? state.LastRuntimeOwnerGeneration,
             state.TerminalGeneration,
-            state.CurrentLeg?.Generation ?? 0,
+            leg?.Generation ?? 0,
             state.CurrentFallbackCheckpointLease,
             NormalizeRuntimeUnlockFallbackSurvivalState(state));
+    }
+
+    internal static string NormalizeFallbackTailYieldCheckpointRequestId(FallbackCheckpointLease? checkpointLease)
+        => checkpointLease is { State: FallbackCheckpointLeaseState.Pending } lease &&
+           !string.IsNullOrWhiteSpace(lease.CheckpointRequestId)
+            ? lease.CheckpointRequestId
+            : "(none)";
+
+    internal static string BuildFallbackTailYieldOwnerKey(
+        string sessionId,
+        string transferId,
+        string routeToken,
+        int protocolVersion,
+        int liveRouteEpoch,
+        int legGeneration,
+        int bridgeRecoveryGeneration,
+        long transportEpoch,
+        string? checkpointRequestIdSnapshot)
+        => string.Join(
+            "|",
+            sessionId,
+            transferId,
+            routeToken,
+            protocolVersion.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            liveRouteEpoch.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            legGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            bridgeRecoveryGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            transportEpoch.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            string.IsNullOrWhiteSpace(checkpointRequestIdSnapshot) ? "(none)" : checkpointRequestIdSnapshot);
 
     private static RepairReplayDecision? CreateRepairReplayDecision(
         FileTransferCoordinatorState state,

@@ -226,6 +226,8 @@ function New-FileTransferRetainedEventIndex {
             'filetransfer_fallback_tail_yield_proof_sent',
             'filetransfer_fallback_tail_yield_proof_received',
             'filetransfer_fallback_tail_paired_yield_granted',
+            'filetransfer_fallback_tail_yield_owner_snapshot',
+            'filetransfer_fallback_tail_paired_yield_rejected',
             'filetransfer_fallback_tail_owner_generation_mismatch',
             'filetransfer_fallback_tail_yield_proof_stale_ignored',
             'filetransfer_fallback_tail_terminal_proof_consumed',

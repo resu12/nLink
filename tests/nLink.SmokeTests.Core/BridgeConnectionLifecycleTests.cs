@@ -5438,6 +5438,75 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public async Task Bridge_Connect_WithPreflight_AllowsDelayedConnectAck()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-delayed-preflight-ack", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-delayed-preflight-ack.js");
+        WriteBridgeScriptWithManifest(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: @"
+    setTimeout(() => {
+      emit({ event:'ok', id: msg.id ?? null, cmd:'connect' });
+      setTimeout(() => emit({ event:'ready', protocol:2, channels:['control','media','bulk'], address:'delayed-preflight.addr', controlAddress:'delayed-preflight.addr', mediaAddress:'delayed-preflight-media.addr', bulkAddress:'delayed-preflight-bulk.addr', connectId: msg.connectId ?? null }), 20);
+    }, 3500);
+    return;
+    "));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevEnabled = Environment.GetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED");
+        var prevTimeout = Environment.GetEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED", "true");
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS", "5000");
+            var options = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "id.json"), "mock-delayed-preflight-ack");
+            var identity = NknIdentityStore.LoadOrCreate(options);
+            using var adapter = new RealNknClientAdapter(identity, options);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+
+            var sw = Stopwatch.StartNew();
+            await adapter.ConnectAsync(cts.Token);
+            sw.Stop();
+
+            Assert.True(sw.Elapsed >= TimeSpan.FromSeconds(3), $"Connect returned before delayed ACK elapsed: {sw.Elapsed}");
+            Assert.Equal("delayed-preflight.addr", adapter.Address);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED", prevEnabled);
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS", prevTimeout);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public async Task Bridge_ConnectPayload_RespectsSubClientTopologyOptions()
     {
         if (!OperatingSystem.IsWindows())

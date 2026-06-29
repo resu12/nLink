@@ -2491,7 +2491,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 payload["fallbackDelayMs"] = options.ReceiveStallRecoveryFallbackDelayMs;
             }
 
-            await SendCommandAndWaitAckAsync("connect", payload, ct, timeoutOverride: CommandAckTimeout);
+            await SendCommandAndWaitAckAsync("connect", payload, ct, timeoutOverride: ResolveConnectCommandAckTimeout());
 
             BridgeReadyInfo readyInfo;
             try
@@ -2548,6 +2548,20 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         {
             connectAttempts.CompleteAttempt(sequence, connectId);
         }
+    }
+
+    private TimeSpan ResolveConnectCommandAckTimeout()
+    {
+        if (!options.PreflightRpcEnabled)
+        {
+            return CommandAckTimeout;
+        }
+
+        var preflightBudget = TimeSpan.FromMilliseconds(Math.Max(1, options.PreflightTimeoutMs));
+        var timeout = preflightBudget + CommandAckTimeout;
+        return timeout > ConnectReadyTimeout
+            ? ConnectReadyTimeout
+            : timeout;
     }
 
     public async Task DisconnectAsync()
