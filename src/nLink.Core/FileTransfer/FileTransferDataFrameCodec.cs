@@ -731,6 +731,7 @@ public static class FileTransferDataFrameCodec
                     Priority = metadata.Priority,
                     RecoveryMode = metadata.RecoveryMode,
                     OwnerKey = yieldFields.OwnerKey,
+                    PairKey = yieldFields.PairKey,
                     Direction = yieldFields.Direction,
                     YieldGeneration = yieldFields.YieldGeneration,
                     LiveRouteEpoch = yieldFields.LiveRouteEpoch,
@@ -1382,6 +1383,11 @@ public static class FileTransferDataFrameCodec
             frame.SentUnixTimeMilliseconds < 0 ||
             !FileTransferPayloadCodec.TryNormalizeOptional(frame.OwnerKey, 1024, out var ownerKey) ||
             string.IsNullOrWhiteSpace(ownerKey) ||
+            !FileTransferPayloadCodec.TryNormalizeOptional(
+                string.IsNullOrWhiteSpace(frame.PairKey) ? ownerKey : frame.PairKey,
+                1024,
+                out var pairKey) ||
+            string.IsNullOrWhiteSpace(pairKey) ||
             !FileTransferPayloadCodec.TryNormalizeOptional(frame.Direction, FileTransferProtocol.MaxReasonLength, out var direction) ||
             string.IsNullOrWhiteSpace(direction))
         {
@@ -1401,6 +1407,7 @@ public static class FileTransferDataFrameCodec
             SessionId = sessionId,
             TransferId = transferId,
             OwnerKey = ownerKey,
+            PairKey = pairKey,
             Direction = normalizedDirection,
             BatchId = NormalizeTransportMetadataToken(frame.BatchId),
             RepairRequestId = NormalizeTransportMetadataToken(frame.RepairRequestId),
@@ -1487,6 +1494,7 @@ public static class FileTransferDataFrameCodec
         WriteInt32(stream, frame.CommittedChunkIndex);
         WriteInt32(stream, frame.HighestObservedChunkIndex);
         WriteInt64(stream, frame.SentUnixTimeMilliseconds);
+        WriteString(stream, string.IsNullOrWhiteSpace(frame.PairKey) ? frame.OwnerKey : frame.PairKey);
     }
 
     private static bool TryReadTransportMetadata(ref BinaryFrameReader reader, out TransportMetadata metadata)
@@ -1559,8 +1567,21 @@ public static class FileTransferDataFrameCodec
             return false;
         }
 
+        var pairKey = ownerKey;
+        if (!reader.IsFullyConsumed &&
+            reader.TryReadString(out var appendedPairKey))
+        {
+            pairKey = string.IsNullOrWhiteSpace(appendedPairKey) ? ownerKey : appendedPairKey;
+        }
+
+        if (!reader.IsFullyConsumed)
+        {
+            return false;
+        }
+
         fields = new FallbackTailYieldFields(
             ownerKey,
+            pairKey,
             direction,
             yieldGeneration,
             liveRouteEpoch,
@@ -1602,6 +1623,7 @@ public static class FileTransferDataFrameCodec
 
     private readonly record struct FallbackTailYieldFields(
         string OwnerKey,
+        string PairKey,
         string Direction,
         long YieldGeneration,
         int LiveRouteEpoch,

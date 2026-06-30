@@ -657,6 +657,32 @@ public sealed class FileTransferCoordinatorTests
     {
         var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
         var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        var pendingRequested = RequestFallbackCheckpoint(
+            FallBack(StartRegular(regular).State, fallback, committedChunk: 8, transportEpoch: 4).State,
+            fallback,
+            "checkpoint:tail",
+            4);
+        var pendingOwner = pendingRequested.State.CurrentRuntimeOwner!.Value;
+        var pendingLeg = pendingRequested.State.CurrentLeg!;
+
+        var pendingQuiescent = FileTransferCoordinator.AuthorizeAction(
+            pendingRequested.State,
+            FallbackActionRequest(
+                FileTransferCoordinatorActionKind.FallbackTailQuiescent,
+                pendingOwner,
+                pendingLeg,
+                fallbackTailYieldKind: FallbackTailYieldKind.Quiescent));
+        Assert.True(pendingQuiescent.Accepted);
+        Assert.Equal("(none)", pendingQuiescent.FallbackTailYieldDecision!.Value.CheckpointRequestIdSnapshot);
+        Assert.DoesNotContain("checkpoint:tail", pendingQuiescent.FallbackTailYieldDecision.Value.OwnerKey, StringComparison.Ordinal);
+        Assert.DoesNotContain("checkpoint:tail", pendingQuiescent.FallbackTailYieldDecision.Value.PairKey, StringComparison.Ordinal);
+
+        var pendingQuiescentApplied = MarkFallbackTailQuiescent(pendingRequested.State, fallback, 4, 12, 18);
+        Assert.Null(pendingQuiescentApplied.State.CurrentFallbackCheckpointLease);
+        Assert.Equal("(none)", pendingQuiescentApplied.FallbackTailYieldDecision!.Value.CheckpointRequestIdSnapshot);
+        Assert.DoesNotContain("checkpoint:tail", pendingQuiescentApplied.FallbackTailYieldDecision.Value.OwnerKey, StringComparison.Ordinal);
+        Assert.DoesNotContain("checkpoint:tail", pendingQuiescentApplied.FallbackTailYieldDecision.Value.PairKey, StringComparison.Ordinal);
+
         var requested = RequestFallbackCheckpoint(
             FallBack(StartRegular(regular).State, fallback, committedChunk: 8, transportEpoch: 4).State,
             fallback,
@@ -679,7 +705,11 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(FallbackTailYieldKind.Quiescent, quiescent.FallbackTailYieldDecision.Value.YieldKind);
         Assert.Equal("(none)", quiescent.FallbackTailYieldDecision.Value.CheckpointRequestIdSnapshot);
         Assert.EndsWith("|(none)", quiescent.FallbackTailYieldDecision.Value.OwnerKey, StringComparison.Ordinal);
+        Assert.EndsWith("|(none)", quiescent.FallbackTailYieldDecision.Value.PairKey, StringComparison.Ordinal);
+        Assert.Equal(9, quiescent.FallbackTailYieldDecision.Value.OwnerKey.Split('|').Length);
+        Assert.Equal(8, quiescent.FallbackTailYieldDecision.Value.PairKey.Split('|').Length);
         Assert.DoesNotContain("checkpoint:tail", quiescent.FallbackTailYieldDecision.Value.OwnerKey, StringComparison.Ordinal);
+        Assert.DoesNotContain("checkpoint:tail", quiescent.FallbackTailYieldDecision.Value.PairKey, StringComparison.Ordinal);
 
         var failed = FileTransferCoordinator.AuthorizeAction(
             accepted.State,

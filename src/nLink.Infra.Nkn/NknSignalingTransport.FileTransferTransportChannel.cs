@@ -2313,6 +2313,23 @@ public sealed partial class NknSignalingTransport
     private bool TryGetFileTransferRouteHintUnsafe(
         string? sessionId,
         string? transferId,
+        FileTransferDirection direction,
+        out FileTransferRouteHint routeHint)
+    {
+        routeHint = default;
+        if (string.IsNullOrWhiteSpace(sessionId) ||
+            string.IsNullOrWhiteSpace(transferId))
+        {
+            return false;
+        }
+
+        var routeHintKey = CreateFileTransferRouteHintKey(sessionId, transferId, direction);
+        return fileTransferRouteHints.TryGetValue(routeHintKey, out routeHint);
+    }
+
+    private bool TryGetFileTransferRouteHintUnsafe(
+        string? sessionId,
+        string? transferId,
         out FileTransferRouteHint routeHint)
     {
         routeHint = default;

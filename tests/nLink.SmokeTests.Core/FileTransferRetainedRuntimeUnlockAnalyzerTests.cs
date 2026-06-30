@@ -244,6 +244,30 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryRouteLessScheduleWithOfferGeneration_ClassifiesMissingDispatchProof()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                "transfer_runtime_unlock_dispatch_routeless_schedule",
+                RuntimeUnlockRetryReleasedLine("transfer_runtime_unlock_dispatch_routeless_schedule"),
+                RuntimeUnlockRetryRouteLessScheduledLine("transfer_runtime_unlock_dispatch_routeless_schedule"),
+                RuntimeUnlockRetryOfferGenerationLine()),
+            ["-LiveRouteProofMode", "None"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("runtime_unlock_retry_dispatch_missing", verdict["recovery_failure_class"]);
+        Assert.Equal("fail", verdict["runtime_unlock_retry_dispatch_proof_verdict"]);
+    }
+
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_RuntimeUnlockRetryReleaseWithDispatchGrantAndObserved_PassesDispatchProof()
     {
         if (!OperatingSystem.IsWindows())
@@ -853,6 +877,9 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
     private static string RuntimeUnlockRetryScheduledLine(string transferId)
         => $"event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled; direction=outbound; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=session_liveness_timeout_pending; retired_generation=11; contract_generation=7; offer_generation=11; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; regular_v4_liveness_generation=3; bridge_decision_generation=5; trigger=regular_v4_receive_proof_observed; queued_behind_active_negotiation=1";
+
+    private static string RuntimeUnlockRetryRouteLessScheduledLine(string transferId)
+        => $"event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled; direction=outbound; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=session_liveness_timeout_pending; retired_generation=11; contract_generation=7; offer_generation=11; route=(none); protocol_version=0; live_route_epoch=0; regular_v4_liveness_generation=0; bridge_decision_generation=0; trigger=regular_v4_receive_proof_observed; queued_behind_active_negotiation=1";
 
     private static string RuntimeUnlockRetryOfferGenerationLine()
         => "event=runtime_unlock_transaction_offer_generation_created; session_id=sess_runtime_unlock_dispatch_proof; transaction_generation=4; offer_generation=12; state=offerpreparing; peer_visible_proof=0; peer_received=0; answer_received=0; route_commit_pending=0; route_committed=0; failure_reason=(none); retired_reason=(none); reason=runtime_unlock";

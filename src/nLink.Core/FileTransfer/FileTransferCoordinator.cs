@@ -373,6 +373,7 @@ internal readonly record struct FallbackTailYieldDecision(
     string Reason,
     int YieldGeneration,
     string OwnerKey,
+    string PairKey,
     string CheckpointRequestIdSnapshot,
     FileTransferRoute CurrentRoute,
     int CurrentProtocolVersion,
@@ -1097,7 +1098,10 @@ internal static class FileTransferCoordinator
                         ? FallbackTailYieldKind.Failed
                         : FallbackTailYieldKind.Quiescent),
                     "accepted",
-                    Math.Max(1, state.LastFallbackTailYieldGeneration + 1))
+                    Math.Max(1, state.LastFallbackTailYieldGeneration + 1),
+                    checkpointSnapshotOverride: request.Kind == FileTransferCoordinatorActionKind.FallbackTailQuiescent
+                        ? "(none)"
+                        : null)
                 : (FallbackTailYieldDecision?)null;
         var repairReplayDecision = request.Kind == FileTransferCoordinatorActionKind.RepairReplay
             ? CreateRepairReplayDecision(
@@ -3050,10 +3054,13 @@ internal static class FileTransferCoordinator
         bool accepted,
         FallbackTailYieldKind yieldKind,
         string reason,
-        int yieldGeneration)
+        int yieldGeneration,
+        string? checkpointSnapshotOverride = null)
     {
         var leg = state.CurrentLeg;
-        var checkpointSnapshot = NormalizeFallbackTailYieldCheckpointRequestId(state.CurrentFallbackCheckpointLease);
+        var checkpointSnapshot = string.IsNullOrWhiteSpace(checkpointSnapshotOverride)
+            ? NormalizeFallbackTailYieldCheckpointRequestId(state.CurrentFallbackCheckpointLease)
+            : checkpointSnapshotOverride;
         var ownerKey = leg is null
             ? string.Empty
             : BuildFallbackTailYieldOwnerKey(
@@ -3066,6 +3073,17 @@ internal static class FileTransferCoordinator
                 leg.BridgeRecoveryGeneration,
                 leg.TransportEpochId,
                 checkpointSnapshot);
+        var pairKey = leg is null
+            ? string.Empty
+            : BuildFallbackTailYieldPairKey(
+                state.SessionId,
+                state.TransferId,
+                state.RouteSelection.TelemetryToken,
+                state.RouteSelection.ProtocolVersion,
+                state.CurrentLiveRouteEpoch?.EpochId ?? leg.LiveRouteEpochId,
+                leg.BridgeRecoveryGeneration,
+                leg.TransportEpochId,
+                checkpointSnapshot);
 
         return new FallbackTailYieldDecision(
             accepted,
@@ -3073,6 +3091,7 @@ internal static class FileTransferCoordinator
             NormalizeReason(reason),
             yieldGeneration,
             ownerKey,
+            pairKey,
             checkpointSnapshot,
             state.RouteSelection.Route,
             state.RouteSelection.ProtocolVersion,
@@ -3108,6 +3127,26 @@ internal static class FileTransferCoordinator
             protocolVersion.ToString(System.Globalization.CultureInfo.InvariantCulture),
             liveRouteEpoch.ToString(System.Globalization.CultureInfo.InvariantCulture),
             legGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            bridgeRecoveryGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            transportEpoch.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            string.IsNullOrWhiteSpace(checkpointRequestIdSnapshot) ? "(none)" : checkpointRequestIdSnapshot);
+
+    internal static string BuildFallbackTailYieldPairKey(
+        string sessionId,
+        string transferId,
+        string routeToken,
+        int protocolVersion,
+        int liveRouteEpoch,
+        int bridgeRecoveryGeneration,
+        long transportEpoch,
+        string? checkpointRequestIdSnapshot)
+        => string.Join(
+            "|",
+            sessionId,
+            transferId,
+            routeToken,
+            protocolVersion.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            liveRouteEpoch.ToString(System.Globalization.CultureInfo.InvariantCulture),
             bridgeRecoveryGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture),
             transportEpoch.ToString(System.Globalization.CultureInfo.InvariantCulture),
             string.IsNullOrWhiteSpace(checkpointRequestIdSnapshot) ? "(none)" : checkpointRequestIdSnapshot);
@@ -3694,13 +3733,17 @@ internal static class FileTransferCoordinator
             coordinatorEvent.CommittedChunkIndex,
             coordinatorEvent.HighestObservedChunkIndex);
         var yieldGeneration = Math.Max(1, state.LastFallbackTailYieldGeneration + 1);
+        var tailState = state with
+        {
+            CurrentFallbackCheckpointLease = null,
+        };
         var yieldDecision = CreateFallbackTailYieldDecision(
-            state,
+            tailState,
             accepted: true,
             FallbackTailYieldKind.Quiescent,
             reason,
             yieldGeneration);
-        var nextState = state with
+        var nextState = tailState with
         {
             LastFallbackTailYieldDecision = yieldDecision,
             LastFallbackTailYieldGeneration = yieldGeneration,

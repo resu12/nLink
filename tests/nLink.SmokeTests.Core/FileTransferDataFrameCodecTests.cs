@@ -167,6 +167,7 @@ public sealed class FileTransferDataFrameCodecTests
                 Priority = " control ",
                 RecoveryMode = " post_tuna_fallback_v6 ",
                 OwnerKey = " session_a|transfer_tail_yield|post_tuna_fallback_v6|6|4|5|2|9|checkpoint:42 ",
+                PairKey = " session_a|transfer_tail_yield|post_tuna_fallback_v6|6|4|2|9|checkpoint:42 ",
                 Direction = " inbound ",
                 YieldGeneration = 3,
                 LiveRouteEpoch = 4,
@@ -190,6 +191,7 @@ public sealed class FileTransferDataFrameCodecTests
         Assert.Equal("control", yieldFrame.Priority);
         Assert.Equal("post_tuna_fallback_v6", yieldFrame.RecoveryMode);
         Assert.Equal("session_a|transfer_tail_yield|post_tuna_fallback_v6|6|4|5|2|9|checkpoint:42", yieldFrame.OwnerKey);
+        Assert.Equal("session_a|transfer_tail_yield|post_tuna_fallback_v6|6|4|2|9|checkpoint:42", yieldFrame.PairKey);
         Assert.Equal("inbound", yieldFrame.Direction);
         Assert.Equal(3, yieldFrame.YieldGeneration);
         Assert.Equal(4, yieldFrame.LiveRouteEpoch);

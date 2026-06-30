@@ -291,6 +291,8 @@ public record FileTransferFallbackTailYieldFrameV6 : FileTransferDataFrame, IFil
 
     public string OwnerKey { get; init; } = string.Empty;
 
+    public string PairKey { get; init; } = string.Empty;
+
     public string Direction { get; init; } = string.Empty;
 
     public long YieldGeneration { get; init; }
