@@ -2825,6 +2825,18 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $phase = 'route_publication'
         $reason = 'file_tuna_v4_publication_missing_after_transfer'
     }
+    elseif ($ErrorMessage.IndexOf('second_transfer_preactivation_readiness_missing', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $ErrorMessage.IndexOf('second_transfer_tuna_readiness_unstable', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $ErrorMessage.IndexOf('Tuna GUI second-transfer readiness did not stabilize', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        $phase = 'preactivation_readiness'
+        $reason = if ($listenerReadyUnavailableContradiction -or
+            $ErrorMessage.IndexOf('listener_ready_unavailable_contradiction', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            'listener_ready_unavailable_contradiction'
+        }
+        else {
+            'second_transfer_preactivation_readiness_missing'
+        }
+    }
     elseif ($ErrorMessage.IndexOf('live multi-toggle normal-to-Tuna route epoch started', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         $phase = 'live_route_proof'
         $reason = 'normal_to_tuna_live_epoch_missing'
@@ -3200,7 +3212,20 @@ function Wait-TunaGuiSecondTransferReadinessOrThrow {
         $lastSendLine = '(none)'
     }
 
-    $readinessFailureReason = if ($ready -eq 1 -and $unavailable -eq 1) { 'listener_ready_unavailable_contradiction' } else { 'second_transfer_tuna_readiness_unstable' }
+    $readinessFailureReason = if ($ready -eq 1 -and $unavailable -eq 1) {
+        'listener_ready_unavailable_contradiction'
+    }
+    elseif ($active -eq 1 -and
+        $ready -eq 0 -and
+        $sendLogReady -eq 1 -and
+        $sendLogConnected -eq 1 -and
+        $sendLogCanSend -eq 1 -and
+        $sendLogOutboundClear -eq 1) {
+        'second_transfer_preactivation_readiness_missing'
+    }
+    else {
+        'second_transfer_tuna_readiness_unstable'
+    }
     throw ("Tuna GUI second-transfer readiness did not stabilize: phase=preactivation_readiness; reason={0}; route_mode={1}; tuna_active={2}; listener_ready={3}; listener_unavailable={4}; send_log_ready={5}; send_log_connected={6}; send_log_can_send_files={7}; send_log_outbound_clear={8}; send_ui_state={9}; send_enabled_error={10}; last_tuna_active_index={11}; last_tuna_inactive_index={12}; stable_ready_polls={13}; required_stable_ready_polls={14}; last_sender_panel_state={15}" -f `
         $readinessFailureReason,
         $RouteMode,

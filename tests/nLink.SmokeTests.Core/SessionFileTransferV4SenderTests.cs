@@ -11041,10 +11041,8 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
         Assert.True(GetPrivateProperty<bool>(context, "PeerFallbackTailYieldGranted"));
         Assert.Equal(ownerKey, GetPrivateProperty<string>(context, "PeerFallbackTailYieldOwnerKey"));
-
-        serviceType
-            .GetMethod("RecordOutboundFallbackTailLocalYieldLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, leg, 1810, 1809, "fallback_tail_quiescent"]);
+        Assert.True(GetPrivateProperty<bool>(context, "LocalFallbackTailYieldGranted"));
+        Assert.Equal(ownerKey, GetPrivateProperty<string>(context, "LocalFallbackTailYieldOwnerKey"));
         SetPrivateProperty(context, "LocalFallbackTailYieldPeerVisible", true);
         serviceType
             .GetMethod("TryGrantPairedOutboundFallbackTailYieldLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -11172,10 +11170,8 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
         Assert.True(GetPrivateProperty<bool>(context, "PeerFallbackTailYieldGranted"));
         Assert.Equal(canonicalOwnerKey, GetPrivateProperty<string>(context, "PeerFallbackTailYieldOwnerKey"));
-
-        serviceType
-            .GetMethod("RecordOutboundFallbackTailLocalYieldLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, leg, 1810, 1809, "fallback_tail_quiescent"]);
+        Assert.True(GetPrivateProperty<bool>(context, "LocalFallbackTailYieldGranted"));
+        Assert.Equal(canonicalOwnerKey, GetPrivateProperty<string>(context, "LocalFallbackTailYieldOwnerKey"));
         SetPrivateProperty(context, "LocalFallbackTailYieldPeerVisible", true);
         serviceType
             .GetMethod("TryGrantPairedOutboundFallbackTailYieldLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -11266,10 +11262,9 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.True(GetPrivateProperty<bool>(context, "PeerFallbackTailYieldGranted"));
         Assert.Equal(peerOwnerKey, GetPrivateProperty<string>(context, "PeerFallbackTailYieldOwnerKey"));
         Assert.Equal(pairKey, GetPrivateProperty<string>(context, "PeerFallbackTailYieldPairKey"));
-
-        serviceType
-            .GetMethod("RecordOutboundFallbackTailLocalYieldLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, leg, 1810, 1809, "fallback_tail_quiescent"]);
+        Assert.True(GetPrivateProperty<bool>(context, "LocalFallbackTailYieldGranted"));
+        Assert.NotEqual(peerOwnerKey, GetPrivateProperty<string>(context, "LocalFallbackTailYieldOwnerKey"));
+        Assert.Equal(pairKey, GetPrivateProperty<string>(context, "LocalFallbackTailYieldPairKey"));
         SetPrivateProperty(context, "LocalFallbackTailYieldPeerVisible", true);
         serviceType
             .GetMethod("TryGrantPairedOutboundFallbackTailYieldLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -12514,11 +12509,11 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
-    public async Task RuntimeUnlockPrecommitProbe_WithoutCurrentAdmissionOnlyLogsRejection()
+    public async Task RuntimeUnlockPrecommitProbe_WithoutCurrentAdmissionRequestsAdmissionAndSendsAck()
     {
         using var service = new SessionFileTransferService();
         var serviceType = typeof(SessionFileTransferService);
-        const string transferId = "transfer_runtime_unlock_precommit_probe_missing_admission";
+        const string transferId = "transfer_runtime_unlock_precommit_probe_requests_admission";
         var sessionId = $"session_{transferId}";
         using var transport = new LoopbackFileTransferTransport(sessionId);
         service.AttachTransport(transport);
@@ -12559,20 +12554,26 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 ])!;
 
         Assert.True(handled);
-        Assert.Empty(dataSession.SentFrames);
-        Assert.Empty(transport.RuntimeUnlockProbeEvents);
+        var ack = Assert.IsType<FileTransferRuntimeUnlockPreCommitProbeAckFrame>(Assert.Single(dataSession.SentFrames));
+        Assert.True(ack.Accepted);
+        Assert.Equal("precommit_probe_received", ack.Reason);
+        Assert.Contains(
+            "started:runtime-unlock-precommit:3:4:stale:precommit_probe_received",
+            string.Join('\n', transport.RuntimeUnlockProbeEvents),
+            StringComparison.Ordinal);
         Assert.Empty(transport.RuntimeUnlockRouteCommitResults);
         var routeSelection = GetPrivateProperty<FileTransferRouteSelection>(context, "RouteSelection");
         Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken, routeSelection.TelemetryToken);
 
         var log = ReadOperationalLogTail(logStart);
         Assert.Contains("event=runtime_unlock_tuna_probe_received; transport=tuna; direction=inbound;", log, StringComparison.Ordinal);
-        Assert.Contains("event=filetransfer_runtime_unlock_callback_rejected; direction=inbound;", log, StringComparison.Ordinal);
-        Assert.Contains("action_kind=RuntimeUnlockProbeAck", log, StringComparison.Ordinal);
-        Assert.Contains("rejection_reason=runtime_unlock_admission_missing", log, StringComparison.Ordinal);
-        Assert.DoesNotContain("event=runtime_unlock_precommit_probe_ack_sent; direction=inbound;", log, StringComparison.Ordinal);
-        Assert.DoesNotContain("event=runtime_unlock_precommit_peer_probe_tracked; direction=inbound;", log, StringComparison.Ordinal);
-        Assert.DoesNotContain("event=runtime_unlock_precommit_probe_ack_waiting_for_commit_confirmation; direction=inbound;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_runtime_unlock_admission_granted; direction=inbound;", log, StringComparison.Ordinal);
+        Assert.Contains("source=precommit_probe_received", log, StringComparison.Ordinal);
+        Assert.Contains("event=runtime_unlock_precommit_probe_ack_sent; direction=inbound;", log, StringComparison.Ordinal);
+        Assert.Contains("event=runtime_unlock_precommit_probe_ack_waiting_for_commit_confirmation; direction=inbound;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_runtime_unlock_callback_rejected; direction=inbound;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("rejection_reason=runtime_unlock_admission_missing", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("admission_generation=0", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_route_transitioned; direction=inbound;", log, StringComparison.Ordinal);
     }
 

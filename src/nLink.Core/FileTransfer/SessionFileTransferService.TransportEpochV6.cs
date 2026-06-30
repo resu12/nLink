@@ -1302,87 +1302,47 @@ public sealed partial class SessionFileTransferService
         var accepted = true;
         var ackReason = RuntimeUnlockPreCommitProbeReceivedReason;
         RuntimeUnlockAdmissionToken? currentAdmissionToken = null;
-        if (!HasCurrentRuntimeUnlockPreCommitProbeAdmissionLocked(direction, sessionId, transferId))
+        var admissionStatus = EnsureRuntimeUnlockPreCommitProbeAdmissionLocked(
+            direction,
+            sessionId,
+            transferId,
+            out var admissionRejectionReason,
+            out currentAdmissionToken);
+        if (admissionStatus == RuntimeUnlockPreCommitProbeAdmissionStatus.Rejected)
         {
-            var admissionStatus = EnsureRuntimeUnlockPreCommitProbeAdmissionLocked(
-                    direction,
-                    sessionId,
-                    transferId,
-                    out var admissionRejectionReason);
-            if (admissionStatus == RuntimeUnlockPreCommitProbeAdmissionStatus.Rejected)
-            {
-                accepted = false;
-                ackReason = admissionRejectionReason;
-            }
-            else if (admissionStatus != RuntimeUnlockPreCommitProbeAdmissionStatus.Granted)
-            {
-                lock (gate)
-                {
-                    _ = TryAuthorizeRuntimeUnlockCallbackActionForDirectionLocked(
-                        direction,
-                        sessionId,
-                        transferId,
-                        runtimeOwner: null,
-                        actionKind: FileTransferCoordinatorActionKind.RuntimeUnlockProbeAck,
-                        source: "runtime_unlock_precommit_probe_received",
-                        attemptedAction: "probe_received",
-                        admissionToken: null,
-                        routeCommitToken: null,
-                        transactionGeneration: probe.TransactionGeneration,
-                        offerGeneration: probe.OfferGeneration,
-                        tunaPathLeaseGeneration: probe.TunaPathLeaseGeneration,
-                        tunaPathLeaseListenerRunId: null,
-                        probeId: probe.ProbeId,
-                        probeAcked: true,
-                        samePathTunaProbeAckId: probe.ProbeId,
-                        routeCommitGeneration: null,
-                        targetRoute: FileTransferRoute.FileTunaV4,
-                        targetProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
-                        targetTransport: FileTransferTransportKind.Tuna,
-                        out _);
-                }
-
-                return;
-            }
+            accepted = false;
+            ackReason = admissionRejectionReason;
         }
-
-        if (accepted)
+        else if (admissionStatus != RuntimeUnlockPreCommitProbeAdmissionStatus.Granted ||
+                 currentAdmissionToken is null)
         {
             lock (gate)
             {
-                if (!TryGetCurrentRuntimeUnlockPreCommitProbeAdmissionLocked(
-                        direction,
-                        sessionId,
-                        transferId,
-                        out var admissionToken))
-                {
-                    _ = TryAuthorizeRuntimeUnlockCallbackActionForDirectionLocked(
-                        direction,
-                        sessionId,
-                        transferId,
-                        runtimeOwner: null,
-                        actionKind: FileTransferCoordinatorActionKind.RuntimeUnlockProbeAck,
-                        source: "runtime_unlock_precommit_probe_received",
-                        attemptedAction: "probe_received",
-                        admissionToken: null,
-                        routeCommitToken: null,
-                        transactionGeneration: probe.TransactionGeneration,
-                        offerGeneration: probe.OfferGeneration,
-                        tunaPathLeaseGeneration: probe.TunaPathLeaseGeneration,
-                        tunaPathLeaseListenerRunId: null,
-                        probeId: probe.ProbeId,
-                        probeAcked: true,
-                        samePathTunaProbeAckId: probe.ProbeId,
-                        routeCommitGeneration: null,
-                        targetRoute: FileTransferRoute.FileTunaV4,
-                        targetProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
-                        targetTransport: FileTransferTransportKind.Tuna,
-                        out _);
-                    return;
-                }
-
-                currentAdmissionToken = admissionToken;
+                _ = TryAuthorizeRuntimeUnlockCallbackActionForDirectionLocked(
+                    direction,
+                    sessionId,
+                    transferId,
+                    runtimeOwner: null,
+                    actionKind: FileTransferCoordinatorActionKind.RuntimeUnlockProbeAck,
+                    source: "runtime_unlock_precommit_probe_received",
+                    attemptedAction: "probe_received",
+                    admissionToken: null,
+                    routeCommitToken: null,
+                    transactionGeneration: probe.TransactionGeneration,
+                    offerGeneration: probe.OfferGeneration,
+                    tunaPathLeaseGeneration: probe.TunaPathLeaseGeneration,
+                    tunaPathLeaseListenerRunId: null,
+                    probeId: probe.ProbeId,
+                    probeAcked: true,
+                    samePathTunaProbeAckId: probe.ProbeId,
+                    routeCommitGeneration: null,
+                    targetRoute: FileTransferRoute.FileTunaV4,
+                    targetProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
+                    targetTransport: FileTransferTransportKind.Tuna,
+                    out _);
             }
+
+            return;
         }
 
         var ack = new FileTransferRuntimeUnlockPreCommitProbeAckFrame
@@ -1566,16 +1526,18 @@ public sealed partial class SessionFileTransferService
         FileTransferDirection direction,
         string sessionId,
         string transferId,
-        out string rejectionReason)
+        out string rejectionReason,
+        out RuntimeUnlockAdmissionToken? admissionToken)
     {
         rejectionReason = "none";
+        admissionToken = null;
         lock (gate)
         {
             if (direction == FileTransferDirection.Outbound &&
                 IsOutboundLifecycleMessageMatchLocked(sessionId, transferId) &&
                 outboundTransfer is { IsTerminal: false } outbound)
             {
-                if (HasCurrentRuntimeUnlockAdmissionLocked(outbound))
+                if (TryGetCurrentRuntimeUnlockAdmissionTokenLocked(outbound, out admissionToken))
                 {
                     return RuntimeUnlockPreCommitProbeAdmissionStatus.Granted;
                 }
@@ -1586,7 +1548,18 @@ public sealed partial class SessionFileTransferService
                     "precommit_probe_received");
                 if (admission.Granted)
                 {
+                    if (admission.AdmissionToken is not { } grantedToken)
+                    {
+                        rejectionReason = "runtime_unlock_admission_missing";
+                        return RuntimeUnlockPreCommitProbeAdmissionStatus.Unavailable;
+                    }
+
                     ClearOutboundRuntimeUnlockFallbackSeparationStateLocked(outbound);
+                    outbound.RuntimeUnlockAdmissionToken = grantedToken;
+                    outbound.LastRuntimeUnlockAdmissionGeneration = Math.Max(
+                        outbound.LastRuntimeUnlockAdmissionGeneration,
+                        grantedToken.AdmissionGeneration);
+                    admissionToken = grantedToken;
                     return RuntimeUnlockPreCommitProbeAdmissionStatus.Granted;
                 }
 
@@ -1611,7 +1584,7 @@ public sealed partial class SessionFileTransferService
                 IsInboundLifecycleMessageMatchLocked(sessionId, transferId) &&
                 inboundTransfer is { IsTerminal: false } inbound)
             {
-                if (HasCurrentRuntimeUnlockAdmissionLocked(inbound))
+                if (TryGetCurrentRuntimeUnlockAdmissionTokenLocked(inbound, out admissionToken))
                 {
                     return RuntimeUnlockPreCommitProbeAdmissionStatus.Granted;
                 }
@@ -1622,7 +1595,18 @@ public sealed partial class SessionFileTransferService
                     "precommit_probe_received");
                 if (admission.Granted)
                 {
+                    if (admission.AdmissionToken is not { } grantedToken)
+                    {
+                        rejectionReason = "runtime_unlock_admission_missing";
+                        return RuntimeUnlockPreCommitProbeAdmissionStatus.Unavailable;
+                    }
+
                     ClearInboundRuntimeUnlockFallbackSeparationStateLocked(inbound);
+                    inbound.RuntimeUnlockAdmissionToken = grantedToken;
+                    inbound.LastRuntimeUnlockAdmissionGeneration = Math.Max(
+                        inbound.LastRuntimeUnlockAdmissionGeneration,
+                        grantedToken.AdmissionGeneration);
+                    admissionToken = grantedToken;
                     return RuntimeUnlockPreCommitProbeAdmissionStatus.Granted;
                 }
 
@@ -1645,6 +1629,42 @@ public sealed partial class SessionFileTransferService
         }
 
         return RuntimeUnlockPreCommitProbeAdmissionStatus.Unavailable;
+    }
+
+    private static bool TryGetCurrentRuntimeUnlockAdmissionTokenLocked(
+        OutboundTransferContext context,
+        out RuntimeUnlockAdmissionToken? token)
+    {
+        if (context.RuntimeUnlockAdmissionToken is { } currentToken &&
+            FileTransferCoordinator.IsRuntimeUnlockAdmissionTokenCurrent(
+                CreateCoordinatorStateLocked(context),
+                currentToken,
+                out _))
+        {
+            token = currentToken;
+            return true;
+        }
+
+        token = null;
+        return false;
+    }
+
+    private static bool TryGetCurrentRuntimeUnlockAdmissionTokenLocked(
+        InboundTransferContext context,
+        out RuntimeUnlockAdmissionToken? token)
+    {
+        if (context.RuntimeUnlockAdmissionToken is { } currentToken &&
+            FileTransferCoordinator.IsRuntimeUnlockAdmissionTokenCurrent(
+                CreateCoordinatorStateLocked(context),
+                currentToken,
+                out _))
+        {
+            token = currentToken;
+            return true;
+        }
+
+        token = null;
+        return false;
     }
 
     private static bool HasCurrentRuntimeUnlockAdmissionLocked(OutboundTransferContext context)

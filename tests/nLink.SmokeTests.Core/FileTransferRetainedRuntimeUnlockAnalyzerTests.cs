@@ -747,6 +747,49 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockPreCommitProbeSentThenTimeoutWithoutAck_ClassifiesAckMissing()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_precommit_ack_missing";
+        const string sessionId = "sess_runtime_unlock_precommit_ack_missing";
+        const string firstProbeId = "runtime-unlock-precommit:1:7:first";
+        const string secondProbeId = "runtime-unlock-precommit:2:9:second";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id={sessionId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4; file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=conservative_nkn_startup", secondsOffset: 0),
+            LogLine($"event=runtime_unlock_transaction_answer_received; session_id={sessionId}; transaction_generation=1; offer_generation=7; state=answerreceived; peer_visible_proof=1; peer_received=1; answer_received=1; route_commit_pending=0; route_committed=0; tuna_path_lease_generation=3; tuna_path_lease_state=listenerready; tuna_path_lease_current=1; reason=transport_acceleration_answer_received", secondsOffset: 1),
+            LogLine($"event=runtime_unlock_precommit_probe_started; direction=outbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=1; offer_generation=7; tuna_path_lease_generation=3; probe_id={firstProbeId}; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; handoff_kind=normal_to_tuna_activation", secondsOffset: 2),
+            LogLine($"event=runtime_unlock_precommit_probe_sent; direction=outbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=1; offer_generation=7; tuna_path_lease_generation=3; probe_id={firstProbeId}; target_transport=tuna; reason=precommit_probe_sent", secondsOffset: 3),
+            LogLine($"event=runtime_unlock_tuna_probe_ack_received; transport=tuna; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=1; offer_generation=7; tuna_path_lease_generation=3; probe_id={firstProbeId}; accepted=1; reason=precommit_probe_ack", secondsOffset: 4),
+            LogLine($"event=runtime_unlock_precommit_probe_acked; direction=outbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=1; offer_generation=7; tuna_path_lease_generation=3; probe_id={firstProbeId}; received_transport=tuna", secondsOffset: 5),
+            LogLine($"event=runtime_unlock_precommit_probe_paired_commit_confirmed; session_id={sessionId}; transfer_id={transferId}; transaction_generation=1; offer_generation=7; probe_id={firstProbeId}; reason=precommit_probe_ack", secondsOffset: 6),
+            LogLine($"event=filetransfer_runtime_unlock_route_commit_accepted; direction=outbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=1; offer_generation=7; route_commit_generation=1; reason=normal_to_tuna_activation", secondsOffset: 7),
+            LogLine($"event=filetransfer_live_route_epoch_recovered; direction=outbound; transfer_id={transferId}; session_id={sessionId}; route=file_tuna_v4; protocol_version=4; live_route_epoch=3; handoff_kind=normal_to_tuna_activation; target_transport=tuna; reason=precommit_probe_ack", secondsOffset: 8),
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id={sessionId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4; file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=conservative_nkn_startup; live_route_epoch=4", secondsOffset: 9),
+            LogLine($"event=runtime_unlock_transaction_answer_received; session_id={sessionId}; transaction_generation=2; offer_generation=9; state=answerreceived; peer_visible_proof=1; peer_received=1; answer_received=1; route_commit_pending=0; route_committed=0; tuna_path_lease_generation=5; tuna_path_lease_state=listenerready; tuna_path_lease_current=1; reason=transport_acceleration_answer_received", secondsOffset: 10),
+            LogLine($"event=filetransfer_runtime_unlock_activation_window_granted; direction=outbound; transfer_id={transferId}; session_id={sessionId}; reason=fallback_tail_quiescent; leg_id=leg:4; leg_generation=4; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; transport_epoch=9; bridge_recovery_generation=1; checkpoint_request_id=(none); state=recovery_active; can_send_data=1", secondsOffset: 10),
+            LogLine($"event=runtime_unlock_precommit_probe_started; direction=outbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=2; offer_generation=9; tuna_path_lease_generation=5; probe_id={secondProbeId}; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; handoff_kind=normal_to_tuna_activation", secondsOffset: 11),
+            LogLine($"event=runtime_unlock_precommit_probe_sent; direction=outbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=2; offer_generation=9; tuna_path_lease_generation=5; probe_id={secondProbeId}; target_transport=tuna; reason=precommit_probe_sent", secondsOffset: 12),
+            LogLine($"event=runtime_unlock_tuna_probe_sent; transport=tuna; session_id={sessionId}; transfer_id={transferId}; transaction_generation=2; offer_generation=9; tuna_path_lease_generation=5; probe_id={secondProbeId}; target_transport=tuna", secondsOffset: 13),
+            LogLine($"event=runtime_unlock_precommit_probe_failed; direction=outbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=2; offer_generation=9; tuna_path_lease_generation=5; probe_id={secondProbeId}; reason=timeout", secondsOffset: 43),
+            LogLine($"event=transfer_terminal; direction=outbound; transfer_id={transferId}; session_id={sessionId}; file_name_len=33; file_size_bytes=268435456; bytes_transferred=134217728; chunks_transferred=6241; chunk_count=12481; error_code=peer_disconnected; reason=Peer disconnected.; saved_path=(none); route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none", secondsOffset: 90)
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("runtime_unlock_precommit_probe_ack_missing", verdict["recovery_failure_class"]);
+        Assert.Equal("2", verdict["runtime_unlock_precommit_probe_sent_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_precommit_probe_ack_missing_count"]);
+        Assert.Equal("fail", verdict["runtime_unlock_probe_commit_verdict"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_RuntimeUnlockTunaProbeSidecarClosedRegularTerminal_ClassifiesProbePathFailure()
     {
         if (!OperatingSystem.IsWindows())

@@ -398,6 +398,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("secondTransfer", guiText, StringComparison.Ordinal);
         Assert.Contains("filetransfer-second-transfer-retained-log-slice.log", guiText, StringComparison.Ordinal);
         Assert.Contains("Wait-TunaGuiSecondTransferReadinessOrThrow", guiText, StringComparison.Ordinal);
+        Assert.Contains("second_transfer_preactivation_readiness_missing", guiText, StringComparison.Ordinal);
+        Assert.Contains("Tuna GUI second-transfer readiness did not stabilize: phase=preactivation_readiness", guiText, StringComparison.Ordinal);
         Assert.Contains("$lastTunaInactiveIndex", guiText, StringComparison.Ordinal);
         Assert.Contains("$requiredStableReadyPolls = 4", guiText, StringComparison.Ordinal);
         Assert.Contains("$RouteMode -eq 'live-reactivation-second-transfer') -and", guiText, StringComparison.Ordinal);

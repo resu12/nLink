@@ -4692,6 +4692,7 @@ public sealed partial class SessionFileTransferService
         context.DataSession = session;
         session.AvailabilityChanged += OnDataSessionAvailabilityChanged;
         TryReplayOutboundRuntimeUnlockPendingPreCommitProbeLocked(context, "data_session_attached");
+        RetryOutboundFallbackTailLocalYieldProofIfPendingLocked(context, "data_session_attached");
     }
 
     private void ReplaceInboundDataSessionLocked(InboundTransferContext context, IFileTransferDataSession session)
@@ -4710,6 +4711,7 @@ public sealed partial class SessionFileTransferService
         context.DataSession = session;
         session.AvailabilityChanged += OnDataSessionAvailabilityChanged;
         TryReplayInboundRuntimeUnlockPendingPreCommitProbeLocked(context, "data_session_attached");
+        RetryInboundFallbackTailLocalYieldProofIfPendingLocked(context, "data_session_attached");
     }
 
     private static void TrimRecentEvents(Queue<DateTimeOffset> events, DateTimeOffset now)
