@@ -8650,6 +8650,32 @@ public sealed partial class SessionFileTransferService : IDisposable
                    normalizedPeerPairKey);
     }
 
+    private static bool HasCurrentFallbackTailLocalYield(
+        string sessionId,
+        string transferId,
+        FileTransferLeg? leg,
+        FallbackTailYieldDecision? lastTailYieldDecision,
+        FallbackCheckpointLease? currentCheckpointLease,
+        bool localYieldGranted,
+        string? localOwnerKey,
+        string? localPairKey)
+    {
+        if (!localYieldGranted || !IsCurrentPostTunaFallbackLeg(leg))
+        {
+            return false;
+        }
+
+        var ownerSnapshot = BuildFallbackTailYieldOwnerSnapshot(
+            sessionId,
+            transferId,
+            leg!,
+            lastTailYieldDecision,
+            currentCheckpointLease);
+        var normalizedLocalPairKey = NormalizeFallbackTailYieldPairKey(localPairKey, localOwnerKey);
+        return string.Equals(localOwnerKey, ownerSnapshot.OwnerKey, StringComparison.Ordinal) &&
+               string.Equals(normalizedLocalPairKey, ownerSnapshot.PairKey, StringComparison.Ordinal);
+    }
+
     private static bool IsPairedFallbackTailYieldForCurrentLegAfterTransportEpochAdvance(
         string sessionId,
         string transferId,
@@ -9538,10 +9564,32 @@ public sealed partial class SessionFileTransferService : IDisposable
             return;
         }
 
+        var localYieldCurrent = HasCurrentFallbackTailLocalYield(
+            context.SessionId,
+            context.TransferId,
+            context.CurrentTransferLeg,
+            context.LastFallbackTailYieldDecision,
+            context.CurrentFallbackCheckpointLease,
+            context.LocalFallbackTailYieldGranted,
+            context.LocalFallbackTailYieldOwnerKey,
+            context.LocalFallbackTailYieldPairKey);
         if (context.PeerFallbackTailYieldGranted &&
-            !context.LocalFallbackTailYieldGranted)
+            !localYieldCurrent)
         {
             TryMarkOutboundFallbackTailLocalYieldFromCurrentLegLocked(context, reason);
+            localYieldCurrent = HasCurrentFallbackTailLocalYield(
+                context.SessionId,
+                context.TransferId,
+                context.CurrentTransferLeg,
+                context.LastFallbackTailYieldDecision,
+                context.CurrentFallbackCheckpointLease,
+                context.LocalFallbackTailYieldGranted,
+                context.LocalFallbackTailYieldOwnerKey,
+                context.LocalFallbackTailYieldPairKey);
+            if (!localYieldCurrent)
+            {
+                return;
+            }
         }
 
         if (!context.LocalFallbackTailYieldPeerVisible)
@@ -9559,10 +9607,32 @@ public sealed partial class SessionFileTransferService : IDisposable
             return;
         }
 
+        var localYieldCurrent = HasCurrentFallbackTailLocalYield(
+            context.SessionId,
+            context.TransferId,
+            context.CurrentTransferLeg,
+            context.LastFallbackTailYieldDecision,
+            context.CurrentFallbackCheckpointLease,
+            context.LocalFallbackTailYieldGranted,
+            context.LocalFallbackTailYieldOwnerKey,
+            context.LocalFallbackTailYieldPairKey);
         if (context.PeerFallbackTailYieldGranted &&
-            !context.LocalFallbackTailYieldGranted)
+            !localYieldCurrent)
         {
             TryMarkInboundFallbackTailLocalYieldFromCurrentLegLocked(context, reason);
+            localYieldCurrent = HasCurrentFallbackTailLocalYield(
+                context.SessionId,
+                context.TransferId,
+                context.CurrentTransferLeg,
+                context.LastFallbackTailYieldDecision,
+                context.CurrentFallbackCheckpointLease,
+                context.LocalFallbackTailYieldGranted,
+                context.LocalFallbackTailYieldOwnerKey,
+                context.LocalFallbackTailYieldPairKey);
+            if (!localYieldCurrent)
+            {
+                return;
+            }
         }
 
         if (!context.LocalFallbackTailYieldPeerVisible)
