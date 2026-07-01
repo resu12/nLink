@@ -8521,7 +8521,34 @@ public sealed partial class SessionFileTransferService : IDisposable
             var decisionCheckpointSnapshot = string.IsNullOrWhiteSpace(decision.CheckpointRequestIdSnapshot)
                 ? "(none)"
                 : decision.CheckpointRequestIdSnapshot;
-            if (string.Equals(decisionCheckpointSnapshot, currentCheckpointSnapshot, StringComparison.Ordinal))
+            var decisionCheckpointMatchesCurrent = string.Equals(
+                decisionCheckpointSnapshot,
+                currentCheckpointSnapshot,
+                StringComparison.Ordinal);
+            var decisionConsumesCurrentCheckpoint =
+                !decisionCheckpointMatchesCurrent &&
+                string.Equals(decisionCheckpointSnapshot, "(none)", StringComparison.Ordinal) &&
+                currentCheckpointLease is { State: FallbackCheckpointLeaseState.Pending } currentLease &&
+                decision.CheckpointLease is { State: FallbackCheckpointLeaseState.Accepted or FallbackCheckpointLeaseState.Retired } decisionLease &&
+                string.Equals(decisionLease.CheckpointRequestId, currentLease.CheckpointRequestId, StringComparison.Ordinal) &&
+                decisionLease.LeaseGeneration == currentLease.LeaseGeneration &&
+                decisionLease.CheckpointGeneration == currentLease.CheckpointGeneration;
+            var decisionCarriesCurrentSurvivalSnapshot =
+                !decisionCheckpointMatchesCurrent &&
+                string.Equals(decisionCheckpointSnapshot, "(none)", StringComparison.Ordinal) &&
+                currentCheckpointLease is { State: FallbackCheckpointLeaseState.Pending } &&
+                decision.FallbackSurvivalState.FallbackCurrent &&
+                !decision.FallbackSurvivalState.FallbackTerminalized &&
+                !decision.FallbackSurvivalState.CheckpointDeliveryRecoveryPending &&
+                !decision.FallbackSurvivalState.StateRefreshSendInFlight &&
+                !decision.FallbackSurvivalState.DeferredStateRefreshPending &&
+                !decision.FallbackSurvivalState.ProofReplayPending &&
+                !decision.FallbackSurvivalState.ControlPlanePressurePending &&
+                !decision.FallbackSurvivalState.BridgeRecoveryPending &&
+                !decision.FallbackSurvivalState.FallbackTailRepairPending;
+            if (decisionCheckpointMatchesCurrent ||
+                decisionConsumesCurrentCheckpoint ||
+                decisionCarriesCurrentSurvivalSnapshot)
             {
                 var decisionOwnerKey = FileTransferCoordinator.BuildFallbackTailYieldOwnerKey(
                     sessionId,
