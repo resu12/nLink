@@ -3715,6 +3715,7 @@ function Test-FileTransferStaleRejectedProofForbiddenEffect {
                 'runtime_unlock_tuna_probe_sent',
                 'runtime_unlock_tuna_probe_received',
                 'runtime_unlock_tuna_probe_ack_sent',
+                'runtime_unlock_precommit_probe_ack_delivery_result',
                 'runtime_unlock_tuna_probe_ack_received',
                 'runtime_unlock_precommit_probe_ack_sent',
                 'runtime_unlock_precommit_probe_commit_confirmation_sent',
@@ -6402,6 +6403,7 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_tuna_probe_sent_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSentCount),
         ("runtime_unlock_tuna_probe_received_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeReceivedCount),
         ("runtime_unlock_tuna_probe_ack_sent_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeAckSentCount),
+        ("runtime_unlock_precommit_probe_ack_delivery_result_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckDeliveryResultCount),
         ("runtime_unlock_tuna_probe_ack_received_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeAckReceivedCount),
         ("runtime_unlock_tuna_probe_sidecar_failure_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSidecarFailureCount),
         ("runtime_unlock_tuna_probe_sidecar_fresh_transaction_scheduled_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSidecarFreshTransactionScheduledCount),
@@ -7148,6 +7150,9 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockTunaProbeAckSentEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_tuna_probe_ack_sent'
     })
+    $runtimeUnlockPreCommitProbeAckDeliveryResultEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_precommit_probe_ack_delivery_result'
+    })
     $runtimeUnlockTunaProbeAckReceivedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_tuna_probe_ack_received'
     })
@@ -7453,6 +7458,30 @@ function Get-FileTransferRecoveryFailureClassification {
         }
 
         if ($null -eq $firstAckOrCommitSequence -or [int64]$firstFailureSequence -lt [int64]$firstAckOrCommitSequence) {
+            $runtimeUnlockPreCommitProbeAckMissingCount++
+        }
+    }
+
+    foreach ($ackSent in $runtimeUnlockTunaProbeAckSentEvents) {
+        $ackSentSequence = [int64]$ackSent.Sequence
+        $matchingAckDelivery = @(
+            $runtimeUnlockPreCommitProbeAckDeliveryResultEvents |
+                Where-Object {
+                    (Get-FileTransferEventField -Event $_ -Name 'delivery_result' -Default '') -eq 'sent' -and
+                    (Test-RuntimeUnlockPreCommitProbeTupleMatch -Sent $ackSent -Candidate $_)
+                }
+        )
+        $matchingAckReceive = @(
+            @($runtimeUnlockTunaProbeAckReceivedEvents + $runtimeUnlockPreCommitProbeAckedEvents + $runtimeUnlockTransactionCommittedEvents) |
+                Where-Object {
+                    [int64]$_.Sequence -gt $ackSentSequence -and
+                    (($_.EventName -ne 'runtime_unlock_tuna_probe_ack_received') -or
+                        (Get-FileTransferEventField -Event $_ -Name 'accepted' -Default '1') -ne '0') -and
+                    (Test-RuntimeUnlockPreCommitProbeTupleMatch -Sent $ackSent -Candidate $_)
+                }
+        )
+
+        if ($matchingAckDelivery.Count -eq 0 -and $matchingAckReceive.Count -eq 0) {
             $runtimeUnlockPreCommitProbeAckMissingCount++
         }
     }
@@ -7827,6 +7856,7 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockTunaProbeSentCount = $runtimeUnlockTunaProbeSentEvents.Count
         RuntimeUnlockTunaProbeReceivedCount = $runtimeUnlockTunaProbeReceivedEvents.Count
         RuntimeUnlockTunaProbeAckSentCount = $runtimeUnlockTunaProbeAckSentEvents.Count
+        RuntimeUnlockPreCommitProbeAckDeliveryResultCount = $runtimeUnlockPreCommitProbeAckDeliveryResultEvents.Count
         RuntimeUnlockTunaProbeAckReceivedCount = $runtimeUnlockTunaProbeAckReceivedEvents.Count
         RuntimeUnlockTunaProbeSidecarFailureCount = $runtimeUnlockTunaProbeSidecarFailureEvents.Count
         RuntimeUnlockTunaProbeSidecarFreshTransactionScheduledCount = $runtimeUnlockTunaProbeSidecarFreshTransactionScheduledEvents.Count
@@ -8353,6 +8383,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_tuna_probe_sent_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSentCount),
         ("runtime_unlock_tuna_probe_received_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeReceivedCount),
         ("runtime_unlock_tuna_probe_ack_sent_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeAckSentCount),
+        ("runtime_unlock_precommit_probe_ack_delivery_result_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckDeliveryResultCount),
         ("runtime_unlock_tuna_probe_ack_received_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeAckReceivedCount),
         ("runtime_unlock_tuna_probe_sidecar_failure_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSidecarFailureCount),
         ("runtime_unlock_tuna_probe_sidecar_fresh_transaction_scheduled_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSidecarFreshTransactionScheduledCount),

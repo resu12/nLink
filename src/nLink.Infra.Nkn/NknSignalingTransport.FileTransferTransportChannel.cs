@@ -1072,14 +1072,40 @@ public sealed partial class NknSignalingTransport
 
     private FileTransferRequiredTunaBulkUnavailableException CreateRequiredTunaBulkUnavailableException(string transferId)
     {
-        var reason = TryGetCurrentFileTransferDataSessionAvailabilityReason(transferId, out var availabilityReason)
-            ? availabilityReason
-            : "required_tuna_bulk_unavailable";
+        var reason = "required_tuna_bulk_unavailable";
+        if (TryGetCurrentFileTransferDataSessionReasonContext(
+                transferId,
+                out var sessionId,
+                out var availabilityReason))
+        {
+            reason = availabilityReason;
+        }
+
+        if (TryGetRequiredTunaBulkUnavailableFallbackReasonForSession(sessionId, out var fallbackReason))
+        {
+            reason = fallbackReason;
+        }
+
         return new FileTransferRequiredTunaBulkUnavailableException(reason);
     }
 
     private bool TryGetCurrentFileTransferDataSessionAvailabilityReason(string transferId, out string reason)
     {
+        if (TryGetCurrentFileTransferDataSessionReasonContext(transferId, out _, out reason))
+        {
+            return true;
+        }
+
+        reason = string.Empty;
+        return false;
+    }
+
+    private bool TryGetCurrentFileTransferDataSessionReasonContext(
+        string transferId,
+        out string sessionId,
+        out string reason)
+    {
+        sessionId = string.Empty;
         reason = string.Empty;
         if (string.IsNullOrWhiteSpace(transferId))
         {
@@ -1094,6 +1120,7 @@ public sealed partial class NknSignalingTransport
                 return false;
             }
 
+            sessionId = session.SessionId;
             reason = session.CurrentAvailabilityReason;
             return !string.IsNullOrWhiteSpace(reason);
         }
@@ -1112,6 +1139,13 @@ public sealed partial class NknSignalingTransport
             LocalOperationalLog.Warn(
                 "NKN.Tuna",
                 $"event=runtime_unlock_precommit_ack_authority_failed; session_id={SanitizeLogToken(authority.SessionId)}; transfer_id={SanitizeLogToken(authority.TransferId)}; transaction_generation={authority.TransactionGeneration}; offer_generation={authority.OfferGeneration}; tuna_path_lease_generation={authority.TunaPathLeaseGeneration}; probe_id={SanitizeLogToken(authority.ProbeId)}; reason=invalid_message_or_channel; message_type={MapEnvelopeTypeForDiagnostics(messageType)}; channel={MapBridgeChannel(channel)}");
+            LogRuntimeUnlockPreCommitAckDeliveryResult(
+                authority,
+                channel,
+                envelopeBytes.Length,
+                FileTransferTransportKind.Unknown,
+                deliveryResult: "rejected",
+                rejectionReason: "invalid_message_or_channel");
             return false;
         }
 
@@ -1122,6 +1156,13 @@ public sealed partial class NknSignalingTransport
             LocalOperationalLog.Warn(
                 "NKN.Tuna",
                 $"event=runtime_unlock_precommit_ack_authority_failed; session_id={SanitizeLogToken(authority.SessionId)}; transfer_id={SanitizeLogToken(authority.TransferId)}; transaction_generation={authority.TransactionGeneration}; offer_generation={authority.OfferGeneration}; tuna_path_lease_generation={authority.TunaPathLeaseGeneration}; probe_id={SanitizeLogToken(authority.ProbeId)}; reason=lane_unavailable; lane_available={(diagnostics?.IsAvailable == true ? 1 : 0)}; last_unavailable_reason={SanitizeLogToken(diagnostics?.LastUnavailableReason ?? "none")}; terminal_sidecar_reason={SanitizeLogToken(diagnostics?.TerminalSidecarReason ?? "none")}");
+            LogRuntimeUnlockPreCommitAckDeliveryResult(
+                authority,
+                channel,
+                envelopeBytes.Length,
+                FileTransferTransportKind.Unknown,
+                deliveryResult: "rejected",
+                rejectionReason: "lane_unavailable");
             return false;
         }
 
@@ -1133,6 +1174,13 @@ public sealed partial class NknSignalingTransport
                 LocalOperationalLog.Info(
                     "NKN.Tuna",
                     $"event=runtime_unlock_precommit_ack_authority_sent; transport=tuna; session_id={SanitizeLogToken(authority.SessionId)}; transfer_id={SanitizeLogToken(authority.TransferId)}; transaction_generation={authority.TransactionGeneration}; offer_generation={authority.OfferGeneration}; tuna_path_lease_generation={authority.TunaPathLeaseGeneration}; probe_id={SanitizeLogToken(authority.ProbeId)}; channel={MapBridgeChannel(channel)}; payload_bytes={envelopeBytes.Length}");
+                LogRuntimeUnlockPreCommitAckDeliveryResult(
+                    authority,
+                    channel,
+                    envelopeBytes.Length,
+                    FileTransferTransportKind.Tuna,
+                    deliveryResult: "sent",
+                    rejectionReason: "(none)");
                 LocalOperationalLog.Info(
                     "NKN.Tuna",
                     $"event=tuna_accelerated_envelope_sent; message_type={MapEnvelopeTypeForDiagnostics(messageType)}; channel={MapBridgeChannel(channel)}; payload_bytes={envelopeBytes.Length}; source=runtime_unlock_precommit_ack_authority");
@@ -1154,6 +1202,13 @@ public sealed partial class NknSignalingTransport
                 $"; last_unavailable_reason={SanitizeLogToken(diagnostics.LastUnavailableReason)}" +
                 $"; terminal_sidecar_reason={SanitizeLogToken(diagnostics.TerminalSidecarReason)}" +
                 $"; send_rejected={diagnostics.SendRejected}");
+            LogRuntimeUnlockPreCommitAckDeliveryResult(
+                authority,
+                channel,
+                envelopeBytes.Length,
+                FileTransferTransportKind.Unknown,
+                deliveryResult: "rejected",
+                rejectionReason: "try_send_rejected");
             return false;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1161,8 +1216,28 @@ public sealed partial class NknSignalingTransport
             LocalOperationalLog.Warn(
                 "NKN.Tuna",
                 $"event=runtime_unlock_precommit_ack_authority_failed; session_id={SanitizeLogToken(authority.SessionId)}; transfer_id={SanitizeLogToken(authority.TransferId)}; transaction_generation={authority.TransactionGeneration}; offer_generation={authority.OfferGeneration}; tuna_path_lease_generation={authority.TunaPathLeaseGeneration}; probe_id={SanitizeLogToken(authority.ProbeId)}; reason=exception; error={ex.GetType().Name}");
+            LogRuntimeUnlockPreCommitAckDeliveryResult(
+                authority,
+                channel,
+                envelopeBytes.Length,
+                FileTransferTransportKind.Unknown,
+                deliveryResult: "rejected",
+                rejectionReason: ex.GetType().Name);
             return false;
         }
+    }
+
+    private static void LogRuntimeUnlockPreCommitAckDeliveryResult(
+        RuntimeUnlockPreCommitAckSendAuthority authority,
+        NknBridgeChannel channel,
+        int payloadBytes,
+        FileTransferTransportKind actualTransport,
+        string deliveryResult,
+        string rejectionReason)
+    {
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_precommit_probe_ack_delivery_result; session_id={SanitizeLogToken(authority.SessionId)}; transfer_id={SanitizeLogToken(authority.TransferId)}; frame_type={FileTransferProtocol.RuntimeUnlockPreCommitProbeAckFrameType}; transaction_generation={authority.TransactionGeneration}; offer_generation={authority.OfferGeneration}; tuna_path_lease_generation={authority.TunaPathLeaseGeneration}; probe_id={SanitizeLogToken(authority.ProbeId)}; ack_authority_source=runtime_unlock_precommit_ack_authority; ack_authority_generation={authority.OfferGeneration}; intended_transport=tuna; actual_transport={FormatFileTransferTransportKindForLog(actualTransport)}; lane={MapBridgeChannel(channel)}; payload_bytes={payloadBytes}; delivery_result={SanitizeLogToken(deliveryResult)}; rejection_reason={SanitizeLogToken(rejectionReason)}");
     }
 
     private bool DoesFileTransferDataFrameFitTransportBudget(

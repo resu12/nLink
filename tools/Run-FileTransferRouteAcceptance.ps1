@@ -1480,6 +1480,13 @@ function Assert-TunaRouteAcceptanceRun {
         $inboundError = [string](Get-JsonPropertyValue -Object $summary -Name 'inboundErrorCode' -DefaultValue '(missing)')
         $outboundError = [string](Get-JsonPropertyValue -Object $summary -Name 'outboundErrorCode' -DefaultValue '(missing)')
         $measuredPhase = Get-JsonPropertyValue -Object $summary -Name 'measuredPhase' -DefaultValue $null
+        if ($Name -eq 'second-transfer-after-reactivation') {
+            $secondTransferPhase = Get-JsonPropertyValue -Object $summary -Name 'secondTransfer' -DefaultValue $null
+            if ($null -ne $secondTransferPhase) {
+                $measuredPhase = $secondTransferPhase
+            }
+        }
+
         if ($null -ne $measuredPhase) {
             $measuredRoute = [string](Get-JsonPropertyValue -Object $measuredPhase -Name 'route' -DefaultValue '')
             $measuredProtocol = ConvertTo-RouteAcceptanceInt -Value (Get-JsonPropertyValue -Object $measuredPhase -Name 'protocolVersion' -DefaultValue 0)
@@ -1981,6 +1988,13 @@ function Assert-Phase4ScenarioRun {
         if (Assert-RouteAcceptanceFileExists -Result $result -RelativePath 'filetransfer-tuna-gui-summary.json') {
             $summary = Get-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json') -Raw | ConvertFrom-Json
             $measuredPhase = Get-JsonPropertyValue -Object $summary -Name 'measuredPhase' -DefaultValue $null
+            if ($Scenario.Name -eq 'second-transfer-after-reactivation') {
+                $secondTransferPhase = Get-JsonPropertyValue -Object $summary -Name 'secondTransfer' -DefaultValue $null
+                if ($null -ne $secondTransferPhase) {
+                    $measuredPhase = $secondTransferPhase
+                }
+            }
+
             $phase = if ($null -ne $measuredPhase) { $measuredPhase } else { $summary }
             $result.completed = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $phase -Name 'completed' -DefaultValue $false)
             $result.integrityOk = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $phase -Name 'integrityOk' -DefaultValue $false)

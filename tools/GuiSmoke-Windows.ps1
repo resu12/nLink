@@ -2604,10 +2604,21 @@ function Copy-FileTransferLiveLogSlice {
     param(
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
         [Parameter(Mandatory = $true)][int]$Bookmark,
-        [string]$FileName = 'filetransfer-retained-log-slice.log'
+        [string]$FileName = 'filetransfer-retained-log-slice.log',
+        [string[]]$PrefixLines = @()
     )
 
     $lines = @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)
+    foreach ($prefixLine in @($PrefixLines)) {
+        if ([string]::IsNullOrWhiteSpace($prefixLine)) {
+            continue
+        }
+
+        if (-not ($lines | Where-Object { [string]::Equals([string]$_, [string]$prefixLine, [System.StringComparison]::Ordinal) } | Select-Object -First 1)) {
+            $lines = @($prefixLine) + $lines
+        }
+    }
+
     $path = Join-Path $ArtifactDir $FileName
     if ($lines.Count -gt 0) {
         [System.IO.File]::WriteAllText($path, ($lines -join [Environment]::NewLine), [System.Text.Encoding]::UTF8)
@@ -3179,10 +3190,16 @@ function Wait-TunaGuiSecondTransferReadinessOrThrow {
             $lastUiState = "error=$lastSendError"
         }
 
-        $isReadyNow = $null -ne $sendButton -and
+        $allowCoordinatorProofAfterSend = [string]::Equals(
+            $RouteMode,
+            'live-reactivation-second-transfer',
+            [System.StringComparison]::OrdinalIgnoreCase)
+        $routeReadinessSatisfied = $allowCoordinatorProofAfterSend -or (
             [bool]$lastState.TunaActive -and
             [bool]$lastState.ListenerReady -and
-            -not [bool]$lastState.ListenerUnavailable -and
+            -not [bool]$lastState.ListenerUnavailable)
+        $isReadyNow = $null -ne $sendButton -and
+            $routeReadinessSatisfied -and
             [bool]$lastSendState.Ready
         if ($isReadyNow) {
             $stableReadyPolls++
@@ -4008,6 +4025,13 @@ function Wait-TunaGuiFileTunaV4PublicationAfterBookmark {
         })
     }
     catch {
+        foreach ($candidateLine in @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)) {
+            if ($candidateLine.IndexOf('event=runtime_unlock_answer_rejected_tuna_path_lease_unavailable', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $candidateLine.IndexOf('tuna_path_lease_unavailable_at_answer', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                throw ("Phase 5 pre-transfer Tuna diagnostic readiness missing: failurePhase=diagnostic_tuna_readiness; failureReason=pretransfer_tuna_readiness_missing; readiness_failure=tuna_path_lease_unavailable_at_answer; original_error={0}" -f $_.Exception.Message)
+            }
+        }
+
         throw ("Phase 5 measured file-transfer route publication missing: failurePhase=route_publication; failureReason=file_tuna_v4_publication_missing_after_transfer; original_error={0}" -f $_.Exception.Message)
     }
 
@@ -6539,12 +6563,30 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         $secondStartedUtc = [datetime]::UtcNow
         $secondSw = [System.Diagnostics.Stopwatch]::StartNew()
         $secondTransferPhase = $null
+        $secondRouteLine = ''
         Write-Host "[GUI Smoke][filetransfer_tuna] Starting second transfer after live reactivation; expecting file_tuna_v4 protocol 4." -ForegroundColor DarkGray
 
         try {
-            $secondDiagnosticReadinessLine = [string](Wait-TunaGuiDiagnosticReadinessBeforeMeasuredTransfer -Bookmark $secondBookmark -TimeoutMs ([Math]::Min(60000, $StartupTimeoutMs)))
-            $observedEvidenceLines.Add($secondDiagnosticReadinessLine) | Out-Null
-            $diagnosticTunaReadinessObserved = $true
+            try {
+                $secondDiagnosticReadinessLine = [string](Wait-TunaGuiDiagnosticReadinessBeforeMeasuredTransfer -Bookmark $secondBookmark -TimeoutMs ([Math]::Min(60000, $StartupTimeoutMs)))
+                $observedEvidenceLines.Add($secondDiagnosticReadinessLine) | Out-Null
+                $diagnosticTunaReadinessObserved = $true
+                $summary['secondTransferDiagnosticReadiness'] = [ordered]@{
+                    observed = $true
+                    line = $secondDiagnosticReadinessLine
+                }
+                $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json') -Encoding UTF8
+            }
+            catch {
+                $summary['secondTransferDiagnosticReadiness'] = [ordered]@{
+                    observed = $false
+                    error = $_.Exception.Message
+                    authority = 'diagnostic_only'
+                    nextRequiredProof = 'second_transfer_file_tuna_v4_route_publication'
+                }
+                $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json') -Encoding UTF8
+                Write-Host "[GUI Smoke][filetransfer_tuna] Second-transfer diagnostic Tuna readiness was not refreshed before send; continuing to require coordinator-authorized file_tuna_v4 publication for the new transfer." -ForegroundColor Yellow
+            }
 
             $secondSendButton = Wait-TunaGuiSecondTransferReadinessOrThrow -Window $senderWindow -Bookmark $bookmark -TimeoutMs ([Math]::Min(60000, $StartupTimeoutMs)) -RouteMode $RouteMode -SenderRole $expectedOutboundRole
             Click-Element $secondSendButton
@@ -6670,7 +6712,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
             throw
         }
         finally {
-            Copy-FileTransferLiveLogSlice -ArtifactDir $ArtifactDir -Bookmark $secondBookmark -FileName 'filetransfer-second-transfer-retained-log-slice.log'
+            Copy-FileTransferLiveLogSlice -ArtifactDir $ArtifactDir -Bookmark $secondBookmark -FileName 'filetransfer-second-transfer-retained-log-slice.log' -PrefixLines @($secondRouteLine)
         }
     }
 

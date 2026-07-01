@@ -1166,8 +1166,15 @@ internal static class FileTransferCoordinator
                     request.RuntimeUnlockPendingPreCommitProbeRequest)
                 : (RuntimeUnlockPendingPreCommitProbeDecision?)null;
 
-        var acceptedState = ApplyIssuedRecoveryAuthority(
+        var acceptedState = ApplyIssuedFallbackAuthority(
             state,
+            request.Kind,
+            issuedControlPlaneToken,
+            issuedCheckpointLease,
+            issuedPressureToken,
+            yieldDecision);
+        acceptedState = ApplyIssuedRecoveryAuthority(
+            acceptedState,
             request.Kind,
             repairReplayDecision,
             transportEpochDecision,
@@ -2943,6 +2950,60 @@ internal static class FileTransferCoordinator
             CurrentRoutePublicationToken = token,
             LastRoutePublicationGeneration = token.PublicationGeneration,
         };
+    }
+
+    private static FileTransferCoordinatorState ApplyIssuedFallbackAuthority(
+        FileTransferCoordinatorState state,
+        FileTransferCoordinatorActionKind kind,
+        FallbackControlPlaneToken? controlPlaneToken,
+        FallbackCheckpointLease? checkpointLease,
+        FallbackControlPlanePressureToken? pressureToken,
+        FallbackTailYieldDecision? tailYieldDecision)
+    {
+        var next = state;
+        if (controlPlaneToken is { } token &&
+            kind == FileTransferCoordinatorActionKind.ControlPlaneSend)
+        {
+            next = next with
+            {
+                CurrentFallbackControlPlaneToken = token,
+                LastFallbackControlPlaneTokenGeneration = token.TokenGeneration,
+            };
+        }
+
+        if (checkpointLease is { } lease &&
+            kind == FileTransferCoordinatorActionKind.FallbackCheckpointBegin)
+        {
+            next = next with
+            {
+                CurrentFallbackCheckpointLease = lease,
+                LastFallbackCheckpointLeaseGeneration = lease.LeaseGeneration,
+            };
+        }
+
+        if (pressureToken is { } pressure &&
+            kind == FileTransferCoordinatorActionKind.FallbackControlPlanePressure)
+        {
+            next = next with
+            {
+                CurrentFallbackControlPlanePressureToken = pressure,
+                LastFallbackControlPlanePressureGeneration = pressure.PressureGeneration,
+            };
+        }
+
+        if (tailYieldDecision is { } yield)
+        {
+            next = next with
+            {
+                LastFallbackTailYieldDecision = yield,
+                LastFallbackTailYieldGeneration = yield.YieldGeneration,
+                CurrentFallbackCheckpointLease = kind == FileTransferCoordinatorActionKind.FallbackTailQuiescent
+                    ? null
+                    : next.CurrentFallbackCheckpointLease,
+            };
+        }
+
+        return next;
     }
 
     private static FallbackControlPlaneToken? IssueFallbackControlPlaneToken(
