@@ -9646,7 +9646,19 @@ public sealed partial class NknSignalingTransport
              state.ObservedSendPending));
 
     private static bool RequiresRuntimeUnlockRetryDispatchProofBeforeCompletion(RuntimeUnlockRecoveryRetryState state)
-        => RequiresRuntimeUnlockRetryDispatchProof(state);
+        => state.DispatchAuthorityGranted ||
+           state.DispatchAuthorityRejected ||
+           (RequiresRuntimeUnlockRetryDispatchAuthority(state.RetryReason) &&
+            (state.RetryQueued ||
+             state.RetryDispatching ||
+             state.RetryDispatched ||
+             state.ObservedSendPending));
+
+    private static bool ShouldDeferRuntimeUnlockRetryCompletionUntilListenerRearm(
+        RuntimeUnlockRecoveryRetryState state)
+        => state.RequiresLocalListenerRetry &&
+           !state.ListenerRearmCompleted &&
+           state.ContractState is not (SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed);
 
     private static bool RequiresRuntimeUnlockRetryDispatchAuthority(string? reason)
         => IsRuntimeUnlockActivationRetryReason(reason) ||
@@ -11548,6 +11560,7 @@ public sealed partial class NknSignalingTransport
     {
         RuntimeUnlockRecoveryRetryState? stateSnapshot = null;
         RuntimeUnlockRecoveryRetryState? rejectedState = null;
+        RuntimeUnlockRecoveryRetryState? deferredState = null;
         lock (accelerationGate)
         {
             var state = runtimeUnlockRecoveryRetryState;
@@ -11558,7 +11571,13 @@ public sealed partial class NknSignalingTransport
                 return;
             }
 
-            if (RequiresRuntimeUnlockRetryDispatchProofBeforeCompletion(state) &&
+            if (ShouldDeferRuntimeUnlockRetryCompletionUntilListenerRearm(state))
+            {
+                state.AuthorityFailureReason = "listener_rearm_required_before_dispatch_completion";
+                deferredState = state;
+                stateSnapshot = state;
+            }
+            else if (RequiresRuntimeUnlockRetryDispatchProofBeforeCompletion(state) &&
                 !state.DispatchObserved)
             {
                 MarkRuntimeUnlockRetryDispatchAuthorityRejectedUnsafe(
@@ -11587,6 +11606,15 @@ public sealed partial class NknSignalingTransport
             }
         }
 
+        if (deferredState is not null)
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=runtime_unlock_retry_completion_deferred_listener_rearm_pending; session_id={SanitizeLogToken(deferredState.SessionId)}; transfer_id={SanitizeLogToken(deferredState.TransferId ?? "(none)")}; contract_generation={deferredState.ContractGeneration}; offer_generation={(deferredState.CurrentOfferGeneration > 0 ? deferredState.CurrentOfferGeneration : deferredState.RetiredOfferGeneration)}; retry_reason={SanitizeLogToken(deferredState.RetryReason)}; recovery_reason={SanitizeLogToken(deferredState.RecoveryReason)}; completion_reason={SanitizeLogToken(reason)}; decision_reason=listener_rearm_required_before_dispatch_completion");
+            LogRuntimeUnlockRecoveryContract("session_recovery_contract_completion_deferred", deferredState.SessionId);
+            return;
+        }
+
         if (rejectedState is not null)
         {
             LogRuntimeUnlockRetryDispatchProof(
@@ -11610,6 +11638,7 @@ public sealed partial class NknSignalingTransport
     private void MarkRuntimeUnlockRecoveryContractListenerRearmCompleted(string sessionId, string reason)
     {
         RuntimeUnlockRecoveryRetryState? stateSnapshot = null;
+        var retryWasHeldForListenerRearm = false;
         var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? string.Empty : sessionId.Trim();
         if (string.IsNullOrWhiteSpace(normalizedSessionId))
         {
@@ -11628,13 +11657,36 @@ public sealed partial class NknSignalingTransport
             }
 
             var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            retryWasHeldForListenerRearm =
+                state.Settled &&
+                !state.RetryQueued &&
+                !state.RetryDispatching &&
+                !state.RetryDispatched &&
+                string.Equals(
+                    state.AuthorityFailureReason,
+                    "listener_rearm_required_before_dispatch_authority",
+                    StringComparison.Ordinal);
             RefreshRuntimeUnlockRecoveryContractOfferSendWindowUnsafe(state, nowMs);
             state.AuthorityFailureReason = null;
             state.ListenerRearmCompleted = true;
             state.ObservedSendPending = false;
-            state.ContractState = state.RetryDispatched
-                ? SessionRecoveryContractState.RetryDispatched
-                : SessionRecoveryContractState.RetryQueued;
+            if (retryWasHeldForListenerRearm)
+            {
+                state.RetryQueued = false;
+                state.RetryDispatching = false;
+                state.RetryDispatched = false;
+                state.RetryAuthorityPending = false;
+                state.RetryAuthorityGranted = false;
+                state.ObservedSendDeadlineUtcMs = 0;
+                state.ContractState = SessionRecoveryContractState.RecoverySettled;
+            }
+            else
+            {
+                state.ContractState = state.RetryDispatched
+                    ? SessionRecoveryContractState.RetryDispatched
+                    : SessionRecoveryContractState.RetryQueued;
+            }
+
             stateSnapshot = state;
         }
 
@@ -11642,6 +11694,10 @@ public sealed partial class NknSignalingTransport
             "NKN.Tuna",
             $"event=session_recovery_contract_listener_rearm_completed; session_id={SanitizeLogToken(normalizedSessionId)}; trigger={SanitizeLogToken(reason)}");
         LogRuntimeUnlockRecoveryContract("session_recovery_contract_listener_rearm_completed", stateSnapshot!.SessionId);
+        if (retryWasHeldForListenerRearm)
+        {
+            ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed("listener_rearm_completed");
+        }
     }
 
     private void FailRuntimeUnlockRecoveryContractIfActive(string? sessionId, string reason)

@@ -10342,6 +10342,12 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.DoesNotContain("event=session_recovery_contract_retry_authority_granted;", pendingTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=session_recovery_contract_retry_queued;", pendingTail, StringComparison.Ordinal);
 
+            InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractListenerRearmCompleted", sessionId, "runtime_unlock");
+            var grantedTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=runtime_unlock_retry_dispatch_authority_granted;", grantedTail, StringComparison.Ordinal);
+            Assert.Contains("event=session_recovery_contract_retry_authority_granted;", grantedTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_observed;", grantedTail, StringComparison.Ordinal);
+
             InvokePrivateMethod(host, "CompleteRuntimeUnlockRecoveryContractIfActive", sessionId, "transport_acceleration_answer");
 
             var completedTail = ReadOperationalLogTail(logStart);
