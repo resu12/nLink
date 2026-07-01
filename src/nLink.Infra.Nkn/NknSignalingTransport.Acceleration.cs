@@ -9646,10 +9646,7 @@ public sealed partial class NknSignalingTransport
              state.ObservedSendPending));
 
     private static bool RequiresRuntimeUnlockRetryDispatchProofBeforeCompletion(RuntimeUnlockRecoveryRetryState state)
-        => string.Equals(
-               SanitizeLogToken(state.RetryReason),
-               RuntimeUnlockProbeSidecarClosedRetryReason,
-               StringComparison.Ordinal);
+        => RequiresRuntimeUnlockRetryDispatchProof(state);
 
     private static bool RequiresRuntimeUnlockRetryDispatchAuthority(string? reason)
         => IsRuntimeUnlockActivationRetryReason(reason) ||
