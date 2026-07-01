@@ -10645,6 +10645,59 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task InitialTunaReadinessProvider_InvalidatesPositiveSnapshotWhenTunaLaneUnavailable()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.initial-tuna-positive-lane-unavailable.address");
+            var hostLane = new RetryableTunaAccelerationSession(canListen: true, failedDialAttemptsBeforeSuccess: 0);
+            hostLane.MarkListenerAvailableForTests();
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-initial-tuna-positive-lane-unavailable-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                hostLane);
+
+            const string sessionId = "session_initial_tuna_positive_lane_unavailable";
+            const string transferId = "transfer_initial_tuna_positive_lane_unavailable";
+            host.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, sessionId);
+            InvokePrivateMethod(
+                host,
+                "RecordInitialTunaReadinessAnswerReceived",
+                sessionId,
+                1L,
+                101L,
+                "unit_test_positive_readiness",
+                true);
+
+            var provider = Assert.IsAssignableFrom<IFileTransferInitialTunaReadinessProvider>(host);
+            Assert.True(provider.TryGetInitialTunaReadinessEvidence(
+                sessionId,
+                transferId,
+                FileTransferDirection.Outbound,
+                out var evidence));
+            Assert.NotNull(evidence);
+
+            await hostLane.StopAsync("sidecar_read_failed", CancellationToken.None);
+
+            Assert.False(provider.TryGetInitialTunaReadinessEvidence(
+                sessionId,
+                transferId,
+                FileTransferDirection.Outbound,
+                out var unavailableEvidence));
+            Assert.Null(unavailableEvidence);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public void InitialTunaReadinessProvider_RemintsPositiveSnapshotFromAcceptedRouteCommitForNextTransfer()
     {
         FakeNknClient.ResetNetwork();

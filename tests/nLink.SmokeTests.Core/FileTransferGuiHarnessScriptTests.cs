@@ -392,8 +392,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     {
         var repoRoot = FindRepoRoot();
         var wrapperPath = Path.Combine(repoRoot, "tools", "Run-FileTransferTunaGuiSmoke.ps1");
+        var routeAcceptancePath = Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1");
         var guiPath = Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1");
         var wrapperText = File.ReadAllText(wrapperPath);
+        var routeAcceptanceText = File.ReadAllText(routeAcceptancePath);
         var guiText = File.ReadAllText(guiPath);
 
         Assert.Contains("\"live-reactivation-second-transfer\"", wrapperText, StringComparison.Ordinal);
@@ -413,11 +415,20 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("reason=prearm_after_fallback_epoch_started", guiText, StringComparison.Ordinal);
         Assert.Contains("firstTransferTerminalBeforeLiveReactivation", guiText, StringComparison.Ordinal);
         Assert.Contains("terminal_before_same_transfer_reactivation", guiText, StringComparison.Ordinal);
+        Assert.Contains("secondTransferRequiresFreshDiagnosticReadiness", guiText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer_tuna_gui_second_transfer_fresh_readiness_required", guiText, StringComparison.Ordinal);
+        Assert.Contains("first_transfer_terminal_before_same_transfer_reactivation", guiText, StringComparison.Ordinal);
+        Assert.Contains("Tuna GUI second-transfer preactivation readiness missing", guiText, StringComparison.Ordinal);
         Assert.Contains("Tuna GUI live reactivation second-transfer proof did not prove clean fallback terminal followed by second-transfer Tuna V4", guiText, StringComparison.Ordinal);
         Assert.Contains("last_tuna_inactive_index=", guiText, StringComparison.Ordinal);
         Assert.Contains("required_stable_ready_polls=", guiText, StringComparison.Ordinal);
         Assert.Contains("-FileName 'filetransfer-second-transfer-retained-log-slice.log'", guiText, StringComparison.Ordinal);
         Assert.Contains("setupFailurePhase", guiText, StringComparison.Ordinal);
+        Assert.Contains("$secondSetupPhaseKnown", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("$secondSetupReasonKnown", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("[string]::Equals($secondSetupPhase, 'unknown'", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("$result.setupFailurePhase = $secondSetupPhase", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("$result.setupFailureReason = $secondSetupReason", routeAcceptanceText, StringComparison.Ordinal);
         Assert.Contains("second-transfer-analysis", wrapperText, StringComparison.Ordinal);
         Assert.Contains("Invoke-TunaGuiLiveRetainedAnalysisBestEffort", wrapperText, StringComparison.Ordinal);
         Assert.Contains("post_tuna_fallback_v6,file_tuna_v4", guiText, StringComparison.Ordinal);

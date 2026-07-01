@@ -2826,7 +2826,19 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $phase = 'unknown'
     $reason = 'unknown'
     $listenerReadyUnavailableContradiction = $listenerReady -and ($listenerUnavailable -or $listenerSidecarUnavailable)
-    if ($ErrorMessage.IndexOf('pretransfer_tuna_readiness_missing', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+    if ($ErrorMessage.IndexOf('second_transfer_preactivation_readiness_missing', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $ErrorMessage.IndexOf('second_transfer_tuna_readiness_unstable', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $ErrorMessage.IndexOf('Tuna GUI second-transfer readiness did not stabilize', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        $phase = 'preactivation_readiness'
+        $reason = if ($listenerReadyUnavailableContradiction -or
+            $ErrorMessage.IndexOf('listener_ready_unavailable_contradiction', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            'listener_ready_unavailable_contradiction'
+        }
+        else {
+            'second_transfer_preactivation_readiness_missing'
+        }
+    }
+    elseif ($ErrorMessage.IndexOf('pretransfer_tuna_readiness_missing', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $ErrorMessage.IndexOf('diagnostic Tuna readiness before measured GUI file transfer', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         $phase = 'diagnostic_tuna_readiness'
         $reason = 'pretransfer_tuna_readiness_missing'
@@ -2839,18 +2851,6 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $ErrorMessage.IndexOf('coordinator-authorized file Tuna V4 publication after measured GUI file transfer', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         $phase = 'route_publication'
         $reason = 'file_tuna_v4_publication_missing_after_transfer'
-    }
-    elseif ($ErrorMessage.IndexOf('second_transfer_preactivation_readiness_missing', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-        $ErrorMessage.IndexOf('second_transfer_tuna_readiness_unstable', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-        $ErrorMessage.IndexOf('Tuna GUI second-transfer readiness did not stabilize', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-        $phase = 'preactivation_readiness'
-        $reason = if ($listenerReadyUnavailableContradiction -or
-            $ErrorMessage.IndexOf('listener_ready_unavailable_contradiction', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-            'listener_ready_unavailable_contradiction'
-        }
-        else {
-            'second_transfer_preactivation_readiness_missing'
-        }
     }
     elseif ($ErrorMessage.IndexOf('live multi-toggle normal-to-Tuna route epoch started', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         $phase = 'live_route_proof'
@@ -5762,6 +5762,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     $liveRouteEpochObservations = New-Object System.Collections.Generic.List[object]
     $firstTransferTerminalBeforeLiveReactivation = $false
     $firstTransferTerminalBeforeLiveReactivationTransferId = ''
+    $secondTransferRequiresFreshDiagnosticReadiness = $false
     $firstTransferTerminalBeforeFallbackSwitchOff = $false
     $firstTransferTerminalBeforeFallbackSwitchOffTransferId = ''
     $liveSwitchOffMinimumFaultPayloadBytes = 0L
@@ -6553,6 +6554,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     $secondTransferProofOk = $false
     if ($RouteMode -eq 'live-reactivation-second-transfer' -and -not $liveSwitchOffTerminalCompletedBeforeFault) {
         $secondPayloadBytes = 16777216L
+        $secondTransferRequiresFreshDiagnosticReadiness = [bool]$firstTransferTerminalBeforeLiveReactivation
         $postTerminalQuietBookmark = Get-AppLogBookmark
         $postTerminalQuiet = Wait-TunaGuiSecondTransferPostTerminalQuietWindowOrThrow `
             -Bookmark $postTerminalQuietBookmark `
@@ -6562,6 +6564,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
             postTerminalQuietMs = $postTerminalQuiet.QuietMs
             postTerminalNoiseCount = $postTerminalQuiet.NoiseCount
             postTerminalLastNoiseUtc = $postTerminalQuiet.LastNoiseUtc
+            requiresFreshDiagnosticReadiness = $secondTransferRequiresFreshDiagnosticReadiness
+            freshReadinessReason = if ($secondTransferRequiresFreshDiagnosticReadiness) { 'first_transfer_terminal_before_same_transfer_reactivation' } else { 'same_transfer_reactivation_proof_observed_or_not_required' }
         }
         $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json') -Encoding UTF8
         Write-Host ("[GUI Smoke][filetransfer_tuna] First-transfer terminal echoes quiet for {0} ms before second transfer; noise_count={1}." -f $postTerminalQuiet.QuietMs, $postTerminalQuiet.NoiseCount) -ForegroundColor DarkGray
@@ -6576,6 +6580,12 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         Write-Host "[GUI Smoke][filetransfer_tuna] Starting second transfer after live reactivation; expecting file_tuna_v4 protocol 4." -ForegroundColor DarkGray
 
         try {
+            if ($secondTransferRequiresFreshDiagnosticReadiness) {
+                $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_second_transfer_fresh_readiness_required; route_mode={1}; first_transfer_id={2}; reason=first_transfer_terminal_before_same_transfer_reactivation" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $RouteMode, $firstTransferTerminalBeforeLiveReactivationTransferId)) | Out-Null
+                Write-Host "[GUI Smoke][filetransfer_tuna] First transfer completed before same-transfer reactivation; requiring fresh diagnostic Tuna readiness before second send." -ForegroundColor Yellow
+                Unlock-TunaPayers -Context $Context -PayerMode $PayerMode -Password $WalletPassword
+            }
+
             try {
                 $secondDiagnosticReadinessLine = [string](Wait-TunaGuiDiagnosticReadinessBeforeMeasuredTransfer -Bookmark $secondBookmark -TimeoutMs ([Math]::Min(60000, $StartupTimeoutMs)))
                 $observedEvidenceLines.Add($secondDiagnosticReadinessLine) | Out-Null
@@ -6583,6 +6593,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 $summary['secondTransferDiagnosticReadiness'] = [ordered]@{
                     observed = $true
                     line = $secondDiagnosticReadinessLine
+                    required = $secondTransferRequiresFreshDiagnosticReadiness
                 }
                 $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json') -Encoding UTF8
             }
@@ -6592,8 +6603,14 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                     error = $_.Exception.Message
                     authority = 'diagnostic_only'
                     nextRequiredProof = 'second_transfer_file_tuna_v4_route_publication'
+                    required = $secondTransferRequiresFreshDiagnosticReadiness
+                    requiredReason = if ($secondTransferRequiresFreshDiagnosticReadiness) { 'first_transfer_terminal_before_same_transfer_reactivation' } else { '(none)' }
                 }
                 $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json') -Encoding UTF8
+                if ($secondTransferRequiresFreshDiagnosticReadiness) {
+                    throw ("Tuna GUI second-transfer preactivation readiness missing: failurePhase=preactivation_readiness; failureReason=second_transfer_preactivation_readiness_missing; reason=first_transfer_terminal_before_same_transfer_reactivation; original_error={0}" -f $_.Exception.Message)
+                }
+
                 Write-Host "[GUI Smoke][filetransfer_tuna] Second-transfer diagnostic Tuna readiness was not refreshed before send; continuing to require coordinator-authorized file_tuna_v4 publication for the new transfer." -ForegroundColor Yellow
             }
 

@@ -2041,7 +2041,17 @@ function Assert-Phase4ScenarioRun {
                     $secondIntegrity = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $second -Name 'integrityOk' -DefaultValue $false)
                     $secondSetupPhase = [string](Get-JsonPropertyValue -Object $second -Name 'setupFailurePhase' -DefaultValue '')
                     $secondSetupReason = [string](Get-JsonPropertyValue -Object $second -Name 'setupFailureReason' -DefaultValue '')
-                    if (-not [string]::IsNullOrWhiteSpace($secondSetupPhase) -or -not [string]::IsNullOrWhiteSpace($secondSetupReason)) {
+                    $secondSetupPhaseKnown = -not [string]::IsNullOrWhiteSpace($secondSetupPhase) -and
+                        -not [string]::Equals($secondSetupPhase, 'unknown', [System.StringComparison]::OrdinalIgnoreCase)
+                    $secondSetupReasonKnown = -not [string]::IsNullOrWhiteSpace($secondSetupReason) -and
+                        -not [string]::Equals($secondSetupReason, 'unknown', [System.StringComparison]::OrdinalIgnoreCase)
+                    if ($secondSetupPhaseKnown -or $secondSetupReasonKnown) {
+                        if ($secondSetupPhaseKnown) {
+                            $result.setupFailurePhase = $secondSetupPhase
+                        }
+                        if ($secondSetupReasonKnown) {
+                            $result.setupFailureReason = $secondSetupReason
+                        }
                         Add-RouteAcceptanceFailure -Result $result -Message ("second transfer setup failure after reactivation: phase={0}; reason={1}" -f `
                             ($(if ([string]::IsNullOrWhiteSpace($secondSetupPhase)) { '(unknown)' } else { $secondSetupPhase })),
                             ($(if ([string]::IsNullOrWhiteSpace($secondSetupReason)) { '(unknown)' } else { $secondSetupReason })))
