@@ -894,6 +894,14 @@ public sealed partial class NknSignalingTransport
                string.Equals(ProbeId, ack.ProbeId ?? string.Empty, StringComparison.Ordinal);
     }
 
+    private readonly record struct RuntimeUnlockPreCommitProbeSendAuthority(
+        string SessionId,
+        string TransferId,
+        long TransactionGeneration,
+        long OfferGeneration,
+        long TunaPathLeaseGeneration,
+        string ProbeId);
+
     private async Task SendFileTransferEnvelopeRawAsync(
         MsgType messageType,
         string transferId,
@@ -907,6 +915,7 @@ public sealed partial class NknSignalingTransport
         bool forceRegularNknBulk = false,
         bool requireAcceleratedBulk = false,
         bool allowAccelerationDuringRegularNknFallback = false,
+        RuntimeUnlockPreCommitProbeSendAuthority? runtimeUnlockPreCommitProbeAuthority = null,
         RuntimeUnlockPreCommitAckSendAuthority? runtimeUnlockPreCommitAckAuthority = null,
         FileTransferDataPathSendAuthority? dataPathSendAuthority = null)
     {
@@ -965,6 +974,28 @@ public sealed partial class NknSignalingTransport
         var dataPathAuthoritySuffix = dataPathSendAuthority is null
             ? string.Empty
             : FormatFileTransferDataPathAuthoritySuffix(dataPathSendAuthority);
+        var runtimeUnlockPreCommitProbeDeliveryLogged = false;
+        void LogRuntimeUnlockPreCommitProbeDeliveryOnce(
+            FileTransferTransportKind actualTransport,
+            string deliveryResult,
+            string rejectionReason)
+        {
+            if (runtimeUnlockPreCommitProbeAuthority is not { } probeAuthority ||
+                runtimeUnlockPreCommitProbeDeliveryLogged)
+            {
+                return;
+            }
+
+            runtimeUnlockPreCommitProbeDeliveryLogged = true;
+            LogRuntimeUnlockPreCommitProbeDeliveryResult(
+                probeAuthority,
+                useBulkLane ? NknBridgeChannel.Bulk : NknBridgeChannel.Control,
+                transportPayload.Length,
+                actualTransport,
+                deliveryResult,
+                rejectionReason);
+        }
+
         if (useBulkLane)
         {
             var suppressUncommittedRuntimeUnlockAcceleration =
@@ -985,6 +1016,10 @@ public sealed partial class NknSignalingTransport
 
                 if (requireAcceleratedBulk && !sentViaAcceleration)
                 {
+                    LogRuntimeUnlockPreCommitProbeDeliveryOnce(
+                        FileTransferTransportKind.Unknown,
+                        "rejected",
+                        "required_tuna_bulk_unavailable");
                     LocalOperationalLog.Warn(
                         "SessionSecurity",
                         $"event=filetransfer_required_tuna_bulk_send_not_observed; transport=nkn; message_type={MapSecureFileTransferMessageType(messageType)}; frame_type={frameType ?? "(none)"}; transfer_id={normalizedTransferId}; force_regular_nkn_bulk={(forceRegularNknBulk ? 1 : 0)}{dataPathAuthoritySuffix}");
@@ -1025,6 +1060,10 @@ public sealed partial class NknSignalingTransport
 
             if (requireAcceleratedBulk && !sentViaAcceleration)
             {
+                LogRuntimeUnlockPreCommitProbeDeliveryOnce(
+                    FileTransferTransportKind.Unknown,
+                    "rejected",
+                    "required_tuna_bulk_unavailable");
                 LocalOperationalLog.Warn(
                     "SessionSecurity",
                     $"event=filetransfer_required_tuna_bulk_send_not_observed; transport=nkn; message_type={MapSecureFileTransferMessageType(messageType)}; frame_type={frameType ?? "(none)"}; transfer_id={normalizedTransferId}; force_regular_nkn_bulk={(forceRegularNknBulk ? 1 : 0)}{dataPathAuthoritySuffix}");
@@ -1038,6 +1077,10 @@ public sealed partial class NknSignalingTransport
 
         if (messageType == MsgType.FileTransferDataFrame)
         {
+            LogRuntimeUnlockPreCommitProbeDeliveryOnce(
+                sentViaAcceleration ? FileTransferTransportKind.Tuna : FileTransferTransportKind.RegularNkn,
+                "sent",
+                "(none)");
             LogFileTransferDataPathSendResult(
                 normalizedTransferId,
                 frameType,
@@ -1238,6 +1281,19 @@ public sealed partial class NknSignalingTransport
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=runtime_unlock_precommit_probe_ack_delivery_result; session_id={SanitizeLogToken(authority.SessionId)}; transfer_id={SanitizeLogToken(authority.TransferId)}; frame_type={FileTransferProtocol.RuntimeUnlockPreCommitProbeAckFrameType}; transaction_generation={authority.TransactionGeneration}; offer_generation={authority.OfferGeneration}; tuna_path_lease_generation={authority.TunaPathLeaseGeneration}; probe_id={SanitizeLogToken(authority.ProbeId)}; ack_authority_source=runtime_unlock_precommit_ack_authority; ack_authority_generation={authority.OfferGeneration}; intended_transport=tuna; actual_transport={FormatFileTransferTransportKindForLog(actualTransport)}; lane={MapBridgeChannel(channel)}; payload_bytes={payloadBytes}; delivery_result={SanitizeLogToken(deliveryResult)}; rejection_reason={SanitizeLogToken(rejectionReason)}");
+    }
+
+    private static void LogRuntimeUnlockPreCommitProbeDeliveryResult(
+        RuntimeUnlockPreCommitProbeSendAuthority authority,
+        NknBridgeChannel channel,
+        int payloadBytes,
+        FileTransferTransportKind actualTransport,
+        string deliveryResult,
+        string rejectionReason)
+    {
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_precommit_probe_delivery_result; session_id={SanitizeLogToken(authority.SessionId)}; transfer_id={SanitizeLogToken(authority.TransferId)}; frame_type={FileTransferProtocol.RuntimeUnlockPreCommitProbeFrameType}; transaction_generation={authority.TransactionGeneration}; offer_generation={authority.OfferGeneration}; tuna_path_lease_generation={authority.TunaPathLeaseGeneration}; probe_id={SanitizeLogToken(authority.ProbeId)}; probe_authority_source=runtime_unlock_precommit_probe_authority; probe_authority_generation={authority.OfferGeneration}; intended_transport=tuna; actual_transport={FormatFileTransferTransportKindForLog(actualTransport)}; lane={MapBridgeChannel(channel)}; payload_bytes={payloadBytes}; delivery_result={SanitizeLogToken(deliveryResult)}; rejection_reason={SanitizeLogToken(rejectionReason)}");
     }
 
     private bool DoesFileTransferDataFrameFitTransportBudget(
@@ -7698,6 +7754,7 @@ public sealed partial class NknSignalingTransport
                     (dataPathSendAuthority is { } authority &&
                      IsFileTunaV4TargetTuna(authority) &&
                      IsFileTransferV4DataPathFrame(frame.Type, ResolveFileTransferDataPathBatchProfile(frame)));
+                var preCommitProbeAuthority = TryCreateRuntimeUnlockPreCommitProbeAuthority(frame);
                 var preCommitAckAuthority = TryConsumeRuntimeUnlockPreCommitAckAuthority(frame);
 
                 await owner.SendFileTransferEnvelopeRawAsync(
@@ -7713,6 +7770,7 @@ public sealed partial class NknSignalingTransport
                         forceRegularNknBulk: ShouldForceRegularNknBulk(frame) && !requireTunaBulk,
                         requireAcceleratedBulk: requireTunaBulk,
                         allowAccelerationDuringRegularNknFallback: requireTunaBulk,
+                        runtimeUnlockPreCommitProbeAuthority: preCommitProbeAuthority,
                         runtimeUnlockPreCommitAckAuthority: preCommitAckAuthority,
                         dataPathSendAuthority: dataPathSendAuthority)
                     .ConfigureAwait(false);
@@ -7770,6 +7828,23 @@ public sealed partial class NknSignalingTransport
                 "NKN.Tuna",
                 $"event=runtime_unlock_precommit_ack_authority_consumed; session_id={SanitizeLogToken(snapshot.SessionId)}; transfer_id={SanitizeLogToken(snapshot.TransferId)}; transaction_generation={snapshot.TransactionGeneration}; offer_generation={snapshot.OfferGeneration}; tuna_path_lease_generation={snapshot.TunaPathLeaseGeneration}; probe_id={SanitizeLogToken(snapshot.ProbeId)}");
             return snapshot;
+        }
+
+        private static RuntimeUnlockPreCommitProbeSendAuthority? TryCreateRuntimeUnlockPreCommitProbeAuthority(
+            FileTransferDataFrame frame)
+        {
+            if (frame is not FileTransferRuntimeUnlockPreCommitProbeFrame probe)
+            {
+                return null;
+            }
+
+            return new RuntimeUnlockPreCommitProbeSendAuthority(
+                probe.SessionId,
+                probe.TransferId,
+                probe.TransactionGeneration,
+                probe.OfferGeneration,
+                probe.TunaPathLeaseGeneration,
+                probe.ProbeId ?? string.Empty);
         }
 
         private bool TryGetTunaActivationPauseBlockingReason(out string pauseReason)

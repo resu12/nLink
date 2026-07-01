@@ -174,6 +174,12 @@ public interface IFileTransferRouteCompletionObserver
     void ObserveFileTransferRouteCompleted(FileTransferRouteCompletedNotification notification);
 }
 
+public static class FileTransferInitialTunaReadinessScopes
+{
+    public const string Transfer = "transfer";
+    public const string SessionReactivation = "session_reactivation";
+}
+
 public sealed record FileTransferInitialTunaReadinessEvidence(
     string SessionId,
     string TransferId,
@@ -187,7 +193,11 @@ public sealed record FileTransferInitialTunaReadinessEvidence(
     bool PeerVisibleProof,
     bool AnswerReceived,
     bool AnswerAckReceived,
-    bool TunaNegotiatedObserved);
+    bool TunaNegotiatedObserved,
+    string ReadinessScope = FileTransferInitialTunaReadinessScopes.Transfer,
+    string? SourceTransferId = null,
+    long SnapshotGeneration = 0,
+    DateTimeOffset SourceCapturedUtc = default);
 
 public interface IFileTransferInitialTunaReadinessProvider
 {

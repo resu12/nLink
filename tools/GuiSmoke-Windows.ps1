@@ -2831,6 +2831,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $phase = 'diagnostic_tuna_readiness'
         $reason = 'pretransfer_tuna_readiness_missing'
     }
+    elseif ($ErrorMessage.IndexOf('initial_tuna_evidence_not_current', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        $phase = 'preactivation_readiness'
+        $reason = 'initial_tuna_evidence_not_current'
+    }
     elseif ($ErrorMessage.IndexOf('file_tuna_v4_publication_missing_after_transfer', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $ErrorMessage.IndexOf('coordinator-authorized file Tuna V4 publication after measured GUI file transfer', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         $phase = 'route_publication'
@@ -4029,6 +4033,11 @@ function Wait-TunaGuiFileTunaV4PublicationAfterBookmark {
             if ($candidateLine.IndexOf('event=runtime_unlock_answer_rejected_tuna_path_lease_unavailable', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
                 $candidateLine.IndexOf('tuna_path_lease_unavailable_at_answer', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
                 throw ("Phase 5 pre-transfer Tuna diagnostic readiness missing: failurePhase=diagnostic_tuna_readiness; failureReason=pretransfer_tuna_readiness_missing; readiness_failure=tuna_path_lease_unavailable_at_answer; original_error={0}" -f $_.Exception.Message)
+            }
+
+            if ($candidateLine.IndexOf('event=filetransfer_initial_tuna_route_selection_denied', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                $candidateLine.IndexOf('coordinator_reason=initial_tuna_evidence_not_current', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                throw ("Phase 5 initial Tuna readiness evidence was not current: failurePhase=preactivation_readiness; failureReason=initial_tuna_evidence_not_current; original_error={0}" -f $_.Exception.Message)
             }
         }
 

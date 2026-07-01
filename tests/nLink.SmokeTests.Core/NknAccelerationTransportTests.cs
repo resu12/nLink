@@ -4043,8 +4043,12 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=runtime_unlock_precommit_probe_activation_pause_bypassed;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_precommit_probe_delivery_result;", logTail, StringComparison.Ordinal);
             Assert.Contains("frame_type=filetransfer.runtime_unlock.precommit_probe", logTail, StringComparison.Ordinal);
             Assert.Contains("frame_type=filetransfer.runtime_unlock.precommit_probe_ack", logTail, StringComparison.Ordinal);
+            Assert.Contains("intended_transport=tuna", logTail, StringComparison.Ordinal);
+            Assert.Contains("actual_transport=tuna", logTail, StringComparison.Ordinal);
+            Assert.Contains("delivery_result=sent", logTail, StringComparison.Ordinal);
             Assert.Contains("effective_transport=tuna", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_data_session_send_canceled_for_tuna_activation_pause;", logTail, StringComparison.Ordinal);
             Assert.Equal(2, hostLane.Sent.Count);
@@ -10709,13 +10713,37 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Equal(secondTransferId, evidence!.TransferId);
             Assert.Equal(11L, evidence.OfferGeneration);
             Assert.Equal(707L, evidence.LeaseGeneration);
+            Assert.Equal(FileTransferInitialTunaReadinessScopes.SessionReactivation, evidence.ReadinessScope);
+            Assert.Equal(firstTransferId, evidence.SourceTransferId);
+            Assert.True(evidence.SnapshotGeneration > 0);
+            Assert.NotEqual(default, evidence.SourceCapturedUtc);
+            Assert.True(evidence.CapturedUtc >= evidence.SourceCapturedUtc);
             Assert.True(evidence.LeaseCurrent);
             Assert.True(evidence.ListenerReady);
             Assert.True(evidence.PeerVisibleProof);
             Assert.True(evidence.AnswerReceived);
 
+            Assert.True(provider.TryGetInitialTunaReadinessEvidence(
+                sessionId,
+                secondTransferId,
+                FileTransferDirection.Outbound,
+                out var repeatedEvidence));
+            Assert.NotNull(repeatedEvidence);
+            Assert.Equal(secondTransferId, repeatedEvidence!.TransferId);
+            Assert.Equal(evidence.SnapshotGeneration, repeatedEvidence.SnapshotGeneration);
+
+            Assert.False(provider.TryGetInitialTunaReadinessEvidence(
+                sessionId,
+                "transfer_initial_tuna_route_commit_remint_third",
+                FileTransferDirection.Outbound,
+                out var consumedEvidence));
+            Assert.Null(consumedEvidence);
+
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=initial_tuna_readiness_reminted_from_route_commit;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=initial_tuna_readiness_snapshot_consumed;", logTail, StringComparison.Ordinal);
+            Assert.Contains("readiness_scope=session_reactivation", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=initial_tuna_readiness_consumed;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=initial_tuna_readiness_unavailable;", logTail, StringComparison.Ordinal);
         }
         finally
@@ -16021,7 +16049,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task TransportAccelerationDown_RuntimeUnlockProbeSidecarCloseSchedulesFreshTransactionGeneration()
+    public async Task TransportAccelerationDown_RuntimeUnlockProbeSidecarCloseSchedulesListenerRearmWithoutFreshTransactionAuthority()
     {
         FakeNknClient.ResetNetwork();
         var previousHelpeePriorityDelay = NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
@@ -16100,16 +16128,39 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(logStart).Contains(
-                    "event=runtime_unlock_tuna_probe_sidecar_closed_fresh_transaction_scheduled;",
+                    "event=runtime_unlock_precommit_probe_sidecar_rearm_scheduled;",
                     StringComparison.Ordinal),
                 TimeSpan.FromSeconds(5));
 
             var tail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=runtime_unlock_tuna_probe_sidecar_failure;", tail, StringComparison.Ordinal);
             Assert.Contains("retry_reason=runtime_unlock_tuna_probe_sidecar_closed", tail, StringComparison.Ordinal);
-            Assert.Contains("event=runtime_unlock_tuna_probe_sidecar_closed_fresh_transaction_scheduled;", tail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_precommit_probe_sidecar_rearm_scheduled;", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_tuna_probe_sidecar_closed_fresh_transaction_scheduled;", tail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_runtime_unlock_listener_rearm_after_sidecar_drop;", tail, StringComparison.Ordinal);
             Assert.DoesNotContain("listener_ready_reuse=1", tail, StringComparison.Ordinal);
+            var dispatchGrantIndex = tail.IndexOf(
+                "event=runtime_unlock_retry_dispatch_authority_granted;",
+                StringComparison.Ordinal);
+            var retryScheduleIndex = tail.IndexOf(
+                "event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_tuna_probe_sidecar_closed",
+                StringComparison.Ordinal);
+            var offerGenerationIndex = tail.IndexOf(
+                "event=runtime_unlock_transaction_offer_generation_created;",
+                StringComparison.Ordinal);
+            if (retryScheduleIndex >= 0)
+            {
+                Assert.True(
+                    dispatchGrantIndex >= 0 && dispatchGrantIndex < retryScheduleIndex,
+                    "Runtime-unlock retry scheduling must be preceded by dispatch authority after listener rearm.");
+            }
+
+            if (offerGenerationIndex >= 0)
+            {
+                Assert.True(
+                    dispatchGrantIndex >= 0 && dispatchGrantIndex < offerGenerationIndex,
+                    "Runtime-unlock offer generation must be preceded by dispatch authority after listener rearm.");
+            }
         }
         finally
         {

@@ -784,6 +784,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("runtime_unlock_precommit_probe_ack_missing", verdict["recovery_failure_class"]);
         Assert.Equal("2", verdict["runtime_unlock_precommit_probe_sent_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_precommit_probe_delivery_result_count"]);
         Assert.Equal("1", verdict["runtime_unlock_precommit_probe_ack_missing_count"]);
         Assert.Equal("fail", verdict["runtime_unlock_probe_commit_verdict"]);
     }
@@ -816,6 +817,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("runtime_unlock_precommit_probe_ack_missing", verdict["recovery_failure_class"]);
         Assert.Equal("1", verdict["runtime_unlock_tuna_probe_ack_sent_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_precommit_probe_delivery_result_count"]);
         Assert.Equal("0", verdict["runtime_unlock_precommit_probe_ack_delivery_result_count"]);
         Assert.Equal("0", verdict["runtime_unlock_tuna_probe_ack_received_count"]);
         Assert.Equal("1", verdict["runtime_unlock_precommit_probe_ack_missing_count"]);
@@ -849,6 +851,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("1", verdict["runtime_unlock_tuna_probe_ack_sent_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_precommit_probe_delivery_result_count"]);
         Assert.Equal("1", verdict["runtime_unlock_precommit_probe_ack_delivery_result_count"]);
         Assert.Equal("0", verdict["runtime_unlock_tuna_probe_ack_received_count"]);
         Assert.Equal("0", verdict["runtime_unlock_precommit_probe_ack_missing_count"]);

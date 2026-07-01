@@ -152,6 +152,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("pretransfer_tuna_readiness_missing", scriptText, StringComparison.Ordinal);
         Assert.Contains("Wait-TunaGuiFileTunaV4PublicationAfterBookmark", scriptText, StringComparison.Ordinal);
         Assert.Contains("file_tuna_v4_publication_missing_after_transfer", scriptText, StringComparison.Ordinal);
+        Assert.Contains("initial_tuna_evidence_not_current", scriptText, StringComparison.Ordinal);
         Assert.Contains("readiness_failure=tuna_path_lease_unavailable_at_answer", scriptText, StringComparison.Ordinal);
         Assert.DoesNotContain("Tuna transport active before measured GUI file transfer", scriptText, StringComparison.Ordinal);
         Assert.Contains("nkn_bridge_receive_stall_recovery_unproven", scriptText, StringComparison.Ordinal);
