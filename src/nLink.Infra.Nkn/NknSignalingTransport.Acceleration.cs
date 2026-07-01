@@ -327,7 +327,7 @@ public sealed partial class NknSignalingTransport
 
         public required string SessionId { get; init; }
 
-        public string? TransferId { get; init; }
+        public string? TransferId { get; set; }
 
         public required string RetryReason { get; init; }
 
@@ -4947,6 +4947,16 @@ public sealed partial class NknSignalingTransport
            !string.IsNullOrWhiteSpace(accelerationSessionId) &&
            string.Equals(accelerationSessionId, sessionId, StringComparison.Ordinal);
 
+    private static bool IsPositiveInitialTunaReadinessEvidence(
+        bool leaseCurrent,
+        bool listenerReady,
+        bool peerVisibleProof,
+        bool answerReceived)
+        => leaseCurrent &&
+           listenerReady &&
+           peerVisibleProof &&
+           answerReceived;
+
     private void LogInitialTunaReadinessAnswerReceived(
         InitialTunaReadinessSnapshot snapshot,
         string reason)
@@ -4973,6 +4983,29 @@ public sealed partial class NknSignalingTransport
 
         lock (accelerationGate)
         {
+            FileTransferInitialTunaReadinessEvidence? positiveSnapshotEvidence = null;
+            if (initialTunaReadinessState is { } initial &&
+                string.Equals(initial.SessionId, normalizedSessionId, StringComparison.Ordinal) &&
+                IsInitialTunaReadinessSnapshotCurrentUnsafe(initial, normalizedSessionId))
+            {
+                positiveSnapshotEvidence = new FileTransferInitialTunaReadinessEvidence(
+                    normalizedSessionId,
+                    normalizedTransferId,
+                    direction,
+                    initial.CapturedUtc,
+                    initial.LeaseGeneration,
+                    initial.ListenerRunId,
+                    initial.LeaseCurrent,
+                    initial.ListenerReady,
+                    initial.OfferGeneration,
+                    PeerVisibleProof: true,
+                    AnswerReceived: true,
+                    initial.AnswerAckReceived,
+                    initial.TunaNegotiatedObserved ||
+                    (!string.IsNullOrWhiteSpace(accelerationSessionId) &&
+                     string.Equals(accelerationSessionId, normalizedSessionId, StringComparison.Ordinal)));
+            }
+
             var state = runtimeUnlockTransactionState;
             if (!state.IsTerminal &&
                 string.Equals(state.SessionId, normalizedSessionId, StringComparison.Ordinal) &&
@@ -4989,44 +5022,53 @@ public sealed partial class NknSignalingTransport
                     !string.IsNullOrWhiteSpace(pendingAccelerationAnswerAckNonce) &&
                     IsRuntimeUnlockActivationReason(pendingAccelerationAnswerAckTrigger) &&
                     string.Equals(pendingAccelerationAnswerAckSessionId, normalizedSessionId, StringComparison.Ordinal);
-                evidence = new FileTransferInitialTunaReadinessEvidence(
-                    normalizedSessionId,
-                    normalizedTransferId,
-                    direction,
-                    DateTimeOffset.UtcNow,
-                    leaseMatches ? lease.LeaseGeneration : state.TunaPathLeaseGeneration,
-                    leaseMatches ? lease.ListenerRunId : state.TunaPathLeaseListenerRunId,
-                    leaseMatches ? lease.IsCurrent : state.TunaPathLeaseCurrent,
-                    (leaseMatches ? lease.State : state.TunaPathLeaseState) == RuntimeUnlockTunaPathLeaseState.ListenerReady,
-                    state.OfferGeneration,
-                    state.HasPeerVisibleProof,
-                    state.AnswerReceived,
-                    answerAckReceived,
-                    !string.IsNullOrWhiteSpace(accelerationSessionId) &&
-                    string.Equals(accelerationSessionId, normalizedSessionId, StringComparison.Ordinal));
-                return true;
+                var leaseGeneration = leaseMatches ? lease.LeaseGeneration : state.TunaPathLeaseGeneration;
+                var listenerRunId = leaseMatches ? lease.ListenerRunId : state.TunaPathLeaseListenerRunId;
+                var leaseCurrent = leaseMatches ? lease.IsCurrent : state.TunaPathLeaseCurrent;
+                var listenerReady =
+                    (leaseMatches ? lease.State : state.TunaPathLeaseState) == RuntimeUnlockTunaPathLeaseState.ListenerReady;
+                if (IsPositiveInitialTunaReadinessEvidence(
+                        leaseCurrent,
+                        listenerReady,
+                        state.HasPeerVisibleProof,
+                        state.AnswerReceived))
+                {
+                    evidence = new FileTransferInitialTunaReadinessEvidence(
+                        normalizedSessionId,
+                        normalizedTransferId,
+                        direction,
+                        DateTimeOffset.UtcNow,
+                        leaseGeneration,
+                        listenerRunId,
+                        leaseCurrent,
+                        listenerReady,
+                        state.OfferGeneration,
+                        state.HasPeerVisibleProof,
+                        state.AnswerReceived,
+                        answerAckReceived,
+                        !string.IsNullOrWhiteSpace(accelerationSessionId) &&
+                        string.Equals(accelerationSessionId, normalizedSessionId, StringComparison.Ordinal));
+                    return true;
+                }
+
+                if (positiveSnapshotEvidence is not null)
+                {
+                    LocalOperationalLog.Warn(
+                        "NKN.Tuna",
+                        $"event=initial_tuna_positive_readiness_shadowed; session_id={SanitizeLogToken(normalizedSessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; active_transaction_generation={state.TransactionGeneration}; active_offer_generation={state.OfferGeneration}; active_lease_generation={leaseGeneration}; active_lease_current={(leaseCurrent ? 1 : 0)}; active_listener_ready={(listenerReady ? 1 : 0)}; active_peer_visible_proof={(state.HasPeerVisibleProof ? 1 : 0)}; active_answer_received={(state.AnswerReceived ? 1 : 0)}; snapshot_lease_generation={positiveSnapshotEvidence.LeaseGeneration}; snapshot_offer_generation={positiveSnapshotEvidence.OfferGeneration}; decision_reason=using_current_positive_readiness_snapshot");
+                    evidence = positiveSnapshotEvidence;
+                    return true;
+                }
+
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=initial_tuna_readiness_unavailable; session_id={SanitizeLogToken(normalizedSessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; transaction_generation={state.TransactionGeneration}; offer_generation={state.OfferGeneration}; lease_generation={leaseGeneration}; lease_current={(leaseCurrent ? 1 : 0)}; listener_ready={(listenerReady ? 1 : 0)}; peer_visible_proof={(state.HasPeerVisibleProof ? 1 : 0)}; answer_received={(state.AnswerReceived ? 1 : 0)}; decision_reason=positive_readiness_missing");
+                return false;
             }
 
-            if (initialTunaReadinessState is { } initial &&
-                string.Equals(initial.SessionId, normalizedSessionId, StringComparison.Ordinal) &&
-                IsInitialTunaReadinessSnapshotCurrentUnsafe(initial, normalizedSessionId))
+            if (positiveSnapshotEvidence is not null)
             {
-                evidence = new FileTransferInitialTunaReadinessEvidence(
-                    normalizedSessionId,
-                    normalizedTransferId,
-                    direction,
-                    initial.CapturedUtc,
-                    initial.LeaseGeneration,
-                    initial.ListenerRunId,
-                    initial.LeaseCurrent,
-                    initial.ListenerReady,
-                    initial.OfferGeneration,
-                    PeerVisibleProof: true,
-                    AnswerReceived: true,
-                    initial.AnswerAckReceived,
-                    initial.TunaNegotiatedObserved ||
-                    (!string.IsNullOrWhiteSpace(accelerationSessionId) &&
-                     string.Equals(accelerationSessionId, normalizedSessionId, StringComparison.Ordinal)));
+                evidence = positiveSnapshotEvidence;
                 return true;
             }
 
@@ -5525,6 +5567,14 @@ public sealed partial class NknSignalingTransport
                 reason,
                 DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
             runtimeUnlockTunaPathLeaseState = failed;
+            if (initialTunaReadinessState is { } initial &&
+                string.Equals(initial.SessionId, failed.SessionId, StringComparison.Ordinal) &&
+                initial.OfferGeneration == failed.OfferGeneration &&
+                initial.LeaseGeneration == failed.LeaseGeneration)
+            {
+                initialTunaReadinessState = null;
+            }
+
             runtimeUnlockTransactionState = AttachRuntimeUnlockTunaPathLeaseUnsafe(runtimeUnlockTransactionState);
             if (failTransaction &&
                 !runtimeUnlockTransactionState.IsTerminal &&
@@ -6134,6 +6184,38 @@ public sealed partial class NknSignalingTransport
     {
         return TryGetLatestFileTransferRouteHintForSession(sessionId, out var routeHint) &&
                routeHint.Route == FileTransferRoute.FileTunaV4;
+    }
+
+    private bool HasAuthorizedRegularV4FileTransferRouteHint(string? sessionId)
+    {
+        return TryGetLatestFileTransferRouteHintForSession(sessionId, out var routeHint) &&
+               routeHint.Route == FileTransferRoute.RegularNknV4Fast &&
+               routeHint.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4;
+    }
+
+    private bool HasAuthorizedRegularV4FileTransferRouteHint(
+        string? sessionId,
+        string? transferId,
+        FileTransferDirection direction)
+    {
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? string.Empty : sessionId.Trim();
+        var normalizedTransferId = string.IsNullOrWhiteSpace(transferId) ? string.Empty : transferId.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedSessionId) ||
+            string.IsNullOrWhiteSpace(normalizedTransferId))
+        {
+            return false;
+        }
+
+        lock (gate)
+        {
+            return TryGetFileTransferRouteHintUnsafe(
+                       normalizedSessionId,
+                       normalizedTransferId,
+                       direction,
+                       out var routeHint) &&
+                   routeHint.Route == FileTransferRoute.RegularNknV4Fast &&
+                   routeHint.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4;
+        }
     }
 
     private bool TryGetLatestFileTransferRouteHintForSession(
@@ -12138,6 +12220,12 @@ public sealed partial class NknSignalingTransport
         }
 
         var transferId = TryGetFirstActiveFileTransferIdForSession(normalizedSessionId);
+        if (string.IsNullOrWhiteSpace(transferId) &&
+            TryGetActiveRegularV4RecoveryLivenessSnapshot(normalizedSessionId, out var retryLivenessSnapshot))
+        {
+            transferId = retryLivenessSnapshot.TransferId;
+        }
+
         RuntimeUnlockRecoveryRetryState? preservedCutThroughState = null;
         lock (accelerationGate)
         {
@@ -12318,7 +12406,8 @@ public sealed partial class NknSignalingTransport
         deferReason = "none";
         livenessSnapshot = default;
         if (string.IsNullOrWhiteSpace(sessionId) ||
-            !HasActiveRegularV4FileTransferRouteHint(sessionId))
+            (!HasActiveRegularV4FileTransferRouteHint(sessionId) &&
+             !HasAuthorizedRegularV4FileTransferRouteHint(sessionId)))
         {
             return false;
         }
@@ -12374,6 +12463,11 @@ public sealed partial class NknSignalingTransport
         FileTransferRegularV4RecoveryLivenessSnapshot livenessSnapshot,
         string blockerReason)
     {
+        if (string.IsNullOrWhiteSpace(state.TransferId))
+        {
+            state.TransferId = livenessSnapshot.TransferId;
+        }
+
         state.BlockedByRegularV4ReceiveRecovery = true;
         state.RegularV4RecoveryBlockedTransferId = livenessSnapshot.TransferId;
         state.RegularV4RecoveryDirection = livenessSnapshot.Direction;
@@ -12458,7 +12552,7 @@ public sealed partial class NknSignalingTransport
         var attemptedLiveRouteEpoch = 0;
         var attemptedRegularV4LivenessGeneration = 0;
         var attemptedBridgeDecisionGeneration = 0;
-        var routeStillRegular = IsActiveRegularV4FileTransferRouteHint(
+        var routeStillRegular = HasAuthorizedRegularV4FileTransferRouteHint(
             livenessSnapshot.SessionId,
             livenessSnapshot.TransferId,
             livenessSnapshot.Direction);
@@ -12514,10 +12608,6 @@ public sealed partial class NknSignalingTransport
             {
                 decisionReason = "regular_v4_recovery_authority_mismatch";
             }
-            else if (!routeStillRegular)
-            {
-                decisionReason = "regular_v4_route_superseded";
-            }
             else if (livenessSnapshot.RecoveryExhausted)
             {
                 decisionReason = "regular_v4_recovery_exhausted";
@@ -12525,6 +12615,10 @@ public sealed partial class NknSignalingTransport
             else if (!hasDispatchAuthority)
             {
                 decisionReason = dispatchAuthorityRejectionReason;
+            }
+            else if (!routeStillRegular)
+            {
+                decisionReason = "regular_v4_route_superseded";
             }
 
             if (!string.Equals(decisionReason, "accepted", StringComparison.Ordinal))
@@ -13766,6 +13860,20 @@ public sealed partial class NknSignalingTransport
 
         if (stateSnapshot is null)
         {
+            return;
+        }
+
+        if (stateSnapshot.BlockedByRegularV4ReceiveRecovery)
+        {
+            if (TryGetActiveRegularV4RecoveryLivenessSnapshot(stateSnapshot.SessionId, out var blockedLivenessSnapshot) &&
+                ResolveRuntimeUnlockRetryBlockedByRegularV4Recovery(blockedLivenessSnapshot, trigger))
+            {
+                return;
+            }
+
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=runtime_unlock_retry_dispatch_held_by_regular_v4_receive_recovery; session_id={SanitizeLogToken(stateSnapshot.SessionId)}; transfer_id={SanitizeLogToken(stateSnapshot.RegularV4RecoveryBlockedTransferId ?? stateSnapshot.TransferId ?? "(none)")}; trigger={SanitizeLogToken(trigger)}; blocker_reason={SanitizeLogToken(stateSnapshot.RegularV4RecoveryBlockerReason ?? "regular_v4_receive_recovery_pending")}; route={SanitizeLogToken(stateSnapshot.RegularV4RecoveryRouteToken ?? "(none)")}; protocol_version={stateSnapshot.RegularV4RecoveryProtocolVersion}; live_route_epoch={stateSnapshot.RegularV4RecoveryLiveRouteEpoch}; regular_v4_liveness_generation={stateSnapshot.RegularV4RecoveryLivenessGeneration}; bridge_decision_generation={stateSnapshot.RegularV4RecoveryBridgeDecisionGeneration}; decision_reason=awaiting_regular_v4_recovery_settlement");
             return;
         }
 
