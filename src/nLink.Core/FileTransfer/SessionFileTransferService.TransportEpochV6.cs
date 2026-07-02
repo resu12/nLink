@@ -1316,6 +1316,9 @@ public sealed partial class SessionFileTransferService
         else if (admissionStatus != RuntimeUnlockPreCommitProbeAdmissionStatus.Granted ||
                  currentAdmissionToken is null)
         {
+            var authorityRejectionReason = string.IsNullOrWhiteSpace(admissionRejectionReason)
+                ? "runtime_unlock_admission_missing"
+                : admissionRejectionReason;
             lock (gate)
             {
                 _ = TryAuthorizeRuntimeUnlockCallbackActionForDirectionLocked(
@@ -1340,6 +1343,15 @@ public sealed partial class SessionFileTransferService
                     targetProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
                     targetTransport: FileTransferTransportKind.Tuna,
                     out _);
+
+                LogRuntimeUnlockPreCommitProbeAckAuthorityRejected(
+                    direction,
+                    transferId,
+                    sessionId,
+                    probe,
+                    attemptedAdmissionToken: null,
+                    currentAdmissionToken: null,
+                    authorityRejectionReason);
             }
 
             return;
@@ -1366,6 +1378,25 @@ public sealed partial class SessionFileTransferService
         {
             lock (gate)
             {
+                var attemptedAdmissionToken = currentAdmissionToken;
+                if (!TryGetCurrentRuntimeUnlockAdmissionTokenForDirectionLocked(
+                        direction,
+                        sessionId,
+                        transferId,
+                        out var refreshedAdmissionToken) ||
+                    refreshedAdmissionToken is null)
+                {
+                    LogRuntimeUnlockPreCommitProbeAckAuthorityRejected(
+                        direction,
+                        transferId,
+                        sessionId,
+                        probe,
+                        attemptedAdmissionToken,
+                        currentAdmissionToken: null,
+                        "runtime_unlock_admission_missing");
+                    return;
+                }
+
                 if (!TryAuthorizeRuntimeUnlockCallbackActionForDirectionLocked(
                         direction,
                         sessionId,
@@ -1374,7 +1405,7 @@ public sealed partial class SessionFileTransferService
                         actionKind: FileTransferCoordinatorActionKind.RuntimeUnlockProbeAck,
                         source: "runtime_unlock_precommit_probe_received",
                         attemptedAction: "probe_received",
-                        admissionToken: currentAdmissionToken,
+                        admissionToken: refreshedAdmissionToken,
                         routeCommitToken: null,
                         transactionGeneration: probe.TransactionGeneration,
                         offerGeneration: probe.OfferGeneration,
@@ -1387,8 +1418,16 @@ public sealed partial class SessionFileTransferService
                         targetRoute: FileTransferRoute.FileTunaV4,
                         targetProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
                         targetTransport: FileTransferTransportKind.Tuna,
-                        out _))
+                        out var authorityRejectionReason))
                 {
+                    LogRuntimeUnlockPreCommitProbeAckAuthorityRejected(
+                        direction,
+                        transferId,
+                        sessionId,
+                        probe,
+                        attemptedAdmissionToken,
+                        refreshedAdmissionToken,
+                        authorityRejectionReason);
                     return;
                 }
             }
@@ -1514,6 +1553,44 @@ public sealed partial class SessionFileTransferService
         token = default;
         return false;
     }
+
+    private bool TryGetCurrentRuntimeUnlockAdmissionTokenForDirectionLocked(
+        FileTransferDirection direction,
+        string sessionId,
+        string transferId,
+        out RuntimeUnlockAdmissionToken? token)
+    {
+        if (direction == FileTransferDirection.Outbound &&
+            IsOutboundLifecycleMessageMatchLocked(sessionId, transferId) &&
+            outboundTransfer is { IsTerminal: false } outbound &&
+            TryGetCurrentRuntimeUnlockAdmissionTokenLocked(outbound, out token))
+        {
+            return true;
+        }
+
+        if (direction == FileTransferDirection.Inbound &&
+            IsInboundLifecycleMessageMatchLocked(sessionId, transferId) &&
+            inboundTransfer is { IsTerminal: false } inbound &&
+            TryGetCurrentRuntimeUnlockAdmissionTokenLocked(inbound, out token))
+        {
+            return true;
+        }
+
+        token = null;
+        return false;
+    }
+
+    private static void LogRuntimeUnlockPreCommitProbeAckAuthorityRejected(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        FileTransferRuntimeUnlockPreCommitProbeFrame probe,
+        RuntimeUnlockAdmissionToken? attemptedAdmissionToken,
+        RuntimeUnlockAdmissionToken? currentAdmissionToken,
+        string decisionReason)
+        => LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=runtime_unlock_precommit_probe_ack_authority_rejected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={probe.TransactionGeneration}; offer_generation={probe.OfferGeneration}; tuna_path_lease_generation={probe.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(probe.ProbeId ?? "(none)")}; attempted_admission_generation={attemptedAdmissionToken?.AdmissionGeneration ?? 0}; current_admission_generation={currentAdmissionToken?.AdmissionGeneration ?? 0}; attempted_runtime_generation={attemptedAdmissionToken?.RuntimeGeneration ?? 0}; current_runtime_generation={currentAdmissionToken?.RuntimeGeneration ?? 0}; attempted_terminal_generation={attemptedAdmissionToken?.TerminalGeneration ?? 0}; current_terminal_generation={currentAdmissionToken?.TerminalGeneration ?? 0}; attempted_leg_generation={attemptedAdmissionToken?.LegGeneration ?? 0}; current_leg_generation={currentAdmissionToken?.LegGeneration ?? 0}; target_route={FormatProtocolLogValue(probe.TargetRoute)}; target_protocol_version={probe.TargetProtocolVersion}; target_transport={FormatProtocolLogValue(probe.TargetTransport)}; decision_reason={FormatProtocolLogValue(decisionReason)}");
 
     private enum RuntimeUnlockPreCommitProbeAdmissionStatus
     {

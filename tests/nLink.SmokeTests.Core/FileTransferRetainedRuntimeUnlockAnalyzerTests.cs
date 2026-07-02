@@ -791,6 +791,44 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockPreCommitAckAuthorityRejected_ClassifiesAckMissing()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_precommit_ack_authority_rejected";
+        const string sessionId = "sess_runtime_unlock_precommit_ack_authority_rejected";
+        const string probeId = "runtime-unlock-precommit:3:5:ack-authority-rejected";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id={sessionId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; selection_reason=regular_nkn_default_v4", secondsOffset: 0),
+            LogLine($"event=runtime_unlock_transaction_answer_received; session_id={sessionId}; transaction_generation=3; offer_generation=5; state=answerreceived; peer_visible_proof=1; peer_received=1; answer_received=1; route_commit_pending=0; route_committed=0; tuna_path_lease_generation=7; tuna_path_lease_state=listenerready; tuna_path_lease_current=1; reason=transport_acceleration_answer_received", secondsOffset: 1),
+            LogLine($"event=filetransfer_runtime_unlock_admission_granted; direction=inbound; transfer_id={transferId}; session_id={sessionId}; source=precommit_probe_responder; admission_generation=4; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=9; runtime_generation=11; terminal_generation=2; leg_generation=6; reason=current_regular_route", secondsOffset: 2),
+            LogLine($"event=runtime_unlock_precommit_probe_started; direction=outbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=3; offer_generation=5; tuna_path_lease_generation=7; probe_id={probeId}; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; handoff_kind=normal_to_tuna_activation", secondsOffset: 3),
+            LogLine($"event=runtime_unlock_precommit_probe_sent; direction=outbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=3; offer_generation=5; tuna_path_lease_generation=7; probe_id={probeId}; target_transport=tuna; reason=runtime_unlock_answer_ack_probe_ready", secondsOffset: 4),
+            LogLine($"event=runtime_unlock_tuna_probe_received; transport=tuna; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=3; offer_generation=5; tuna_path_lease_generation=7; probe_id={probeId}; target_transport=tuna", secondsOffset: 5),
+            LogLine($"event=runtime_unlock_precommit_probe_ack_authority_rejected; direction=inbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=3; offer_generation=5; tuna_path_lease_generation=7; probe_id={probeId}; attempted_admission_generation=3; current_admission_generation=4; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; decision_reason=runtime_unlock_admission_generation_mismatch", secondsOffset: 6),
+            LogLine($"event=filetransfer_runtime_unlock_callback_rejected; direction=inbound; transfer_id={transferId}; session_id={sessionId}; action_kind=RuntimeUnlockProbeAck; source=runtime_unlock_precommit_probe_received; attempted_action=probe_received; rejection_reason=runtime_unlock_admission_generation_mismatch; transaction_generation=3; offer_generation=5; tuna_path_lease_generation=7; probe_id={probeId}; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; admission_generation=3", secondsOffset: 7),
+            LogLine($"event=transfer_terminal; direction=outbound; transfer_id={transferId}; session_id={sessionId}; file_name_len=33; file_size_bytes=268435456; bytes_transferred=134217728; chunks_transferred=6241; chunk_count=12481; error_code=peer_disconnected; reason=Peer disconnected.; saved_path=(none); route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none", secondsOffset: 90)
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("runtime_unlock_precommit_probe_ack_missing", verdict["recovery_failure_class"]);
+        Assert.Equal("1", verdict["runtime_unlock_precommit_probe_sent_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_tuna_probe_received_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_precommit_probe_ack_authority_rejected_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_tuna_probe_ack_sent_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_precommit_probe_ack_delivery_result_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_tuna_probe_ack_received_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_precommit_probe_ack_missing_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_RuntimeUnlockPreCommitAckSentWithoutDeliveryOrReceive_ClassifiesAckMissing()
     {
         if (!OperatingSystem.IsWindows())

@@ -6398,6 +6398,7 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_precommit_probe_sent_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeSentCount),
         ("runtime_unlock_precommit_probe_acked_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckedCount),
         ("runtime_unlock_precommit_probe_ack_missing_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckMissingCount),
+        ("runtime_unlock_precommit_probe_ack_authority_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckAuthorityRejectedCount),
         ("runtime_unlock_precommit_probe_failed_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeFailedCount),
         ("runtime_unlock_precommit_probe_protocol_mismatch_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeProtocolMismatchCount),
         ("runtime_unlock_precommit_probe_delivery_result_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeDeliveryResultCount),
@@ -7151,6 +7152,9 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockTunaProbeReceivedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_tuna_probe_received'
     })
+    $runtimeUnlockPreCommitProbeAckAuthorityRejectedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_precommit_probe_ack_authority_rejected'
+    })
     $runtimeUnlockTunaProbeAckSentEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_tuna_probe_ack_sent'
     })
@@ -7478,8 +7482,12 @@ function Get-FileTransferRecoveryFailureClassification {
             [int64]$_.Sequence -gt $sentSequence -and
             (Test-RuntimeUnlockPreCommitProbeTupleMatch -Sent $sent -Candidate $_)
         })
+        $matchingAckAuthorityRejected = @($runtimeUnlockPreCommitProbeAckAuthorityRejectedEvents | Where-Object {
+            [int64]$_.Sequence -gt $sentSequence -and
+            (Test-RuntimeUnlockPreCommitProbeTupleMatch -Sent $sent -Candidate $_)
+        })
 
-        if ($matchingFailure.Count -eq 0) {
+        if ($matchingFailure.Count -eq 0 -or $matchingAckAuthorityRejected.Count -gt 0) {
             continue
         }
 
@@ -7491,6 +7499,38 @@ function Get-FileTransferRecoveryFailureClassification {
         }
 
         if ($null -eq $firstAckOrCommitSequence -or [int64]$firstFailureSequence -lt [int64]$firstAckOrCommitSequence) {
+            $runtimeUnlockPreCommitProbeAckMissingCount++
+        }
+    }
+
+    foreach ($received in $runtimeUnlockTunaProbeReceivedEvents) {
+        $receivedSequence = [int64]$received.Sequence
+        $matchingAckAuthorityRejected = @($runtimeUnlockPreCommitProbeAckAuthorityRejectedEvents | Where-Object {
+            [int64]$_.Sequence -gt $receivedSequence -and
+            (Test-RuntimeUnlockPreCommitProbeTupleMatch -Sent $received -Candidate $_)
+        })
+
+        if ($matchingAckAuthorityRejected.Count -eq 0) {
+            continue
+        }
+
+        $matchingAckOrCommit = @(
+            @($runtimeUnlockTunaProbeAckSentEvents + $runtimeUnlockPreCommitProbeAckDeliveryResultEvents + $runtimeUnlockTunaProbeAckReceivedEvents + $runtimeUnlockPreCommitProbeAckedEvents + $runtimeUnlockTransactionCommittedEvents) |
+                Where-Object {
+                    [int64]$_.Sequence -gt $receivedSequence -and
+                    (($_.EventName -ne 'runtime_unlock_tuna_probe_ack_received') -or
+                        (Get-FileTransferEventField -Event $_ -Name 'accepted' -Default '1') -ne '0') -and
+                    (Test-RuntimeUnlockPreCommitProbeTupleMatch -Sent $received -Candidate $_)
+                }
+        )
+        $firstRejectionSequence = (@($matchingAckAuthorityRejected | Sort-Object Sequence | Select-Object -First 1))[0].Sequence
+        $firstAckOrCommitSequence = if ($matchingAckOrCommit.Count -gt 0) {
+            (@($matchingAckOrCommit | Sort-Object Sequence | Select-Object -First 1))[0].Sequence
+        } else {
+            $null
+        }
+
+        if ($null -eq $firstAckOrCommitSequence -or [int64]$firstRejectionSequence -lt [int64]$firstAckOrCommitSequence) {
             $runtimeUnlockPreCommitProbeAckMissingCount++
         }
     }
@@ -7885,6 +7925,7 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockPreCommitProbeDeliveryResultCount = $runtimeUnlockPreCommitProbeDeliveryResultEvents.Count
         RuntimeUnlockPreCommitProbeAckedCount = ($runtimeUnlockPreCommitProbeAckedEvents.Count + $runtimeUnlockPreCommitRouteEpochRecoveredEvents.Count)
         RuntimeUnlockPreCommitProbeAckMissingCount = $runtimeUnlockPreCommitProbeAckMissingCount
+        RuntimeUnlockPreCommitProbeAckAuthorityRejectedCount = $runtimeUnlockPreCommitProbeAckAuthorityRejectedEvents.Count
         RuntimeUnlockPreCommitProbeFailedCount = $runtimeUnlockPreCommitProbeFailedEvents.Count
         RuntimeUnlockPreCommitProbeProtocolMismatchCount = $runtimeUnlockPreCommitProbeProtocolMismatchEvents.Count
         RuntimeUnlockTunaProbeSentCount = $runtimeUnlockTunaProbeSentEvents.Count
@@ -8412,6 +8453,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_precommit_probe_sent_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeSentCount),
         ("runtime_unlock_precommit_probe_acked_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckedCount),
         ("runtime_unlock_precommit_probe_ack_missing_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckMissingCount),
+        ("runtime_unlock_precommit_probe_ack_authority_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckAuthorityRejectedCount),
         ("runtime_unlock_precommit_probe_failed_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeFailedCount),
         ("runtime_unlock_precommit_probe_protocol_mismatch_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeProtocolMismatchCount),
         ("runtime_unlock_precommit_probe_delivery_result_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeDeliveryResultCount),
