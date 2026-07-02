@@ -2818,6 +2818,17 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $activationOfferSent = (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=tuna_acceleration_offer_queued')) -or
         (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=tuna_acceleration_offer_replay_sent'))
     $activationOfferReceived = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=tuna_acceleration_offer_received_raw')
+    $fallbackTailLocalYieldBlocked = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_tail_local_yield_blocked')
+    $fallbackTailFrontierStateMissing = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_tail_local_yield_blocked', 'decision_reason=fallback_frontier_state_missing')
+    $fallbackFrontierRepairAuthorityGranted = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_frontier_repair_authority_granted')
+    $fallbackFrontierRepairDispatched = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_frontier_repair_dispatched')
+    $fallbackFrontierRepairProgressObserved = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_frontier_repair_progress_observed')
+    $fallbackProgressTimeout = $ErrorMessage.IndexOf('no useful data progress', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_live_progress_timeout')) -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_gui_progress_timeout'))
+    $fallbackFrontierRepairStalled = ($fallbackFrontierRepairAuthorityGranted -or $fallbackFrontierRepairDispatched) -and
+        (-not $fallbackFrontierRepairProgressObserved) -and
+        $fallbackProgressTimeout
     $activationPhaseEvidence = (-not $tunaActive) -and ($activationOfferNotObserved -or $activationOfferWaitingAnswer -or $activationOfferSent -or $activationOfferReceived)
     $offerSent = if ($activationPhaseEvidence) { $activationOfferSent } else { $measuredOfferSent }
     $offerReceived = if ($activationPhaseEvidence) { $activationOfferReceived } else { $measuredOfferReceived }
@@ -2851,6 +2862,14 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $ErrorMessage.IndexOf('coordinator-authorized file Tuna V4 publication after measured GUI file transfer', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         $phase = 'route_publication'
         $reason = 'file_tuna_v4_publication_missing_after_transfer'
+    }
+    elseif ($fallbackFrontierRepairStalled) {
+        $phase = 'fallback_frontier_repair'
+        $reason = 'fallback_frontier_repair_stalled'
+    }
+    elseif ($fallbackTailLocalYieldBlocked) {
+        $phase = 'fallback_tail_quiescence'
+        $reason = if ($fallbackTailFrontierStateMissing) { 'fallback_frontier_state_missing' } else { 'fallback_tail_local_yield_missing' }
     }
     elseif ($ErrorMessage.IndexOf('live multi-toggle normal-to-Tuna route epoch started', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         $phase = 'live_route_proof'
@@ -2985,6 +3004,12 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         BridgeBootstrapNotReady = [bool]$bridgeBootstrapNotReady
         ActivationOfferSent = [bool]$activationOfferSent
         ActivationOfferReceived = [bool]$activationOfferReceived
+        FallbackTailLocalYieldBlocked = [bool]$fallbackTailLocalYieldBlocked
+        FallbackTailFrontierStateMissing = [bool]$fallbackTailFrontierStateMissing
+        FallbackFrontierRepairAuthorityGranted = [bool]$fallbackFrontierRepairAuthorityGranted
+        FallbackFrontierRepairDispatched = [bool]$fallbackFrontierRepairDispatched
+        FallbackFrontierRepairProgressObserved = [bool]$fallbackFrontierRepairProgressObserved
+        FallbackFrontierRepairStalled = [bool]$fallbackFrontierRepairStalled
         MeasuredOfferSent = [bool]$measuredOfferSent
         MeasuredOfferReceived = [bool]$measuredOfferReceived
         OfferSent = [bool]$offerSent

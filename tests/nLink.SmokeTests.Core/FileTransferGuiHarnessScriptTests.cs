@@ -172,6 +172,12 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("activationOfferReceived", scriptText, StringComparison.Ordinal);
         Assert.Contains("measuredOfferReceived", scriptText, StringComparison.Ordinal);
         Assert.Contains("offerReceived", scriptText, StringComparison.Ordinal);
+        Assert.Contains("FallbackTailLocalYieldBlocked", scriptText, StringComparison.Ordinal);
+        Assert.Contains("fallback_tail_local_yield_missing", scriptText, StringComparison.Ordinal);
+        Assert.Contains("fallback_frontier_state_missing", scriptText, StringComparison.Ordinal);
+        Assert.Contains("FallbackFrontierRepairStalled", scriptText, StringComparison.Ordinal);
+        Assert.Contains("fallback_frontier_repair_stalled", scriptText, StringComparison.Ordinal);
+        Assert.Contains("fallback_frontier_repair", scriptText, StringComparison.Ordinal);
         Assert.Contains("message_type=file_transfer_offer", scriptText, StringComparison.Ordinal);
         Assert.Contains("event=tuna_acceleration_offer_received_raw", scriptText, StringComparison.Ordinal);
         Assert.Contains("event=offer_received", scriptText, StringComparison.Ordinal);

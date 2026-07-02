@@ -7509,6 +7509,91 @@ public sealed partial class SessionFileTransferService : IDisposable
             "FileTransferService",
             $"event=filetransfer_recovery_authority_rejected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; action_kind={FormatProtocolLogValue(actionKind.ToString())}; source={FormatProtocolLogValue(source)}; attempted_action={FormatProtocolLogValue(attemptedAction)}; rejection_reason={FormatProtocolLogValue(rejectionReason)}; reason={FormatProtocolLogValue(rejectionReason)}; repair_replay_kind={FormatProtocolLogValue(repairReplayKind?.ToString() ?? "(none)")}; transport_epoch_action_kind={FormatProtocolLogValue(transportEpochActionKind?.ToString() ?? "(none)")}; bridge_recovery_kind={FormatProtocolLogValue(bridgeRecoveryKind?.ToString() ?? "(none)")}; current_route={FormatProtocolLogValue(currentOwner?.RouteToken ?? "(none)")}; current_protocol_version={currentOwner?.ProtocolVersion ?? 0}; current_live_route_epoch={currentOwner?.LiveRouteEpoch ?? 0}; current_runtime_generation={currentOwner?.RuntimeGeneration ?? 0}; current_terminal_generation={currentOwner?.TerminalGeneration ?? 0}; attempted_route={FormatProtocolLogValue(attemptedLeg?.RouteSelection.TelemetryToken ?? attemptedOwner?.RouteToken ?? "(none)")}; attempted_protocol_version={attemptedLeg?.ProtocolVersion ?? attemptedOwner?.ProtocolVersion ?? 0}; attempted_live_route_epoch={attemptedLeg?.LiveRouteEpochId ?? attemptedOwner?.LiveRouteEpoch ?? 0}; attempted_runtime_generation={attemptedOwner?.RuntimeGeneration ?? 0}; attempted_terminal_generation={attemptedOwner?.TerminalGeneration ?? 0}; attempted_leg_generation={attemptedLeg?.Generation ?? 0}; attempted_transport_epoch={transportEpoch ?? attemptedLeg?.TransportEpochId ?? 0}; attempted_bridge_recovery_generation={bridgeRecoveryGeneration ?? attemptedLeg?.BridgeRecoveryGeneration ?? 0}; recovery_decision_generation={recoveryDecisionGeneration ?? 0}; recovery_liveness_lease_generation={recoveryLivenessLeaseGeneration ?? 0}; target_route={FormatProtocolLogValue(targetRoute is { } route ? FileTransferRouteResolver.Resolve(route).TelemetryToken : "(none)")}; target_protocol_version={targetProtocolVersion ?? 0}; target_transport={FormatProtocolLogValue(targetTransport is { } transport ? FormatFileTransferTransportKind(transport) : "(none)")}");
 
+    private static void LogFileTransferFallbackFrontierRepairAuthorityGranted(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        RepairReplayDecision decision,
+        FileTransferLeg? leg,
+        string repairRequestKey,
+        string source,
+        string stage,
+        int rangeCount,
+        int requestedChunkCount,
+        int scheduledChunkCount)
+    {
+        var routeToken = FileTransferRouteResolver.Resolve(decision.CurrentRoute).TelemetryToken;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_fallback_frontier_repair_authority_granted; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; source={FormatProtocolLogValue(source)}; stage={FormatProtocolLogValue(stage)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; repair_replay_kind={FormatProtocolLogValue(decision.RepairKind.ToString())}; route={FormatProtocolLogValue(routeToken)}; protocol_version={decision.CurrentProtocolVersion}; live_route_epoch={decision.CurrentLiveRouteEpoch}; runtime_generation={decision.CurrentRuntimeGeneration}; terminal_generation={decision.CurrentTerminalGeneration}; leg_generation={decision.CurrentLegGeneration}; transport_epoch={decision.TransportEpoch}; bridge_recovery_generation={decision.BridgeRecoveryGeneration}; repair_replay_generation={decision.RepairGeneration}; attempted_leg_generation={leg?.Generation ?? 0}; attempted_transport_epoch={leg?.TransportEpochId ?? 0}; attempted_bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; range_count={rangeCount}; requested_chunk_count={requestedChunkCount}; scheduled_chunk_count={scheduledChunkCount}; decision_reason={FormatProtocolLogValue(decision.Reason)}");
+    }
+
+    private static void LogFileTransferFallbackFrontierRepairAuthorityRejected(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        FileTransferLeg? leg,
+        string repairRequestKey,
+        string source,
+        string stage,
+        string rejectionReason,
+        RepairReplayKind repairKind)
+        => LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_fallback_frontier_repair_authority_rejected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; source={FormatProtocolLogValue(source)}; stage={FormatProtocolLogValue(stage)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; repair_replay_kind={FormatProtocolLogValue(repairKind.ToString())}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? "(none)")}; protocol_version={leg?.ProtocolVersion ?? 0}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; leg_generation={leg?.Generation ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; rejection_reason={FormatProtocolLogValue(rejectionReason)}; decision_reason={FormatProtocolLogValue(rejectionReason)}");
+
+    private static void LogFileTransferFallbackFrontierRepairDispatched(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        RepairReplayDecision? decision,
+        FileTransferLeg? leg,
+        string repairRequestKey,
+        string protocolRepairRequestId,
+        string stage,
+        int sentChunkCount,
+        int remoteNextExpectedChunkIndex,
+        int chunksAcceptedForTransport)
+    {
+        var route = decision is { } authority
+            ? FileTransferRouteResolver.Resolve(authority.CurrentRoute).TelemetryToken
+            : leg?.RouteSelection.TelemetryToken ?? "(none)";
+        var protocolVersion = decision is { } protocolAuthority
+            ? protocolAuthority.CurrentProtocolVersion
+            : leg?.ProtocolVersion ?? 0;
+        var liveRouteEpoch = decision is { } liveAuthority
+            ? liveAuthority.CurrentLiveRouteEpoch
+            : leg?.LiveRouteEpochId ?? 0;
+        var legGeneration = decision is { } legAuthority
+            ? legAuthority.CurrentLegGeneration
+            : leg?.Generation ?? 0;
+        var transportEpoch = decision is { } transportAuthority
+            ? transportAuthority.TransportEpoch
+            : leg?.TransportEpochId ?? 0;
+        var bridgeRecoveryGeneration = decision is { } bridgeAuthority
+            ? bridgeAuthority.BridgeRecoveryGeneration
+            : leg?.BridgeRecoveryGeneration ?? 0;
+        var runtimeGeneration = decision?.CurrentRuntimeGeneration ?? 0;
+        var terminalGeneration = decision?.CurrentTerminalGeneration ?? 0;
+        var repairReplayGeneration = decision?.RepairGeneration ?? 0;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_fallback_frontier_repair_dispatched; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; stage={FormatProtocolLogValue(stage)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; protocol_repair_request_id={FormatProtocolLogValue(protocolRepairRequestId)}; route={FormatProtocolLogValue(route)}; protocol_version={protocolVersion}; live_route_epoch={liveRouteEpoch}; runtime_generation={runtimeGeneration}; terminal_generation={terminalGeneration}; leg_generation={legGeneration}; transport_epoch={transportEpoch}; bridge_recovery_generation={bridgeRecoveryGeneration}; repair_replay_generation={repairReplayGeneration}; attempted_leg_generation={leg?.Generation ?? 0}; attempted_transport_epoch={leg?.TransportEpochId ?? 0}; attempted_bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; sent_chunk_count={sentChunkCount}; remote_next_expected_chunk_index={remoteNextExpectedChunkIndex}; chunks_accepted_for_transport={chunksAcceptedForTransport}");
+    }
+
+    private static void LogFileTransferFallbackFrontierRepairProgressObserved(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        string repairRequestKey,
+        string reason,
+        int committedFrontierBefore,
+        int committedFrontierAfter,
+        int requestedChunkCount)
+        => LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_fallback_frontier_repair_progress_observed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; reason={FormatProtocolLogValue(reason)}; committed_frontier_before={committedFrontierBefore}; committed_frontier_after={committedFrontierAfter}; requested_chunk_count={requestedChunkCount}");
+
     private static void LogFileTransferBridgeRecoveryAuthorityGranted(
         FileTransferDirection direction,
         string transferId,
@@ -11202,6 +11287,43 @@ public sealed partial class SessionFileTransferService : IDisposable
             IsV6TransportHandoffBlockingTail(context.V6TransportHandoff);
         if (pendingOwnerWork || stateRecoveryWorkStillBlocking)
         {
+            if (context.PeerFallbackTailYieldGranted && !context.LocalFallbackTailYieldGranted)
+            {
+                var ownerSnapshot = BuildFallbackTailYieldOwnerSnapshot(context, leg);
+                var peerPairKey = NormalizeFallbackTailYieldPairKey(
+                    context.PeerFallbackTailYieldPairKey,
+                    context.PeerFallbackTailYieldOwnerKey);
+                var decisionReason = pendingOwnerWork
+                    ? context.PullTransportFrontierOnlyRepairActive
+                        ? "fallback_tail_frontier_repair_pending"
+                        : IsV6TransportHandoffBlockingTail(context.V6TransportHandoff)
+                            ? "fallback_tail_transport_handoff_blocking"
+                            : context.V6RegularNknFallbackCheckpointDeliveryRecoveryPending
+                                ? "fallback_tail_checkpoint_delivery_recovery_pending"
+                                : context.V6RegularNknStateRefreshSendInFlight != 0
+                                    ? "fallback_tail_state_refresh_send_inflight"
+                                    : context.V6RegularNknDeferredStateRefreshRequest is not null
+                                        ? "fallback_tail_deferred_state_refresh_pending"
+                                        : "fallback_tail_local_owner_work_pending"
+                    : stateRecoveryWorkStillBlocking
+                        ? "fallback_frontier_state_missing"
+                        : "fallback_tail_local_owner_work_pending";
+                LogFileTransferFallbackTailLocalYieldBlocked(
+                    FileTransferDirection.Outbound,
+                    context.TransferId,
+                    context.SessionId,
+                    leg,
+                    ownerSnapshot.OwnerKey,
+                    ownerSnapshot.PairKey,
+                    ownerSnapshot.CheckpointRequestIdSnapshot,
+                    context.LocalFallbackTailYieldOwnerKey,
+                    context.PeerFallbackTailYieldOwnerKey,
+                    context.LocalFallbackTailYieldPairKey,
+                    peerPairKey,
+                    decisionReason,
+                    reason);
+            }
+
             if (context.FallbackTailQuiescenceTupleRepeatCount >= V6PostTunaFallbackTailQuiescenceRepeatLimit)
             {
                 if (TryMarkOutboundFallbackTailFailedWithCoordinatorLocked(context, leg, reason) &&
