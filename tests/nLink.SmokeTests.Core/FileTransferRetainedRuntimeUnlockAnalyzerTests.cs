@@ -863,7 +863,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task AnalyzeRetained_RuntimeUnlockPreCommitAckDeliveryBeforeLogicalAckSent_DoesNotClassifyAckMissing()
+    public async Task AnalyzeRetained_RuntimeUnlockPreCommitAckDeliveryWithoutReceiveOrFailure_ClassifiesAckMissing()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -892,8 +892,8 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal("0", verdict["runtime_unlock_precommit_probe_delivery_result_count"]);
         Assert.Equal("1", verdict["runtime_unlock_precommit_probe_ack_delivery_result_count"]);
         Assert.Equal("0", verdict["runtime_unlock_tuna_probe_ack_received_count"]);
-        Assert.Equal("0", verdict["runtime_unlock_precommit_probe_ack_missing_count"]);
-        Assert.NotEqual("runtime_unlock_precommit_probe_ack_missing", verdict["recovery_failure_class"]);
+        Assert.Equal("1", verdict["runtime_unlock_precommit_probe_ack_missing_count"]);
+        Assert.Equal("runtime_unlock_precommit_probe_ack_missing", verdict["recovery_failure_class"]);
     }
 
     [Fact]

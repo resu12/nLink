@@ -1584,7 +1584,7 @@ public sealed partial class SessionFileTransferService
         FileTransferDirection direction,
         string transferId,
         string sessionId,
-        FileTransferRuntimeUnlockPreCommitProbeFrame probe,
+        FileTransferRuntimeUnlockPreCommitProbeFrameBase probe,
         RuntimeUnlockAdmissionToken? attemptedAdmissionToken,
         RuntimeUnlockAdmissionToken? currentAdmissionToken,
         string decisionReason)
@@ -2009,9 +2009,18 @@ public sealed partial class SessionFileTransferService
                 ? RuntimeUnlockPreCommitProbeCommitConfirmedReplyReason
                 : RuntimeUnlockPreCommitProbeAcceptedReason;
 
+        RuntimeUnlockAdmissionToken? currentAdmissionToken;
+        bool authorized;
+        string ackAuthorizationRejectionReason;
         lock (gate)
         {
-            if (!TryAuthorizeRuntimeUnlockCallbackActionForDirectionLocked(
+            _ = TryGetCurrentRuntimeUnlockAdmissionTokenForDirectionLocked(
+                direction,
+                sessionId,
+                transferId,
+                out currentAdmissionToken);
+
+            authorized = TryAuthorizeRuntimeUnlockCallbackActionForDirectionLocked(
                     direction,
                     sessionId,
                     transferId,
@@ -2019,7 +2028,7 @@ public sealed partial class SessionFileTransferService
                     actionKind: FileTransferCoordinatorActionKind.RuntimeUnlockProbeAck,
                     source: "runtime_unlock_precommit_probe_ack",
                     attemptedAction: ack.Accepted ? "probe_ack" : "probe_rejected",
-                    admissionToken: null,
+                    admissionToken: currentAdmissionToken,
                     routeCommitToken: null,
                     transactionGeneration: ack.TransactionGeneration,
                     offerGeneration: ack.OfferGeneration,
@@ -2032,10 +2041,30 @@ public sealed partial class SessionFileTransferService
                     targetRoute: FileTransferRoute.FileTunaV4,
                     targetProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
                     targetTransport: FileTransferTransportKind.Tuna,
-                    out _))
+                    out ackAuthorizationRejectionReason);
+        }
+
+        if (!authorized)
+        {
+            RuntimeUnlockAdmissionToken? latestAdmissionToken;
+            lock (gate)
             {
-                return;
+                _ = TryGetCurrentRuntimeUnlockAdmissionTokenForDirectionLocked(
+                    direction,
+                    sessionId,
+                    transferId,
+                    out latestAdmissionToken);
             }
+
+            LogRuntimeUnlockPreCommitProbeAckAuthorityRejected(
+                direction,
+                transferId,
+                sessionId,
+                ack,
+                currentAdmissionToken,
+                latestAdmissionToken,
+                ackAuthorizationRejectionReason);
+            return;
         }
 
         if (!ack.Accepted)

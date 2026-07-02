@@ -7541,6 +7541,7 @@ function Get-FileTransferRecoveryFailureClassification {
             $runtimeUnlockPreCommitProbeAckDeliveryResultEvents |
                 Where-Object {
                     (Get-FileTransferEventField -Event $_ -Name 'delivery_result' -Default '') -eq 'sent' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'actual_transport' -Default '') -eq 'tuna' -and
                     (Test-RuntimeUnlockPreCommitProbeTupleMatch -Sent $ackSent -Candidate $_)
                 }
         )
@@ -7553,8 +7554,70 @@ function Get-FileTransferRecoveryFailureClassification {
                     (Test-RuntimeUnlockPreCommitProbeTupleMatch -Sent $ackSent -Candidate $_)
                 }
         )
+        $matchingAckAuthorityRejected = @($runtimeUnlockPreCommitProbeAckAuthorityRejectedEvents | Where-Object {
+            [int64]$_.Sequence -gt $ackSentSequence -and
+            (Test-RuntimeUnlockPreCommitProbeTupleMatch -Sent $ackSent -Candidate $_)
+        })
+        $matchingAckFailure = @($runtimeUnlockPreCommitProbeFailedEvents | Where-Object {
+            [int64]$_.Sequence -gt $ackSentSequence -and
+            (Test-RuntimeUnlockPreCommitProbeTupleMatch -Sent $ackSent -Candidate $_)
+        })
+        $matchingTransactionFailure = @($runtimeUnlockTransactionFailedEvents | Where-Object {
+            [int64]$_.Sequence -gt $ackSentSequence -and
+            (Test-RuntimeUnlockPreCommitProbeTupleMatch -Sent $ackSent -Candidate $_)
+        })
 
         if ($matchingAckDelivery.Count -eq 0 -and $matchingAckReceive.Count -eq 0) {
+            $runtimeUnlockPreCommitProbeAckMissingCount++
+        } elseif ($matchingAckDelivery.Count -gt 0 -and
+            $matchingAckReceive.Count -eq 0 -and
+            $matchingAckAuthorityRejected.Count -eq 0 -and
+            $matchingAckFailure.Count -eq 0 -and
+            $matchingTransactionFailure.Count -eq 0) {
+            $runtimeUnlockPreCommitProbeAckMissingCount++
+        }
+    }
+
+    foreach ($ackDelivery in $runtimeUnlockPreCommitProbeAckDeliveryResultEvents) {
+        $ackDeliverySequence = [int64]$ackDelivery.Sequence
+        if ((Get-FileTransferEventField -Event $ackDelivery -Name 'delivery_result' -Default '') -ne 'sent' -or
+            (Get-FileTransferEventField -Event $ackDelivery -Name 'actual_transport' -Default '') -ne 'tuna') {
+            continue
+        }
+
+        $matchingAckSent = @($runtimeUnlockTunaProbeAckSentEvents | Where-Object {
+            (Test-RuntimeUnlockPreCommitProbeTupleMatch -Sent $ackDelivery -Candidate $_)
+        })
+        if ($matchingAckSent.Count -gt 0) {
+            continue
+        }
+
+        $matchingAckReceive = @(
+            @($runtimeUnlockTunaProbeAckReceivedEvents + $runtimeUnlockPreCommitProbeAckedEvents + $runtimeUnlockTransactionCommittedEvents) |
+                Where-Object {
+                    [int64]$_.Sequence -gt $ackDeliverySequence -and
+                    (($_.EventName -ne 'runtime_unlock_tuna_probe_ack_received') -or
+                        (Get-FileTransferEventField -Event $_ -Name 'accepted' -Default '1') -ne '0') -and
+                    (Test-RuntimeUnlockPreCommitProbeTupleMatch -Sent $ackDelivery -Candidate $_)
+                }
+        )
+        $matchingAckAuthorityRejected = @($runtimeUnlockPreCommitProbeAckAuthorityRejectedEvents | Where-Object {
+            [int64]$_.Sequence -gt $ackDeliverySequence -and
+            (Test-RuntimeUnlockPreCommitProbeTupleMatch -Sent $ackDelivery -Candidate $_)
+        })
+        $matchingAckFailure = @($runtimeUnlockPreCommitProbeFailedEvents | Where-Object {
+            [int64]$_.Sequence -gt $ackDeliverySequence -and
+            (Test-RuntimeUnlockPreCommitProbeTupleMatch -Sent $ackDelivery -Candidate $_)
+        })
+        $matchingTransactionFailure = @($runtimeUnlockTransactionFailedEvents | Where-Object {
+            [int64]$_.Sequence -gt $ackDeliverySequence -and
+            (Test-RuntimeUnlockPreCommitProbeTupleMatch -Sent $ackDelivery -Candidate $_)
+        })
+
+        if ($matchingAckReceive.Count -eq 0 -and
+            $matchingAckAuthorityRejected.Count -eq 0 -and
+            $matchingAckFailure.Count -eq 0 -and
+            $matchingTransactionFailure.Count -eq 0) {
             $runtimeUnlockPreCommitProbeAckMissingCount++
         }
     }

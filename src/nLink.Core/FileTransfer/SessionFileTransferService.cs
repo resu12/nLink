@@ -9549,6 +9549,64 @@ public sealed partial class SessionFileTransferService : IDisposable
             ? expectedPairKey
             : null;
         var matchedOwnerKey = expectedOwnerKey;
+        var matchedCheckpointSnapshot = ownerSnapshot.CheckpointRequestIdSnapshot;
+        if (matchedPairKey is null &&
+            string.Equals(frameCheckpointSnapshot, "(none)", StringComparison.Ordinal) &&
+            !string.Equals(ownerSnapshot.CheckpointRequestIdSnapshot, "(none)", StringComparison.Ordinal))
+        {
+            var canonicalOwnerKey = FileTransferCoordinator.BuildFallbackTailYieldOwnerKey(
+                sessionId,
+                transferId,
+                currentLeg.RouteSelection.TelemetryToken,
+                currentLeg.ProtocolVersion,
+                currentLeg.LiveRouteEpochId,
+                currentLeg.Generation,
+                currentLeg.BridgeRecoveryGeneration,
+                currentLeg.TransportEpochId,
+                frameCheckpointSnapshot);
+            var canonicalPairKey = FileTransferCoordinator.BuildFallbackTailYieldPairKey(
+                sessionId,
+                transferId,
+                currentLeg.RouteSelection.TelemetryToken,
+                currentLeg.ProtocolVersion,
+                currentLeg.LiveRouteEpochId,
+                currentLeg.BridgeRecoveryGeneration,
+                currentLeg.TransportEpochId,
+                frameCheckpointSnapshot);
+            var coordinatorDecisionAllowsCanonicalSnapshot =
+                lastTailYieldDecision is { Accepted: true } decision &&
+                decision.CurrentRoute == currentLeg.RouteSelection.Route &&
+                decision.CurrentProtocolVersion == currentLeg.ProtocolVersion &&
+                decision.CurrentLiveRouteEpoch == currentLeg.LiveRouteEpochId &&
+                decision.CurrentLegGeneration == currentLeg.Generation &&
+                string.Equals(decision.CheckpointRequestIdSnapshot, frameCheckpointSnapshot, StringComparison.Ordinal) &&
+                string.Equals(decision.OwnerKey, canonicalOwnerKey, StringComparison.Ordinal) &&
+                string.Equals(decision.PairKey, canonicalPairKey, StringComparison.Ordinal) &&
+                (
+                    currentCheckpointLease is not { State: FallbackCheckpointLeaseState.Pending } currentLease ||
+                    (decision.CheckpointLease is { State: FallbackCheckpointLeaseState.Accepted or FallbackCheckpointLeaseState.Retired } decisionLease &&
+                     string.Equals(decisionLease.CheckpointRequestId, currentLease.CheckpointRequestId, StringComparison.Ordinal) &&
+                     decisionLease.LeaseGeneration == currentLease.LeaseGeneration &&
+                     decisionLease.CheckpointGeneration == currentLease.CheckpointGeneration) ||
+                    (decision.FallbackSurvivalState.FallbackCurrent &&
+                     !decision.FallbackSurvivalState.FallbackTerminalized &&
+                     !decision.FallbackSurvivalState.CheckpointDeliveryRecoveryPending &&
+                     !decision.FallbackSurvivalState.StateRefreshSendInFlight &&
+                     !decision.FallbackSurvivalState.DeferredStateRefreshPending &&
+                     !decision.FallbackSurvivalState.ProofReplayPending &&
+                     !decision.FallbackSurvivalState.ControlPlanePressurePending &&
+                     !decision.FallbackSurvivalState.BridgeRecoveryPending &&
+                     !decision.FallbackSurvivalState.FallbackTailRepairPending)
+                );
+            if (coordinatorDecisionAllowsCanonicalSnapshot &&
+                string.Equals(framePairKey, canonicalPairKey, StringComparison.Ordinal))
+            {
+                matchedOwnerKey = canonicalOwnerKey;
+                matchedPairKey = canonicalPairKey;
+                matchedCheckpointSnapshot = frameCheckpointSnapshot;
+            }
+        }
+
         if (matchedPairKey is null ||
             !string.Equals(frame.Direction, expectedPeerDirection, StringComparison.Ordinal) ||
             frame.LiveRouteEpoch != expectedLiveRouteEpoch ||
@@ -9575,7 +9633,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             currentLeg,
             matchedOwnerKey,
             matchedPairKey,
-            ownerSnapshot.CheckpointRequestIdSnapshot,
+            matchedCheckpointSnapshot,
             null,
             frame.OwnerKey,
             null,

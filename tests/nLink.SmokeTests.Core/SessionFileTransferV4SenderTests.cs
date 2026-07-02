@@ -13160,6 +13160,8 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Contains("event=filetransfer_runtime_unlock_callback_rejected; direction=outbound;", log, StringComparison.Ordinal);
         Assert.Contains("action_kind=RuntimeUnlockProbeAck", log, StringComparison.Ordinal);
         Assert.Contains("rejection_reason=runtime_unlock_admission_missing", log, StringComparison.Ordinal);
+        Assert.Contains("event=runtime_unlock_precommit_probe_ack_authority_rejected; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("decision_reason=runtime_unlock_admission_missing", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=runtime_unlock_tuna_probe_ack_received; transport=tuna; direction=outbound;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=runtime_unlock_paired_commit_started; direction=outbound;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_route_transitioned; direction=outbound;", log, StringComparison.Ordinal);
@@ -13273,6 +13275,100 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Contains("coordinator_decision_reason=accepted", routeTransitionLog, StringComparison.Ordinal);
         Assert.Contains("event=runtime_unlock_paired_commit_confirmed; direction=outbound;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=runtime_unlock_paired_commit_aborted; direction=outbound;", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RuntimeUnlockPrecommitAck_UnderFallbackRouteUsesRuntimeUnlockAuthority()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        const string transferId = "transfer_runtime_unlock_precommit_ack_under_fallback";
+        var sessionId = $"session_{transferId}";
+        const string probeId = "runtime-unlock-precommit:2:9:fallback";
+        using var transport = new LoopbackFileTransferTransport(sessionId)
+        {
+            RuntimeUnlockRouteCommitSnapshot = new RuntimeUnlockRouteCommitSnapshot(
+                sessionId,
+                transferId,
+                TransactionGeneration: 2,
+                OfferGeneration: 9,
+                PeerVisibleProof: true,
+                PeerReceived: true,
+                AnswerReceived: true,
+                TargetRoute: FileTransferRoute.FileTunaV4,
+                ProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
+                HandoffKind: FileTransferTransportHandoffKind.NormalToTunaActivation,
+                TargetTransport: FileTransferTransportKind.Tuna,
+                TransactionState: RuntimeUnlockTransactionState.AnswerReceived.ToString(),
+                Reason: "test_ack_under_fallback_route",
+                PathProbeId: probeId,
+                PathProbeState: RuntimeUnlockPathProbeState.Acked.ToString(),
+                PathProbeTransport: FileTransferTransportKind.Tuna,
+                TunaPathLeaseRequired: true,
+                TunaPathLeaseGeneration: 5,
+                TunaPathLeaseState: RuntimeUnlockTunaPathLeaseState.ListenerReady.ToString(),
+                TunaPathLeaseCurrent: true)
+        };
+        service.AttachTransport(transport);
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 64,
+            chunksAcceptedForTransport: 64,
+            remoteGrantedUntilExclusive: 128,
+            chunkCount: 256);
+        var leg = Assert.IsType<FileTransferLeg>(GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+        SeedPairedFallbackTailYieldForTest(context, leg);
+        SeedRuntimeUnlockAdmissionForTest(
+            context,
+            FileTransferDirection.Outbound,
+            "fallback_quiescent");
+        serviceType
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var dataSession = new RecordingDataSession(sessionId, transferId);
+        var ack = new FileTransferRuntimeUnlockPreCommitProbeAckFrame
+        {
+            SessionId = sessionId,
+            TransferId = transferId,
+            TransactionGeneration = 2,
+            OfferGeneration = 9,
+            TunaPathLeaseGeneration = 5,
+            ProbeId = probeId,
+            TargetRoute = FileTransferRouteResolver.FileTunaV4Token,
+            TargetProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+            TargetTransport = "tuna",
+            HandoffKind = "normal_to_tuna_activation",
+            SentUnixTimeMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            Accepted = true,
+            Reason = "precommit_probe_ack",
+        };
+
+        var logStart = GetOperationalLogLength();
+        var handled = await (Task<bool>)serviceType
+            .GetMethod("TryHandleRuntimeUnlockPreCommitProbeDataFrameAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Outbound,
+                    ack,
+                    FileTransferTransportKind.Tuna,
+                    dataSession,
+                ])!;
+
+        Assert.True(handled);
+        var sentConfirmations = dataSession.SentFrames.OfType<FileTransferRuntimeUnlockPreCommitProbeAckFrame>().ToArray();
+        Assert.Equal(2, sentConfirmations.Length);
+        Assert.All(sentConfirmations, sent => Assert.Equal("precommit_probe_commit_confirmed", sent.Reason));
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=runtime_unlock_tuna_probe_ack_received; transport=tuna; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("event=runtime_unlock_precommit_probe_acked; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("event=runtime_unlock_paired_commit_started; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=runtime_unlock_precommit_probe_ack_authority_rejected; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_runtime_unlock_callback_rejected; direction=outbound;", log, StringComparison.Ordinal);
     }
 
     [Fact]
