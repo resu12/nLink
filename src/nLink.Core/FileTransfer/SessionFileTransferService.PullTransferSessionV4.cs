@@ -3191,6 +3191,10 @@ public sealed partial class SessionFileTransferService
            context.NegotiatedDataProtocolVersion >= FileTransferProtocol.ProtocolVersionV6 &&
            IsOutboundPostTunaRecoveryActiveLocked(context);
 
+    private static bool HasCurrentOutboundPostTunaFallbackFrontierRepairAuthorityLocked(OutboundTransferContext context)
+        => IsOutboundPostTunaFallbackV6LiveSparseRecoveryActiveLocked(context) &&
+           IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg);
+
     private static bool IsOutboundNormalToTunaActivationProofPendingLocked(OutboundTransferContext context)
     {
         if (context.V6TransportEpoch is { } epoch &&
@@ -5599,7 +5603,7 @@ public sealed partial class SessionFileTransferService
         OutboundTransferContext context,
         int frontierChunkIndex)
     {
-        if (!IsOutboundPostTunaRecoveryActiveLocked(context) ||
+        if (!HasCurrentOutboundPostTunaFallbackFrontierRepairAuthorityLocked(context) ||
             frontierChunkIndex < 0 ||
             frontierChunkIndex >= context.ChunkCount)
         {
@@ -6406,7 +6410,7 @@ public sealed partial class SessionFileTransferService
             ? V4PostFallbackEmergencyFrontierRepairChunks
             : ResolveV4RepairRequestMaxChunksForSend(context, state);
         var normalizedInputRanges = NormalizeV4MissingRangesForSend(state.MissingRanges, context.ChunkCount, maxRepairChunks);
-        var postRebindFrontierRepair = IsOutboundPostTunaRecoveryActiveLocked(context) &&
+        var postRebindFrontierRepair = HasCurrentOutboundPostTunaFallbackFrontierRepairAuthorityLocked(context) &&
             normalizedInputRanges.Any(range =>
                 range.StartChunkIndex <= state.ContiguousCommittedChunkIndex &&
                 state.ContiguousCommittedChunkIndex < range.StartChunkIndex + range.ChunkCount);

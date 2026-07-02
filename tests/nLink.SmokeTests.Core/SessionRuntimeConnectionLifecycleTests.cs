@@ -1035,6 +1035,52 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
     }
 
     [Fact]
+    public void FileTransferRecoveryLiveness_FallbackReceiveProofRemainsActiveUntilAuthorityCompletes()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var method = typeof(SessionRuntime).GetMethod(
+            "IsActiveFileTransferRecoveryLivenessSnapshot",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var fallbackReceiveProof = new FileTransferRecoveryLivenessSnapshot(
+            "sess_fallback_receive_proof_active",
+            "ft_fallback_receive_proof_active",
+            "post_tuna_fallback_v6",
+            FileTransferProtocol.ProtocolVersionV6,
+            LiveRouteEpoch: 2,
+            TransferLegGeneration: 4,
+            BridgeRecoveryGeneration: 1,
+            TransportEpoch: 9,
+            CheckpointRequestId: "v6-regular-nkn-state-refresh:1",
+            AuthorityReason: "post_tuna_fallback_state_refresh_failed",
+            State: FileTransferRecoveryLivenessState.ReceiveProofObserved,
+            CreatedUtc: now,
+            LivenessDeferralDeadlineUtc: now.AddSeconds(40),
+            BridgeRecoveryRequested: true,
+            BridgeRecoveryStarted: true,
+            BridgeRecoveryCompleted: true,
+            ReceiveProofObserved: true,
+            RecoveryExhausted: false,
+            AuthorityCompleted: false,
+            TerminalRecommended: false);
+        var regularReceiveProof = fallbackReceiveProof with
+        {
+            RouteToken = "regular_nkn_v4_fast",
+            ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+        };
+        var completedFallback = fallbackReceiveProof with
+        {
+            AuthorityCompleted = true,
+            TerminalRecommended = true,
+        };
+
+        Assert.True(Assert.IsType<bool>(method!.Invoke(null, [fallbackReceiveProof, now])));
+        Assert.False(Assert.IsType<bool>(method.Invoke(null, [regularReceiveProof, now])));
+        Assert.False(Assert.IsType<bool>(method.Invoke(null, [completedFallback, now])));
+    }
+
+    [Fact]
     public void SessionRuntime_FileTransferPeerDisconnected_DoesNotEndConnectedSession()
     {
         var helperAddress = new PeerAddress("helper.file.peer.disconnect");

@@ -1022,10 +1022,13 @@ public sealed partial class NknSignalingTransport
     {
         var normalizedSessionId = SanitizeLogToken(sessionId ?? "none");
         var normalizedTransferId = SanitizeLogToken(transferId);
+        var normalizedDirection = request.Direction.ToString().ToLowerInvariant();
         var normalizedRoute = SanitizeLogToken(request.RouteToken ?? "post_tuna_fallback_v6");
+        var normalizedCheckpointRequestId = SanitizeLogToken(request.CheckpointRequestId ?? "none");
         var normalizedAuthorityReason = SanitizeLogToken(request.AuthorityReason ?? reason);
         FileTransferFallbackLegAuthorityState state;
         bool started = false;
+        bool restarted = false;
         lock (fileTransferFallbackProofGate)
         {
             var existing = fileTransferFallbackLegAuthorityState;
@@ -1033,9 +1036,32 @@ public sealed partial class NknSignalingTransport
                 !existing.Completed &&
                 string.Equals(existing.SessionId, normalizedSessionId, StringComparison.Ordinal) &&
                 string.Equals(existing.TransferId, normalizedTransferId, StringComparison.Ordinal) &&
-                existing.LegGeneration == request.TransferLegGeneration)
+                string.Equals(existing.Direction, normalizedDirection, StringComparison.Ordinal) &&
+                existing.LegGeneration == request.TransferLegGeneration &&
+                string.Equals(existing.RouteToken, normalizedRoute, StringComparison.Ordinal) &&
+                existing.ProtocolVersion == request.ProtocolVersion &&
+                existing.LiveRouteEpoch == request.LiveRouteEpoch &&
+                existing.TransportEpoch == request.TransportEpoch &&
+                existing.BridgeRecoveryGeneration == request.BridgeRecoveryGeneration &&
+                string.Equals(existing.CheckpointRequestId ?? "none", normalizedCheckpointRequestId, StringComparison.Ordinal) &&
+                string.Equals(existing.AuthorityReason, normalizedAuthorityReason, StringComparison.Ordinal))
             {
                 state = existing;
+                if (state.ReceiveProofObserved ||
+                    state.RecoveryExhausted ||
+                    state.BridgeRecoveryCompleted ||
+                    state.BridgeRecoveryStarted)
+                {
+                    state.BridgeRecoveryRequested = false;
+                    state.BridgeRecoveryStarted = false;
+                    state.BridgeRecoveryCompleted = false;
+                    state.ReceiveProofObserved = false;
+                    state.RecoveryExhausted = false;
+                    state.BridgeRecoveryEscalated = false;
+                    restarted = true;
+                }
+
+                RefreshFileTransferFallbackLegAuthorityLivenessDeadlineUnsafe(state);
             }
             else
             {
@@ -1044,14 +1070,14 @@ public sealed partial class NknSignalingTransport
                 {
                     SessionId = normalizedSessionId,
                     TransferId = normalizedTransferId,
-                    Direction = request.Direction.ToString().ToLowerInvariant(),
+                    Direction = normalizedDirection,
                     LegGeneration = request.TransferLegGeneration,
                     RouteToken = normalizedRoute,
                     ProtocolVersion = request.ProtocolVersion,
                     LiveRouteEpoch = request.LiveRouteEpoch,
                     TransportEpoch = request.TransportEpoch,
                     BridgeRecoveryGeneration = request.BridgeRecoveryGeneration,
-                    CheckpointRequestId = SanitizeLogToken(request.CheckpointRequestId ?? "none"),
+                    CheckpointRequestId = normalizedCheckpointRequestId,
                     AuthorityReason = normalizedAuthorityReason,
                     CreatedUtcMs = now.ToUnixTimeMilliseconds(),
                     LivenessDeferralDeadlineUtcMs = now
@@ -1068,6 +1094,12 @@ public sealed partial class NknSignalingTransport
             LocalOperationalLog.Info(
                 "NKN.Tuna",
                 $"event=filetransfer_fallback_leg_authority_started; direction={state.Direction}; session_id={state.SessionId}; transfer_id={state.TransferId}; leg_generation={state.LegGeneration}; route={state.RouteToken}; protocol_version={state.ProtocolVersion}; live_route_epoch={state.LiveRouteEpoch}; transport_epoch={state.TransportEpoch}; bridge_recovery_generation={state.BridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(state.CheckpointRequestId ?? "none")}; authority_reason={state.AuthorityReason}; reason={reason}");
+        }
+        else if (restarted)
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=filetransfer_fallback_leg_authority_restarted; direction={state.Direction}; session_id={state.SessionId}; transfer_id={state.TransferId}; leg_generation={state.LegGeneration}; route={state.RouteToken}; protocol_version={state.ProtocolVersion}; live_route_epoch={state.LiveRouteEpoch}; transport_epoch={state.TransportEpoch}; bridge_recovery_generation={state.BridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(state.CheckpointRequestId ?? "none")}; authority_reason={state.AuthorityReason}; reason={SanitizeLogToken(reason)}; liveness_deferral_deadline_utc_ms={state.LivenessDeferralDeadlineUtcMs}");
         }
 
         return state;
@@ -1578,7 +1610,6 @@ public sealed partial class NknSignalingTransport
                     FileTransferRecoveryLivenessState.AuthorityActive;
                 var terminalRecommended =
                     recoveryState is FileTransferRecoveryLivenessState.Exhausted or
-                        FileTransferRecoveryLivenessState.ReceiveProofObserved or
                         FileTransferRecoveryLivenessState.Completed;
 
                 snapshot = new FileTransferRecoveryLivenessSnapshot(
@@ -1652,6 +1683,40 @@ public sealed partial class NknSignalingTransport
 
             return false;
         }
+    }
+
+    public void NotifyFileTransferRecoveryLivenessAuthorityRejected(
+        FileTransferRecoveryLivenessSnapshot snapshot,
+        string reason)
+    {
+        if (snapshot is not
+            {
+                RouteToken: FileTransferRouteResolver.RegularNknV4FastToken,
+                ProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
+            } ||
+            string.IsNullOrWhiteSpace(snapshot.SessionId) ||
+            string.IsNullOrWhiteSpace(snapshot.TransferId))
+        {
+            return;
+        }
+
+        RejectRuntimeUnlockRetryBlockedByRegularV4RecoveryForLivenessAuthorityRejection(
+            snapshot,
+            reason);
+    }
+
+    public void ObserveFileTransferTerminal(FileTransferTerminalNotification notification)
+    {
+        if (notification.TerminalState == FileTransferTransferState.Completed ||
+            !string.Equals(notification.RouteToken, FileTransferRouteResolver.RegularNknV4FastToken, StringComparison.Ordinal) ||
+            notification.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+            string.IsNullOrWhiteSpace(notification.SessionId) ||
+            string.IsNullOrWhiteSpace(notification.TransferId))
+        {
+            return;
+        }
+
+        RejectRuntimeUnlockRetryBlockedByRegularV4RecoveryForTransferTerminal(notification);
     }
 
     private void MarkFileTransferFallbackLegAuthorityCompleted(
@@ -9951,14 +10016,15 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
-        if (!string.Equals(snapshot.SessionId, sessionId, StringComparison.Ordinal) ||
+        var normalizedSessionId = SanitizeLogToken(sessionId);
+        if (!string.Equals(snapshot.SessionId, normalizedSessionId, StringComparison.Ordinal) ||
             snapshot.Direction != expectedDirection)
         {
             return false;
         }
 
         if (!string.IsNullOrWhiteSpace(transferId) &&
-            !string.Equals(snapshot.TransferId, transferId, StringComparison.Ordinal))
+            !string.Equals(snapshot.TransferId, SanitizeLogToken(transferId), StringComparison.Ordinal))
         {
             return false;
         }
@@ -13171,6 +13237,105 @@ public sealed partial class NknSignalingTransport
             $"event=runtime_unlock_retry_rejected_after_regular_v4_receive_recovery; session_id={SanitizeLogToken(rejectedState.SessionId)}; transfer_id={SanitizeLogToken(transferId)}; retry_reason={SanitizeLogToken(rejectedState.RetryReason)}; recovery_reason={SanitizeLogToken(rejectedState.RecoveryReason)}; retired_generation={rejectedState.RetiredOfferGeneration}; current_retired_generation={rejectedState.RetiredOfferGeneration}; contract_generation={rejectedState.ContractGeneration}; current_contract_generation={rejectedState.ContractGeneration}; offer_generation={(rejectedState.CurrentOfferGeneration > 0 ? rejectedState.CurrentOfferGeneration : rejectedState.RetiredOfferGeneration)}; current_offer_generation={(rejectedState.CurrentOfferGeneration > 0 ? rejectedState.CurrentOfferGeneration : rejectedState.RetiredOfferGeneration)}; route={SanitizeLogToken(attemptedRoute)}; current_route={SanitizeLogToken(currentRoute)}; protocol_version={attemptedProtocolVersion}; current_protocol_version={currentProtocolVersion}; live_route_epoch={attemptedLiveRouteEpoch}; current_live_route_epoch={currentLiveRouteEpoch}; regular_v4_liveness_generation={attemptedRegularV4LivenessGeneration}; current_regular_v4_liveness_generation={currentRegularV4LivenessGeneration}; bridge_decision_generation={attemptedBridgeDecisionGeneration}; current_bridge_decision_generation={currentBridgeDecisionGeneration}; blocker_reason={SanitizeLogToken(blockedReason)}; settlement_trigger={sanitizedTrigger}; decision_reason={sanitizedDecisionReason}");
         LogRuntimeUnlockRecoveryContract("session_recovery_contract_failed", rejectedState.SessionId);
         return true;
+    }
+
+    private bool RejectRuntimeUnlockRetryBlockedByRegularV4RecoveryForLivenessAuthorityRejection(
+        FileTransferRecoveryLivenessSnapshot rejectedSnapshot,
+        string reason)
+    {
+        RuntimeUnlockRecoveryRetryState? stateSnapshot = null;
+        var normalizedSessionId = SanitizeLogToken(rejectedSnapshot.SessionId);
+        var normalizedTransferId = SanitizeLogToken(rejectedSnapshot.TransferId);
+        lock (accelerationGate)
+        {
+            var state = runtimeUnlockRecoveryRetryState;
+            if (state is null ||
+                !state.BlockedByRegularV4ReceiveRecovery ||
+                state.ContractState is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed ||
+                !string.Equals(state.SessionId, normalizedSessionId, StringComparison.Ordinal) ||
+                !string.Equals(
+                    state.RegularV4RecoveryBlockedTransferId ?? state.TransferId ?? string.Empty,
+                    normalizedTransferId,
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            stateSnapshot = state;
+        }
+
+        FileTransferRegularV4RecoveryLivenessSnapshot? currentLivenessSnapshot = null;
+        if (TryGetActiveRegularV4RecoveryLivenessSnapshot(normalizedSessionId, out var activeLivenessSnapshot))
+        {
+            currentLivenessSnapshot = activeLivenessSnapshot;
+        }
+
+        var normalizedReason = SanitizeLogToken(reason);
+        var decisionReason =
+            normalizedReason.Contains("peer_disconnected", StringComparison.OrdinalIgnoreCase) ||
+            normalizedReason.Contains("transfer_terminal", StringComparison.OrdinalIgnoreCase) ||
+            normalizedReason.Contains("session_terminal", StringComparison.OrdinalIgnoreCase) ||
+            normalizedReason.Contains("session_closed", StringComparison.OrdinalIgnoreCase)
+                ? GetRegularV4BlockedRetrySettlementRejectionReason(
+                    stateSnapshot!,
+                    currentLivenessSnapshot,
+                    reason)
+                : "regular_v4_recovery_liveness_authority_rejected";
+
+        return RejectRuntimeUnlockRetryBlockedByRegularV4Recovery(
+            stateSnapshot!,
+            currentLivenessSnapshot,
+            reason,
+            decisionReason);
+    }
+
+    private bool RejectRuntimeUnlockRetryBlockedByRegularV4RecoveryForTransferTerminal(
+        FileTransferTerminalNotification notification)
+    {
+        RuntimeUnlockRecoveryRetryState? stateSnapshot = null;
+        var normalizedSessionId = SanitizeLogToken(notification.SessionId);
+        var normalizedTransferId = SanitizeLogToken(notification.TransferId);
+        lock (accelerationGate)
+        {
+            var state = runtimeUnlockRecoveryRetryState;
+            if (state is null ||
+                !state.BlockedByRegularV4ReceiveRecovery ||
+                state.ContractState is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed ||
+                !string.Equals(state.SessionId, normalizedSessionId, StringComparison.Ordinal) ||
+                !string.Equals(
+                    state.RegularV4RecoveryBlockedTransferId ?? state.TransferId ?? string.Empty,
+                    normalizedTransferId,
+                    StringComparison.Ordinal) ||
+                (state.RegularV4RecoveryDirection.HasValue &&
+                 state.RegularV4RecoveryDirection.Value != notification.Direction))
+            {
+                return false;
+            }
+
+            stateSnapshot = state;
+        }
+
+        FileTransferRegularV4RecoveryLivenessSnapshot? currentLivenessSnapshot = null;
+        if (TryGetActiveRegularV4RecoveryLivenessSnapshot(normalizedSessionId, out var activeLivenessSnapshot))
+        {
+            currentLivenessSnapshot = activeLivenessSnapshot;
+        }
+
+        var terminalReason = SanitizeLogToken(
+            !string.IsNullOrWhiteSpace(notification.ErrorCode)
+                ? notification.ErrorCode
+                : !string.IsNullOrWhiteSpace(notification.Reason)
+                    ? notification.Reason
+                    : notification.TerminalState.ToString().ToLowerInvariant());
+        var trigger = $"transfer_terminal_{terminalReason}";
+        return RejectRuntimeUnlockRetryBlockedByRegularV4Recovery(
+            stateSnapshot!,
+            currentLivenessSnapshot,
+            trigger,
+            GetRegularV4BlockedRetrySettlementRejectionReason(
+                stateSnapshot!,
+                currentLivenessSnapshot,
+                trigger));
     }
 
     private bool ResolveRuntimeUnlockRetryBlockedByRegularV4Recovery(

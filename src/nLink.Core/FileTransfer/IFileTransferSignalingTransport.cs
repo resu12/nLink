@@ -130,6 +130,28 @@ public interface IFileTransferRecoveryLivenessState
         out FileTransferRecoveryLivenessSnapshot snapshot);
 }
 
+public interface IFileTransferRecoveryLivenessAuthorityObserver
+{
+    void NotifyFileTransferRecoveryLivenessAuthorityRejected(
+        FileTransferRecoveryLivenessSnapshot snapshot,
+        string reason);
+}
+
+public sealed record FileTransferTerminalNotification(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    string RouteToken,
+    int ProtocolVersion,
+    FileTransferTransferState TerminalState,
+    string? ErrorCode,
+    string? Reason);
+
+public interface IFileTransferTerminalObserver
+{
+    void ObserveFileTransferTerminal(FileTransferTerminalNotification notification);
+}
+
 public sealed record FileTransferRegularV4ControlFeedbackPressure(
     string SessionId,
     string TransferId,

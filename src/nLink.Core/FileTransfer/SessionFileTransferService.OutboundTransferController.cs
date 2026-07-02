@@ -52,6 +52,7 @@ public sealed partial class SessionFileTransferService
         int dataCancelProtocolVersion;
         long dataCancelTransportEpoch;
         IFileTransferRouteCompletionObserver? routeCompletionObserver;
+        IFileTransferTerminalObserver? terminalObserver;
         string? normalizedErrorCodeForNotify;
 
         lock (gate)
@@ -146,6 +147,7 @@ public sealed partial class SessionFileTransferService
             normalizedCancelReason = NormalizeReason(cancelReason) ?? CanceledReason;
             dataSessionToDispose = context.DetachDataSession();
             routeCompletionObserver = transport as IFileTransferRouteCompletionObserver;
+            terminalObserver = transport as IFileTransferTerminalObserver;
         }
 
         LogV4EfficiencySummary(context, terminalState);
@@ -263,6 +265,15 @@ public sealed partial class SessionFileTransferService
             context.CurrentLiveRouteEpoch,
             terminalState,
             context.StatusMessage);
+        NotifyTransferTerminal(
+            terminalObserver,
+            FileTransferDirection.Outbound,
+            context.RouteSelection,
+            terminalState,
+            sessionId,
+            transferId,
+            context.ErrorCode,
+            context.StatusMessage);
         NotifyRouteCompletedIfNeeded(routeCompletionObserver, context.RouteSelection, terminalState, sessionId, transferId);
     }
 
@@ -287,6 +298,7 @@ public sealed partial class SessionFileTransferService
         int dataCancelProtocolVersion;
         long dataCancelTransportEpoch;
         IFileTransferRouteCompletionObserver? routeCompletionObserver;
+        IFileTransferTerminalObserver? terminalObserver;
         string? normalizedErrorCodeForNotify;
 
         lock (gate)
@@ -376,6 +388,7 @@ public sealed partial class SessionFileTransferService
                                !string.IsNullOrWhiteSpace(cancelReason);
             dataSessionToDispose = context.DetachDataSession();
             routeCompletionObserver = transport as IFileTransferRouteCompletionObserver;
+            terminalObserver = transport as IFileTransferTerminalObserver;
         }
 
         LogV4EfficiencySummary(context, terminalState);
@@ -507,7 +520,38 @@ public sealed partial class SessionFileTransferService
             context.CurrentLiveRouteEpoch,
             terminalState,
             statusMessage);
+        NotifyTransferTerminal(
+            terminalObserver,
+            FileTransferDirection.Inbound,
+            context.RouteSelection,
+            terminalState,
+            sessionId,
+            transferId,
+            normalizedErrorCode,
+            statusMessage);
         NotifyRouteCompletedIfNeeded(routeCompletionObserver, context.RouteSelection, terminalState, sessionId, transferId);
+    }
+
+    private static void NotifyTransferTerminal(
+        IFileTransferTerminalObserver? observer,
+        FileTransferDirection direction,
+        FileTransferRouteSelection routeSelection,
+        FileTransferTransferState terminalState,
+        string sessionId,
+        string transferId,
+        string? errorCode,
+        string? reason)
+    {
+        observer?.ObserveFileTransferTerminal(
+            new FileTransferTerminalNotification(
+                sessionId,
+                transferId,
+                direction,
+                routeSelection.TelemetryToken,
+                routeSelection.ProtocolVersion,
+                terminalState,
+                errorCode,
+                reason));
     }
 
     private static void NotifyRouteCompletedIfNeeded(

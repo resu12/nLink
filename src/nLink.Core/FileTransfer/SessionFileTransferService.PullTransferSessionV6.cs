@@ -4730,6 +4730,11 @@ public sealed partial class SessionFileTransferService
         int nextChunkIndexAfterCommit;
         int highestReceivedChunkIndexAfterCommit;
         int previousCommittedChunkIndex;
+        var postTunaFallbackRepairProgressObserved = false;
+        string? postTunaFallbackRepairProgressKey = null;
+        int postTunaFallbackRepairProgressBefore = 0;
+        int postTunaFallbackRepairProgressAfter = 0;
+        int postTunaFallbackRepairProgressRequestedCount = 0;
         lock (gate)
         {
             if (!ReferenceEquals(inboundTransfer, context) ||
@@ -4784,6 +4789,27 @@ public sealed partial class SessionFileTransferService
                 var tailTransportEpoch = batch.TransportEpoch > 0
                     ? batch.TransportEpoch
                     : context.CurrentTransferLeg?.TransportEpochId ?? 0;
+                var replayPending =
+                    context.V6PostTunaFallbackProofReplayReceiverStatePending ||
+                    context.V6PostTunaFallbackProofReplayFrontierRequestPending;
+                postTunaFallbackRepairProgressObserved =
+                    IsInboundV6PostTunaFallbackSurvivalPathLocked(context) &&
+                    IsInboundPostTunaRecoveryActiveLocked(context) &&
+                    (replayPending ||
+                     context.PullPostTunaRecoveryActive ||
+                     context.PullTransportRebindGeneration > 0) &&
+                    context.NextChunkIndex > previousCommittedChunkIndex;
+                if (postTunaFallbackRepairProgressObserved)
+                {
+                    postTunaFallbackRepairProgressKey =
+                        batch.RepairRequestId ??
+                        batch.BatchId ??
+                        $"v6-fallback-progress:{batch.StartChunkIndex}:{batch.ChunkCount}";
+                    postTunaFallbackRepairProgressBefore = previousCommittedChunkIndex;
+                    postTunaFallbackRepairProgressAfter = context.NextChunkIndex;
+                    postTunaFallbackRepairProgressRequestedCount = acceptedChunks.Count;
+                }
+
                 TryMarkInboundFallbackTailQuiescentLocked(
                     context,
                     tailTransportEpoch,
@@ -4799,6 +4825,18 @@ public sealed partial class SessionFileTransferService
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_v6_sparse_write_committed; transfer_id={context.TransferId}; session_id={context.SessionId}; written_chunk_count={acceptedChunks.Count}; written_bytes={writtenBytes}; contiguous_chunks_committed={committedChunkCount}; contiguous_bytes_committed={committedByteCount}; write_duration_ms={writeStopwatch.ElapsedMilliseconds}; next_chunk_index={nextChunkIndexAfterCommit}; highest_received_chunk_index={highestReceivedChunkIndexAfterCommit}; pending_bytes={context.BufferedBytes}");
+        if (postTunaFallbackRepairProgressObserved)
+        {
+            LogFileTransferFallbackFrontierRepairProgressObserved(
+                FileTransferDirection.Inbound,
+                context.TransferId,
+                context.SessionId,
+                postTunaFallbackRepairProgressKey ?? "(none)",
+                "chunk_batch_committed",
+                postTunaFallbackRepairProgressBefore,
+                postTunaFallbackRepairProgressAfter,
+                postTunaFallbackRepairProgressRequestedCount);
+        }
 
         if (snapshot is not null)
         {
@@ -4825,7 +4863,8 @@ public sealed partial class SessionFileTransferService
 
         if (committedChunkCount > 0)
         {
-            var forceState = ShouldForceInboundV6ReceiverStateAfterProgress(context, previousCommittedChunkIndex);
+            var forceState = postTunaFallbackRepairProgressObserved ||
+                             ShouldForceInboundV6ReceiverStateAfterProgress(context, previousCommittedChunkIndex);
             await SendInboundV6ReceiverStateAsync(context, "chunk_batch_committed", forceSend: forceState).ConfigureAwait(false);
         }
         else

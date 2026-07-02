@@ -425,6 +425,56 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
+    public void FileTunaV4PostTunaRecovery_MissingRangeStateDoesNotClaimFallbackFrontierRepairAuthority()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        const string transferId = "transfer_file_tuna_v4_no_fallback_frontier_authority";
+        var context = CreateFileTunaV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 100,
+            chunksAcceptedForTransport: 100,
+            remoteGrantedUntilExclusive: 128,
+            chunkCount: 512);
+        SetPrivateProperty(context, "PullPostTunaRecoveryActive", true);
+        SetPrivateProperty(context, "PullTransportRebindGeneration", 3);
+        SetPrivateProperty(context, "PullTransportFrontierOnlyRepairActive", true);
+        SetPrivateProperty(context, "PullTransportFrontierOnlyRepairStartChunkIndex", 100);
+        serviceType
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        var state = new FileTransferStateFrameV4
+        {
+            SessionId = $"session_{transferId}",
+            TransferId = transferId,
+            Epoch = 7,
+            ContiguousCommittedChunkIndex = 100,
+            DurableReceivedHighestChunkIndex = 120,
+            CreditUntilChunkIndexExclusive = 128,
+            MissingRanges =
+            [
+                new FileTransferRangeV4
+                {
+                    StartChunkIndex = 100,
+                    ChunkCount = 1,
+                },
+            ],
+            BytesCommitted = 100L * 21 * 1024,
+        };
+
+        var logStart = GetOperationalLogLength();
+        serviceType
+            .GetMethod("EnqueueV4RepairsFromState", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, state]);
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_v4_repair_scheduled;", log, StringComparison.Ordinal);
+        Assert.Contains("post_rebind_frontier_exclusive=0", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_v6_exact_frontier_repair_enqueued;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_fallback_frontier_repair_authority_granted;", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void RegularNknV4ReceiveRecoveryRequest_ArmsPeerSilenceSafetyReplayWithBoundedNormalSends()
     {
         const string transferId = "transfer_regular_v4_receive_recovery_replay";

@@ -708,6 +708,13 @@ public sealed partial class SessionRuntime
                 out var livenessGrant) ||
             livenessGrant is null)
         {
+            if (transport is IFileTransferRecoveryLivenessAuthorityObserver recoveryAuthorityObserver)
+            {
+                recoveryAuthorityObserver.NotifyFileTransferRecoveryLivenessAuthorityRejected(
+                    snapshot,
+                    "recovery_liveness_lease_rejected");
+            }
+
             LocalOperationalLog.Warn(
                 "Session",
                 $"event=session_liveness_timeout_filetransfer_recovery_state_not_deferred; session_id={sessionIdSnapshot}; transfer_id={snapshot.TransferId}; route={snapshot.RouteToken}; protocol_version={snapshot.ProtocolVersion}; live_route_epoch={snapshot.LiveRouteEpoch}; leg_generation={snapshot.TransferLegGeneration}; bridge_recovery_generation={snapshot.BridgeRecoveryGeneration}; transport_epoch={snapshot.TransportEpoch}; state={snapshot.State.ToString().ToLowerInvariant()}; metadata_valid=1; route_current=1; currentness_reason=recovery_liveness_lease_rejected; current_route={SanitizeSessionLivenessReason(currentRoute)}; current_protocol_version={currentProtocolVersion}; terminal_recommended={(snapshot.TerminalRecommended ? 1 : 0)}; authority_completed={(snapshot.AuthorityCompleted ? 1 : 0)}; receive_proof_observed={(snapshot.ReceiveProofObserved ? 1 : 0)}; recovery_exhausted={(snapshot.RecoveryExhausted ? 1 : 0)}; liveness_deferral_deadline_utc_ms={snapshot.LivenessDeferralDeadlineUtc.ToUnixTimeMilliseconds()}; silence_ms={(long)silence.TotalMilliseconds}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
@@ -1136,11 +1143,18 @@ public sealed partial class SessionRuntime
     private static bool IsActiveFileTransferRecoveryLivenessSnapshot(
         FileTransferRecoveryLivenessSnapshot snapshot,
         DateTimeOffset now)
-        => !snapshot.TerminalRecommended &&
-           !snapshot.AuthorityCompleted &&
-           !snapshot.ReceiveProofObserved &&
-           !snapshot.RecoveryExhausted &&
-           now <= snapshot.LivenessDeferralDeadlineUtc;
+    {
+        if (snapshot.TerminalRecommended ||
+            snapshot.AuthorityCompleted ||
+            snapshot.RecoveryExhausted ||
+            now > snapshot.LivenessDeferralDeadlineUtc)
+        {
+            return false;
+        }
+
+        return !snapshot.ReceiveProofObserved ||
+               string.Equals(snapshot.RouteToken, "post_tuna_fallback_v6", StringComparison.Ordinal);
+    }
 
     private bool IsCurrentFileTransferRecoveryLivenessSnapshot(
         string sessionIdSnapshot,
