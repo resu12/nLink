@@ -2818,6 +2818,19 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $activationOfferSent = (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=tuna_acceleration_offer_queued')) -or
         (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=tuna_acceleration_offer_replay_sent'))
     $activationOfferReceived = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=tuna_acceleration_offer_received_raw')
+    $runtimeUnlockRetryBlockedByRegularV4Recovery = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_retry_blocked_by_regular_v4_receive_recovery')
+    $runtimeUnlockRetryHeldByRegularV4Recovery = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_retry_dispatch_held_by_regular_v4_receive_recovery')
+    $runtimeUnlockRetryReleasedAfterRegularV4Recovery = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_retry_released_after_regular_v4_receive_recovery')
+    $runtimeUnlockRetryRejectedAfterRegularV4Recovery = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_retry_rejected_after_regular_v4_receive_recovery')
+    $runtimeUnlockRetryRecoverySettlementMissingMarker = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_retry_regular_v4_recovery_settlement_missing')
+    $runtimeUnlockRetryContractFailed = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=session_recovery_contract_failed')
+    $runtimeUnlockRetryRegularV4RecoverySettled = $runtimeUnlockRetryReleasedAfterRegularV4Recovery -or
+        $runtimeUnlockRetryRejectedAfterRegularV4Recovery -or
+        $runtimeUnlockRetryContractFailed
+    $runtimeUnlockRetryRegularV4RecoverySettlementMissing = ($runtimeUnlockRetryRecoverySettlementMissingMarker -and (-not $runtimeUnlockRetryRegularV4RecoverySettled)) -or
+        (($runtimeUnlockRetryBlockedByRegularV4Recovery -or $runtimeUnlockRetryHeldByRegularV4Recovery) -and
+            (-not $runtimeUnlockRetryRegularV4RecoverySettled) -and
+            $activationOfferNotObserved)
     $fallbackTailLocalYieldBlocked = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_tail_local_yield_blocked')
     $fallbackTailFrontierStateMissing = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_tail_local_yield_blocked', 'decision_reason=fallback_frontier_state_missing')
     $fallbackFrontierRepairAuthorityGranted = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_frontier_repair_authority_granted')
@@ -2866,6 +2879,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     elseif ($fallbackFrontierRepairStalled) {
         $phase = 'fallback_frontier_repair'
         $reason = 'fallback_frontier_repair_stalled'
+    }
+    elseif ($runtimeUnlockRetryRegularV4RecoverySettlementMissing) {
+        $phase = 'runtime_unlock_retry'
+        $reason = 'runtime_unlock_retry_regular_v4_recovery_settlement_missing'
     }
     elseif ($fallbackTailLocalYieldBlocked) {
         $phase = 'fallback_tail_quiescence'
@@ -2935,6 +2952,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             $phase = 'preactivation_readiness'
             $reason = 'regular_v4_receive_recovery_unproven'
         }
+        elseif ($runtimeUnlockRetryRegularV4RecoverySettlementMissing) {
+            $phase = 'runtime_unlock_retry'
+            $reason = 'runtime_unlock_retry_regular_v4_recovery_settlement_missing'
+        }
         elseif (-not $tunaActive -and $activationOfferNotObserved) {
             $phase = 'activation_offer_send'
             $reason = 'activation_offer_not_observed'
@@ -2972,6 +2993,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $phase = 'preactivation_readiness'
         $reason = 'regular_v4_receive_recovery_unproven'
     }
+    elseif ($runtimeUnlockRetryRegularV4RecoverySettlementMissing) {
+        $phase = 'runtime_unlock_retry'
+        $reason = 'runtime_unlock_retry_regular_v4_recovery_settlement_missing'
+    }
     elseif (-not $tunaActive -and $activationOfferNotObserved) {
         $phase = 'activation_offer_send'
         $reason = 'activation_offer_not_observed'
@@ -3001,6 +3026,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         ActivationOfferNotObserved = [bool]$activationOfferNotObserved
         ActivationOfferWaitingAnswer = [bool]$activationOfferWaitingAnswer
         RuntimeUnlockDispatchDeferredForRegularV4ReceiveRecovery = [bool]$runtimeUnlockDispatchDeferredForRegularV4ReceiveRecovery
+        RuntimeUnlockRetryRegularV4RecoverySettlementMissing = [bool]$runtimeUnlockRetryRegularV4RecoverySettlementMissing
         BridgeBootstrapNotReady = [bool]$bridgeBootstrapNotReady
         ActivationOfferSent = [bool]$activationOfferSent
         ActivationOfferReceived = [bool]$activationOfferReceived

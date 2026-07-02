@@ -161,6 +161,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("offer_sent_accept_not_enabled", scriptText, StringComparison.Ordinal);
         Assert.Contains("preflight_listener_unavailable", scriptText, StringComparison.Ordinal);
         Assert.Contains("regular_v4_receive_recovery_unproven", scriptText, StringComparison.Ordinal);
+        Assert.Contains("runtime_unlock_retry_regular_v4_recovery_settlement_missing", scriptText, StringComparison.Ordinal);
+        Assert.Contains("event=runtime_unlock_retry_blocked_by_regular_v4_receive_recovery", scriptText, StringComparison.Ordinal);
+        Assert.Contains("event=runtime_unlock_retry_rejected_after_regular_v4_receive_recovery", scriptText, StringComparison.Ordinal);
         Assert.Contains("activation_offer_not_observed", scriptText, StringComparison.Ordinal);
         Assert.Contains("activation_offer_sent_waiting_answer", scriptText, StringComparison.Ordinal);
         Assert.Contains("normal_to_tuna_live_epoch_missing", scriptText, StringComparison.Ordinal);

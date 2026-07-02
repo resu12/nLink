@@ -6525,6 +6525,10 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_retry_dispatch_observed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchObservedCount),
         ("runtime_unlock_retry_dispatch_missing_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchMissingCount),
         ("runtime_unlock_retry_missing_authority_after_release_count={0}" -f $recoveryClassification.RuntimeUnlockRetryMissingAuthorityAfterReleaseCount),
+        ("runtime_unlock_retry_blocked_by_regular_v4_recovery_count={0}" -f $recoveryClassification.RuntimeUnlockRetryBlockedByRegularV4RecoveryCount),
+        ("runtime_unlock_retry_held_by_regular_v4_recovery_count={0}" -f $recoveryClassification.RuntimeUnlockRetryHeldByRegularV4RecoveryCount),
+        ("runtime_unlock_retry_rejected_after_regular_v4_recovery_count={0}" -f $recoveryClassification.RuntimeUnlockRetryRejectedAfterRegularV4RecoveryCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_count={0}" -f $recoveryClassification.RuntimeUnlockRetryRegularV4RecoverySettlementMissingCount),
         ("runtime_unlock_broken_state_fresh_retry_consumed_count={0}" -f $recoveryClassification.RuntimeUnlockBrokenStateFreshRetryConsumedCount),
         ("runtime_unlock_broken_state_retry_suppressed_count={0}" -f $recoveryClassification.RuntimeUnlockBrokenStateRetrySuppressedCount),
         ("runtime_unlock_broken_state_transaction_failed_count={0}" -f $recoveryClassification.RuntimeUnlockBrokenStateTransactionFailedCount),
@@ -7124,6 +7128,18 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockRetryReleasedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_retry_released_after_regular_v4_receive_recovery'
     })
+    $runtimeUnlockRetryBlockedByRegularV4RecoveryEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_blocked_by_regular_v4_receive_recovery'
+    })
+    $runtimeUnlockRetryHeldByRegularV4RecoveryEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_held_by_regular_v4_receive_recovery'
+    })
+    $runtimeUnlockRetryRejectedAfterRegularV4RecoveryEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_rejected_after_regular_v4_receive_recovery'
+    })
+    $runtimeUnlockRetryRegularV4RecoverySettlementMissingEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_regular_v4_recovery_settlement_missing'
+    })
     $runtimeUnlockRetryDispatchAuthorityGrantedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_retry_dispatch_authority_granted'
     })
@@ -7539,6 +7555,43 @@ function Get-FileTransferRecoveryFailureClassification {
         return $matchedDiscriminator
     }
 
+    $runtimeUnlockRetryRegularV4RecoverySettlementMissingCount = 0
+    $regularV4RecoverySettlementCandidates = @()
+    if ($runtimeUnlockRetryBlockedByRegularV4RecoveryEvents.Count -gt 0) {
+        $regularV4RecoverySettlementCandidates = @($runtimeUnlockRetryBlockedByRegularV4RecoveryEvents)
+    }
+    else {
+        $regularV4RecoverySettlementCandidates = @($runtimeUnlockRetryHeldByRegularV4RecoveryEvents)
+    }
+
+    if ($regularV4RecoverySettlementCandidates.Count -eq 0 -and
+        $runtimeUnlockRetryRegularV4RecoverySettlementMissingEvents.Count -gt 0) {
+        $regularV4RecoverySettlementCandidates = @($runtimeUnlockRetryRegularV4RecoverySettlementMissingEvents)
+    }
+
+    foreach ($blockedRetry in $regularV4RecoverySettlementCandidates) {
+        $blockedSequence = [int64]$blockedRetry.Sequence
+        $matchingRelease = @($runtimeUnlockRetryReleasedEvents | Where-Object {
+            [int64]$_.Sequence -gt $blockedSequence -and
+            (Test-RuntimeUnlockRetryDispatchMatch -Release $blockedRetry -Candidate $_)
+        })
+        $matchingRegularV4Rejection = @($runtimeUnlockRetryRejectedAfterRegularV4RecoveryEvents | Where-Object {
+            [int64]$_.Sequence -gt $blockedSequence -and
+            (Test-RuntimeUnlockRetryDispatchMatch -Release $blockedRetry -Candidate $_)
+        })
+        $matchingContractFailure = @($events | Where-Object {
+            [int64]$_.Sequence -gt $blockedSequence -and
+            $_.EventName -eq 'session_recovery_contract_failed' -and
+            (Test-RuntimeUnlockRetryDispatchMatch -Release $blockedRetry -Candidate $_)
+        })
+
+        if ($matchingRelease.Count -eq 0 -and
+            $matchingRegularV4Rejection.Count -eq 0 -and
+            $matchingContractFailure.Count -eq 0) {
+            $runtimeUnlockRetryRegularV4RecoverySettlementMissingCount++
+        }
+    }
+
     $runtimeUnlockRetryDispatchMissingCount = 0
     $runtimeUnlockRetryDispatchReleaseCount = $runtimeUnlockRetryReleasedEvents.Count
     foreach ($release in $runtimeUnlockRetryReleasedEvents) {
@@ -7897,6 +7950,9 @@ function Get-FileTransferRecoveryFailureClassification {
     elseif ($runtimeUnlockRetryDispatchProofVerdict -eq 'fail') {
         $class = 'runtime_unlock_retry_dispatch_missing'
     }
+    elseif ($runtimeUnlockRetryRegularV4RecoverySettlementMissingCount -gt 0) {
+        $class = 'runtime_unlock_retry_regular_v4_recovery_settlement_missing'
+    }
     elseif ($staleRejectedActionEffectProof.Verdict -eq 'fail') {
         $class = 'stale_rejected_action_effect'
     }
@@ -8216,6 +8272,10 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockRetryDispatchObservedCount = $runtimeUnlockRetryDispatchObservedEvents.Count
         RuntimeUnlockRetryDispatchMissingCount = $runtimeUnlockRetryDispatchMissingCount
         RuntimeUnlockRetryMissingAuthorityAfterReleaseCount = $runtimeUnlockRetryMissingAuthorityAfterReleaseCount
+        RuntimeUnlockRetryBlockedByRegularV4RecoveryCount = $runtimeUnlockRetryBlockedByRegularV4RecoveryEvents.Count
+        RuntimeUnlockRetryHeldByRegularV4RecoveryCount = $runtimeUnlockRetryHeldByRegularV4RecoveryEvents.Count
+        RuntimeUnlockRetryRejectedAfterRegularV4RecoveryCount = $runtimeUnlockRetryRejectedAfterRegularV4RecoveryEvents.Count
+        RuntimeUnlockRetryRegularV4RecoverySettlementMissingCount = $runtimeUnlockRetryRegularV4RecoverySettlementMissingCount
         RuntimeUnlockBrokenStateFreshRetryConsumedCount = $runtimeUnlockBrokenStateFreshRetryConsumedEvents.Count
         RuntimeUnlockBrokenStateRetrySuppressedCount = $runtimeUnlockBrokenStateRetrySuppressedEvents.Count
         RuntimeUnlockBrokenStateTransactionFailedCount = $runtimeUnlockBrokenStateTransactionFailedEvents.Count
@@ -8761,6 +8821,10 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_retry_dispatch_observed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchObservedCount),
         ("runtime_unlock_retry_dispatch_missing_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchMissingCount),
         ("runtime_unlock_retry_missing_authority_after_release_count={0}" -f $recoveryClassification.RuntimeUnlockRetryMissingAuthorityAfterReleaseCount),
+        ("runtime_unlock_retry_blocked_by_regular_v4_recovery_count={0}" -f $recoveryClassification.RuntimeUnlockRetryBlockedByRegularV4RecoveryCount),
+        ("runtime_unlock_retry_held_by_regular_v4_recovery_count={0}" -f $recoveryClassification.RuntimeUnlockRetryHeldByRegularV4RecoveryCount),
+        ("runtime_unlock_retry_rejected_after_regular_v4_recovery_count={0}" -f $recoveryClassification.RuntimeUnlockRetryRejectedAfterRegularV4RecoveryCount),
+        ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_count={0}" -f $recoveryClassification.RuntimeUnlockRetryRegularV4RecoverySettlementMissingCount),
         ("runtime_unlock_broken_state_fresh_retry_consumed_count={0}" -f $recoveryClassification.RuntimeUnlockBrokenStateFreshRetryConsumedCount),
         ("runtime_unlock_broken_state_retry_suppressed_count={0}" -f $recoveryClassification.RuntimeUnlockBrokenStateRetrySuppressedCount),
         ("runtime_unlock_broken_state_transaction_failed_count={0}" -f $recoveryClassification.RuntimeUnlockBrokenStateTransactionFailedCount),
