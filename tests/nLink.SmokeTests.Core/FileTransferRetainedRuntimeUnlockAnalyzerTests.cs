@@ -268,6 +268,29 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryQueuedGrantWithoutObservedSend_ClassifiesMissingDispatchProof()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                "transfer_runtime_unlock_dispatch_queued_grant_missing_observed",
+                RuntimeUnlockRetryDispatchGrantedLine("transfer_runtime_unlock_dispatch_queued_grant_missing_observed"),
+                RuntimeUnlockRetryOfferGenerationLine()),
+            ["-LiveRouteProofMode", "None"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("runtime_unlock_retry_dispatch_missing", verdict["recovery_failure_class"]);
+        Assert.Equal("fail", verdict["runtime_unlock_retry_dispatch_proof_verdict"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_missing_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_RuntimeUnlockRetryReleaseWithDispatchGrantAndObserved_PassesDispatchProof()
     {
         if (!OperatingSystem.IsWindows())
@@ -919,6 +942,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             LogLine($"event=runtime_unlock_precommit_probe_ack_delivery_result; session_id={sessionId}; transfer_id={transferId}; frame_type=filetransfer.runtime_unlock.precommit_probe_ack; transaction_generation=3; offer_generation=5; tuna_path_lease_generation=7; probe_id={probeId}; ack_authority_source=runtime_unlock_precommit_ack_authority; ack_authority_generation=5; intended_transport=tuna; actual_transport=tuna; lane=bulk; payload_bytes=512; delivery_result=sent; rejection_reason=(none)", secondsOffset: 6),
             LogLine($"event=runtime_unlock_tuna_probe_ack_sent; transport=tuna; session_id={sessionId}; transfer_id={transferId}; transaction_generation=3; offer_generation=5; tuna_path_lease_generation=7; probe_id={probeId}; reason=precommit_probe_received; accepted=1", secondsOffset: 7),
             LogLine($"event=filetransfer_data_path_receive_result; transfer_id={transferId}; session_id={sessionId}; frame_type=filetransfer.runtime_unlock.precommit_probe_ack; lane=bulk; actual_transport=tuna; delivery_transport=tuna; chunk_index=(none); payload_bytes=512; raw_payload_bytes=512; transport_payload_bytes=0; batch_chunk_count=0; batch_profile=(none); delivery_result=received; transaction_generation=3; offer_generation=5; tuna_path_lease_generation=7; probe_id={probeId}; direction=outbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=2; runtime_generation=3; terminal_generation=1; leg_generation=3; route_publication_generation=11; route_commit_generation=0; target_route=regular_nkn_v4_fast; target_protocol_version=4; target_transport=regular_nkn; intended_target_transport=regular_nkn; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted", secondsOffset: 8),
+            LogLine($"event=runtime_unlock_precommit_probe_ack_receive_queued; transfer_id={transferId}; session_id={sessionId}; frame_type=filetransfer.runtime_unlock.precommit_probe_ack; transaction_generation=3; offer_generation=5; tuna_path_lease_generation=7; probe_id={probeId}; actual_transport=tuna; delivery_transport=tuna; lane=bulk; priority=1; queued_frames=88; queued_bytes=65536; decision_reason=queued_for_core_authority_handler", secondsOffset: 9),
             LogLine($"event=runtime_unlock_precommit_probe_failed; direction=outbound; transfer_id={transferId}; session_id={sessionId}; transaction_generation=3; offer_generation=5; tuna_path_lease_generation=7; probe_id={probeId}; reason=timeout", secondsOffset: 38),
             LogLine($"event=transfer_terminal; direction=outbound; transfer_id={transferId}; session_id={sessionId}; file_name_len=33; file_size_bytes=268435456; bytes_transferred=134217728; chunks_transferred=6241; chunk_count=12481; error_code=peer_disconnected; reason=Peer disconnected.; saved_path=(none); route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none", secondsOffset: 90)
         };
@@ -929,6 +953,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal("runtime_unlock_precommit_probe_ack_missing", verdict["recovery_failure_class"]);
         Assert.Equal("1", verdict["runtime_unlock_precommit_probe_ack_delivery_result_count"]);
         Assert.Equal("1", verdict["runtime_unlock_precommit_probe_ack_receive_result_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_precommit_probe_ack_receive_queued_count"]);
         Assert.Equal("0", verdict["runtime_unlock_precommit_probe_ack_receive_dispatched_count"]);
         Assert.Equal("0", verdict["runtime_unlock_tuna_probe_ack_received_count"]);
         Assert.Equal("1", verdict["runtime_unlock_precommit_probe_ack_missing_count"]);
@@ -950,7 +975,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         {
             LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id={sessionId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; selection_reason=regular_nkn_default_v4", secondsOffset: 0),
             LogLine($"event=filetransfer_data_path_receive_result; transfer_id={transferId}; session_id={sessionId}; frame_type=filetransfer.runtime_unlock.precommit_probe_ack; lane=bulk; actual_transport=tuna; delivery_transport=tuna; chunk_index=(none); payload_bytes=512; raw_payload_bytes=512; transport_payload_bytes=0; batch_chunk_count=0; batch_profile=(none); delivery_result=received; transaction_generation=3; offer_generation=5; tuna_path_lease_generation=7; probe_id={probeId}; direction=outbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=2; runtime_generation=3; terminal_generation=1; leg_generation=3; route_publication_generation=11; route_commit_generation=0; target_route=regular_nkn_v4_fast; target_protocol_version=4; target_transport=regular_nkn; intended_target_transport=regular_nkn; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted", secondsOffset: 1),
-            LogLine($"event=runtime_unlock_precommit_probe_ack_receive_dispatched; transfer_id={transferId}; session_id={sessionId}; frame_type=filetransfer.runtime_unlock.precommit_probe_ack; transaction_generation=3; offer_generation=5; tuna_path_lease_generation=7; probe_id={probeId}; actual_transport=tuna; delivery_transport=tuna; lane=bulk; priority=1; queued_frames=1; queued_bytes=512; decision_reason=queued_for_core", secondsOffset: 2),
+            LogLine($"event=runtime_unlock_precommit_probe_ack_receive_dispatched; transfer_id={transferId}; session_id={sessionId}; frame_type=filetransfer.runtime_unlock.precommit_probe_ack; transaction_generation=3; offer_generation=5; tuna_path_lease_generation=7; probe_id={probeId}; actual_transport=tuna; delivery_transport=tuna; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; decision_reason=core_handler_invoked", secondsOffset: 2),
             LogLine($"event=transfer_terminal; direction=outbound; transfer_id={transferId}; session_id={sessionId}; file_name_len=33; file_size_bytes=268435456; bytes_transferred=134217728; chunks_transferred=6241; chunk_count=12481; error_code=peer_disconnected; reason=Peer disconnected.; saved_path=(none); route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none", secondsOffset: 90)
         };
 
@@ -959,6 +984,7 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("runtime_unlock_precommit_probe_ack_missing", verdict["recovery_failure_class"]);
         Assert.Equal("1", verdict["runtime_unlock_precommit_probe_ack_receive_result_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_precommit_probe_ack_receive_queued_count"]);
         Assert.Equal("1", verdict["runtime_unlock_precommit_probe_ack_receive_dispatched_count"]);
         Assert.Equal("0", verdict["runtime_unlock_tuna_probe_ack_received_count"]);
         Assert.Equal("1", verdict["runtime_unlock_precommit_probe_ack_missing_count"]);

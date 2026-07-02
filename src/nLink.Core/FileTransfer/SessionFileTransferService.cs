@@ -3107,6 +3107,66 @@ public sealed partial class SessionFileTransferService : IDisposable
             () => HandleDataSessionAvailabilityChangedAsync(dataSession, e));
     }
 
+    private void OnRuntimeUnlockAuthorityFrameReceived(
+        object? sender,
+        FileTransferRuntimeUnlockAuthorityFrameReceivedEventArgs e)
+    {
+        if (sender is not IFileTransferDataSession dataSession)
+        {
+            return;
+        }
+
+        RunHardPriorityInboundLifecycle(
+            "runtime_unlock_authority_frame",
+            () => HandleRuntimeUnlockAuthorityFrameReceivedAsync(dataSession, e.ReceivedFrame));
+    }
+
+    private async Task HandleRuntimeUnlockAuthorityFrameReceivedAsync(
+        IFileTransferDataSession dataSession,
+        FileTransferReceivedDataFrame received)
+    {
+        if (received.Frame is not FileTransferRuntimeUnlockPreCommitProbeAckFrame ack)
+        {
+            return;
+        }
+
+        FileTransferDirection? direction = null;
+        lock (gate)
+        {
+            if (outboundTransfer is { IsTerminal: false } outbound &&
+                ReferenceEquals(outbound.DataSession, dataSession) &&
+                string.Equals(outbound.SessionId, dataSession.SessionId, StringComparison.Ordinal) &&
+                string.Equals(outbound.TransferId, dataSession.TransferId, StringComparison.Ordinal))
+            {
+                direction = FileTransferDirection.Outbound;
+            }
+            else if (inboundTransfer is { IsTerminal: false } inbound &&
+                     ReferenceEquals(inbound.DataSession, dataSession) &&
+                     string.Equals(inbound.SessionId, dataSession.SessionId, StringComparison.Ordinal) &&
+                     string.Equals(inbound.TransferId, dataSession.TransferId, StringComparison.Ordinal))
+            {
+                direction = FileTransferDirection.Inbound;
+            }
+        }
+
+        if (direction is not { } resolvedDirection)
+        {
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=runtime_unlock_precommit_probe_ack_receive_dispatch_rejected; direction=unknown; transfer_id={FormatProtocolLogValue(dataSession.TransferId)}; session_id={FormatProtocolLogValue(dataSession.SessionId)}; frame_type={FormatProtocolLogValue(FileTransferProtocol.RuntimeUnlockPreCommitProbeAckFrameType)}; transaction_generation={ack.TransactionGeneration}; offer_generation={ack.OfferGeneration}; tuna_path_lease_generation={ack.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(ack.ProbeId ?? "(none)")}; actual_transport={FormatFileTransferTransportKind(received.TransportKind)}; delivery_transport={FormatFileTransferTransportKind(received.TransportKind)}; target_route={FormatProtocolLogValue(ack.TargetRoute)}; target_protocol_version={ack.TargetProtocolVersion}; target_transport={FormatProtocolLogValue(ack.TargetTransport)}; decision_reason=no_current_data_session");
+            return;
+        }
+
+        await TryHandleRuntimeUnlockPreCommitProbeDataFrameAsync(
+                dataSession.SessionId,
+                dataSession.TransferId,
+                resolvedDirection,
+                received.Frame,
+                received.TransportKind,
+                dataSession)
+            .ConfigureAwait(false);
+    }
+
     private async Task HandleDataSessionAvailabilityChangedAsync(
         IFileTransferDataSession dataSession,
         FileTransferDataSessionAvailabilityChangedEventArgs availability)

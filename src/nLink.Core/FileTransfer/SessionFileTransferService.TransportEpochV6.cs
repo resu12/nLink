@@ -1592,6 +1592,17 @@ public sealed partial class SessionFileTransferService
             "FileTransferService",
             $"event=runtime_unlock_precommit_probe_ack_authority_rejected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={probe.TransactionGeneration}; offer_generation={probe.OfferGeneration}; tuna_path_lease_generation={probe.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(probe.ProbeId ?? "(none)")}; attempted_admission_generation={attemptedAdmissionToken?.AdmissionGeneration ?? 0}; current_admission_generation={currentAdmissionToken?.AdmissionGeneration ?? 0}; attempted_runtime_generation={attemptedAdmissionToken?.RuntimeGeneration ?? 0}; current_runtime_generation={currentAdmissionToken?.RuntimeGeneration ?? 0}; attempted_terminal_generation={attemptedAdmissionToken?.TerminalGeneration ?? 0}; current_terminal_generation={currentAdmissionToken?.TerminalGeneration ?? 0}; attempted_leg_generation={attemptedAdmissionToken?.LegGeneration ?? 0}; current_leg_generation={currentAdmissionToken?.LegGeneration ?? 0}; target_route={FormatProtocolLogValue(probe.TargetRoute)}; target_protocol_version={probe.TargetProtocolVersion}; target_transport={FormatProtocolLogValue(probe.TargetTransport)}; decision_reason={FormatProtocolLogValue(decisionReason)}");
 
+    private static void LogRuntimeUnlockPreCommitProbeAckReceiveDispatched(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        FileTransferRuntimeUnlockPreCommitProbeAckFrame ack,
+        FileTransferTransportKind receivedTransportKind,
+        string decisionReason)
+        => LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=runtime_unlock_precommit_probe_ack_receive_dispatched; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; frame_type={FormatProtocolLogValue(FileTransferProtocol.RuntimeUnlockPreCommitProbeAckFrameType)}; transaction_generation={ack.TransactionGeneration}; offer_generation={ack.OfferGeneration}; tuna_path_lease_generation={ack.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(ack.ProbeId ?? "(none)")}; actual_transport={FormatFileTransferTransportKind(receivedTransportKind)}; delivery_transport={FormatFileTransferTransportKind(receivedTransportKind)}; target_route={FormatProtocolLogValue(ack.TargetRoute)}; target_protocol_version={ack.TargetProtocolVersion}; target_transport={FormatProtocolLogValue(ack.TargetTransport)}; decision_reason={FormatProtocolLogValue(decisionReason)}");
+
     private enum RuntimeUnlockPreCommitProbeAdmissionStatus
     {
         Granted,
@@ -1982,6 +1993,14 @@ public sealed partial class SessionFileTransferService
         FileTransferTransportKind receivedTransportKind,
         IFileTransferDataSession? dataSession)
     {
+        LogRuntimeUnlockPreCommitProbeAckReceiveDispatched(
+            direction,
+            transferId,
+            sessionId,
+            ack,
+            receivedTransportKind,
+            "core_handler_invoked");
+
         if (!TryValidateRuntimeUnlockPreCommitProbeFrame(
                 sessionId,
                 transferId,
@@ -1991,6 +2010,24 @@ public sealed partial class SessionFileTransferService
                 expectAck: true,
                 out var reason))
         {
+            RuntimeUnlockAdmissionToken? latestAdmissionToken;
+            lock (gate)
+            {
+                _ = TryGetCurrentRuntimeUnlockAdmissionTokenForDirectionLocked(
+                    direction,
+                    sessionId,
+                    transferId,
+                    out latestAdmissionToken);
+            }
+
+            LogRuntimeUnlockPreCommitProbeAckAuthorityRejected(
+                direction,
+                transferId,
+                sessionId,
+                ack,
+                attemptedAdmissionToken: null,
+                currentAdmissionToken: latestAdmissionToken,
+                reason);
             LogRuntimeUnlockPreCommitProbeIgnored(direction, transferId, sessionId, ack, receivedTransportKind, reason);
             return;
         }

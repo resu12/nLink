@@ -2958,6 +2958,7 @@ public sealed partial class NknSignalingTransport
             {
                 "attempted" => "runtime_unlock_precommit_probe_ack_receive_dispatch_attempted",
                 "dispatched" => "runtime_unlock_precommit_probe_ack_receive_dispatched",
+                "queued" => "runtime_unlock_precommit_probe_ack_receive_queued",
                 _ => "runtime_unlock_precommit_probe_ack_receive_dispatch_rejected",
             }
             : normalizedState switch
@@ -7526,7 +7527,8 @@ public sealed partial class NknSignalingTransport
         IFileTransferDataSession,
         IFileTransferDataPathAuthoritySession,
         IFileTransferRuntimeUnlockPreCommitProbeAckAuthorizer,
-        IFileTransferRuntimeUnlockTunaProbeSender
+        IFileTransferRuntimeUnlockTunaProbeSender,
+        IFileTransferRuntimeUnlockAuthorityFrameReceiver
     {
         private const long QueuedControlFrameEstimatedBytes = 1024L;
         private static readonly TimeSpan RuntimeUnlockPreCommitAckAuthorityTtl = TimeSpan.FromSeconds(10);
@@ -7544,6 +7546,13 @@ public sealed partial class NknSignalingTransport
                 AllowSynchronousContinuations = false,
             });
         private readonly Channel<QueuedFileTransferDataFrame> priorityFrames = Channel.CreateUnbounded<QueuedFileTransferDataFrame>(
+            new UnboundedChannelOptions
+            {
+                SingleReader = true,
+                SingleWriter = false,
+                AllowSynchronousContinuations = false,
+            });
+        private readonly Channel<QueuedFileTransferDataFrame> runtimeUnlockAuthorityFrames = Channel.CreateUnbounded<QueuedFileTransferDataFrame>(
             new UnboundedChannelOptions
             {
                 SingleReader = true,
@@ -7568,6 +7577,7 @@ public sealed partial class NknSignalingTransport
         private long lastTunaActivationPauseRecoveredUtcTicks;
         private RuntimeUnlockPreCommitAckSendAuthority? preCommitAckSendAuthority;
         private EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? availabilityChanged;
+        private EventHandler<FileTransferRuntimeUnlockAuthorityFrameReceivedEventArgs>? runtimeUnlockAuthorityFrameReceived;
 
         public TransportFileTransferDataSession(NknSignalingTransport owner, string sessionId, string transferId)
         {
@@ -7721,6 +7731,12 @@ public sealed partial class NknSignalingTransport
             remove => availabilityChanged -= value;
         }
 
+        public event EventHandler<FileTransferRuntimeUnlockAuthorityFrameReceivedEventArgs>? RuntimeUnlockAuthorityFrameReceived
+        {
+            add => runtimeUnlockAuthorityFrameReceived += value;
+            remove => runtimeUnlockAuthorityFrameReceived -= value;
+        }
+
         private bool TryReplayTunaActivationPauseAvailability(EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs> handler)
         {
             if (!IsUnavailableForTunaActivationPause(out var pauseReason))
@@ -7767,6 +7783,11 @@ public sealed partial class NknSignalingTransport
         {
             while (true)
             {
+                if (runtimeUnlockAuthorityFrames.Reader.TryRead(out var authorityFrame))
+                {
+                    return authorityFrame;
+                }
+
                 if (priorityFrames.Reader.TryRead(out var priorityFrame))
                 {
                     return priorityFrame;
@@ -7777,11 +7798,13 @@ public sealed partial class NknSignalingTransport
                     return regularFrame;
                 }
 
+                var authorityReady = runtimeUnlockAuthorityFrames.Reader.WaitToReadAsync(ct).AsTask();
                 var priorityReady = priorityFrames.Reader.WaitToReadAsync(ct).AsTask();
                 var regularReady = frames.Reader.WaitToReadAsync(ct).AsTask();
-                var completed = await Task.WhenAny(priorityReady, regularReady).ConfigureAwait(false);
+                var completed = await Task.WhenAny(authorityReady, priorityReady, regularReady).ConfigureAwait(false);
                 var canRead = await completed.ConfigureAwait(false);
                 if (!canRead &&
+                    runtimeUnlockAuthorityFrames.Reader.Completion.IsCompleted &&
                     priorityFrames.Reader.Completion.IsCompleted &&
                     frames.Reader.Completion.IsCompleted)
                 {
@@ -8698,6 +8721,10 @@ public sealed partial class NknSignalingTransport
             string? peerId = null)
         {
             var isRuntimeUnlockPreCommitFrame = IsRuntimeUnlockPreCommitProbeFrame(frame);
+            var isRuntimeUnlockPreCommitAckFrame = frame is FileTransferRuntimeUnlockPreCommitProbeAckFrame;
+            var runtimeUnlockAuthorityHandler = isRuntimeUnlockPreCommitAckFrame
+                ? runtimeUnlockAuthorityFrameReceived
+                : null;
             var effectiveTransportKind = receivedTransportKind == FileTransferTransportKind.Unknown
                 ? ResolveInboundFileTransferDataFrameTransportKind(channel)
                 : receivedTransportKind;
@@ -8726,10 +8753,24 @@ public sealed partial class NknSignalingTransport
                     channel,
                     effectiveTransportKind,
                     "attempted",
-                    "queue_handoff",
-                    priority: false,
+                    runtimeUnlockAuthorityHandler is not null ? "direct_core_handoff" : "queue_handoff",
+                    priority: runtimeUnlockAuthorityHandler is not null,
                     queuedFramesAfter: 0,
                     queuedBytesAfter: 0);
+            }
+
+            var receivedFrame = new FileTransferReceivedDataFrame(
+                frame,
+                effectiveTransportKind,
+                MapBridgeChannel(channel),
+                DateTimeOffset.UtcNow);
+            if (isRuntimeUnlockPreCommitAckFrame &&
+                runtimeUnlockAuthorityHandler is not null)
+            {
+                runtimeUnlockAuthorityHandler(
+                    this,
+                    new FileTransferRuntimeUnlockAuthorityFrameReceivedEventArgs(receivedFrame));
+                return;
             }
 
             var estimatedBytes = EstimateQueuedFrameBytes(frame);
@@ -8752,13 +8793,12 @@ public sealed partial class NknSignalingTransport
                 return;
             }
 
-            var receivedFrame = new FileTransferReceivedDataFrame(
-                frame,
-                effectiveTransportKind,
-                MapBridgeChannel(channel),
-                DateTimeOffset.UtcNow);
             var prioritized = ShouldPrioritizeQueuedFileTransferDataFrame(frame);
-            var writer = prioritized ? priorityFrames.Writer : frames.Writer;
+            var writer = isRuntimeUnlockPreCommitAckFrame
+                ? runtimeUnlockAuthorityFrames.Writer
+                : prioritized
+                    ? priorityFrames.Writer
+                    : frames.Writer;
             if (!writer.TryWrite(new QueuedFileTransferDataFrame(receivedFrame, estimatedBytes)))
             {
                 ReleaseQueuedFrame(estimatedBytes);
@@ -8770,7 +8810,7 @@ public sealed partial class NknSignalingTransport
                         effectiveTransportKind,
                         "rejected",
                         "queue_write_failed",
-                        prioritized,
+                        isRuntimeUnlockPreCommitAckFrame || prioritized,
                         queuedFramesAfter,
                         queuedBytesAfter);
                 }
@@ -8789,9 +8829,9 @@ public sealed partial class NknSignalingTransport
                     frame,
                     channel,
                     effectiveTransportKind,
-                    "dispatched",
-                    "queued_for_core",
-                    prioritized,
+                    isRuntimeUnlockPreCommitAckFrame ? "queued" : "dispatched",
+                    isRuntimeUnlockPreCommitAckFrame ? "queued_for_core_authority_handler" : "queued_for_core",
+                    isRuntimeUnlockPreCommitAckFrame || prioritized,
                     queuedFramesAfter,
                     queuedBytesAfter);
             }
@@ -9167,6 +9207,7 @@ public sealed partial class NknSignalingTransport
             LogChunkBatchTransportSummary();
             frames.Writer.TryComplete();
             priorityFrames.Writer.TryComplete();
+            runtimeUnlockAuthorityFrames.Writer.TryComplete();
             owner.RemoveFileTransferDataSession(this);
         }
 

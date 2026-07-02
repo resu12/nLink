@@ -4816,12 +4816,12 @@ public sealed partial class SessionFileTransferService
 
         if (context.DataSession is not null)
         {
-            context.DataSession.AvailabilityChanged -= OnDataSessionAvailabilityChanged;
+            UnsubscribeDataSessionEvents(context.DataSession);
             context.DataSession.Dispose();
         }
 
         context.DataSession = session;
-        session.AvailabilityChanged += OnDataSessionAvailabilityChanged;
+        SubscribeDataSessionEvents(session);
         TryReplayOutboundRuntimeUnlockPendingPreCommitProbeLocked(context, "data_session_attached");
         RetryOutboundFallbackTailLocalYieldProofIfPendingLocked(context, "data_session_attached");
     }
@@ -4835,14 +4835,32 @@ public sealed partial class SessionFileTransferService
 
         if (context.DataSession is not null)
         {
-            context.DataSession.AvailabilityChanged -= OnDataSessionAvailabilityChanged;
+            UnsubscribeDataSessionEvents(context.DataSession);
             context.DataSession.Dispose();
         }
 
         context.DataSession = session;
-        session.AvailabilityChanged += OnDataSessionAvailabilityChanged;
+        SubscribeDataSessionEvents(session);
         TryReplayInboundRuntimeUnlockPendingPreCommitProbeLocked(context, "data_session_attached");
         RetryInboundFallbackTailLocalYieldProofIfPendingLocked(context, "data_session_attached");
+    }
+
+    private void SubscribeDataSessionEvents(IFileTransferDataSession session)
+    {
+        session.AvailabilityChanged += OnDataSessionAvailabilityChanged;
+        if (session is IFileTransferRuntimeUnlockAuthorityFrameReceiver authorityFrameReceiver)
+        {
+            authorityFrameReceiver.RuntimeUnlockAuthorityFrameReceived += OnRuntimeUnlockAuthorityFrameReceived;
+        }
+    }
+
+    private void UnsubscribeDataSessionEvents(IFileTransferDataSession session)
+    {
+        session.AvailabilityChanged -= OnDataSessionAvailabilityChanged;
+        if (session is IFileTransferRuntimeUnlockAuthorityFrameReceiver authorityFrameReceiver)
+        {
+            authorityFrameReceiver.RuntimeUnlockAuthorityFrameReceived -= OnRuntimeUnlockAuthorityFrameReceived;
+        }
     }
 
     private static void TrimRecentEvents(Queue<DateTimeOffset> events, DateTimeOffset now)

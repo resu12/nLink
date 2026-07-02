@@ -2304,9 +2304,92 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             Assert.IsType<FileTransferChunkBatchFrameV6>(second.Frame);
             string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
             Assert.Contains("event=runtime_unlock_precommit_probe_ack_receive_dispatch_attempted;", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=runtime_unlock_precommit_probe_ack_receive_dispatched;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_precommit_probe_ack_receive_queued;", logTail, StringComparison.Ordinal);
+            Assert.Contains("decision_reason=queued_for_core_authority_handler", logTail, StringComparison.Ordinal);
             Assert.Contains("frame_type=filetransfer.runtime_unlock.precommit_probe_ack", logTail, StringComparison.Ordinal);
             Assert.Contains("priority=1", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_precommit_probe_ack_receive_dispatched;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_precommit_probe_ack_receive_dispatch_rejected;", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_FileTransferDataSession_DispatchesRuntimeUnlockPreCommitAckDirectlyWhenSubscribed()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfer.precommit-ack-direct.address");
+            var helperClient = new FakeNknClient("helper.filetransfer.precommit-ack-direct.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-filetransfer-precommit-ack-direct-id", hostClient.Address));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-filetransfer-precommit-ack-direct-id", helperClient.Address));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_precommit_ack_direct";
+            IFileTransferDataSession inboundSession = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            var authorityReceiver = Assert.IsAssignableFrom<IFileTransferRuntimeUnlockAuthorityFrameReceiver>(inboundSession);
+            var receivedAuthorityFrame = new TaskCompletionSource<FileTransferReceivedDataFrame>(TaskCreationOptions.RunContinuationsAsynchronously);
+            authorityReceiver.RuntimeUnlockAuthorityFrameReceived += (_, e) =>
+            {
+                receivedAuthorityFrame.TrySetResult(e.ReceivedFrame);
+            };
+
+            FileTransferRuntimeUnlockPreCommitProbeAckFrame ackFrame = new FileTransferRuntimeUnlockPreCommitProbeAckFrame
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                TransactionGeneration = 2,
+                OfferGeneration = 3,
+                TunaPathLeaseGeneration = 4,
+                ProbeId = "runtime-unlock-precommit:2:3:direct",
+                TargetRoute = FileTransferRouteResolver.FileTunaV4Token,
+                TargetProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                TargetTransport = "tuna",
+                HandoffKind = "normal_to_tuna_activation",
+                SentUnixTimeMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                Accepted = true,
+                Reason = "precommit_probe_ack",
+            };
+
+            var logStartIndex = CoreSmokeTestsBase.GetOperationalLogLength();
+            var deliverMethod = inboundSession
+                .GetType()
+                .GetMethod("Deliver", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            Assert.NotNull(deliverMethod);
+            deliverMethod.Invoke(
+                inboundSession,
+                [
+                    ackFrame,
+                    NknBridgeChannel.Bulk,
+                    FileTransferTransportKind.Tuna,
+                    helperClient.ConnectedBulkAddress,
+                ]);
+
+            FileTransferReceivedDataFrame received = await receivedAuthorityFrame.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            Assert.Same(ackFrame, received.Frame);
+            Assert.Equal(FileTransferTransportKind.Tuna, received.TransportKind);
+            string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
+            Assert.Contains("event=runtime_unlock_precommit_probe_ack_receive_dispatch_attempted;", logTail, StringComparison.Ordinal);
+            Assert.Contains("decision_reason=direct_core_handoff", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_precommit_probe_ack_receive_queued;", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=runtime_unlock_precommit_probe_ack_receive_dispatch_rejected;", logTail, StringComparison.Ordinal);
         }
         finally

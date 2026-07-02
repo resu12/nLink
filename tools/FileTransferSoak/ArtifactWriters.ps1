@@ -6407,6 +6407,7 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_tuna_probe_ack_sent_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeAckSentCount),
         ("runtime_unlock_precommit_probe_ack_delivery_result_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckDeliveryResultCount),
         ("runtime_unlock_precommit_probe_ack_receive_result_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckReceiveResultCount),
+        ("runtime_unlock_precommit_probe_ack_receive_queued_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckReceiveQueuedCount),
         ("runtime_unlock_precommit_probe_ack_receive_dispatched_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckReceiveDispatchedCount),
         ("runtime_unlock_precommit_probe_ack_receive_dispatch_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckReceiveDispatchRejectedCount),
         ("runtime_unlock_tuna_probe_ack_received_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeAckReceivedCount),
@@ -6976,9 +6977,12 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockRetryDispatchObservedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_retry_dispatch_observed'
     })
-    $runtimeUnlockRetryQueuedBehindActiveNegotiationEvents = @($runtimeUnlockRetryScheduledEvents | Where-Object {
-        (Get-FileTransferEventField -Event $_ -Name 'queued_behind_active_negotiation' -Default '0') -eq '1'
+    $runtimeUnlockRetryDispatchHeldByActiveNegotiationEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_held_by_active_negotiation'
     })
+    $runtimeUnlockRetryQueuedBehindActiveNegotiationEvents = @(@($runtimeUnlockRetryScheduledEvents | Where-Object {
+        (Get-FileTransferEventField -Event $_ -Name 'queued_behind_active_negotiation' -Default '0') -eq '1'
+    }) + $runtimeUnlockRetryDispatchHeldByActiveNegotiationEvents)
     $runtimeUnlockBrokenStateFreshRetryConsumedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_broken_state_fresh_retry_consumed'
     })
@@ -7170,6 +7174,9 @@ function Get-FileTransferRecoveryFailureClassification {
     })
     $runtimeUnlockPreCommitProbeAckReceiveDispatchRejectedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_precommit_probe_ack_receive_dispatch_rejected'
+    })
+    $runtimeUnlockPreCommitProbeAckReceiveQueuedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_precommit_probe_ack_receive_queued'
     })
     $runtimeUnlockPreCommitProbeAckReceiveDispatchedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_precommit_probe_ack_receive_dispatched'
@@ -7405,6 +7412,31 @@ function Get-FileTransferRecoveryFailureClassification {
         }
 
         $runtimeUnlockRetryDispatchMissingCount++
+    }
+
+    foreach ($grant in @($runtimeUnlockRetryDispatchAuthorityGrantedEvents | Where-Object {
+        (Get-FileTransferEventField -Event $_ -Name 'queued_behind_active_negotiation' -Default '0') -eq '1'
+    })) {
+        $grantSequence = [int64]$grant.Sequence
+        $matchingObserved = @($runtimeUnlockRetryDispatchObservedEvents | Where-Object {
+            [int64]$_.Sequence -gt $grantSequence -and
+            (Test-RuntimeUnlockRetryDispatchMatch -Release $grant -Candidate $_)
+        })
+        $matchingRejected = @($runtimeUnlockRetryDispatchAuthorityRejectedEvents | Where-Object {
+            [int64]$_.Sequence -gt $grantSequence -and
+            (Test-RuntimeUnlockRetryDispatchMatch -Release $grant -Candidate $_)
+        })
+        $matchingFailed = @($events | Where-Object {
+            [int64]$_.Sequence -gt $grantSequence -and
+            $_.EventName -eq 'session_recovery_contract_failed' -and
+            (Test-RuntimeUnlockRetryDispatchMatch -Release $grant -Candidate $_)
+        })
+
+        if ($matchingObserved.Count -eq 0 -and
+            $matchingRejected.Count -eq 0 -and
+            $matchingFailed.Count -eq 0) {
+            $runtimeUnlockRetryDispatchMissingCount++
+        }
     }
 
     $runtimeUnlockRetryMissingAuthorityAfterReleaseCount = 0
@@ -8051,6 +8083,7 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockTunaProbeAckSentCount = $runtimeUnlockTunaProbeAckSentEvents.Count
         RuntimeUnlockPreCommitProbeAckDeliveryResultCount = $runtimeUnlockPreCommitProbeAckDeliveryResultEvents.Count
         RuntimeUnlockPreCommitProbeAckReceiveResultCount = $runtimeUnlockPreCommitProbeAckReceiveResultEvents.Count
+        RuntimeUnlockPreCommitProbeAckReceiveQueuedCount = $runtimeUnlockPreCommitProbeAckReceiveQueuedEvents.Count
         RuntimeUnlockPreCommitProbeAckReceiveDispatchedCount = $runtimeUnlockPreCommitProbeAckReceiveDispatchedEvents.Count
         RuntimeUnlockPreCommitProbeAckReceiveDispatchRejectedCount = $runtimeUnlockPreCommitProbeAckReceiveDispatchRejectedEvents.Count
         RuntimeUnlockTunaProbeAckReceivedCount = $runtimeUnlockTunaProbeAckReceivedEvents.Count
@@ -8583,6 +8616,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_tuna_probe_ack_sent_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeAckSentCount),
         ("runtime_unlock_precommit_probe_ack_delivery_result_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckDeliveryResultCount),
         ("runtime_unlock_precommit_probe_ack_receive_result_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckReceiveResultCount),
+        ("runtime_unlock_precommit_probe_ack_receive_queued_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckReceiveQueuedCount),
         ("runtime_unlock_precommit_probe_ack_receive_dispatched_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckReceiveDispatchedCount),
         ("runtime_unlock_precommit_probe_ack_receive_dispatch_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckReceiveDispatchRejectedCount),
         ("runtime_unlock_tuna_probe_ack_received_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeAckReceivedCount),

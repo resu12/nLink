@@ -490,6 +490,19 @@ public interface IFileTransferDataPathAuthoritySession
     Task SendAsync(FileTransferDataFrame frame, FileTransferDataPathSendAuthority authority, CancellationToken ct);
 }
 
+public sealed class FileTransferRuntimeUnlockAuthorityFrameReceivedEventArgs : EventArgs
+{
+    public FileTransferRuntimeUnlockAuthorityFrameReceivedEventArgs(FileTransferReceivedDataFrame receivedFrame)
+        => ReceivedFrame = receivedFrame ?? throw new ArgumentNullException(nameof(receivedFrame));
+
+    public FileTransferReceivedDataFrame ReceivedFrame { get; }
+}
+
+public interface IFileTransferRuntimeUnlockAuthorityFrameReceiver
+{
+    event EventHandler<FileTransferRuntimeUnlockAuthorityFrameReceivedEventArgs>? RuntimeUnlockAuthorityFrameReceived;
+}
+
 public interface IFileTransferRuntimeUnlockPreCommitProbeAckAuthorizer
 {
     void AuthorizeRuntimeUnlockPreCommitProbeAck(

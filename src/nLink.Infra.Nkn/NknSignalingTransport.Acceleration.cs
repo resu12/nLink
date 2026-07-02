@@ -9700,12 +9700,25 @@ public sealed partial class NknSignalingTransport
             }
 
             state.QueuedBehindActiveNegotiation = true;
-            state.RetryQueued = true;
-            state.ContractState = SessionRecoveryContractState.RetryQueued;
+            state.RetryQueued = false;
+            state.RetryDispatching = false;
+            state.RetryDispatched = false;
+            state.RetryAuthorityPending = false;
+            state.RetryAuthorityGranted = false;
+            state.ObservedSendPending = false;
+            state.DispatchAuthorityGranted = false;
+            state.DispatchObserved = false;
+            state.DispatchDecisionReason = "active_negotiation_pending";
+            state.ContractState = state.Settled
+                ? SessionRecoveryContractState.RecoverySettled
+                : state.ContractState;
             stateSnapshot = state;
         }
 
-        LogRuntimeUnlockRecoveryContract("session_recovery_contract_retry_queued", stateSnapshot!.SessionId);
+        LogRuntimeUnlockRetryDispatchProof(
+            "runtime_unlock_retry_dispatch_held_by_active_negotiation",
+            stateSnapshot!,
+            "active_negotiation_pending");
     }
 
     private void GrantRuntimeUnlockRecoveryContractRetryAuthorityUnsafe(RuntimeUnlockRecoveryRetryState state)
@@ -14275,6 +14288,7 @@ public sealed partial class NknSignalingTransport
 
         RuntimeUnlockRecoveryRetryState? stateToSchedule = null;
         RuntimeUnlockRecoveryRetryState? rejectedDispatchState = null;
+        RuntimeUnlockRecoveryRetryState? activeNegotiationHeldState = null;
         var queuedBehindActiveNegotiation = false;
         var dispatchAuthorityGranted = false;
         var requiresDispatchAuthority = RequiresRuntimeUnlockRetryDispatchAuthority(stateSnapshot.RetryReason);
@@ -14330,54 +14344,84 @@ public sealed partial class NknSignalingTransport
                 return;
             }
 
-            if (requiresDispatchProof && !hasDispatchAuthority)
+            state.Settled = true;
+            queuedBehindActiveNegotiation = Volatile.Read(ref accelerationNegotiationScheduled) != 0;
+            if (requiresDispatchProof &&
+                queuedBehindActiveNegotiation &&
+                !holdDispatchGrantForListenerRearm)
+            {
+                state.RetryQueued = false;
+                state.RetryDispatching = false;
+                state.RetryDispatched = false;
+                state.RetryAuthorityPending = false;
+                state.RetryAuthorityGranted = false;
+                state.ObservedSendPending = false;
+                state.QueuedBehindActiveNegotiation = true;
+                state.DispatchAuthorityGranted = false;
+                state.DispatchAuthorityRejected = false;
+                state.DispatchObserved = false;
+                state.DispatchDecisionReason = "active_negotiation_pending";
+                state.AuthorityFailureReason = null;
+                state.ContractState = SessionRecoveryContractState.RecoverySettled;
+                pendingRuntimeUnlockAccelerationNegotiationReason = IsRuntimeUnlockActivationReason(state.RetryReason)
+                    ? SanitizeLogToken(state.RetryReason)
+                    : "runtime_unlock";
+                pendingRuntimeUnlockAccelerationNegotiation = 1;
+                activeNegotiationHeldState = state;
+                stateToSchedule = state;
+            }
+            else if (requiresDispatchProof && !hasDispatchAuthority)
             {
                 MarkRuntimeUnlockRetryDispatchAuthorityRejectedUnsafe(state, dispatchAuthorityRejectionReason);
                 rejectedDispatchState = state;
                 stateToSchedule = state;
             }
+            else if (requiresDispatchAuthority &&
+                holdDispatchGrantForListenerRearm)
+            {
+                state.RetryQueued = false;
+                state.RetryDispatching = false;
+                state.RetryDispatched = false;
+                state.RetryAuthorityPending = false;
+                state.RetryAuthorityGranted = false;
+                state.ObservedSendPending = false;
+                state.QueuedBehindActiveNegotiation = false;
+                state.AuthorityFailureReason = "listener_rearm_required_before_dispatch_authority";
+                state.ContractState = SessionRecoveryContractState.RecoverySettled;
+                stateToSchedule = state;
+            }
             else
             {
-                state.Settled = true;
-                queuedBehindActiveNegotiation = Volatile.Read(ref accelerationNegotiationScheduled) != 0;
-                if (requiresDispatchAuthority &&
-                    holdDispatchGrantForListenerRearm)
+                state.RetryQueued = true;
+                state.QueuedBehindActiveNegotiation = false;
+                GrantRuntimeUnlockRecoveryContractRetryAuthorityUnsafe(state);
+                if (requiresDispatchAuthority)
                 {
-                    state.RetryQueued = false;
-                    state.RetryDispatching = false;
-                    state.RetryDispatched = false;
-                    state.RetryAuthorityPending = false;
-                    state.RetryAuthorityGranted = false;
-                    state.ObservedSendPending = false;
-                    state.QueuedBehindActiveNegotiation = false;
-                    state.AuthorityFailureReason = "listener_rearm_required_before_dispatch_authority";
-                    state.ContractState = SessionRecoveryContractState.RecoverySettled;
-                }
-                else
-                {
-                    state.RetryQueued = true;
-                    state.QueuedBehindActiveNegotiation = queuedBehindActiveNegotiation;
-                    GrantRuntimeUnlockRecoveryContractRetryAuthorityUnsafe(state);
-                    if (requiresDispatchAuthority)
-                    {
-                        MarkRuntimeUnlockRetryDispatchAuthorityGrantedUnsafe(
-                            state,
-                            dispatchAuthority,
-                            queuedBehindActiveNegotiation
-                                ? "queued_retry_dispatch_reacquired_for_recovery_schedule"
-                                : "retry_dispatch_reacquired_for_recovery_schedule");
-                        dispatchAuthorityGranted = true;
-                    }
-
-                    state.ContractState = SessionRecoveryContractState.RetryQueued;
+                    MarkRuntimeUnlockRetryDispatchAuthorityGrantedUnsafe(
+                        state,
+                        dispatchAuthority,
+                        "retry_dispatch_reacquired_for_recovery_schedule");
+                    dispatchAuthorityGranted = true;
                 }
 
+                state.ContractState = SessionRecoveryContractState.RetryQueued;
                 stateToSchedule = state;
             }
         }
 
         if (stateToSchedule is null)
         {
+            return;
+        }
+
+        if (activeNegotiationHeldState is not null)
+        {
+            LogRuntimeUnlockRetryDispatchProof(
+                "runtime_unlock_retry_dispatch_held_by_active_negotiation",
+                activeNegotiationHeldState,
+                activeNegotiationHeldState.DispatchDecisionReason ?? "active_negotiation_pending");
+            LogRuntimeUnlockRecoveryContract("session_recovery_contract_recovery_settled", activeNegotiationHeldState.SessionId);
+            NotifyTransportAccelerationStateChanged("runtime_unlock_retry_dispatch_held_by_active_negotiation");
             return;
         }
 
