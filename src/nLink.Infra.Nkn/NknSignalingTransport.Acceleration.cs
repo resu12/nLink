@@ -11595,6 +11595,30 @@ public sealed partial class NknSignalingTransport
             }
         }
 
+        var capturedNormalizedSessionId = string.IsNullOrWhiteSpace(capturedSessionId)
+            ? normalizedSessionId
+            : capturedSessionId.Trim();
+        if (!string.IsNullOrWhiteSpace(capturedNormalizedSessionId) &&
+            TryGetActiveRegularV4RecoveryLivenessSnapshot(capturedNormalizedSessionId, out var preDispatchRegularV4LivenessSnapshot) &&
+            IsRegularV4RecoveryLivenessSnapshotCurrentForRetryDispatch(
+                preDispatchRegularV4LivenessSnapshot,
+                capturedSessionId,
+                capturedTransferId,
+                expectedDispatchDirection,
+                expectedLiveRouteEpoch) &&
+            !preDispatchRegularV4LivenessSnapshot.ReceiveProofObserved &&
+            !preDispatchRegularV4LivenessSnapshot.Completed &&
+            !preDispatchRegularV4LivenessSnapshot.RecoveryExhausted)
+        {
+            MarkRuntimeUnlockRecoveryContractDispatchDeferredForRegularV4ReceiveRecovery(
+                capturedNormalizedSessionId,
+                preDispatchRegularV4LivenessSnapshot.StateReason);
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=runtime_unlock_retry_dispatch_held_by_regular_v4_receive_recovery; session_id={SanitizeLogToken(capturedNormalizedSessionId)}; transfer_id={SanitizeLogToken(preDispatchRegularV4LivenessSnapshot.TransferId)}; trigger={SanitizeLogToken(reason)}; blocker_reason={SanitizeLogToken(preDispatchRegularV4LivenessSnapshot.StateReason)}; route={SanitizeLogToken(preDispatchRegularV4LivenessSnapshot.RouteToken)}; protocol_version={preDispatchRegularV4LivenessSnapshot.ProtocolVersion}; live_route_epoch={preDispatchRegularV4LivenessSnapshot.LiveRouteEpoch}; regular_v4_liveness_generation={preDispatchRegularV4LivenessSnapshot.Generation}; bridge_decision_generation={preDispatchRegularV4LivenessSnapshot.BridgeDecisionGeneration}; decision_reason=awaiting_regular_v4_recovery_settlement");
+            return false;
+        }
+
         var hasDispatchAuthority = TryCaptureRuntimeUnlockRetryDispatchRouteAuthority(
             sessionId,
             transferId,

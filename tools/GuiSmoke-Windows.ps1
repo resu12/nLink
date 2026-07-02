@@ -3202,9 +3202,12 @@ function Wait-TunaGuiSecondTransferReadinessOrThrow {
             [bool]$lastState.TunaActive -and
             [bool]$lastState.ListenerReady -and
             -not [bool]$lastState.ListenerUnavailable)
-        $isReadyNow = $null -ne $sendButton -and
+        $coordinatorProofAfterSendReady = $allowCoordinatorProofAfterSend -and
+            $null -ne $sendButton
+        $isReadyNow = $coordinatorProofAfterSendReady -or (
+            $null -ne $sendButton -and
             $routeReadinessSatisfied -and
-            [bool]$lastSendState.Ready
+            [bool]$lastSendState.Ready)
         if ($isReadyNow) {
             $stableReadyPolls++
         }

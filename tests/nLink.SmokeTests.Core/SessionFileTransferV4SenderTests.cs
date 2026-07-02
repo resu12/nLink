@@ -11386,6 +11386,120 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
     [Fact]
     [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
+    public void FallbackTailYield_PeerCanonicalNoneProofSettlesRawPendingCheckpointWithoutLocalDecision()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        const string transferId = "transfer_fallback_tail_peer_none_raw_checkpoint";
+        const string currentCheckpointId = "v6-regular-nkn-state-refresh:1";
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 1809,
+            chunksAcceptedForTransport: 1810,
+            remoteGrantedUntilExclusive: 1810,
+            chunkCount: 4096);
+        serviceType
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var leg = Assert.IsType<FileTransferLeg>(GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+        leg.State = FileTransferLegState.CheckpointPending;
+        leg.CanSendData = false;
+        leg.CheckpointRequestId = currentCheckpointId;
+        leg.CheckpointGeneration = 1;
+        leg.CheckpointPriority = null;
+        leg.CheckpointRequestedUtc = DateTimeOffset.UtcNow;
+        SetPrivateProperty(context, "LastFallbackTailYieldDecision", null);
+        SetPrivateProperty(context, "PullPostTunaRecoveryActive", false);
+        SetPrivateProperty(context, "PullTransportFrontierOnlyRepairActive", false);
+        SetPrivateProperty(context, "V6RegularNknFallbackCheckpointDeliveryRecoveryPending", false);
+        SetPrivateProperty(context, "V6RegularNknStateRefreshSendInFlight", 0);
+        SetPrivateProperty(context, "V6RegularNknDeferredStateRefreshRequest", null);
+
+        var sessionId = GetPrivateProperty<string>(context, "SessionId");
+        var runtimeOwner = GetPrivateProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner");
+        SetPrivateProperty(
+            context,
+            "CurrentFallbackCheckpointLease",
+            new FallbackCheckpointLease(
+                sessionId,
+                transferId,
+                FileTransferDirection.Outbound,
+                runtimeOwner,
+                FileTransferRoute.PostTunaFallbackV6,
+                leg.RouteSelection.TelemetryToken,
+                leg.ProtocolVersion,
+                leg.LiveRouteEpochId,
+                runtimeOwner.RuntimeGeneration,
+                runtimeOwner.TerminalGeneration,
+                leg.Generation,
+                leg.TransportEpochId,
+                leg.BridgeRecoveryGeneration,
+                currentCheckpointId,
+                CheckpointGeneration: 1,
+                LeaseGeneration: 1,
+                State: FallbackCheckpointLeaseState.Pending,
+                Reason: "unit_test_raw_checkpoint"));
+
+        var canonicalOwnerKey = FileTransferCoordinator.BuildFallbackTailYieldOwnerKey(
+            sessionId,
+            transferId,
+            leg.RouteSelection.TelemetryToken,
+            leg.ProtocolVersion,
+            leg.LiveRouteEpochId,
+            leg.Generation,
+            leg.BridgeRecoveryGeneration,
+            leg.TransportEpochId,
+            "(none)");
+        var canonicalPairKey = FileTransferCoordinator.BuildFallbackTailYieldPairKey(
+            sessionId,
+            transferId,
+            leg.RouteSelection.TelemetryToken,
+            leg.ProtocolVersion,
+            leg.LiveRouteEpochId,
+            leg.BridgeRecoveryGeneration,
+            leg.TransportEpochId,
+            "(none)");
+        var peerYield = new FileTransferFallbackTailYieldFrameV6
+        {
+            SessionId = sessionId,
+            TransferId = transferId,
+            TransportEpoch = leg.TransportEpochId,
+            OwnerKey = canonicalOwnerKey,
+            PairKey = canonicalPairKey,
+            Direction = "inbound",
+            YieldGeneration = 1,
+            LiveRouteEpoch = leg.LiveRouteEpochId,
+            FallbackLegGeneration = leg.Generation,
+            BridgeRecoveryGeneration = leg.BridgeRecoveryGeneration,
+            CommittedChunkIndex = 1810,
+            HighestObservedChunkIndex = 1809,
+            RecoveryMode = "fallback_tail_yield",
+        };
+
+        var logStart = GetOperationalLogLength();
+        serviceType
+            .GetMethod("ApplyOutboundFallbackTailYieldProof", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, peerYield]);
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.True(GetPrivateProperty<bool>(context, "PeerFallbackTailYieldGranted"), log);
+        Assert.Equal(canonicalOwnerKey, GetPrivateProperty<string>(context, "PeerFallbackTailYieldOwnerKey"));
+        Assert.True(GetPrivateProperty<bool>(context, "LocalFallbackTailYieldGranted"));
+        Assert.Equal(canonicalOwnerKey, GetPrivateProperty<string>(context, "LocalFallbackTailYieldOwnerKey"));
+        Assert.Equal(canonicalPairKey, GetPrivateProperty<string>(context, "LocalFallbackTailYieldPairKey"));
+        Assert.True(leg.CanSendData);
+        Assert.Equal(FileTransferLegState.Active, leg.State);
+        Assert.Null(leg.CheckpointRequestId);
+
+        Assert.Contains("event=filetransfer_fallback_tail_yield_proof_received; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_fallback_tail_yield_owner_snapshot; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("checkpoint_request_id_snapshot=(none)", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_fallback_tail_owner_generation_mismatch", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
     public void FallbackTailYield_StaleNoneDecisionDoesNotOverrideCurrentCheckpointLease()
     {
         using var service = new SessionFileTransferService();

@@ -9605,6 +9605,18 @@ public sealed partial class SessionFileTransferService : IDisposable
                 matchedPairKey = canonicalPairKey;
                 matchedCheckpointSnapshot = frameCheckpointSnapshot;
             }
+
+            var peerProofCarriesCanonicalCurrentOwner =
+                lastTailYieldDecision is null &&
+                string.Equals(frame.OwnerKey, canonicalOwnerKey, StringComparison.Ordinal) &&
+                string.Equals(framePairKey, canonicalPairKey, StringComparison.Ordinal);
+            if (matchedPairKey is null &&
+                peerProofCarriesCanonicalCurrentOwner)
+            {
+                matchedOwnerKey = canonicalOwnerKey;
+                matchedPairKey = canonicalPairKey;
+                matchedCheckpointSnapshot = frameCheckpointSnapshot;
+            }
         }
 
         if (matchedPairKey is null ||
@@ -9868,12 +9880,23 @@ public sealed partial class SessionFileTransferService : IDisposable
         }
 
         var currentLeg = leg!;
+        var canonicalNonePairKey = string.Equals(ownerSnapshot.CheckpointRequestIdSnapshot, "(none)", StringComparison.Ordinal)
+            ? ownerSnapshot.PairKey
+            : FileTransferCoordinator.BuildFallbackTailYieldPairKey(
+                context.SessionId,
+                context.TransferId,
+                currentLeg.RouteSelection.TelemetryToken,
+                currentLeg.ProtocolVersion,
+                currentLeg.LiveRouteEpochId,
+                currentLeg.BridgeRecoveryGeneration,
+                currentLeg.TransportEpochId,
+                "(none)");
         var peerYieldCanSettleCanonicalCheckpoint =
             string.Equals(reason, "fallback_tail_peer_yield", StringComparison.Ordinal) &&
             context.PeerFallbackTailYieldGranted &&
             context.PeerFallbackTailYieldCommittedChunkIndex >= 0 &&
-            string.Equals(peerPairKey, ownerSnapshot.PairKey, StringComparison.Ordinal) &&
-            string.Equals(ownerSnapshot.CheckpointRequestIdSnapshot, "(none)", StringComparison.Ordinal) &&
+            (string.Equals(peerPairKey, ownerSnapshot.PairKey, StringComparison.Ordinal) ||
+             string.Equals(peerPairKey, canonicalNonePairKey, StringComparison.Ordinal)) &&
             !string.IsNullOrWhiteSpace(currentLeg.CheckpointRequestId) &&
             currentLeg.State == FileTransferLegState.CheckpointPending;
         if (!currentLeg.CanSendData && !peerYieldCanSettleCanonicalCheckpoint)
@@ -9885,7 +9908,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         if (!string.Equals(
                 ownerSnapshot.CheckpointRequestIdSnapshot,
                 "(none)",
-                StringComparison.Ordinal))
+                StringComparison.Ordinal) &&
+            !peerYieldCanSettleCanonicalCheckpoint)
         {
             LogBlocked("fallback_tail_local_checkpoint_pending");
             return false;
@@ -9986,12 +10010,23 @@ public sealed partial class SessionFileTransferService : IDisposable
         }
 
         var currentLeg = leg!;
+        var canonicalNonePairKey = string.Equals(ownerSnapshot.CheckpointRequestIdSnapshot, "(none)", StringComparison.Ordinal)
+            ? ownerSnapshot.PairKey
+            : FileTransferCoordinator.BuildFallbackTailYieldPairKey(
+                context.SessionId,
+                context.TransferId,
+                currentLeg.RouteSelection.TelemetryToken,
+                currentLeg.ProtocolVersion,
+                currentLeg.LiveRouteEpochId,
+                currentLeg.BridgeRecoveryGeneration,
+                currentLeg.TransportEpochId,
+                "(none)");
         var peerYieldCanSettleCanonicalCheckpoint =
             string.Equals(reason, "fallback_tail_peer_yield", StringComparison.Ordinal) &&
             context.PeerFallbackTailYieldGranted &&
             context.PeerFallbackTailYieldCommittedChunkIndex >= 0 &&
-            string.Equals(peerPairKey, ownerSnapshot.PairKey, StringComparison.Ordinal) &&
-            string.Equals(ownerSnapshot.CheckpointRequestIdSnapshot, "(none)", StringComparison.Ordinal) &&
+            (string.Equals(peerPairKey, ownerSnapshot.PairKey, StringComparison.Ordinal) ||
+             string.Equals(peerPairKey, canonicalNonePairKey, StringComparison.Ordinal)) &&
             !string.IsNullOrWhiteSpace(currentLeg.CheckpointRequestId) &&
             currentLeg.State == FileTransferLegState.CheckpointPending;
         if (!currentLeg.CanSendData && !peerYieldCanSettleCanonicalCheckpoint)
@@ -10003,7 +10038,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         if (!string.Equals(
                 ownerSnapshot.CheckpointRequestIdSnapshot,
                 "(none)",
-                StringComparison.Ordinal))
+                StringComparison.Ordinal) &&
+            !peerYieldCanSettleCanonicalCheckpoint)
         {
             LogBlocked("fallback_tail_local_checkpoint_pending");
             return false;

@@ -2898,11 +2898,12 @@ public sealed partial class NknSignalingTransport
         var actualTransportText = FormatFileTransferTransportKindForLog(actualTransport);
         var lane = MapBridgeChannel(channel);
         var authoritySuffix = FormatFileTransferDataPathAuthoritySuffix(hasAuthority, routeHint);
+        var runtimeUnlockPreCommitSuffix = FormatRuntimeUnlockPreCommitProbeTupleSuffix(frame);
         var rawPayloadBytes = GetFrameRawPayloadBytes(frame);
         var batchChunkCount = GetFrameBatchChunkCount(frame);
         LocalOperationalLog.Info(
             "SessionSecurity",
-            $"event=filetransfer_data_path_receive_result; transfer_id={SanitizeLogToken(frame.TransferId)}; session_id={SanitizeLogToken(frame.SessionId)}; frame_type={SanitizeLogToken(frameType)}; lane={SanitizeLogToken(lane)}; actual_transport={actualTransportText}; delivery_transport={actualTransportText}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}; payload_bytes={rawPayloadBytes}; raw_payload_bytes={rawPayloadBytes}; transport_payload_bytes=0; batch_chunk_count={batchChunkCount}; batch_profile={SanitizeLogToken(batchProfile)}; delivery_result=received{authoritySuffix}");
+            $"event=filetransfer_data_path_receive_result; transfer_id={SanitizeLogToken(frame.TransferId)}; session_id={SanitizeLogToken(frame.SessionId)}; frame_type={SanitizeLogToken(frameType)}; lane={SanitizeLogToken(lane)}; actual_transport={actualTransportText}; delivery_transport={actualTransportText}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}; payload_bytes={rawPayloadBytes}; raw_payload_bytes={rawPayloadBytes}; transport_payload_bytes=0; batch_chunk_count={batchChunkCount}; batch_profile={SanitizeLogToken(batchProfile)}; delivery_result=received{runtimeUnlockPreCommitSuffix}{authoritySuffix}");
 
         if (hasAuthority &&
             routeHint.Route == FileTransferRoute.FileTunaV4 &&
@@ -2927,6 +2928,57 @@ public sealed partial class NknSignalingTransport
                     $"event=filetransfer_tuna_data_path_mismatch; transfer_id={SanitizeLogToken(frame.TransferId)}; session_id={SanitizeLogToken(frame.SessionId)}; frame_type={SanitizeLogToken(frameType)}; lane={SanitizeLogToken(lane)}; actual_transport={actualTransportText}; delivery_transport={actualTransportText}; payload_bytes={rawPayloadBytes}; raw_payload_bytes={rawPayloadBytes}; transport_payload_bytes=0; batch_chunk_count={batchChunkCount}; batch_profile={SanitizeLogToken(batchProfile)}; proof_direction=receive; mismatch_reason=file_tuna_v4_resolved_to_regular_nkn{authoritySuffix}");
             }
         }
+    }
+
+    private static string FormatRuntimeUnlockPreCommitProbeTupleSuffix(FileTransferDataFrame frame)
+        => frame is FileTransferRuntimeUnlockPreCommitProbeFrameBase probe
+            ? $"; transaction_generation={probe.TransactionGeneration}; offer_generation={probe.OfferGeneration}; tuna_path_lease_generation={probe.TunaPathLeaseGeneration}; probe_id={SanitizeLogToken(probe.ProbeId ?? "(none)")}"
+            : string.Empty;
+
+    private void LogRuntimeUnlockPreCommitProbeReceiveDispatch(
+        FileTransferDataFrame frame,
+        NknBridgeChannel channel,
+        FileTransferTransportKind actualTransport,
+        string dispatchState,
+        string decisionReason,
+        bool priority,
+        int queuedFramesAfter,
+        long queuedBytesAfter)
+    {
+        if (frame is not FileTransferRuntimeUnlockPreCommitProbeFrameBase probe)
+        {
+            return;
+        }
+
+        var normalizedState = string.IsNullOrWhiteSpace(dispatchState)
+            ? "rejected"
+            : dispatchState.Trim();
+        var eventName = frame is FileTransferRuntimeUnlockPreCommitProbeAckFrame
+            ? normalizedState switch
+            {
+                "attempted" => "runtime_unlock_precommit_probe_ack_receive_dispatch_attempted",
+                "dispatched" => "runtime_unlock_precommit_probe_ack_receive_dispatched",
+                _ => "runtime_unlock_precommit_probe_ack_receive_dispatch_rejected",
+            }
+            : normalizedState switch
+            {
+                "attempted" => "runtime_unlock_precommit_probe_receive_dispatch_attempted",
+                "dispatched" => "runtime_unlock_precommit_probe_receive_dispatched",
+                _ => "runtime_unlock_precommit_probe_receive_dispatch_rejected",
+            };
+        var hasAuthority = TryGetFileTransferDataPathRouteAuthority(frame.SessionId, frame.TransferId, out var routeHint);
+        var authoritySuffix = FormatFileTransferDataPathAuthoritySuffix(hasAuthority, routeHint);
+        var lane = MapBridgeChannel(channel);
+        var actualTransportText = FormatFileTransferTransportKindForLog(actualTransport);
+        var message =
+            $"event={eventName}; transfer_id={SanitizeLogToken(frame.TransferId)}; session_id={SanitizeLogToken(frame.SessionId)}; frame_type={SanitizeLogToken(frame.Type)}; transaction_generation={probe.TransactionGeneration}; offer_generation={probe.OfferGeneration}; tuna_path_lease_generation={probe.TunaPathLeaseGeneration}; probe_id={SanitizeLogToken(probe.ProbeId ?? "(none)")}; actual_transport={actualTransportText}; delivery_transport={actualTransportText}; lane={SanitizeLogToken(lane)}; priority={(priority ? 1 : 0)}; queued_frames={queuedFramesAfter}; queued_bytes={queuedBytesAfter}; decision_reason={SanitizeLogToken(string.IsNullOrWhiteSpace(decisionReason) ? "(none)" : decisionReason)}{authoritySuffix}";
+        if (normalizedState == "rejected")
+        {
+            LocalOperationalLog.Warn("SessionSecurity", message);
+            return;
+        }
+
+        LocalOperationalLog.Info("SessionSecurity", message);
     }
 
     public void ObserveFileTransferRouteHint(FileTransferRouteHintNotification notification)
@@ -8645,23 +8697,64 @@ public sealed partial class NknSignalingTransport
             FileTransferTransportKind receivedTransportKind = FileTransferTransportKind.Unknown,
             string? peerId = null)
         {
+            var isRuntimeUnlockPreCommitFrame = IsRuntimeUnlockPreCommitProbeFrame(frame);
+            var effectiveTransportKind = receivedTransportKind == FileTransferTransportKind.Unknown
+                ? ResolveInboundFileTransferDataFrameTransportKind(channel)
+                : receivedTransportKind;
             if (disposed != 0)
             {
+                if (isRuntimeUnlockPreCommitFrame)
+                {
+                    owner.LogRuntimeUnlockPreCommitProbeReceiveDispatch(
+                        frame,
+                        channel,
+                        effectiveTransportKind,
+                        "rejected",
+                        "session_disposed",
+                        priority: false,
+                        queuedFramesAfter: 0,
+                        queuedBytesAfter: 0);
+                }
+
                 return;
+            }
+
+            if (isRuntimeUnlockPreCommitFrame)
+            {
+                owner.LogRuntimeUnlockPreCommitProbeReceiveDispatch(
+                    frame,
+                    channel,
+                    effectiveTransportKind,
+                    "attempted",
+                    "queue_handoff",
+                    priority: false,
+                    queuedFramesAfter: 0,
+                    queuedBytesAfter: 0);
             }
 
             var estimatedBytes = EstimateQueuedFrameBytes(frame);
             if (!TryReserveQueuedFrame(estimatedBytes, out var queuedFramesAfter, out var queuedBytesAfter))
             {
+                if (isRuntimeUnlockPreCommitFrame)
+                {
+                    owner.LogRuntimeUnlockPreCommitProbeReceiveDispatch(
+                        frame,
+                        channel,
+                        effectiveTransportKind,
+                        "rejected",
+                        "queue_capacity_exceeded",
+                        priority: false,
+                        queuedFramesAfter,
+                        queuedBytesAfter);
+                }
+
                 FailQueueOverflow(frame, channel, estimatedBytes);
                 return;
             }
 
             var receivedFrame = new FileTransferReceivedDataFrame(
                 frame,
-                receivedTransportKind == FileTransferTransportKind.Unknown
-                    ? ResolveInboundFileTransferDataFrameTransportKind(channel)
-                    : receivedTransportKind,
+                effectiveTransportKind,
                 MapBridgeChannel(channel),
                 DateTimeOffset.UtcNow);
             var prioritized = ShouldPrioritizeQueuedFileTransferDataFrame(frame);
@@ -8669,12 +8762,38 @@ public sealed partial class NknSignalingTransport
             if (!writer.TryWrite(new QueuedFileTransferDataFrame(receivedFrame, estimatedBytes)))
             {
                 ReleaseQueuedFrame(estimatedBytes);
+                if (isRuntimeUnlockPreCommitFrame)
+                {
+                    owner.LogRuntimeUnlockPreCommitProbeReceiveDispatch(
+                        frame,
+                        channel,
+                        effectiveTransportKind,
+                        "rejected",
+                        "queue_write_failed",
+                        prioritized,
+                        queuedFramesAfter,
+                        queuedBytesAfter);
+                }
+
                 if (disposed == 0)
                 {
                     FailQueueOverflow(frame, channel, estimatedBytes);
                 }
 
                 return;
+            }
+
+            if (isRuntimeUnlockPreCommitFrame)
+            {
+                owner.LogRuntimeUnlockPreCommitProbeReceiveDispatch(
+                    frame,
+                    channel,
+                    effectiveTransportKind,
+                    "dispatched",
+                    "queued_for_core",
+                    prioritized,
+                    queuedFramesAfter,
+                    queuedBytesAfter);
             }
 
             if (frame is FileTransferFallbackTailYieldFrameV6 yieldFrame)
@@ -8694,6 +8813,7 @@ public sealed partial class NknSignalingTransport
             => IsReceiverFeedbackDataFrame(frame) ||
                IsV6RecoveryControlDataFrame(frame) ||
                IsTerminalDataFrame(frame) ||
+               IsRuntimeUnlockPreCommitProbeFrame(frame) ||
                frame is FileTransferPauseControlFrameV4;
 
         private void RecordChunkBatchTransportSummary(

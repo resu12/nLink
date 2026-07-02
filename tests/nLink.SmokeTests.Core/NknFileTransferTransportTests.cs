@@ -2211,6 +2211,112 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task NknTransport_FileTransferDataSession_PrioritizesRuntimeUnlockPreCommitAckReceiveDispatch()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            int logStartIndex = CoreSmokeTestsBase.GetOperationalLogLength();
+            using CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(8.0));
+            NknTransportOptions options = NknTransportOptions.Load();
+            FakeNknClient hostClient = new FakeNknClient("host.filetransfer.precommit-ack-priority.address");
+            FakeNknClient helperClient = new FakeNknClient("helper.filetransfer.precommit-ack-priority.address");
+            NknIdentity hostIdentity = new NknIdentity("host-precommit-ack-priority-id", hostClient.Address);
+            NknIdentity helperIdentity = new NknIdentity("helper-precommit-ack-priority-id", helperClient.Address);
+            using NknSignalingTransport host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using NknSignalingTransport helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            const string transferId = "transfer_nkn_precommit_ack_priority";
+            string sessionId = await CoreSmokeTestsBase.ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            TaskCompletionSource<FileTransferOfferV2> offerReceived = new TaskCompletionSource<FileTransferOfferV2>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<FileTransferAcceptV1> acceptReceived = new TaskCompletionSource<FileTransferAcceptV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<FileTransferSessionOpenV2> sessionOpenReceived = new TaskCompletionSource<FileTransferSessionOpenV2>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.FileTransferOfferReceived += delegate (object? _, FileTransferOfferReceivedEventArgs e)
+            {
+                offerReceived.TrySetResult(e.Message);
+            };
+            helper.FileTransferAcceptReceived += delegate (object? _, FileTransferAcceptReceivedEventArgs e)
+            {
+                acceptReceived.TrySetResult(e.Message);
+            };
+            host.FileTransferSessionOpenReceived += delegate (object? _, FileTransferSessionOpenReceivedEventArgs e)
+            {
+                sessionOpenReceived.TrySetResult(e.Message);
+            };
+
+            await helper.SendFileTransferOfferAsync(new FileTransferOfferV2 { SessionId = sessionId, TransferId = transferId, FileName = "precommit-ack-priority.bin", FileSizeBytes = 2048L, PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6 }, cts.Token);
+            await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+            await host.SendFileTransferAcceptAsync(new FileTransferAcceptV1 { SessionId = sessionId, TransferId = transferId, AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6 }, cts.Token);
+            await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+            await helper.SendFileTransferSessionOpenAsync(new FileTransferSessionOpenV2 { SessionId = sessionId, TransferId = transferId, ProtocolVersion = FileTransferProtocol.ProtocolVersionV6, SessionRole = FileTransferProtocol.SessionRoleSender, ChunkSizeBytes = 1024, InitialPipelineDepth = 8 }, cts.Token);
+            await sessionOpenReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+            IFileTransferDataSession inboundSession = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            FileTransferChunkBatchFrameV6 batchFrame = new FileTransferChunkBatchFrameV6
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                StartChunkIndex = 12,
+                ChunkCount = 2,
+                DataSegments = new byte[2][] { Enumerable.Repeat((byte)17, 1024).ToArray(), Enumerable.Repeat((byte)34, 1024).ToArray() },
+                BatchProfile = "v6_fallback_data",
+            };
+            FileTransferRuntimeUnlockPreCommitProbeAckFrame ackFrame = new FileTransferRuntimeUnlockPreCommitProbeAckFrame
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                TransactionGeneration = 2,
+                OfferGeneration = 3,
+                TunaPathLeaseGeneration = 4,
+                ProbeId = "runtime-unlock-precommit:2:3:priority",
+                TargetRoute = FileTransferRouteResolver.FileTunaV4Token,
+                TargetProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                TargetTransport = "tuna",
+                HandoffKind = "normal_to_tuna_activation",
+                SentUnixTimeMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                Accepted = true,
+                Reason = "precommit_probe_ack",
+            };
+
+            var deliverMethod = inboundSession
+                .GetType()
+                .GetMethod("Deliver", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            Assert.NotNull(deliverMethod);
+            deliverMethod.Invoke(
+                inboundSession,
+                [
+                    batchFrame,
+                    NknBridgeChannel.Bulk,
+                    FileTransferTransportKind.RegularNkn,
+                    helperClient.ConnectedBulkAddress,
+                ]);
+            deliverMethod.Invoke(
+                inboundSession,
+                [
+                    ackFrame,
+                    NknBridgeChannel.Bulk,
+                    FileTransferTransportKind.Tuna,
+                    helperClient.ConnectedBulkAddress,
+                ]);
+
+            FileTransferReceivedDataFrame first = await inboundSession.ReceiveWithMetadataAsync(cts.Token);
+            FileTransferReceivedDataFrame second = await inboundSession.ReceiveWithMetadataAsync(cts.Token);
+
+            Assert.IsType<FileTransferRuntimeUnlockPreCommitProbeAckFrame>(first.Frame);
+            Assert.IsType<FileTransferChunkBatchFrameV6>(second.Frame);
+            string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
+            Assert.Contains("event=runtime_unlock_precommit_probe_ack_receive_dispatch_attempted;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_precommit_probe_ack_receive_dispatched;", logTail, StringComparison.Ordinal);
+            Assert.Contains("frame_type=filetransfer.runtime_unlock.precommit_probe_ack", logTail, StringComparison.Ordinal);
+            Assert.Contains("priority=1", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_precommit_probe_ack_receive_dispatch_rejected;", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task NknTransport_FileTransferDataSession_RejectsBulkDataFramesWithSpoofedBridgeSource()
     {
         FakeNknClient.ResetNetwork();

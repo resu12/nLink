@@ -239,6 +239,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("secondTransferDiagnosticReadiness", cycleBody, StringComparison.Ordinal);
         Assert.Contains("second_transfer_file_tuna_v4_route_publication", cycleBody, StringComparison.Ordinal);
         Assert.Contains("continuing to require coordinator-authorized file_tuna_v4 publication", cycleBody, StringComparison.Ordinal);
+        Assert.Contains("if ($secondTransferRequiresFreshDiagnosticReadiness) {", cycleBody, StringComparison.Ordinal);
+        Assert.Contains("Tuna GUI second-transfer preactivation readiness missing", cycleBody, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -414,6 +416,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("$lastTunaInactiveIndex", guiText, StringComparison.Ordinal);
         Assert.Contains("$requiredStableReadyPolls = 4", guiText, StringComparison.Ordinal);
         Assert.Contains("$allowCoordinatorProofAfterSend", guiText, StringComparison.Ordinal);
+        Assert.Contains("$coordinatorProofAfterSendReady = $allowCoordinatorProofAfterSend -and", guiText, StringComparison.Ordinal);
+        Assert.Contains("$isReadyNow = $coordinatorProofAfterSendReady -or", guiText, StringComparison.Ordinal);
         Assert.Contains("$routeReadinessSatisfied = $allowCoordinatorProofAfterSend -or", guiText, StringComparison.Ordinal);
         Assert.Contains("$RouteMode -eq 'live-reactivation-second-transfer') -and", guiText, StringComparison.Ordinal);
         Assert.Contains("reason=prearm_after_fallback_epoch_started", guiText, StringComparison.Ordinal);
