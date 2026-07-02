@@ -347,6 +347,7 @@ internal interface IRuntimeUnlockRouteCommitProofProvider
     void NotifyRuntimeUnlockRouteCommitResult(
         string sessionId,
         string transferId,
+        FileTransferDirection direction,
         long transactionGeneration,
         long offerGeneration,
         bool accepted,

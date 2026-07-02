@@ -235,6 +235,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.DoesNotContain("-or $line.IndexOf('event=tuna_acceleration_negotiated'", summaryBody, StringComparison.Ordinal);
 
         Assert.Contains("$secondDiagnosticReadinessLine = [string](Wait-TunaGuiDiagnosticReadinessBeforeMeasuredTransfer -Bookmark $secondBookmark", cycleBody, StringComparison.Ordinal);
+        Assert.Contains("$secondSendButton = Wait-TunaGuiSecondTransferReadinessOrThrow -Window $senderWindow -Bookmark $secondBookmark", cycleBody, StringComparison.Ordinal);
         Assert.Contains("secondTransferDiagnosticReadiness", cycleBody, StringComparison.Ordinal);
         Assert.Contains("second_transfer_file_tuna_v4_route_publication", cycleBody, StringComparison.Ordinal);
         Assert.Contains("continuing to require coordinator-authorized file_tuna_v4 publication", cycleBody, StringComparison.Ordinal);
@@ -381,6 +382,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("final_off_after_reactivation", guiText, StringComparison.Ordinal);
         Assert.Contains("regular_activation_cycle_off_after_live_tuna_epoch", guiText, StringComparison.Ordinal);
         Assert.Contains("file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", guiText, StringComparison.Ordinal);
+        Assert.Contains("$terminalBeforeFallbackAllowedSequences = @(", guiText, StringComparison.Ordinal);
+        Assert.Contains("'file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4'", guiText, StringComparison.Ordinal);
+        Assert.Contains("$terminalBeforeFallbackExpectedRoutes = @($joinedRouteSequence.Split(',', [System.StringSplitOptions]::RemoveEmptyEntries))", guiText, StringComparison.Ordinal);
         Assert.Contains("regular-to-Tuna and fallback/reactivation strict live-route epoch cycling", guiText, StringComparison.Ordinal);
         Assert.Contains("filetransfer_tuna_gui_post_transfer_connected_header_wait_skipped", guiText, StringComparison.Ordinal);
         Assert.Contains("$skipPostTransferConnectedHeaderWait", guiText, StringComparison.Ordinal);
@@ -417,6 +421,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("terminal_before_same_transfer_reactivation", guiText, StringComparison.Ordinal);
         Assert.Contains("secondTransferRequiresFreshDiagnosticReadiness", guiText, StringComparison.Ordinal);
         Assert.Contains("filetransfer_tuna_gui_second_transfer_fresh_readiness_required", guiText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer_tuna_gui_second_transfer_fresh_unlock_not_completed", guiText, StringComparison.Ordinal);
+        Assert.Contains("unlockError = $secondFreshUnlockError", guiText, StringComparison.Ordinal);
         Assert.Contains("first_transfer_terminal_before_same_transfer_reactivation", guiText, StringComparison.Ordinal);
         Assert.Contains("Tuna GUI second-transfer preactivation readiness missing", guiText, StringComparison.Ordinal);
         Assert.Contains("Tuna GUI live reactivation second-transfer proof did not prove clean fallback terminal followed by second-transfer Tuna V4", guiText, StringComparison.Ordinal);

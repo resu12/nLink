@@ -354,11 +354,25 @@ public sealed partial class SessionFileTransferService
 
             context.V6LastReceiverFeedbackReceivedUtc = DateTimeOffset.UtcNow;
             var receiverProgressChanged = UpdateOutboundReceiverAcknowledgedProgressFromV4StateLocked(context, state);
-            var recoveredFromReceiverStateProof = TryRecoverOutboundV6RegularNknEpochFromPeerControlLocked(
-                context,
-                state.TransportEpoch,
-                receivedTransportKind,
-                "receiver_state_control_proof");
+            var stateCarriesPostYieldRecoveryWork =
+                state.MissingRanges.Count > 0 ||
+                !string.IsNullOrWhiteSpace(state.RepairRequestId) ||
+                !string.IsNullOrWhiteSpace(state.RecoveryMode) ||
+                !string.IsNullOrWhiteSpace(state.Priority);
+            var suppressPostYieldReceiverRecoveryWork =
+                stateCarriesPostYieldRecoveryWork &&
+                ShouldIgnoreOutboundPostYieldFallbackRecoveryFrameLocked(
+                    context,
+                    state.TransportEpoch,
+                    FileTransferProtocol.ReceiverStateFrameTypeV6,
+                    "peer_receiver_state_after_fallback_yield");
+            var recoveredFromReceiverStateProof =
+                !suppressPostYieldReceiverRecoveryWork &&
+                TryRecoverOutboundV6RegularNknEpochFromPeerControlLocked(
+                    context,
+                    state.TransportEpoch,
+                    receivedTransportKind,
+                    "receiver_state_control_proof");
             if (recoveredFromReceiverStateProof)
             {
                 TryResumeOutboundRuntimeUnlockAfterFallbackSurvivalProofLocked(
@@ -413,10 +427,12 @@ public sealed partial class SessionFileTransferService
 
                 PruneOutboundV6RequestedChunksBeforeLocked(context, context.RemoteNextExpectedChunkIndex);
                 TrimSenderRepairCacheLocked(context, context.RemoteNextExpectedChunkIndex);
-                var stateProvesFrontierGap = OutboundV6ReceiverStateRequestsCurrentFrontierLocked(
-                    context,
-                    state,
-                    receiverAdvancedFrontier);
+                var stateProvesFrontierGap =
+                    !suppressPostYieldReceiverRecoveryWork &&
+                    OutboundV6ReceiverStateRequestsCurrentFrontierLocked(
+                        context,
+                        state,
+                        receiverAdvancedFrontier);
                 if (!stateProvesFrontierGap)
                 {
                     ClearOutboundV6RegularNknInferredFrontierObservationLocked(context);
@@ -432,7 +448,14 @@ public sealed partial class SessionFileTransferService
                     previousRemoteFrontier,
                     receiverAdvancedFrontier,
                     stateRequestsFrontierGap);
-                if (stateRequestsFrontierGap)
+                if (suppressPostYieldReceiverRecoveryWork)
+                {
+                    ClearOutboundV6NormalRequestedChunksLocked(
+                        context,
+                        state.TransportEpoch,
+                        "post_yield_receiver_state_recovery_ignored");
+                }
+                else if (stateRequestsFrontierGap)
                 {
                     EnterOutboundV6RegularNknFrontierPressureLocked(context, state);
                     PreemptOutboundV6NormalPipelineForReceiverStateFrontierLocked(context, state, stateFrontierPriorityRanges);
@@ -476,7 +499,9 @@ public sealed partial class SessionFileTransferService
                     MaybeClearOutboundV6RegularNknFrontierPressureLocked(context, state, "receiver_state_empty_window");
                 }
 
-                if (stateRequestsFrontierGap && context.RemoteNextExpectedChunkIndex < context.ChunkCount)
+                if (!suppressPostYieldReceiverRecoveryWork &&
+                    stateRequestsFrontierGap &&
+                    context.RemoteNextExpectedChunkIndex < context.ChunkCount)
                 {
                     var forceRegularNknBulk =
                         !IsRecoveredOutboundV6RegularNknFrontierRepairEpoch(context, state.TransportEpoch) &&
@@ -512,7 +537,9 @@ public sealed partial class SessionFileTransferService
                         obsoleteBeforeChunkIndex: context.RemoteNextExpectedChunkIndex);
                 }
 
-                context.V6SenderPumpLastWakeReason = state.MissingRanges.Count > 0
+                context.V6SenderPumpLastWakeReason = suppressPostYieldReceiverRecoveryWork
+                    ? "post_yield_receiver_state_recovery_ignored"
+                    : state.MissingRanges.Count > 0
                     ? "receiver_state_request"
                     : state.TransferPaused
                         ? "peer_user_paused"
@@ -521,6 +548,8 @@ public sealed partial class SessionFileTransferService
                     ? GetV6TransportEpochStatus(context.V6TransportEpoch!)
                     : state.TransferPaused
                         ? "Peer paused transfer."
+                        : suppressPostYieldReceiverRecoveryWork
+                        ? "Waiting for fallback tail settlement."
                         : state.MissingRanges.Count > 0
                         ? "Sending requested V6 file data."
                         : "Waiting for V6 receiver requests.";
@@ -529,12 +558,15 @@ public sealed partial class SessionFileTransferService
                     context.V6SenderPumpLastWakeReason = "receiver_state_control_proof";
                 }
 
-                var fallbackTailYielded = TryMarkOutboundFallbackTailQuiescentOrTerminalLocked(
-                    context,
-                    state,
-                    stateRequestsFrontierGap,
-                    "receiver_state_progress",
-                    out var fallbackTerminalProofConsumed);
+                var fallbackTerminalProofConsumed = false;
+                var fallbackTailYielded =
+                    !suppressPostYieldReceiverRecoveryWork &&
+                    TryMarkOutboundFallbackTailQuiescentOrTerminalLocked(
+                        context,
+                        state,
+                        stateRequestsFrontierGap,
+                        "receiver_state_progress",
+                        out fallbackTerminalProofConsumed);
                 if (fallbackTerminalProofConsumed)
                 {
                     completeFromFallbackTerminalReady = true;

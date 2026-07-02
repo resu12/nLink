@@ -430,6 +430,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         void IRuntimeUnlockRouteCommitProofProvider.NotifyRuntimeUnlockRouteCommitResult(
             string sessionId,
             string transferId,
+            FileTransferDirection direction,
             long transactionGeneration,
             long offerGeneration,
             bool accepted,

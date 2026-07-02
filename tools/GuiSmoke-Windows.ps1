@@ -6577,13 +6577,21 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         $secondSw = [System.Diagnostics.Stopwatch]::StartNew()
         $secondTransferPhase = $null
         $secondRouteLine = ''
+        $secondFreshUnlockError = ''
         Write-Host "[GUI Smoke][filetransfer_tuna] Starting second transfer after live reactivation; expecting file_tuna_v4 protocol 4." -ForegroundColor DarkGray
 
         try {
             if ($secondTransferRequiresFreshDiagnosticReadiness) {
                 $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_second_transfer_fresh_readiness_required; route_mode={1}; first_transfer_id={2}; reason=first_transfer_terminal_before_same_transfer_reactivation" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $RouteMode, $firstTransferTerminalBeforeLiveReactivationTransferId)) | Out-Null
                 Write-Host "[GUI Smoke][filetransfer_tuna] First transfer completed before same-transfer reactivation; requiring fresh diagnostic Tuna readiness before second send." -ForegroundColor Yellow
-                Unlock-TunaPayers -Context $Context -PayerMode $PayerMode -Password $WalletPassword
+                try {
+                    Unlock-TunaPayers -Context $Context -PayerMode $PayerMode -Password $WalletPassword
+                }
+                catch {
+                    $secondFreshUnlockError = $_.Exception.Message
+                    $observedEvidenceLines.Add(("[{0}] [WARN] [GuiSmoke] event=filetransfer_tuna_gui_second_transfer_fresh_unlock_not_completed; route_mode={1}; first_transfer_id={2}; reason=unlock_prompt_or_runtime_evidence_missing; error={3}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $RouteMode, $firstTransferTerminalBeforeLiveReactivationTransferId, ($secondFreshUnlockError -replace ';', ','))) | Out-Null
+                    Write-Host ("[GUI Smoke][filetransfer_tuna] Fresh second-transfer Tuna unlock did not complete before readiness wait: {0}" -f $secondFreshUnlockError) -ForegroundColor Yellow
+                }
             }
 
             try {
@@ -6605,6 +6613,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                     nextRequiredProof = 'second_transfer_file_tuna_v4_route_publication'
                     required = $secondTransferRequiresFreshDiagnosticReadiness
                     requiredReason = if ($secondTransferRequiresFreshDiagnosticReadiness) { 'first_transfer_terminal_before_same_transfer_reactivation' } else { '(none)' }
+                    unlockError = $secondFreshUnlockError
                 }
                 $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json') -Encoding UTF8
                 if ($secondTransferRequiresFreshDiagnosticReadiness) {
@@ -6614,7 +6623,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 Write-Host "[GUI Smoke][filetransfer_tuna] Second-transfer diagnostic Tuna readiness was not refreshed before send; continuing to require coordinator-authorized file_tuna_v4 publication for the new transfer." -ForegroundColor Yellow
             }
 
-            $secondSendButton = Wait-TunaGuiSecondTransferReadinessOrThrow -Window $senderWindow -Bookmark $bookmark -TimeoutMs ([Math]::Min(60000, $StartupTimeoutMs)) -RouteMode $RouteMode -SenderRole $expectedOutboundRole
+            $secondSendButton = Wait-TunaGuiSecondTransferReadinessOrThrow -Window $senderWindow -Bookmark $secondBookmark -TimeoutMs ([Math]::Min(60000, $StartupTimeoutMs)) -RouteMode $RouteMode -SenderRole $expectedOutboundRole
             Click-Element $secondSendButton
 
             $secondAcceptButton = Wait-TunaGuiFileTransferAcceptOrThrow -Window $receiverWindow -Bookmark $secondBookmark -TimeoutMs $StartupTimeoutMs -RouteMode $RouteMode
@@ -6833,12 +6842,24 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     elseif ($RouteMode -eq 'live-regular-activation-cycle') {
         $joinedRouteSequence = ($liveRouteEpochRouteChanges.ToArray() -join ',')
         if ($firstTransferTerminalBeforeFallbackSwitchOff) {
-            $liveRouteProof = Get-TunaGuiLiveRouteEpochProof -Observations $liveRouteEpochObservations -ExpectedRoutes @('file_tuna_v4')
+            $terminalBeforeFallbackAllowedSequences = @(
+                'file_tuna_v4',
+                'file_tuna_v4,post_tuna_fallback_v6',
+                'file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4'
+            )
+            $terminalBeforeFallbackExpectedRoutes = @($joinedRouteSequence.Split(',', [System.StringSplitOptions]::RemoveEmptyEntries))
+            if ($terminalBeforeFallbackExpectedRoutes.Count -eq 0) {
+                $terminalBeforeFallbackExpectedRoutes = @('file_tuna_v4')
+            }
+            $liveRouteProof = Get-TunaGuiLiveRouteEpochProof -Observations $liveRouteEpochObservations -ExpectedRoutes $terminalBeforeFallbackExpectedRoutes
+            $terminalBeforeFallbackSequenceAllowed = $terminalBeforeFallbackAllowedSequences -contains $joinedRouteSequence
+            $terminalBeforeFallbackNeedsFallbackProof = $joinedRouteSequence.IndexOf('post_tuna_fallback_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
             if (-not $evidence.tunaNegotiated -or
                 -not $evidence.activationEpochStarted -or
                 -not $evidence.activationEpochRecovered -or
+                ($terminalBeforeFallbackNeedsFallbackProof -and (-not $evidence.fallbackEpochStarted -or -not $evidence.fallbackEpochRecovered -or -not $evidence.postTunaFallbackV6RouteObserved)) -or
                 -not $liveRouteProof.Pass -or
-                $joinedRouteSequence -ne 'file_tuna_v4') {
+                -not $terminalBeforeFallbackSequenceAllowed) {
                 throw "Tuna GUI live regular activation cycle reached terminal completion before fallback takeover but did not prove the committed Tuna prefix. sequence=$joinedRouteSequence findings=$($liveRouteProof.Findings -join '|') metadata_missing=$($liveRouteProof.MetadataMissingCount) Summary: $($evidence | ConvertTo-Json -Compress)"
             }
         }

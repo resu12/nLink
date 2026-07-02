@@ -8246,7 +8246,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         string reason)
         => LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_tail_reconciliation_accepted; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; leg_id={FormatProtocolLogValue(leg.LegId)}; leg_generation={leg.Generation}; route={leg.RouteSelection.TelemetryToken}; protocol_version={leg.ProtocolVersion}; live_route_epoch={leg.LiveRouteEpochId}; transport_epoch={leg.TransportEpochId}; checkpoint_request_id={FormatProtocolLogValue(checkpointRequestId ?? "(none)")}; proven_committed_chunk={leg.ProvenCommittedChunkIndex}; proven_highest_observed_chunk={leg.ProvenHighestObservedChunkIndex}; receiver_committed_chunk={state.ContiguousCommittedChunkIndex}; receiver_highest_observed_chunk={state.DurableReceivedHighestChunkIndex}; receiver_credit_until_chunk_index_exclusive={state.CreditUntilChunkIndexExclusive}; priority={FormatProtocolLogValue(priority ?? "(none)")}; reason={FormatProtocolLogValue(reason)}");
+            $"event=filetransfer_fallback_tail_reconciliation_accepted; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; leg_id={FormatProtocolLogValue(leg.LegId)}; leg_generation={leg.Generation}; route={leg.RouteSelection.TelemetryToken}; protocol_version={leg.ProtocolVersion}; live_route_epoch={leg.LiveRouteEpochId}; transport_epoch={leg.TransportEpochId}; peer_transport_epoch={state.TransportEpoch}; checkpoint_request_id={FormatProtocolLogValue(checkpointRequestId ?? "(none)")}; proven_committed_chunk={leg.ProvenCommittedChunkIndex}; proven_highest_observed_chunk={leg.ProvenHighestObservedChunkIndex}; receiver_committed_chunk={state.ContiguousCommittedChunkIndex}; receiver_highest_observed_chunk={state.DurableReceivedHighestChunkIndex}; receiver_credit_until_chunk_index_exclusive={state.CreditUntilChunkIndexExclusive}; priority={FormatProtocolLogValue(priority ?? "(none)")}; reason={FormatProtocolLogValue(reason)}");
 
     private static void LogFileTransferFallbackTailQuiescentYieldGranted(
         FileTransferDirection direction,
@@ -13646,12 +13646,15 @@ public sealed partial class SessionFileTransferService : IDisposable
             plainTailReconciliationProof ||
             IsPostTunaFallbackTailReconciliationStateRefresh(state) ||
             string.Equals(currentLeg.CheckpointPriority, V6RegularNknStateRefreshTailReconciliationPriority, StringComparison.Ordinal);
+        var acceptedTransportEpoch = plainTailReconciliationProof && currentLeg.TransportEpochId > 0
+            ? currentLeg.TransportEpochId
+            : state.TransportEpoch;
 
         var acceptedCommitted = Math.Clamp(state.ContiguousCommittedChunkIndex, 0, Math.Max(0, context.ChunkCount));
         if (!TryAcceptOutboundFallbackCheckpointWithCoordinatorLocked(
                 context,
                 currentLeg,
-                state.TransportEpoch,
+                acceptedTransportEpoch,
                 acceptedCommitted,
                 state.DurableReceivedHighestChunkIndex,
                 acceptedCheckpointRequestId,
@@ -13660,15 +13663,15 @@ public sealed partial class SessionFileTransferService : IDisposable
             return false;
         }
 
-        RememberRetiredFallbackCheckpointRequest(context.RetiredFallbackCheckpointRequestKeys, currentLeg, state.TransportEpoch, acceptedCheckpointRequestId);
+        RememberRetiredFallbackCheckpointRequest(context.RetiredFallbackCheckpointRequestKeys, currentLeg, acceptedTransportEpoch, acceptedCheckpointRequestId);
         ClearOutboundFallbackCheckpointRetryStateLocked(context, acceptedCheckpointRequestId, "checkpoint_accepted");
         ClearOutboundFallbackCheckpointDeliveryRecoveryPendingLocked(context, "checkpoint_accepted");
         MarkOutboundFallbackCheckpointRepairAuthorityAcceptedLocked(
             context,
             currentLeg,
             acceptedCheckpointRequestId,
-            state.TransportEpoch);
-        ClearStaleOutboundFallbackTransportEpochAfterCheckpointLocked(context, currentLeg, state.TransportEpoch, reason);
+            acceptedTransportEpoch);
+        ClearStaleOutboundFallbackTransportEpochAfterCheckpointLocked(context, currentLeg, acceptedTransportEpoch, reason);
         LogFileTransferFallbackCheckpointAccepted(
             FileTransferDirection.Outbound,
             context.TransferId,

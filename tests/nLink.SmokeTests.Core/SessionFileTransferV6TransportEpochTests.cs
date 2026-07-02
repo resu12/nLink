@@ -93,6 +93,21 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             FileTransferTransportKind.RegularNkn);
         await WaitUntilAsync(() => senderTransport.SentTransportEpochs.Any(), timeoutMs: 5000);
         var epoch = senderTransport.SentTransportEpochs.Last();
+        var context = typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(sender);
+        Assert.NotNull(context);
+        var handoffType = typeof(SessionFileTransferService).Assembly.GetType("NLink.Core.FileTransfer.TransportHandoffEpoch");
+        Assert.NotNull(handoffType);
+        var legacyHandoff = Activator.CreateInstance(handoffType!)!;
+        SetPrivateProperty(legacyHandoff, "EpochId", epoch.TransportEpoch);
+        SetPrivateProperty(legacyHandoff, "Kind", FileTransferTransportHandoffKind.TunaToNormalFallback);
+        SetPrivateProperty(legacyHandoff, "SourceTransport", FileTransferTransportKind.Tuna);
+        SetPrivateProperty(legacyHandoff, "TargetTransport", FileTransferTransportKind.RegularNkn);
+        SetPrivateProperty(legacyHandoff, "Direction", FileTransferDirection.Outbound);
+        SetPrivateProperty(legacyHandoff, "Reason", "legacy_tuna_to_normal_fallback");
+        SetPrivateProperty(legacyHandoff, "State", V6TransportHandoffState.FrontierRepairOnly);
+        SetPrivateProperty(context!, "V6TransportHandoff", legacyHandoff);
 
         senderTransport.NextDataFrameTransportKind = FileTransferTransportKind.RegularNkn;
         await receiverSession.SendAsync(
@@ -119,6 +134,10 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         Assert.Contains("event=filetransfer_v6_epoch_recovered; direction=outbound", logTail, StringComparison.Ordinal);
         Assert.Contains("handoff_kind=tuna_to_normal_fallback", logTail, StringComparison.Ordinal);
         Assert.Contains("target_transport=regular_nkn", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v6_legacy_handoff_retired_by_transport_epoch; direction=outbound", logTail, StringComparison.Ordinal);
+        Assert.Null(context!.GetType()
+            .GetProperty("V6TransportHandoff", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(context));
     }
 
     [Fact]

@@ -2651,10 +2651,49 @@ public sealed partial class SessionFileTransferService
         }
 
         var admission = RequestRuntimeUnlockAdmissionLocked(context, "fallback_survival_resume", reason);
-        if (context.IsTerminal ||
-            !context.RouteRuntime.UsesPostTunaFallbackV6Runtime ||
-            !admission.Granted)
+        if (context.IsTerminal)
         {
+            LogRuntimeUnlockFallbackSurvivalResumeRejected(
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentTransferLeg,
+                reason,
+                "terminal_context",
+                admission);
+            return;
+        }
+
+        if (!context.RouteRuntime.UsesPostTunaFallbackV6Runtime)
+        {
+            LogRuntimeUnlockFallbackSurvivalResumeRejected(
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentTransferLeg,
+                reason,
+                "route_not_post_tuna_fallback",
+                admission);
+            return;
+        }
+
+        if (!admission.Granted)
+        {
+            var rejectionReason = FormatRuntimeUnlockFallbackAdmissionRejection(
+                FileTransferDirection.Outbound,
+                admission);
+            MarkOutboundRuntimeUnlockWaitingForFallbackSurvivalLocked(
+                context,
+                reason,
+                rejectionReason);
+            LogRuntimeUnlockFallbackSurvivalResumeHeld(
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentTransferLeg,
+                reason,
+                rejectionReason,
+                admission);
             return;
         }
 
@@ -2672,10 +2711,49 @@ public sealed partial class SessionFileTransferService
         }
 
         var admission = RequestRuntimeUnlockAdmissionLocked(context, "fallback_survival_resume", reason);
-        if (context.IsTerminal ||
-            !context.RouteRuntime.UsesPostTunaFallbackV6Runtime ||
-            !admission.Granted)
+        if (context.IsTerminal)
         {
+            LogRuntimeUnlockFallbackSurvivalResumeRejected(
+                FileTransferDirection.Inbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentTransferLeg,
+                reason,
+                "terminal_context",
+                admission);
+            return;
+        }
+
+        if (!context.RouteRuntime.UsesPostTunaFallbackV6Runtime)
+        {
+            LogRuntimeUnlockFallbackSurvivalResumeRejected(
+                FileTransferDirection.Inbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentTransferLeg,
+                reason,
+                "route_not_post_tuna_fallback",
+                admission);
+            return;
+        }
+
+        if (!admission.Granted)
+        {
+            var rejectionReason = FormatRuntimeUnlockFallbackAdmissionRejection(
+                FileTransferDirection.Inbound,
+                admission);
+            MarkInboundRuntimeUnlockWaitingForFallbackSurvivalLocked(
+                context,
+                reason,
+                rejectionReason);
+            LogRuntimeUnlockFallbackSurvivalResumeHeld(
+                FileTransferDirection.Inbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentTransferLeg,
+                reason,
+                rejectionReason,
+                admission);
             return;
         }
 
@@ -2829,6 +2907,58 @@ public sealed partial class SessionFileTransferService
         => LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_runtime_unlock_waiting_for_fallback_survival; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; reason={FormatProtocolLogValue(reason)}; rejection_reason={FormatProtocolLogValue(rejectionReason)}; leg_id={FormatProtocolLogValue(leg?.LegId ?? "(none)")}; leg_generation={leg?.Generation ?? 0}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? "(none)")}; protocol_version={leg?.ProtocolVersion ?? 0}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(leg?.CheckpointRequestId ?? "(none)")}; state={FormatProtocolLogValue(leg is null ? "none" : FormatFileTransferLegState(leg.State))}; can_send_data={(leg?.CanSendData == true ? 1 : 0)}");
+
+    private static void LogRuntimeUnlockFallbackSurvivalResumeHeld(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        FileTransferLeg? leg,
+        string reason,
+        string rejectionReason,
+        RuntimeUnlockAdmissionDecision admission)
+        => LogRuntimeUnlockFallbackSurvivalResumeOutcome(
+            "filetransfer_runtime_unlock_fallback_survival_resume_held",
+            direction,
+            transferId,
+            sessionId,
+            leg,
+            reason,
+            rejectionReason,
+            admission);
+
+    private static void LogRuntimeUnlockFallbackSurvivalResumeRejected(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        FileTransferLeg? leg,
+        string reason,
+        string rejectionReason,
+        RuntimeUnlockAdmissionDecision admission)
+        => LogRuntimeUnlockFallbackSurvivalResumeOutcome(
+            "filetransfer_runtime_unlock_fallback_survival_resume_rejected",
+            direction,
+            transferId,
+            sessionId,
+            leg,
+            reason,
+            rejectionReason,
+            admission);
+
+    private static void LogRuntimeUnlockFallbackSurvivalResumeOutcome(
+        string eventName,
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        FileTransferLeg? leg,
+        string reason,
+        string rejectionReason,
+        RuntimeUnlockAdmissionDecision admission)
+    {
+        var survival = admission.FallbackSurvivalState;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event={eventName}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; reason={FormatProtocolLogValue(reason)}; rejection_reason={FormatProtocolLogValue(rejectionReason)}; admission_generation={admission.AdmissionToken?.AdmissionGeneration ?? 0}; admission_reason={FormatProtocolLogValue(admission.Reason)}; route={FormatProtocolLogValue(FormatRuntimeUnlockAdmissionRouteToken(admission.CurrentRoute))}; protocol_version={admission.CurrentProtocolVersion}; live_route_epoch={admission.CurrentLiveRouteEpoch}; runtime_generation={admission.CurrentRuntimeGeneration}; terminal_generation={admission.CurrentTerminalGeneration}; leg_generation={admission.CurrentLegGeneration}; leg_id={FormatProtocolLogValue(leg?.LegId ?? "(none)")}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(leg?.CheckpointRequestId ?? "(none)")}; fallback_active={(survival.FallbackActive ? 1 : 0)}; fallback_current={(survival.FallbackCurrent ? 1 : 0)}; fallback_terminalized={(survival.FallbackTerminalized ? 1 : 0)}; checkpoint_delivery_recovery_pending={(survival.CheckpointDeliveryRecoveryPending ? 1 : 0)}; state_refresh_send_in_flight={(survival.StateRefreshSendInFlight ? 1 : 0)}; deferred_state_refresh_pending={(survival.DeferredStateRefreshPending ? 1 : 0)}; proof_replay_pending={(survival.ProofReplayPending ? 1 : 0)}; control_plane_pressure_pending={(survival.ControlPlanePressurePending ? 1 : 0)}; bridge_recovery_pending={(survival.BridgeRecoveryPending ? 1 : 0)}; fallback_tail_repair_pending={(survival.FallbackTailRepairPending ? 1 : 0)}; paired_fallback_yield_granted={(survival.PairedFallbackYieldGranted ? 1 : 0)}");
+    }
 
     private static void LogRuntimeUnlockAdmissionDecision(
         FileTransferDirection direction,
@@ -3296,6 +3426,7 @@ public sealed partial class SessionFileTransferService
                 proofProvider.NotifyRuntimeUnlockRouteCommitResult(
                     sessionId,
                     transferId,
+                    direction,
                     routeCommitToken.TransactionGeneration,
                     routeCommitToken.OfferGeneration,
                     accepted: true,

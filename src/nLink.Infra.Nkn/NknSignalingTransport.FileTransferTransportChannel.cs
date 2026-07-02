@@ -1004,6 +1004,29 @@ public sealed partial class NknSignalingTransport
                     frameType,
                     requireAcceleratedBulk,
                     runtimeUnlockPreCommitAckAuthority is not null);
+            if (runtimeUnlockPreCommitProbeAuthority is { } probeAuthority)
+            {
+                sentViaAcceleration = await TrySendRuntimeUnlockPreCommitProbeWithAuthorityAsync(
+                        messageType,
+                        NknBridgeChannel.Bulk,
+                        transportPayload,
+                        probeAuthority,
+                        ct)
+                    .ConfigureAwait(false);
+
+                if (requireAcceleratedBulk && !sentViaAcceleration)
+                {
+                    LogRuntimeUnlockPreCommitProbeDeliveryOnce(
+                        FileTransferTransportKind.Unknown,
+                        "rejected",
+                        "required_tuna_bulk_unavailable");
+                    LocalOperationalLog.Warn(
+                        "SessionSecurity",
+                        $"event=filetransfer_required_tuna_bulk_send_not_observed; transport=nkn; message_type={MapSecureFileTransferMessageType(messageType)}; frame_type={frameType ?? "(none)"}; transfer_id={normalizedTransferId}; force_regular_nkn_bulk={(forceRegularNknBulk ? 1 : 0)}{dataPathAuthoritySuffix}");
+                    throw CreateRequiredTunaBulkUnavailableException(normalizedTransferId);
+                }
+            }
+
             if (runtimeUnlockPreCommitAckAuthority is { } ackAuthority)
             {
                 sentViaAcceleration = await TrySendRuntimeUnlockPreCommitAckWithAuthorityAsync(
@@ -1130,6 +1153,72 @@ public sealed partial class NknSignalingTransport
         }
 
         return new FileTransferRequiredTunaBulkUnavailableException(reason);
+    }
+
+    private async Task<bool> TrySendRuntimeUnlockPreCommitProbeWithAuthorityAsync(
+        MsgType messageType,
+        NknBridgeChannel channel,
+        byte[] envelopeBytes,
+        RuntimeUnlockPreCommitProbeSendAuthority authority,
+        CancellationToken ct)
+    {
+        if (messageType != MsgType.FileTransferDataFrame ||
+            channel != NknBridgeChannel.Bulk)
+        {
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=runtime_unlock_precommit_probe_authority_failed; session_id={SanitizeLogToken(authority.SessionId)}; transfer_id={SanitizeLogToken(authority.TransferId)}; transaction_generation={authority.TransactionGeneration}; offer_generation={authority.OfferGeneration}; tuna_path_lease_generation={authority.TunaPathLeaseGeneration}; probe_id={SanitizeLogToken(authority.ProbeId)}; reason=invalid_message_or_channel; message_type={MapEnvelopeTypeForDiagnostics(messageType)}; channel={MapBridgeChannel(channel)}");
+            return false;
+        }
+
+        var laneClient = accelerationLane;
+        if (laneClient is null || !laneClient.IsAvailable)
+        {
+            var diagnostics = laneClient?.GetDiagnosticsSnapshot();
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=runtime_unlock_precommit_probe_authority_failed; session_id={SanitizeLogToken(authority.SessionId)}; transfer_id={SanitizeLogToken(authority.TransferId)}; transaction_generation={authority.TransactionGeneration}; offer_generation={authority.OfferGeneration}; tuna_path_lease_generation={authority.TunaPathLeaseGeneration}; probe_id={SanitizeLogToken(authority.ProbeId)}; reason=lane_unavailable; lane_available={(diagnostics?.IsAvailable == true ? 1 : 0)}; last_unavailable_reason={SanitizeLogToken(diagnostics?.LastUnavailableReason ?? "none")}; terminal_sidecar_reason={SanitizeLogToken(diagnostics?.TerminalSidecarReason ?? "none")}");
+            return false;
+        }
+
+        try
+        {
+            var sent = await laneClient.TrySendAsync(channel, envelopeBytes, ct).ConfigureAwait(false);
+            if (sent)
+            {
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=runtime_unlock_precommit_probe_authority_sent; transport=tuna; session_id={SanitizeLogToken(authority.SessionId)}; transfer_id={SanitizeLogToken(authority.TransferId)}; transaction_generation={authority.TransactionGeneration}; offer_generation={authority.OfferGeneration}; tuna_path_lease_generation={authority.TunaPathLeaseGeneration}; probe_id={SanitizeLogToken(authority.ProbeId)}; channel={MapBridgeChannel(channel)}; payload_bytes={envelopeBytes.Length}");
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=tuna_accelerated_envelope_sent; message_type={MapEnvelopeTypeForDiagnostics(messageType)}; channel={MapBridgeChannel(channel)}; payload_bytes={envelopeBytes.Length}; source=runtime_unlock_precommit_probe_authority");
+                return true;
+            }
+
+            var diagnostics = laneClient.GetDiagnosticsSnapshot();
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                "event=runtime_unlock_precommit_probe_authority_failed" +
+                $"; session_id={SanitizeLogToken(authority.SessionId)}" +
+                $"; transfer_id={SanitizeLogToken(authority.TransferId)}" +
+                $"; transaction_generation={authority.TransactionGeneration}" +
+                $"; offer_generation={authority.OfferGeneration}" +
+                $"; tuna_path_lease_generation={authority.TunaPathLeaseGeneration}" +
+                $"; probe_id={SanitizeLogToken(authority.ProbeId)}" +
+                "; reason=try_send_rejected" +
+                $"; lane_available={(diagnostics.IsAvailable ? 1 : 0)}" +
+                $"; last_unavailable_reason={SanitizeLogToken(diagnostics.LastUnavailableReason)}" +
+                $"; terminal_sidecar_reason={SanitizeLogToken(diagnostics.TerminalSidecarReason)}" +
+                $"; send_rejected={diagnostics.SendRejected}");
+            return false;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=runtime_unlock_precommit_probe_authority_failed; session_id={SanitizeLogToken(authority.SessionId)}; transfer_id={SanitizeLogToken(authority.TransferId)}; transaction_generation={authority.TransactionGeneration}; offer_generation={authority.OfferGeneration}; tuna_path_lease_generation={authority.TunaPathLeaseGeneration}; probe_id={SanitizeLogToken(authority.ProbeId)}; reason=exception; error={ex.GetType().Name}");
+            return false;
+        }
     }
 
     private bool TryGetCurrentFileTransferDataSessionAvailabilityReason(string transferId, out string reason)

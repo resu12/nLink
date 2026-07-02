@@ -2209,6 +2209,7 @@ public sealed partial class SessionFileTransferService
                 proofProvider.NotifyRuntimeUnlockRouteCommitResult(
                     sessionId,
                     transferId,
+                    direction,
                     ack.TransactionGeneration,
                     ack.OfferGeneration,
                     accepted: false,
@@ -2440,6 +2441,7 @@ public sealed partial class SessionFileTransferService
         proofProvider.NotifyRuntimeUnlockRouteCommitResult(
             sessionId,
             transferId,
+            direction,
             transactionGeneration,
             offerGeneration,
             accepted: true,
@@ -4651,6 +4653,12 @@ public sealed partial class SessionFileTransferService
         context.PullTransportSafetyReplayRearmCount = 0;
         context.PullTransportFrontierOnlyRepairActive = false;
         context.PullTransportFrontierOnlyRepairStartChunkIndex = -1;
+        TryRetireOutboundV6TransportHandoffAfterEpochRecoveryLocked(
+            context,
+            epoch!,
+            reason,
+            context.RemoteNextExpectedChunkIndex,
+            observedHighestChunkIndex);
         if (restoreDiagnosticSenderTail &&
             diagnosticSenderTailExclusive > context.ChunksAcceptedForTransport)
         {
@@ -4729,6 +4737,12 @@ public sealed partial class SessionFileTransferService
         context.PullTransportGraceDeadlineUtc = null;
         context.PullTransportPauseReason = null;
         context.PullTransportResumeRequestPending = false;
+        TryRetireInboundV6TransportHandoffAfterEpochRecoveryLocked(
+            context,
+            epoch!,
+            reason,
+            context.NextChunkIndex,
+            context.PullHighestReceivedChunkIndex);
         if (epoch.Kind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
             epoch.TargetTransport == FileTransferTransportKind.RegularNkn &&
             IsCurrentPostTunaFallbackLegCheckpointPending(context.CurrentTransferLeg))
@@ -4800,6 +4814,78 @@ public sealed partial class SessionFileTransferService
 
         return true;
     }
+
+    private static bool TryRetireOutboundV6TransportHandoffAfterEpochRecoveryLocked(
+        OutboundTransferContext context,
+        V6TransportEpoch epoch,
+        string reason,
+        int committedChunkIndex,
+        int highestObservedChunkIndex)
+    {
+        var handoff = context.V6TransportHandoff;
+        if (!IsMatchingV6TransportHandoffForRecoveredEpoch(handoff, epoch))
+        {
+            return false;
+        }
+
+        TrySetV6TransportHandoffState(
+            handoff,
+            FileTransferDirection.Outbound,
+            context.TransferId,
+            context.SessionId,
+            V6TransportHandoffState.Recovered,
+            $"transport_epoch_completed_{reason}",
+            committedChunkIndex,
+            highestObservedChunkIndex);
+        context.LastRecoveredV6TransportHandoffEpoch = Math.Max(
+            context.LastRecoveredV6TransportHandoffEpoch,
+            handoff!.EpochId);
+        context.V6TransportHandoff = null;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_v6_legacy_handoff_retired_by_transport_epoch; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={epoch.EpochId}; handoff_kind={FormatFileTransferTransportHandoffKind(epoch.Kind)}; source_transport={FormatFileTransferTransportKind(epoch.SourceTransport)}; target_transport={FormatFileTransferTransportKind(epoch.TargetTransport)}; reason={FormatProtocolLogValue(reason)}; committed_chunk={committedChunkIndex}; highest_observed_chunk={highestObservedChunkIndex}");
+        return true;
+    }
+
+    private static bool TryRetireInboundV6TransportHandoffAfterEpochRecoveryLocked(
+        InboundTransferContext context,
+        V6TransportEpoch epoch,
+        string reason,
+        int committedChunkIndex,
+        int highestObservedChunkIndex)
+    {
+        var handoff = context.V6TransportHandoff;
+        if (!IsMatchingV6TransportHandoffForRecoveredEpoch(handoff, epoch))
+        {
+            return false;
+        }
+
+        TrySetV6TransportHandoffState(
+            handoff,
+            FileTransferDirection.Inbound,
+            context.TransferId,
+            context.SessionId,
+            V6TransportHandoffState.Recovered,
+            $"transport_epoch_completed_{reason}",
+            committedChunkIndex,
+            highestObservedChunkIndex);
+        context.LastRecoveredV6TransportHandoffEpoch = Math.Max(
+            context.LastRecoveredV6TransportHandoffEpoch,
+            handoff!.EpochId);
+        context.V6TransportHandoff = null;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_v6_legacy_handoff_retired_by_transport_epoch; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={epoch.EpochId}; handoff_kind={FormatFileTransferTransportHandoffKind(epoch.Kind)}; source_transport={FormatFileTransferTransportKind(epoch.SourceTransport)}; target_transport={FormatFileTransferTransportKind(epoch.TargetTransport)}; reason={FormatProtocolLogValue(reason)}; committed_chunk={committedChunkIndex}; highest_observed_chunk={highestObservedChunkIndex}");
+        return true;
+    }
+
+    private static bool IsMatchingV6TransportHandoffForRecoveredEpoch(
+        TransportHandoffEpoch? handoff,
+        V6TransportEpoch epoch)
+        => handoff is not null &&
+           handoff.EpochId == epoch.EpochId &&
+           handoff.Kind == epoch.Kind &&
+           handoff.TargetTransport == epoch.TargetTransport;
 
     private void ScheduleOutboundV6TransportEpochProofTimeout(OutboundTransferContext context, long epochId)
         => _ = RunOutboundV6TransportEpochProofTimeoutAsync(context, epochId);
