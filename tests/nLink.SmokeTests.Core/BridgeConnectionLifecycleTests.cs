@@ -2929,7 +2929,8 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 "test_regular_v4_credit_frontier_pressure",
                 creditExhaustedTimeMs: 42_000,
                 frontierLagChunks: 512,
-                pendingRepairCount: 4);
+                pendingRepairCount: 4,
+                repairAuthority: CreateRegularV4FrontierRepairAuthority("transfer-control-regular-v4-pressure"));
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             await adapter.ConnectAsync(cts.Token);
 
@@ -3636,7 +3637,8 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 "regular_v4_receiver_frontier_repair_due",
                 creditExhaustedTimeMs: 0,
                 frontierLagChunks: 128,
-                pendingRepairCount: 8);
+                pendingRepairCount: 8,
+                repairAuthority: CreateRegularV4FrontierRepairAuthority("transfer-regular-v4-feedback-pressure"));
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
             await adapter.ConnectAsync(cts.Token);
 
@@ -3745,7 +3747,8 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 "regular_v4_receiver_frontier_repair_due",
                 creditExhaustedTimeMs: 0,
                 frontierLagChunks: 128,
-                pendingRepairCount: 8);
+                pendingRepairCount: 8,
+                repairAuthority: CreateRegularV4FrontierRepairAuthority("transfer-regular-v4-bulk-recent"));
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
             await adapter.ConnectAsync(cts.Token);
 
@@ -4113,7 +4116,8 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 "regular_v4_receiver_frontier_repair_due",
                 creditExhaustedTimeMs: 0,
                 frontierLagChunks: 12,
-                pendingRepairCount: 12);
+                pendingRepairCount: 12,
+                repairAuthority: CreateRegularV4FrontierRepairAuthority("transfer-regular-v4-unproven-escalation"));
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
             await adapter.ConnectAsync(cts.Token);
             var nowTick = Stopwatch.GetTimestamp();
@@ -6905,5 +6909,35 @@ rl.on('line', (line) => {{
             bridgeDecisionGeneration,
             "BridgeReceiveStallRecovery",
             reason);
+
+    private static FileTransferRegularV4FrontierRepairAuthority CreateRegularV4FrontierRepairAuthority(
+        string transferId,
+        string sessionId = "test-session",
+        string repairKey = "regular-v4-frontier:0:12",
+        int frontierChunkIndex = 0,
+        int durableReceivedHighestChunkIndex = -1,
+        int pendingRepairCount = 8,
+        int decisionGeneration = 1)
+        => new(
+            sessionId,
+            transferId,
+            FileTransferDirection.Outbound,
+            FileTransferRouteResolver.RegularNknV4FastToken,
+            FileTransferProtocol.ProtocolVersionV4,
+            LiveRouteEpoch: 1,
+            RuntimeGeneration: 1,
+            TerminalGeneration: 0,
+            LegGeneration: 1,
+            TransportEpoch: 1,
+            BridgeRecoveryGeneration: 1,
+            BridgeDecisionGeneration: 1,
+            RoutePublicationGeneration: 1,
+            RouteCommitGeneration: null,
+            repairKey,
+            frontierChunkIndex,
+            durableReceivedHighestChunkIndex,
+            pendingRepairCount,
+            decisionGeneration,
+            "test_regular_v4_frontier_repair_authority");
 
 }

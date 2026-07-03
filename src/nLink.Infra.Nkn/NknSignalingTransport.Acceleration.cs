@@ -1848,7 +1848,8 @@ public sealed partial class NknSignalingTransport
             reason,
             pressure.CreditExhaustedTimeMs,
             pressure.FrontierLagChunks,
-            pressure.PendingRepairCount);
+            pressure.PendingRepairCount,
+            pressure.RepairAuthority);
     }
 
     public void ObservePostTunaFallbackControlPlanePressure(FileTransferPostTunaFallbackControlPlanePressure pressure)

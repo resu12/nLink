@@ -6585,6 +6585,12 @@ function New-FileTransferStabilityGateSummaryLines {
         ("regular_v4_frontier_rebind_rejected_count={0}" -f $recoveryClassification.RegularV4FrontierRebindRejectedCount),
         ("regular_v4_frontier_stall_missing_range_count={0}" -f $recoveryClassification.RegularV4FrontierStallMissingRangeCount),
         ("regular_v4_repair_requested_count={0}" -f $recoveryClassification.RegularV4RepairRequestedCount),
+        ("regular_v4_frontier_repair_authority_granted_count={0}" -f $recoveryClassification.RegularV4FrontierRepairAuthorityGrantedCount),
+        ("regular_v4_frontier_repair_authority_rejected_count={0}" -f $recoveryClassification.RegularV4FrontierRepairAuthorityRejectedCount),
+        ("regular_v4_frontier_repair_dispatched_count={0}" -f $recoveryClassification.RegularV4FrontierRepairDispatchedCount),
+        ("regular_v4_frontier_repair_progress_observed_count={0}" -f $recoveryClassification.RegularV4FrontierRepairProgressObservedCount),
+        ("regular_v4_frontier_repair_stalled_count={0}" -f $recoveryClassification.RegularV4FrontierRepairStalledCount),
+        ("regular_v4_frontier_repair_verdict={0}" -f $recoveryClassification.RegularV4FrontierRepairVerdict),
         ("regular_v4_repair_cache_pressure_count={0}" -f $recoveryClassification.RegularV4RepairCachePressureCount),
         ("listener_ready_unavailable_contradiction_count={0}" -f $recoveryClassification.ListenerReadyUnavailableContradictionCount),
         ("listener_rearm_required_count={0}" -f $recoveryClassification.ListenerRearmRequiredCount),
@@ -7447,6 +7453,21 @@ function Get-FileTransferRecoveryFailureClassification {
     $regularV4RepairRequestedEvents = @($events | Where-Object {
         $_.EventName -eq 'filetransfer_v4_repair_requested'
     })
+    $regularV4FrontierRepairAuthorityGrantedEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_authority_granted'
+    })
+    $regularV4FrontierRepairAuthorityRejectedEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_authority_rejected'
+    })
+    $regularV4FrontierRepairDispatchedEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_dispatched'
+    })
+    $regularV4FrontierRepairProgressObservedEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_progress_observed'
+    })
+    $regularV4FrontierRepairStalledEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_stalled'
+    })
     $regularV4RepairCachePressureEvents = @($events | Where-Object {
         $_.EventName -eq 'filetransfer_sender_repair_cache_pressure_entered'
     })
@@ -7939,6 +7960,26 @@ function Get-FileTransferRecoveryFailureClassification {
             (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6'
         }).Count -gt 0
     }
+    $hasRegularOnlyRouteEvidence =
+        $routeChanges.Count -eq 1 -and
+        $routeChanges[0] -eq 'regular_nkn_v4_fast' -and
+        -not $hasPostTunaFallbackEvidence
+    $regularV4RepairLivenessAuthorityMissing =
+        $hasRegularOnlyRouteEvidence -and
+        $regularV4FrontierStallMissingRangeEvents.Count -gt 0 -and
+        $regularV4RepairRequestedEvents.Count -gt 0 -and
+        $regularV4FrontierRepairAuthorityGrantedEvents.Count -eq 0 -and
+        ($sessionLivenessTimeoutEvents.Count -gt 0 -or $peerDisconnectedTerminalEvents.Count -gt 0)
+    $regularV4FrontierRepairStalled =
+        $hasRegularOnlyRouteEvidence -and
+        (
+            $regularV4FrontierRepairStalledEvents.Count -gt 0 -or
+            (
+                $regularV4FrontierRepairDispatchedEvents.Count -gt 0 -and
+                $regularV4FrontierRepairProgressObservedEvents.Count -eq 0 -and
+                ($sessionLivenessTimeoutEvents.Count -gt 0 -or $peerDisconnectedTerminalEvents.Count -gt 0)
+            )
+        )
 
     $class = '(none)'
     if ($publicationAuthorityFieldCoverageProof.Verdict -eq 'fail') {
@@ -7952,6 +7993,12 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     elseif ($runtimeUnlockRetryRegularV4RecoverySettlementMissingCount -gt 0) {
         $class = 'runtime_unlock_retry_regular_v4_recovery_settlement_missing'
+    }
+    elseif ($regularV4FrontierRepairStalled) {
+        $class = 'regular_v4_frontier_repair_stalled'
+    }
+    elseif ($regularV4RepairLivenessAuthorityMissing) {
+        $class = 'regular_v4_repair_liveness_authority_missing'
     }
     elseif ($staleRejectedActionEffectProof.Verdict -eq 'fail') {
         $class = 'stale_rejected_action_effect'
@@ -8353,6 +8400,18 @@ function Get-FileTransferRecoveryFailureClassification {
         RegularV4FrontierRebindRejectedCount = $regularV4FrontierRebindRejectedEvents.Count
         RegularV4FrontierStallMissingRangeCount = $regularV4FrontierStallMissingRangeEvents.Count
         RegularV4RepairRequestedCount = $regularV4RepairRequestedEvents.Count
+        RegularV4FrontierRepairAuthorityGrantedCount = $regularV4FrontierRepairAuthorityGrantedEvents.Count
+        RegularV4FrontierRepairAuthorityRejectedCount = $regularV4FrontierRepairAuthorityRejectedEvents.Count
+        RegularV4FrontierRepairDispatchedCount = $regularV4FrontierRepairDispatchedEvents.Count
+        RegularV4FrontierRepairProgressObservedCount = $regularV4FrontierRepairProgressObservedEvents.Count
+        RegularV4FrontierRepairStalledCount = $regularV4FrontierRepairStalledEvents.Count
+        RegularV4FrontierRepairVerdict = if ($regularV4FrontierRepairStalled -or $regularV4RepairLivenessAuthorityMissing) {
+            'fail'
+        } elseif ($regularV4FrontierRepairProgressObservedEvents.Count -gt 0 -or $regularV4FrontierRepairAuthorityRejectedEvents.Count -gt 0) {
+            'pass'
+        } else {
+            'none'
+        }
         RegularV4RepairCachePressureCount = $regularV4RepairCachePressureEvents.Count
         RuntimeUnlockTransactionProofVerdict = if (-not $runtimeUnlockHasMakeBeforeBreakEvidence) {
             'none'
@@ -8892,6 +8951,12 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("regular_v4_frontier_rebind_rejected_count={0}" -f $recoveryClassification.RegularV4FrontierRebindRejectedCount),
         ("regular_v4_frontier_stall_missing_range_count={0}" -f $recoveryClassification.RegularV4FrontierStallMissingRangeCount),
         ("regular_v4_repair_requested_count={0}" -f $recoveryClassification.RegularV4RepairRequestedCount),
+        ("regular_v4_frontier_repair_authority_granted_count={0}" -f $recoveryClassification.RegularV4FrontierRepairAuthorityGrantedCount),
+        ("regular_v4_frontier_repair_authority_rejected_count={0}" -f $recoveryClassification.RegularV4FrontierRepairAuthorityRejectedCount),
+        ("regular_v4_frontier_repair_dispatched_count={0}" -f $recoveryClassification.RegularV4FrontierRepairDispatchedCount),
+        ("regular_v4_frontier_repair_progress_observed_count={0}" -f $recoveryClassification.RegularV4FrontierRepairProgressObservedCount),
+        ("regular_v4_frontier_repair_stalled_count={0}" -f $recoveryClassification.RegularV4FrontierRepairStalledCount),
+        ("regular_v4_frontier_repair_verdict={0}" -f $recoveryClassification.RegularV4FrontierRepairVerdict),
         ("regular_v4_repair_cache_pressure_count={0}" -f $recoveryClassification.RegularV4RepairCachePressureCount),
         ("listener_ready_unavailable_contradiction_count={0}" -f $recoveryClassification.ListenerReadyUnavailableContradictionCount),
         ("listener_rearm_required_count={0}" -f $recoveryClassification.ListenerRearmRequiredCount),

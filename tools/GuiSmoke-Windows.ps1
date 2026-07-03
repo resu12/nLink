@@ -2836,16 +2836,32 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $fallbackFrontierRepairAuthorityGranted = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_frontier_repair_authority_granted')
     $fallbackFrontierRepairDispatched = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_frontier_repair_dispatched')
     $fallbackFrontierRepairProgressObserved = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_frontier_repair_progress_observed')
+    $regularV4FrontierRepairAuthorityGranted = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_authority_granted')
+    $regularV4FrontierRepairAuthorityRejected = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_authority_rejected')
+    $regularV4FrontierRepairDispatched = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_dispatched')
+    $regularV4FrontierRepairProgressObserved = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_progress_observed')
+    $regularV4FrontierRepairStalledEvent = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_stalled')
+    $regularV4FrontierMissingRanges = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_v4_frontier_stall_missing_range_due')
+    $regularV4RepairRequested = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_v4_repair_requested')
+    $regularV4LivenessTimeoutWithoutAuthority = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('active_filetransfer_progress_observed_without_recovery_authority')
+    $terminalObserved = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('_terminal')
     $fallbackProgressTimeout = $ErrorMessage.IndexOf('no useful data progress', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_live_progress_timeout')) -or
         (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_gui_progress_timeout'))
     $fallbackFrontierRepairStalled = ($fallbackFrontierRepairAuthorityGranted -or $fallbackFrontierRepairDispatched) -and
         (-not $fallbackFrontierRepairProgressObserved) -and
         $fallbackProgressTimeout
+    $regularV4FrontierRepairStalled = ($regularV4FrontierRepairStalledEvent -or
+        (($regularV4FrontierRepairAuthorityGranted -or $regularV4FrontierRepairDispatched) -and
+            (-not $regularV4FrontierRepairProgressObserved) -and
+            ($fallbackProgressTimeout -or $regularV4LivenessTimeoutWithoutAuthority)))
+    $regularV4RepairLivenessAuthorityMissing = $regularV4FrontierMissingRanges -and
+        $regularV4RepairRequested -and
+        (-not $regularV4FrontierRepairAuthorityGranted) -and
+        ($regularV4LivenessTimeoutWithoutAuthority -or $terminalObserved)
     $activationPhaseEvidence = (-not $tunaActive) -and ($activationOfferNotObserved -or $activationOfferWaitingAnswer -or $activationOfferSent -or $activationOfferReceived)
     $offerSent = if ($activationPhaseEvidence) { $activationOfferSent } else { $measuredOfferSent }
     $offerReceived = if ($activationPhaseEvidence) { $activationOfferReceived } else { $measuredOfferReceived }
-    $terminalObserved = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('_terminal')
 
     $phase = 'unknown'
     $reason = 'unknown'
@@ -2875,6 +2891,14 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $ErrorMessage.IndexOf('coordinator-authorized file Tuna V4 publication after measured GUI file transfer', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         $phase = 'route_publication'
         $reason = 'file_tuna_v4_publication_missing_after_transfer'
+    }
+    elseif ($regularV4FrontierRepairStalled) {
+        $phase = 'regular_v4_frontier_repair'
+        $reason = 'regular_v4_frontier_repair_stalled'
+    }
+    elseif ($regularV4RepairLivenessAuthorityMissing) {
+        $phase = 'regular_v4_frontier_repair'
+        $reason = 'regular_v4_repair_liveness_authority_missing'
     }
     elseif ($fallbackFrontierRepairStalled) {
         $phase = 'fallback_frontier_repair'

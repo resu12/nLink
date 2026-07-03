@@ -152,13 +152,36 @@ public interface IFileTransferTerminalObserver
     void ObserveFileTransferTerminal(FileTransferTerminalNotification notification);
 }
 
+public sealed record FileTransferRegularV4FrontierRepairAuthority(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    string RouteToken,
+    int ProtocolVersion,
+    int LiveRouteEpoch,
+    int RuntimeGeneration,
+    int TerminalGeneration,
+    long LegGeneration,
+    long TransportEpoch,
+    int BridgeRecoveryGeneration,
+    int BridgeDecisionGeneration,
+    int RoutePublicationGeneration,
+    int? RouteCommitGeneration,
+    string RepairKey,
+    int FrontierChunkIndex,
+    int DurableReceivedHighestChunkIndex,
+    int PendingRepairCount,
+    int DecisionGeneration,
+    string DecisionReason);
+
 public sealed record FileTransferRegularV4ControlFeedbackPressure(
     string SessionId,
     string TransferId,
     long CreditExhaustedTimeMs,
     int FrontierLagChunks,
     int PendingRepairCount,
-    string Reason);
+    string Reason,
+    FileTransferRegularV4FrontierRepairAuthority? RepairAuthority = null);
 
 public interface IFileTransferRegularV4ControlFeedbackPressureObserver
 {

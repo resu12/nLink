@@ -348,6 +348,41 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RegularV4FrontierRepairAuthorityMissing_IsClassifiedBeforeRuntimeUnlock()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_regular_v4_frontier_authority_missing";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4; file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=nkn", secondsOffset: 0),
+            LogLine($"event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; bridge_recovery_policy=regular_nkn_v4_fast; live_route_epoch=1; runtime_generation=1; leg_generation=1", secondsOffset: 1),
+            LogLine($"event=filetransfer_v4_frontier_stall_missing_range_due; direction=inbound; transfer_id={transferId}; session_id=sess_a; next_chunk_index=1024; highest_received_chunk_index=4096; missing_range_count=9; missing_chunk_count=384; frontier_stall_age_ms=42000", secondsOffset: 20),
+            LogLine($"event=filetransfer_v4_repair_requested; direction=inbound; transfer_id={transferId}; session_id=sess_a; request_key=frontier:1024-1407; missing_chunk_count=384; reason=frontier_stall_missing_range", secondsOffset: 21),
+            LogLine($"event=filetransfer_sender_repair_cache_pressure_entered; direction=outbound; transfer_id={transferId}; session_id=sess_a; sent_cache_chunk_count=4096; sent_cache_bytes=67108864", secondsOffset: 22),
+            LogLine($"event=session_liveness_timeout; transfer_id={transferId}; session_id=sess_a; reason=active_filetransfer_progress_observed_without_recovery_authority; route=regular_nkn_v4_fast; protocol_version=4", secondsOffset: 45),
+            LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_a; transfer_id={transferId}; state=Failed; route=regular_nkn_v4_fast; protocol_version=4; error_code=peer_disconnected; integrity_ok=0", secondsOffset: 50)
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("regular_v4_repair_liveness_authority_missing", verdict["recovery_failure_class"]);
+        Assert.Equal("1", verdict["regular_v4_frontier_stall_missing_range_count"]);
+        Assert.Equal("1", verdict["regular_v4_repair_requested_count"]);
+        Assert.Equal("0", verdict["regular_v4_frontier_repair_authority_granted_count"]);
+        Assert.Equal("fail", verdict["regular_v4_frontier_repair_verdict"]);
+
+        var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
+        Assert.Equal("regular_v4_repair_liveness_authority_missing", stability["recovery_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_BridgeConfigSummary_RecordsFrozenDefaults()
     {
         if (!OperatingSystem.IsWindows())
