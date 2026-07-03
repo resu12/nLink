@@ -3741,6 +3741,31 @@ function Get-Phase5BridgeReadinessPreflightFailureClass {
     return 'preflight_bridge_bootstrap'
 }
 
+function Get-Phase5BridgeReadinessPreflightFailureSubreason {
+    param(
+        [string]$FailureReason = '',
+        [string]$OutputText = ''
+    )
+
+    $combined = @($FailureReason, $OutputText) -join "`n"
+    foreach ($name in @('failure_subreason', 'subreason')) {
+        $pattern = "(?i)(?:^|[;`r`n]\s*)" + [regex]::Escape($name) + "=([^;`r`n]+)"
+        $match = [regex]::Match($combined, $pattern)
+        if ($match.Success) {
+            $value = $match.Groups[1].Value.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($value) -and $value -ne '(none)') {
+                return $value
+            }
+        }
+    }
+
+    if ($combined.IndexOf('helpee_invite_host_before_bridge_ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return 'helpee_invite_host_before_bridge_ready'
+    }
+
+    return ''
+}
+
 function Invoke-Phase5BridgeReadinessPreflight {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
@@ -3761,12 +3786,17 @@ function Invoke-Phase5BridgeReadinessPreflight {
         }
 
         $reason = Get-RouteAcceptanceEnvValue -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_FAILURE_REASON' -DefaultValue 'nkn_bridge_bootstrap_not_ready'
+        $failureSubreason = Get-RouteAcceptanceEnvValue -Name 'NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_FAILURE_SUBREASON' -DefaultValue ''
+        if ([string]::IsNullOrWhiteSpace($failureSubreason)) {
+            $failureSubreason = Get-Phase5BridgeReadinessPreflightFailureSubreason -FailureReason $reason -OutputText $reason
+        }
         $failureClass = Get-Phase5BridgeReadinessPreflightFailureClass -FailureReason $reason -OutputText $reason
         $lines = @(
             'Phase 5 Bridge Readiness Preflight',
             'verdict=FAIL',
             ("failure_class={0}" -f $failureClass),
             ("failure_reason={0}" -f $reason),
+            ("failure_subreason={0}" -f $failureSubreason),
             'scenario=NKN_DIRECT_CONNECT',
             ("artifact_dir={0}" -f $artifactDir),
             'exit_code=1'
@@ -3777,6 +3807,7 @@ function Invoke-Phase5BridgeReadinessPreflight {
             verdict = 'FAIL'
             failureClass = $failureClass
             failureReason = $reason
+            failureSubreason = $failureSubreason
             scenario = 'NKN_DIRECT_CONNECT'
             artifactDir = $artifactDir
             exitCode = 1
@@ -3787,6 +3818,7 @@ function Invoke-Phase5BridgeReadinessPreflight {
             ArtifactDir = $artifactDir
             FailureClass = $failureClass
             FailureReason = $reason
+            FailureSubreason = $failureSubreason
             ExitCode = 1
         }
     }
@@ -3916,8 +3948,10 @@ function Invoke-Phase5BridgeReadinessPreflight {
     }
 
     $failureReason = ''
+    $failureSubreason = ''
     if ($exitCode -ne 0) {
         $joined = $outputLines -join "`n"
+        $failureSubreason = Get-Phase5BridgeReadinessPreflightFailureSubreason -OutputText $joined
         if ($joined.IndexOf('Timed out waiting for current helper identity bootstrap UI before clipboard fallback', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $joined.IndexOf('helper_identity_window_ownership_mismatch', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $joined.IndexOf('helper_identity_clipboard_stale', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
@@ -3979,6 +4013,7 @@ function Invoke-Phase5BridgeReadinessPreflight {
         ("verdict={0}" -f $verdict),
         ("failure_class={0}" -f $failureClass),
         ("failure_reason={0}" -f ($(if ($exitCode -eq 0) { '' } else { $failureReason }))),
+        ("failure_subreason={0}" -f ($(if ($exitCode -eq 0) { '' } else { $failureSubreason }))),
         'scenario=NKN_DIRECT_CONNECT',
         ("artifact_dir={0}" -f $artifactDir),
         ("exit_code={0}" -f $exitCode),
@@ -3991,6 +4026,7 @@ function Invoke-Phase5BridgeReadinessPreflight {
         verdict = $verdict
         failureClass = $failureClass
         failureReason = $failureReason
+        failureSubreason = $failureSubreason
         scenario = 'NKN_DIRECT_CONNECT'
         artifactDir = $artifactDir
         exitCode = $exitCode
@@ -4003,6 +4039,7 @@ function Invoke-Phase5BridgeReadinessPreflight {
         ArtifactDir = $artifactDir
         FailureClass = $failureClass
         FailureReason = $failureReason
+        FailureSubreason = $failureSubreason
         ExitCode = $exitCode
     }
 }
@@ -4153,6 +4190,7 @@ function Write-Phase5BridgeReadinessPreflightQuarantineSummary {
         ("scope={0}" -f $Scope),
         ("failure_class={0}" -f $PreflightResult.FailureClass),
         ("failure_reason={0}" -f $PreflightResult.FailureReason),
+        ("failure_subreason={0}" -f ($(if ($PreflightResult.PSObject.Properties.Name -contains 'FailureSubreason') { [string]$PreflightResult.FailureSubreason } else { '' }))),
         ("artifact_dir={0}" -f $PreflightResult.ArtifactDir),
         ("exit_code={0}" -f $PreflightResult.ExitCode),
         'classification=setup_preflight_only_not_route_evidence'
@@ -4165,6 +4203,7 @@ function Write-Phase5BridgeReadinessPreflightQuarantineSummary {
         scope = $Scope
         failureClass = $PreflightResult.FailureClass
         failureReason = $PreflightResult.FailureReason
+        failureSubreason = if ($PreflightResult.PSObject.Properties.Name -contains 'FailureSubreason') { [string]$PreflightResult.FailureSubreason } else { '' }
         artifactDir = $PreflightResult.ArtifactDir
         exitCode = $PreflightResult.ExitCode
         classification = 'setup_preflight_only_not_route_evidence'
@@ -4181,7 +4220,9 @@ function Write-Phase5BridgeReadinessPreflightAttemptSummary {
     $retryUsed = if ($PreflightResult.PSObject.Properties.Name -contains 'RetryUsed' -and $PreflightResult.RetryUsed) { 1 } else { 0 }
     $selectedAttempt = if ($PreflightResult.PSObject.Properties.Name -contains 'SelectedAttempt') { [int]$PreflightResult.SelectedAttempt } else { 1 }
     $firstFailureReason = if ($PreflightResult.PSObject.Properties.Name -contains 'FirstFailureReason') { [string]$PreflightResult.FirstFailureReason } else { '' }
+    $firstFailureSubreason = if ($PreflightResult.PSObject.Properties.Name -contains 'FirstFailureSubreason') { [string]$PreflightResult.FirstFailureSubreason } else { '' }
     $firstArtifactDir = if ($PreflightResult.PSObject.Properties.Name -contains 'FirstArtifactDir') { [string]$PreflightResult.FirstArtifactDir } else { '' }
+    $finalFailureSubreason = if ($PreflightResult.PSObject.Properties.Name -contains 'FailureSubreason') { [string]$PreflightResult.FailureSubreason } else { '' }
     $verdict = if ($PreflightResult.Passed) { 'PASS' } else { 'FAIL' }
 
     $lines = @(
@@ -4192,9 +4233,11 @@ function Write-Phase5BridgeReadinessPreflightAttemptSummary {
         ("selected_attempt={0}" -f $selectedAttempt),
         ("final_failure_class={0}" -f $PreflightResult.FailureClass),
         ("final_failure_reason={0}" -f $PreflightResult.FailureReason),
+        ("final_failure_subreason={0}" -f $finalFailureSubreason),
         ("final_artifact_dir={0}" -f $PreflightResult.ArtifactDir),
         ("final_exit_code={0}" -f $PreflightResult.ExitCode),
         ("first_failure_reason={0}" -f $firstFailureReason),
+        ("first_failure_subreason={0}" -f $firstFailureSubreason),
         ("first_artifact_dir={0}" -f $firstArtifactDir)
     )
     $lines | Set-Content -LiteralPath (Join-Path $RunRoot 'phase5-bridge-readiness-preflight-attempts.txt') -Encoding UTF8
@@ -4207,9 +4250,11 @@ function Write-Phase5BridgeReadinessPreflightAttemptSummary {
         selectedAttempt = $selectedAttempt
         finalFailureClass = $PreflightResult.FailureClass
         finalFailureReason = $PreflightResult.FailureReason
+        finalFailureSubreason = $finalFailureSubreason
         finalArtifactDir = $PreflightResult.ArtifactDir
         finalExitCode = $PreflightResult.ExitCode
         firstFailureReason = $firstFailureReason
+        firstFailureSubreason = $firstFailureSubreason
         firstArtifactDir = $firstArtifactDir
     }) | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $RunRoot 'phase5-bridge-readiness-preflight-attempts.json') -Encoding UTF8
 }
@@ -4223,16 +4268,19 @@ function Invoke-Phase5BridgeReadinessPreflightWithRetry {
 
     $first = Invoke-Phase5BridgeReadinessPreflight -RepoRoot $RepoRoot -RunRoot $RunRoot -ResolvedExePath $ResolvedExePath
     if ($first.Passed -or -not (Test-Phase5BridgeReadinessPreflightRetryableFailure -PreflightResult $first)) {
+        $firstSubreason = if ($first.PSObject.Properties.Name -contains 'FailureSubreason') { [string]$first.FailureSubreason } else { '' }
         $result = [pscustomobject]@{
             Passed = $first.Passed
             ArtifactDir = $first.ArtifactDir
             FailureClass = $first.FailureClass
             FailureReason = $first.FailureReason
+            FailureSubreason = $firstSubreason
             ExitCode = $first.ExitCode
             AttemptCount = 1
             RetryUsed = $false
             SelectedAttempt = 1
             FirstFailureReason = ''
+            FirstFailureSubreason = ''
             FirstArtifactDir = ''
         }
         Write-Phase5BridgeReadinessPreflightAttemptSummary -RunRoot $RunRoot -PreflightResult $result
@@ -4262,16 +4310,20 @@ function Invoke-Phase5BridgeReadinessPreflightWithRetry {
     Start-Sleep -Seconds 2
 
     $second = Invoke-Phase5BridgeReadinessPreflight -RepoRoot $RepoRoot -RunRoot $RunRoot -ResolvedExePath $ResolvedExePath
+    $secondSubreason = if ($second.PSObject.Properties.Name -contains 'FailureSubreason') { [string]$second.FailureSubreason } else { '' }
+    $firstSubreason = if ($first.PSObject.Properties.Name -contains 'FailureSubreason') { [string]$first.FailureSubreason } else { '' }
     $result = [pscustomobject]@{
         Passed = $second.Passed
         ArtifactDir = $second.ArtifactDir
         FailureClass = $second.FailureClass
         FailureReason = $second.FailureReason
+        FailureSubreason = $secondSubreason
         ExitCode = $second.ExitCode
         AttemptCount = 2
         RetryUsed = $true
         SelectedAttempt = 2
         FirstFailureReason = $first.FailureReason
+        FirstFailureSubreason = $firstSubreason
         FirstArtifactDir = $firstArtifactDir
     }
     Write-Phase5BridgeReadinessPreflightAttemptSummary -RunRoot $RunRoot -PreflightResult $result
@@ -4439,10 +4491,17 @@ function Write-Phase5PreflightFailureSummaryFiles {
         [Parameter(Mandatory = $true)]$PreflightResult
     )
 
-    $failureLine = "phase5-preflight-bridge-ready: {0}" -f $PreflightResult.FailureReason
+    $failureSubreason = if ($PreflightResult.PSObject.Properties.Name -contains 'FailureSubreason') { [string]$PreflightResult.FailureSubreason } else { '' }
+    $failureLine = if ([string]::IsNullOrWhiteSpace($failureSubreason)) {
+        "phase5-preflight-bridge-ready: {0}" -f $PreflightResult.FailureReason
+    }
+    else {
+        "phase5-preflight-bridge-ready: {0}; subreason={1}" -f $PreflightResult.FailureReason, $failureSubreason
+    }
     $attemptCount = if ($PreflightResult.PSObject.Properties.Name -contains 'AttemptCount') { [int]$PreflightResult.AttemptCount } else { 1 }
     $retryUsed = if ($PreflightResult.PSObject.Properties.Name -contains 'RetryUsed' -and $PreflightResult.RetryUsed) { 1 } else { 0 }
     $firstFailureReason = if ($PreflightResult.PSObject.Properties.Name -contains 'FirstFailureReason') { [string]$PreflightResult.FirstFailureReason } else { '' }
+    $firstFailureSubreason = if ($PreflightResult.PSObject.Properties.Name -contains 'FirstFailureSubreason') { [string]$PreflightResult.FirstFailureSubreason } else { '' }
     $firstArtifactDir = if ($PreflightResult.PSObject.Properties.Name -contains 'FirstArtifactDir') { [string]$PreflightResult.FirstArtifactDir } else { '' }
     $textLines = @(
         'Phase 5 File Transfer Analyzer/GUI Acceptance',
@@ -4456,11 +4515,13 @@ function Write-Phase5PreflightFailureSummaryFiles {
         'preflight_verdict=FAIL',
         ("preflight_failure_class={0}" -f $PreflightResult.FailureClass),
         ("preflight_failure_reason={0}" -f $PreflightResult.FailureReason),
+        ("preflight_failure_subreason={0}" -f $failureSubreason),
         ("preflight_artifact_dir={0}" -f $PreflightResult.ArtifactDir),
         ("preflight_exit_code={0}" -f $PreflightResult.ExitCode),
         ("preflight_attempt_count={0}" -f $attemptCount),
         ("preflight_retry_used={0}" -f $retryUsed),
         ("preflight_first_failure_reason={0}" -f $firstFailureReason),
+        ("preflight_first_failure_subreason={0}" -f $firstFailureSubreason),
         ("preflight_first_artifact_dir={0}" -f $firstArtifactDir),
         'run_count=0',
         'failure_count=1',
@@ -4502,11 +4563,13 @@ function Write-Phase5PreflightFailureSummaryFiles {
         preflightVerdict = 'FAIL'
         preflightFailureClass = $PreflightResult.FailureClass
         preflightFailureReason = $PreflightResult.FailureReason
+        preflightFailureSubreason = $failureSubreason
         preflightArtifactDir = $PreflightResult.ArtifactDir
         preflightExitCode = $PreflightResult.ExitCode
         preflightAttemptCount = $attemptCount
         preflightRetryUsed = $retryUsed
         preflightFirstFailureReason = $firstFailureReason
+        preflightFirstFailureSubreason = $firstFailureSubreason
         preflightFirstArtifactDir = $firstArtifactDir
         failureCount = 1
         correctnessFailureCount = 1

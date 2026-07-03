@@ -7623,6 +7623,25 @@ function Get-IsNknTransport {
     return [string]::Equals($env:NLINK_TRANSPORT, 'NKN', [System.StringComparison]::OrdinalIgnoreCase)
 }
 
+function Get-GuiSmokeDelimitedLogField {
+    param(
+        [AllowNull()][string]$Line,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Line)) {
+        return ''
+    }
+
+    $pattern = '(?i)(?:^|[;|]\s*)' + [regex]::Escape($Name) + '=([^;|]+)'
+    $match = [regex]::Match($Line, $pattern)
+    if (-not $match.Success) {
+        return ''
+    }
+
+    return $match.Groups[1].Value.Trim()
+}
+
 function Get-TransportAwareTimeoutMs {
     param(
         [Parameter(Mandatory = $true)][int]$DefaultMs,
@@ -7677,12 +7696,34 @@ function Get-NknBridgeBootstrapReadinessForRole {
     }
 
     $failureReasons = New-Object System.Collections.Generic.List[string]
+    $failureSubreason = '(none)'
+    $failureReadyEmitted = ''
+    $failureLastError = '(none)'
+    $failureLine = ''
     foreach ($line in $lines) {
         foreach ($marker in $failureMarkers) {
             if ($line.IndexOf($marker, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
                 if (-not $failureReasons.Contains($marker)) {
                     $failureReasons.Add($marker) | Out-Null
                 }
+            }
+        }
+
+        if ($line.IndexOf('event=nkn_bridge_bootstrap_not_ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $failureLine = [string]$line
+            $subreason = Get-GuiSmokeDelimitedLogField -Line $line -Name 'subreason'
+            if (-not [string]::IsNullOrWhiteSpace($subreason)) {
+                $failureSubreason = $subreason
+            }
+
+            $readyEmitted = Get-GuiSmokeDelimitedLogField -Line $line -Name 'ready_emitted'
+            if (-not [string]::IsNullOrWhiteSpace($readyEmitted)) {
+                $failureReadyEmitted = $readyEmitted
+            }
+
+            $lastError = Get-GuiSmokeDelimitedLogField -Line $line -Name 'last_error'
+            if (-not [string]::IsNullOrWhiteSpace($lastError)) {
+                $failureLastError = $lastError
             }
         }
     }
@@ -7693,6 +7734,10 @@ function Get-NknBridgeBootstrapReadinessForRole {
         Ready = $ready
         ReadyMarker = $readyMarker
         FailureReason = if ($failureReasons.Count -gt 0) { ($failureReasons -join ',') } else { '(none)' }
+        FailureSubreason = $failureSubreason
+        FailureReadyEmitted = $failureReadyEmitted
+        FailureLastError = $failureLastError
+        FailureLine = $failureLine
         ReadyEmittedZeroObserved = $failureReasons.Contains('ready_emitted=0')
         LineCount = $lines.Count
         Tail = $tail
@@ -7732,6 +7777,9 @@ function Write-NknBridgeBootstrapReadinessArtifact {
         $lines.Add("ready=$(if ($Snapshot.Ready) { 1 } else { 0 })") | Out-Null
         $lines.Add("ready_marker=$($Snapshot.ReadyMarker)") | Out-Null
         $lines.Add("failure_reason=$($Snapshot.FailureReason)") | Out-Null
+        $lines.Add("failure_subreason=$($Snapshot.FailureSubreason)") | Out-Null
+        $lines.Add("failure_ready_emitted=$($Snapshot.FailureReadyEmitted)") | Out-Null
+        $lines.Add("failure_last_error=$($Snapshot.FailureLastError)") | Out-Null
         $lines.Add("line_count=$($Snapshot.LineCount)") | Out-Null
         if ($RoleName -eq 'helpee' -and $Context.HelpeeWindow) {
             try {
@@ -7758,6 +7806,10 @@ function Write-NknBridgeBootstrapReadinessArtifact {
             ready = [bool]$Snapshot.Ready
             readyMarker = [string]$Snapshot.ReadyMarker
             failureReason = [string]$Snapshot.FailureReason
+            failureSubreason = [string]$Snapshot.FailureSubreason
+            failureReadyEmitted = [string]$Snapshot.FailureReadyEmitted
+            failureLastError = [string]$Snapshot.FailureLastError
+            failureLine = [string]$Snapshot.FailureLine
             lineCount = [int]$Snapshot.LineCount
             outputTail = @($Snapshot.Tail)
         }) | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
@@ -7805,7 +7857,17 @@ function Wait-NknBridgeBootstrapReadyForRole {
     }
 
     Write-NknBridgeBootstrapReadinessArtifact -Context $Context -RoleName $RoleName -Snapshot $lastSnapshot -Reason "timeout_$Reason"
-    throw ("nkn_bridge_bootstrap_network_unready: role={0}; process_id={1}; reason={2}; ready_emitted=0; failure_markers={3}; line_count={4}" -f $RoleName, $lastSnapshot.ProcessId, $Reason, $lastSnapshot.FailureReason, $lastSnapshot.LineCount)
+    $inviteDiagnostic = '(none)'
+    if ($RoleName -eq 'helpee' -and $Context.HelpeeWindow) {
+        try {
+            $inviteDiagnostic = Get-HelpeeInviteReadinessDiagnostic -Window $Context.HelpeeWindow
+        }
+        catch {
+            $inviteDiagnostic = "diagnostic_error=$($_.Exception.GetType().Name)"
+        }
+    }
+
+    throw ("nkn_bridge_bootstrap_network_unready: role={0}; process_id={1}; reason={2}; ready_emitted=0; failure_markers={3}; line_count={4}; failure_subreason={5}; failure_last_error={6}; helpee_invite_diagnostic={7}" -f $RoleName, $lastSnapshot.ProcessId, $Reason, $lastSnapshot.FailureReason, $lastSnapshot.LineCount, $lastSnapshot.FailureSubreason, $lastSnapshot.FailureLastError, $inviteDiagnostic)
 }
 
 function Wait-NknBridgeBootstrapReadyForCurrentPair {
@@ -9707,6 +9769,7 @@ function Test-HelpeeInviteBootstrapBridgeRetryableError {
     if ([string]::IsNullOrWhiteSpace($Message)) { return $false }
     return $Message.IndexOf('nkn_bridge_bootstrap_network_unready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $Message.IndexOf('nkn_bridge_bootstrap_not_ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $Message.IndexOf('helpee_invite_host_before_bridge_ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $Message.IndexOf('HostByAddressAsync failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $Message.IndexOf('RPC call failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $Message.IndexOf('Connect failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
