@@ -8720,26 +8720,90 @@ public sealed partial class NknSignalingTransport
         }
     }
 
+    private bool TryQueueRuntimeUnlockNegotiationBehindPendingGeneration(string reason, string waitReason)
+    {
+        var normalizedReason = SanitizeLogToken(reason);
+        if (!IsRuntimeUnlockActivationReason(normalizedReason))
+        {
+            return false;
+        }
+
+        bool hasOffer;
+        bool hasAnswerAck;
+        lock (accelerationGate)
+        {
+            hasOffer = !string.IsNullOrWhiteSpace(outboundAccelerationOfferNonce);
+            hasAnswerAck = !string.IsNullOrWhiteSpace(pendingAccelerationAnswerAckNonce);
+            if (!hasOffer && !hasAnswerAck)
+            {
+                return false;
+            }
+
+            pendingRuntimeUnlockAccelerationNegotiationReason = normalizedReason;
+            pendingRuntimeUnlockAccelerationNegotiation = 1;
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=tuna_acceleration_runtime_unlock_queued_behind_pending_generation; reason={normalizedReason}; wait_reason={SanitizeLogToken(waitReason)}; has_offer={(hasOffer ? 1 : 0)}; has_answer_ack={(hasAnswerAck ? 1 : 0)}");
+        return true;
+    }
+
     private bool TryConsumePendingRuntimeUnlockAccelerationNegotiation(out string reason)
     {
         reason = "runtime_unlock";
         lock (accelerationGate)
         {
-            if (pendingRuntimeUnlockAccelerationNegotiation == 0)
-            {
-                return false;
-            }
+            return TryConsumePendingRuntimeUnlockAccelerationNegotiationUnsafe(out reason);
+        }
+    }
 
-            pendingRuntimeUnlockAccelerationNegotiation = 0;
-            if (!string.IsNullOrWhiteSpace(pendingRuntimeUnlockAccelerationNegotiationReason))
-            {
-                reason = pendingRuntimeUnlockAccelerationNegotiationReason;
-            }
-
-            pendingRuntimeUnlockAccelerationNegotiationReason = null;
+    private bool TryConsumePendingRuntimeUnlockAccelerationNegotiationUnsafe(out string reason)
+    {
+        reason = "runtime_unlock";
+        if (pendingRuntimeUnlockAccelerationNegotiation == 0)
+        {
+            return false;
         }
 
+        pendingRuntimeUnlockAccelerationNegotiation = 0;
+        if (!string.IsNullOrWhiteSpace(pendingRuntimeUnlockAccelerationNegotiationReason))
+        {
+            reason = pendingRuntimeUnlockAccelerationNegotiationReason;
+        }
+
+        pendingRuntimeUnlockAccelerationNegotiationReason = null;
         return true;
+    }
+
+    private void SchedulePendingRuntimeUnlockAccelerationNegotiationAfterCurrentOperation(string trigger)
+    {
+        if (!TryConsumePendingRuntimeUnlockAccelerationNegotiation(out var pendingReason))
+        {
+            return;
+        }
+
+        ScheduleRuntimeUnlockAccelerationNegotiationWake(pendingReason, trigger);
+    }
+
+    private void SchedulePendingRuntimeUnlockAccelerationNegotiationAfterCurrentOperationUnsafe(string trigger)
+    {
+        if (!TryConsumePendingRuntimeUnlockAccelerationNegotiationUnsafe(out var pendingReason))
+        {
+            return;
+        }
+
+        ScheduleRuntimeUnlockAccelerationNegotiationWake(pendingReason, trigger);
+    }
+
+    private void ScheduleRuntimeUnlockAccelerationNegotiationWake(string pendingReason, string trigger)
+    {
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=tuna_acceleration_runtime_unlock_pending_negotiation_wake_scheduled; reason={SanitizeLogToken(pendingReason)}; trigger={SanitizeLogToken(trigger)}");
+        _ = Task.Run(
+            () => ScheduleAccelerationNegotiationIfEligible(pendingReason),
+            CancellationToken.None);
     }
 
     private void ClearPendingRuntimeUnlockAccelerationNegotiation()
@@ -8784,6 +8848,11 @@ public sealed partial class NknSignalingTransport
 
         if (HasPendingOutboundAccelerationOffer() || HasPendingAccelerationAnswerAck())
         {
+            if (TryQueueRuntimeUnlockNegotiationBehindPendingGeneration(reason, "schedule_pending_generation"))
+            {
+                return;
+            }
+
             return;
         }
 
@@ -11824,6 +11893,7 @@ public sealed partial class NknSignalingTransport
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=tuna_acceleration_outbound_offer_cleared; reason={SanitizeLogToken(reason)}; payer_decision_id={payerDecisionId}; generation={generation}");
+        SchedulePendingRuntimeUnlockAccelerationNegotiationAfterCurrentOperation("outbound_offer_cleared");
     }
 
     private void MarkRuntimeUnlockOfferObservedSendIfCurrent(
@@ -15764,6 +15834,7 @@ public sealed partial class NknSignalingTransport
         pendingAccelerationAnswerAckLanes = NknAccelerationLaneKind.None;
         pendingAccelerationAnswerAckPayerDecisionId = 0;
         pendingAccelerationAnswerAckGeneration++;
+        SchedulePendingRuntimeUnlockAccelerationNegotiationAfterCurrentOperationUnsafe("answer_ack_cleared");
     }
 
     private bool RetirePendingAccelerationAnswerAckForRuntimeUnlockListenerRearm(
@@ -18591,12 +18662,28 @@ public sealed partial class NknSignalingTransport
 
                     if (HasPendingOutboundAccelerationOffer())
                     {
+                        if (TryQueueRuntimeUnlockNegotiationBehindPendingGeneration(
+                                normalizedReason,
+                                "delayed_pending_offer"))
+                        {
+                            LogAccelerationRetryNotScheduled(normalizedReason, "delayed_pending_offer_queued");
+                            return;
+                        }
+
                         LogAccelerationRetryNotScheduled(normalizedReason, "delayed_pending_offer");
                         return;
                     }
 
                     if (HasPendingAccelerationAnswerAck())
                     {
+                        if (TryQueueRuntimeUnlockNegotiationBehindPendingGeneration(
+                                normalizedReason,
+                                "delayed_pending_answer_ack"))
+                        {
+                            LogAccelerationRetryNotScheduled(normalizedReason, "delayed_pending_answer_ack_queued");
+                            return;
+                        }
+
                         LogAccelerationRetryNotScheduled(normalizedReason, "delayed_pending_answer_ack");
                         return;
                     }

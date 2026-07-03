@@ -405,6 +405,14 @@ public sealed partial class SessionFileTransferService
                     transferId,
                     sessionId,
                     reason);
+                LogRuntimeUnlockPreCommitProbePendingHeld(
+                    direction,
+                    transferId,
+                    sessionId,
+                    runtimeOwner,
+                    admissionToken,
+                    reason,
+                    "proof_provider_unavailable");
                 return;
             }
 
@@ -451,6 +459,14 @@ public sealed partial class SessionFileTransferService
                     transferId,
                     sessionId,
                     reason);
+                LogRuntimeUnlockPreCommitProbePendingHeld(
+                    direction,
+                    transferId,
+                    sessionId,
+                    runtimeOwner,
+                    admissionToken,
+                    reason,
+                    "transport_proof_missing");
                 return;
             }
 
@@ -537,6 +553,17 @@ public sealed partial class SessionFileTransferService
                 transferId,
                 sessionId,
                 "snapshot_not_usable");
+            if (IsFallbackTailQuiescentRuntimeUnlockResumeReason(reason))
+            {
+                LogRuntimeUnlockPreCommitProbePendingHeld(
+                    direction,
+                    transferId,
+                    sessionId,
+                    runtimeOwner,
+                    admissionToken,
+                    reason,
+                    "snapshot_not_usable");
+            }
             return;
         }
 
@@ -2955,6 +2982,18 @@ public sealed partial class SessionFileTransferService
         => LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_runtime_unlock_precommit_probe_waiting_for_transport_proof; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; reason={FormatProtocolLogValue(reason)}; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; handoff_kind=normal_to_tuna_activation");
+
+    private static void LogRuntimeUnlockPreCommitProbePendingHeld(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        RuntimeOwnerToken runtimeOwner,
+        RuntimeUnlockAdmissionToken admissionToken,
+        string reason,
+        string holdReason)
+        => LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_runtime_unlock_precommit_probe_pending_held; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; source=runtime_unlock_precommit_probe_pending; reason={FormatProtocolLogValue(reason)}; hold_reason={FormatProtocolLogValue(holdReason)}; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch={runtimeOwner.LiveRouteEpoch}; runtime_generation={runtimeOwner.RuntimeGeneration}; terminal_generation={runtimeOwner.TerminalGeneration}; leg_generation={admissionToken.LegGeneration}; admission_generation={admissionToken.AdmissionGeneration}; pending_probe_generation=0; transaction_generation=0; offer_generation=0; tuna_path_lease_generation=0; tuna_path_lease_listener_run_id=(none); target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; handoff_kind=normal_to_tuna_activation");
 
     private static bool LogRuntimeUnlockPendingPreCommitProbeDecision(
         FileTransferDirection direction,

@@ -6544,6 +6544,8 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_probe_failed_count={0}" -f $recoveryClassification.RuntimeUnlockProbeFailedCount),
         ("runtime_unlock_precommit_probe_started_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeStartedCount),
         ("runtime_unlock_precommit_probe_sent_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeSentCount),
+        ("runtime_unlock_precommit_probe_waiting_for_transport_proof_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeWaitingForTransportProofCount),
+        ("runtime_unlock_precommit_probe_pending_held_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbePendingHeldCount),
         ("runtime_unlock_precommit_probe_acked_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckedCount),
         ("runtime_unlock_precommit_probe_ack_missing_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckMissingCount),
         ("runtime_unlock_precommit_probe_ack_authority_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckAuthorityRejectedCount),
@@ -6559,6 +6561,10 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_precommit_probe_ack_receive_dispatched_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckReceiveDispatchedCount),
         ("runtime_unlock_precommit_probe_ack_receive_dispatch_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckReceiveDispatchRejectedCount),
         ("runtime_unlock_tuna_probe_ack_received_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeAckReceivedCount),
+        ("runtime_unlock_fallback_quiescent_admission_granted_count={0}" -f $recoveryClassification.RuntimeUnlockFallbackQuiescentAdmissionGrantedCount),
+        ("runtime_unlock_fallback_proof_replay_pending_after_paired_yield_count={0}" -f $recoveryClassification.RuntimeUnlockFallbackProofReplayPendingAfterPairedYieldCount),
+        ("runtime_unlock_fallback_proof_replay_pending_after_paired_yield_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockFallbackProofReplayPendingAfterPairedYieldUnresolvedCount),
+        ("post_fallback_runtime_unlock_resume_blocked_count={0}" -f $recoveryClassification.PostFallbackRuntimeUnlockResumeBlockedCount),
         ("runtime_unlock_tuna_probe_sidecar_failure_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSidecarFailureCount),
         ("runtime_unlock_tuna_probe_sidecar_fresh_transaction_scheduled_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSidecarFreshTransactionScheduledCount),
         ("runtime_unlock_tuna_probe_sidecar_fresh_transaction_started_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSidecarFreshTransactionStartedCount),
@@ -7325,6 +7331,17 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockPreCommitProbeSentEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_precommit_probe_sent'
     })
+    $runtimeUnlockPreCommitProbeWaitingForTransportProofEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_runtime_unlock_precommit_probe_waiting_for_transport_proof' -and
+        (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'fallback_tail_quiescent'
+    })
+    $runtimeUnlockPreCommitProbePendingHeldEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_runtime_unlock_precommit_probe_pending_held' -and
+        (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'fallback_tail_quiescent'
+    })
+    $runtimeUnlockPreCommitProbePendingRejectedEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_runtime_unlock_precommit_probe_pending_rejected'
+    })
     $runtimeUnlockPreCommitProbeDeliveryResultEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_precommit_probe_delivery_result'
     })
@@ -7361,6 +7378,16 @@ function Get-FileTransferRecoveryFailureClassification {
     })
     $runtimeUnlockTunaProbeAckReceivedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_tuna_probe_ack_received'
+    })
+    $runtimeUnlockFallbackQuiescentAdmissionGrantedEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_runtime_unlock_admission_granted' -and
+        (Get-FileTransferEventField -Event $_ -Name 'source' -Default '') -eq 'fallback_survival_resume' -and
+        (Get-FileTransferEventField -Event $_ -Name 'admission_reason' -Default '') -eq 'fallback_quiescent'
+    })
+    $runtimeUnlockFallbackProofReplayPendingAfterPairedYieldEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_runtime_unlock_admission_denied' -and
+        (Get-FileTransferEventField -Event $_ -Name 'admission_reason' -Default '') -eq 'fallback_proof_replay_pending' -and
+        (Get-FileTransferEventInt64Field -Event $_ -Name 'paired_fallback_yield_granted' -Default 0) -eq 1
     })
     $runtimeUnlockTunaProbeSidecarFailureEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_tuna_probe_sidecar_failure'
@@ -7980,6 +8007,73 @@ function Get-FileTransferRecoveryFailureClassification {
                 ($sessionLivenessTimeoutEvents.Count -gt 0 -or $peerDisconnectedTerminalEvents.Count -gt 0)
             )
         )
+    $runtimeUnlockFallbackProofReplayPendingAfterPairedYieldUnresolvedEvents = @(
+        foreach ($pending in $runtimeUnlockFallbackProofReplayPendingAfterPairedYieldEvents) {
+            $pendingSequence = [int64]$pending.Sequence
+            $pendingTransferId = Get-FileTransferEventField -Event $pending -Name 'transfer_id' -Default ''
+            $pendingSessionId = Get-FileTransferEventField -Event $pending -Name 'session_id' -Default ''
+            $pendingDirection = Get-FileTransferEventField -Event $pending -Name 'direction' -Default ''
+            $settled = @(
+                @(
+                    $runtimeUnlockFallbackQuiescentAdmissionGrantedEvents +
+                    $runtimeUnlockPreCommitProbeStartedEvents +
+                    $runtimeUnlockPreCommitProbePendingRejectedEvents +
+                    $runtimeUnlockPreCommitProbePendingHeldEvents +
+                    $runtimeUnlockTransactionCommittedEvents
+                ) | Where-Object {
+                    if ([int64]$_.Sequence -le $pendingSequence) {
+                        return $false
+                    }
+
+                    $candidateTransferId = Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default ''
+                    if (-not [string]::IsNullOrWhiteSpace($pendingTransferId) -and
+                        -not [string]::Equals($candidateTransferId, $pendingTransferId, [System.StringComparison]::Ordinal)) {
+                        return $false
+                    }
+
+                    $candidateSessionId = Get-FileTransferEventField -Event $_ -Name 'session_id' -Default ''
+                    if (-not [string]::IsNullOrWhiteSpace($pendingSessionId) -and
+                        -not [string]::IsNullOrWhiteSpace($candidateSessionId) -and
+                        -not [string]::Equals($candidateSessionId, $pendingSessionId, [System.StringComparison]::Ordinal)) {
+                        return $false
+                    }
+
+                    $candidateDirection = Get-FileTransferEventField -Event $_ -Name 'direction' -Default ''
+                    if (-not [string]::IsNullOrWhiteSpace($pendingDirection) -and
+                        -not [string]::IsNullOrWhiteSpace($candidateDirection) -and
+                        -not [string]::Equals($candidateDirection, $pendingDirection, [System.StringComparison]::OrdinalIgnoreCase)) {
+                        return $false
+                    }
+
+                    return $true
+                }
+            )
+            if ($settled.Count -eq 0) {
+                $pending
+            }
+        }
+    )
+    $postFallbackRuntimeUnlockResumeBlocked =
+        $hasPostTunaFallbackEvidence -and
+        (
+            $runtimeUnlockFallbackProofReplayPendingAfterPairedYieldUnresolvedEvents.Count -gt 0 -or
+            (
+                $runtimeUnlockFallbackQuiescentAdmissionGrantedEvents.Count -gt 0 -and
+                (
+                    $runtimeUnlockPreCommitProbeWaitingForTransportProofEvents.Count -gt 0 -or
+                    $runtimeUnlockPreCommitProbePendingHeldEvents.Count -gt 0
+                ) -and
+                $runtimeUnlockPreCommitProbeStartedEvents.Count -eq 0 -and
+                $runtimeUnlockPreCommitProbeAckedEvents.Count -eq 0 -and
+                $runtimeUnlockTransactionCommittedEvents.Count -eq 0
+            )
+        )
+
+    $runtimeUnlockHasPreCommitAckProof =
+        $runtimeUnlockProbeAckedEvents.Count -gt 0 -or
+        $runtimeUnlockTunaProbeAckReceivedEvents.Count -gt 0 -or
+        $runtimeUnlockPreCommitProbeAckedEvents.Count -gt 0 -or
+        $runtimeUnlockPreCommitRouteEpochRecoveredEvents.Count -gt 0
 
     $class = '(none)'
     if ($publicationAuthorityFieldCoverageProof.Verdict -eq 'fail') {
@@ -8048,6 +8142,13 @@ function Get-FileTransferRecoveryFailureClassification {
     elseif ($fallbackTailProof.Verdict -eq 'fail') {
         $class = 'fallback_tail_reconciliation'
     }
+    elseif ($postFallbackRuntimeUnlockResumeBlocked) {
+        $class = if ($runtimeUnlockFallbackProofReplayPendingAfterPairedYieldUnresolvedEvents.Count -gt 0) {
+            'fallback_proof_replay_pending_after_paired_yield'
+        } else {
+            'post_fallback_runtime_unlock_resume_blocked'
+        }
+    }
     elseif (($controlPlaneProof.StaleReplayTreadmillCount -gt $controlPlaneProof.StaleGenerationTreadmillScoreLimit -or
             $controlPlaneProof.CheckpointOwnerViolationCount -gt 0 -or
             $controlPlaneProof.ControlPlaneNonCurrentLegGenerationSendCount -gt 0) -and
@@ -8085,13 +8186,13 @@ function Get-FileTransferRecoveryFailureClassification {
         $class = 'runtime_unlock_precommit_probe_ack_missing'
     }
     elseif ($runtimeUnlockTransactionCommittedEvents.Count -gt 0 -and
-        $runtimeUnlockProbeAckedEvents.Count -eq 0) {
+        -not $runtimeUnlockHasPreCommitAckProof) {
         $class = 'runtime_unlock_route_commit_before_probe'
     }
     elseif ($runtimeUnlockProbeStartedEvents.Count -gt 0 -and
         $runtimeUnlockPreCommitProbeStartedEvents.Count -eq 0 -and
         $runtimeUnlockPreCommitProbeProtocolMismatchEvents.Count -gt 0 -and
-        $runtimeUnlockProbeAckedEvents.Count -eq 0) {
+        -not $runtimeUnlockHasPreCommitAckProof) {
         $class = 'runtime_unlock_precommit_probe_protocol_mismatch'
     }
     elseif ($runtimeUnlockTransactionPeerProofEvents.Count -gt 0 -and
@@ -8122,7 +8223,7 @@ function Get-FileTransferRecoveryFailureClassification {
         $class = 'runtime_unlock_tuna_probe_path_not_established'
     }
     elseif ($runtimeUnlockTransactionPeerProofEvents.Count -gt 0 -and
-        $runtimeUnlockProbeAckedEvents.Count -eq 0 -and
+        -not $runtimeUnlockHasPreCommitAckProof -and
         ($runtimeUnlockProbeMissingRejectedEvents.Count -gt 0 -or
          $sessionLivenessTimeoutEvents.Count -gt 0 -or
          $peerDisconnectedTerminalEvents.Count -gt 0)) {
@@ -8169,7 +8270,7 @@ function Get-FileTransferRecoveryFailureClassification {
         $routeChanges.Count -eq 1 -and
         $routeChanges[0] -eq 'regular_nkn_v4_fast' -and
         $runtimeUnlockTransactionCommittedEvents.Count -eq 0 -and
-        $runtimeUnlockProbeAckedEvents.Count -eq 0 -and
+        -not $runtimeUnlockHasPreCommitAckProof -and
         ($sessionLivenessTimeoutEvents.Count -gt 0 -or
          $peerDisconnectedTerminalEvents.Count -gt 0 -or
          $runtimeUnlockTransactionFailedEvents.Count -gt 0)) {
@@ -8271,10 +8372,6 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockHasMakeBeforeBreakEvidence =
         $runtimeUnlockTransactionStartedEvents.Count -gt 0 -or
         $runtimeUnlockPreCommitRouteEpochRecoveredEvents.Count -gt 0
-    $runtimeUnlockHasPreCommitAckProof =
-        $runtimeUnlockProbeAckedEvents.Count -gt 0 -or
-        $runtimeUnlockPreCommitProbeAckedEvents.Count -gt 0 -or
-        $runtimeUnlockPreCommitRouteEpochRecoveredEvents.Count -gt 0
     $runtimeUnlockHasMakeBeforeBreakInvalidEvidence =
         $runtimeUnlockProbeInvalidRejectedEvents.Count -gt 0 -or
         $runtimeUnlockProbeMissingRejectedEvents.Count -gt 0 -or
@@ -8344,6 +8441,8 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockProbeFailedCount = $runtimeUnlockProbeFailedEvents.Count
         RuntimeUnlockPreCommitProbeStartedCount = $runtimeUnlockPreCommitProbeStartedEvents.Count
         RuntimeUnlockPreCommitProbeSentCount = $runtimeUnlockPreCommitProbeSentEvents.Count
+        RuntimeUnlockPreCommitProbeWaitingForTransportProofCount = $runtimeUnlockPreCommitProbeWaitingForTransportProofEvents.Count
+        RuntimeUnlockPreCommitProbePendingHeldCount = $runtimeUnlockPreCommitProbePendingHeldEvents.Count
         RuntimeUnlockPreCommitProbeDeliveryResultCount = $runtimeUnlockPreCommitProbeDeliveryResultEvents.Count
         RuntimeUnlockPreCommitProbeAckedCount = ($runtimeUnlockPreCommitProbeAckedEvents.Count + $runtimeUnlockPreCommitRouteEpochRecoveredEvents.Count)
         RuntimeUnlockPreCommitProbeAckMissingCount = $runtimeUnlockPreCommitProbeAckMissingCount
@@ -8359,6 +8458,10 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockPreCommitProbeAckReceiveDispatchedCount = $runtimeUnlockPreCommitProbeAckReceiveDispatchedEvents.Count
         RuntimeUnlockPreCommitProbeAckReceiveDispatchRejectedCount = $runtimeUnlockPreCommitProbeAckReceiveDispatchRejectedEvents.Count
         RuntimeUnlockTunaProbeAckReceivedCount = $runtimeUnlockTunaProbeAckReceivedEvents.Count
+        RuntimeUnlockFallbackQuiescentAdmissionGrantedCount = $runtimeUnlockFallbackQuiescentAdmissionGrantedEvents.Count
+        RuntimeUnlockFallbackProofReplayPendingAfterPairedYieldCount = $runtimeUnlockFallbackProofReplayPendingAfterPairedYieldEvents.Count
+        RuntimeUnlockFallbackProofReplayPendingAfterPairedYieldUnresolvedCount = $runtimeUnlockFallbackProofReplayPendingAfterPairedYieldUnresolvedEvents.Count
+        PostFallbackRuntimeUnlockResumeBlockedCount = if ($postFallbackRuntimeUnlockResumeBlocked) { 1 } else { 0 }
         RuntimeUnlockTunaProbeSidecarFailureCount = $runtimeUnlockTunaProbeSidecarFailureEvents.Count
         RuntimeUnlockTunaProbeSidecarFreshTransactionScheduledCount = $runtimeUnlockTunaProbeSidecarFreshTransactionScheduledEvents.Count
         RuntimeUnlockTunaProbeSidecarFreshTransactionStartedCount = $runtimeUnlockTunaProbeSidecarFreshTransactionStartedEvents.Count
@@ -8370,10 +8473,10 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockProbeCommitVerdict = $runtimeUnlockProbeCommitVerdict
         RuntimeUnlockMakeBeforeBreakVerdict = if (-not $runtimeUnlockHasMakeBeforeBreakEvidence) {
             'none'
-        } elseif ($runtimeUnlockTransactionCommittedEvents.Count -gt 0 -and
-            $runtimeUnlockTransactionPeerProofEvents.Count -gt 0 -and
-            $runtimeUnlockProbeAckedEvents.Count -gt 0 -and
-            $runtimeUnlockProbeInvalidRejectedEvents.Count -eq 0) {
+    } elseif ($runtimeUnlockTransactionCommittedEvents.Count -gt 0 -and
+        $runtimeUnlockTransactionPeerProofEvents.Count -gt 0 -and
+        $runtimeUnlockHasPreCommitAckProof -and
+        $runtimeUnlockProbeInvalidRejectedEvents.Count -eq 0) {
             'pass'
         } elseif ($runtimeUnlockPreCommitRouteEpochRecoveredEvents.Count -gt 0 -and
             -not $runtimeUnlockHasMakeBeforeBreakInvalidEvidence) {
@@ -8413,12 +8516,12 @@ function Get-FileTransferRecoveryFailureClassification {
             'none'
         }
         RegularV4RepairCachePressureCount = $regularV4RepairCachePressureEvents.Count
-        RuntimeUnlockTransactionProofVerdict = if (-not $runtimeUnlockHasMakeBeforeBreakEvidence) {
-            'none'
-        } elseif ($runtimeUnlockTransactionCommittedEvents.Count -gt 0 -and
-            $runtimeUnlockTransactionPeerProofEvents.Count -gt 0 -and
-            $runtimeUnlockProbeAckedEvents.Count -gt 0 -and
-            $runtimeUnlockTransactionCommitPendingEvents.Count -le $runtimeUnlockTransactionCommittedEvents.Count) {
+    RuntimeUnlockTransactionProofVerdict = if (-not $runtimeUnlockHasMakeBeforeBreakEvidence) {
+        'none'
+    } elseif ($runtimeUnlockTransactionCommittedEvents.Count -gt 0 -and
+        $runtimeUnlockTransactionPeerProofEvents.Count -gt 0 -and
+        $runtimeUnlockHasPreCommitAckProof -and
+        $runtimeUnlockTransactionCommitPendingEvents.Count -le $runtimeUnlockTransactionCommittedEvents.Count) {
             'pass'
         } elseif ($runtimeUnlockPreCommitRouteEpochRecoveredEvents.Count -gt 0 -and
             -not $runtimeUnlockHasMakeBeforeBreakInvalidEvidence) {
@@ -8899,6 +9002,8 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_probe_failed_count={0}" -f $recoveryClassification.RuntimeUnlockProbeFailedCount),
         ("runtime_unlock_precommit_probe_started_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeStartedCount),
         ("runtime_unlock_precommit_probe_sent_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeSentCount),
+        ("runtime_unlock_precommit_probe_waiting_for_transport_proof_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeWaitingForTransportProofCount),
+        ("runtime_unlock_precommit_probe_pending_held_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbePendingHeldCount),
         ("runtime_unlock_precommit_probe_acked_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckedCount),
         ("runtime_unlock_precommit_probe_ack_missing_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckMissingCount),
         ("runtime_unlock_precommit_probe_ack_authority_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckAuthorityRejectedCount),
@@ -8914,6 +9019,10 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_precommit_probe_ack_receive_dispatched_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckReceiveDispatchedCount),
         ("runtime_unlock_precommit_probe_ack_receive_dispatch_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockPreCommitProbeAckReceiveDispatchRejectedCount),
         ("runtime_unlock_tuna_probe_ack_received_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeAckReceivedCount),
+        ("runtime_unlock_fallback_quiescent_admission_granted_count={0}" -f $recoveryClassification.RuntimeUnlockFallbackQuiescentAdmissionGrantedCount),
+        ("runtime_unlock_fallback_proof_replay_pending_after_paired_yield_count={0}" -f $recoveryClassification.RuntimeUnlockFallbackProofReplayPendingAfterPairedYieldCount),
+        ("runtime_unlock_fallback_proof_replay_pending_after_paired_yield_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockFallbackProofReplayPendingAfterPairedYieldUnresolvedCount),
+        ("post_fallback_runtime_unlock_resume_blocked_count={0}" -f $recoveryClassification.PostFallbackRuntimeUnlockResumeBlockedCount),
         ("runtime_unlock_tuna_probe_sidecar_failure_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSidecarFailureCount),
         ("runtime_unlock_tuna_probe_sidecar_fresh_transaction_scheduled_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSidecarFreshTransactionScheduledCount),
         ("runtime_unlock_tuna_probe_sidecar_fresh_transaction_started_count={0}" -f $recoveryClassification.RuntimeUnlockTunaProbeSidecarFreshTransactionStartedCount),

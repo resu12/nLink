@@ -2833,6 +2833,19 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             $activationOfferNotObserved)
     $fallbackTailLocalYieldBlocked = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_tail_local_yield_blocked')
     $fallbackTailFrontierStateMissing = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_tail_local_yield_blocked', 'decision_reason=fallback_frontier_state_missing')
+    $postFallbackAdmissionGranted = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_runtime_unlock_admission_granted', 'source=fallback_survival_resume', 'admission_reason=fallback_quiescent')
+    $postFallbackPrecommitWaitingForProof = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_runtime_unlock_precommit_probe_waiting_for_transport_proof', 'reason=fallback_tail_quiescent')
+    $postFallbackPrecommitPendingHeld = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_runtime_unlock_precommit_probe_pending_held', 'reason=fallback_tail_quiescent')
+    $postFallbackPrecommitStarted = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_precommit_probe_started')
+    $postFallbackPrecommitRejected = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_runtime_unlock_precommit_probe_pending_rejected')
+    $postFallbackPrecommitAcked = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_precommit_probe_acked')
+    $postFallbackRouteCommitAccepted = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_runtime_unlock_route_commit_accepted')
+    $postFallbackResumeSettled = $postFallbackPrecommitStarted -or $postFallbackPrecommitRejected -or $postFallbackPrecommitAcked -or $postFallbackRouteCommitAccepted
+    $fallbackProofReplayPendingAfterPairedYieldRaw = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_runtime_unlock_admission_denied', 'admission_reason=fallback_proof_replay_pending', 'paired_fallback_yield_granted=1')
+    $fallbackProofReplayPendingAfterPairedYield = $fallbackProofReplayPendingAfterPairedYieldRaw -and (-not ($postFallbackAdmissionGranted -or $postFallbackResumeSettled))
+    $postFallbackRuntimeUnlockResumeBlocked = (-not $postFallbackResumeSettled) -and (($postFallbackAdmissionGranted -and
+        ($postFallbackPrecommitWaitingForProof -or $postFallbackPrecommitPendingHeld)) -or
+        $fallbackProofReplayPendingAfterPairedYield)
     $fallbackFrontierRepairAuthorityGranted = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_frontier_repair_authority_granted')
     $fallbackFrontierRepairDispatched = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_frontier_repair_dispatched')
     $fallbackFrontierRepairProgressObserved = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_frontier_repair_progress_observed')
@@ -2891,6 +2904,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $ErrorMessage.IndexOf('coordinator-authorized file Tuna V4 publication after measured GUI file transfer', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         $phase = 'route_publication'
         $reason = 'file_tuna_v4_publication_missing_after_transfer'
+    }
+    elseif ($postFallbackRuntimeUnlockResumeBlocked) {
+        $phase = 'post_fallback_runtime_unlock_resume'
+        $reason = if ($fallbackProofReplayPendingAfterPairedYield) { 'fallback_proof_replay_pending_after_paired_yield' } else { 'post_fallback_runtime_unlock_resume_blocked' }
     }
     elseif ($regularV4FrontierRepairStalled) {
         $phase = 'regular_v4_frontier_repair'

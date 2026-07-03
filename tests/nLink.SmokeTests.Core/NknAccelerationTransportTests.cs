@@ -91,6 +91,101 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public void RuntimeUnlockPendingNegotiation_QueuesBehindPendingOfferAndWakesWhenCleared()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-pending-offer-wake.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-pending-offer-wake-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                new RetryableTunaAccelerationSession(canListen: true, failedDialAttemptsBeforeSuccess: 0));
+
+            const string nonce = "aa11223344556677889900aabbccddee";
+            SetPrivateField(host, "outboundAccelerationOfferNonce", nonce);
+            SetPrivateField(host, "outboundAccelerationOfferPayerDecisionId", 42L);
+            SetPrivateField(host, "outboundAccelerationOfferGeneration", 7L);
+            var logStart = GetOperationalLogLength();
+
+            var queued = Assert.IsType<bool>(InvokePrivateMethod(
+                host,
+                "TryQueueRuntimeUnlockNegotiationBehindPendingGeneration",
+                "runtime_unlock_after_fallback_tail_quiescent",
+                "unit_test_pending_offer"));
+
+            Assert.True(queued);
+            Assert.Equal(1, Assert.IsType<int>(GetPrivateField(host, "pendingRuntimeUnlockAccelerationNegotiation")));
+            Assert.Equal(
+                "runtime_unlock_after_fallback_tail_quiescent",
+                Assert.IsType<string>(GetPrivateField(host, "pendingRuntimeUnlockAccelerationNegotiationReason")));
+
+            InvokePrivateMethod(host, "ClearOutboundAccelerationOfferIfCurrent", nonce, 42L, 7L, "unit_test_offer_cleared");
+
+            Assert.Equal(0, Assert.IsType<int>(GetPrivateField(host, "pendingRuntimeUnlockAccelerationNegotiation")));
+            Assert.Null(GetPrivateField(host, "pendingRuntimeUnlockAccelerationNegotiationReason"));
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=tuna_acceleration_runtime_unlock_queued_behind_pending_generation;", logTail, StringComparison.Ordinal);
+            Assert.Contains("wait_reason=unit_test_pending_offer", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=tuna_acceleration_runtime_unlock_pending_negotiation_wake_scheduled;", logTail, StringComparison.Ordinal);
+            Assert.Contains("trigger=outbound_offer_cleared", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void RuntimeUnlockPendingNegotiation_QueuesBehindPendingAnswerAckAndWakesWhenCleared()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-pending-answer-wake.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-pending-answer-wake-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                new RetryableTunaAccelerationSession(canListen: true, failedDialAttemptsBeforeSuccess: 0));
+
+            SetPrivateField(host, "pendingAccelerationAnswerAckNonce", "bb11223344556677889900aabbccddee");
+            SetPrivateField(host, "pendingAccelerationAnswerAckPayerDecisionId", 43L);
+            var logStart = GetOperationalLogLength();
+
+            var queued = Assert.IsType<bool>(InvokePrivateMethod(
+                host,
+                "TryQueueRuntimeUnlockNegotiationBehindPendingGeneration",
+                "runtime_unlock_after_fallback_tail_quiescent",
+                "unit_test_pending_answer_ack"));
+
+            Assert.True(queued);
+            Assert.Equal(1, Assert.IsType<int>(GetPrivateField(host, "pendingRuntimeUnlockAccelerationNegotiation")));
+
+            InvokePrivateMethod(host, "ClearPendingAccelerationAnswerAckLocked");
+
+            Assert.Equal(0, Assert.IsType<int>(GetPrivateField(host, "pendingRuntimeUnlockAccelerationNegotiation")));
+            Assert.Null(GetPrivateField(host, "pendingRuntimeUnlockAccelerationNegotiationReason"));
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=tuna_acceleration_runtime_unlock_queued_behind_pending_generation;", logTail, StringComparison.Ordinal);
+            Assert.Contains("wait_reason=unit_test_pending_answer_ack", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=tuna_acceleration_runtime_unlock_pending_negotiation_wake_scheduled;", logTail, StringComparison.Ordinal);
+            Assert.Contains("trigger=answer_ack_cleared", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task RecoveryStateContract_RuntimeUnlockRetryDispatchesBeforeLivenessTerminalizes()
     {
         FakeNknClient.ResetNetwork();

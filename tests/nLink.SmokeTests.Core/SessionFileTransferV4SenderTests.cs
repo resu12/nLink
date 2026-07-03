@@ -1590,13 +1590,15 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
         var handled = Assert.IsType<bool>(serviceType
             .GetMethod("TryStartOutboundRuntimeUnlockPreCommitProbeOrWaitForFallbackLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(service, [context, "runtime_unlock_answer_ack_probe_ready", "runtime_unlock_probe_missing"])!);
+            .Invoke(service, [context, "fallback_tail_quiescent", "runtime_unlock_probe_missing"])!);
 
         Assert.True(handled);
         Assert.Empty(dataSession.SentFrames.OfType<FileTransferRuntimeUnlockPreCommitProbeFrame>());
         Assert.Empty(transport.RuntimeUnlockProbeEvents);
         var log = ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_runtime_unlock_precommit_probe_waiting_for_transport_proof; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_runtime_unlock_precommit_probe_pending_held; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("hold_reason=snapshot_not_usable", log, StringComparison.Ordinal);
         Assert.Contains("reason=snapshot_not_usable", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=runtime_unlock_precommit_probe_started; direction=outbound;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=runtime_unlock_precommit_probe_sent; direction=outbound;", log, StringComparison.Ordinal);

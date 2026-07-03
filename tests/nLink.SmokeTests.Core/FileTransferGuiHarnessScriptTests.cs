@@ -181,6 +181,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("FallbackFrontierRepairStalled", scriptText, StringComparison.Ordinal);
         Assert.Contains("fallback_frontier_repair_stalled", scriptText, StringComparison.Ordinal);
         Assert.Contains("fallback_frontier_repair", scriptText, StringComparison.Ordinal);
+        Assert.Contains("post_fallback_runtime_unlock_resume", scriptText, StringComparison.Ordinal);
+        Assert.Contains("post_fallback_runtime_unlock_resume_blocked", scriptText, StringComparison.Ordinal);
+        Assert.Contains("fallback_proof_replay_pending_after_paired_yield", scriptText, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_runtime_unlock_precommit_probe_pending_held", scriptText, StringComparison.Ordinal);
         Assert.Contains("message_type=file_transfer_offer", scriptText, StringComparison.Ordinal);
         Assert.Contains("event=tuna_acceleration_offer_received_raw", scriptText, StringComparison.Ordinal);
         Assert.Contains("event=offer_received", scriptText, StringComparison.Ordinal);
