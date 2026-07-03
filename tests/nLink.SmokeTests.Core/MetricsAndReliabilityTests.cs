@@ -1051,6 +1051,20 @@ public sealed class MetricsAndReliabilityTests : CoreSmokeTestsBase
 
 [Trait("Category", "LegacySmoke")]
     [Fact]
+    public void TransportFailureMapper_FromException_PreservesBridgeBootstrapMarkerWhenRawErrorIsStale()
+    {
+        var failure = TransportFailureMapper.FromException(
+            new InvalidOperationException("nkn_bridge_bootstrap_not_ready: role=helpee; reason=bridge_transport_connect_failed_before_ready"),
+            rawError: "previous_disconnect_reason");
+
+        Assert.Equal(TransportFailureCategory.BridgeStartFailure, failure.Category);
+        Assert.False(failure.IsTransient);
+        Assert.Contains("nkn_bridge_bootstrap_not_ready", failure.RawError, StringComparison.Ordinal);
+        Assert.Contains("previous_disconnect_reason", failure.RawError, StringComparison.Ordinal);
+    }
+
+[Trait("Category", "LegacySmoke")]
+    [Fact]
     public void TransportFailureMapper_MapsProcessExit_ToUnexpectedProcessExit()
     {
         var failure = TransportFailureMapper.FromSignals(

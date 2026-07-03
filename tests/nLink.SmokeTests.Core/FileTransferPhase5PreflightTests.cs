@@ -161,6 +161,8 @@ public sealed class FileTransferPhase5PreflightTests : FileTransferAcceptancePha
             Assert.Equal("nkn_bridge_bootstrap_network_unready", summary["preflight_failure_reason"]);
             Assert.Equal("helpee_invite_host_before_bridge_ready", summary["preflight_failure_subreason"]);
             Assert.Equal("helpee_invite_host_before_bridge_ready", summary["preflight_first_failure_subreason"]);
+            Assert.Equal("3", summary["preflight_attempt_count"]);
+            Assert.Equal("1", summary["preflight_retry_used"]);
             Assert.Equal("0", summary["run_count"]);
             Assert.Contains("phase5-preflight-bridge-ready: nkn_bridge_bootstrap_network_unready", summaryText, StringComparison.Ordinal);
             Assert.Contains("subreason=helpee_invite_host_before_bridge_ready", summaryText, StringComparison.Ordinal);
@@ -169,8 +171,12 @@ public sealed class FileTransferPhase5PreflightTests : FileTransferAcceptancePha
             Assert.Equal("helpee_invite_host_before_bridge_ready", preflight["failure_subreason"]);
 
             var attempts = ReadArtifactReport(runRoot, "phase5-bridge-readiness-preflight-attempts.txt");
+            Assert.Equal("3", attempts["attempt_count"]);
+            Assert.Equal("1", attempts["retry_used"]);
+            Assert.Equal("3", attempts["selected_attempt"]);
             Assert.Equal("helpee_invite_host_before_bridge_ready", attempts["final_failure_subreason"]);
             Assert.Equal("helpee_invite_host_before_bridge_ready", attempts["first_failure_subreason"]);
+            Assert.True(File.Exists(Path.Combine(runRoot, "preflight-bridge-ready-attempt-2", "phase5-bridge-readiness-preflight-summary.txt")), "Expected second failed preflight attempt to be preserved.");
             Assert.False(Directory.Exists(Path.Combine(runRoot, "regular-v4-live-activation-off-on-off-256mb")), "Preflight failure should not consume the Phase 5 scenario matrix.");
         }
         finally

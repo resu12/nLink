@@ -1689,6 +1689,11 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(logStart).Contains("event=tuna_acceleration_offer_queued; reason=runtime_unlock;", StringComparison.Ordinal),
                 TimeSpan.FromSeconds(5));
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=filetransfer_tuna_activation_negotiation_regular_nkn_paused;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(5));
 
             var contractProvider = Assert.IsAssignableFrom<ISessionRecoveryStateContract>(host);
             Assert.True(contractProvider.TryGetActiveSessionRecoveryContract(sessionId, out var snapshot));
@@ -5168,12 +5173,28 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.True(Volatile.Read(ref blockedOfferCount) > 0);
             Assert.True(hostLane.EnsureListenerCalls > 0);
             Assert.True(helperLane.StartDialerCalls > 0);
+            var matchedBulkBypassTail = string.Empty;
             await WaitUntilAsync(
-                () => ReadOperationalLogTail(logStart).Contains(
-                    "event=tuna_acceleration_control_bulk_bypass_sent; purpose=offer",
-                    StringComparison.Ordinal),
+                () =>
+                {
+                    var tail = ReadOperationalLogTail(logStart);
+                    if (tail.Contains(
+                            "event=tuna_acceleration_control_bulk_bypass_started; purpose=offer",
+                            StringComparison.Ordinal) &&
+                        tail.Contains(
+                            "event=tuna_acceleration_control_bulk_bypass_sent; purpose=offer",
+                            StringComparison.Ordinal) &&
+                        tail.Contains("event=tuna_acceleration_offer_queued;", StringComparison.Ordinal) &&
+                        tail.Contains("observed_lane=control_to_bulk_endpoint", StringComparison.Ordinal))
+                    {
+                        matchedBulkBypassTail = tail;
+                        return true;
+                    }
+
+                    return false;
+                },
                 TimeSpan.FromSeconds(3));
-            var logTail = ReadOperationalLogTail(logStart);
+            var logTail = matchedBulkBypassTail + Environment.NewLine + ReadOperationalLogTail(logStart);
             Assert.Contains("event=tuna_acceleration_control_bulk_bypass_started; purpose=offer", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_control_bulk_bypass_sent; purpose=offer", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_offer_queued;", logTail, StringComparison.Ordinal);
@@ -10138,11 +10159,15 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
         var previousProbeDelay = NknSignalingTransport.RuntimeUnlockRegularV4BridgeRecoveryStartedAuthorityProbeDelayOverrideForTests;
         var previousAuthorityDeadline = NknSignalingTransport.RuntimeUnlockRetryAuthorityDeadlineOverrideForTests;
         var previousSoftSettleDelay = NknSignalingTransport.RuntimeUnlockRecoverySoftSettleDelayOverrideForTests;
+        var previousReceiveRecoveryBlocker = NknSignalingTransport.RuntimeUnlockRegularV4ReceiveRecoveryBlockerOverrideForTests;
+        var previousObservedSendBlocker = NknSignalingTransport.RuntimeUnlockOfferObservedSendBlockerReasonOverrideForTests;
         NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = TimeSpan.Zero;
         NknSignalingTransport.RuntimeUnlockRegularV4BridgeRecoveryStartedAuthorityProbeDelayOverrideForTests =
             TimeSpan.FromSeconds(5);
         NknSignalingTransport.RuntimeUnlockRetryAuthorityDeadlineOverrideForTests = null;
         NknSignalingTransport.RuntimeUnlockRecoverySoftSettleDelayOverrideForTests = TimeSpan.FromSeconds(20);
+        NknSignalingTransport.RuntimeUnlockRegularV4ReceiveRecoveryBlockerOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockOfferObservedSendBlockerReasonOverrideForTests = null;
         try
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
@@ -10284,6 +10309,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 previousProbeDelay;
             NknSignalingTransport.RuntimeUnlockRetryAuthorityDeadlineOverrideForTests = previousAuthorityDeadline;
             NknSignalingTransport.RuntimeUnlockRecoverySoftSettleDelayOverrideForTests = previousSoftSettleDelay;
+            NknSignalingTransport.RuntimeUnlockRegularV4ReceiveRecoveryBlockerOverrideForTests = previousReceiveRecoveryBlocker;
+            NknSignalingTransport.RuntimeUnlockOfferObservedSendBlockerReasonOverrideForTests = previousObservedSendBlocker;
             FakeNknClient.ResetNetwork();
         }
     }
@@ -14567,24 +14594,49 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.True(Volatile.Read(ref blockedIntentCount) > 0);
             Assert.True(hostLane.EnsureListenerCalls > 0);
             Assert.True(helperLane.StartDialerCalls > 0);
+            var sawBulkBypassStarted = false;
+            var sawBulkBypassSent = false;
+            var sawPayerIntentQueued = false;
+            var sawAnswerAckProbeBarrier = false;
             var logTail = string.Empty;
             await WaitUntilAsync(
                 () =>
                 {
                     var currentTail = ReadOperationalLogTail(logStart);
-                    var observed =
-                        currentTail.Contains("event=tuna_acceleration_control_bulk_bypass_started; purpose=payer_intent", StringComparison.Ordinal) &&
-                        currentTail.Contains("event=tuna_acceleration_control_bulk_bypass_sent; purpose=payer_intent", StringComparison.Ordinal) &&
-                        currentTail.Contains("event=tuna_acceleration_payer_intent_queued;", StringComparison.Ordinal) &&
-                        currentTail.Contains("event=runtime_unlock_answer_ack_probe_barrier", StringComparison.Ordinal);
-                    if (observed)
+                    if (!sawBulkBypassStarted &&
+                        currentTail.Contains("event=tuna_acceleration_control_bulk_bypass_started; purpose=payer_intent", StringComparison.Ordinal))
                     {
-                        logTail = currentTail;
+                        sawBulkBypassStarted = true;
+                        logTail += currentTail + Environment.NewLine;
                     }
 
-                    return observed;
+                    if (!sawBulkBypassSent &&
+                        currentTail.Contains("event=tuna_acceleration_control_bulk_bypass_sent; purpose=payer_intent", StringComparison.Ordinal))
+                    {
+                        sawBulkBypassSent = true;
+                        logTail += currentTail + Environment.NewLine;
+                    }
+
+                    if (!sawPayerIntentQueued &&
+                        currentTail.Contains("event=tuna_acceleration_payer_intent_queued;", StringComparison.Ordinal))
+                    {
+                        sawPayerIntentQueued = true;
+                        logTail += currentTail + Environment.NewLine;
+                    }
+
+                    if (!sawAnswerAckProbeBarrier &&
+                        currentTail.Contains("event=runtime_unlock_answer_ack_probe_barrier", StringComparison.Ordinal))
+                    {
+                        sawAnswerAckProbeBarrier = true;
+                        logTail += currentTail + Environment.NewLine;
+                    }
+
+                    return sawBulkBypassStarted &&
+                        sawBulkBypassSent &&
+                        sawPayerIntentQueued &&
+                        sawAnswerAckProbeBarrier;
                 },
-                TimeSpan.FromSeconds(3));
+                TimeSpan.FromSeconds(5));
             Assert.Contains("event=tuna_acceleration_control_bulk_bypass_started; purpose=payer_intent", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_control_bulk_bypass_sent; purpose=payer_intent", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_payer_intent_queued;", logTail, StringComparison.Ordinal);
@@ -22635,7 +22687,15 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
     {
         FakeNknClient.ResetNetwork();
         var previousAuthorityDeadline = NknSignalingTransport.RuntimeUnlockRetryAuthorityDeadlineOverrideForTests;
+        var previousSoftSettleDelay = NknSignalingTransport.RuntimeUnlockRecoverySoftSettleDelayOverrideForTests;
+        var previousReceiveRecoveryBlocker = NknSignalingTransport.RuntimeUnlockRegularV4ReceiveRecoveryBlockerOverrideForTests;
+        var previousObservedSendBlocker = NknSignalingTransport.RuntimeUnlockOfferObservedSendBlockerReasonOverrideForTests;
+        var previousPressureOverride = NknSignalingTransport.RuntimeUnlockOfferQueueAcceptedPressureOverrideForTests;
         NknSignalingTransport.RuntimeUnlockRetryAuthorityDeadlineOverrideForTests = TimeSpan.FromMilliseconds(25);
+        NknSignalingTransport.RuntimeUnlockRecoverySoftSettleDelayOverrideForTests = TimeSpan.FromSeconds(20);
+        NknSignalingTransport.RuntimeUnlockRegularV4ReceiveRecoveryBlockerOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockOfferObservedSendBlockerReasonOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockOfferQueueAcceptedPressureOverrideForTests = null;
         try
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
@@ -22731,6 +22791,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
         finally
         {
             NknSignalingTransport.RuntimeUnlockRetryAuthorityDeadlineOverrideForTests = previousAuthorityDeadline;
+            NknSignalingTransport.RuntimeUnlockRecoverySoftSettleDelayOverrideForTests = previousSoftSettleDelay;
+            NknSignalingTransport.RuntimeUnlockRegularV4ReceiveRecoveryBlockerOverrideForTests = previousReceiveRecoveryBlocker;
+            NknSignalingTransport.RuntimeUnlockOfferObservedSendBlockerReasonOverrideForTests = previousObservedSendBlocker;
+            NknSignalingTransport.RuntimeUnlockOfferQueueAcceptedPressureOverrideForTests = previousPressureOverride;
             FakeNknClient.ResetNetwork();
         }
     }

@@ -449,6 +449,66 @@ public sealed class FileTransferRetainedRouteLawAnalyzerTests : FileTransferOpsS
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_SwitchOffFallbackSetupBeforeSelection_ReturnsRouteConsistencyPass()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "[redacted]";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=tuna_strict; liveness_terminal_policy=file_tuna_v4_fast; selection_reason=file_tuna_active; file_tuna_active=1; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=nkn; live_route_epoch=0; route_publication_generation=1; runtime_generation=1; terminal_generation=0; leg_generation=1; route_commit_generation=0; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted"),
+            LogLine($"event=filetransfer_route_hint_observed_without_publication_authority; transfer_id={transferId}; route=post_tuna_fallback_v6; protocol_version=6; source=availability_broadcast; reason=header_switch_off"),
+            LogLine($"event=filetransfer_leg_started; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; leg_id=leg:2; leg_generation=2; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=1; transport_epoch=1; state=checkpoint_pending; reason=header_switch_off; start_committed_chunk=1440; bridge_recovery_generation=1; can_send_data=0"),
+            LogLine($"event=filetransfer_clean_fallback_leg_started; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; leg_id=leg:2; leg_generation=2; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=1; transport_epoch=1; state=checkpoint_pending; reason=header_switch_off; start_committed_chunk=1440; bridge_recovery_generation=1; can_send_data=0"),
+            LogLine($"event=filetransfer_fallback_leg_recovery_generation_started; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; reason=header_switch_off; leg_generation=2; recovery_generation=1; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=1; transport_epoch=1; frontier_chunk_index=1440; committed_chunk=1440"),
+            LogLine($"event=filetransfer_route_transitioned; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; previous_route=file_tuna_v4; new_route=post_tuna_fallback_v6; previous_protocol_version=4; new_protocol_version=6; previous_runtime_profile=file_tuna_v4_fast; new_runtime_profile=default_v6; previous_frame_family=v4; new_frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; selection_reason=post_tuna_file_fallback_active; reason=header_switch_off; live_route_epoch=1; route_publication_generation=4; runtime_generation=2; terminal_generation=0; leg_generation=2; route_commit_generation=0; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted"),
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6_repair; selection_reason=post_tuna_file_fallback_active; file_tuna_active=0; post_tuna_fallback_active=1; diagnostic_regular_nkn_v6=0; transport_profile=nkn; live_route_epoch=1; route_publication_generation=5; runtime_generation=2; terminal_generation=0; leg_generation=2; route_commit_generation=0; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted"),
+            LogLine($"event=filetransfer_live_route_epoch_started; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=1; previous_route=file_tuna_v4; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; state=started; reason=header_switch_off; route_publication_generation=7; runtime_generation=2; terminal_generation=0; leg_generation=2; route_commit_generation=0; target_route=post_tuna_fallback_v6; target_protocol_version=6; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted"),
+            LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_redacted; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=(none); integrity_ok=1"),
+            LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_redacted; transfer_id={transferId}; state=Completed; error_code=(none); integrity_ok=1")
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "SwitchOff"]);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("pass", route["route_consistency_verdict"]);
+        Assert.Equal("0", route["route_mismatch_count"]);
+        Assert.Equal("file_tuna_v4,post_tuna_fallback_v6", route["selected_route_changes"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeEffectBeforeRouteSelection_ReturnsProtocolFailure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "[redacted]";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_v6_sender_started; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=1; runtime_profile=default_v6; frame_family=v6"),
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6_repair; selection_reason=post_tuna_file_fallback_active; file_tuna_active=0; post_tuna_fallback_active=1; diagnostic_regular_nkn_v6=0; transport_profile=nkn; live_route_epoch=1; route_publication_generation=5; runtime_generation=2; terminal_generation=0; leg_generation=2; route_commit_generation=0; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted"),
+            LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_redacted; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=(none); integrity_ok=1"),
+            LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_redacted; transfer_id={transferId}; state=Completed; error_code=(none); integrity_ok=1")
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "SwitchOff"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        var routeText = File.ReadAllText(Path.Combine(result.ArtifactDir, "filetransfer-route-consistency-summary.txt"));
+        Assert.Contains("route_consistency_verdict=fail", routeText, StringComparison.Ordinal);
+        Assert.Contains("route-aware event has no selected route", routeText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_LiveFileTunaMultiCycleRouteChangesBeforeTerminal_ReturnsRouteConsistencyPass()
     {
         if (!OperatingSystem.IsWindows())

@@ -3115,6 +3115,7 @@ public sealed partial class SessionFileTransferService
             if (ShouldReuseCurrentV6TransportEpoch(context.CurrentTransferLeg, current, handoffKind, targetTransport))
             {
                 AdoptOutboundFallbackLegTransportEpochLocked(context, current.EpochId, reason);
+                ResolveOutboundFallbackTailSurvivalLocked(context, "transport_epoch_adopted");
                 LogV6TransportEpochReused(FileTransferDirection.Outbound, context.TransferId, context.SessionId, current, reason);
                 return true;
             }
@@ -3155,6 +3156,7 @@ public sealed partial class SessionFileTransferService
             epoch.EpochId,
             "transport_epoch_started");
         AdoptOutboundFallbackLegTransportEpochLocked(context, epoch.EpochId, reason);
+        ResolveOutboundFallbackTailSurvivalLocked(context, "transport_epoch_adopted");
         context.StatusMessage = GetV6TransportEpochStatus(epoch);
         LogV6TransportEpochStarted(context.TransferId, context.SessionId, epoch);
         PublishV6TransportEpochSnapshot(context.SessionId, context.TransferId, epoch);
@@ -3193,6 +3195,7 @@ public sealed partial class SessionFileTransferService
             {
                 LogV6TransportEpochReused(FileTransferDirection.Inbound, context.TransferId, context.SessionId, current, reason);
                 AdoptInboundFallbackLegTransportEpochLocked(context, current.EpochId, reason);
+                ResolveInboundFallbackTailSurvivalLocked(context, "transport_epoch_adopted");
                 return;
             }
 
@@ -3220,6 +3223,7 @@ public sealed partial class SessionFileTransferService
         context.V6LastReceiverStateSentUtc = null;
         context.V6LastFrontierRequestSentUtc = null;
         AdoptInboundFallbackLegTransportEpochLocked(context, epoch.EpochId, reason);
+        ResolveInboundFallbackTailSurvivalLocked(context, "transport_epoch_adopted");
         context.StatusMessage = GetV6TransportEpochStatus(epoch);
         LogV6TransportEpochStarted(context.TransferId, context.SessionId, epoch);
         PublishV6TransportEpochSnapshot(context.SessionId, context.TransferId, epoch);
@@ -3929,6 +3933,7 @@ public sealed partial class SessionFileTransferService
             epoch.EpochId,
             "peer_transport_epoch_adopted");
         AdoptOutboundFallbackLegTransportEpochLocked(context, epoch.EpochId, reason);
+        ResolveOutboundFallbackTailSurvivalLocked(context, "transport_epoch_adopted");
         context.StatusMessage = GetV6TransportEpochStatus(epoch);
         LogV6TransportEpochStarted(context.TransferId, context.SessionId, epoch);
         PublishV6TransportEpochSnapshot(context.SessionId, context.TransferId, epoch);
@@ -4065,6 +4070,7 @@ public sealed partial class SessionFileTransferService
         context.V6LastReceiverStateSentUtc = null;
         context.V6LastFrontierRequestSentUtc = null;
         AdoptInboundFallbackLegTransportEpochLocked(context, epoch.EpochId, reason);
+        ResolveInboundFallbackTailSurvivalLocked(context, "transport_epoch_adopted");
         context.StatusMessage = GetV6TransportEpochStatus(epoch);
         LogV6TransportEpochStarted(context.TransferId, context.SessionId, epoch);
         PublishV6TransportEpochSnapshot(context.SessionId, context.TransferId, epoch);

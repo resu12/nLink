@@ -949,10 +949,10 @@ function Set-Phase5PostTerminalGuiCleanupWarning {
         $setupFailureReason.IndexOf('connected_header', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $setupFailurePhase.IndexOf('post_transfer_connected_header', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $setupFailureReason.IndexOf('post_transfer_connected_header', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-        ($failures | Where-Object {
+        @(($failures | Where-Object {
             $_.IndexOf('connected header', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $_.IndexOf('post_transfer_connected_header', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
-        } | Select-Object -First 1).Count -gt 0
+        } | Select-Object -First 1)).Count -gt 0
     if (-not $hasConnectedHeaderCleanupFailure) {
         return $false
     }
@@ -4354,7 +4354,10 @@ function Invoke-Phase5BridgeReadinessPreflightWithRetry {
         Move-Item -LiteralPath $first.ArtifactDir -Destination $firstArtifactDir
     }
 
-    Write-Host ("[FileTransfer Phase5 Preflight] setup/bootstrap preflight failed with {0}; retrying once from a clean preflight artifact directory." -f $first.FailureReason) -ForegroundColor Yellow
+    $firstSubreason = if ($first.PSObject.Properties.Name -contains 'FailureSubreason') { [string]$first.FailureSubreason } else { '' }
+    $maxAttempts = if ([string]::Equals($firstSubreason, 'helpee_invite_host_before_bridge_ready', [System.StringComparison]::OrdinalIgnoreCase)) { 3 } else { 2 }
+
+    Write-Host ("[FileTransfer Phase5 Preflight] setup/bootstrap preflight failed with {0}; retrying from a clean preflight artifact directory (attempt 2/{1})." -f $first.FailureReason, $maxAttempts) -ForegroundColor Yellow
     $cleanupArtifactDir = Join-Path $RunRoot 'preflight-cleanup-after-attempt-1'
     New-Item -ItemType Directory -Force -Path $cleanupArtifactDir | Out-Null
     $cleanupBefore = @(Get-RouteAcceptanceAppProcessesForExePath -ResolvedExePath $ResolvedExePath)
@@ -4369,7 +4372,6 @@ function Invoke-Phase5BridgeReadinessPreflightWithRetry {
 
     $second = Invoke-Phase5BridgeReadinessPreflight -RepoRoot $RepoRoot -RunRoot $RunRoot -ResolvedExePath $ResolvedExePath
     $secondSubreason = if ($second.PSObject.Properties.Name -contains 'FailureSubreason') { [string]$second.FailureSubreason } else { '' }
-    $firstSubreason = if ($first.PSObject.Properties.Name -contains 'FailureSubreason') { [string]$first.FailureSubreason } else { '' }
     $result = [pscustomobject]@{
         Passed = $second.Passed
         ArtifactDir = $second.ArtifactDir
@@ -4384,6 +4386,48 @@ function Invoke-Phase5BridgeReadinessPreflightWithRetry {
         FirstFailureSubreason = $firstSubreason
         FirstArtifactDir = $firstArtifactDir
     }
+
+    if (-not $second.Passed -and $maxAttempts -gt 2 -and (Test-Phase5BridgeReadinessPreflightRetryableFailure -PreflightResult $second)) {
+        $secondArtifactDir = Join-Path $RunRoot 'preflight-bridge-ready-attempt-2'
+        if (Test-Path -LiteralPath $secondArtifactDir) {
+            throw "Phase 5 preflight retry artifact directory already exists: $secondArtifactDir"
+        }
+
+        if (Test-Path -LiteralPath $second.ArtifactDir) {
+            Move-Item -LiteralPath $second.ArtifactDir -Destination $secondArtifactDir
+        }
+
+        Write-Host ("[FileTransfer Phase5 Preflight] setup/bootstrap preflight failed again with {0}; retrying final clean preflight attempt (attempt 3/{1})." -f $second.FailureReason, $maxAttempts) -ForegroundColor Yellow
+        $cleanupArtifactDir = Join-Path $RunRoot 'preflight-cleanup-after-attempt-2'
+        New-Item -ItemType Directory -Force -Path $cleanupArtifactDir | Out-Null
+        $cleanupBefore = @(Get-RouteAcceptanceAppProcessesForExePath -ResolvedExePath $ResolvedExePath)
+        if ($cleanupBefore.Count -gt 0) {
+            Assert-RouteAcceptanceCleanAppProcessState -ResolvedExePath $ResolvedExePath -ArtifactDir $cleanupArtifactDir -Reason 'preflight_after_attempt_2'
+        }
+        else {
+            Write-RouteAcceptanceProcessCleanupArtifacts -ArtifactDir $cleanupArtifactDir -Reason 'preflight_after_attempt_2' -Before @() -After @()
+        }
+
+        Start-Sleep -Seconds 2
+
+        $third = Invoke-Phase5BridgeReadinessPreflight -RepoRoot $RepoRoot -RunRoot $RunRoot -ResolvedExePath $ResolvedExePath
+        $thirdSubreason = if ($third.PSObject.Properties.Name -contains 'FailureSubreason') { [string]$third.FailureSubreason } else { '' }
+        $result = [pscustomobject]@{
+            Passed = $third.Passed
+            ArtifactDir = $third.ArtifactDir
+            FailureClass = $third.FailureClass
+            FailureReason = $third.FailureReason
+            FailureSubreason = $thirdSubreason
+            ExitCode = $third.ExitCode
+            AttemptCount = 3
+            RetryUsed = $true
+            SelectedAttempt = 3
+            FirstFailureReason = $first.FailureReason
+            FirstFailureSubreason = $firstSubreason
+            FirstArtifactDir = $firstArtifactDir
+        }
+    }
+
     Write-Phase5BridgeReadinessPreflightAttemptSummary -RunRoot $RunRoot -PreflightResult $result
     return $result
 }

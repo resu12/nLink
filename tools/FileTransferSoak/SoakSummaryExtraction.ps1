@@ -475,6 +475,7 @@ function Test-FileTransferDiagnosticFallbackRouteEvent {
     }
 
     switch ($Event.EventName) {
+        'filetransfer_route_hint_observed_without_publication_authority' { return $true }
         'filetransfer_fallback_stale_proof_ignored' { return $true }
         'filetransfer_clean_fallback_stale_proof_ignored' { return $true }
         'filetransfer_fallback_stale_proof_replay_suppressed' { return $true }
@@ -510,11 +511,20 @@ function Test-FileTransferLiveRouteEpochRouteEvent {
 function Test-FileTransferRouteEventCanPrecedeSelection {
     param([Parameter(Mandatory = $true)]$Event)
 
-    if ($Event.EventName -ne 'filetransfer_leg_started') {
+    if ($Event.EventName -notin @(
+            'filetransfer_leg_started',
+            'filetransfer_clean_fallback_leg_started',
+            'filetransfer_fallback_leg_recovery_generation_started')) {
         return $false
     }
 
     $reason = Get-FileTransferEventField -Event $Event -Name 'reason' -Default ''
+    $route = Get-FileTransferEventField -Event $Event -Name 'route' -Default ''
+    $protocolVersion = Get-FileTransferEventField -Event $Event -Name 'protocol_version' -Default ''
+    if ($reason -eq 'header_switch_off') {
+        return $route -eq 'post_tuna_fallback_v6' -and $protocolVersion -eq '6'
+    }
+
     return $reason -eq 'new_transfer' -or
         $reason -eq 'offer_received' -or
         $reason -eq 'live_route_tuna_activated' -or
@@ -611,7 +621,7 @@ function Get-FileTransferSelectedRouteForEvent {
     $candidates = @(
         $RouteSelectedEvents |
             Where-Object {
-                $_.Sequence -lt $Event.Sequence -and
+                $_.Sequence -le $Event.Sequence -and
                 (Get-FileTransferRouteEventKey -Event $_) -eq $transferKey
             } |
             Sort-Object Sequence

@@ -69,7 +69,7 @@ public static class TransportFailureMapper
         }
 
         return FromSignals(
-            rawError ?? ex.Message,
+            CombineSignalValues(rawError, ex.Message),
             exceptionType: ex.GetType().Name,
             lastDisconnectReason: lastDisconnectReason,
             fallbackMessage: ex.Message);
@@ -246,6 +246,17 @@ public static class TransportFailureMapper
             exceptionType: ex.GetType().Name,
             rawError: combinedRaw,
             isTransient: isTransient);
+    }
+
+    private static string? CombineSignalValues(params string?[] values)
+    {
+        var parts = values
+            .Select(NormalizeSignalValue)
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        return parts.Length == 0 ? null : string.Join(" | ", parts);
     }
 
     private static string? NormalizeSignalValue(string? value)

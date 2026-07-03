@@ -4140,6 +4140,40 @@ function Test-FileTransferFileTunaV4DataPathScopeMatches {
     return $true
 }
 
+function Get-FileTransferFileTunaV4DataPathScopeKey {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    $values = New-Object System.Collections.Generic.List[string]
+    foreach ($fieldName in @('transfer_id', 'session_id', 'route_publication_generation', 'runtime_generation', 'terminal_generation', 'leg_generation', 'live_route_epoch')) {
+        $value = Get-FileTransferEventField -Event $Event -Name $fieldName -Default ''
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            return ''
+        }
+
+        $values.Add($value.ToLowerInvariant()) | Out-Null
+    }
+
+    return [string]::Join('|', $values)
+}
+
+function Get-FileTransferFileTunaV4DataPathRangeKey {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    $scopeKey = Get-FileTransferFileTunaV4DataPathScopeKey -Event $Event
+    if ([string]::IsNullOrWhiteSpace($scopeKey) -or
+        -not (Test-FileTransferFileTunaV4DataPathHasRange -Event $Event)) {
+        return ''
+    }
+
+    $start = Get-FileTransferFileTunaV4DataPathRangeStart -Event $Event
+    $endExclusive = Get-FileTransferFileTunaV4DataPathRangeEndExclusive -Event $Event
+    if ($start -lt 0 -or $endExclusive -le $start) {
+        return ''
+    }
+
+    return ("{0}|{1}|{2}" -f $scopeKey, $start, $endExclusive)
+}
+
 function Get-FileTransferFileTunaV4DataPathRangeStart {
     param([Parameter(Mandatory = $true)]$Event)
 
@@ -4281,6 +4315,11 @@ function Test-FileTransferFileTunaV4DataPathSendShapeMatches {
 function Get-FileTransferFileTunaV4DataPathProof {
     param([Parameter(Mandatory = $true)]$Summary)
 
+    $cachePropertyName = '__FileTransferFileTunaV4DataPathProof'
+    if ($null -ne $Summary.PSObject.Properties[$cachePropertyName]) {
+        return $Summary.PSObject.Properties[$cachePropertyName].Value
+    }
+
     [object[]]$events = @()
     if ($null -ne $Summary.PSObject.Properties['AllEvents']) {
         $events = @($Summary.AllEvents)
@@ -4308,12 +4347,81 @@ function Get-FileTransferFileTunaV4DataPathProof {
     $missingActualProofCount = 0
     $usedPeerVisibleEventIndexes = New-Object 'System.Collections.Generic.HashSet[int]'
     $usedRepairPeerVisibleEventIndexes = New-Object 'System.Collections.Generic.HashSet[int]'
+    $peerVisibleAvailableChunkCountsByScopeKey = @{}
+    $peerVisibleRangeCountsByRangeKey = @{}
+    foreach ($peerVisible in @($peerVisibleEvents)) {
+        if (-not (Test-FileTransferFileTunaV4DataPathHasRange -Event $peerVisible)) {
+            continue
+        }
+
+        $rangeKey = Get-FileTransferFileTunaV4DataPathRangeKey -Event $peerVisible
+        if (-not [string]::IsNullOrWhiteSpace($rangeKey)) {
+            if (-not $peerVisibleRangeCountsByRangeKey.ContainsKey($rangeKey)) {
+                $peerVisibleRangeCountsByRangeKey[$rangeKey] = 0
+            }
+
+            $peerVisibleRangeCountsByRangeKey[$rangeKey] = [int]$peerVisibleRangeCountsByRangeKey[$rangeKey] + 1
+        }
+
+        $scopeKey = Get-FileTransferFileTunaV4DataPathScopeKey -Event $peerVisible
+        if ([string]::IsNullOrWhiteSpace($scopeKey)) {
+            continue
+        }
+
+        if (-not $peerVisibleAvailableChunkCountsByScopeKey.ContainsKey($scopeKey)) {
+            $peerVisibleAvailableChunkCountsByScopeKey[$scopeKey] = New-Object 'System.Collections.Generic.Dictionary[int64,int]'
+        }
+
+        $availableChunkCounts = $peerVisibleAvailableChunkCountsByScopeKey[$scopeKey]
+        $actualStart = Get-FileTransferFileTunaV4DataPathRangeStart -Event $peerVisible
+        $actualEndExclusive = Get-FileTransferFileTunaV4DataPathRangeEndExclusive -Event $peerVisible
+        for ($chunkIndex = $actualStart; $chunkIndex -lt $actualEndExclusive; $chunkIndex++) {
+            $chunkKey = [int64]$chunkIndex
+            if (-not $availableChunkCounts.ContainsKey($chunkKey)) {
+                $availableChunkCounts[$chunkKey] = 0
+            }
+
+            $availableChunkCounts[$chunkKey] = [int]$availableChunkCounts[$chunkKey] + 1
+        }
+    }
 
     foreach ($intent in @($intentEvents)) {
         if ($intent.EventName -eq 'filetransfer_v4_repair_sent') {
             $requiredRepairChunkCount = Get-FileTransferEventInt64Field -Event $intent -Name 'sent_chunk_count' -Default 0
             if ($requiredRepairChunkCount -le 0) {
                 $requiredRepairChunkCount = Get-FileTransferEventInt64Field -Event $intent -Name 'batch_chunk_count' -Default 0
+            }
+
+            $intentScopeKey = Get-FileTransferFileTunaV4DataPathScopeKey -Event $intent
+            if ($requiredRepairChunkCount -gt 0 -and
+                (Test-FileTransferFileTunaV4DataPathHasRange -Event $intent) -and
+                -not [string]::IsNullOrWhiteSpace($intentScopeKey) -and
+                $peerVisibleAvailableChunkCountsByScopeKey.ContainsKey($intentScopeKey)) {
+                $intentStart = Get-FileTransferFileTunaV4DataPathRangeStart -Event $intent
+                $intentEndExclusive = Get-FileTransferFileTunaV4DataPathRangeEndExclusive -Event $intent
+                $availableChunkCounts = $peerVisibleAvailableChunkCountsByScopeKey[$intentScopeKey]
+                $matchedRepairChunks = New-Object 'System.Collections.Generic.List[int64]'
+                $matchedRepairCoverageCount = 0L
+                for ($chunkIndex = $intentStart; $chunkIndex -lt $intentEndExclusive; $chunkIndex++) {
+                    $chunkKey = [int64]$chunkIndex
+                    if ($availableChunkCounts.ContainsKey($chunkKey) -and [int]$availableChunkCounts[$chunkKey] -gt 0) {
+                        [void]$matchedRepairChunks.Add($chunkKey)
+                        $matchedRepairCoverageCount++
+                    }
+                }
+
+                if ($matchedRepairCoverageCount -lt $requiredRepairChunkCount) {
+                    $missingActualProofCount++
+                    $findings.Add(("file_tuna_v4 V4 repair intent had insufficient peer-visible Tuna data-path proof: required_chunks={0}; matched_chunks={1}; intent={2}" -f $requiredRepairChunkCount, $matchedRepairCoverageCount, (Format-FileTransferEvidenceLine -Event $intent))) | Out-Null
+                    $evidence.Add($intent) | Out-Null
+                }
+                else {
+                    foreach ($chunkKey in @($matchedRepairChunks)) {
+                        $availableChunkCounts[$chunkKey] = [int]$availableChunkCounts[$chunkKey] - 1
+                    }
+                }
+
+                continue
             }
 
             $matchedRepairChunkCount = 0L
@@ -4371,6 +4479,20 @@ function Get-FileTransferFileTunaV4DataPathProof {
             continue
         }
 
+        $intentRangeKey = Get-FileTransferFileTunaV4DataPathRangeKey -Event $intent
+        if (-not [string]::IsNullOrWhiteSpace($intentRangeKey)) {
+            if ($peerVisibleRangeCountsByRangeKey.ContainsKey($intentRangeKey) -and
+                [int]$peerVisibleRangeCountsByRangeKey[$intentRangeKey] -gt 0) {
+                $peerVisibleRangeCountsByRangeKey[$intentRangeKey] = [int]$peerVisibleRangeCountsByRangeKey[$intentRangeKey] - 1
+                continue
+            }
+
+            $missingActualProofCount++
+            $findings.Add(("file_tuna_v4 V4 send intent had no matching peer-visible Tuna data-path proof: intent={0}" -f (Format-FileTransferEvidenceLine -Event $intent))) | Out-Null
+            $evidence.Add($intent) | Out-Null
+            continue
+        }
+
         $matchedPeerVisibleIndex = -1
         for ($peerVisibleIndex = 0; $peerVisibleIndex -lt $peerVisibleEvents.Count; $peerVisibleIndex++) {
             if ($usedPeerVisibleEventIndexes.Contains([int]$peerVisibleIndex)) {
@@ -4410,7 +4532,7 @@ function Get-FileTransferFileTunaV4DataPathProof {
     }
 
     $verdict = if ($intentEvents.Count -eq 0 -and $actualEvents.Count -eq 0) { 'none' } elseif ($findings.Count -eq 0) { 'pass' } else { 'fail' }
-    return [pscustomobject]@{
+    $proof = [pscustomobject]@{
         Verdict = $verdict
         FailureClass = if ($verdict -eq 'fail') { 'file_tuna_data_path_mismatch' } else { 'none' }
         IntendedSendCount = [int]$intentEvents.Count
@@ -4422,6 +4544,8 @@ function Get-FileTransferFileTunaV4DataPathProof {
         Findings = $findings
         EvidenceEvents = @($evidence.ToArray() | Select-Object -First 20)
     }
+    $Summary | Add-Member -NotePropertyName $cachePropertyName -NotePropertyValue $proof -Force
+    return $proof
 }
 
 function Get-FileTransferPublicationAuthorityFieldCoverageProof {

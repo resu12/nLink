@@ -10680,6 +10680,9 @@ public sealed partial class SessionFileTransferService
                                             context,
                                             repairRequest.TransportEpoch,
                                             "state_refresh_received");
+                                        ResolveInboundFallbackTailSurvivalLocked(
+                                            context,
+                                            "transport_epoch_adopted");
                                     }
 
                                     shouldSendStateRefresh = MarkInboundFallbackCheckpointRequestedLocked(context, repairRequest, "state_refresh_received");

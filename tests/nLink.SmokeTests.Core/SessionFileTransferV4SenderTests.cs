@@ -4118,7 +4118,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 ]);
 
         Assert.Empty(GetQueuedV4RepairSends(context));
-        var logTail = ReadOperationalLogTail(logStart);
+        var logTail = ReadV4SenderLogSnapshot(logStart);
         Assert.Contains("reason=not_yet_sent", logTail, StringComparison.Ordinal);
         Assert.DoesNotContain("file_tuna_v6", logTail, StringComparison.Ordinal);
     }
@@ -5816,7 +5816,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             timeoutMs: 5000);
 
         var logTail = ReadV4SenderLogSnapshot(logStart);
-        var proofLog = ReadV4SenderLogSnapshot(logAfterHandoffState);
+        var proofLog = ReadOperationalLogTail(logAfterHandoffState);
         Assert.Contains("event=filetransfer_v6_epoch_tail_unblocked; direction=outbound;", logTail, StringComparison.Ordinal);
         Assert.Contains("reason=frontier_caught_up_to_accepted_tail", logTail, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_v6_tail_blocked_until_frontier_proof; direction=outbound;", proofLog, StringComparison.Ordinal);

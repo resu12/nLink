@@ -2211,6 +2211,184 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task NknTransport_FileTunaV4PayloadReceivedOverRegularNkn_IsRejectedBeforeDispatch()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            int logStartIndex = CoreSmokeTestsBase.GetOperationalLogLength();
+            using CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(8.0));
+            NknTransportOptions options = NknTransportOptions.Load();
+            FakeNknClient hostClient = new FakeNknClient("host.filetransfer.filetuna-recv-regular.address");
+            FakeNknClient helperClient = new FakeNknClient("helper.filetransfer.filetuna-recv-regular.address");
+            NknIdentity hostIdentity = new NknIdentity("host-filetuna-recv-regular-id", hostClient.Address);
+            NknIdentity helperIdentity = new NknIdentity("helper-filetuna-recv-regular-id", helperClient.Address);
+            using NknSignalingTransport host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using NknSignalingTransport helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            string sessionId = await CoreSmokeTestsBase.ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_file_tuna_v4_regular_receive_rejected";
+
+            Assert.IsAssignableFrom<IFileTransferRouteHintObserver>(host).ObserveFileTransferRouteHint(
+                new FileTransferRouteHintNotification(
+                    sessionId,
+                    transferId,
+                    FileTransferRouteResolver.FileTunaV4Token,
+                    FileTransferProtocol.ProtocolVersionV4,
+                    "unit_test_file_tuna_receive_guard",
+                    PublicationAuthority: new FileTransferRoutePublicationAuthority(
+                        sessionId,
+                        transferId,
+                        FileTransferDirection.Inbound,
+                        FileTransferRouteResolver.FileTunaV4Token,
+                        FileTransferProtocol.ProtocolVersionV4,
+                        LiveRouteEpoch: 1,
+                        RuntimeGeneration: 2,
+                        TerminalGeneration: 0,
+                        LegGeneration: 3,
+                        RoutePublicationGeneration: 4,
+                        RouteCommitGeneration: 5,
+                        TargetRouteToken: FileTransferRouteResolver.FileTunaV4Token,
+                        TargetProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
+                        TargetTransport: FileTransferTransportKind.Tuna,
+                        RoutePublicationActionKind: "RouteCommitPublication",
+                        CoordinatorDecisionReason: "unit_test_file_tuna_receive_guard")));
+
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            FileTransferChunkBatchFrameV4 batchFrame = new FileTransferChunkBatchFrameV4
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                StartChunkIndex = 0,
+                ChunkCount = 2,
+                DataSegments = new byte[2][] { Enumerable.Repeat((byte)17, 1024).ToArray(), Enumerable.Repeat((byte)34, 1024).ToArray() },
+                BatchProfile = "v4_default_21k",
+            };
+
+            InjectSecureFileTransferDataFrame(
+                host,
+                helper,
+                helperClient,
+                batchFrame,
+                NknBridgeChannel.Bulk,
+                CoreSmokeTestsBase.GetNextFileTransferSecureSequence(helper));
+
+            string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
+            Assert.Contains("event=filetransfer_data_path_receive_result;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_tuna_data_path_mismatch;", logTail, StringComparison.Ordinal);
+            Assert.Contains("proof_direction=receive; mismatch_reason=file_tuna_v4_resolved_to_regular_nkn", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_data_frame_ignored; transport=nkn;", logTail, StringComparison.Ordinal);
+            Assert.Contains("frame_type=filetransfer.chunk_batch.v4; chunk_index=0-1", logTail, StringComparison.Ordinal);
+            Assert.Contains("reason=file_tuna_v4_payload_requires_tuna", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_data_frame_dispatched; transport=nkn;", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_OutboundFileTunaV4HintDoesNotRejectInboundRegularPayload()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            int logStartIndex = CoreSmokeTestsBase.GetOperationalLogLength();
+            using CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(8.0));
+            NknTransportOptions options = NknTransportOptions.Load();
+            FakeNknClient hostClient = new FakeNknClient("host.filetransfer.filetuna-outbound-hint.address");
+            FakeNknClient helperClient = new FakeNknClient("helper.filetransfer.filetuna-outbound-hint.address");
+            NknIdentity hostIdentity = new NknIdentity("host-filetuna-outbound-hint-id", hostClient.Address);
+            NknIdentity helperIdentity = new NknIdentity("helper-filetuna-outbound-hint-id", helperClient.Address);
+            using NknSignalingTransport host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using NknSignalingTransport helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            string sessionId = await CoreSmokeTestsBase.ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_file_tuna_v4_outbound_hint_not_receive_authority";
+            TaskCompletionSource<FileTransferOfferV2> offerReceived = new TaskCompletionSource<FileTransferOfferV2>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<FileTransferAcceptV1> acceptReceived = new TaskCompletionSource<FileTransferAcceptV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<FileTransferSessionOpenV2> sessionOpenReceived = new TaskCompletionSource<FileTransferSessionOpenV2>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.FileTransferOfferReceived += delegate (object? _, FileTransferOfferReceivedEventArgs e)
+            {
+                offerReceived.TrySetResult(e.Message);
+            };
+            helper.FileTransferAcceptReceived += delegate (object? _, FileTransferAcceptReceivedEventArgs e)
+            {
+                acceptReceived.TrySetResult(e.Message);
+            };
+            host.FileTransferSessionOpenReceived += delegate (object? _, FileTransferSessionOpenReceivedEventArgs e)
+            {
+                sessionOpenReceived.TrySetResult(e.Message);
+            };
+            await helper.SendFileTransferOfferAsync(new FileTransferOfferV2 { SessionId = sessionId, TransferId = transferId, FileName = "outbound-hint.bin", FileSizeBytes = 2048L, PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4 }, cts.Token);
+            await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+            await host.SendFileTransferAcceptAsync(new FileTransferAcceptV1 { SessionId = sessionId, TransferId = transferId, AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4 }, cts.Token);
+            await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+            await helper.SendFileTransferSessionOpenAsync(new FileTransferSessionOpenV2 { SessionId = sessionId, TransferId = transferId, ProtocolVersion = FileTransferProtocol.ProtocolVersionV4, SessionRole = FileTransferProtocol.SessionRoleSender, ChunkSizeBytes = 1024, InitialPipelineDepth = 8 }, cts.Token);
+            await sessionOpenReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+
+            Assert.IsAssignableFrom<IFileTransferRouteHintObserver>(host).ObserveFileTransferRouteHint(
+                new FileTransferRouteHintNotification(
+                    sessionId,
+                    transferId,
+                    FileTransferRouteResolver.FileTunaV4Token,
+                    FileTransferProtocol.ProtocolVersionV4,
+                    "unit_test_file_tuna_outbound_hint",
+                    PublicationAuthority: new FileTransferRoutePublicationAuthority(
+                        sessionId,
+                        transferId,
+                        FileTransferDirection.Outbound,
+                        FileTransferRouteResolver.FileTunaV4Token,
+                        FileTransferProtocol.ProtocolVersionV4,
+                        LiveRouteEpoch: 1,
+                        RuntimeGeneration: 2,
+                        TerminalGeneration: 0,
+                        LegGeneration: 3,
+                        RoutePublicationGeneration: 4,
+                        RouteCommitGeneration: 5,
+                        TargetRouteToken: FileTransferRouteResolver.FileTunaV4Token,
+                        TargetProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
+                        TargetTransport: FileTransferTransportKind.Tuna,
+                        RoutePublicationActionKind: "RouteCommitPublication",
+                        CoordinatorDecisionReason: "unit_test_file_tuna_outbound_hint")));
+
+            var inboundSession = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            FileTransferChunkBatchFrameV4 batchFrame = new FileTransferChunkBatchFrameV4
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                StartChunkIndex = 0,
+                ChunkCount = 2,
+                DataSegments = new byte[2][] { Enumerable.Repeat((byte)17, 1024).ToArray(), Enumerable.Repeat((byte)34, 1024).ToArray() },
+                BatchProfile = "v4_default_21k",
+            };
+
+            InjectSecureFileTransferDataFrame(
+                host,
+                helper,
+                helperClient,
+                batchFrame,
+                NknBridgeChannel.Bulk,
+                CoreSmokeTestsBase.GetNextFileTransferSecureSequence(helper));
+
+            FileTransferReceivedDataFrame received = await inboundSession.ReceiveWithMetadataAsync(cts.Token);
+            FileTransferChunkBatchFrameV4 receivedBatch = Assert.IsType<FileTransferChunkBatchFrameV4>(received.Frame);
+            Assert.Equal(batchFrame.TransferId, receivedBatch.TransferId);
+            Assert.Equal(FileTransferTransportKind.RegularNkn, received.TransportKind);
+
+            string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
+            Assert.Contains("event=filetransfer_data_frame_dispatched; transport=nkn;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("reason=file_tuna_v4_payload_requires_tuna", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_tuna_data_path_mismatch;", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task NknTransport_FileTransferDataSession_PrioritizesRuntimeUnlockPreCommitAckReceiveDispatch()
     {
         FakeNknClient.ResetNetwork();
