@@ -2020,18 +2020,43 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             history.Add(leg);
         }
 
+        var owner = CreateRuntimeOwner(
+            sessionId,
+            transferId,
+            routeSelection,
+            currentEpoch.EpochId,
+            runtimeGeneration: 1,
+            reason,
+            direction);
+        SetPrivateProperty(context, "CurrentRuntimeOwner", owner);
+        SetPrivateProperty(context, "LastRuntimeOwnerGeneration", 1);
+        var publicationGeneration = Math.Max(1, GetPrivateProperty<int>(context, "LastRoutePublicationGeneration"));
+        var targetTransport = routeSelection.Route == FileTransferRoute.FileTunaV4
+            ? FileTransferTransportKind.Tuna
+            : FileTransferTransportKind.RegularNkn;
         SetPrivateProperty(
             context,
-            "CurrentRuntimeOwner",
-            CreateRuntimeOwner(
+            "CurrentRoutePublicationToken",
+            new RoutePublicationToken(
                 sessionId,
                 transferId,
-                routeSelection,
+                direction,
+                owner,
+                routeSelection.Route,
+                routeSelection.TelemetryToken,
+                routeSelection.ProtocolVersion,
                 currentEpoch.EpochId,
-                runtimeGeneration: 1,
-                reason,
-                direction));
-        SetPrivateProperty(context, "LastRuntimeOwnerGeneration", 1);
+                owner.RuntimeGeneration,
+                owner.TerminalGeneration,
+                leg.Generation,
+                null,
+                routeSelection.Route,
+                routeSelection.ProtocolVersion,
+                targetTransport,
+                publicationGeneration,
+                FileTransferCoordinatorActionKind.RoutePublication,
+                reason));
+        SetPrivateProperty(context, "LastRoutePublicationGeneration", publicationGeneration);
         return leg;
     }
 

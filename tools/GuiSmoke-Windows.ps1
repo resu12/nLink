@@ -2848,6 +2848,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $fallbackProofReplayPendingAfterPairedYield)
     $fallbackFrontierRepairAuthorityGranted = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_frontier_repair_authority_granted')
     $fallbackFrontierRepairDispatched = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_frontier_repair_dispatched')
+    $fallbackFrontierRepairStalledEvent = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_frontier_repair_stalled')
     $fallbackFrontierRepairProgressObserved = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_frontier_repair_progress_observed')
     $regularV4FrontierRepairAuthorityGranted = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_authority_granted')
     $regularV4FrontierRepairAuthorityRejected = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_authority_rejected')
@@ -2861,9 +2862,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $fallbackProgressTimeout = $ErrorMessage.IndexOf('no useful data progress', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_live_progress_timeout')) -or
         (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_gui_progress_timeout'))
-    $fallbackFrontierRepairStalled = ($fallbackFrontierRepairAuthorityGranted -or $fallbackFrontierRepairDispatched) -and
-        (-not $fallbackFrontierRepairProgressObserved) -and
-        $fallbackProgressTimeout
+    $fallbackFrontierRepairStalled = $fallbackFrontierRepairStalledEvent -or
+        (($fallbackFrontierRepairAuthorityGranted -or $fallbackFrontierRepairDispatched) -and
+            (-not $fallbackFrontierRepairProgressObserved) -and
+            $fallbackProgressTimeout)
     $regularV4FrontierRepairStalled = ($regularV4FrontierRepairStalledEvent -or
         (($regularV4FrontierRepairAuthorityGranted -or $regularV4FrontierRepairDispatched) -and
             (-not $regularV4FrontierRepairProgressObserved) -and

@@ -2108,4 +2108,34 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
         Assert.Equal("fallback_frontier_repair_stalled", verdict["recovery_failure_class"]);
         Assert.Equal("fail", verdict["classification_fallback_frontier_repair_verdict"]);
     }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_ExplicitFallbackFrontierRepairStalledEvent_ClassifiesRepairStalled()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_frontier_repair_explicit_stalled";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6_repair; selection_reason=post_tuna_file_fallback_active; file_tuna_active=0; post_tuna_fallback_active=1; diagnostic_regular_nkn_v6=0; transport_profile=nkn; live_route_epoch=6"),
+            LogLine($"event=filetransfer_fallback_frontier_repair_stalled; direction=inbound; transfer_id={transferId}; session_id=sess_a; repair_request_key=v6-frontier:2786:2; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=6; leg_generation=8; transport_epoch=3; bridge_recovery_generation=2; reason=repeated_frontier_repair_without_progress; frontier_chunk_index=2786; durable_received_highest_chunk_index=2785; requested_chunk_count=64; attempt_count=2; frontier_stall_age_ms=180000"),
+            LogLine($"event=filetransfer_live_progress_timeout; transfer_id={transferId}; reason=no useful data progress for 120s; total_wait_s=191; progress_timeout_seconds=120; receiver_next_chunk=2786; receiver_highest_chunk=2785; progress_events=3303"),
+            LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_a; transfer_id={transferId}; state=Failed; error_code=peer_disconnected; saved_path=(none)")
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("1", route["fallback_frontier_repair_stalled_count"]);
+        Assert.Equal("fail", route["fallback_frontier_repair_verdict"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("fallback_frontier_repair_stalled", verdict["recovery_failure_class"]);
+        Assert.Equal("1", verdict["classification_fallback_frontier_repair_stalled_count"]);
+    }
 }

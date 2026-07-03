@@ -2475,6 +2475,7 @@ function Get-FileTransferFallbackTailReconciliationProof {
     [object[]]$frontierRepairAuthorityGrantedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_frontier_repair_authority_granted' })
     [object[]]$frontierRepairAuthorityRejectedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_frontier_repair_authority_rejected' })
     [object[]]$frontierRepairDispatchedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_frontier_repair_dispatched' })
+    [object[]]$frontierRepairStalledEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_frontier_repair_stalled' })
     [object[]]$frontierRepairProgressObservedEvents = @($events | Where-Object {
         $_.EventName -eq 'filetransfer_fallback_frontier_repair_progress_observed' -or
         $_.EventName -eq 'filetransfer_v4_frontier_stall_missing_range_filled' -or
@@ -2702,6 +2703,7 @@ function Get-FileTransferFallbackTailReconciliationProof {
         $frontierRepairAuthorityGrantedEvents.Count -gt 0 -or
         $frontierRepairAuthorityRejectedEvents.Count -gt 0 -or
         $frontierRepairDispatchedEvents.Count -gt 0 -or
+        $frontierRepairStalledEvents.Count -gt 0 -or
         $frontierRepairProgressObservedEvents.Count -gt 0 -or
         $staleYieldProofIgnoredEvents.Count -gt 0
     $hasLegacyLocalPairedYield = $outboundQuiescentYieldEvents.Count -gt 0 -and
@@ -2768,7 +2770,14 @@ function Get-FileTransferFallbackTailReconciliationProof {
     })
 
     $frontierRepairVerdict = 'none'
-    if ($frontierRepairDispatchedWithoutProgressEvents.Count -gt 0) {
+    if ($frontierRepairStalledEvents.Count -gt 0) {
+        $frontierRepairVerdict = 'fail'
+        $quiescenceFindings.Add('fallback frontier repair explicitly stalled before terminal progress') | Out-Null
+        foreach ($event in @($frontierRepairStalledEvents + $failureEvents | Select-Object -First 10)) {
+            $quiescenceEvidence.Add($event) | Out-Null
+        }
+    }
+    elseif ($frontierRepairDispatchedWithoutProgressEvents.Count -gt 0) {
         $frontierRepairVerdict = 'fail'
         $quiescenceFindings.Add('fallback frontier repair was dispatched but no progress proof was observed before failure') | Out-Null
         foreach ($event in @($frontierRepairDispatchedWithoutProgressEvents + $failureEvents | Select-Object -First 10)) {
@@ -2821,6 +2830,7 @@ function Get-FileTransferFallbackTailReconciliationProof {
         FrontierRepairAuthorityGrantedCount = $frontierRepairAuthorityGrantedEvents.Count
         FrontierRepairAuthorityRejectedCount = $frontierRepairAuthorityRejectedEvents.Count
         FrontierRepairDispatchedCount = $frontierRepairDispatchedEvents.Count
+        FrontierRepairStalledCount = $frontierRepairStalledEvents.Count
         FrontierRepairProgressObservedCount = $frontierRepairProgressObservedEvents.Count
         FrontierRepairVerdict = $frontierRepairVerdict
         RuntimeUnlockProbeRejectedByFallbackOwnerCount = $runtimeUnlockProbeRejectedByFallbackEvents.Count
@@ -2835,7 +2845,7 @@ function Get-FileTransferFallbackTailReconciliationProof {
         Findings = $findings
         QuiescenceFindings = $quiescenceFindings
         EvidenceEvents = @(@($evidence.ToArray()) + @($zeroCreditBreakerEvents + $requestedEvents + $acceptedEvents + $normalZeroCreditTailStateRefreshEvents) | Select-Object -First 20)
-        QuiescenceEvidenceEvents = @(@($quiescenceEvidence.ToArray()) + @($terminalProofConsumedEvents + $quiescentYieldEvents + $pairedYieldGrantedEvents + $ownerGenerationMismatchEvents + $localYieldBlockedEvents + $quiescenceTimeoutEvents + $progressForcedEvents + $frontierRepairAuthorityGrantedEvents + $frontierRepairDispatchedEvents + $frontierRepairProgressObservedEvents) | Select-Object -First 20)
+        QuiescenceEvidenceEvents = @(@($quiescenceEvidence.ToArray()) + @($terminalProofConsumedEvents + $quiescentYieldEvents + $pairedYieldGrantedEvents + $ownerGenerationMismatchEvents + $localYieldBlockedEvents + $quiescenceTimeoutEvents + $progressForcedEvents + $frontierRepairAuthorityGrantedEvents + $frontierRepairDispatchedEvents + $frontierRepairStalledEvents + $frontierRepairProgressObservedEvents) | Select-Object -First 20)
     }
 }
 
@@ -4130,6 +4140,113 @@ function Test-FileTransferFileTunaV4DataPathScopeMatches {
     return $true
 }
 
+function Get-FileTransferFileTunaV4DataPathRangeStart {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    $start = Get-FileTransferEventInt64Field -Event $Event -Name 'start_chunk_index' -Default -1
+    if ($start -ge 0) {
+        return $start
+    }
+
+    $start = Get-FileTransferEventInt64Field -Event $Event -Name 'first_start_chunk_index' -Default -1
+    if ($start -ge 0) {
+        return $start
+    }
+
+    $chunkIndex = Get-FileTransferEventField -Event $Event -Name 'chunk_index' -Default ''
+    if ($chunkIndex -match '^(\d+)(?:-(\d+))?$') {
+        return [int64]$Matches[1]
+    }
+
+    return -1
+}
+
+function Get-FileTransferFileTunaV4DataPathRangeEndExclusive {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    $endExclusive = Get-FileTransferEventInt64Field -Event $Event -Name 'last_end_chunk_exclusive' -Default -1
+    if ($endExclusive -gt 0) {
+        return $endExclusive
+    }
+
+    $start = Get-FileTransferFileTunaV4DataPathRangeStart -Event $Event
+    if ($start -lt 0) {
+        return -1
+    }
+
+    $chunkIndex = Get-FileTransferEventField -Event $Event -Name 'chunk_index' -Default ''
+    if ($chunkIndex -match '^\d+-(\d+)$') {
+        return [int64]$Matches[1] + 1
+    }
+
+    $count = Get-FileTransferEventInt64Field -Event $Event -Name 'batch_chunk_count' -Default 0
+    if ($count -le 0) {
+        $count = Get-FileTransferEventInt64Field -Event $Event -Name 'sent_chunk_count' -Default 0
+    }
+    if ($count -le 0) {
+        $count = Get-FileTransferEventInt64Field -Event $Event -Name 'frame_chunk_count' -Default 0
+    }
+
+    if ($count -le 0) {
+        return -1
+    }
+
+    return $start + $count
+}
+
+function Test-FileTransferFileTunaV4DataPathHasRange {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    $start = Get-FileTransferFileTunaV4DataPathRangeStart -Event $Event
+    $endExclusive = Get-FileTransferFileTunaV4DataPathRangeEndExclusive -Event $Event
+    return $start -ge 0 -and $endExclusive -gt $start
+}
+
+function Test-FileTransferFileTunaV4DataPathSequenceAllowsMatch {
+    param(
+        [Parameter(Mandatory = $true)]$Intent,
+        [Parameter(Mandatory = $true)]$Actual
+    )
+
+    if ((Test-FileTransferFileTunaV4DataPathHasRange -Event $Intent) -and
+        (Test-FileTransferFileTunaV4DataPathHasRange -Event $Actual)) {
+        return $true
+    }
+
+    if ($null -ne $Intent.PSObject.Properties['Sequence'] -and
+        $null -ne $Actual.PSObject.Properties['Sequence'] -and
+        [int64]$Actual.Sequence -lt [int64]$Intent.Sequence) {
+        return $false
+    }
+
+    return $true
+}
+
+function Test-FileTransferFileTunaV4DataPathRangeMatches {
+    param(
+        [Parameter(Mandatory = $true)]$Intent,
+        [Parameter(Mandatory = $true)]$Actual
+    )
+
+    if (-not (Test-FileTransferFileTunaV4DataPathHasRange -Event $Intent) -or
+        -not (Test-FileTransferFileTunaV4DataPathHasRange -Event $Actual)) {
+        return $true
+    }
+
+    $intentStart = Get-FileTransferFileTunaV4DataPathRangeStart -Event $Intent
+    $intentEndExclusive = Get-FileTransferFileTunaV4DataPathRangeEndExclusive -Event $Intent
+    $actualStart = Get-FileTransferFileTunaV4DataPathRangeStart -Event $Actual
+    $actualEndExclusive = Get-FileTransferFileTunaV4DataPathRangeEndExclusive -Event $Actual
+
+    if ($Intent.EventName -eq 'filetransfer_v4_repair_sent') {
+        return $actualStart -ge $intentStart -and
+            $actualEndExclusive -le $intentEndExclusive
+    }
+
+    return $actualStart -eq $intentStart -and
+        $actualEndExclusive -eq $intentEndExclusive
+}
+
 function Test-FileTransferFileTunaV4DataPathSendShapeMatches {
     param(
         [Parameter(Mandatory = $true)]$Intent,
@@ -4158,7 +4275,7 @@ function Test-FileTransferFileTunaV4DataPathSendShapeMatches {
         }
     }
 
-    return $true
+    return Test-FileTransferFileTunaV4DataPathRangeMatches -Intent $Intent -Actual $Actual
 }
 
 function Get-FileTransferFileTunaV4DataPathProof {
@@ -4190,6 +4307,7 @@ function Get-FileTransferFileTunaV4DataPathProof {
     $evidence = New-Object System.Collections.Generic.List[object]
     $missingActualProofCount = 0
     $usedPeerVisibleEventIndexes = New-Object 'System.Collections.Generic.HashSet[int]'
+    $usedRepairPeerVisibleEventIndexes = New-Object 'System.Collections.Generic.HashSet[int]'
 
     foreach ($intent in @($intentEvents)) {
         if ($intent.EventName -eq 'filetransfer_v4_repair_sent') {
@@ -4199,16 +4317,16 @@ function Get-FileTransferFileTunaV4DataPathProof {
             }
 
             $matchedRepairChunkCount = 0L
+            $matchedRepairCoveredChunks = New-Object 'System.Collections.Generic.HashSet[int64]'
+            $matchedRepairHasRangeProof = $false
             $matchedRepairPeerVisibleIndexes = New-Object 'System.Collections.Generic.List[int]'
             for ($peerVisibleIndex = 0; $peerVisibleIndex -lt $peerVisibleEvents.Count; $peerVisibleIndex++) {
-                if ($usedPeerVisibleEventIndexes.Contains([int]$peerVisibleIndex)) {
+                if ($usedRepairPeerVisibleEventIndexes.Contains([int]$peerVisibleIndex)) {
                     continue
                 }
 
                 $peerVisible = $peerVisibleEvents[$peerVisibleIndex]
-                if ($null -ne $intent.PSObject.Properties['Sequence'] -and
-                    $null -ne $peerVisible.PSObject.Properties['Sequence'] -and
-                    [int64]$peerVisible.Sequence -lt [int64]$intent.Sequence) {
+                if (-not (Test-FileTransferFileTunaV4DataPathSequenceAllowsMatch -Intent $intent -Actual $peerVisible)) {
                     continue
                 }
 
@@ -4221,20 +4339,32 @@ function Get-FileTransferFileTunaV4DataPathProof {
 
                     [void]$matchedRepairPeerVisibleIndexes.Add([int]$peerVisibleIndex)
                     $matchedRepairChunkCount += $actualBatchChunkCount
-                    if ($requiredRepairChunkCount -gt 0 -and $matchedRepairChunkCount -ge $requiredRepairChunkCount) {
+                    if ((Test-FileTransferFileTunaV4DataPathHasRange -Event $intent) -and
+                        (Test-FileTransferFileTunaV4DataPathHasRange -Event $peerVisible)) {
+                        $matchedRepairHasRangeProof = $true
+                        $actualStart = Get-FileTransferFileTunaV4DataPathRangeStart -Event $peerVisible
+                        $actualEndExclusive = Get-FileTransferFileTunaV4DataPathRangeEndExclusive -Event $peerVisible
+                        for ($chunkIndex = $actualStart; $chunkIndex -lt $actualEndExclusive; $chunkIndex++) {
+                            [void]$matchedRepairCoveredChunks.Add([int64]$chunkIndex)
+                        }
+                    }
+
+                    $matchedRepairEffectiveChunkCount = if ($matchedRepairHasRangeProof) { [int64]$matchedRepairCoveredChunks.Count } else { $matchedRepairChunkCount }
+                    if ($requiredRepairChunkCount -gt 0 -and $matchedRepairEffectiveChunkCount -ge $requiredRepairChunkCount) {
                         break
                     }
                 }
             }
 
-            if ($requiredRepairChunkCount -gt 0 -and $matchedRepairChunkCount -ge $requiredRepairChunkCount) {
+            $matchedRepairEffectiveChunkCount = if ($matchedRepairHasRangeProof) { [int64]$matchedRepairCoveredChunks.Count } else { $matchedRepairChunkCount }
+            if ($requiredRepairChunkCount -gt 0 -and $matchedRepairEffectiveChunkCount -ge $requiredRepairChunkCount) {
                 foreach ($peerVisibleIndex in @($matchedRepairPeerVisibleIndexes)) {
-                    [void]$usedPeerVisibleEventIndexes.Add([int]$peerVisibleIndex)
+                    [void]$usedRepairPeerVisibleEventIndexes.Add([int]$peerVisibleIndex)
                 }
             }
             else {
                 $missingActualProofCount++
-                $findings.Add(("file_tuna_v4 V4 repair intent had insufficient peer-visible Tuna data-path proof: required_chunks={0}; matched_chunks={1}; intent={2}" -f $requiredRepairChunkCount, $matchedRepairChunkCount, (Format-FileTransferEvidenceLine -Event $intent))) | Out-Null
+                $findings.Add(("file_tuna_v4 V4 repair intent had insufficient peer-visible Tuna data-path proof: required_chunks={0}; matched_chunks={1}; intent={2}" -f $requiredRepairChunkCount, $matchedRepairEffectiveChunkCount, (Format-FileTransferEvidenceLine -Event $intent))) | Out-Null
                 $evidence.Add($intent) | Out-Null
             }
 
@@ -4248,9 +4378,7 @@ function Get-FileTransferFileTunaV4DataPathProof {
             }
 
             $peerVisible = $peerVisibleEvents[$peerVisibleIndex]
-            if ($null -ne $intent.PSObject.Properties['Sequence'] -and
-                $null -ne $peerVisible.PSObject.Properties['Sequence'] -and
-                [int64]$peerVisible.Sequence -lt [int64]$intent.Sequence) {
+            if (-not (Test-FileTransferFileTunaV4DataPathSequenceAllowsMatch -Intent $intent -Actual $peerVisible)) {
                 continue
             }
 
@@ -4825,6 +4953,7 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("fallback_frontier_repair_authority_granted_count={0}" -f $fallbackTailProof.FrontierRepairAuthorityGrantedCount)) | Out-Null
     $lines.Add(("fallback_frontier_repair_authority_rejected_count={0}" -f $fallbackTailProof.FrontierRepairAuthorityRejectedCount)) | Out-Null
     $lines.Add(("fallback_frontier_repair_dispatched_count={0}" -f $fallbackTailProof.FrontierRepairDispatchedCount)) | Out-Null
+    $lines.Add(("fallback_frontier_repair_stalled_count={0}" -f $fallbackTailProof.FrontierRepairStalledCount)) | Out-Null
     $lines.Add(("fallback_frontier_repair_progress_observed_count={0}" -f $fallbackTailProof.FrontierRepairProgressObservedCount)) | Out-Null
     $lines.Add(("fallback_frontier_repair_verdict={0}" -f $fallbackTailProof.FrontierRepairVerdict)) | Out-Null
     $lines.Add(("runtime_unlock_probe_rejected_by_fallback_owner_count={0}" -f $fallbackTailProof.RuntimeUnlockProbeRejectedByFallbackOwnerCount)) | Out-Null
@@ -6643,6 +6772,7 @@ function New-FileTransferStabilityGateSummaryLines {
         ("classification_fallback_frontier_repair_authority_granted_count={0}" -f $recoveryClassification.FallbackFrontierRepairAuthorityGrantedCount),
         ("classification_fallback_frontier_repair_authority_rejected_count={0}" -f $recoveryClassification.FallbackFrontierRepairAuthorityRejectedCount),
         ("classification_fallback_frontier_repair_dispatched_count={0}" -f $recoveryClassification.FallbackFrontierRepairDispatchedCount),
+        ("classification_fallback_frontier_repair_stalled_count={0}" -f $recoveryClassification.FallbackFrontierRepairStalledCount),
         ("classification_fallback_frontier_repair_progress_observed_count={0}" -f $recoveryClassification.FallbackFrontierRepairProgressObservedCount),
         ("classification_fallback_frontier_repair_verdict={0}" -f $recoveryClassification.FallbackFrontierRepairVerdict),
         ("classification_runtime_unlock_probe_rejected_by_fallback_owner_count={0}" -f $recoveryClassification.RuntimeUnlockProbeRejectedByFallbackOwnerCount),
@@ -6720,6 +6850,7 @@ function New-FileTransferStabilityGateSummaryLines {
         ("fallback_frontier_repair_authority_granted_count={0}" -f $fallbackTailProof.FrontierRepairAuthorityGrantedCount),
         ("fallback_frontier_repair_authority_rejected_count={0}" -f $fallbackTailProof.FrontierRepairAuthorityRejectedCount),
         ("fallback_frontier_repair_dispatched_count={0}" -f $fallbackTailProof.FrontierRepairDispatchedCount),
+        ("fallback_frontier_repair_stalled_count={0}" -f $fallbackTailProof.FrontierRepairStalledCount),
         ("fallback_frontier_repair_progress_observed_count={0}" -f $fallbackTailProof.FrontierRepairProgressObservedCount),
         ("fallback_frontier_repair_verdict={0}" -f $fallbackTailProof.FrontierRepairVerdict),
         ("runtime_unlock_probe_rejected_by_fallback_owner_count={0}" -f $fallbackTailProof.RuntimeUnlockProbeRejectedByFallbackOwnerCount),
@@ -8574,6 +8705,7 @@ function Get-FileTransferRecoveryFailureClassification {
         FallbackFrontierRepairAuthorityGrantedCount = $fallbackTailProof.FrontierRepairAuthorityGrantedCount
         FallbackFrontierRepairAuthorityRejectedCount = $fallbackTailProof.FrontierRepairAuthorityRejectedCount
         FallbackFrontierRepairDispatchedCount = $fallbackTailProof.FrontierRepairDispatchedCount
+        FallbackFrontierRepairStalledCount = $fallbackTailProof.FrontierRepairStalledCount
         FallbackFrontierRepairProgressObservedCount = $fallbackTailProof.FrontierRepairProgressObservedCount
         FallbackFrontierRepairVerdict = $fallbackTailProof.FrontierRepairVerdict
         RuntimeUnlockProbeRejectedByFallbackOwnerCount = $fallbackTailProof.RuntimeUnlockProbeRejectedByFallbackOwnerCount
@@ -9099,6 +9231,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("classification_fallback_frontier_repair_authority_granted_count={0}" -f $recoveryClassification.FallbackFrontierRepairAuthorityGrantedCount),
         ("classification_fallback_frontier_repair_authority_rejected_count={0}" -f $recoveryClassification.FallbackFrontierRepairAuthorityRejectedCount),
         ("classification_fallback_frontier_repair_dispatched_count={0}" -f $recoveryClassification.FallbackFrontierRepairDispatchedCount),
+        ("classification_fallback_frontier_repair_stalled_count={0}" -f $recoveryClassification.FallbackFrontierRepairStalledCount),
         ("classification_fallback_frontier_repair_progress_observed_count={0}" -f $recoveryClassification.FallbackFrontierRepairProgressObservedCount),
         ("classification_fallback_frontier_repair_verdict={0}" -f $recoveryClassification.FallbackFrontierRepairVerdict),
         ("classification_control_plane_isolation_verdict={0}" -f $recoveryClassification.ControlPlaneIsolationVerdict),
@@ -9186,6 +9319,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("fallback_frontier_repair_authority_granted_count={0}" -f $fallbackTailProof.FrontierRepairAuthorityGrantedCount),
         ("fallback_frontier_repair_authority_rejected_count={0}" -f $fallbackTailProof.FrontierRepairAuthorityRejectedCount),
         ("fallback_frontier_repair_dispatched_count={0}" -f $fallbackTailProof.FrontierRepairDispatchedCount),
+        ("fallback_frontier_repair_stalled_count={0}" -f $fallbackTailProof.FrontierRepairStalledCount),
         ("fallback_frontier_repair_progress_observed_count={0}" -f $fallbackTailProof.FrontierRepairProgressObservedCount),
         ("fallback_frontier_repair_verdict={0}" -f $fallbackTailProof.FrontierRepairVerdict),
         ("runtime_unlock_probe_rejected_by_fallback_owner_count={0}" -f $fallbackTailProof.RuntimeUnlockProbeRejectedByFallbackOwnerCount),

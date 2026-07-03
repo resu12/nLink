@@ -1202,6 +1202,172 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
     [Fact]
     [Trait("RetainedAuthorityProofSuite", "FileTunaV4DataPathProof")]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_FileTunaV4DataPathRangeMatchedProofBeforeIntent_Passes()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_file_tuna_v4_data_path_prior_range_proof_pass";
+        var lines = BuildFileTunaV4DataPathProofFixture(
+            transferId,
+            FileTunaV4DataPathActualMessage(
+                transferId,
+                actualTransport: "tuna",
+                eventName: "filetransfer_tuna_data_path_peer_visible",
+                proofDirection: "send",
+                startChunkIndex: 1122,
+                batchChunkCount: 3,
+                payloadBytes: 64512,
+                rawPayloadBytes: 64512,
+                batchProfile: "v4_repair_21k"),
+            FileTunaV4DataPathIntentMessage(transferId, startChunkIndex: 1122, batchChunkCount: 3, rawBytes: 64512));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("pass", route["file_tuna_v4_data_path_proof_verdict"]);
+        Assert.Equal("0", route["file_tuna_v4_data_path_missing_actual_proof_count"]);
+    }
+
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "FileTunaV4DataPathProof")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_FileTunaV4RepairAggregateAndSubBatchesShareConcreteProofSet_Passes()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_file_tuna_v4_repair_sub_batch_proof_pass";
+        var lines = BuildFileTunaV4DataPathProofFixture(
+            transferId,
+            FileTunaV4DataPathActualMessage(
+                transferId,
+                actualTransport: "tuna",
+                eventName: "filetransfer_tuna_data_path_peer_visible",
+                proofDirection: "send",
+                startChunkIndex: 0,
+                batchChunkCount: 3,
+                payloadBytes: 64512,
+                rawPayloadBytes: 64512,
+                batchProfile: "v4_repair_21k"),
+            FileTunaV4DataPathActualMessage(
+                transferId,
+                actualTransport: "tuna",
+                eventName: "filetransfer_tuna_data_path_peer_visible",
+                proofDirection: "send",
+                startChunkIndex: 3,
+                batchChunkCount: 3,
+                payloadBytes: 64512,
+                rawPayloadBytes: 64512,
+                batchProfile: "v4_repair_21k"),
+            FileTunaV4DataPathActualMessage(
+                transferId,
+                actualTransport: "tuna",
+                eventName: "filetransfer_tuna_data_path_peer_visible",
+                proofDirection: "send",
+                startChunkIndex: 6,
+                batchChunkCount: 3,
+                payloadBytes: 64512,
+                rawPayloadBytes: 64512,
+                batchProfile: "v4_repair_21k"),
+            FileTunaV4DataPathActualMessage(
+                transferId,
+                actualTransport: "tuna",
+                eventName: "filetransfer_tuna_data_path_peer_visible",
+                proofDirection: "send",
+                startChunkIndex: 9,
+                batchChunkCount: 3,
+                payloadBytes: 64512,
+                rawPayloadBytes: 64512,
+                batchProfile: "v4_repair_21k"),
+            FileTunaV4DataPathRepairChunkIntentMessage(transferId, startChunkIndex: 0),
+            FileTunaV4DataPathRepairChunkIntentMessage(transferId, startChunkIndex: 3),
+            FileTunaV4DataPathRepairChunkIntentMessage(transferId, startChunkIndex: 6),
+            FileTunaV4DataPathRepairChunkIntentMessage(transferId, startChunkIndex: 9),
+            FileTunaV4DataPathRepairIntentMessage(transferId, sentChunkCount: 12));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("pass", route["file_tuna_v4_data_path_proof_verdict"]);
+        Assert.Equal("5", route["file_tuna_v4_intended_send_count"]);
+        Assert.Equal("4", route["file_tuna_v4_tuna_send_result_count"]);
+        Assert.Equal("0", route["file_tuna_v4_data_path_missing_actual_proof_count"]);
+    }
+
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "FileTunaV4DataPathProof")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_FileTunaV4RepairAggregateDuplicateRangesDoNotSatisfyCoverage_Fails()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_file_tuna_v4_repair_duplicate_range_proof_fail";
+        var lines = BuildFileTunaV4DataPathProofFixture(
+            transferId,
+            FileTunaV4DataPathActualMessage(
+                transferId,
+                actualTransport: "tuna",
+                eventName: "filetransfer_tuna_data_path_peer_visible",
+                proofDirection: "send",
+                startChunkIndex: 0,
+                batchChunkCount: 3,
+                payloadBytes: 64512,
+                rawPayloadBytes: 64512,
+                batchProfile: "v4_repair_21k"),
+            FileTunaV4DataPathActualMessage(
+                transferId,
+                actualTransport: "tuna",
+                eventName: "filetransfer_tuna_data_path_peer_visible",
+                proofDirection: "send",
+                startChunkIndex: 0,
+                batchChunkCount: 3,
+                payloadBytes: 64512,
+                rawPayloadBytes: 64512,
+                batchProfile: "v4_repair_21k"),
+            FileTunaV4DataPathActualMessage(
+                transferId,
+                actualTransport: "tuna",
+                eventName: "filetransfer_tuna_data_path_peer_visible",
+                proofDirection: "send",
+                startChunkIndex: 0,
+                batchChunkCount: 3,
+                payloadBytes: 64512,
+                rawPayloadBytes: 64512,
+                batchProfile: "v4_repair_21k"),
+            FileTunaV4DataPathActualMessage(
+                transferId,
+                actualTransport: "tuna",
+                eventName: "filetransfer_tuna_data_path_peer_visible",
+                proofDirection: "send",
+                startChunkIndex: 0,
+                batchChunkCount: 3,
+                payloadBytes: 64512,
+                rawPayloadBytes: 64512,
+                batchProfile: "v4_repair_21k"),
+            FileTunaV4DataPathRepairIntentMessage(transferId, sentChunkCount: 12));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("fail", route["file_tuna_v4_data_path_proof_verdict"]);
+        Assert.Equal("1", route["file_tuna_v4_data_path_missing_actual_proof_count"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("file_tuna_data_path_mismatch", verdict["acceptance_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("RetainedAuthorityProofSuite", "FileTunaV4DataPathProof")]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_FileTunaV4DataPathIntentOnly_Fails()
     {
         if (!OperatingSystem.IsWindows())
@@ -1428,8 +1594,15 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
     private static string FileTunaV4DataPathAuthoritySuffix(string transferId)
         => $"direction=outbound; transfer_id={transferId}; session_id=sess_a; route=file_tuna_v4; protocol_version=4; live_route_epoch=3; runtime_generation=7; terminal_generation=0; leg_generation=4; route_publication_generation=9; route_commit_generation=0; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; intended_target_transport=tuna; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted";
 
-    private static string FileTunaV4DataPathIntentMessage(string transferId, int startChunkIndex = 0)
-        => $"event=filetransfer_v4_chunk_batch_sent; {FileTunaV4DataPathAuthoritySuffix(transferId)}; repair_request_key=none; start_chunk_index={startChunkIndex}; batch_chunk_count=2; raw_bytes=65536; repair_send=0; mixed_screenshare=0; screen_share_active=0; screen_share_degraded=0; screen_share_observed=0; repair_delivery_mode=none; repair_delivery_escalation_reason=none; repair_batch_send_attempt=1; repair_batch_send_attempt_count=1";
+    private static string FileTunaV4DataPathIntentMessage(
+        string transferId,
+        int startChunkIndex = 0,
+        int batchChunkCount = 2,
+        int rawBytes = 65536)
+        => $"event=filetransfer_v4_chunk_batch_sent; {FileTunaV4DataPathAuthoritySuffix(transferId)}; repair_request_key=none; start_chunk_index={startChunkIndex}; batch_chunk_count={batchChunkCount}; raw_bytes={rawBytes}; repair_send=0; mixed_screenshare=0; screen_share_active=0; screen_share_degraded=0; screen_share_observed=0; repair_delivery_mode=none; repair_delivery_escalation_reason=none; repair_batch_send_attempt=1; repair_batch_send_attempt_count=1";
+
+    private static string FileTunaV4DataPathRepairChunkIntentMessage(string transferId, int startChunkIndex)
+        => $"event=filetransfer_v4_chunk_batch_sent; {FileTunaV4DataPathAuthoritySuffix(transferId)}; repair_request_key=repair-1; start_chunk_index={startChunkIndex}; batch_chunk_count=3; raw_bytes=64512; repair_send=1; mixed_screenshare=0; screen_share_active=0; screen_share_degraded=0; screen_share_observed=0; repair_delivery_mode=control_bulk_escalated; repair_delivery_escalation_reason=credit_stall; repair_batch_send_attempt=1; repair_batch_send_attempt_count=1";
 
     private static string FileTunaV4DataPathRepairIntentMessage(string transferId, int sentChunkCount)
         => $"event=filetransfer_v4_repair_sent; {FileTunaV4DataPathAuthoritySuffix(transferId)}; repair_request_key=repair-1; protocol_repair_request_id=repair-protocol-1; range_count=1; requested_chunk_count={sentChunkCount}; sent_chunk_count={sentChunkCount}; sent_chunk_indices=0-9; transport_sent_chunk_count={sentChunkCount}; repair_batch_send_attempt_count=1; repair_delivery_mode=bulk_only; repair_delivery_escalation_reason=none; first_start_chunk_index=0; last_end_chunk_exclusive={sentChunkCount}; frontier_tail_repair=0; credit_exhausted_time_ms_at_repair=0; remote_next_expected_chunk_index=0; chunks_accepted_for_transport={sentChunkCount}; skipped_obsolete_count=0; skipped_future_count=0; skipped_out_of_bounds_count=0; receiver_proof_status=pending";
@@ -1443,8 +1616,14 @@ public sealed class FileTransferRetainedAuthorityProofAnalyzerTests : FileTransf
         int payloadBytes = 65536,
         int rawPayloadBytes = 65536,
         int batchChunkCount = 2,
-        string batchProfile = "v4_batch")
-        => $"event={eventName}; {FileTunaV4DataPathAuthoritySuffix(transferId)}; actual_transport={actualTransport}; delivery_transport={actualTransport}; lane=bulk; sent_via_acceleration={(actualTransport == "tuna" ? 1 : 0)}; force_regular_nkn_bulk=0; payload_bytes={payloadBytes}; raw_payload_bytes={rawPayloadBytes}; batch_count=1; batch_chunk_count={batchChunkCount}; batch_profile={batchProfile}; frame_type={frameType}; delivery_result=accepted; proof_direction={proofDirection ?? (eventName == "filetransfer_tuna_data_path_peer_visible" ? "receive" : "none")}";
+        string batchProfile = "v4_batch",
+        int? startChunkIndex = null)
+    {
+        var rangeSuffix = startChunkIndex is { } start
+            ? $"; chunk_index={start}-{start + batchChunkCount - 1}; start_chunk_index={start}; last_end_chunk_exclusive={start + batchChunkCount}; frame_chunk_count={batchChunkCount}"
+            : string.Empty;
+        return $"event={eventName}; {FileTunaV4DataPathAuthoritySuffix(transferId)}; actual_transport={actualTransport}; delivery_transport={actualTransport}; lane=bulk; sent_via_acceleration={(actualTransport == "tuna" ? 1 : 0)}; force_regular_nkn_bulk=0; payload_bytes={payloadBytes}; raw_payload_bytes={rawPayloadBytes}; batch_count=1; batch_chunk_count={batchChunkCount}; batch_profile={batchProfile}; frame_type={frameType}; delivery_result=accepted; proof_direction={proofDirection ?? (eventName == "filetransfer_tuna_data_path_peer_visible" ? "receive" : "none")}{rangeSuffix}";
+    }
 
     private static string RuntimeOwnerStaleRejectedMessage(string family, string transferId)
         => $"event=filetransfer_runtime_owner_stale_update_rejected; direction=outbound; transfer_id={transferId}; session_id=sess_a; source=phase1d_fixture; attempted_action={AttemptedAction(family)}; reason=runtime_generation_mismatch; runtime_generation=1; current_runtime_generation=2; terminal_generation=0; current_terminal_generation=0; route=regular_nkn_v4_fast; current_route=regular_nkn_v4_fast; protocol_version=4; current_protocol_version=4; live_route_epoch=0; current_live_route_epoch=0; runtime_family=regular_v4; current_runtime_family=regular_v4";

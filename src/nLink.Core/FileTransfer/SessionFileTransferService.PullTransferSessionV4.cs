@@ -13415,6 +13415,22 @@ public sealed partial class SessionFileTransferService
                             repairState.AttemptCount,
                             frontierStallAgeMs);
                     }
+                    else if (IsInboundPostTunaRecoveryActiveLocked(context) &&
+                        repairState.AttemptCount > 0)
+                    {
+                        LogFileTransferFallbackFrontierRepairStalled(
+                            FileTransferDirection.Inbound,
+                            context.TransferId,
+                            context.SessionId,
+                            context.CurrentTransferLeg,
+                            repairRequestKey,
+                            "retry_interval_without_frontier_progress",
+                            context.NextChunkIndex,
+                            context.PullHighestReceivedChunkIndex,
+                            requestedChunkCount,
+                            repairState.AttemptCount,
+                            frontierStallAgeMs);
+                    }
 
                     if (FileTransferDiagnosticLogPolicy.TraceEnabled)
                     {
@@ -13440,6 +13456,22 @@ public sealed partial class SessionFileTransferService
                 repairState.AttemptCount > 1)
             {
                 LogFileTransferRegularV4FrontierRepairStalled(
+                    FileTransferDirection.Inbound,
+                    context.TransferId,
+                    context.SessionId,
+                    context.CurrentTransferLeg,
+                    repairRequestKey,
+                    "repeated_frontier_repair_without_progress",
+                    context.NextChunkIndex,
+                    context.PullHighestReceivedChunkIndex,
+                    requestedChunkCount,
+                    repairState.AttemptCount,
+                    frontierStallAgeMs);
+            }
+            else if (IsInboundPostTunaRecoveryActiveLocked(context) &&
+                repairState.AttemptCount > 1)
+            {
+                LogFileTransferFallbackFrontierRepairStalled(
                     FileTransferDirection.Inbound,
                     context.TransferId,
                     context.SessionId,

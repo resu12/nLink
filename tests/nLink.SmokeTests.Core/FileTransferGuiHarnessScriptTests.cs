@@ -379,8 +379,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     {
         var repoRoot = FindRepoRoot();
         var wrapperPath = Path.Combine(repoRoot, "tools", "Run-FileTransferTunaGuiSmoke.ps1");
+        var routeAcceptancePath = Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1");
         var guiPath = Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1");
         var wrapperText = File.ReadAllText(wrapperPath);
+        var routeAcceptanceText = File.ReadAllText(routeAcceptancePath);
         var guiText = File.ReadAllText(guiPath);
 
         Assert.Contains("\"live-regular-activation-cycle\"", wrapperText, StringComparison.Ordinal);
@@ -409,6 +411,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("filetransfer_tuna_gui_post_transfer_connected_header_wait_skipped", guiText, StringComparison.Ordinal);
         Assert.Contains("$skipPostTransferConnectedHeaderWait", guiText, StringComparison.Ordinal);
         Assert.Contains("terminal_fallback_outcome", guiText, StringComparison.Ordinal);
+        Assert.Contains("$hasConnectedHeaderCleanupFailure", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("post_transfer_connected_header", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("connected header", routeAcceptanceText, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -7594,6 +7594,22 @@ public sealed partial class SessionFileTransferService : IDisposable
             "FileTransferService",
             $"event=filetransfer_fallback_frontier_repair_progress_observed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; reason={FormatProtocolLogValue(reason)}; committed_frontier_before={committedFrontierBefore}; committed_frontier_after={committedFrontierAfter}; requested_chunk_count={requestedChunkCount}");
 
+    private static void LogFileTransferFallbackFrontierRepairStalled(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        FileTransferLeg? leg,
+        string repairRequestKey,
+        string reason,
+        int frontierChunkIndex,
+        int durableReceivedHighestChunkIndex,
+        int requestedChunkCount,
+        int attemptCount,
+        long frontierStallAgeMs)
+        => LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_fallback_frontier_repair_stalled; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? "(none)")}; protocol_version={leg?.ProtocolVersion ?? 0}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; leg_generation={leg?.Generation ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; reason={FormatProtocolLogValue(reason)}; frontier_chunk_index={frontierChunkIndex}; durable_received_highest_chunk_index={durableReceivedHighestChunkIndex}; requested_chunk_count={requestedChunkCount}; attempt_count={attemptCount}; frontier_stall_age_ms={frontierStallAgeMs}");
+
     private static void LogFileTransferRegularV4FrontierRepairAuthorityGranted(
         FileTransferDirection direction,
         string transferId,
