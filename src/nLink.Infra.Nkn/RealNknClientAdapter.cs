@@ -807,7 +807,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             string.Equals(authorityTransferId, normalizedTransferId, StringComparison.Ordinal) &&
             repairAuthority.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
             string.Equals(repairAuthority.RouteToken, "regular_nkn_v4_fast", StringComparison.Ordinal) &&
-            repairAuthority.LiveRouteEpoch > 0 &&
+            repairAuthority.LiveRouteEpoch >= 0 &&
             repairAuthority.RuntimeGeneration > 0 &&
             repairAuthority.LegGeneration > 0 &&
             repairAuthority.RoutePublicationGeneration > 0 &&

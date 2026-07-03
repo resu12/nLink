@@ -2869,6 +2869,100 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public void Bridge_RegularV4ControlFeedbackPressure_AcceptsInitialLiveRouteEpochZeroAuthority()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-regular-v4-frontier-authority", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "regular-v4-frontier-authority");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "regular-v4-frontier-authority");
+            var identity = new NknIdentity("regular-v4-frontier-authority", "regular-v4-frontier-authority.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+
+            var transferSuffix = Guid.NewGuid().ToString("N");
+            var acceptedDecisionGeneration = RandomNumberGenerator.GetInt32(100_000, 999_999);
+            var rejectedDecisionGeneration = RandomNumberGenerator.GetInt32(100_000, 999_999);
+            var acceptedTransferId = $"transfer-regular-v4-frontier-epoch-zero-{transferSuffix}";
+            var acceptedRepairKey = $"regular-v4-frontier-accepted:{transferSuffix}";
+            adapter.RegisterActiveFileTransferDataSession(acceptedTransferId);
+            adapter.RegisterActiveFileTransferRuntime(acceptedTransferId);
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                acceptedTransferId,
+                "regular_v4_receiver_frontier_repair_due",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 128,
+                pendingRepairCount: 8,
+                repairAuthority: CreateRegularV4FrontierRepairAuthority(
+                    acceptedTransferId,
+                    repairKey: acceptedRepairKey,
+                    liveRouteEpoch: 0,
+                    decisionGeneration: acceptedDecisionGeneration));
+
+            var acceptedLogText = LocalOperationalLog.GetRecentLogText();
+            Assert.True(
+                ContainsLogLineWithTokens(acceptedLogText, "filetransfer_regular_v4_frontier_repair_authority_granted", "live_route_epoch=0", $"decision_generation={acceptedDecisionGeneration}"),
+                acceptedLogText);
+            Assert.True(
+                ContainsLogLineWithTokens(acceptedLogText, "filetransfer_regular_v4_control_feedback_pressure_marked", "live_route_epoch=0", $"decision_generation={acceptedDecisionGeneration}"),
+                acceptedLogText);
+            Assert.Contains("route=regular_nkn_v4_fast", acceptedLogText, StringComparison.Ordinal);
+            Assert.Contains("protocol_version=4", acceptedLogText, StringComparison.Ordinal);
+            Assert.Contains("live_route_epoch=0", acceptedLogText, StringComparison.Ordinal);
+            Assert.Contains("repair_request_key=", acceptedLogText, StringComparison.Ordinal);
+
+            var rejectedTransferId = $"transfer-regular-v4-frontier-negative-epoch-{transferSuffix}";
+            var rejectedRepairKey = $"regular-v4-frontier-rejected:{transferSuffix}";
+            adapter.RegisterActiveFileTransferDataSession(rejectedTransferId);
+            adapter.RegisterActiveFileTransferRuntime(rejectedTransferId);
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                rejectedTransferId,
+                "regular_v4_receiver_frontier_repair_due",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 128,
+                pendingRepairCount: 8,
+                repairAuthority: CreateRegularV4FrontierRepairAuthority(
+                    rejectedTransferId,
+                    repairKey: rejectedRepairKey,
+                    liveRouteEpoch: -1,
+                    decisionGeneration: rejectedDecisionGeneration));
+
+            var rejectedLogText = LocalOperationalLog.GetRecentLogText();
+            Assert.True(
+                ContainsLogLineWithTokens(rejectedLogText, "filetransfer_regular_v4_frontier_repair_authority_rejected", "live_route_epoch=-1", $"decision_generation={rejectedDecisionGeneration}"),
+                rejectedLogText);
+            Assert.Contains("live_route_epoch=-1", rejectedLogText, StringComparison.Ordinal);
+            Assert.Contains("rejection_reason=repair_authority_invalid", rejectedLogText, StringComparison.Ordinal);
+            Assert.False(
+                ContainsLogLineWithTokens(rejectedLogText, "filetransfer_regular_v4_frontier_repair_authority_granted", "live_route_epoch=-1", $"decision_generation={rejectedDecisionGeneration}"),
+                rejectedLogText);
+            Assert.False(
+                ContainsLogLineWithTokens(rejectedLogText, "filetransfer_regular_v4_control_feedback_pressure_marked", "live_route_epoch=-1", $"decision_generation={rejectedDecisionGeneration}"),
+                rejectedLogText);
+
+            adapter.UnregisterActiveFileTransferRuntime(acceptedTransferId);
+            adapter.UnregisterActiveFileTransferDataSession(acceptedTransferId);
+            adapter.UnregisterActiveFileTransferRuntime(rejectedTransferId);
+            adapter.UnregisterActiveFileTransferDataSession(rejectedTransferId);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public async Task Bridge_ReceiveStallRecovery_ControlOnlyOverrideReconnectsWhenRegularV4PressureMarked()
     {
         if (!OperatingSystem.IsWindows())
@@ -6882,6 +6976,16 @@ rl.on('line', (line) => {{
             : text;
     }
 
+    private static bool ContainsLogLineWithTokens(string text, string eventName, params string[] tokens)
+    {
+        var eventToken = $"event={eventName}";
+        return text
+            .Split(new[] { "\r\n", "\n" }, StringSplitOptions.None)
+            .Any(line =>
+                line.Contains(eventToken, StringComparison.Ordinal) &&
+                tokens.All(token => line.Contains(token, StringComparison.Ordinal)));
+    }
+
     private static FileTransferBridgeRecoveryAuthority CreateBridgeRecoveryAuthority(
         string transferId,
         string reason,
@@ -6917,14 +7021,15 @@ rl.on('line', (line) => {{
         int frontierChunkIndex = 0,
         int durableReceivedHighestChunkIndex = -1,
         int pendingRepairCount = 8,
-        int decisionGeneration = 1)
+        int decisionGeneration = 1,
+        int liveRouteEpoch = 1)
         => new(
             sessionId,
             transferId,
             FileTransferDirection.Outbound,
             FileTransferRouteResolver.RegularNknV4FastToken,
             FileTransferProtocol.ProtocolVersionV4,
-            LiveRouteEpoch: 1,
+            LiveRouteEpoch: liveRouteEpoch,
             RuntimeGeneration: 1,
             TerminalGeneration: 0,
             LegGeneration: 1,
