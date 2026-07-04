@@ -467,6 +467,7 @@ public sealed class FileTransferRetainedRouteLawAnalyzerTests : FileTransferOpsS
             LogLine($"event=filetransfer_route_transitioned; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; previous_route=file_tuna_v4; new_route=post_tuna_fallback_v6; previous_protocol_version=4; new_protocol_version=6; previous_runtime_profile=file_tuna_v4_fast; new_runtime_profile=default_v6; previous_frame_family=v4; new_frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; selection_reason=post_tuna_file_fallback_active; reason=header_switch_off; live_route_epoch=1; route_publication_generation=4; runtime_generation=2; terminal_generation=0; leg_generation=2; route_commit_generation=0; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted"),
             LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6_repair; selection_reason=post_tuna_file_fallback_active; file_tuna_active=0; post_tuna_fallback_active=1; diagnostic_regular_nkn_v6=0; transport_profile=nkn; live_route_epoch=1; route_publication_generation=5; runtime_generation=2; terminal_generation=0; leg_generation=2; route_commit_generation=0; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted"),
             LogLine($"event=filetransfer_live_route_epoch_started; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; live_route_epoch=1; previous_route=file_tuna_v4; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; target_transport=regular_nkn; state=started; reason=header_switch_off; route_publication_generation=7; runtime_generation=2; terminal_generation=0; leg_generation=2; route_commit_generation=0; target_route=post_tuna_fallback_v6; target_protocol_version=6; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted"),
+            LogLine($"event=runtime_unlock_retry_dispatch_authority_rejected; session_id=sess_redacted; transfer_id={transferId}; contract_generation=1; retired_generation=0; offer_generation=0; route=(none); protocol_version=0; live_route_epoch=0; runtime_generation=0; terminal_generation=0; leg_generation=0; regular_v4_liveness_generation=0; bridge_decision_generation=0; queued_behind_active_negotiation=0; decision_reason=missing_route_publication_authority"),
             LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_redacted; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=(none); integrity_ok=1"),
             LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_redacted; transfer_id={transferId}; state=Completed; error_code=(none); integrity_ok=1")
         };
@@ -657,6 +658,50 @@ public sealed class FileTransferRetainedRouteLawAnalyzerTests : FileTransferOpsS
         var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
         Assert.Equal("post_tuna_fallback_v6", route["live_route_epoch_route_changes"]);
         Assert.Equal("0", route["live_route_epoch_metadata_missing_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_LiveSwitchOffMetadataLessNonPayloadReceive_IsDiagnostic()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildRouteAwareLiveSwitchOffFixture()
+            .Append(LogLine("event=filetransfer_data_path_receive_result; transfer_id=[redacted]; session_id=sess_redacted; frame_type=filetransfer.complete.v4; lane=bulk; actual_transport=regular_nkn; delivery_transport=regular_nkn; payload_bytes=0; raw_payload_bytes=0; transport_payload_bytes=0; batch_chunk_count=0; batch_profile=(none); delivery_result=received; transaction_generation=0; offer_generation=0; tuna_path_lease_generation=0; probe_id=(none); direction=(none); route=(none); protocol_version=0; live_route_epoch=0; runtime_generation=0; terminal_generation=0; leg_generation=0; route_publication_generation=0; route_commit_generation=0; target_route=(none); target_protocol_version=0; target_transport=unknown; intended_target_transport=unknown; route_publication_action_kind=(none); coordinator_decision_reason=(none)", secondsOffset: 30))
+            .ToArray();
+
+        var result = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "SwitchOff"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("PASS", verdict["verdict"]);
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("pass", route["route_consistency_verdict"]);
+        Assert.Equal("0", route["route_mismatch_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_MetadataLessPayloadReceive_RemainsRouteFailure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildRouteAwareLiveSwitchOffFixture()
+            .Append(LogLine("event=filetransfer_data_path_receive_result; transfer_id=[redacted]; session_id=sess_redacted; frame_type=filetransfer.chunk_batch.v4; lane=bulk; actual_transport=regular_nkn; delivery_transport=regular_nkn; payload_bytes=65536; raw_payload_bytes=65536; transport_payload_bytes=65536; batch_chunk_count=3; batch_profile=v4_bulk_chunk_batch; delivery_result=received; transaction_generation=0; offer_generation=0; tuna_path_lease_generation=0; probe_id=(none); direction=(none); route=(none); protocol_version=0; live_route_epoch=0; runtime_generation=0; terminal_generation=0; leg_generation=0; route_publication_generation=0; route_commit_generation=0; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; intended_target_transport=tuna; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted", secondsOffset: 30))
+            .ToArray();
+
+        var result = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "SwitchOff"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("fail", route["route_consistency_verdict"]);
+        Assert.NotEqual("0", route["route_mismatch_count"]);
     }
 
     [Fact]

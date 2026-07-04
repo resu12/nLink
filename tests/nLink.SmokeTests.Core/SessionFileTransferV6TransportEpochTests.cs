@@ -2215,6 +2215,68 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
     }
 
     [Fact]
+    public void V6Epoch_FallbackCheckpointProofDeliveryFailure_IsDiagnosticOnly()
+    {
+        const string transferId = "transfer_v6_fallback_checkpoint_proof_delivery_failure";
+        const string sessionId = "session_v6_fallback_checkpoint_proof_delivery_failure";
+        var request = new FileTransferControlPlaneDeliveryRequest(
+            FileTransferControlPlaneKind.FallbackCheckpointProof,
+            new FileTransferReceiverStateFrameV6
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                Epoch = 3,
+                ContiguousCommittedChunkIndex = 10,
+                DurableReceivedHighestChunkIndex = 10,
+                CreditUntilChunkIndexExclusive = 11,
+                MissingRanges = [],
+                BytesCommitted = 44,
+                TransportEpoch = 7,
+                RepairRequestId = "v6-regular-nkn-state-refresh:7",
+                Priority = "state_refresh",
+                RecoveryMode = "regular_nkn_state_refresh",
+            },
+            "checkpoint_proof")
+        {
+            Direction = FileTransferDirection.Inbound,
+            RouteToken = FileTransferRouteResolver.PostTunaFallbackV6Token,
+            ProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+            LiveRouteEpoch = 4,
+            TransferLegGeneration = 6,
+            BridgeRecoveryGeneration = 2,
+            TransportEpoch = 7,
+            CheckpointRequestId = "v6-regular-nkn-state-refresh:7",
+        };
+        var result = new FileTransferControlPlaneDeliveryResult(
+            FileTransferControlPlaneKind.FallbackCheckpointProof,
+            transferId,
+            sessionId,
+            "msg-checkpoint-proof-failed",
+            ControlQueue: false,
+            ControlAck: false,
+            ControlCopy: false,
+            BulkCopy: false,
+            PeerVisibleAny: false,
+            AcceptedAny: false,
+            ControlQueueErrorName: "LifecyclePreSendValidationException",
+            ControlAckErrorName: "none",
+            ControlCopyErrorName: "OperationCanceledException",
+            BulkCopyErrorName: "OperationCanceledException");
+        var method = typeof(SessionFileTransferService).GetMethod(
+            "LogFileTransferControlPlaneDeliveryResult",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var logStart = GetOperationalLogLength();
+        var exception = Record.Exception(() => method!.Invoke(null, [request, result]));
+
+        Assert.Null(exception);
+        var logTail = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_control_plane_delivery_failed;", logTail, StringComparison.Ordinal);
+        Assert.Contains("kind=fallback_checkpoint_proof", logTail, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void V6Epoch_PostTunaFallbackSurvivalPathStaysLockedWhileRegularNknEpochWaiting()
     {
         const string transferId = "transfer_v6_post_fallback_waiting_epoch_survival";

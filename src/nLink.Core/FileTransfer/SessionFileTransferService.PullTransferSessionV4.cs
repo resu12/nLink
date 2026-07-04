@@ -6816,6 +6816,10 @@ public sealed partial class SessionFileTransferService
             context.CurrentRuntimeOwner);
 
         var scheduleRepairReplayKind = ResolveRepairReplayKind(queuedRepair);
+        var shouldLogFallbackFrontierRepairProof =
+            ShouldLogFallbackFrontierRepairProof(scheduleRepairReplayKind, context.CurrentTransferLeg, repairRequestKey);
+        var shouldLogRegularV4FrontierRepairProof =
+            ShouldLogRegularV4FrontierRepairProof(scheduleRepairReplayKind, context.CurrentTransferLeg, frontierTailRepair);
         if (!TryAuthorizeRepairReplayLocked(
                 context,
                 queuedRepair.RuntimeOwner,
@@ -6828,7 +6832,7 @@ public sealed partial class SessionFileTransferService
                 null,
                 out var scheduleRepairDecision))
         {
-            if (ShouldLogFallbackFrontierRepairProof(scheduleRepairReplayKind, context.CurrentTransferLeg, repairRequestKey))
+            if (shouldLogFallbackFrontierRepairProof)
             {
                 LogFileTransferFallbackFrontierRepairAuthorityRejected(
                     FileTransferDirection.Outbound,
@@ -6842,7 +6846,7 @@ public sealed partial class SessionFileTransferService
                     scheduleRepairReplayKind);
             }
 
-            if (ShouldLogRegularV4FrontierRepairProof(scheduleRepairReplayKind, context.CurrentTransferLeg, frontierTailRepair))
+            if (shouldLogRegularV4FrontierRepairProof)
             {
                 LogFileTransferRegularV4FrontierRepairAuthorityRejected(
                     FileTransferDirection.Outbound,
@@ -6861,19 +6865,8 @@ public sealed partial class SessionFileTransferService
             return;
         }
 
-        if (chunkIndices.Count == 0)
-        {
-            LocalOperationalLog.Info(
-                "FileTransferService",
-                $"event=filetransfer_v4_repair_scheduled; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairRequestKey}; protocol_repair_request_id={FormatProtocolLogValue(protocolRepairRequestId ?? "(none)")}; epoch={state.Epoch}; range_count={normalizedRanges.Count}; requested_chunk_count={requestedChunkCount}; scheduled_chunk_count=0; scheduled_chunk_indices=(none); first_start_chunk_index={firstStart}; last_end_chunk_exclusive={lastEndExclusive}; frontier_tail_repair={(frontierTailRepair ? 1 : 0)}; post_rebind_frontier_exclusive={(postRebindFrontierRepair ? 1 : 0)}; credit_exhausted_time_ms_at_repair=-1; remote_next_expected_chunk_index={stats.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={stats.ChunksAcceptedForTransport}; skipped_obsolete_count={stats.SkippedObsoleteCount}; skipped_future_count={stats.SkippedFutureCount}; skipped_out_of_bounds_count={stats.SkippedOutOfBoundsCount}");
-            LocalOperationalLog.Info(
-                "FileTransferService",
-                $"event=filetransfer_v4_repair_sent; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairRequestKey}; protocol_repair_request_id={FormatProtocolLogValue(protocolRepairRequestId ?? "(none)")}; range_count={queuedRepair.RangeCount}; requested_chunk_count={queuedRepair.RequestedChunkCount}; sent_chunk_count=0; sent_chunk_indices=(none); repair_delivery_mode=bulk_only; repair_delivery_escalation_reason=no_chunks; first_start_chunk_index={queuedRepair.FirstStartChunkIndex}; last_end_chunk_exclusive={queuedRepair.LastEndChunkExclusive}; frontier_tail_repair={(queuedRepair.FrontierTailRepair ? 1 : 0)}; post_rebind_frontier_exclusive={(postRebindFrontierRepair ? 1 : 0)}; credit_exhausted_time_ms_at_repair=-1; remote_next_expected_chunk_index={queuedRepair.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={queuedRepair.ChunksAcceptedForTransport}; skipped_obsolete_count={queuedRepair.SkippedObsoleteCount}; skipped_future_count={queuedRepair.SkippedFutureCount}; skipped_out_of_bounds_count={queuedRepair.SkippedOutOfBoundsCount}; receiver_proof_status=not_applicable{FormatV4DataPathAuthoritySuffix(context, "filetransfer_v4_repair_sent_no_chunks")}");
-            return;
-        }
-
         if (scheduleRepairDecision is { } scheduleDecision &&
-            ShouldLogFallbackFrontierRepairProof(scheduleRepairReplayKind, context.CurrentTransferLeg, repairRequestKey))
+            shouldLogFallbackFrontierRepairProof)
         {
             LogFileTransferFallbackFrontierRepairAuthorityGranted(
                 FileTransferDirection.Outbound,
@@ -6890,7 +6883,7 @@ public sealed partial class SessionFileTransferService
         }
 
         if (scheduleRepairDecision is { } regularScheduleDecision &&
-            ShouldLogRegularV4FrontierRepairProof(scheduleRepairReplayKind, context.CurrentTransferLeg, frontierTailRepair))
+            shouldLogRegularV4FrontierRepairProof)
         {
             var regularAuthority = CreateRegularV4FrontierRepairAuthority(
                 context,
@@ -6929,6 +6922,49 @@ public sealed partial class SessionFileTransferService
                     requestedChunkCount);
                 return;
             }
+        }
+
+        if (chunkIndices.Count == 0)
+        {
+            if (shouldLogFallbackFrontierRepairProof)
+            {
+                LogFileTransferFallbackFrontierRepairStalled(
+                    FileTransferDirection.Outbound,
+                    context.TransferId,
+                    context.SessionId,
+                    context.CurrentTransferLeg,
+                    repairRequestKey,
+                    "no_schedulable_repair_chunks",
+                    firstStart,
+                    state.DurableReceivedHighestChunkIndex,
+                    requestedChunkCount,
+                    1,
+                    0);
+            }
+
+            if (shouldLogRegularV4FrontierRepairProof)
+            {
+                LogFileTransferRegularV4FrontierRepairStalled(
+                    FileTransferDirection.Outbound,
+                    context.TransferId,
+                    context.SessionId,
+                    context.CurrentTransferLeg,
+                    repairRequestKey,
+                    "no_schedulable_repair_chunks",
+                    stats.RemoteNextExpectedChunkIndex,
+                    Math.Max(-1, stats.RemoteNextExpectedChunkIndex - 1),
+                    requestedChunkCount,
+                    1,
+                    0);
+            }
+
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_v4_repair_scheduled; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairRequestKey}; protocol_repair_request_id={FormatProtocolLogValue(protocolRepairRequestId ?? "(none)")}; epoch={state.Epoch}; range_count={normalizedRanges.Count}; requested_chunk_count={requestedChunkCount}; scheduled_chunk_count=0; scheduled_chunk_indices=(none); first_start_chunk_index={firstStart}; last_end_chunk_exclusive={lastEndExclusive}; frontier_tail_repair={(frontierTailRepair ? 1 : 0)}; post_rebind_frontier_exclusive={(postRebindFrontierRepair ? 1 : 0)}; credit_exhausted_time_ms_at_repair=-1; remote_next_expected_chunk_index={stats.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={stats.ChunksAcceptedForTransport}; skipped_obsolete_count={stats.SkippedObsoleteCount}; skipped_future_count={stats.SkippedFutureCount}; skipped_out_of_bounds_count={stats.SkippedOutOfBoundsCount}");
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_v4_repair_sent; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairRequestKey}; protocol_repair_request_id={FormatProtocolLogValue(protocolRepairRequestId ?? "(none)")}; range_count={queuedRepair.RangeCount}; requested_chunk_count={queuedRepair.RequestedChunkCount}; sent_chunk_count=0; sent_chunk_indices=(none); repair_delivery_mode=bulk_only; repair_delivery_escalation_reason=no_chunks; first_start_chunk_index={queuedRepair.FirstStartChunkIndex}; last_end_chunk_exclusive={queuedRepair.LastEndChunkExclusive}; frontier_tail_repair={(queuedRepair.FrontierTailRepair ? 1 : 0)}; post_rebind_frontier_exclusive={(postRebindFrontierRepair ? 1 : 0)}; credit_exhausted_time_ms_at_repair=-1; remote_next_expected_chunk_index={queuedRepair.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={queuedRepair.ChunksAcceptedForTransport}; skipped_obsolete_count={queuedRepair.SkippedObsoleteCount}; skipped_future_count={queuedRepair.SkippedFutureCount}; skipped_out_of_bounds_count={queuedRepair.SkippedOutOfBoundsCount}; receiver_proof_status=not_applicable{FormatV4DataPathAuthoritySuffix(context, "filetransfer_v4_repair_sent_no_chunks")}");
+            return;
         }
 
         lock (gate)

@@ -7675,6 +7675,7 @@ function Get-NknBridgeBootstrapReadinessForRole {
     )
     $failureMarkers = @(
         'event=nkn_bridge_bootstrap_not_ready',
+        'event=helpee_invite_bootstrap_bridge_before_ready_retry',
         'HostByAddressAsync failed',
         'RPC call failed',
         'Connect failed',
@@ -7702,6 +7703,7 @@ function Get-NknBridgeBootstrapReadinessForRole {
     $failureReadyEmitted = ''
     $failureLastError = '(none)'
     $failureLine = ''
+    $hostReadyConnectFailureSubreason = if ($RoleName -eq 'helpee') { 'helpee_bridge_host_ready_connect_failed' } else { 'helper_bridge_host_ready_connect_failed' }
     foreach ($line in $lines) {
         foreach ($marker in $failureMarkers) {
             if ($line.IndexOf($marker, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
@@ -7718,6 +7720,11 @@ function Get-NknBridgeBootstrapReadinessForRole {
                 $failureSubreason = $subreason
             }
 
+            $failureReason = Get-GuiSmokeDelimitedLogField -Line $line -Name 'failure_reason'
+            if (-not [string]::IsNullOrWhiteSpace($failureReason) -and -not $failureReasons.Contains($failureReason)) {
+                $failureReasons.Add($failureReason) | Out-Null
+            }
+
             $readyEmitted = Get-GuiSmokeDelimitedLogField -Line $line -Name 'ready_emitted'
             if (-not [string]::IsNullOrWhiteSpace($readyEmitted)) {
                 $failureReadyEmitted = $readyEmitted
@@ -7726,6 +7733,43 @@ function Get-NknBridgeBootstrapReadinessForRole {
             $lastError = Get-GuiSmokeDelimitedLogField -Line $line -Name 'last_error'
             if (-not [string]::IsNullOrWhiteSpace($lastError)) {
                 $failureLastError = $lastError
+            }
+        }
+
+        if ($line.IndexOf('event=helpee_invite_bootstrap_bridge_before_ready_retry', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $failureLine = [string]$line
+            $failureSubreason = 'helpee_invite_host_before_bridge_ready'
+
+            $failureReason = Get-GuiSmokeDelimitedLogField -Line $line -Name 'failure_reason'
+            if (-not [string]::IsNullOrWhiteSpace($failureReason) -and -not $failureReasons.Contains($failureReason)) {
+                $failureReasons.Add($failureReason) | Out-Null
+            }
+
+            $lastError = Get-GuiSmokeDelimitedLogField -Line $line -Name 'last_error'
+            if (-not [string]::IsNullOrWhiteSpace($lastError)) {
+                $failureLastError = $lastError
+            }
+        }
+
+        if ($line.IndexOf('HostByAddressAsync failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('Connect failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('RPC call failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('connect EACCES', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            if ($failureSubreason -eq '(none)') {
+                $failureSubreason = $hostReadyConnectFailureSubreason
+            }
+
+            if ($line.IndexOf('connect EACCES', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $failureLastError = 'connect EACCES'
+            }
+            elseif ($failureLastError -eq '(none)' -and $line.IndexOf('HostByAddressAsync failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $failureLastError = 'HostByAddressAsync failed'
+            }
+            elseif ($failureLastError -eq '(none)' -and $line.IndexOf('Connect failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $failureLastError = 'Connect failed'
+            }
+            elseif ($failureLastError -eq '(none)' -and $line.IndexOf('RPC call failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $failureLastError = 'RPC call failed'
             }
         }
     }
@@ -9777,6 +9821,7 @@ function Test-HelpeeInviteBootstrapBridgeRetryableError {
     return $Message.IndexOf('nkn_bridge_bootstrap_network_unready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $Message.IndexOf('nkn_bridge_bootstrap_not_ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $Message.IndexOf('helpee_invite_host_before_bridge_ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $Message.IndexOf('helpee_invite_bootstrap_bridge_before_ready_retry', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $Message.IndexOf('HostByAddressAsync failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $Message.IndexOf('RPC call failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $Message.IndexOf('Connect failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or

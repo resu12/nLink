@@ -3821,6 +3821,21 @@ function Get-Phase5BridgeReadinessPreflightFailureSubreason {
         return 'helpee_invite_host_before_bridge_ready'
     }
 
+    if ($combined.IndexOf('helpee_invite_bootstrap_bridge_before_ready_retry', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return 'helpee_invite_host_before_bridge_ready'
+    }
+
+    if ($combined.IndexOf('HostByAddressAsync failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('Connect failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('RPC call failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('connect EACCES', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        if ($combined.IndexOf('role=helper', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'helper_bridge_host_ready_connect_failed'
+        }
+
+        return 'helpee_bridge_host_ready_connect_failed'
+    }
+
     return ''
 }
 
@@ -4355,7 +4370,11 @@ function Invoke-Phase5BridgeReadinessPreflightWithRetry {
     }
 
     $firstSubreason = if ($first.PSObject.Properties.Name -contains 'FailureSubreason') { [string]$first.FailureSubreason } else { '' }
-    $maxAttempts = if ([string]::Equals($firstSubreason, 'helpee_invite_host_before_bridge_ready', [System.StringComparison]::OrdinalIgnoreCase)) { 3 } else { 2 }
+    $usesFinalSetupRetry =
+        [string]::Equals($firstSubreason, 'helpee_invite_host_before_bridge_ready', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($firstSubreason, 'helpee_bridge_host_ready_connect_failed', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($firstSubreason, 'helper_bridge_host_ready_connect_failed', [System.StringComparison]::OrdinalIgnoreCase)
+    $maxAttempts = if ($usesFinalSetupRetry) { 3 } else { 2 }
 
     Write-Host ("[FileTransfer Phase5 Preflight] setup/bootstrap preflight failed with {0}; retrying from a clean preflight artifact directory (attempt 2/{1})." -f $first.FailureReason, $maxAttempts) -ForegroundColor Yellow
     $cleanupArtifactDir = Join-Path $RunRoot 'preflight-cleanup-after-attempt-1'

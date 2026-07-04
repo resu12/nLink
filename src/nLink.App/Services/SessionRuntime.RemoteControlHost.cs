@@ -8067,6 +8067,12 @@ public sealed partial class SessionRuntime
     private bool TryRecoverHelpeeHostReadyStartFailure(Exception ex, string reason)
     {
         var nknSnapshot = NknRuntimeDiagnostics.Snapshot();
+        var rawStartFailure = ((nknSnapshot.LastError ?? string.Empty) + " " + ex.Message).Trim();
+        if (rawStartFailure.Contains("transport_unavailable", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
         var failure = TransportFailureMapper.FromException(
             ex,
             nknSnapshot.LastError,

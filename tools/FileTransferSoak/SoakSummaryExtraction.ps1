@@ -451,8 +451,58 @@ function Test-FileTransferRouteAwareEvent {
         return $false
     }
 
+    if (Test-FileTransferDiagnosticDataPathReceiveWithoutRouteAuthority -Event $Event) {
+        return $false
+    }
+
     return $Event.EventName -eq 'filetransfer_route_selected' -or
         ($null -ne $Event.Fields -and $Event.Fields.ContainsKey('route'))
+}
+
+function Test-FileTransferDiagnosticDataPathReceiveWithoutRouteAuthority {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    if ($Event.EventName -ne 'filetransfer_data_path_receive_result') {
+        return $false
+    }
+
+    $route = Get-FileTransferEventField -Event $Event -Name 'route' -Default ''
+    if (-not ([string]::IsNullOrWhiteSpace($route) -or $route -eq '(none)')) {
+        return $false
+    }
+
+    $protocolVersion = Get-FileTransferEventField -Event $Event -Name 'protocol_version' -Default ''
+    if (-not ([string]::IsNullOrWhiteSpace($protocolVersion) -or $protocolVersion -eq '0' -or $protocolVersion -eq '(none)')) {
+        return $false
+    }
+
+    $direction = Get-FileTransferEventField -Event $Event -Name 'direction' -Default ''
+    if (-not ([string]::IsNullOrWhiteSpace($direction) -or $direction -eq '(none)')) {
+        return $false
+    }
+
+    $frameType = Get-FileTransferEventField -Event $Event -Name 'frame_type' -Default ''
+    if ($frameType -like 'filetransfer.chunk_batch.*' -or
+        $frameType -like 'filetransfer.repair*') {
+        return $false
+    }
+
+    $batchChunkCount = Get-FileTransferEventInt64Field -Event $Event -Name 'batch_chunk_count' -Default 0
+    $chunkCount = Get-FileTransferEventInt64Field -Event $Event -Name 'chunk_count' -Default 0
+    $sentChunkCount = Get-FileTransferEventInt64Field -Event $Event -Name 'sent_chunk_count' -Default 0
+    if ($batchChunkCount -gt 0 -or $chunkCount -gt 0 -or $sentChunkCount -gt 0) {
+        return $false
+    }
+
+    $batchProfile = Get-FileTransferEventField -Event $Event -Name 'batch_profile' -Default ''
+    if (-not [string]::IsNullOrWhiteSpace($batchProfile) -and
+        $batchProfile -ne '(none)' -and
+        ($batchProfile.StartsWith('v4_', [System.StringComparison]::OrdinalIgnoreCase) -or
+         $batchProfile.StartsWith('v6_', [System.StringComparison]::OrdinalIgnoreCase))) {
+        return $false
+    }
+
+    return $true
 }
 
 function Test-FileTransferDiagnosticFallbackRouteEvent {
@@ -485,6 +535,7 @@ function Test-FileTransferDiagnosticFallbackRouteEvent {
         'filetransfer_coordinator_leg_mutation_rejected' { return $true }
         'filetransfer_runtime_unlock_callback_rejected' { return $true }
         'filetransfer_recovery_authority_rejected' { return $true }
+        'runtime_unlock_retry_dispatch_authority_rejected' { return $true }
         'filetransfer_v6_post_tuna_fallback_control_coalesced' { return $true }
         'filetransfer_post_tuna_fallback_control_plane_pressure_marked' { return $true }
         'filetransfer_post_tuna_fallback_control_plane_pressure_cleared' { return $true }

@@ -1151,7 +1151,37 @@ public void HangReport_WritesScreenshareEvidenceText()
         }
     }
 
-[Trait("Category", "LegacySmoke")]
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void TransportRuntimeConfig_NknFactoryFallsBackWhenInjectedTransportIsNotNkn()
+    {
+        var previousTransport = Environment.GetEnvironmentVariable("NLINK_TRANSPORT");
+        var previousKeyPath = Environment.GetEnvironmentVariable("NLINK_NKN_KEY_PATH");
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-nkn-factory-fallback-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(tempRoot);
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", "NKN");
+            Environment.SetEnvironmentVariable("NLINK_NKN_KEY_PATH", Path.Combine(tempRoot, "identity.json"));
+
+            var config = TransportRuntimeConfig.Select(static () => new DevLocalTransport());
+
+            Assert.Equal("NKN", config.Key);
+            using var transport = config.CreateTransport();
+            Assert.IsType<NknSignalingTransport>(transport);
+            Assert.IsAssignableFrom<ISessionSecuritySignalingTransport>(transport);
+            Assert.Contains("NKN_TRANSPORT_FACTORY_INVALID", NknRuntimeDiagnostics.Snapshot().LastError, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", previousTransport);
+            Environment.SetEnvironmentVariable("NLINK_NKN_KEY_PATH", previousKeyPath);
+            try { Directory.Delete(tempRoot, recursive: true); } catch { }
+            NknRuntimeDiagnostics.SetLastError("(none)");
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void RealNknClientAdapter_BridgeDiagnosticFormatter_Redacts_Sensitive_Content()
     {

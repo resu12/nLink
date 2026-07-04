@@ -187,6 +187,60 @@ public sealed class FileTransferPhase5PreflightTests : FileTransferAcceptancePha
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task RunFileTransferRouteAcceptance_Phase5PreflightBridgeHostReadyFailureGetsFinalSetupRetry()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "phase5-preflight-host-ready-connect");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-preflight-host-ready-connect");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_BRIDGE_BOOTSTRAP_FAIL"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_FAILURE_REASON"] = "nkn_bridge_bootstrap_network_unready";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_FAILURE_SUBREASON"] = "helpee_bridge_host_ready_connect_failed";
+
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.NotEqual(0, result.ExitCode);
+            var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal("FAIL", summary["verdict"]);
+            Assert.Equal("preflight_bridge_bootstrap", summary["preflight_failure_class"]);
+            Assert.Equal("nkn_bridge_bootstrap_network_unready", summary["preflight_failure_reason"]);
+            Assert.Equal("helpee_bridge_host_ready_connect_failed", summary["preflight_failure_subreason"]);
+            Assert.Equal("helpee_bridge_host_ready_connect_failed", summary["preflight_first_failure_subreason"]);
+            Assert.Equal("3", summary["preflight_attempt_count"]);
+            Assert.Equal("1", summary["preflight_retry_used"]);
+            Assert.Equal("0", summary["run_count"]);
+
+            var attempts = ReadArtifactReport(runRoot, "phase5-bridge-readiness-preflight-attempts.txt");
+            Assert.Equal("3", attempts["attempt_count"]);
+            Assert.Equal("helpee_bridge_host_ready_connect_failed", attempts["final_failure_subreason"]);
+            Assert.Equal("helpee_bridge_host_ready_connect_failed", attempts["first_failure_subreason"]);
+            Assert.True(File.Exists(Path.Combine(runRoot, "preflight-bridge-ready-attempt-2", "phase5-bridge-readiness-preflight-summary.txt")), "Expected second failed preflight attempt to be preserved.");
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task RunFileTransferRouteAcceptance_Phase5PreflightHelperWindowOwnershipFailureIsClassified()
     {
         if (!OperatingSystem.IsWindows())
@@ -408,6 +462,8 @@ public sealed class FileTransferPhase5PreflightTests : FileTransferAcceptancePha
         Assert.Contains("helpee_request_flow_not_enabled_after_identity_paste", scriptText, StringComparison.Ordinal);
         Assert.Contains("Timed out waiting for helpee connection entry mode", scriptText, StringComparison.Ordinal);
         Assert.Contains("nkn_bridge_bootstrap_network_unready", scriptText, StringComparison.Ordinal);
+        Assert.Contains("helpee_invite_bootstrap_bridge_before_ready_retry", scriptText, StringComparison.Ordinal);
+        Assert.Contains("helpee_invite_host_before_bridge_ready", scriptText, StringComparison.Ordinal);
         Assert.Contains("RPC call failed", scriptText, StringComparison.Ordinal);
         Assert.Contains("Connect failed", scriptText, StringComparison.Ordinal);
         Assert.Contains("connect EACCES", scriptText, StringComparison.Ordinal);

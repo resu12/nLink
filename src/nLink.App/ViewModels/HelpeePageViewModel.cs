@@ -2469,6 +2469,11 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             return false;
         }
 
+        if (string.Equals(bridgeReadiness.FailureReason, "transport_unavailable", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
         return bridgeReadiness.TerminalFailure ||
                ex.Message.Contains("nkn_bridge_bootstrap_not_ready", StringComparison.OrdinalIgnoreCase);
     }
@@ -2504,8 +2509,26 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             return;
         }
 
-        // SessionRuntime owns the quiet rehost/retry loop. The view model only keeps
-        // setup UI non-terminal while that coordinator-owned setup recovery runs.
+        var shouldRestartHosting = false;
+        await UiThreadDispatch.RunAsync(() =>
+        {
+            shouldRestartHosting =
+                !disposed &&
+                generation == Volatile.Read(ref inviteBootstrapGeneration) &&
+                !HasShareInvite &&
+                !HasIncomingRequest &&
+                !IsRequestAllowed &&
+                IsInvitePreparationStatus(ShareInviteStatusText);
+        }).ConfigureAwait(false);
+
+        if (!shouldRestartHosting)
+        {
+            return;
+        }
+
+        AppLog.Warn(
+            $"event=helpee_invite_bootstrap_bridge_before_ready_rehost; generation={generation}; failure_reason={bridgeReadiness.FailureReason}; last_error={bridgeReadiness.LastError}");
+        _ = StartHostingAsync();
     }
 
     private async Task SurfaceInviteBootstrapFailureAsync(string message, string reason)
@@ -2546,9 +2569,10 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             ConnectionStatus = "Could not prepare invite. Refresh invite and try again.";
             ConnectionState = "Failed";
             AppLog.Warn(
-                $"event={eventName}; subreason={subreason}; message={message}; verified_helper={(HasVerifiedInviteHelperIdentity ? 1 : 0)}; runtime_state={sessionRuntime.State}; transport_state={sessionRuntime.TransportLifecycleState}; invite_status={ShareInviteStatusText}; " +
+                $"event={eventName}; subreason={subreason}; failure_reason={bridgeReadiness.FailureReason}; last_error={bridgeReadiness.LastError}; " +
                 $"ready_emitted={(bridgeReadiness.ReadyEmitted ? 1 : 0)}; control_ready={(bridgeReadiness.ControlReady ? 1 : 0)}; media_ready={(bridgeReadiness.MediaReady ? 1 : 0)}; bulk_ready={(bridgeReadiness.BulkReady ? 1 : 0)}; " +
-                $"bootstrap_role={bridgeReadiness.Role}; bootstrap_generation={bridgeReadiness.Generation}; terminal_failure={(bridgeReadiness.TerminalFailure ? 1 : 0)}; failure_reason={bridgeReadiness.FailureReason}; last_error={bridgeReadiness.LastError}");
+                $"bootstrap_role={bridgeReadiness.Role}; bootstrap_generation={bridgeReadiness.Generation}; terminal_failure={(bridgeReadiness.TerminalFailure ? 1 : 0)}; " +
+                $"verified_helper={(HasVerifiedInviteHelperIdentity ? 1 : 0)}; runtime_state={sessionRuntime.State}; transport_state={sessionRuntime.TransportLifecycleState}; invite_status={ShareInviteStatusText}; message={message}");
             RefreshCommandStates();
         });
     }

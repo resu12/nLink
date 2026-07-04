@@ -115,6 +115,7 @@ public sealed partial class NknSignalingTransport
     internal static Func<NknSignalingTransport, string?>? RuntimeUnlockOfferObservedSendBlockerReasonOverrideForTests;
     internal static Func<NknSignalingTransport, string?>? RuntimeUnlockBulkQueueObservedProofBlockerOverrideForTests;
     internal static Func<NknSignalingTransport, string?>? RuntimeUnlockRegularV4ReceiveRecoveryBlockerOverrideForTests;
+    internal static Func<NknSignalingTransport, (bool HasBlocker, string Reason, long RemainingMs)>? RuntimeUnlockRegularV4RepairPressureBlockerOverrideForTests;
     internal static Func<NknSignalingTransport, string, string?>? RuntimeUnlockOfferDirectObservedLaneBlockerOverrideForTests;
     internal static Func<NknSignalingTransport, string, string?, bool>? RuntimeUnlockOfferSendRecoveryRequestOverrideForTests;
     private readonly object accelerationGate = new();
@@ -9251,6 +9252,17 @@ public sealed partial class NknSignalingTransport
         }
 
         if (isRuntimeUnlockActivation &&
+            TryDeferRuntimeUnlockOfferDispatchForRegularV4FrontierRepair(
+                sessionId,
+                reason,
+                payerDecisionId,
+                out _,
+                out _))
+        {
+            return;
+        }
+
+        if (isRuntimeUnlockActivation &&
             !TryConsumeRuntimeUnlockBrokenStateRetryBudgetForOfferDispatch(reason, out var brokenStateRetryReason))
         {
             LogAccelerationRetryNotScheduled(brokenStateRetryReason, "runtime_unlock_broken_state_finalized");
@@ -11141,7 +11153,13 @@ public sealed partial class NknSignalingTransport
             }
 
             var requiresDispatchProof = RequiresRuntimeUnlockRetryDispatchProof(state);
-            if (!requiresDispatchProof)
+            if (requiresDispatchProof &&
+                state.BlockedByRegularV4ReceiveRecovery)
+            {
+                heldByRegularV4RecoveryState = state;
+                stateSnapshot = state;
+            }
+            else if (!requiresDispatchProof)
             {
                 state.RetryQueued = true;
                 state.RetryDispatching = true;
@@ -11193,6 +11211,14 @@ public sealed partial class NknSignalingTransport
                 state.ContractState = SessionRecoveryContractState.RetryDispatched;
                 stateSnapshot = state;
             }
+        }
+
+        if (heldByRegularV4RecoveryState is not null)
+        {
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=runtime_unlock_retry_dispatch_held_by_regular_v4_receive_recovery; session_id={SanitizeLogToken(heldByRegularV4RecoveryState.SessionId)}; transfer_id={SanitizeLogToken(heldByRegularV4RecoveryState.RegularV4RecoveryBlockedTransferId ?? heldByRegularV4RecoveryState.TransferId ?? "(none)")}; trigger={SanitizeLogToken(reason)}; blocker_reason={SanitizeLogToken(heldByRegularV4RecoveryState.RegularV4RecoveryBlockerReason ?? "regular_v4_receive_recovery_pending")}; route={SanitizeLogToken(heldByRegularV4RecoveryState.RegularV4RecoveryRouteToken ?? "(none)")}; protocol_version={heldByRegularV4RecoveryState.RegularV4RecoveryProtocolVersion}; live_route_epoch={heldByRegularV4RecoveryState.RegularV4RecoveryLiveRouteEpoch}; regular_v4_liveness_generation={heldByRegularV4RecoveryState.RegularV4RecoveryLivenessGeneration}; bridge_decision_generation={heldByRegularV4RecoveryState.RegularV4RecoveryBridgeDecisionGeneration}; decision_reason=awaiting_regular_v4_recovery_settlement");
+            return RuntimeUnlockRetryDispatchAuthorityResult.Held;
         }
 
         if (rejectedState is not null)
@@ -11337,6 +11363,60 @@ public sealed partial class NknSignalingTransport
         LocalOperationalLog.Warn(
             "NKN.Tuna",
             $"event=tuna_acceleration_runtime_unlock_dispatch_deferred_for_regular_v4_receive_recovery; session_id={SanitizeLogToken(sessionId ?? "none")}; trigger={SanitizeLogToken(trigger)}; payer_decision_id={payerDecisionId}; blocker_reason={SanitizeLogToken(blockerReason)}; blocker_remaining_ms={blockerRemainingMs}; proof_reason={SanitizeLogToken(proofReason)}; retry_scheduled={(retryScheduled ? 1 : 0)}; retry_after_receive_proof_armed={(retryAfterReceiveProofArmed ? 1 : 0)}; recovery_requested=0");
+        return true;
+    }
+
+    private bool TryDeferRuntimeUnlockOfferDispatchForRegularV4FrontierRepair(
+        string? sessionId,
+        string trigger,
+        long payerDecisionId,
+        out string blockerReason,
+        out long blockerRemainingMs)
+    {
+        blockerReason = string.Empty;
+        blockerRemainingMs = 0;
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return false;
+        }
+
+        var normalizedSessionId = sessionId.Trim();
+        if (!HasActiveRegularV4FileTransferRouteHint(normalizedSessionId) ||
+            HasActivePostTunaFallbackFileTransferRouteHint(normalizedSessionId))
+        {
+            return false;
+        }
+
+        var overrideBlocker = RuntimeUnlockRegularV4RepairPressureBlockerOverrideForTests?.Invoke(this);
+        if (overrideBlocker is { HasBlocker: true })
+        {
+            blockerReason = SanitizeLogToken(overrideBlocker.Value.Reason);
+            blockerRemainingMs = Math.Max(0, overrideBlocker.Value.RemainingMs);
+        }
+        else if (client is not RealNknClientAdapter realClient)
+        {
+            return false;
+        }
+        else if (!realClient.TryGetFileTransferRegularV4ActivationSendBlocker(
+                     out blockerReason,
+                     out blockerRemainingMs,
+                     includeRegularV4Pressure: true))
+        {
+            return false;
+        }
+
+        if (!IsRegularV4PressureActivationSendBlocker(blockerReason))
+        {
+            return false;
+        }
+
+        MarkRuntimeUnlockRecoveryContractAuthorityBlocked(blockerReason);
+        MarkPendingRuntimeUnlockAccelerationNegotiation(trigger);
+        var retryScheduled = ScheduleAccelerationNegotiationRetry(trigger);
+        LocalOperationalLog.Warn(
+            "NKN.Tuna",
+            $"event=runtime_unlock_offer_dispatch_held_by_regular_v4_frontier_repair; session_id={SanitizeLogToken(normalizedSessionId)}; trigger={SanitizeLogToken(trigger)}; payer_decision_id={payerDecisionId}; blocker_reason={SanitizeLogToken(blockerReason)}; blocker_remaining_ms={blockerRemainingMs}; retry_scheduled={(retryScheduled ? 1 : 0)}; decision_reason=awaiting_regular_v4_frontier_repair_settlement");
+        NotifyTransportAccelerationStateChanged("runtime_unlock_regular_v4_frontier_repair_pending");
         return true;
     }
 

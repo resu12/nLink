@@ -2180,6 +2180,83 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task RecoveryStateContract_RuntimeUnlockOfferHoldsBehindRegularV4FrontierRepairPressure()
+    {
+        FakeNknClient.ResetNetwork();
+        var previousRepairPressureBlocker = NknSignalingTransport.RuntimeUnlockRegularV4RepairPressureBlockerOverrideForTests;
+        NknSignalingTransport.RuntimeUnlockRegularV4RepairPressureBlockerOverrideForTests =
+            _ => (true, "regular_v4_control_feedback_pressure", 2_500L);
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var options = NknTransportOptions.Load();
+            var tunaSidecarPath = Path.Combine(Path.GetTempPath(), "nlink-recovery-frontier-pressure.exe");
+            var hostClient = new FakeNknClient("host.recovery.frontier.pressure.aaaaaaaaaaaaaaaaaaaaaaaa");
+            var helperClient = new FakeNknClient("helper.recovery.frontier.pressure.bbbbbbbbbbbbbbbbbbbbbb");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-recovery-frontier-pressure-id", hostClient.Address),
+                NknTunaAccelerationOptions.CreateRuntimePilot(tunaSidecarPath, NknAccelerationLaneKind.File),
+                new RetryableTunaAccelerationSession(canListen: false, failedDialAttemptsBeforeSuccess: 0));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-recovery-frontier-pressure-id", helperClient.Address),
+                NknTunaAccelerationOptions.CreatePassiveDialer(tunaSidecarPath, NknAccelerationLaneKind.File),
+                new RetryableTunaAccelerationSession(canListen: false, failedDialAttemptsBeforeSuccess: 0));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_recovery_frontier_pressure";
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            InvokePrivateMethod(
+                host,
+                "TrackAuthorizedFileTransferRouteHintForTests",
+                transferId,
+                FileTransferRouteResolver.RegularNknV4FastToken,
+                FileTransferProtocol.ProtocolVersionV4,
+                "test_regular_route",
+                false,
+                "unknown",
+                "unknown",
+                false,
+                0L,
+                null,
+                1);
+
+            var method = typeof(NknSignalingTransport).GetMethod(
+                "TryDeferRuntimeUnlockOfferDispatchForRegularV4FrontierRepair",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.NotNull(method);
+            var logStart = GetOperationalLogLength();
+            var methodArgs = new object?[] { sessionId, "runtime_unlock", 17L, null, 0L };
+            var deferred = Assert.IsType<bool>(method!.Invoke(host, methodArgs));
+
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.True(deferred);
+            Assert.Equal("regular_v4_control_feedback_pressure", Assert.IsType<string>(methodArgs[3]));
+            Assert.Equal(2_500L, Assert.IsType<long>(methodArgs[4]));
+            Assert.Contains("event=runtime_unlock_offer_dispatch_held_by_regular_v4_frontier_repair;", logTail, StringComparison.Ordinal);
+            Assert.Contains("blocker_reason=regular_v4_control_feedback_pressure", logTail, StringComparison.Ordinal);
+            Assert.Contains("retry_scheduled=1", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=tuna_acceleration_retry_scheduled; reason=runtime_unlock", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_transaction_offer_generation_created;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_authority_granted;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            NknSignalingTransport.RuntimeUnlockRegularV4RepairPressureBlockerOverrideForTests = previousRepairPressureBlocker;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task RecoveryStateContract_RuntimeUnlockRetryAuthorityOpensRegularV4ActivationWindow()
     {
         FakeNknClient.ResetNetwork();

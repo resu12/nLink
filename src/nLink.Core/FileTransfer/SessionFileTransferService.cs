@@ -11837,8 +11837,26 @@ public sealed partial class SessionFileTransferService : IDisposable
             LocalOperationalLog.Warn(
                 "FileTransferService",
                 $"event=filetransfer_control_plane_delivery_failed; direction={FormatFileTransferDirection(request.Direction)}; kind={FormatFileTransferControlPlaneKind(request.Kind)}; transfer_id={request.Frame.TransferId}; session_id={request.Frame.SessionId}; route={FormatProtocolLogValue(request.RouteToken ?? "(none)")}; protocol_version={request.ProtocolVersion}; live_route_epoch={request.LiveRouteEpoch}; leg_generation={request.TransferLegGeneration}; bridge_recovery_generation={request.BridgeRecoveryGeneration}; transport_epoch={request.TransportEpoch}; checkpoint_request_id={FormatProtocolLogValue(request.CheckpointRequestId ?? "(none)")}; reason={FormatProtocolLogValue(request.Reason)}; frame_type={FormatProtocolLogValue(request.Frame.Type)}; control_queue_error={FormatProtocolLogValue(result.ControlQueueErrorName)}; control_copy_error={FormatProtocolLogValue(result.ControlCopyErrorName)}; bulk_copy_error={FormatProtocolLogValue(result.BulkCopyErrorName)}");
-            throw new InvalidOperationException($"File-transfer control-plane delivery failed for {request.Kind}.");
+            if (!IsDiagnosticOnlyControlPlaneDeliveryFailure(request))
+            {
+                throw new InvalidOperationException($"File-transfer control-plane delivery failed for {request.Kind}.");
+            }
         }
+    }
+
+    private static bool IsDiagnosticOnlyControlPlaneDeliveryFailure(
+        FileTransferControlPlaneDeliveryRequest request)
+    {
+        return request.Kind == FileTransferControlPlaneKind.FallbackCheckpointProof &&
+            string.Equals(
+                request.RouteToken,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                StringComparison.Ordinal) &&
+            request.ProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
+            request.LiveRouteEpoch > 0 &&
+            request.TransferLegGeneration > 0 &&
+            request.TransportEpoch > 0 &&
+            !string.IsNullOrWhiteSpace(request.CheckpointRequestId);
     }
 
     private bool TryAuthorizeOutboundFallbackControlPlaneSendLocked(
@@ -12287,6 +12305,10 @@ public sealed partial class SessionFileTransferService : IDisposable
                 }
 
                 LogFileTransferControlPlaneDeliveryResult(request, result);
+                if (!result.AcceptedAny)
+                {
+                    return (false, result);
+                }
             }
 
             MaybeObserveInboundPostTunaFallbackControlPlanePressure(context, request);

@@ -769,6 +769,46 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task HelpeePageViewModel_TransportUnavailableBeforeBridgeReady_SurfacesRetryablePreflightFailure()
+    {
+        var createdTransports = 0;
+        var hostCalls = 0;
+        using var runtime = new SessionRuntime(() =>
+        {
+            var attempt = Interlocked.Increment(ref createdTransports);
+            return new BootstrapRetryHelpeeHostTransport(
+                $"helpee.bootstrap.transport-unavailable.window.{attempt}",
+                failBeforeReady: attempt <= 2,
+                onHostCall: () => Interlocked.Increment(ref hostCalls),
+                failAsTransportUnavailable: true);
+        });
+        using var helpee = new HelpeePageViewModel(
+            cancelAction: static () => { },
+            CreateNknTestConfig(),
+            runtime,
+            inviteBootstrapTimeout: TimeSpan.FromSeconds(10));
+
+        try
+        {
+            await WaitUntilAsync(
+                () => runtime.State == SessionRuntimeState.Failed &&
+                      string.Equals(helpee.ShareInviteStatusText, "Could not prepare invite. Refresh invite and try again.", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(3));
+        }
+        catch (TimeoutException ex)
+        {
+            throw new TimeoutException(
+                $"created_transports={Volatile.Read(ref createdTransports)}; host_calls={Volatile.Read(ref hostCalls)}; state={runtime.State}; transport_state={runtime.TransportLifecycleState}; status={runtime.StatusText}; connection_state={helpee.ConnectionState}; invite_status={helpee.ShareInviteStatusText}",
+                ex);
+        }
+
+        Assert.Equal(1, Volatile.Read(ref hostCalls));
+        Assert.False(helpee.HasShareInvite);
+        Assert.Equal("Failed", helpee.ConnectionState);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public void HelpeePageViewModel_IncomingApproval_ClearsStalePeerEndedHeaderNotice()
     {
         using var runtime = new SessionRuntime(() => new DevLocalTransport());
@@ -1025,6 +1065,7 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
         private readonly bool failBeforeReady;
         private readonly Action onHostCall;
         private readonly bool failAsHostReadyTimeout;
+        private readonly bool failAsTransportUnavailable;
         private int bootstrapFailed;
         private SessionSecurityState currentSessionSecurityState = SessionSecurityState.Empty;
 
@@ -1032,12 +1073,14 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
             string localPeerAddress,
             bool failBeforeReady,
             Action onHostCall,
-            bool failAsHostReadyTimeout = false)
+            bool failAsHostReadyTimeout = false,
+            bool failAsTransportUnavailable = false)
         {
             LocalPeerAddress = localPeerAddress;
             this.failBeforeReady = failBeforeReady;
             this.onHostCall = onHostCall;
             this.failAsHostReadyTimeout = failAsHostReadyTimeout;
+            this.failAsTransportUnavailable = failAsTransportUnavailable;
         }
 
         public string LocalPeerAddress { get; }
@@ -1056,6 +1099,12 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
             if (failBeforeReady)
             {
                 Volatile.Write(ref bootstrapFailed, 1);
+                if (failAsTransportUnavailable)
+                {
+                    NknRuntimeDiagnostics.SetLastError("transport_unavailable");
+                    throw new InvalidOperationException("transport_unavailable");
+                }
+
                 if (failAsHostReadyTimeout)
                 {
                     NknRuntimeDiagnostics.SetLastError("ConnectToNodeTimeoutError: host_ready_connect_failed");
@@ -1102,8 +1151,8 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
                     LastReadyUtcMs: 0,
                     DeadlineUtcMs: 0,
                     TerminalFailure: true,
-                    FailureReason: failAsHostReadyTimeout ? "host_ready_connect_failed" : "bridge_transport_connect_failed_before_ready",
-                    LastError: failAsHostReadyTimeout ? "ConnectToNodeTimeoutError" : "connect EACCES");
+                    FailureReason: failAsTransportUnavailable ? "transport_unavailable" : failAsHostReadyTimeout ? "host_ready_connect_failed" : "bridge_transport_connect_failed_before_ready",
+                    LastError: failAsTransportUnavailable ? "(none)" : failAsHostReadyTimeout ? "ConnectToNodeTimeoutError" : "connect EACCES");
 
         public Task SendChatMessageAsync(ReadOnlyMemory<byte> payload, CancellationToken ct) => Task.CompletedTask;
 

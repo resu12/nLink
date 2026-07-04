@@ -59,6 +59,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("FailureSubreason", scriptText, StringComparison.Ordinal);
         Assert.Contains("failure_subreason=", scriptText, StringComparison.Ordinal);
         Assert.Contains("helpee_invite_host_before_bridge_ready", scriptText, StringComparison.Ordinal);
+        Assert.Contains("helpee_bridge_host_ready_connect_failed", scriptText, StringComparison.Ordinal);
+        Assert.Contains("helper_bridge_host_ready_connect_failed", scriptText, StringComparison.Ordinal);
+        Assert.Contains("helpee_invite_bootstrap_bridge_before_ready_retry", scriptText, StringComparison.Ordinal);
         Assert.Contains("nkn_bridge_bootstrap_network_unready", scriptText, StringComparison.Ordinal);
         Assert.Contains("nkn_bridge_bootstrap_pair_retry_scheduled", scriptText, StringComparison.Ordinal);
         Assert.Contains("Test-HelpeeInviteBootstrapBridgeRetryableError", scriptText, StringComparison.Ordinal);
@@ -95,6 +98,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         var bridgeRetryBody = scriptText[bridgeRetryStart..bridgeRetryEnd];
         Assert.Contains("nkn_bridge_bootstrap_network_unready", bridgeRetryBody, StringComparison.Ordinal);
         Assert.Contains("helpee_invite_host_before_bridge_ready", bridgeRetryBody, StringComparison.Ordinal);
+        Assert.Contains("helpee_invite_bootstrap_bridge_before_ready_retry", bridgeRetryBody, StringComparison.Ordinal);
         Assert.Contains("HostByAddressAsync failed", bridgeRetryBody, StringComparison.Ordinal);
         Assert.Contains("RPC call failed", bridgeRetryBody, StringComparison.Ordinal);
         Assert.Contains("Connect failed", bridgeRetryBody, StringComparison.Ordinal);

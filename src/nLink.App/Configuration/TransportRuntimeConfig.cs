@@ -192,7 +192,45 @@ public sealed class TransportRuntimeConfig
             startupWarningText: startupWarningText,
             configurationErrorText: configurationErrorText,
             bridgeReusePolicy: policy,
-            createTransport: nknTransportFactory ?? (() => new NknSignalingTransport()));
+            createTransport: () => CreateValidatedNknTransport(nknTransportFactory));
+    }
+
+    private static ISignalingTransport CreateValidatedNknTransport(Func<ISignalingTransport>? nknTransportFactory)
+    {
+        if (nknTransportFactory is null)
+        {
+            return new NknSignalingTransport();
+        }
+
+        ISignalingTransport? transport = null;
+        try
+        {
+            transport = nknTransportFactory();
+            if (transport is NknSignalingTransport)
+            {
+                return transport;
+            }
+
+            var transportType = transport?.GetType().Name ?? "(null)";
+            NknRuntimeDiagnostics.SetLastError($"NKN_TRANSPORT_FACTORY_INVALID: {transportType}");
+            AppLog.Warn($"event=nkn_transport_factory_invalid; transport_type={transportType}; fallback=plain_nkn");
+        }
+        catch (Exception ex)
+        {
+            NknRuntimeDiagnostics.SetLastError($"NKN_TRANSPORT_FACTORY_FAILED: {ex.GetType().Name}");
+            AppLog.Warn($"event=nkn_transport_factory_failed; error={ex.GetType().Name}; fallback=plain_nkn");
+        }
+
+        try
+        {
+            transport?.Dispose();
+        }
+        catch
+        {
+            // Best-effort cleanup for the invalid injected transport.
+        }
+
+        return new NknSignalingTransport();
     }
 
     private static TransportRuntimeConfig CreateDevLocalConfig(
