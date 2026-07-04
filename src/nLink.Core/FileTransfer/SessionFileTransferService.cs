@@ -10282,7 +10282,13 @@ public sealed partial class SessionFileTransferService : IDisposable
         var proofReplayPending =
             context.V6PostTunaFallbackProofReplayReceiverStatePending ||
             context.V6PostTunaFallbackProofReplayFrontierRequestPending;
-        if (proofReplayPending || IsV6TransportHandoffBlockingTail(context.V6TransportHandoff))
+        if (proofReplayPending)
+        {
+            LogBlocked("fallback_proof_replay_pending");
+            return false;
+        }
+
+        if (IsV6TransportHandoffBlockingTail(context.V6TransportHandoff))
         {
             LogBlocked("fallback_tail_local_owner_work_pending");
             return false;
@@ -11614,6 +11620,28 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         if (proofReplayPending)
         {
+            if (context.PeerFallbackTailYieldGranted && !context.LocalFallbackTailYieldGranted)
+            {
+                var ownerSnapshot = BuildFallbackTailYieldOwnerSnapshot(context, currentLeg);
+                var peerPairKey = NormalizeFallbackTailYieldPairKey(
+                    context.PeerFallbackTailYieldPairKey,
+                    context.PeerFallbackTailYieldOwnerKey);
+                LogFileTransferFallbackTailLocalYieldBlocked(
+                    FileTransferDirection.Inbound,
+                    context.TransferId,
+                    context.SessionId,
+                    currentLeg,
+                    ownerSnapshot.OwnerKey,
+                    ownerSnapshot.PairKey,
+                    ownerSnapshot.CheckpointRequestIdSnapshot,
+                    context.LocalFallbackTailYieldOwnerKey,
+                    context.PeerFallbackTailYieldOwnerKey,
+                    context.LocalFallbackTailYieldPairKey,
+                    peerPairKey,
+                    "fallback_proof_replay_pending",
+                    reason);
+            }
+
             return false;
         }
 

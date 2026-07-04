@@ -4415,6 +4415,7 @@ public sealed partial class NknSignalingTransport
         }
 
         var effectiveTransport = FormatFileTransferTransportKindForLog(receivedTransportKind);
+        var usesDedicatedChunkDispatch = ShouldUseDedicatedChunkDispatchForFileTransferDataFrame(frame);
         work = CreateInboundFileTransferDispatchWork(
             MsgType.FileTransferDataFrame,
             frame.TransferId,
@@ -4432,7 +4433,8 @@ public sealed partial class NknSignalingTransport
                 LogFileTransferDataPathReceiveResult(frame, channel, receivedTransportKind);
                 DeliverFileTransferDataFrame(frame, channel, receivedTransportKind, source);
                 LogFileTransferEnvelopeEvent("received", MsgType.FileTransferDataFrame, frame.TransferId, source, effectiveTransport);
-            });
+            },
+            usesDedicatedChunkDispatch);
         return true;
     }
 
@@ -4455,7 +4457,8 @@ public sealed partial class NknSignalingTransport
     private static InboundFileTransferDispatchWork CreateInboundFileTransferDispatchWork(
         MsgType messageType,
         string transferId,
-        Action dispatch)
+        Action dispatch,
+        bool? usesDedicatedChunkDispatch = null)
     {
         var blocksChunkDispatch = messageType is MsgType.FileTransferOffer
             or MsgType.FileTransferAccept
@@ -4469,12 +4472,13 @@ public sealed partial class NknSignalingTransport
             or MsgType.FileTransferTransportEpoch
             or MsgType.FileTransferTransportProbe
             or MsgType.FileTransferRepairProof;
+        var defaultUsesDedicatedChunkDispatch = messageType is MsgType.FileTransferChunk or MsgType.FileTransferDataFrame;
         return new InboundFileTransferDispatchWork(
             Generation: 0,
             Order: 0,
             Type: messageType,
             TransferId: transferId,
-            UsesDedicatedChunkDispatch: messageType is MsgType.FileTransferChunk or MsgType.FileTransferDataFrame,
+            UsesDedicatedChunkDispatch: usesDedicatedChunkDispatch ?? defaultUsesDedicatedChunkDispatch,
             BlocksChunkDispatch: blocksChunkDispatch,
             Dispatch: dispatch,
             LifecycleCompletion: blocksChunkDispatch
@@ -6893,6 +6897,9 @@ public sealed partial class NknSignalingTransport
     private static bool IsSenderDataFrame(FileTransferDataFrame frame)
         => frame is FileTransferManifestFrameV4
             or FileTransferChunkBatchFrameV4;
+
+    private static bool ShouldUseDedicatedChunkDispatchForFileTransferDataFrame(FileTransferDataFrame frame)
+        => IsSenderDataFrame(frame);
 
     private static bool IsSenderStateControlDataFrame(
         FileTransferDataFrame frame,

@@ -518,6 +518,12 @@ public sealed partial class NknSignalingTransport
 
         public required int LiveRouteEpoch { get; init; }
 
+        public required int TransferLegGeneration { get; init; }
+
+        public required long TransportEpoch { get; init; }
+
+        public required int BridgeRecoveryGeneration { get; init; }
+
         public required int BridgeDecisionGeneration { get; init; }
 
         public required string AuthorityReason { get; init; }
@@ -549,6 +555,9 @@ public sealed partial class NknSignalingTransport
         string RouteToken,
         int ProtocolVersion,
         int LiveRouteEpoch,
+        int TransferLegGeneration,
+        long TransportEpoch,
+        int BridgeRecoveryGeneration,
         int BridgeDecisionGeneration,
         string AuthorityReason,
         bool BridgeRecoveryCompleted,
@@ -999,6 +1008,9 @@ public sealed partial class NknSignalingTransport
                 $"; route={SanitizeLogToken(request.RouteToken ?? FileTransferRouteResolver.RegularNknV4FastToken)}" +
                 $"; protocol_version={request.ProtocolVersion}" +
                 $"; live_route_epoch={request.LiveRouteEpoch}" +
+                $"; leg_generation={request.TransferLegGeneration}" +
+                $"; transport_epoch={request.TransportEpoch}" +
+                $"; bridge_recovery_generation={request.BridgeRecoveryGeneration}" +
                 $"; authority_reason={SanitizeLogToken(request.AuthorityReason ?? request.Reason)}" +
                 $"; bridge_decision_generation={request.BridgeRecoveryAuthority?.BridgeDecisionGeneration ?? 0}";
         }
@@ -1142,6 +1154,10 @@ public sealed partial class NknSignalingTransport
         var normalizedTransferId = SanitizeLogToken(transferId);
         var normalizedRoute = SanitizeLogToken(request.RouteToken ?? FileTransferRouteResolver.RegularNknV4FastToken);
         var normalizedAuthorityReason = SanitizeLogToken(request.AuthorityReason ?? reason);
+        var transferLegGeneration = Math.Max(0, request.TransferLegGeneration);
+        var transportEpoch = Math.Max(0, request.TransportEpoch);
+        var bridgeRecoveryGeneration = Math.Max(0, request.BridgeRecoveryGeneration);
+        var bridgeDecisionGeneration = request.BridgeRecoveryAuthority?.BridgeDecisionGeneration ?? 0;
         FileTransferRegularV4RecoveryLivenessState state;
         bool started = false;
         lock (fileTransferFallbackProofGate)
@@ -1152,6 +1168,11 @@ public sealed partial class NknSignalingTransport
                 string.Equals(existing.SessionId, normalizedSessionId, StringComparison.Ordinal) &&
                 string.Equals(existing.TransferId, normalizedTransferId, StringComparison.Ordinal) &&
                 existing.Direction == request.Direction &&
+                existing.LiveRouteEpoch == Math.Max(0, request.LiveRouteEpoch) &&
+                existing.TransferLegGeneration == transferLegGeneration &&
+                existing.TransportEpoch == transportEpoch &&
+                existing.BridgeRecoveryGeneration == bridgeRecoveryGeneration &&
+                existing.BridgeDecisionGeneration == bridgeDecisionGeneration &&
                 !existing.ReceiveProofObserved &&
                 !existing.RecoveryExhausted)
             {
@@ -1169,7 +1190,10 @@ public sealed partial class NknSignalingTransport
                     RouteToken = normalizedRoute,
                     ProtocolVersion = request.ProtocolVersion,
                     LiveRouteEpoch = Math.Max(0, request.LiveRouteEpoch),
-                    BridgeDecisionGeneration = request.BridgeRecoveryAuthority?.BridgeDecisionGeneration ?? 0,
+                    TransferLegGeneration = transferLegGeneration,
+                    TransportEpoch = transportEpoch,
+                    BridgeRecoveryGeneration = bridgeRecoveryGeneration,
+                    BridgeDecisionGeneration = bridgeDecisionGeneration,
                     AuthorityReason = normalizedAuthorityReason,
                     CreatedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                     LivenessDeferralDeadlineUtcMs = DateTimeOffset.UtcNow
@@ -1442,6 +1466,9 @@ public sealed partial class NknSignalingTransport
             state.RouteToken,
             state.ProtocolVersion,
             state.LiveRouteEpoch,
+            state.TransferLegGeneration,
+            state.TransportEpoch,
+            state.BridgeRecoveryGeneration,
             state.BridgeDecisionGeneration,
             state.AuthorityReason,
             state.BridgeRecoveryCompleted,
@@ -1664,9 +1691,9 @@ public sealed partial class NknSignalingTransport
                     regularV4State.RouteToken,
                     regularV4State.ProtocolVersion,
                     regularV4State.LiveRouteEpoch,
-                    regularV4State.Generation,
-                    BridgeRecoveryGeneration: regularV4State.Generation,
-                    TransportEpoch: 0,
+                    regularV4State.TransferLegGeneration,
+                    regularV4State.BridgeRecoveryGeneration,
+                    regularV4State.TransportEpoch,
                     CheckpointRequestId: null,
                     regularV4State.AuthorityReason,
                     regularRecoveryState,

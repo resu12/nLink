@@ -150,6 +150,82 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void StartTransfer_SessionReactivationInitialTunaEvidenceAcceptsLongerCurrentWindow()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var state = EmptyState(regular);
+
+        var decision = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.StartTransfer,
+                tuna,
+                targetTransport: FileTransferTransportKind.Tuna,
+                initialTunaReadinessEvidence: InitialTunaEvidence(
+                    state,
+                    readinessScope: FileTransferInitialTunaReadinessScopes.SessionReactivation,
+                    sourceTransferId: "first_transfer",
+                    snapshotGeneration: 3,
+                    sourceCapturedUtc: DateTimeOffset.UtcNow - TimeSpan.FromMinutes(5),
+                    capturedUtc: DateTimeOffset.UtcNow - TimeSpan.FromMinutes(5))),
+            state);
+
+        Assert.NotNull(decision.StartedLeg);
+        Assert.Equal(FileTransferRoute.FileTunaV4, decision.State.RouteSelection.Route);
+        Assert.True(decision.InitialTunaRouteSelectionDecision?.Accepted);
+        Assert.False(decision.InitialTunaRouteSelectionDecision?.FallbackApplied);
+    }
+
+    [Fact]
+    public void StartTransfer_SessionReactivationInitialTunaEvidenceRejectsExpiredWindow()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var state = EmptyState(regular);
+
+        var decision = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.StartTransfer,
+                tuna,
+                targetTransport: FileTransferTransportKind.Tuna,
+                initialTunaReadinessEvidence: InitialTunaEvidence(
+                    state,
+                    readinessScope: FileTransferInitialTunaReadinessScopes.SessionReactivation,
+                    sourceTransferId: "first_transfer",
+                    snapshotGeneration: 3,
+                    sourceCapturedUtc: DateTimeOffset.UtcNow - TimeSpan.FromMinutes(5),
+                    capturedUtc: DateTimeOffset.UtcNow - TimeSpan.FromMinutes(31))),
+            state);
+
+        Assert.Null(decision.StartedLeg);
+        Assert.Equal("initial_tuna_evidence_not_current", decision.MutationRejectedReason);
+        Assert.False(decision.InitialTunaRouteSelectionDecision?.Accepted);
+    }
+
+    [Fact]
+    public void StartTransfer_SessionReactivationInitialTunaEvidenceRejectsMissingSourceSnapshot()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var tuna = FileTransferRouteResolver.Resolve(FileTransferRoute.FileTunaV4);
+        var state = EmptyState(regular);
+
+        var decision = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.StartTransfer,
+                tuna,
+                targetTransport: FileTransferTransportKind.Tuna,
+                initialTunaReadinessEvidence: InitialTunaEvidence(
+                    state,
+                    readinessScope: FileTransferInitialTunaReadinessScopes.SessionReactivation,
+                    capturedUtc: DateTimeOffset.UtcNow - TimeSpan.FromMinutes(5))),
+            state);
+
+        Assert.Null(decision.StartedLeg);
+        Assert.Equal("initial_tuna_session_reactivation_evidence_invalid", decision.MutationRejectedReason);
+        Assert.False(decision.InitialTunaRouteSelectionDecision?.Accepted);
+    }
+
+    [Fact]
     public void RegularV4ToTunaV4_CreatesRecoveredLiveEpochAndActiveTunaLeg()
     {
         var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
@@ -3644,7 +3720,11 @@ public sealed class FileTransferCoordinatorTests
         bool answerReceived = true,
         bool answerAckReceived = true,
         bool tunaNegotiatedObserved = true,
-        DateTimeOffset? capturedUtc = null)
+        DateTimeOffset? capturedUtc = null,
+        string readinessScope = FileTransferInitialTunaReadinessScopes.Transfer,
+        string? sourceTransferId = null,
+        long snapshotGeneration = 0,
+        DateTimeOffset? sourceCapturedUtc = null)
         => new(
             sessionId ?? state.SessionId,
             transferId ?? state.TransferId,
@@ -3658,7 +3738,11 @@ public sealed class FileTransferCoordinatorTests
             PeerVisibleProof: peerVisibleProof,
             AnswerReceived: answerReceived,
             AnswerAckReceived: answerAckReceived,
-            TunaNegotiatedObserved: tunaNegotiatedObserved);
+            TunaNegotiatedObserved: tunaNegotiatedObserved,
+            ReadinessScope: readinessScope,
+            SourceTransferId: sourceTransferId,
+            SnapshotGeneration: snapshotGeneration,
+            SourceCapturedUtc: sourceCapturedUtc ?? default);
 
     private static FileTransferCoordinatorActionRequest ActionRequest(
         FileTransferCoordinatorActionKind kind,

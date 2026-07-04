@@ -1742,7 +1742,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             Assert.True(rawControlMessages.Count >= 3);
             Assert.True(rawBulkMessages.Count >= 3);
 
-            string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
+            string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex) + Environment.NewLine + LocalOperationalLog.GetRecentLogText();
             Assert.Contains($"frame_type={FileTransferProtocol.TransportEpochFrameTypeV6}", logTail, StringComparison.Ordinal);
             Assert.Contains($"frame_type={FileTransferProtocol.FrontierRequestFrameTypeV6}", logTail, StringComparison.Ordinal);
             Assert.Contains($"frame_type={FileTransferProtocol.RepairProofFrameTypeV6}", logTail, StringComparison.Ordinal);
@@ -2859,6 +2859,68 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
         {
             FakeNknClient.ResetNetwork();
         }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void NknTransport_FileTransferDataFrameDispatchRouting_KeepsAuthorityControlFramesOffChunkDispatch()
+    {
+        MethodInfo? method = typeof(NknSignalingTransport).GetMethod(
+            "ShouldUseDedicatedChunkDispatchForFileTransferDataFrame",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        bool UsesDedicatedChunkDispatch(FileTransferDataFrame frame)
+            => Assert.IsType<bool>(method!.Invoke(null, [frame]));
+
+        const string sessionId = "session_dispatch_route";
+        const string transferId = "transfer_dispatch_route";
+        Assert.True(UsesDedicatedChunkDispatch(new FileTransferManifestFrameV6
+        {
+            SessionId = sessionId,
+            TransferId = transferId,
+            FileName = "payload.bin",
+            FileSizeBytes = 1024,
+            ChunkSizeBytes = 1024,
+            ChunkCount = 1,
+            Sha256Base64 = Convert.ToBase64String(new byte[32]),
+        }));
+        Assert.True(UsesDedicatedChunkDispatch(new FileTransferChunkBatchFrameV6
+        {
+            SessionId = sessionId,
+            TransferId = transferId,
+            StartChunkIndex = 0,
+            ChunkCount = 1,
+            DataSegments = [new byte[1024]],
+        }));
+        Assert.False(UsesDedicatedChunkDispatch(new FileTransferReceiverStateFrameV6
+        {
+            SessionId = sessionId,
+            TransferId = transferId,
+            TransportEpoch = 2,
+            Epoch = 10,
+            RepairRequestId = "repair-1",
+        }));
+        Assert.False(UsesDedicatedChunkDispatch(new FileTransferFallbackTailYieldFrameV6
+        {
+            SessionId = sessionId,
+            TransferId = transferId,
+            TransportEpoch = 2,
+            OwnerKey = "owner",
+            PairKey = "pair",
+            Direction = "outbound",
+            YieldGeneration = 1,
+        }));
+        Assert.False(UsesDedicatedChunkDispatch(new FileTransferRuntimeUnlockPreCommitProbeAckFrame
+        {
+            SessionId = sessionId,
+            TransferId = transferId,
+            TransportEpoch = 2,
+            TransactionGeneration = 1,
+            OfferGeneration = 1,
+            TunaPathLeaseGeneration = 1,
+            ProbeId = "probe-1",
+        }));
     }
 
     private static void DeliverFileTransferDataFrameDirectly(

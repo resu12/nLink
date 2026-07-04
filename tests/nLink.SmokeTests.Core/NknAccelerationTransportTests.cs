@@ -10394,6 +10394,83 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public void RegularV4RecoveryLivenessSnapshot_PreservesCoordinatorOwnerGenerations()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var options = NknTransportOptions.Load();
+            var client = new FakeNknClient("regular.v4.recovery.liveness.owner.fields.address");
+            using var transport = new NknSignalingTransport(
+                client,
+                options,
+                new NknIdentity("regular-v4-recovery-liveness-owner-fields-id", client.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+
+            const string sessionId = "session_regular_v4_recovery_liveness_owner_fields";
+            const string transferId = "transfer_regular_v4_recovery_liveness_owner_fields";
+            var request = new FileTransferReceiveRecoveryRequest(
+                sessionId,
+                transferId,
+                FileTransferDirection.Outbound,
+                "session_liveness_timeout_pending")
+            {
+                RouteToken = FileTransferRouteResolver.RegularNknV4FastToken,
+                ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                LiveRouteEpoch = 0,
+                TransferLegGeneration = 7,
+                TransportEpoch = 13,
+                BridgeRecoveryGeneration = 11,
+                AuthorityReason = "regular_v4_startup_local_only_no_ack",
+                BridgeRecoveryAuthority = new FileTransferBridgeRecoveryAuthority(
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Outbound,
+                    FileTransferRouteResolver.RegularNknV4FastToken,
+                    FileTransferProtocol.ProtocolVersionV4,
+                    LiveRouteEpoch: 0,
+                    RuntimeGeneration: 3,
+                    TerminalGeneration: 0,
+                    TransferLegGeneration: 7,
+                    TransportEpoch: 13,
+                    BridgeRecoveryGeneration: 11,
+                    BridgeDecisionGeneration: 17,
+                    RecoveryKind: "BridgeReceiveStallRecovery",
+                    Reason: "session_liveness_timeout_pending"),
+            };
+
+            var state = InvokePrivateMethod(
+                transport,
+                "MarkFileTransferRegularV4RecoveryLivenessStarted",
+                request,
+                sessionId,
+                transferId,
+                "session_liveness_timeout_pending");
+            Assert.NotNull(state);
+
+            var recoveryState = Assert.IsAssignableFrom<IFileTransferRecoveryLivenessState>(transport);
+            Assert.True(recoveryState.TryGetActiveFileTransferRecoveryLivenessSnapshot(sessionId, out var snapshot));
+            Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken, snapshot.RouteToken);
+            Assert.Equal(FileTransferProtocol.ProtocolVersionV4, snapshot.ProtocolVersion);
+            Assert.Equal(0, snapshot.LiveRouteEpoch);
+            Assert.Equal(7, snapshot.TransferLegGeneration);
+            Assert.Equal(13, snapshot.TransportEpoch);
+            Assert.Equal(11, snapshot.BridgeRecoveryGeneration);
+
+            var stateType = state.GetType();
+            Assert.Equal(17, Assert.IsType<int>(stateType.GetProperty(
+                "BridgeDecisionGeneration",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.GetValue(state)));
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public void RegularV4RecoveryLiveness_BridgeLifecycleRefreshesDeferralDeadlineWithinCap()
     {
         FakeNknClient.ResetNetwork();
@@ -23430,6 +23507,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
         int bridgeDecisionGeneration,
         string authorityReason,
         string stateReason,
+        int transferLegGeneration = 1,
+        long transportEpoch = 0,
+        int bridgeRecoveryGeneration = 1,
         FileTransferDirection direction = FileTransferDirection.Outbound)
     {
         var snapshotType = typeof(NknSignalingTransport).GetNestedType(
@@ -23446,6 +23526,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 routeToken,
                 protocolVersion,
                 liveRouteEpoch,
+                transferLegGeneration,
+                transportEpoch,
+                bridgeRecoveryGeneration,
                 bridgeDecisionGeneration,
                 authorityReason,
                 false,

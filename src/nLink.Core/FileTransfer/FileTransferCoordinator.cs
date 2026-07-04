@@ -733,6 +733,7 @@ internal sealed class FileTransferLeg
 internal static class FileTransferCoordinator
 {
     private static readonly TimeSpan InitialTunaReadinessEvidenceMaxAge = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan SessionReactivationInitialTunaReadinessEvidenceMaxAge = TimeSpan.FromMinutes(30);
 
     public static FileTransferCoordinatorDecision Apply(
         FileTransferCoordinatorEvent coordinatorEvent,
@@ -3507,9 +3508,23 @@ internal static class FileTransferCoordinator
         }
 
         var now = DateTimeOffset.UtcNow;
+        var isSessionReactivationEvidence = string.Equals(
+            evidence.ReadinessScope,
+            FileTransferInitialTunaReadinessScopes.SessionReactivation,
+            StringComparison.Ordinal);
+        var evidenceMaxAge = isSessionReactivationEvidence
+            ? SessionReactivationInitialTunaReadinessEvidenceMaxAge
+            : InitialTunaReadinessEvidenceMaxAge;
+        if (isSessionReactivationEvidence &&
+            !HasValidSessionReactivationInitialTunaEvidence(evidence, state, now))
+        {
+            rejectionReason = "initial_tuna_session_reactivation_evidence_invalid";
+            return false;
+        }
+
         if (evidence.CapturedUtc == default ||
             evidence.CapturedUtc > now ||
-            now - evidence.CapturedUtc > InitialTunaReadinessEvidenceMaxAge)
+            now - evidence.CapturedUtc > evidenceMaxAge)
         {
             rejectionReason = "initial_tuna_evidence_not_current";
             return false;
@@ -3529,6 +3544,24 @@ internal static class FileTransferCoordinator
             !evidence.AnswerReceived)
         {
             rejectionReason = "initial_tuna_peer_visible_answer_missing";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool HasValidSessionReactivationInitialTunaEvidence(
+        FileTransferInitialTunaReadinessEvidence evidence,
+        FileTransferCoordinatorState state,
+        DateTimeOffset now)
+    {
+        if (string.IsNullOrWhiteSpace(evidence.SourceTransferId) ||
+            string.Equals(evidence.SourceTransferId.Trim(), state.TransferId, StringComparison.Ordinal) ||
+            evidence.SnapshotGeneration <= 0 ||
+            evidence.SourceCapturedUtc == default ||
+            evidence.SourceCapturedUtc > now ||
+            now - evidence.SourceCapturedUtc > SessionReactivationInitialTunaReadinessEvidenceMaxAge)
+        {
             return false;
         }
 

@@ -2471,6 +2471,10 @@ function Get-FileTransferFallbackTailReconciliationProof {
     [object[]]$pairedYieldGrantedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_tail_paired_yield_granted' })
     [object[]]$ownerGenerationMismatchEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_tail_owner_generation_mismatch' })
     [object[]]$localYieldBlockedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_tail_local_yield_blocked' })
+    [object[]]$proofReplayLocalYieldBlockedEvents = @(
+        $localYieldBlockedEvents |
+            Where-Object { (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq 'fallback_proof_replay_pending' }
+    )
     [object[]]$staleYieldProofIgnoredEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_tail_yield_proof_stale_ignored' })
     [object[]]$frontierRepairAuthorityGrantedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_frontier_repair_authority_granted' })
     [object[]]$frontierRepairAuthorityRejectedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_frontier_repair_authority_rejected' })
@@ -2825,6 +2829,7 @@ function Get-FileTransferFallbackTailReconciliationProof {
         PairedYieldGrantedCount = $pairedYieldGrantedEvents.Count
         OwnerGenerationMismatchCount = $ownerGenerationMismatchEvents.Count
         LocalYieldBlockedCount = $localYieldBlockedEvents.Count
+        ProofReplayLocalYieldBlockedCount = $proofReplayLocalYieldBlockedEvents.Count
         StaleYieldProofIgnoredCount = $staleYieldProofIgnoredEvents.Count
         PairedYieldVerdict = $(if ($terminalProofConsumedEvents.Count -gt 0 -or $hasPairedYield) { 'pass' } elseif ($hasTailActivity) { 'fail' } else { 'none' })
         FrontierRepairAuthorityGrantedCount = $frontierRepairAuthorityGrantedEvents.Count
@@ -2845,7 +2850,7 @@ function Get-FileTransferFallbackTailReconciliationProof {
         Findings = $findings
         QuiescenceFindings = $quiescenceFindings
         EvidenceEvents = @(@($evidence.ToArray()) + @($zeroCreditBreakerEvents + $requestedEvents + $acceptedEvents + $normalZeroCreditTailStateRefreshEvents) | Select-Object -First 20)
-        QuiescenceEvidenceEvents = @(@($quiescenceEvidence.ToArray()) + @($terminalProofConsumedEvents + $quiescentYieldEvents + $pairedYieldGrantedEvents + $ownerGenerationMismatchEvents + $localYieldBlockedEvents + $quiescenceTimeoutEvents + $progressForcedEvents + $frontierRepairAuthorityGrantedEvents + $frontierRepairDispatchedEvents + $frontierRepairStalledEvents + $frontierRepairProgressObservedEvents) | Select-Object -First 20)
+        QuiescenceEvidenceEvents = @(@($quiescenceEvidence.ToArray()) + @($terminalProofConsumedEvents + $quiescentYieldEvents + $pairedYieldGrantedEvents + $ownerGenerationMismatchEvents + $localYieldBlockedEvents + $proofReplayLocalYieldBlockedEvents + $quiescenceTimeoutEvents + $progressForcedEvents + $frontierRepairAuthorityGrantedEvents + $frontierRepairDispatchedEvents + $frontierRepairStalledEvents + $frontierRepairProgressObservedEvents) | Select-Object -First 20)
     }
 }
 
@@ -5110,6 +5115,7 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("fallback_tail_paired_yield_granted_count={0}" -f $fallbackTailProof.PairedYieldGrantedCount)) | Out-Null
     $lines.Add(("fallback_tail_owner_generation_mismatch_count={0}" -f $fallbackTailProof.OwnerGenerationMismatchCount)) | Out-Null
     $lines.Add(("fallback_tail_local_yield_blocked_count={0}" -f $fallbackTailProof.LocalYieldBlockedCount)) | Out-Null
+    $lines.Add(("fallback_tail_proof_replay_local_yield_blocked_count={0}" -f $fallbackTailProof.ProofReplayLocalYieldBlockedCount)) | Out-Null
     $lines.Add(("fallback_tail_stale_yield_proof_ignored_count={0}" -f $fallbackTailProof.StaleYieldProofIgnoredCount)) | Out-Null
     $lines.Add(("fallback_tail_paired_yield_verdict={0}" -f $fallbackTailProof.PairedYieldVerdict)) | Out-Null
     $lines.Add(("fallback_frontier_repair_authority_granted_count={0}" -f $fallbackTailProof.FrontierRepairAuthorityGrantedCount)) | Out-Null
@@ -6929,6 +6935,7 @@ function New-FileTransferStabilityGateSummaryLines {
         ("classification_fallback_tail_paired_yield_granted_count={0}" -f $recoveryClassification.FallbackTailPairedYieldGrantedCount),
         ("classification_fallback_tail_owner_generation_mismatch_count={0}" -f $recoveryClassification.FallbackTailOwnerGenerationMismatchCount),
         ("classification_fallback_tail_local_yield_blocked_count={0}" -f $recoveryClassification.FallbackTailLocalYieldBlockedCount),
+        ("classification_fallback_tail_proof_replay_local_yield_blocked_count={0}" -f $recoveryClassification.FallbackTailProofReplayLocalYieldBlockedCount),
         ("classification_fallback_tail_stale_yield_proof_ignored_count={0}" -f $recoveryClassification.FallbackTailStaleYieldProofIgnoredCount),
         ("classification_fallback_tail_paired_yield_verdict={0}" -f $recoveryClassification.FallbackTailPairedYieldVerdict),
         ("classification_fallback_frontier_repair_authority_granted_count={0}" -f $recoveryClassification.FallbackFrontierRepairAuthorityGrantedCount),
@@ -7007,6 +7014,7 @@ function New-FileTransferStabilityGateSummaryLines {
         ("fallback_tail_paired_yield_granted_count={0}" -f $fallbackTailProof.PairedYieldGrantedCount),
         ("fallback_tail_owner_generation_mismatch_count={0}" -f $fallbackTailProof.OwnerGenerationMismatchCount),
         ("fallback_tail_local_yield_blocked_count={0}" -f $fallbackTailProof.LocalYieldBlockedCount),
+        ("fallback_tail_proof_replay_local_yield_blocked_count={0}" -f $fallbackTailProof.ProofReplayLocalYieldBlockedCount),
         ("fallback_tail_stale_yield_proof_ignored_count={0}" -f $fallbackTailProof.StaleYieldProofIgnoredCount),
         ("fallback_tail_paired_yield_verdict={0}" -f $fallbackTailProof.PairedYieldVerdict),
         ("fallback_frontier_repair_authority_granted_count={0}" -f $fallbackTailProof.FrontierRepairAuthorityGrantedCount),
@@ -8425,6 +8433,11 @@ function Get-FileTransferRecoveryFailureClassification {
         $hasPostTunaFallbackEvidence) {
         $class = 'fallback_frontier_repair_stalled'
     }
+    elseif ($fallbackTailProof.ProofReplayLocalYieldBlockedCount -gt 0 -and
+        $fallbackTailProof.PairedYieldVerdict -eq 'fail' -and
+        $hasPostTunaFallbackEvidence) {
+        $class = 'post_fallback_frontier_replay_unsettled'
+    }
     elseif ($fallbackTailProof.LocalYieldBlockedCount -gt 0 -and
         $fallbackTailProof.PairedYieldVerdict -eq 'fail' -and
         $hasPostTunaFallbackEvidence) {
@@ -8883,6 +8896,7 @@ function Get-FileTransferRecoveryFailureClassification {
         FallbackTailPairedYieldGrantedCount = $fallbackTailProof.PairedYieldGrantedCount
         FallbackTailOwnerGenerationMismatchCount = $fallbackTailProof.OwnerGenerationMismatchCount
         FallbackTailLocalYieldBlockedCount = $fallbackTailProof.LocalYieldBlockedCount
+        FallbackTailProofReplayLocalYieldBlockedCount = $fallbackTailProof.ProofReplayLocalYieldBlockedCount
         FallbackTailStaleYieldProofIgnoredCount = $fallbackTailProof.StaleYieldProofIgnoredCount
         FallbackTailPairedYieldVerdict = $fallbackTailProof.PairedYieldVerdict
         FallbackFrontierRepairAuthorityGrantedCount = $fallbackTailProof.FrontierRepairAuthorityGrantedCount
@@ -9411,6 +9425,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("classification_fallback_tail_reconciliation_accepted_count={0}" -f $recoveryClassification.FallbackTailReconciliationAcceptedCount),
         ("classification_fallback_tail_normal_zero_credit_state_refresh_count={0}" -f $recoveryClassification.FallbackTailNormalZeroCreditStateRefreshCount),
         ("classification_fallback_tail_local_yield_blocked_count={0}" -f $recoveryClassification.FallbackTailLocalYieldBlockedCount),
+        ("classification_fallback_tail_proof_replay_local_yield_blocked_count={0}" -f $recoveryClassification.FallbackTailProofReplayLocalYieldBlockedCount),
         ("classification_fallback_frontier_repair_authority_granted_count={0}" -f $recoveryClassification.FallbackFrontierRepairAuthorityGrantedCount),
         ("classification_fallback_frontier_repair_authority_rejected_count={0}" -f $recoveryClassification.FallbackFrontierRepairAuthorityRejectedCount),
         ("classification_fallback_frontier_repair_dispatched_count={0}" -f $recoveryClassification.FallbackFrontierRepairDispatchedCount),
@@ -9497,6 +9512,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("fallback_tail_paired_yield_granted_count={0}" -f $fallbackTailProof.PairedYieldGrantedCount),
         ("fallback_tail_owner_generation_mismatch_count={0}" -f $fallbackTailProof.OwnerGenerationMismatchCount),
         ("fallback_tail_local_yield_blocked_count={0}" -f $fallbackTailProof.LocalYieldBlockedCount),
+        ("fallback_tail_proof_replay_local_yield_blocked_count={0}" -f $fallbackTailProof.ProofReplayLocalYieldBlockedCount),
         ("fallback_tail_stale_yield_proof_ignored_count={0}" -f $fallbackTailProof.StaleYieldProofIgnoredCount),
         ("fallback_tail_paired_yield_verdict={0}" -f $fallbackTailProof.PairedYieldVerdict),
         ("fallback_frontier_repair_authority_granted_count={0}" -f $fallbackTailProof.FrontierRepairAuthorityGrantedCount),
