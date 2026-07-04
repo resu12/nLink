@@ -132,6 +132,68 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_PostFallbackAdmissionHeldWithOtherTransferRejection_StillClassifiesResumeBlocked()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "[redacted-a]";
+        const string otherTransferId = "[redacted-b]";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; selection_reason=regular_nkn_default_v4; live_route_epoch=0"),
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=normal_to_tuna_activation; selection_reason=file_tuna_active; file_tuna_active=1; live_route_epoch=1"),
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; selection_reason=post_tuna_file_fallback_active; post_tuna_fallback_active=1; live_route_epoch=2"),
+            LogLine($"event=filetransfer_fallback_tail_paired_yield_granted; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; reason=fallback_tail_quiescent; leg_generation=6; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; transport_epoch=9; checkpoint_request_id=(none)"),
+            LogLine($"event=filetransfer_runtime_unlock_admission_granted; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; source=fallback_survival_resume; reason=fallback_tail_quiescent; admission_generation=4; admission_reason=fallback_quiescent; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=6; fallback_active=1; fallback_current=1; fallback_terminalized=0; checkpoint_delivery_recovery_pending=0; state_refresh_send_in_flight=0; deferred_state_refresh_pending=0; proof_replay_pending=0; control_plane_pressure_pending=0; bridge_recovery_pending=0; fallback_tail_repair_pending=0; paired_fallback_yield_granted=1"),
+            LogLine($"event=filetransfer_runtime_unlock_precommit_probe_pending_held; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; source=runtime_unlock_precommit_probe_pending; reason=fallback_tail_quiescent; hold_reason=transport_proof_missing; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=6; admission_generation=4; pending_probe_generation=0; transaction_generation=0; offer_generation=0; tuna_path_lease_generation=0; tuna_path_lease_listener_run_id=(none); target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; handoff_kind=normal_to_tuna_activation"),
+            LogLine($"event=filetransfer_runtime_unlock_precommit_probe_pending_rejected; direction=outbound; transfer_id={otherTransferId}; session_id=sess_redacted; source=runtime_unlock_precommit_probe_pending; reason=snapshot_not_usable; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=6; admission_generation=4; pending_probe_generation=0; transaction_generation=0; offer_generation=0; tuna_path_lease_generation=0; tuna_path_lease_listener_run_id=(none); target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; handoff_kind=normal_to_tuna_activation; rejection_reason=snapshot_not_usable"),
+            LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_redacted; transfer_id={transferId}; state=Failed; error_code=peer_disconnected")
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("post_fallback_runtime_unlock_resume_blocked", verdict["recovery_failure_class"]);
+        Assert.Equal("1", verdict["post_fallback_runtime_unlock_resume_blocked_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_PostFallbackAdmissionWaitingThenPendingRejected_DoesNotClassifyResumeBlocked()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "[redacted]";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; selection_reason=regular_nkn_default_v4; live_route_epoch=0"),
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=file_tuna_v4; protocol_version=4; runtime_profile=file_tuna_v4_fast; frame_family=v4; handoff_kind=normal_to_tuna_activation; selection_reason=file_tuna_active; file_tuna_active=1; live_route_epoch=1"),
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; selection_reason=post_tuna_file_fallback_active; post_tuna_fallback_active=1; live_route_epoch=2"),
+            LogLine($"event=filetransfer_fallback_tail_paired_yield_granted; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; reason=fallback_tail_quiescent; leg_generation=6; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; transport_epoch=9; checkpoint_request_id=(none)"),
+            LogLine($"event=filetransfer_runtime_unlock_admission_granted; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; source=fallback_survival_resume; reason=fallback_tail_quiescent; admission_generation=4; admission_reason=fallback_quiescent; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=6; fallback_active=1; fallback_current=1; fallback_terminalized=0; checkpoint_delivery_recovery_pending=0; state_refresh_send_in_flight=0; deferred_state_refresh_pending=0; proof_replay_pending=0; control_plane_pressure_pending=0; bridge_recovery_pending=0; fallback_tail_repair_pending=0; paired_fallback_yield_granted=1"),
+            LogLine($"event=filetransfer_runtime_unlock_precommit_probe_waiting_for_transport_proof; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; reason=snapshot_not_usable; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; handoff_kind=normal_to_tuna_activation"),
+            LogLine($"event=filetransfer_runtime_unlock_precommit_probe_pending_rejected; direction=outbound; transfer_id={transferId}; session_id=sess_redacted; source=runtime_unlock_precommit_probe_pending; reason=snapshot_not_usable; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=6; admission_generation=4; pending_probe_generation=0; transaction_generation=8; offer_generation=13; tuna_path_lease_generation=5; tuna_path_lease_listener_run_id=listener-start-5; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; handoff_kind=normal_to_tuna_activation; rejection_reason=snapshot_not_usable"),
+            LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_redacted; transfer_id={transferId}; state=Failed; error_code=peer_disconnected")
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("0", verdict["post_fallback_runtime_unlock_resume_blocked_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_precommit_probe_pending_held_count"]);
+        Assert.NotEqual("post_fallback_runtime_unlock_resume_blocked", verdict["recovery_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_TransientFallbackProofReplayPendingThenProbeCommit_DoesNotClassifyResumeBlocked()
     {
         if (!OperatingSystem.IsWindows())

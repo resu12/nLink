@@ -1597,9 +1597,11 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Empty(transport.RuntimeUnlockProbeEvents);
         var log = ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_runtime_unlock_precommit_probe_waiting_for_transport_proof; direction=outbound;", log, StringComparison.Ordinal);
-        Assert.Contains("event=filetransfer_runtime_unlock_precommit_probe_pending_held; direction=outbound;", log, StringComparison.Ordinal);
-        Assert.Contains("hold_reason=snapshot_not_usable", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_runtime_unlock_precommit_probe_pending_rejected; direction=outbound;", log, StringComparison.Ordinal);
         Assert.Contains("reason=snapshot_not_usable", log, StringComparison.Ordinal);
+        Assert.Contains("transaction_generation=3", log, StringComparison.Ordinal);
+        Assert.Contains("offer_generation=4", log, StringComparison.Ordinal);
+        Assert.Contains("tuna_path_lease_generation=5", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=runtime_unlock_precommit_probe_started; direction=outbound;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=runtime_unlock_precommit_probe_sent; direction=outbound;", log, StringComparison.Ordinal);
         Assert.DoesNotContain("event=runtime_unlock_precommit_probe_failed; direction=outbound;", log, StringComparison.Ordinal);

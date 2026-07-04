@@ -4828,6 +4828,44 @@ function Test-FileTransferRuntimeUnlockCoordinatorDenialEvent {
     return $false
 }
 
+function Test-FileTransferRuntimeUnlockResumeSettlementMatches {
+    param(
+        [Parameter(Mandatory = $true)]$Blocked,
+        [Parameter(Mandatory = $true)]$Settlement
+    )
+
+    if ([int64]$Settlement.Sequence -le [int64]$Blocked.Sequence) {
+        return $false
+    }
+
+    if (-not (Test-FileTransferStaleRejectedProofScopeMatches -Rejection $Blocked -Effect $Settlement)) {
+        return $false
+    }
+
+    foreach ($fieldName in @(
+            'admission_generation',
+            'transaction_generation',
+            'offer_generation',
+            'tuna_path_lease_generation',
+            'pending_probe_generation')) {
+        $blockedValue = Get-FileTransferEventField -Event $Blocked -Name $fieldName -Default ''
+        if (-not (Test-FileTransferStaleRejectedProofMeaningfulValue -Value $blockedValue)) {
+            continue
+        }
+
+        $settlementValue = Get-FileTransferEventField -Event $Settlement -Name $fieldName -Default ''
+        if (-not (Test-FileTransferStaleRejectedProofMeaningfulValue -Value $settlementValue)) {
+            continue
+        }
+
+        if (-not [string]::Equals($blockedValue, $settlementValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
 function Test-FileTransferRuntimeUnlockFallbackUnavailableHasCoordinatorDenial {
     param(
         [Parameter(Mandatory = $true)]$FallbackUnavailable,
@@ -8308,20 +8346,41 @@ function Get-FileTransferRecoveryFailureClassification {
             }
         }
     )
+    $runtimeUnlockPostFallbackResumeBlockedEvents = @(
+        foreach ($blocked in @($runtimeUnlockPreCommitProbeWaitingForTransportProofEvents + $runtimeUnlockPreCommitProbePendingHeldEvents)) {
+            $blockedSequence = [int64]$blocked.Sequence
+            $matchingAdmission = @(
+                $runtimeUnlockFallbackQuiescentAdmissionGrantedEvents | Where-Object {
+                    [int64]$_.Sequence -le $blockedSequence -and
+                    (Test-FileTransferStaleRejectedProofScopeMatches -Rejection $blocked -Effect $_)
+                }
+            )
+            if ($matchingAdmission.Count -eq 0) {
+                continue
+            }
+
+            $settled = @(
+                @(
+                    $runtimeUnlockPreCommitProbeStartedEvents +
+                    $runtimeUnlockPreCommitProbeAckedEvents +
+                    $runtimeUnlockPreCommitProbePendingRejectedEvents +
+                    $runtimeUnlockPreCommitProbeFailedEvents +
+                    $runtimeUnlockTransactionCommittedEvents
+                ) | Where-Object {
+                    Test-FileTransferRuntimeUnlockResumeSettlementMatches -Blocked $blocked -Settlement $_
+                }
+            )
+
+            if ($settled.Count -eq 0) {
+                $blocked
+            }
+        }
+    )
     $postFallbackRuntimeUnlockResumeBlocked =
         $hasPostTunaFallbackEvidence -and
         (
             $runtimeUnlockFallbackProofReplayPendingAfterPairedYieldUnresolvedEvents.Count -gt 0 -or
-            (
-                $runtimeUnlockFallbackQuiescentAdmissionGrantedEvents.Count -gt 0 -and
-                (
-                    $runtimeUnlockPreCommitProbeWaitingForTransportProofEvents.Count -gt 0 -or
-                    $runtimeUnlockPreCommitProbePendingHeldEvents.Count -gt 0
-                ) -and
-                $runtimeUnlockPreCommitProbeStartedEvents.Count -eq 0 -and
-                $runtimeUnlockPreCommitProbeAckedEvents.Count -eq 0 -and
-                $runtimeUnlockTransactionCommittedEvents.Count -eq 0
-            )
+            $runtimeUnlockPostFallbackResumeBlockedEvents.Count -gt 0
         )
 
     $runtimeUnlockHasPreCommitAckProof =

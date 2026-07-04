@@ -1912,11 +1912,21 @@ public sealed partial class SessionRuntime
                 lastDisconnectReason: nknSnapshot.LastDisconnectReason,
                 fallbackMessage: "Connection lost.");
 
-            if (ShouldQuietlyRecoverHelpeeHostStartFailure(failure) &&
-                TryScheduleQuietHelpeeRehost("host_start_failed_rehost"))
+            var bridgeBootstrapBeforeReady =
+                IsHelpeeBridgeBootstrapBeforeReadyFailure(failure) ||
+                IsCurrentHelpeeBridgeBootstrapBeforeReadyFailure(failure);
+            if (ShouldQuietlyRecoverHelpeeHostStartFailure(failure))
             {
-                LogTransportFailure(failure, "host_start_failed_recovering");
-                return;
+                var scheduled = TryScheduleQuietHelpeeRehost(
+                    "host_start_failed_rehost",
+                    bridgeBootstrapBeforeReady
+                        ? QuietHelpeeBridgeBootstrapRehostDelay
+                        : TimeSpan.Zero);
+                if (scheduled || Volatile.Read(ref quietHelpeeRehostInProgress) != 0)
+                {
+                    LogTransportFailure(failure, "host_start_failed_recovering");
+                    return;
+                }
             }
 
             var message = failure.Category == TransportFailureCategory.BridgeStartFailure && UserErrorMapper.IsNknStartFailure(lastError)
@@ -8003,10 +8013,14 @@ public sealed partial class SessionRuntime
             return false;
         }
 
-        if (failure.Category == TransportFailureCategory.BridgeStartFailure &&
-            (failure.RawError.Contains("nkn_bridge_bootstrap_not_ready", StringComparison.OrdinalIgnoreCase) ||
-             failure.RawError.Contains("bridge_transport_connect_failed_before_ready", StringComparison.OrdinalIgnoreCase)) &&
-            connectAttempt < MaxQuietHelpeeRehostConnectAttempt)
+        if (IsHelpeeBridgeBootstrapBeforeReadyFailure(failure) &&
+            connectAttempt < MaxQuietHelpeeBridgeBootstrapRehostConnectAttempt)
+        {
+            return true;
+        }
+
+        if (IsCurrentHelpeeBridgeBootstrapBeforeReadyFailure(failure) &&
+            connectAttempt < MaxQuietHelpeeBridgeBootstrapRehostConnectAttempt)
         {
             return true;
         }
@@ -8016,6 +8030,38 @@ public sealed partial class SessionRuntime
             TransportFailureCategory.UnexpectedProcessExit or
             TransportFailureCategory.BridgeCrashed or
             TransportFailureCategory.UserCancelled;
+    }
+
+    private static bool IsHelpeeBridgeBootstrapBeforeReadyFailure(TransportFailure failure)
+    {
+        return failure.Category == TransportFailureCategory.BridgeStartFailure &&
+               (failure.RawError.Contains("nkn_bridge_bootstrap_not_ready", StringComparison.OrdinalIgnoreCase) ||
+                failure.RawError.Contains("bridge_transport_connect_failed_before_ready", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private bool IsCurrentHelpeeBridgeBootstrapBeforeReadyFailure(TransportFailure failure)
+    {
+        if (failure.Category == TransportFailureCategory.UserCancelled ||
+            role != SessionRuntimeRole.Helpee ||
+            transport is not NknSignalingTransport)
+        {
+            return false;
+        }
+
+        var snapshot = BridgeBootstrapReadiness;
+        if (snapshot.ReadyEmitted ||
+            !snapshot.TerminalFailure ||
+            snapshot.Role.IndexOf("helpee", StringComparison.OrdinalIgnoreCase) < 0)
+        {
+            return false;
+        }
+
+        return snapshot.FailureReason.Contains("host_ready_connect_failed", StringComparison.OrdinalIgnoreCase) ||
+               snapshot.FailureReason.Contains("bridge_transport_connect_failed_before_ready", StringComparison.OrdinalIgnoreCase) ||
+               snapshot.FailureReason.Contains("bridge_bootstrap_diagnostics_failure", StringComparison.OrdinalIgnoreCase) ||
+               snapshot.LastError.Contains("bridge_transport_connect_failed_before_ready", StringComparison.OrdinalIgnoreCase) ||
+               snapshot.LastError.Contains("connecttonodetimeouterror", StringComparison.OrdinalIgnoreCase) ||
+               snapshot.LastError.Contains("rpctimeouterror", StringComparison.OrdinalIgnoreCase);
     }
 
     private bool TryRecoverHelpeeHostReadyStartFailure(Exception ex, string reason)
@@ -8030,7 +8076,14 @@ public sealed partial class SessionRuntime
             return false;
         }
 
-        var scheduled = TryScheduleQuietHelpeeRehost(reason);
+        var bridgeBootstrapBeforeReady =
+            IsHelpeeBridgeBootstrapBeforeReadyFailure(failure) ||
+            IsCurrentHelpeeBridgeBootstrapBeforeReadyFailure(failure);
+        var scheduled = TryScheduleQuietHelpeeRehost(
+            reason,
+            bridgeBootstrapBeforeReady
+                ? QuietHelpeeBridgeBootstrapRehostDelay
+                : TimeSpan.Zero);
         if (!scheduled && Volatile.Read(ref quietHelpeeRehostInProgress) == 0)
         {
             return false;
@@ -8040,10 +8093,11 @@ public sealed partial class SessionRuntime
         return true;
     }
 
-    private bool TryScheduleQuietHelpeeRehost(string reason)
+    private bool TryScheduleQuietHelpeeRehost(string reason, TimeSpan restartDelay = default)
     {
         if (Interlocked.Exchange(ref quietHelpeeRehostInProgress, 1) != 0)
         {
+            Interlocked.Exchange(ref quietHelpeeRehostPending, 1);
             return false;
         }
 
@@ -8056,6 +8110,11 @@ public sealed partial class SessionRuntime
         {
             try
             {
+                if (restartDelay > TimeSpan.Zero)
+                {
+                    await Task.Delay(restartDelay).ConfigureAwait(false);
+                }
+
                 await ResetAsync(notifyRemoteSessionEnd: false).ConfigureAwait(false);
                 await StartHelpeeAsync(CancellationToken.None).ConfigureAwait(false);
             }
@@ -8066,6 +8125,10 @@ public sealed partial class SessionRuntime
             finally
             {
                 Interlocked.Exchange(ref quietHelpeeRehostInProgress, 0);
+                if (!disposed && Interlocked.Exchange(ref quietHelpeeRehostPending, 0) != 0)
+                {
+                    TryScheduleQuietHelpeeRehost(reason, restartDelay);
+                }
             }
         });
 

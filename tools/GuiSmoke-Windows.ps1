@@ -2911,6 +2911,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $phase = 'post_fallback_runtime_unlock_resume'
         $reason = if ($fallbackProofReplayPendingAfterPairedYield) { 'fallback_proof_replay_pending_after_paired_yield' } else { 'post_fallback_runtime_unlock_resume_blocked' }
     }
+    elseif ($fallbackFrontierRepairStalled) {
+        $phase = 'fallback_frontier_repair'
+        $reason = 'fallback_frontier_repair_stalled'
+    }
     elseif ($regularV4FrontierRepairStalled) {
         $phase = 'regular_v4_frontier_repair'
         $reason = 'regular_v4_frontier_repair_stalled'
@@ -2918,10 +2922,6 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     elseif ($regularV4RepairLivenessAuthorityMissing) {
         $phase = 'regular_v4_frontier_repair'
         $reason = 'regular_v4_repair_liveness_authority_missing'
-    }
-    elseif ($fallbackFrontierRepairStalled) {
-        $phase = 'fallback_frontier_repair'
-        $reason = 'fallback_frontier_repair_stalled'
     }
     elseif ($runtimeUnlockRetryRegularV4RecoverySettlementMissing) {
         $phase = 'runtime_unlock_retry'
@@ -8935,6 +8935,7 @@ function Copy-HelperIdentityWithRecovery {
 
 function Enter-HelpeeHelperIdentityAndRequestHelp {
     param(
+        $Context,
         [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$HelpeeWindow,
         [Parameter(Mandatory = $true)][string]$HelperIdentity
     )
@@ -9123,6 +9124,10 @@ function Enter-HelpeeHelperIdentityAndRequestHelp {
             throw ("Helpee request flow produced no Request help button. {0}" -f (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow))
         }
 
+        if (Get-IsNknTransport -and $null -ne $Context) {
+            Wait-NknBridgeBootstrapReadyForCurrentPair -Context $Context -TimeoutMs (Get-TransportAwareTimeoutMs -DefaultMs 1000 -NknMs 60000) -Reason 'before_request_help_click'
+        }
+
         Click-Element $requestButton
         return $requestButton
     }
@@ -9199,7 +9204,7 @@ function Connect-HelperIdentityRequestFlow {
         }
 
         try {
-            [void](Enter-HelpeeHelperIdentityAndRequestHelp -HelpeeWindow $Context.HelpeeWindow -HelperIdentity $HelperIdentity)
+            [void](Enter-HelpeeHelperIdentityAndRequestHelp -Context $Context -HelpeeWindow $Context.HelpeeWindow -HelperIdentity $HelperIdentity)
         }
         catch {
             $lastError = $_

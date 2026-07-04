@@ -64,6 +64,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("Test-HelpeeInviteBootstrapBridgeRetryableError", scriptText, StringComparison.Ordinal);
         Assert.Contains("nkn_identity_rotation_skipped_for_bridge_bootstrap_retry", scriptText, StringComparison.Ordinal);
         Assert.Contains("Wait-NknBridgeBootstrapReadyForCurrentPairWithRecovery -Context $Context", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Wait-NknBridgeBootstrapReadyForCurrentPair -Context $Context", scriptText, StringComparison.Ordinal);
+        Assert.Contains("before_request_help_click", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Enter-HelpeeHelperIdentityAndRequestHelp -Context $Context", scriptText, StringComparison.Ordinal);
         Assert.Contains("-RotateIdentity $nextPairRestartRotateIdentity", scriptText, StringComparison.Ordinal);
         Assert.Contains("function Rotate-GuiSmokeNknIdentityPairForBootstrapRetry", scriptText, StringComparison.Ordinal);
         Assert.Contains("function Rotate-GuiSmokeNknIdentityForRole", scriptText, StringComparison.Ordinal);
@@ -196,6 +199,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("Get-TunaGuiReadinessStateAfterBookmark -Bookmark $Bookmark", scriptText, StringComparison.Ordinal);
         Assert.Contains("rawListenerUnavailable", scriptText, StringComparison.Ordinal);
         Assert.Contains("rawListenerReady", scriptText, StringComparison.Ordinal);
+        Assert.True(
+            scriptText.IndexOf("elseif ($fallbackFrontierRepairStalled)", StringComparison.Ordinal) <
+            scriptText.IndexOf("elseif ($regularV4FrontierRepairStalled)", StringComparison.Ordinal),
+            "Fallback frontier repair classification must outrank stale regular V4 frontier labels after a fallback route is current.");
     }
 
     [Fact]
@@ -463,6 +470,12 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("$result.setupFailurePhase = $secondSetupPhase", routeAcceptanceText, StringComparison.Ordinal);
         Assert.Contains("$result.setupFailureReason = $secondSetupReason", routeAcceptanceText, StringComparison.Ordinal);
         Assert.Contains("second-transfer-analysis", wrapperText, StringComparison.Ordinal);
+        Assert.Contains("Ensure-TunaGuiSecondTransferRetainedLogSlice", wrapperText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer-second-transfer-retained-log-slice-source.txt", wrapperText, StringComparison.Ordinal);
+        Assert.Contains("source=missing", wrapperText, StringComparison.Ordinal);
+        Assert.Contains("refusing to analyze the full retained log as second-transfer proof", wrapperText, StringComparison.Ordinal);
+        Assert.Contains("Second-transfer retained analysis skipped because the scenario-specific retained slice is missing", wrapperText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Copy-Item -LiteralPath $retainedPath -Destination $secondRetainedPath", wrapperText, StringComparison.Ordinal);
         Assert.Contains("Invoke-TunaGuiLiveRetainedAnalysisBestEffort", wrapperText, StringComparison.Ordinal);
         Assert.Contains("post_tuna_fallback_v6,file_tuna_v4", guiText, StringComparison.Ordinal);
         Assert.Contains("Second transfer after live reactivation failed route/integrity check", guiText, StringComparison.Ordinal);

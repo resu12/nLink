@@ -747,7 +747,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
                 bulkReady = health.BulkReady;
                 if (!terminalFailure && health.TerminalFailure)
                 {
-                    terminalFailure = true;
+                    // Health samples are setup diagnostics; only the host-ready task can make invite bootstrap terminal.
                     failureReason = health.FailureReason;
                     lastError =
                         $"health_age_ms={health.HealthSummaryAgeMs}; ready_emitted={(health.ReadyEmitted ? 1 : 0)}; " +

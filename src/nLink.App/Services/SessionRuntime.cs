@@ -200,6 +200,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
         RemoteControlModifiersMask.Win;
     private const int RemoteControlInjectionQueueCapacity = 256;
     private const long MaxQuietHelpeeRehostConnectAttempt = 3;
+    private const long MaxQuietHelpeeBridgeBootstrapRehostConnectAttempt = 90;
     private const long RemoteControlConsentTokenTtlMs = 60_000;
     private const long RemoteControlAckMouseMoveMinSeqDelta = 8;
     private const string RemoteControlScreenChangedStatusTextHelper = "Screen changed";
@@ -208,6 +209,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
     private const string FileTransferTransfersDirectoryName = "transfers";
     private const string FileTransferIncomingDirectoryName = "incoming";
     private static readonly TimeSpan RemoteScreenShareStopFrameSuppressionWindow = TimeSpan.FromMilliseconds(750);
+    private static readonly TimeSpan QuietHelpeeBridgeBootstrapRehostDelay = TimeSpan.FromSeconds(1);
 
     private readonly Func<ISignalingTransport> createTransport;
     private readonly SessionChatService chatService = new();
@@ -296,6 +298,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
     private bool transientStatusCanCancel;
     private string remoteControlStatusHintText = string.Empty;
     private int quietHelpeeRehostInProgress;
+    private int quietHelpeeRehostPending;
     private int quietHelperListenerRestartInProgress;
     private bool activeSessionCounted;
     private bool activeConnectAttemptCounted;

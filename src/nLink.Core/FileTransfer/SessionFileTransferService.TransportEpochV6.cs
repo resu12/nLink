@@ -555,13 +555,17 @@ public sealed partial class SessionFileTransferService
                 "snapshot_not_usable");
             if (IsFallbackTailQuiescentRuntimeUnlockResumeReason(reason))
             {
-                LogRuntimeUnlockPreCommitProbePendingHeld(
+                LogRuntimeUnlockPreCommitProbePendingRejected(
                     direction,
                     transferId,
                     sessionId,
+                    pendingReplay,
                     runtimeOwner,
                     admissionToken,
-                    reason,
+                    snapshot.TransactionGeneration,
+                    snapshot.OfferGeneration,
+                    snapshot.TunaPathLeaseGeneration,
+                    snapshot.TunaPathLeaseListenerRunId,
                     "snapshot_not_usable");
             }
             return;

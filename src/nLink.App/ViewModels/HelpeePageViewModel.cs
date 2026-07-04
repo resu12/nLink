@@ -49,6 +49,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private static readonly TimeSpan RecoveryTransientThrottle = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DefaultInviteLifetime = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan DefaultInviteBootstrapTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan DefaultNknInviteBootstrapTimeout = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan PeerEndedNoticeDuration = TimeSpan.FromSeconds(4);
     private static readonly TimeSpan TransportScreenShareRetryDelay = TimeSpan.FromMilliseconds(300);
     private const int FileTransferUiRefreshMinIntervalMs = 125;
@@ -145,6 +146,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private readonly TimeSpan inviteBootstrapTimeout;
     private bool startupBlocked;
     private bool startupFailureBlocksAutoRestart;
+    private bool inviteBootstrapBridgeBeforeReadyRetryActive;
     private bool autoRegeneratingAfterDisconnect;
     private UserFacingStatus bannerStatus = UserFacingStatus.IdleStatus;
     private UserFacingStatus presenterBannerStatus = UserFacingStatus.IdleStatus;
@@ -259,7 +261,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         RefreshAutomaticIdentityRecoveryWarning();
         inviteTokenFactory = ConnectInputResolverFactory.CreateInviteTokenFactory();
         this.incomingRequestTimeout = incomingRequestTimeout ?? DefaultIncomingRequestTimeout;
-        this.inviteBootstrapTimeout = inviteBootstrapTimeout ?? DefaultInviteBootstrapTimeout;
+        this.inviteBootstrapTimeout = inviteBootstrapTimeout ??
+            (transportConfig.IsDevLocal ? DefaultInviteBootstrapTimeout : DefaultNknInviteBootstrapTimeout);
         this.uiStateStore = uiStateStore;
         shareInviteExpiryTimer = new DispatcherTimer
         {
@@ -2369,6 +2372,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private async Task StartHostingAsync()
     {
+        var generation = Volatile.Read(ref inviteBootstrapGeneration);
         using var bootstrapCts = inviteBootstrapTimeout > TimeSpan.Zero
             ? new CancellationTokenSource(inviteBootstrapTimeout)
             : new CancellationTokenSource();
@@ -2378,6 +2382,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             await sessionRuntime.StartHelpeeAsync(bootstrapCts.Token);
             await UiThreadDispatch.RunAsync(() =>
             {
+                inviteBootstrapBridgeBeforeReadyRetryActive = false;
                 RefreshAutomaticIdentityRecoveryWarning();
                 EnsureInviteSnapshot(forceNewToken: false);
             });
@@ -2406,6 +2411,12 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                     (bridgeReadiness.TerminalFailure ||
                      ex.Message.Contains("nkn_bridge_bootstrap_not_ready", StringComparison.OrdinalIgnoreCase)))
                 {
+                    if (ShouldRetryInviteBootstrapBridgeBeforeReady(ex, bridgeReadiness, generation))
+                    {
+                        await RetryInviteBootstrapBridgeBeforeReadyAsync(generation, bridgeReadiness).ConfigureAwait(false);
+                        return;
+                    }
+
                     await SurfaceInviteBootstrapFailureAsync(
                         "Helpee invite bootstrap failed before the local NKN bridge became ready.",
                         "helpee_invite_bootstrap_bridge_not_ready");
@@ -2441,16 +2452,75 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
     }
 
+    private bool ShouldRetryInviteBootstrapBridgeBeforeReady(
+        Exception ex,
+        BridgeBootstrapReadinessSnapshot bridgeReadiness,
+        long generation)
+    {
+        if (disposed ||
+            startupFailureBlocksAutoRestart ||
+            generation != Volatile.Read(ref inviteBootstrapGeneration) ||
+            HasShareInvite ||
+            HasIncomingRequest ||
+            IsRequestAllowed ||
+            inviteBootstrapTimeout <= TimeSpan.Zero ||
+            bridgeReadiness.ReadyEmitted)
+        {
+            return false;
+        }
+
+        return bridgeReadiness.TerminalFailure ||
+               ex.Message.Contains("nkn_bridge_bootstrap_not_ready", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async Task RetryInviteBootstrapBridgeBeforeReadyAsync(
+        long generation,
+        BridgeBootstrapReadinessSnapshot bridgeReadiness)
+    {
+        AppLog.Warn(
+            $"event=helpee_invite_bootstrap_bridge_before_ready_retry; generation={generation}; failure_reason={bridgeReadiness.FailureReason}; last_error={bridgeReadiness.LastError}; retry_delay_ms=1000");
+
+        await UiThreadDispatch.RunAsync(() =>
+        {
+            inviteBootstrapBridgeBeforeReadyRetryActive = true;
+            ClearFailurePresentation();
+            ConnectionState = "Waiting";
+            ConnectionStatus = "Preparing invite…";
+            if (uiStateStore is not null)
+            {
+                uiStateStore.SetPhase(SessionUiPhase.Connecting, "HelpeeInviteBootstrap:BridgeBeforeReadyRetry");
+            }
+
+            OnPropertyChanged(nameof(HeaderStatusText));
+            RefreshCommandStates();
+        }).ConfigureAwait(false);
+
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
+        }
+        catch
+        {
+            return;
+        }
+
+        // SessionRuntime owns the quiet rehost/retry loop. The view model only keeps
+        // setup UI non-terminal while that coordinator-owned setup recovery runs.
+    }
+
     private async Task SurfaceInviteBootstrapFailureAsync(string message, string reason)
     {
         Interlocked.Increment(ref inviteBootstrapGeneration);
+        inviteBootstrapBridgeBeforeReadyRetryActive = false;
         startupFailureBlocksAutoRestart = true;
         autoRegeneratingAfterDisconnect = false;
         var bridgeReadiness = sessionRuntime.BridgeBootstrapReadiness;
         var bridgeNotReady = !bridgeReadiness.ReadyEmitted;
         var eventName = bridgeNotReady ? "nkn_bridge_bootstrap_not_ready" : reason;
         var subreason = bridgeNotReady
-            ? "helpee_invite_host_before_bridge_ready"
+            ? string.Equals(reason, "helpee_invite_bootstrap_bridge_not_ready", StringComparison.Ordinal)
+                ? "helpee_invite_host_before_bridge_ready"
+                : reason
             : reason;
 
         try
@@ -2511,6 +2581,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             string.Equals(lastInviteHelperIdentityForToken, boundHelperIdentity, StringComparison.Ordinal) &&
             !string.IsNullOrWhiteSpace(shareInviteText))
         {
+            inviteBootstrapBridgeBeforeReadyRetryActive = false;
             UpdateShareInviteStatusText("Invite ready");
             return;
         }
@@ -2572,6 +2643,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         UpdateShareInviteText(created.Token!);
         UpdateShareInviteRawTokenText(created.Token!);
+        inviteBootstrapBridgeBeforeReadyRetryActive = false;
         UpdateShareInviteStatusText("Invite ready");
         shareInviteExpiresAtUtc = DateTimeOffset.FromUnixTimeMilliseconds(created.Payload!.ExpiresAtUtcMs);
         shareInviteAutoRefreshTriggered = false;
@@ -4699,6 +4771,13 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private SessionUiPhase GetEffectivePhase()
     {
+        if (inviteBootstrapBridgeBeforeReadyRetryActive &&
+            !startupFailureBlocksAutoRestart &&
+            IsInvitePreparationStatus(ShareInviteStatusText))
+        {
+            return SessionUiPhase.Connecting;
+        }
+
         return sessionRuntime.FlowSnapshot.UiPhase;
     }
 

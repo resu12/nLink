@@ -447,6 +447,30 @@ function Merge-TunaGuiMilestoneEvidenceIntoRetainedLogSlice {
     [System.IO.File]::WriteAllText($retainedPath, ($combined -join [Environment]::NewLine), [System.Text.Encoding]::UTF8)
 }
 
+function Ensure-TunaGuiSecondTransferRetainedLogSlice {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir
+    )
+
+    $secondRetainedPath = Join-Path $ArtifactDir 'filetransfer-second-transfer-retained-log-slice.log'
+    if (Test-Path -LiteralPath $secondRetainedPath -PathType Leaf) {
+        return $secondRetainedPath
+    }
+
+    $retainedPath = Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log'
+    $sourcePath = Join-Path $ArtifactDir 'filetransfer-second-transfer-retained-log-slice-source.txt'
+    $sourceLines = @(
+        'source=missing',
+        'reason=second_transfer_specific_slice_missing',
+        ('retained_log_slice={0}' -f $retainedPath),
+        ('retained_log_slice_exists={0}' -f ($(if (Test-Path -LiteralPath $retainedPath -PathType Leaf) { '1' } else { '0' }))),
+        ('second_transfer_retained_log_slice={0}' -f $secondRetainedPath),
+        'second_transfer_retained_log_slice_exists=0'
+    )
+    [System.IO.File]::WriteAllLines($sourcePath, $sourceLines, [System.Text.Encoding]::UTF8)
+    return $null
+}
+
 function Invoke-TunaGuiLiveRetainedAnalysisBestEffort {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
@@ -468,8 +492,13 @@ function Invoke-TunaGuiLiveRetainedAnalysisBestEffort {
     Invoke-TunaGuiRetainedAnalysisBestEffort -RepoRoot $RepoRoot -AnalysisDir $ArtifactDir -LogPath $retainedPath -LiveRouteProofMode $liveRouteProofMode
 
     if ($RouteMode -eq 'live-reactivation-second-transfer') {
-        $secondRetainedPath = Join-Path $ArtifactDir 'filetransfer-second-transfer-retained-log-slice.log'
-        Invoke-TunaGuiRetainedAnalysisBestEffort -RepoRoot $RepoRoot -AnalysisDir (Join-Path $ArtifactDir 'second-transfer-analysis') -LogPath $secondRetainedPath
+        $secondRetainedPath = Ensure-TunaGuiSecondTransferRetainedLogSlice -ArtifactDir $ArtifactDir
+        if (-not [string]::IsNullOrWhiteSpace([string]$secondRetainedPath)) {
+            Invoke-TunaGuiRetainedAnalysisBestEffort -RepoRoot $RepoRoot -AnalysisDir (Join-Path $ArtifactDir 'second-transfer-analysis') -LogPath $secondRetainedPath
+        }
+        else {
+            Write-Warning ("Second-transfer retained analysis skipped because the scenario-specific retained slice is missing. Artifact: {0}" -f (Join-Path $ArtifactDir 'filetransfer-second-transfer-retained-log-slice-source.txt'))
+        }
     }
 }
 
@@ -936,7 +965,11 @@ try {
         Merge-TunaGuiMilestoneEvidenceIntoRetainedLogSlice -ArtifactDir $resolvedArtifactDir
         Invoke-TunaGuiRetainedAnalysis -RepoRoot $repoRoot -AnalysisDir $resolvedArtifactDir -LogPath $retainedPath -LiveRouteProofMode $liveRouteProofMode
         if ($RouteMode -eq 'live-reactivation-second-transfer') {
-            $secondRetainedPath = Join-Path $resolvedArtifactDir 'filetransfer-second-transfer-retained-log-slice.log'
+            $secondRetainedPath = Ensure-TunaGuiSecondTransferRetainedLogSlice -ArtifactDir $resolvedArtifactDir
+            if ([string]::IsNullOrWhiteSpace([string]$secondRetainedPath)) {
+                throw ("Second-transfer retained log slice is missing; refusing to analyze the full retained log as second-transfer proof. Artifact: {0}" -f (Join-Path $resolvedArtifactDir 'filetransfer-second-transfer-retained-log-slice-source.txt'))
+            }
+
             Invoke-TunaGuiRetainedAnalysis -RepoRoot $repoRoot -AnalysisDir (Join-Path $resolvedArtifactDir 'second-transfer-analysis') -LogPath $secondRetainedPath
         }
     }
