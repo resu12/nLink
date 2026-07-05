@@ -7620,9 +7620,12 @@ public sealed partial class SessionFileTransferService : IDisposable
         int rangeCount,
         int requestedChunkCount,
         int scheduledChunkCount)
-        => LocalOperationalLog.Info(
+    {
+        var eventName = FormatV4FrontierRepairProofEventName(authority.RouteToken, "authority_granted");
+        LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_regular_v4_frontier_repair_authority_granted; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; source={FormatProtocolLogValue(source)}; stage={FormatProtocolLogValue(stage)}; repair_request_key={FormatProtocolLogValue(authority.RepairKey)}; route={FormatProtocolLogValue(authority.RouteToken)}; protocol_version={authority.ProtocolVersion}; live_route_epoch={authority.LiveRouteEpoch}; runtime_generation={authority.RuntimeGeneration}; terminal_generation={authority.TerminalGeneration}; leg_generation={authority.LegGeneration}; transport_epoch={authority.TransportEpoch}; bridge_recovery_generation={authority.BridgeRecoveryGeneration}; bridge_decision_generation={authority.BridgeDecisionGeneration}; route_publication_generation={authority.RoutePublicationGeneration}; route_commit_generation={authority.RouteCommitGeneration ?? 0}; frontier_chunk_index={authority.FrontierChunkIndex}; durable_received_highest_chunk_index={authority.DurableReceivedHighestChunkIndex}; pending_repair_count={authority.PendingRepairCount}; decision_generation={authority.DecisionGeneration}; range_count={rangeCount}; requested_chunk_count={requestedChunkCount}; scheduled_chunk_count={scheduledChunkCount}; decision_reason={FormatProtocolLogValue(authority.DecisionReason)}");
+            $"event={eventName}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; source={FormatProtocolLogValue(source)}; stage={FormatProtocolLogValue(stage)}; repair_request_key={FormatProtocolLogValue(authority.RepairKey)}; route={FormatProtocolLogValue(authority.RouteToken)}; protocol_version={authority.ProtocolVersion}; live_route_epoch={authority.LiveRouteEpoch}; runtime_generation={authority.RuntimeGeneration}; terminal_generation={authority.TerminalGeneration}; leg_generation={authority.LegGeneration}; transport_epoch={authority.TransportEpoch}; bridge_recovery_generation={authority.BridgeRecoveryGeneration}; bridge_decision_generation={authority.BridgeDecisionGeneration}; route_publication_generation={authority.RoutePublicationGeneration}; route_commit_generation={authority.RouteCommitGeneration ?? 0}; target_transport={FormatFileTransferTransportKind(authority.TargetTransport)}; frontier_chunk_index={authority.FrontierChunkIndex}; durable_received_highest_chunk_index={authority.DurableReceivedHighestChunkIndex}; pending_repair_count={authority.PendingRepairCount}; decision_generation={authority.DecisionGeneration}; range_count={rangeCount}; requested_chunk_count={requestedChunkCount}; scheduled_chunk_count={scheduledChunkCount}; decision_reason={FormatProtocolLogValue(authority.DecisionReason)}");
+    }
 
     private static void LogFileTransferRegularV4FrontierRepairAuthorityRejected(
         FileTransferDirection direction,
@@ -7636,9 +7639,13 @@ public sealed partial class SessionFileTransferService : IDisposable
         int frontierChunkIndex,
         int durableReceivedHighestChunkIndex,
         int pendingRepairCount)
-        => LocalOperationalLog.Warn(
+    {
+        var routeToken = leg?.RouteSelection.TelemetryToken ?? "(none)";
+        var eventName = FormatV4FrontierRepairProofEventName(routeToken, "authority_rejected");
+        LocalOperationalLog.Warn(
             "FileTransferService",
-            $"event=filetransfer_regular_v4_frontier_repair_authority_rejected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; source={FormatProtocolLogValue(source)}; stage={FormatProtocolLogValue(stage)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? "(none)")}; protocol_version={leg?.ProtocolVersion ?? 0}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; leg_generation={leg?.Generation ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; frontier_chunk_index={frontierChunkIndex}; durable_received_highest_chunk_index={durableReceivedHighestChunkIndex}; pending_repair_count={pendingRepairCount}; rejection_reason={FormatProtocolLogValue(rejectionReason)}; decision_reason={FormatProtocolLogValue(rejectionReason)}");
+            $"event={eventName}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; source={FormatProtocolLogValue(source)}; stage={FormatProtocolLogValue(stage)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; route={FormatProtocolLogValue(routeToken)}; protocol_version={leg?.ProtocolVersion ?? 0}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; leg_generation={leg?.Generation ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; target_transport={FormatFileTransferTransportKind(ResolveV4FrontierRepairTargetTransport(routeToken))}; frontier_chunk_index={frontierChunkIndex}; durable_received_highest_chunk_index={durableReceivedHighestChunkIndex}; pending_repair_count={pendingRepairCount}; rejection_reason={FormatProtocolLogValue(rejectionReason)}; decision_reason={FormatProtocolLogValue(rejectionReason)}");
+    }
 
     private static void LogFileTransferRegularV4FrontierRepairDispatched(
         FileTransferDirection direction,
@@ -7650,22 +7657,30 @@ public sealed partial class SessionFileTransferService : IDisposable
         int sentChunkCount,
         int remoteNextExpectedChunkIndex,
         int chunksAcceptedForTransport)
-        => LocalOperationalLog.Info(
+    {
+        var eventName = FormatV4FrontierRepairProofEventName(authority.RouteToken, "dispatched");
+        LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_regular_v4_frontier_repair_dispatched; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; stage={FormatProtocolLogValue(stage)}; repair_request_key={FormatProtocolLogValue(authority.RepairKey)}; protocol_repair_request_id={FormatProtocolLogValue(protocolRepairRequestId)}; route={FormatProtocolLogValue(authority.RouteToken)}; protocol_version={authority.ProtocolVersion}; live_route_epoch={authority.LiveRouteEpoch}; runtime_generation={authority.RuntimeGeneration}; terminal_generation={authority.TerminalGeneration}; leg_generation={authority.LegGeneration}; transport_epoch={authority.TransportEpoch}; bridge_recovery_generation={authority.BridgeRecoveryGeneration}; bridge_decision_generation={authority.BridgeDecisionGeneration}; route_publication_generation={authority.RoutePublicationGeneration}; route_commit_generation={authority.RouteCommitGeneration ?? 0}; decision_generation={authority.DecisionGeneration}; sent_chunk_count={sentChunkCount}; remote_next_expected_chunk_index={remoteNextExpectedChunkIndex}; chunks_accepted_for_transport={chunksAcceptedForTransport}");
+            $"event={eventName}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; stage={FormatProtocolLogValue(stage)}; repair_request_key={FormatProtocolLogValue(authority.RepairKey)}; protocol_repair_request_id={FormatProtocolLogValue(protocolRepairRequestId)}; route={FormatProtocolLogValue(authority.RouteToken)}; protocol_version={authority.ProtocolVersion}; live_route_epoch={authority.LiveRouteEpoch}; runtime_generation={authority.RuntimeGeneration}; terminal_generation={authority.TerminalGeneration}; leg_generation={authority.LegGeneration}; transport_epoch={authority.TransportEpoch}; bridge_recovery_generation={authority.BridgeRecoveryGeneration}; bridge_decision_generation={authority.BridgeDecisionGeneration}; route_publication_generation={authority.RoutePublicationGeneration}; route_commit_generation={authority.RouteCommitGeneration ?? 0}; target_transport={FormatFileTransferTransportKind(authority.TargetTransport)}; decision_generation={authority.DecisionGeneration}; sent_chunk_count={sentChunkCount}; remote_next_expected_chunk_index={remoteNextExpectedChunkIndex}; chunks_accepted_for_transport={chunksAcceptedForTransport}");
+    }
 
     private static void LogFileTransferRegularV4FrontierRepairProgressObserved(
         FileTransferDirection direction,
         string transferId,
         string sessionId,
+        FileTransferLeg? leg,
         string repairRequestKey,
         string reason,
         int committedFrontierBefore,
         int committedFrontierAfter,
         int requestedChunkCount)
-        => LocalOperationalLog.Info(
+    {
+        var routeToken = leg?.RouteSelection.TelemetryToken ?? "(none)";
+        var eventName = FormatV4FrontierRepairProofEventName(routeToken, "progress_observed");
+        LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_regular_v4_frontier_repair_progress_observed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; reason={FormatProtocolLogValue(reason)}; committed_frontier_before={committedFrontierBefore}; committed_frontier_after={committedFrontierAfter}; requested_chunk_count={requestedChunkCount}");
+            $"event={eventName}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; route={FormatProtocolLogValue(routeToken)}; protocol_version={leg?.ProtocolVersion ?? 0}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; leg_generation={leg?.Generation ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; target_transport={FormatFileTransferTransportKind(ResolveV4FrontierRepairTargetTransport(routeToken))}; reason={FormatProtocolLogValue(reason)}; committed_frontier_before={committedFrontierBefore}; committed_frontier_after={committedFrontierAfter}; requested_chunk_count={requestedChunkCount}");
+    }
 
     private static void LogFileTransferRegularV4FrontierRepairStalled(
         FileTransferDirection direction,
@@ -7679,9 +7694,18 @@ public sealed partial class SessionFileTransferService : IDisposable
         int requestedChunkCount,
         int attemptCount,
         long frontierStallAgeMs)
-        => LocalOperationalLog.Warn(
+    {
+        var routeToken = leg?.RouteSelection.TelemetryToken ?? "(none)";
+        var eventName = FormatV4FrontierRepairProofEventName(routeToken, "stalled");
+        LocalOperationalLog.Warn(
             "FileTransferService",
-            $"event=filetransfer_regular_v4_frontier_repair_stalled; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? "(none)")}; protocol_version={leg?.ProtocolVersion ?? 0}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; leg_generation={leg?.Generation ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; reason={FormatProtocolLogValue(reason)}; frontier_chunk_index={frontierChunkIndex}; durable_received_highest_chunk_index={durableReceivedHighestChunkIndex}; requested_chunk_count={requestedChunkCount}; attempt_count={attemptCount}; frontier_stall_age_ms={frontierStallAgeMs}");
+            $"event={eventName}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; route={FormatProtocolLogValue(routeToken)}; protocol_version={leg?.ProtocolVersion ?? 0}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; leg_generation={leg?.Generation ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; target_transport={FormatFileTransferTransportKind(ResolveV4FrontierRepairTargetTransport(routeToken))}; reason={FormatProtocolLogValue(reason)}; frontier_chunk_index={frontierChunkIndex}; durable_received_highest_chunk_index={durableReceivedHighestChunkIndex}; requested_chunk_count={requestedChunkCount}; attempt_count={attemptCount}; frontier_stall_age_ms={frontierStallAgeMs}");
+    }
+
+    private static string FormatV4FrontierRepairProofEventName(string? routeToken, string suffix)
+        => string.Equals(routeToken, FileTransferRouteResolver.FileTunaV4Token, StringComparison.Ordinal)
+            ? $"filetransfer_file_tuna_v4_frontier_repair_{suffix}"
+            : $"filetransfer_regular_v4_frontier_repair_{suffix}";
 
     private static void LogFileTransferBridgeRecoveryAuthorityGranted(
         FileTransferDirection direction,

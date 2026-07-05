@@ -333,6 +333,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
         public int? RouteCommitGeneration { get; init; }
 
+        public required FileTransferTransportKind TargetTransport { get; init; }
+
         public required string RepairKey { get; init; }
 
         public required int FrontierChunkIndex { get; init; }
@@ -774,10 +776,9 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             ? "regular_v4_control_feedback_pressure"
             : reason.Trim();
         var normalizedReason = SanitizeLogToken(rawReason);
-        var activationSendOnly = string.Equals(
-            rawReason,
-            "regular_v4_sender_remote_frontier_pressure",
-            StringComparison.Ordinal);
+        var activationSendOnly =
+            string.Equals(rawReason, "regular_v4_sender_remote_frontier_pressure", StringComparison.Ordinal) ||
+            string.Equals(rawReason, "file_tuna_v4_sender_remote_frontier_pressure", StringComparison.Ordinal);
         var nowTick = Stopwatch.GetTimestamp();
         var ttl = activationSendOnly
             ? RegularV4ActivationSendPressureTtl
@@ -803,10 +804,12 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         var authoritySessionId = string.IsNullOrWhiteSpace(repairAuthority.SessionId)
             ? "none"
             : repairAuthority.SessionId.Trim();
+        var expectedTargetTransport = ResolveV4FrontierRepairTargetTransport(repairAuthority.RouteToken);
         var authorityValid =
             string.Equals(authorityTransferId, normalizedTransferId, StringComparison.Ordinal) &&
             repairAuthority.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
-            string.Equals(repairAuthority.RouteToken, "regular_nkn_v4_fast", StringComparison.Ordinal) &&
+            IsV4FrontierRepairRouteToken(repairAuthority.RouteToken) &&
+            repairAuthority.TargetTransport == expectedTargetTransport &&
             repairAuthority.LiveRouteEpoch >= 0 &&
             repairAuthority.RuntimeGeneration > 0 &&
             repairAuthority.LegGeneration > 0 &&
@@ -860,6 +863,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             BridgeDecisionGeneration = repairAuthority.BridgeDecisionGeneration,
             RoutePublicationGeneration = repairAuthority.RoutePublicationGeneration,
             RouteCommitGeneration = repairAuthority.RouteCommitGeneration,
+            TargetTransport = expectedTargetTransport,
             RepairKey = string.IsNullOrWhiteSpace(repairAuthority.RepairKey) ? "(none)" : repairAuthority.RepairKey.Trim(),
             FrontierChunkIndex = repairAuthority.FrontierChunkIndex,
             DurableReceivedHighestChunkIndex = repairAuthority.DurableReceivedHighestChunkIndex,
@@ -886,12 +890,12 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         }
 
         Log(
-            "event=filetransfer_regular_v4_frontier_repair_authority_granted; source=nkn_bridge_pressure; stage=control_feedback_pressure; " +
-            $"session_id={SanitizeLogToken(authoritySessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; direction={repairAuthority.Direction.ToString().ToLowerInvariant()}; route={SanitizeLogToken(repairAuthority.RouteToken)}; protocol_version={repairAuthority.ProtocolVersion}; live_route_epoch={repairAuthority.LiveRouteEpoch}; runtime_generation={repairAuthority.RuntimeGeneration}; terminal_generation={repairAuthority.TerminalGeneration}; leg_generation={repairAuthority.LegGeneration}; transport_epoch={repairAuthority.TransportEpoch}; bridge_recovery_generation={repairAuthority.BridgeRecoveryGeneration}; bridge_decision_generation={repairAuthority.BridgeDecisionGeneration}; route_publication_generation={repairAuthority.RoutePublicationGeneration}; route_commit_generation={repairAuthority.RouteCommitGeneration ?? 0}; repair_request_key={SanitizeLogToken(pressureState.RepairKey)}; frontier_chunk_index={repairAuthority.FrontierChunkIndex}; durable_received_highest_chunk_index={repairAuthority.DurableReceivedHighestChunkIndex}; pending_repair_count={repairAuthority.PendingRepairCount}; decision_generation={repairAuthority.DecisionGeneration}; decision_reason={SanitizeLogToken(pressureState.DecisionReason)}; ttl_ms={(long)ttl.TotalMilliseconds}");
+            $"event={FormatV4FrontierRepairProofEventName(repairAuthority.RouteToken, "authority_granted")}; source=nkn_bridge_pressure; stage=control_feedback_pressure; " +
+            $"session_id={SanitizeLogToken(authoritySessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; direction={repairAuthority.Direction.ToString().ToLowerInvariant()}; route={SanitizeLogToken(repairAuthority.RouteToken)}; protocol_version={repairAuthority.ProtocolVersion}; live_route_epoch={repairAuthority.LiveRouteEpoch}; runtime_generation={repairAuthority.RuntimeGeneration}; terminal_generation={repairAuthority.TerminalGeneration}; leg_generation={repairAuthority.LegGeneration}; transport_epoch={repairAuthority.TransportEpoch}; bridge_recovery_generation={repairAuthority.BridgeRecoveryGeneration}; bridge_decision_generation={repairAuthority.BridgeDecisionGeneration}; route_publication_generation={repairAuthority.RoutePublicationGeneration}; route_commit_generation={repairAuthority.RouteCommitGeneration ?? 0}; target_transport={FormatFileTransferTransportKindForLog(pressureState.TargetTransport)}; repair_request_key={SanitizeLogToken(pressureState.RepairKey)}; frontier_chunk_index={repairAuthority.FrontierChunkIndex}; durable_received_highest_chunk_index={repairAuthority.DurableReceivedHighestChunkIndex}; pending_repair_count={repairAuthority.PendingRepairCount}; decision_generation={repairAuthority.DecisionGeneration}; decision_reason={SanitizeLogToken(pressureState.DecisionReason)}; ttl_ms={(long)ttl.TotalMilliseconds}");
         Log(
             "event=filetransfer_regular_v4_control_feedback_pressure_marked; " +
             $"session_id={SanitizeLogToken(authoritySessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; direction={repairAuthority.Direction.ToString().ToLowerInvariant()}; reason={normalizedReason}; activation_send_only={(activationSendOnly ? 1 : 0)}; credit_exhausted_time_ms={Math.Max(0, creditExhaustedTimeMs)}; frontier_lag_chunks={Math.Max(0, frontierLagChunks)}; pending_repair_count={Math.Max(0, pendingRepairCount)}; ttl_ms={(long)ttl.TotalMilliseconds}; " +
-            $"route={SanitizeLogToken(repairAuthority.RouteToken)}; protocol_version={repairAuthority.ProtocolVersion}; live_route_epoch={repairAuthority.LiveRouteEpoch}; runtime_generation={repairAuthority.RuntimeGeneration}; terminal_generation={repairAuthority.TerminalGeneration}; leg_generation={repairAuthority.LegGeneration}; transport_epoch={repairAuthority.TransportEpoch}; bridge_recovery_generation={repairAuthority.BridgeRecoveryGeneration}; bridge_decision_generation={repairAuthority.BridgeDecisionGeneration}; route_publication_generation={repairAuthority.RoutePublicationGeneration}; route_commit_generation={repairAuthority.RouteCommitGeneration ?? 0}; repair_request_key={SanitizeLogToken(pressureState.RepairKey)}; decision_generation={repairAuthority.DecisionGeneration}; " +
+            $"route={SanitizeLogToken(repairAuthority.RouteToken)}; protocol_version={repairAuthority.ProtocolVersion}; live_route_epoch={repairAuthority.LiveRouteEpoch}; runtime_generation={repairAuthority.RuntimeGeneration}; terminal_generation={repairAuthority.TerminalGeneration}; leg_generation={repairAuthority.LegGeneration}; transport_epoch={repairAuthority.TransportEpoch}; bridge_recovery_generation={repairAuthority.BridgeRecoveryGeneration}; bridge_decision_generation={repairAuthority.BridgeDecisionGeneration}; route_publication_generation={repairAuthority.RoutePublicationGeneration}; route_commit_generation={repairAuthority.RouteCommitGeneration ?? 0}; target_transport={FormatFileTransferTransportKindForLog(pressureState.TargetTransport)}; repair_request_key={SanitizeLogToken(pressureState.RepairKey)}; decision_generation={repairAuthority.DecisionGeneration}; " +
             $"active_file_transfer_sessions={Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions))}; active_file_transfer_runtime_sessions={activeFileTransferRuntimeTransfers.Count}");
     }
 
@@ -933,10 +937,40 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         var routeToken = repairAuthority?.RouteToken ?? "(none)";
         var sessionId = repairAuthority?.SessionId ?? "none";
         var authorityTransferId = repairAuthority?.TransferId ?? transferId;
+        var targetTransport = repairAuthority is null
+            ? FileTransferTransportKind.Unknown
+            : repairAuthority.TargetTransport;
+        var expectedTargetTransport = repairAuthority is null
+            ? FileTransferTransportKind.Unknown
+            : ResolveV4FrontierRepairTargetTransport(repairAuthority.RouteToken);
         Log(
-            "event=filetransfer_regular_v4_frontier_repair_authority_rejected; source=nkn_bridge_pressure; stage=control_feedback_pressure; " +
-            $"session_id={SanitizeLogToken(sessionId)}; transfer_id={SanitizeLogToken(authorityTransferId)}; requested_transfer_id={SanitizeLogToken(transferId)}; direction={repairAuthority?.Direction.ToString().ToLowerInvariant() ?? "unknown"}; route={SanitizeLogToken(routeToken)}; protocol_version={repairAuthority?.ProtocolVersion ?? 0}; live_route_epoch={repairAuthority?.LiveRouteEpoch ?? 0}; runtime_generation={repairAuthority?.RuntimeGeneration ?? 0}; terminal_generation={repairAuthority?.TerminalGeneration ?? 0}; leg_generation={repairAuthority?.LegGeneration ?? 0}; transport_epoch={repairAuthority?.TransportEpoch ?? 0}; bridge_recovery_generation={repairAuthority?.BridgeRecoveryGeneration ?? 0}; bridge_decision_generation={repairAuthority?.BridgeDecisionGeneration ?? 0}; route_publication_generation={repairAuthority?.RoutePublicationGeneration ?? 0}; route_commit_generation={repairAuthority?.RouteCommitGeneration ?? 0}; repair_request_key={SanitizeLogToken(repairAuthority?.RepairKey ?? "(none)")}; frontier_chunk_index={repairAuthority?.FrontierChunkIndex ?? -1}; durable_received_highest_chunk_index={repairAuthority?.DurableReceivedHighestChunkIndex ?? -1}; pending_repair_count={Math.Max(0, pendingRepairCount)}; authority_pending_repair_count={repairAuthority?.PendingRepairCount ?? 0}; decision_generation={repairAuthority?.DecisionGeneration ?? 0}; pressure_reason={SanitizeLogToken(reason)}; credit_exhausted_time_ms={Math.Max(0, creditExhaustedTimeMs)}; frontier_lag_chunks={Math.Max(0, frontierLagChunks)}; rejection_reason={SanitizeLogToken(rejectionReason)}; decision_reason={SanitizeLogToken(rejectionReason)}; active_file_transfer_sessions={Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions))}; active_file_transfer_runtime_sessions={activeFileTransferRuntimeTransfers.Count}");
+            $"event={FormatV4FrontierRepairProofEventName(routeToken, "authority_rejected")}; source=nkn_bridge_pressure; stage=control_feedback_pressure; " +
+            $"session_id={SanitizeLogToken(sessionId)}; transfer_id={SanitizeLogToken(authorityTransferId)}; requested_transfer_id={SanitizeLogToken(transferId)}; direction={repairAuthority?.Direction.ToString().ToLowerInvariant() ?? "unknown"}; route={SanitizeLogToken(routeToken)}; protocol_version={repairAuthority?.ProtocolVersion ?? 0}; live_route_epoch={repairAuthority?.LiveRouteEpoch ?? 0}; runtime_generation={repairAuthority?.RuntimeGeneration ?? 0}; terminal_generation={repairAuthority?.TerminalGeneration ?? 0}; leg_generation={repairAuthority?.LegGeneration ?? 0}; transport_epoch={repairAuthority?.TransportEpoch ?? 0}; bridge_recovery_generation={repairAuthority?.BridgeRecoveryGeneration ?? 0}; bridge_decision_generation={repairAuthority?.BridgeDecisionGeneration ?? 0}; route_publication_generation={repairAuthority?.RoutePublicationGeneration ?? 0}; route_commit_generation={repairAuthority?.RouteCommitGeneration ?? 0}; target_transport={FormatFileTransferTransportKindForLog(targetTransport)}; expected_target_transport={FormatFileTransferTransportKindForLog(expectedTargetTransport)}; repair_request_key={SanitizeLogToken(repairAuthority?.RepairKey ?? "(none)")}; frontier_chunk_index={repairAuthority?.FrontierChunkIndex ?? -1}; durable_received_highest_chunk_index={repairAuthority?.DurableReceivedHighestChunkIndex ?? -1}; pending_repair_count={Math.Max(0, pendingRepairCount)}; authority_pending_repair_count={repairAuthority?.PendingRepairCount ?? 0}; decision_generation={repairAuthority?.DecisionGeneration ?? 0}; pressure_reason={SanitizeLogToken(reason)}; credit_exhausted_time_ms={Math.Max(0, creditExhaustedTimeMs)}; frontier_lag_chunks={Math.Max(0, frontierLagChunks)}; rejection_reason={SanitizeLogToken(rejectionReason)}; decision_reason={SanitizeLogToken(rejectionReason)}; active_file_transfer_sessions={Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions))}; active_file_transfer_runtime_sessions={activeFileTransferRuntimeTransfers.Count}");
     }
+
+    private static bool IsV4FrontierRepairRouteToken(string? routeToken)
+        => string.Equals(routeToken, "regular_nkn_v4_fast", StringComparison.Ordinal) ||
+           string.Equals(routeToken, "file_tuna_v4", StringComparison.Ordinal);
+
+    private static FileTransferTransportKind ResolveV4FrontierRepairTargetTransport(string? routeToken)
+        => string.Equals(routeToken, "file_tuna_v4", StringComparison.Ordinal)
+            ? FileTransferTransportKind.Tuna
+            : string.Equals(routeToken, "regular_nkn_v4_fast", StringComparison.Ordinal)
+                ? FileTransferTransportKind.RegularNkn
+                : FileTransferTransportKind.Unknown;
+
+    private static string FormatV4FrontierRepairProofEventName(string? routeToken, string suffix)
+        => string.Equals(routeToken, "file_tuna_v4", StringComparison.Ordinal)
+            ? $"filetransfer_file_tuna_v4_frontier_repair_{suffix}"
+            : $"filetransfer_regular_v4_frontier_repair_{suffix}";
+
+    private static string FormatFileTransferTransportKindForLog(FileTransferTransportKind transport)
+        => transport switch
+        {
+            FileTransferTransportKind.RegularNkn => "regular_nkn",
+            FileTransferTransportKind.Tuna => "tuna",
+            _ => "unknown",
+        };
 
     internal void ReportPostTunaFallbackControlPlanePressure(
         string sessionId,
@@ -1623,8 +1657,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 Interlocked.Exchange(ref regularV4ControlFeedbackPressureExpiresTick, 0);
                 Interlocked.Exchange(ref regularV4ActivationSendPressureExpiresTick, 0);
                 Log(
-                    "event=filetransfer_regular_v4_frontier_repair_authority_rejected; source=nkn_bridge_pressure; stage=active_check; " +
-                    $"session_id={SanitizeLogToken(current.SessionId)}; transfer_id={SanitizeLogToken(current.TransferId)}; direction={current.Direction.ToString().ToLowerInvariant()}; route={SanitizeLogToken(current.RouteToken)}; protocol_version={current.ProtocolVersion}; live_route_epoch={current.LiveRouteEpoch}; runtime_generation={current.RuntimeGeneration}; terminal_generation={current.TerminalGeneration}; leg_generation={current.LegGeneration}; transport_epoch={current.TransportEpoch}; bridge_recovery_generation={current.BridgeRecoveryGeneration}; bridge_decision_generation={current.BridgeDecisionGeneration}; route_publication_generation={current.RoutePublicationGeneration}; route_commit_generation={current.RouteCommitGeneration ?? 0}; repair_request_key={SanitizeLogToken(current.RepairKey)}; frontier_chunk_index={current.FrontierChunkIndex}; durable_received_highest_chunk_index={current.DurableReceivedHighestChunkIndex}; pending_repair_count={current.PendingRepairCount}; decision_generation={current.DecisionGeneration}; rejection_reason=current_transfer_not_active; decision_reason=current_transfer_not_active");
+                    $"event={FormatV4FrontierRepairProofEventName(current.RouteToken, "authority_rejected")}; source=nkn_bridge_pressure; stage=active_check; " +
+                    $"session_id={SanitizeLogToken(current.SessionId)}; transfer_id={SanitizeLogToken(current.TransferId)}; direction={current.Direction.ToString().ToLowerInvariant()}; route={SanitizeLogToken(current.RouteToken)}; protocol_version={current.ProtocolVersion}; live_route_epoch={current.LiveRouteEpoch}; runtime_generation={current.RuntimeGeneration}; terminal_generation={current.TerminalGeneration}; leg_generation={current.LegGeneration}; transport_epoch={current.TransportEpoch}; bridge_recovery_generation={current.BridgeRecoveryGeneration}; bridge_decision_generation={current.BridgeDecisionGeneration}; route_publication_generation={current.RoutePublicationGeneration}; route_commit_generation={current.RouteCommitGeneration ?? 0}; target_transport={FormatFileTransferTransportKindForLog(current.TargetTransport)}; repair_request_key={SanitizeLogToken(current.RepairKey)}; frontier_chunk_index={current.FrontierChunkIndex}; durable_received_highest_chunk_index={current.DurableReceivedHighestChunkIndex}; pending_repair_count={current.PendingRepairCount}; decision_generation={current.DecisionGeneration}; rejection_reason=current_transfer_not_active; decision_reason=current_transfer_not_active");
                 return false;
             }
 
@@ -1813,6 +1847,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             $"; bridge_decision_generation={pressure.BridgeDecisionGeneration}" +
             $"; route_publication_generation={pressure.RoutePublicationGeneration}" +
             $"; route_commit_generation={pressure.RouteCommitGeneration ?? 0}" +
+            $"; target_transport={FormatFileTransferTransportKindForLog(pressure.TargetTransport)}" +
             $"; repair_request_key={SanitizeLogToken(pressure.RepairKey)}" +
             $"; frontier_chunk_index={pressure.FrontierChunkIndex}" +
             $"; durable_received_highest_chunk_index={pressure.DurableReceivedHighestChunkIndex}" +

@@ -3200,6 +3200,26 @@ public sealed partial class SessionFileTransferService
            string.Equals(leg.RouteSelection.TelemetryToken, FileTransferRouteResolver.RegularNknV4FastToken, StringComparison.Ordinal) &&
            leg.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4;
 
+    private static bool IsCurrentFileTunaV4FrontierRepairLeg(FileTransferLeg? leg)
+        => leg is not null &&
+           string.Equals(leg.RouteSelection.TelemetryToken, FileTransferRouteResolver.FileTunaV4Token, StringComparison.Ordinal) &&
+           leg.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4;
+
+    private static bool IsCurrentV4FrontierRepairLeg(FileTransferLeg? leg)
+        => IsCurrentRegularV4FrontierRepairLeg(leg) ||
+           IsCurrentFileTunaV4FrontierRepairLeg(leg);
+
+    private static bool IsV4FrontierRepairRouteToken(string? routeToken)
+        => string.Equals(routeToken, FileTransferRouteResolver.RegularNknV4FastToken, StringComparison.Ordinal) ||
+           string.Equals(routeToken, FileTransferRouteResolver.FileTunaV4Token, StringComparison.Ordinal);
+
+    private static FileTransferTransportKind ResolveV4FrontierRepairTargetTransport(string routeToken)
+        => string.Equals(routeToken, FileTransferRouteResolver.FileTunaV4Token, StringComparison.Ordinal)
+            ? FileTransferTransportKind.Tuna
+            : string.Equals(routeToken, FileTransferRouteResolver.RegularNknV4FastToken, StringComparison.Ordinal)
+                ? FileTransferTransportKind.RegularNkn
+                : FileTransferTransportKind.Unknown;
+
     private static bool IsCurrentRegularV4FrontierRepairRuntime(OutboundTransferContext context)
         => context.RouteRuntime.UsesRegularNknV4FastRuntime &&
            context.RouteRuntime.FrameFamily == FileTransferFrameFamily.V4 &&
@@ -3212,14 +3232,49 @@ public sealed partial class SessionFileTransferService
            context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
            IsCurrentRegularV4FrontierRepairLeg(context.CurrentTransferLeg);
 
+    private static bool IsCurrentV4FrontierRepairRuntime(OutboundTransferContext context)
+        => context.RouteRuntime.FrameFamily == FileTransferFrameFamily.V4 &&
+           context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+           IsCurrentV4FrontierRepairLeg(context.CurrentTransferLeg) &&
+           ((context.RouteRuntime.UsesRegularNknV4FastRuntime && IsCurrentRegularV4FrontierRepairLeg(context.CurrentTransferLeg)) ||
+            (context.RouteRuntime.UsesFileTunaV4Runtime && IsCurrentFileTunaV4FrontierRepairLeg(context.CurrentTransferLeg)));
+
+    private static bool IsCurrentV4FrontierRepairRuntime(InboundTransferContext context)
+        => context.RouteRuntime.FrameFamily == FileTransferFrameFamily.V4 &&
+           context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+           IsCurrentV4FrontierRepairLeg(context.CurrentTransferLeg) &&
+           ((context.RouteRuntime.UsesRegularNknV4FastRuntime && IsCurrentRegularV4FrontierRepairLeg(context.CurrentTransferLeg)) ||
+            (context.RouteRuntime.UsesFileTunaV4Runtime && IsCurrentFileTunaV4FrontierRepairLeg(context.CurrentTransferLeg)));
+
+    private static bool IsCurrentV4FrontierRepairPublicationToken(
+        RoutePublicationToken token,
+        FileTransferLeg? leg)
+    {
+        if (leg is null ||
+            token.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+            !IsV4FrontierRepairRouteToken(token.RouteToken) ||
+            !string.Equals(token.RouteToken, leg.RouteSelection.TelemetryToken, StringComparison.Ordinal) ||
+            token.LegGeneration != leg.Generation ||
+            token.TargetProtocolVersion != FileTransferProtocol.ProtocolVersionV4)
+        {
+            return false;
+        }
+
+        var expectedTransport = ResolveV4FrontierRepairTargetTransport(token.RouteToken);
+        return token.TargetTransport == expectedTransport ||
+               token.TargetTransport == FileTransferTransportKind.Unknown;
+    }
+
     private static bool ShouldLogRegularV4FrontierRepairProof(
         RepairReplayKind repairKind,
         FileTransferLeg? leg,
         bool frontierTailRepair)
         => frontierTailRepair &&
            (repairKind == RepairReplayKind.V4Repair ||
-            repairKind == RepairReplayKind.PeerSilenceReplay) &&
-           IsCurrentRegularV4FrontierRepairLeg(leg);
+            repairKind == RepairReplayKind.PeerSilenceReplay ||
+            (repairKind == RepairReplayKind.TransportRebindSafetyReplay &&
+             IsCurrentFileTunaV4FrontierRepairLeg(leg))) &&
+           IsCurrentV4FrontierRepairLeg(leg);
 
     private static FileTransferRegularV4FrontierRepairAuthority? CreateRegularV4FrontierRepairAuthority(
         OutboundTransferContext context,
@@ -3230,15 +3285,17 @@ public sealed partial class SessionFileTransferService
         int decisionGeneration,
         string decisionReason)
     {
-        if (!IsCurrentRegularV4FrontierRepairRuntime(context) ||
+        if (!IsCurrentV4FrontierRepairRuntime(context) ||
             context.CurrentRoutePublicationToken is not { IsDefault: false } token ||
-            !string.Equals(token.RouteToken, FileTransferRouteResolver.RegularNknV4FastToken, StringComparison.Ordinal) ||
-            token.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4)
+            !IsCurrentV4FrontierRepairPublicationToken(token, context.CurrentTransferLeg))
         {
             return null;
         }
 
         var leg = context.CurrentTransferLeg;
+        var targetTransport = token.TargetTransport == FileTransferTransportKind.Unknown
+            ? ResolveV4FrontierRepairTargetTransport(token.RouteToken)
+            : token.TargetTransport;
         return new FileTransferRegularV4FrontierRepairAuthority(
             context.SessionId,
             context.TransferId,
@@ -3259,7 +3316,8 @@ public sealed partial class SessionFileTransferService
             Math.Max(-1, durableReceivedHighestChunkIndex),
             Math.Max(0, pendingRepairCount),
             Math.Max(decisionGeneration, token.PublicationGeneration),
-            string.IsNullOrWhiteSpace(decisionReason) ? token.Reason : decisionReason);
+            string.IsNullOrWhiteSpace(decisionReason) ? token.Reason : decisionReason,
+            targetTransport);
     }
 
     private static FileTransferRegularV4FrontierRepairAuthority? CreateRegularV4FrontierRepairAuthority(
@@ -3271,15 +3329,17 @@ public sealed partial class SessionFileTransferService
         int decisionGeneration,
         string decisionReason)
     {
-        if (!IsCurrentRegularV4FrontierRepairRuntime(context) ||
+        if (!IsCurrentV4FrontierRepairRuntime(context) ||
             context.CurrentRoutePublicationToken is not { IsDefault: false } token ||
-            !string.Equals(token.RouteToken, FileTransferRouteResolver.RegularNknV4FastToken, StringComparison.Ordinal) ||
-            token.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4)
+            !IsCurrentV4FrontierRepairPublicationToken(token, context.CurrentTransferLeg))
         {
             return null;
         }
 
         var leg = context.CurrentTransferLeg;
+        var targetTransport = token.TargetTransport == FileTransferTransportKind.Unknown
+            ? ResolveV4FrontierRepairTargetTransport(token.RouteToken)
+            : token.TargetTransport;
         return new FileTransferRegularV4FrontierRepairAuthority(
             context.SessionId,
             context.TransferId,
@@ -3300,7 +3360,8 @@ public sealed partial class SessionFileTransferService
             Math.Max(-1, durableReceivedHighestChunkIndex),
             Math.Max(0, pendingRepairCount),
             Math.Max(decisionGeneration, token.PublicationGeneration),
-            string.IsNullOrWhiteSpace(decisionReason) ? token.Reason : decisionReason);
+            string.IsNullOrWhiteSpace(decisionReason) ? token.Reason : decisionReason,
+            targetTransport);
     }
 
     private static bool IsOutboundNormalToTunaActivationProofPendingLocked(OutboundTransferContext context)
@@ -4860,10 +4921,49 @@ public sealed partial class SessionFileTransferService
                 context.CurrentTransferLeg?.TransportEpochId,
                 context.CurrentTransferLeg?.BridgeRecoveryGeneration,
                 null,
-                out var replayDecision))
+                out var replayDecision) ||
+            replayDecision is not { } fileTunaReplayDecision)
         {
             return false;
         }
+
+        var replayOrdinal = context.PullFileTunaV4PostTunaFrontierReplayCount + 1;
+        var repairKey = $"file_tuna_v4_post_tuna_frontier_replay:{context.PullFileTunaV4PostTunaReactivationGeneration}:{remoteFrontier}:{replayOrdinal}";
+        var fileTunaAuthority = CreateRegularV4FrontierRepairAuthority(
+            context,
+            repairKey,
+            remoteFrontier,
+            Math.Max(-1, remoteFrontier - 1),
+            chunkIndices.Count,
+            fileTunaReplayDecision.RepairGeneration,
+            fileTunaReplayDecision.Reason);
+        if (fileTunaAuthority is null)
+        {
+            LogFileTransferRegularV4FrontierRepairAuthorityRejected(
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentTransferLeg,
+                repairKey,
+                "file_tuna_v4_post_tuna_frontier_replay",
+                "schedule",
+                "route_publication_authority_missing",
+                remoteFrontier,
+                Math.Max(-1, remoteFrontier - 1),
+                chunkIndices.Count);
+            return false;
+        }
+
+        LogFileTransferRegularV4FrontierRepairAuthorityGranted(
+            FileTransferDirection.Outbound,
+            context.TransferId,
+            context.SessionId,
+            fileTunaAuthority,
+            "file_tuna_v4_post_tuna_frontier_replay",
+            "schedule",
+            rangeCount: 1,
+            requestedChunkCount: replayChunkCount,
+            scheduledChunkCount: chunkIndices.Count);
 
         foreach (var chunkIndex in chunkIndices)
         {
@@ -4873,8 +4973,7 @@ public sealed partial class SessionFileTransferService
         context.PullFileTunaV4PostTunaLastFrontierReplayUtc = now;
         context.PullFileTunaV4PostTunaLastFrontierReplayChunkIndex = remoteFrontier;
         context.PullFileTunaV4PostTunaLastFrontierReplayEndChunkIndex = replayEndExclusive;
-        var replayOrdinal = ++context.PullFileTunaV4PostTunaFrontierReplayCount;
-        var repairKey = $"file_tuna_v4_post_tuna_frontier_replay:{context.PullFileTunaV4PostTunaReactivationGeneration}:{remoteFrontier}:{replayOrdinal}";
+        context.PullFileTunaV4PostTunaFrontierReplayCount = replayOrdinal;
         context.PullV4SenderPumpRepairQueue.Enqueue(
             new PullV4QueuedRepairSend(
                 chunkIndices,
@@ -7123,7 +7222,9 @@ public sealed partial class SessionFileTransferService
         }
 
         if (queuedRepair.DeliveryEscalationReason.StartsWith("transport_rebind_", StringComparison.Ordinal) ||
-            queuedRepair.RepairRequestKey.StartsWith("transport_rebind_safety_replay:", StringComparison.Ordinal))
+            string.Equals(queuedRepair.DeliveryEscalationReason, "file_tuna_v4_post_tuna_frontier_replay", StringComparison.Ordinal) ||
+            queuedRepair.RepairRequestKey.StartsWith("transport_rebind_safety_replay:", StringComparison.Ordinal) ||
+            queuedRepair.RepairRequestKey.StartsWith("file_tuna_v4_post_tuna_frontier_replay:", StringComparison.Ordinal))
         {
             return RepairReplayKind.TransportRebindSafetyReplay;
         }
@@ -9006,7 +9107,7 @@ public sealed partial class SessionFileTransferService
             (effectivePendingRepairCount > 0 ||
              lastGrantSilenceMs >= PullControlChatterWindowMs * 2L);
 
-        if (!context.RouteRuntime.UsesRegularNknV4FastRuntime ||
+        if (!IsCurrentV4FrontierRepairRuntime(context) ||
             context.NegotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
             context.V4TerminalReady ||
             (!creditFrontierPressure && !remoteFrontierPressure))
@@ -9025,9 +9126,12 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        var routePrefix = IsCurrentFileTunaV4FrontierRepairLeg(context.CurrentTransferLeg)
+            ? "file_tuna_v4"
+            : "regular_v4";
         var pressureReason = remoteFrontierPressure && !creditFrontierPressure
-            ? "regular_v4_sender_remote_frontier_pressure"
-            : "regular_v4_credit_frontier_pressure";
+            ? $"{routePrefix}_sender_remote_frontier_pressure"
+            : $"{routePrefix}_credit_frontier_pressure";
         var replayQueued = MaybeQueueOutboundRegularNknV4PeerSilenceSafetyReplayLocked(context, pressureReason);
         if (replayQueued)
         {
@@ -9060,7 +9164,7 @@ public sealed partial class SessionFileTransferService
         int frontierLagChunks,
         int pendingRepairCount)
     {
-        if (!context.RouteRuntime.UsesRegularNknV4FastRuntime ||
+        if (!IsCurrentV4FrontierRepairRuntime(context) ||
             context.NegotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
             context.IsTerminal ||
             pendingRepairCount <= 0)
@@ -9079,13 +9183,16 @@ public sealed partial class SessionFileTransferService
             return;
         }
 
+        var pressureReason = IsCurrentFileTunaV4FrontierRepairLeg(context.CurrentTransferLeg)
+            ? "file_tuna_v4_receiver_frontier_repair_due"
+            : "regular_v4_receiver_frontier_repair_due";
         observer.ObserveRegularV4ControlFeedbackPressure(new FileTransferRegularV4ControlFeedbackPressure(
             context.SessionId,
             context.TransferId,
             CreditExhaustedTimeMs: 0,
             Math.Max(0, frontierLagChunks),
             pendingRepairCount,
-            "regular_v4_receiver_frontier_repair_due",
+            pressureReason,
             CreateRegularV4FrontierRepairAuthority(
                 context,
                 context.V4ReceiverRepairRequests.Values
@@ -9097,7 +9204,7 @@ public sealed partial class SessionFileTransferService
                 context.PullHighestReceivedChunkIndex,
                 pendingRepairCount,
                 context.LastRoutePublicationGeneration,
-                "regular_v4_receiver_frontier_repair_due")));
+                pressureReason)));
     }
 
     private static bool ShouldLogV4EfficiencySummary(OutboundTransferContext context)
@@ -13438,7 +13545,7 @@ public sealed partial class SessionFileTransferService
                 if (frontierTailRepair)
                 {
                     context.V4FrontierStallSuppressedCountTotal++;
-                    if (IsCurrentRegularV4FrontierRepairRuntime(context) &&
+                    if (IsCurrentV4FrontierRepairRuntime(context) &&
                         repairState.AttemptCount > 0)
                     {
                         LogFileTransferRegularV4FrontierRepairStalled(
@@ -13491,7 +13598,7 @@ public sealed partial class SessionFileTransferService
         if (frontierTailRepair)
         {
             context.PullV4FrontierTailRepairRequestCountTotal++;
-            if (IsCurrentRegularV4FrontierRepairRuntime(context) &&
+            if (IsCurrentV4FrontierRepairRuntime(context) &&
                 repairState.AttemptCount > 1)
             {
                 LogFileTransferRegularV4FrontierRepairStalled(
@@ -13965,12 +14072,13 @@ public sealed partial class SessionFileTransferService
                         $"event=filetransfer_v4_repair_filled; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairState.RepairRequestKey}; first_start_chunk_index={repairState.FirstStartChunkIndex}; last_end_chunk_exclusive={repairState.LastEndChunkExclusive}; requested_chunk_count={repairState.RequestedChunkCount}; attempt_count={repairState.AttemptCount}; request_to_fill_ms={(repairState.LastRequestedUtc is null ? -1 : (long)Math.Max(0, (now - repairState.LastRequestedUtc.Value).TotalMilliseconds))}; contiguous_committed_chunk_index={context.NextChunkIndex}; durable_received_highest_chunk_index={context.PullHighestReceivedChunkIndex}");
                     if (repairState.FrontierTailRepair)
                     {
-                        if (IsCurrentRegularV4FrontierRepairRuntime(context))
+                        if (IsCurrentV4FrontierRepairRuntime(context))
                         {
                             LogFileTransferRegularV4FrontierRepairProgressObserved(
                                 FileTransferDirection.Inbound,
                                 context.TransferId,
                                 context.SessionId,
+                                context.CurrentTransferLeg,
                                 repairState.RepairRequestKey,
                                 clearReason,
                                 repairState.FirstStartChunkIndex,
@@ -14007,12 +14115,13 @@ public sealed partial class SessionFileTransferService
                         $"event=filetransfer_v4_repair_filled; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairState.RepairRequestKey}; first_start_chunk_index={repairState.FirstStartChunkIndex}; last_end_chunk_exclusive={repairState.LastEndChunkExclusive}; requested_chunk_count={repairState.RequestedChunkCount}; attempt_count={repairState.AttemptCount}; request_to_fill_ms={(repairState.LastRequestedUtc is null ? -1 : (long)Math.Max(0, (now - repairState.LastRequestedUtc.Value).TotalMilliseconds))}; contiguous_committed_chunk_index={context.NextChunkIndex}; durable_received_highest_chunk_index={context.PullHighestReceivedChunkIndex}");
                     if (repairState.FrontierTailRepair)
                     {
-                        if (IsCurrentRegularV4FrontierRepairRuntime(context))
+                        if (IsCurrentV4FrontierRepairRuntime(context))
                         {
                             LogFileTransferRegularV4FrontierRepairProgressObserved(
                                 FileTransferDirection.Inbound,
                                 context.TransferId,
                                 context.SessionId,
+                                context.CurrentTransferLeg,
                                 repairState.RepairRequestKey,
                                 clearReason,
                                 repairState.FirstStartChunkIndex,

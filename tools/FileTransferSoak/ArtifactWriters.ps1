@@ -7782,19 +7782,24 @@ function Get-FileTransferRecoveryFailureClassification {
         $_.EventName -eq 'filetransfer_v4_repair_requested'
     })
     $regularV4FrontierRepairAuthorityGrantedEvents = @($events | Where-Object {
-        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_authority_granted'
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_authority_granted' -or
+        $_.EventName -eq 'filetransfer_file_tuna_v4_frontier_repair_authority_granted'
     })
     $regularV4FrontierRepairAuthorityRejectedEvents = @($events | Where-Object {
-        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_authority_rejected'
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_authority_rejected' -or
+        $_.EventName -eq 'filetransfer_file_tuna_v4_frontier_repair_authority_rejected'
     })
     $regularV4FrontierRepairDispatchedEvents = @($events | Where-Object {
-        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_dispatched'
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_dispatched' -or
+        $_.EventName -eq 'filetransfer_file_tuna_v4_frontier_repair_dispatched'
     })
     $regularV4FrontierRepairProgressObservedEvents = @($events | Where-Object {
-        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_progress_observed'
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_progress_observed' -or
+        $_.EventName -eq 'filetransfer_file_tuna_v4_frontier_repair_progress_observed'
     })
     $regularV4FrontierRepairStalledEvents = @($events | Where-Object {
-        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_stalled'
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_stalled' -or
+        $_.EventName -eq 'filetransfer_file_tuna_v4_frontier_repair_stalled'
     })
     $regularV4RepairCachePressureEvents = @($events | Where-Object {
         $_.EventName -eq 'filetransfer_sender_repair_cache_pressure_entered'

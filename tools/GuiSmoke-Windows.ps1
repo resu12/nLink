@@ -2850,11 +2850,16 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $fallbackFrontierRepairDispatched = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_frontier_repair_dispatched')
     $fallbackFrontierRepairStalledEvent = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_frontier_repair_stalled')
     $fallbackFrontierRepairProgressObserved = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_frontier_repair_progress_observed')
-    $regularV4FrontierRepairAuthorityGranted = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_authority_granted')
-    $regularV4FrontierRepairAuthorityRejected = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_authority_rejected')
-    $regularV4FrontierRepairDispatched = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_dispatched')
-    $regularV4FrontierRepairProgressObserved = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_progress_observed')
-    $regularV4FrontierRepairStalledEvent = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_stalled')
+    $regularV4FrontierRepairAuthorityGranted = (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_authority_granted')) -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_file_tuna_v4_frontier_repair_authority_granted'))
+    $regularV4FrontierRepairAuthorityRejected = (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_authority_rejected')) -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_file_tuna_v4_frontier_repair_authority_rejected'))
+    $regularV4FrontierRepairDispatched = (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_dispatched')) -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_file_tuna_v4_frontier_repair_dispatched'))
+    $regularV4FrontierRepairProgressObserved = (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_progress_observed')) -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_file_tuna_v4_frontier_repair_progress_observed'))
+    $regularV4FrontierRepairStalledEvent = (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_stalled')) -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_file_tuna_v4_frontier_repair_stalled'))
     $regularV4FrontierMissingRanges = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_v4_frontier_stall_missing_range_due')
     $regularV4RepairRequested = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_v4_repair_requested')
     $regularV4LivenessTimeoutWithoutAuthority = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('active_filetransfer_progress_observed_without_recovery_authority')

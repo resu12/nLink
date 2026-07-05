@@ -172,7 +172,8 @@ public sealed record FileTransferRegularV4FrontierRepairAuthority(
     int DurableReceivedHighestChunkIndex,
     int PendingRepairCount,
     int DecisionGeneration,
-    string DecisionReason);
+    string DecisionReason,
+    FileTransferTransportKind TargetTransport = FileTransferTransportKind.Unknown);
 
 public sealed record FileTransferRegularV4ControlFeedbackPressure(
     string SessionId,

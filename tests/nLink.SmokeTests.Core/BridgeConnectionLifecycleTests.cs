@@ -2963,6 +2963,147 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public void Bridge_FileTunaV4ControlFeedbackPressure_AcceptsOnlyTunaTargetAuthority()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-file-tuna-v4-frontier-authority", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "file-tuna-v4-frontier-authority");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "file-tuna-v4-frontier-authority");
+            var identity = new NknIdentity("file-tuna-v4-frontier-authority", "file-tuna-v4-frontier-authority.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+
+            var transferSuffix = Guid.NewGuid().ToString("N");
+            var acceptedDecisionGeneration = RandomNumberGenerator.GetInt32(100_000, 999_999);
+            var acceptedTransferId = $"transfer-file-tuna-v4-frontier-{transferSuffix}";
+            adapter.RegisterActiveFileTransferDataSession(acceptedTransferId);
+            adapter.RegisterActiveFileTransferRuntime(acceptedTransferId);
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                acceptedTransferId,
+                "file_tuna_v4_receiver_frontier_repair_due",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 96,
+                pendingRepairCount: 12,
+                repairAuthority: CreateRegularV4FrontierRepairAuthority(
+                    acceptedTransferId,
+                    repairKey: $"file-tuna-v4-frontier-accepted:{transferSuffix}",
+                    liveRouteEpoch: 2,
+                    decisionGeneration: acceptedDecisionGeneration,
+                    routeToken: FileTransferRouteResolver.FileTunaV4Token,
+                    targetTransport: FileTransferTransportKind.Tuna));
+
+            var acceptedLogText = LocalOperationalLog.GetRecentLogText();
+            Assert.True(
+                ContainsLogLineWithTokens(acceptedLogText, "filetransfer_file_tuna_v4_frontier_repair_authority_granted", "route=file_tuna_v4", "target_transport=tuna", $"decision_generation={acceptedDecisionGeneration}"),
+                acceptedLogText);
+            Assert.True(
+                ContainsLogLineWithTokens(acceptedLogText, "filetransfer_regular_v4_control_feedback_pressure_marked", "route=file_tuna_v4", "target_transport=tuna", $"decision_generation={acceptedDecisionGeneration}"),
+                acceptedLogText);
+
+            var rejectedDecisionGeneration = RandomNumberGenerator.GetInt32(100_000, 999_999);
+            var rejectedTransferId = $"transfer-file-tuna-v4-frontier-wrong-target-{transferSuffix}";
+            adapter.RegisterActiveFileTransferDataSession(rejectedTransferId);
+            adapter.RegisterActiveFileTransferRuntime(rejectedTransferId);
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                rejectedTransferId,
+                "file_tuna_v4_receiver_frontier_repair_due",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 96,
+                pendingRepairCount: 12,
+                repairAuthority: CreateRegularV4FrontierRepairAuthority(
+                    rejectedTransferId,
+                    repairKey: $"file-tuna-v4-frontier-rejected:{transferSuffix}",
+                    liveRouteEpoch: 2,
+                    decisionGeneration: rejectedDecisionGeneration,
+                    routeToken: FileTransferRouteResolver.FileTunaV4Token,
+                    targetTransport: FileTransferTransportKind.RegularNkn));
+
+            var rejectedLogText = LocalOperationalLog.GetRecentLogText();
+            Assert.True(
+                ContainsLogLineWithTokens(rejectedLogText, "filetransfer_file_tuna_v4_frontier_repair_authority_rejected", "route=file_tuna_v4", "target_transport=regular_nkn", "expected_target_transport=tuna", $"decision_generation={rejectedDecisionGeneration}"),
+                rejectedLogText);
+            Assert.False(
+                ContainsLogLineWithTokens(rejectedLogText, "filetransfer_file_tuna_v4_frontier_repair_authority_granted", $"decision_generation={rejectedDecisionGeneration}"),
+                rejectedLogText);
+
+            var unknownTargetDecisionGeneration = RandomNumberGenerator.GetInt32(100_000, 999_999);
+            var unknownTargetTransferId = $"transfer-file-tuna-v4-frontier-unknown-target-{transferSuffix}";
+            adapter.RegisterActiveFileTransferDataSession(unknownTargetTransferId);
+            adapter.RegisterActiveFileTransferRuntime(unknownTargetTransferId);
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                unknownTargetTransferId,
+                "file_tuna_v4_receiver_frontier_repair_due",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 96,
+                pendingRepairCount: 12,
+                repairAuthority: CreateRegularV4FrontierRepairAuthority(
+                    unknownTargetTransferId,
+                    repairKey: $"file-tuna-v4-frontier-unknown-target:{transferSuffix}",
+                    liveRouteEpoch: 2,
+                    decisionGeneration: unknownTargetDecisionGeneration,
+                    routeToken: FileTransferRouteResolver.FileTunaV4Token,
+                    targetTransport: FileTransferTransportKind.Unknown));
+
+            var unknownTargetLogText = LocalOperationalLog.GetRecentLogText();
+            Assert.True(
+                ContainsLogLineWithTokens(unknownTargetLogText, "filetransfer_file_tuna_v4_frontier_repair_authority_rejected", "route=file_tuna_v4", "target_transport=unknown", "expected_target_transport=tuna", $"decision_generation={unknownTargetDecisionGeneration}"),
+                unknownTargetLogText);
+            Assert.False(
+                ContainsLogLineWithTokens(unknownTargetLogText, "filetransfer_file_tuna_v4_frontier_repair_authority_granted", $"decision_generation={unknownTargetDecisionGeneration}"),
+                unknownTargetLogText);
+
+            adapter.UnregisterActiveFileTransferRuntime(acceptedTransferId);
+            adapter.UnregisterActiveFileTransferDataSession(acceptedTransferId);
+
+            var remoteFrontierDecisionGeneration = RandomNumberGenerator.GetInt32(100_000, 999_999);
+            var remoteFrontierTransferId = $"transfer-file-tuna-v4-frontier-remote-{transferSuffix}";
+            adapter.RegisterActiveFileTransferDataSession(remoteFrontierTransferId);
+            adapter.RegisterActiveFileTransferRuntime(remoteFrontierTransferId);
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                remoteFrontierTransferId,
+                "file_tuna_v4_sender_remote_frontier_pressure",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 96,
+                pendingRepairCount: 12,
+                repairAuthority: CreateRegularV4FrontierRepairAuthority(
+                    remoteFrontierTransferId,
+                    repairKey: $"file-tuna-v4-frontier-remote:{transferSuffix}",
+                    liveRouteEpoch: 2,
+                    decisionGeneration: remoteFrontierDecisionGeneration,
+                    routeToken: FileTransferRouteResolver.FileTunaV4Token,
+                    targetTransport: FileTransferTransportKind.Tuna));
+
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendPressure(out var pressureReason, out _));
+            Assert.Equal("regular_v4_activation_send_pressure", pressureReason);
+
+            adapter.UnregisterActiveFileTransferRuntime(acceptedTransferId);
+            adapter.UnregisterActiveFileTransferDataSession(acceptedTransferId);
+            adapter.UnregisterActiveFileTransferRuntime(rejectedTransferId);
+            adapter.UnregisterActiveFileTransferDataSession(rejectedTransferId);
+            adapter.UnregisterActiveFileTransferRuntime(unknownTargetTransferId);
+            adapter.UnregisterActiveFileTransferDataSession(unknownTargetTransferId);
+            adapter.UnregisterActiveFileTransferRuntime(remoteFrontierTransferId);
+            adapter.UnregisterActiveFileTransferDataSession(remoteFrontierTransferId);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public async Task Bridge_ReceiveStallRecovery_ControlOnlyOverrideReconnectsWhenRegularV4PressureMarked()
     {
         if (!OperatingSystem.IsWindows())
@@ -7022,12 +7163,14 @@ rl.on('line', (line) => {{
         int durableReceivedHighestChunkIndex = -1,
         int pendingRepairCount = 8,
         int decisionGeneration = 1,
-        int liveRouteEpoch = 1)
+        int liveRouteEpoch = 1,
+        string routeToken = FileTransferRouteResolver.RegularNknV4FastToken,
+        FileTransferTransportKind targetTransport = FileTransferTransportKind.RegularNkn)
         => new(
             sessionId,
             transferId,
             FileTransferDirection.Outbound,
-            FileTransferRouteResolver.RegularNknV4FastToken,
+            routeToken,
             FileTransferProtocol.ProtocolVersionV4,
             LiveRouteEpoch: liveRouteEpoch,
             RuntimeGeneration: 1,
@@ -7043,6 +7186,7 @@ rl.on('line', (line) => {{
             durableReceivedHighestChunkIndex,
             pendingRepairCount,
             decisionGeneration,
-            "test_regular_v4_frontier_repair_authority");
+            "test_regular_v4_frontier_repair_authority",
+            targetTransport);
 
 }
