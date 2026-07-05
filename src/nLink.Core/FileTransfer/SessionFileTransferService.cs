@@ -7664,6 +7664,26 @@ public sealed partial class SessionFileTransferService : IDisposable
             $"event={eventName}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; stage={FormatProtocolLogValue(stage)}; repair_request_key={FormatProtocolLogValue(authority.RepairKey)}; protocol_repair_request_id={FormatProtocolLogValue(protocolRepairRequestId)}; route={FormatProtocolLogValue(authority.RouteToken)}; protocol_version={authority.ProtocolVersion}; live_route_epoch={authority.LiveRouteEpoch}; runtime_generation={authority.RuntimeGeneration}; terminal_generation={authority.TerminalGeneration}; leg_generation={authority.LegGeneration}; transport_epoch={authority.TransportEpoch}; bridge_recovery_generation={authority.BridgeRecoveryGeneration}; bridge_decision_generation={authority.BridgeDecisionGeneration}; route_publication_generation={authority.RoutePublicationGeneration}; route_commit_generation={authority.RouteCommitGeneration ?? 0}; target_transport={FormatFileTransferTransportKind(authority.TargetTransport)}; decision_generation={authority.DecisionGeneration}; sent_chunk_count={sentChunkCount}; remote_next_expected_chunk_index={remoteNextExpectedChunkIndex}; chunks_accepted_for_transport={chunksAcceptedForTransport}");
     }
 
+    private static void LogFileTransferRegularV4FrontierRepairSendDeferred(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        FileTransferRegularV4FrontierRepairAuthority authority,
+        string protocolRepairRequestId,
+        string stage,
+        int scheduledChunkCount,
+        int remoteNextExpectedChunkIndex,
+        int chunksAcceptedForTransport,
+        string deferralReason,
+        FileTransferV4RepairDeliveryMode repairDeliveryMode,
+        string repairDeliveryEscalationReason)
+    {
+        var eventName = FormatV4FrontierRepairProofEventName(authority.RouteToken, "send_deferred");
+        LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event={eventName}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; stage={FormatProtocolLogValue(stage)}; repair_request_key={FormatProtocolLogValue(authority.RepairKey)}; protocol_repair_request_id={FormatProtocolLogValue(protocolRepairRequestId)}; route={FormatProtocolLogValue(authority.RouteToken)}; protocol_version={authority.ProtocolVersion}; live_route_epoch={authority.LiveRouteEpoch}; runtime_generation={authority.RuntimeGeneration}; terminal_generation={authority.TerminalGeneration}; leg_generation={authority.LegGeneration}; transport_epoch={authority.TransportEpoch}; bridge_recovery_generation={authority.BridgeRecoveryGeneration}; bridge_decision_generation={authority.BridgeDecisionGeneration}; route_publication_generation={authority.RoutePublicationGeneration}; route_commit_generation={authority.RouteCommitGeneration ?? 0}; target_transport={FormatFileTransferTransportKind(authority.TargetTransport)}; decision_generation={authority.DecisionGeneration}; scheduled_chunk_count={scheduledChunkCount}; remote_next_expected_chunk_index={remoteNextExpectedChunkIndex}; chunks_accepted_for_transport={chunksAcceptedForTransport}; deferral_reason={FormatProtocolLogValue(deferralReason)}; repair_delivery_mode={FormatV4RepairDeliveryMode(repairDeliveryMode)}; repair_delivery_escalation_reason={FormatProtocolLogValue(repairDeliveryEscalationReason)}");
+    }
+
     private static void LogFileTransferRegularV4FrontierRepairProgressObserved(
         FileTransferDirection direction,
         string transferId,
@@ -16531,6 +16551,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         string? ProtocolRepairRequestId,
         string? ProtocolPriority,
         string? ProtocolRecoveryMode,
+        bool FrontierRepair,
         bool FrontierTailRepair,
         bool EmergencyCreditRepair,
         FileTransferV4RepairDeliveryMode DeliveryMode,
@@ -16576,6 +16597,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         public required IReadOnlyList<FileTransferRangeV4> Ranges { get; init; }
 
         public bool Filled { get; set; }
+
+        public bool FrontierRepair { get; init; }
 
         public bool FrontierTailRepair { get; init; }
     }

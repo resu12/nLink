@@ -2856,6 +2856,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_file_tuna_v4_frontier_repair_authority_rejected'))
     $regularV4FrontierRepairDispatched = (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_dispatched')) -or
         (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_file_tuna_v4_frontier_repair_dispatched'))
+    $regularV4FrontierRepairSendDeferredEvent = (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_send_deferred')) -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_file_tuna_v4_frontier_repair_send_deferred'))
     $regularV4FrontierRepairProgressObserved = (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_progress_observed')) -or
         (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_file_tuna_v4_frontier_repair_progress_observed'))
     $regularV4FrontierRepairStalledEvent = (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_stalled')) -or
@@ -2875,6 +2877,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         (($regularV4FrontierRepairAuthorityGranted -or $regularV4FrontierRepairDispatched) -and
             (-not $regularV4FrontierRepairProgressObserved) -and
             ($fallbackProgressTimeout -or $regularV4LivenessTimeoutWithoutAuthority)))
+    $regularV4FrontierRepairSendDeferred = $regularV4FrontierRepairSendDeferredEvent -and
+        (-not $regularV4FrontierRepairProgressObserved) -and
+        ($fallbackProgressTimeout -or $regularV4LivenessTimeoutWithoutAuthority -or $terminalObserved)
     $regularV4RepairLivenessAuthorityMissing = $regularV4FrontierMissingRanges -and
         $regularV4RepairRequested -and
         (-not $regularV4FrontierRepairAuthorityGranted) -and
@@ -2919,6 +2924,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     elseif ($fallbackFrontierRepairStalled) {
         $phase = 'fallback_frontier_repair'
         $reason = 'fallback_frontier_repair_stalled'
+    }
+    elseif ($regularV4FrontierRepairSendDeferred) {
+        $phase = 'regular_v4_frontier_repair'
+        $reason = 'regular_v4_frontier_repair_send_deferred_or_stalled'
     }
     elseif ($regularV4FrontierRepairStalled) {
         $phase = 'regular_v4_frontier_repair'
