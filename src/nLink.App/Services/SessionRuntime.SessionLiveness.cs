@@ -691,6 +691,17 @@ public sealed partial class SessionRuntime
             !routeCurrent ||
             (!IsActiveFileTransferRecoveryLivenessSnapshot(snapshot, now) && !bridgeLifecycleGrace))
         {
+            if (metadataValid &&
+                routeCurrent &&
+                snapshot.TerminalRecommended &&
+                !snapshot.ReceiveProofObserved &&
+                transport is IFileTransferRecoveryLivenessAuthorityObserver recoveryAuthorityObserver)
+            {
+                recoveryAuthorityObserver.NotifyFileTransferRecoveryLivenessAuthorityRejected(
+                    snapshot,
+                    "recovery_liveness_terminal_without_proof");
+            }
+
             LocalOperationalLog.Warn(
                 "Session",
                 $"event=session_liveness_timeout_filetransfer_recovery_state_not_deferred; session_id={sessionIdSnapshot}; transfer_id={snapshot.TransferId}; route={snapshot.RouteToken}; protocol_version={snapshot.ProtocolVersion}; live_route_epoch={snapshot.LiveRouteEpoch}; leg_generation={snapshot.TransferLegGeneration}; bridge_recovery_generation={snapshot.BridgeRecoveryGeneration}; transport_epoch={snapshot.TransportEpoch}; state={snapshot.State.ToString().ToLowerInvariant()}; metadata_valid={(metadataValid ? 1 : 0)}; route_current={(routeCurrent ? 1 : 0)}; currentness_reason={SanitizeSessionLivenessReason(currentnessReason)}; current_route={SanitizeSessionLivenessReason(currentRoute)}; current_protocol_version={currentProtocolVersion}; terminal_recommended={(snapshot.TerminalRecommended ? 1 : 0)}; authority_completed={(snapshot.AuthorityCompleted ? 1 : 0)}; receive_proof_observed={(snapshot.ReceiveProofObserved ? 1 : 0)}; recovery_exhausted={(snapshot.RecoveryExhausted ? 1 : 0)}; liveness_deferral_deadline_utc_ms={snapshot.LivenessDeferralDeadlineUtc.ToUnixTimeMilliseconds()}; silence_ms={(long)silence.TotalMilliseconds}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");

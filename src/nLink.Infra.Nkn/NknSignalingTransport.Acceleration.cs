@@ -9334,6 +9334,14 @@ public sealed partial class NknSignalingTransport
 
         var isRuntimeUnlockActivation = IsRuntimeUnlockActivationReason(reason);
         var requiresContractLocalListenerRetry = false;
+        if (isRuntimeUnlockActivation &&
+            ShouldPauseRegularNknV4FileTransferBeforeRuntimeUnlockPayerIntent(sessionId, reason))
+        {
+            pausedForActivationNegotiation = PauseRegularNknV4FileTransferForRuntimeUnlockMakeBeforeBreak(
+                sessionId,
+                "runtime_unlock_retry_dispatch_payer_intent",
+                reason);
+        }
 
         try
         {
@@ -9363,6 +9371,14 @@ public sealed partial class NknSignalingTransport
                     ? "runtime_unlock_payer_intent_send_rejected"
                     : "payer_intent_send_rejected";
                 ResumeActivationPauseIfNeeded("tuna_activation_failed_regular_v4_resumed", payerIntentRetryReason);
+                if (isRuntimeUnlockActivation &&
+                    RejectRuntimeUnlockRecoveryRetryBeforeDispatchIfActive(
+                        sessionId,
+                        "runtime_unlock_payer_intent_send_rejected_before_retry_dispatch"))
+                {
+                    return;
+                }
+
                 ScheduleAccelerationNegotiationRetry(payerIntentRetryReason);
                 return;
             }
@@ -9550,6 +9566,9 @@ public sealed partial class NknSignalingTransport
                 out _,
                 out _))
         {
+            ResumeActivationPauseIfNeeded(
+                "tuna_activation_failed_regular_v4_resumed",
+                "regular_v4_receive_recovery_pending");
             return;
         }
 
@@ -9561,6 +9580,9 @@ public sealed partial class NknSignalingTransport
                 out _,
                 out _))
         {
+            ResumeActivationPauseIfNeeded(
+                "tuna_activation_failed_regular_v4_resumed",
+                "regular_v4_frontier_repair_pending");
             return;
         }
 
@@ -9576,6 +9598,9 @@ public sealed partial class NknSignalingTransport
             var dispatchAuthorityResult = TryGrantRuntimeUnlockRecoveryRetryDispatchAuthorityForOfferSend(reason, sessionId);
             if (dispatchAuthorityResult == RuntimeUnlockRetryDispatchAuthorityResult.Held)
             {
+                ResumeActivationPauseIfNeeded(
+                    "tuna_activation_failed_regular_v4_resumed",
+                    "runtime_unlock_retry_dispatch_authority_held");
                 return;
             }
 
@@ -10471,6 +10496,46 @@ public sealed partial class NknSignalingTransport
         return true;
     }
 
+    private bool RejectRuntimeUnlockRecoveryRetryBeforeDispatchIfActive(
+        string? sessionId,
+        string decisionReason)
+    {
+        if (RejectRuntimeUnlockRetryDispatchAuthorityForCurrentContract(sessionId, decisionReason))
+        {
+            return true;
+        }
+
+        RuntimeUnlockRecoveryRetryState? stateSnapshot = null;
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? string.Empty : sessionId.Trim();
+        lock (accelerationGate)
+        {
+            var state = runtimeUnlockRecoveryRetryState;
+            if (state is null ||
+                state.RetryObserved ||
+                state.RetryDispatched ||
+                state.ContractState is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed ||
+                (!string.IsNullOrWhiteSpace(normalizedSessionId) &&
+                 !string.Equals(state.SessionId, normalizedSessionId, StringComparison.Ordinal)) ||
+                !IsRuntimeUnlockActivationRetryReason(state.RetryReason) ||
+                !IsSessionRecoveryContractRetryRequired(state))
+            {
+                return false;
+            }
+
+            state.RetryQueued = false;
+            state.RetryDispatching = false;
+            state.RetryAuthorityPending = false;
+            state.RetryAuthorityGranted = false;
+            state.ObservedSendPending = false;
+            state.AuthorityFailureReason = SanitizeLogToken(decisionReason);
+            state.ContractState = SessionRecoveryContractState.Failed;
+            stateSnapshot = state;
+        }
+
+        LogRuntimeUnlockRecoveryContract("session_recovery_contract_failed", stateSnapshot!.SessionId);
+        return true;
+    }
+
     private void RefreshRuntimeUnlockRecoveryContractOfferSendWindowUnsafe(
         RuntimeUnlockRecoveryRetryState state,
         long nowMs)
@@ -10582,6 +10647,38 @@ public sealed partial class NknSignalingTransport
                    !state.RetryObserved &&
                    state.ContractState is not (SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed) &&
                    string.Equals(state.SessionId, sessionId.Trim(), StringComparison.Ordinal);
+        }
+    }
+
+    private bool ShouldPauseRegularNknV4FileTransferBeforeRuntimeUnlockPayerIntent(
+        string? sessionId,
+        string reason)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId) ||
+            !IsRuntimeUnlockActivationReason(reason) ||
+            !ShouldPauseRegularNknV4FileTransferForRuntimeUnlock(sessionId))
+        {
+            return false;
+        }
+
+        var normalizedSessionId = sessionId.Trim();
+        lock (accelerationGate)
+        {
+            var state = runtimeUnlockRecoveryRetryState;
+            return state is not null &&
+                   state.ContractState is not (SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed) &&
+                   !state.RetryObserved &&
+                   !state.BlockedByRegularV4ReceiveRecovery &&
+                   string.Equals(
+                       state.RegularV4FrontierRepairTrigger,
+                       "regular_v4_frontier_repair_settlement",
+                       StringComparison.Ordinal) &&
+                   IsRuntimeUnlockActivationRetryReason(state.RetryReason) &&
+                   string.Equals(state.SessionId, normalizedSessionId, StringComparison.Ordinal) &&
+                   (state.Settled ||
+                    state.RetryQueued ||
+                    state.RetryAuthorityGranted ||
+                    state.DispatchAuthorityGranted);
         }
     }
 
@@ -13642,7 +13739,7 @@ public sealed partial class NknSignalingTransport
         if ((snapshot.Completed || snapshot.RecoveryExhausted || snapshot.DeadlineExpired) &&
             !snapshot.ReceiveProofObserved)
         {
-            return "regular_v4_recovery_terminal_without_proof";
+            return "v4_recovery_terminal_no_proof";
         }
 
         if (state.RegularV4RecoveryBridgeDecisionGeneration != snapshot.BridgeDecisionGeneration)
@@ -13763,10 +13860,13 @@ public sealed partial class NknSignalingTransport
 
         var normalizedReason = SanitizeLogToken(reason);
         var decisionReason =
-            normalizedReason.Contains("peer_disconnected", StringComparison.OrdinalIgnoreCase) ||
-            normalizedReason.Contains("transfer_terminal", StringComparison.OrdinalIgnoreCase) ||
-            normalizedReason.Contains("session_terminal", StringComparison.OrdinalIgnoreCase) ||
-            normalizedReason.Contains("session_closed", StringComparison.OrdinalIgnoreCase)
+            ((rejectedSnapshot.TerminalRecommended && !rejectedSnapshot.ReceiveProofObserved) ||
+             normalizedReason.Contains("terminal_without_proof", StringComparison.OrdinalIgnoreCase))
+                ? "v4_recovery_terminal_no_proof"
+                : normalizedReason.Contains("peer_disconnected", StringComparison.OrdinalIgnoreCase) ||
+                  normalizedReason.Contains("transfer_terminal", StringComparison.OrdinalIgnoreCase) ||
+                  normalizedReason.Contains("session_terminal", StringComparison.OrdinalIgnoreCase) ||
+                  normalizedReason.Contains("session_closed", StringComparison.OrdinalIgnoreCase)
                 ? GetRegularV4BlockedRetrySettlementRejectionReason(
                     stateSnapshot!,
                     currentLivenessSnapshot,
