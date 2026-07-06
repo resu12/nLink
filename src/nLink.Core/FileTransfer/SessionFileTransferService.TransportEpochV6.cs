@@ -4452,6 +4452,13 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        if (string.Equals(batch.Priority, "frontier", StringComparison.OrdinalIgnoreCase) &&
+            batch.StartChunkIndex <= context.NextChunkIndex &&
+            context.NextChunkIndex < batch.StartChunkIndex + Math.Max(0, batch.ChunkCount))
+        {
+            return false;
+        }
+
         if (!TryAuthorizeTransportEpochActionLocked(
                 context,
                 FileTransferCoordinatorActionKind.TransportEpochAdoption,

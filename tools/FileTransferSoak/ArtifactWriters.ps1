@@ -2486,6 +2486,22 @@ function Get-FileTransferFallbackTailReconciliationProof {
         $_.EventName -eq 'filetransfer_v4_frontier_repair_batch_applied' -or
         $_.EventName -eq 'filetransfer_frontier_gap_repair_filled'
     })
+    [object[]]$frontierRequestDeliveryAcceptedEvents = @(
+        $events |
+            Where-Object {
+                $_.EventName -eq 'filetransfer_control_plane_delivery_result' -and
+                (Get-FileTransferEventField -Event $_ -Name 'kind' -Default '') -eq 'frontier_request' -and
+                (Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -eq 'filetransfer.frontier_request.v6' -and
+                (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'protocol_version' -Default 0) -eq 6 -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'peer_visible_any' -Default 0) -gt 0 -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'accepted_any' -Default 0) -gt 0
+            } |
+            Sort-Object Sequence
+    )
+    [object[]]$frontierRequestReceiveDispatchAttemptedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_v6_frontier_request_receive_dispatch_attempted' } | Sort-Object Sequence)
+    [object[]]$frontierRequestReceiveDispatchedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_v6_frontier_request_receive_dispatched' } | Sort-Object Sequence)
+    [object[]]$frontierRequestReceiveDispatchRejectedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_v6_frontier_request_receive_dispatch_rejected' } | Sort-Object Sequence)
     [object[]]$outboundQuiescentYieldEvents = @(
         $quiescentYieldEvents |
             Where-Object { (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' }
@@ -2540,6 +2556,7 @@ function Get-FileTransferFallbackTailReconciliationProof {
         $events |
             Where-Object {
                 if ($_.EventName -eq 'session_liveness_timeout' -or
+                    $_.EventName -eq 'filetransfer_live_progress_timeout' -or
                     $_.EventName -eq 'filetransfer_gui_progress_timeout') {
                     return $true
                 }
@@ -2661,6 +2678,47 @@ function Get-FileTransferFallbackTailReconciliationProof {
         }).Count -gt 0
     }
 
+    function Test-FallbackFrontierRequestHasLaterDispatchOutcome {
+        param([Parameter(Mandatory = $true)]$DeliveryEvent)
+
+        $deliverySequence = [int64]$DeliveryEvent.Sequence
+        return @($frontierRequestReceiveDispatchedEvents + $frontierRequestReceiveDispatchRejectedEvents | Where-Object {
+            [int64]$_.Sequence -gt $deliverySequence -and
+            (Test-FallbackFrontierRequestDispatchTupleMatch -Anchor $DeliveryEvent -Candidate $_)
+        }).Count -gt 0
+    }
+
+    function Test-FallbackFrontierRequestDispatchTupleMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Anchor,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        foreach ($fieldName in @(
+                'transfer_id',
+                'session_id',
+                'route',
+                'protocol_version',
+                'live_route_epoch',
+                'leg_generation',
+                'bridge_recovery_generation',
+                'transport_epoch',
+                'checkpoint_request_id')) {
+            $anchorValue = Get-FileTransferEventField -Event $Anchor -Name $fieldName -Default ''
+            $candidateValue = Get-FileTransferEventField -Event $Candidate -Name $fieldName -Default ''
+            if ([string]::IsNullOrWhiteSpace($anchorValue) -or
+                [string]::IsNullOrWhiteSpace($candidateValue)) {
+                return $false
+            }
+
+            if ($anchorValue -ne $candidateValue) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
     $metadataMissing = New-Object System.Collections.Generic.List[object]
     foreach ($event in @($requestedEvents + $acceptedEvents + $staleFrontierRetiredEvents)) {
         $route = Get-FileTransferEventField -Event $event -Name 'route' -Default ''
@@ -2737,6 +2795,10 @@ function Get-FileTransferFallbackTailReconciliationProof {
         $frontierRepairDispatchedEvents.Count -gt 0 -or
         $frontierRepairStalledEvents.Count -gt 0 -or
         $frontierRepairProgressObservedEvents.Count -gt 0 -or
+        $frontierRequestDeliveryAcceptedEvents.Count -gt 0 -or
+        $frontierRequestReceiveDispatchAttemptedEvents.Count -gt 0 -or
+        $frontierRequestReceiveDispatchedEvents.Count -gt 0 -or
+        $frontierRequestReceiveDispatchRejectedEvents.Count -gt 0 -or
         $staleYieldProofIgnoredEvents.Count -gt 0
     $hasLegacyLocalPairedYield = $outboundQuiescentYieldEvents.Count -gt 0 -and
         $inboundQuiescentYieldEvents.Count -gt 0
@@ -2804,9 +2866,34 @@ function Get-FileTransferFallbackTailReconciliationProof {
         -not (Test-FallbackFrontierRepairHasLaterProgress -DispatchEvent $_) -and
         -not (Test-FallbackFrontierRepairHasLaterCleanTerminal -Anchor $_)
     })
+    [object[]]$currentFrontierRequestDeliveryAcceptedEvents = @(
+        $frontierRequestDeliveryAcceptedEvents |
+            Select-Object -Last 1
+    )
+    [object[]]$frontierRequestDispatchMissingEvents = @($currentFrontierRequestDeliveryAcceptedEvents | Where-Object {
+        (Test-FallbackFrontierRepairHasLaterFailure -Anchor $_) -and
+        -not (Test-FallbackFrontierRequestHasLaterDispatchOutcome -DeliveryEvent $_) -and
+        -not (Test-FallbackFrontierRepairHasLaterCleanTerminal -Anchor $_)
+    })
+
+    $frontierRequestDispatchVerdict = 'none'
+    if ($frontierRequestDispatchMissingEvents.Count -gt 0) {
+        $frontierRequestDispatchVerdict = 'fail'
+        $quiescenceFindings.Add('peer-visible fallback frontier request was accepted but no sender receive dispatch or rejection proof was observed before failure') | Out-Null
+        foreach ($event in @($frontierRequestDispatchMissingEvents + $failureEvents | Select-Object -First 10)) {
+            $quiescenceEvidence.Add($event) | Out-Null
+        }
+    }
+    elseif ($frontierRequestReceiveDispatchedEvents.Count -gt 0 -or
+        $frontierRequestReceiveDispatchRejectedEvents.Count -gt 0) {
+        $frontierRequestDispatchVerdict = 'pass'
+    }
 
     $frontierRepairVerdict = 'none'
-    if ($frontierRepairUnresolvedStalledEvents.Count -gt 0) {
+    if ($frontierRequestDispatchVerdict -eq 'fail') {
+        $frontierRepairVerdict = 'fail'
+    }
+    elseif ($frontierRepairUnresolvedStalledEvents.Count -gt 0) {
         $frontierRepairVerdict = 'fail'
         $quiescenceFindings.Add('fallback frontier repair explicitly stalled before terminal progress') | Out-Null
         foreach ($event in @($frontierRepairUnresolvedStalledEvents + $failureEvents | Select-Object -First 10)) {
@@ -2873,6 +2960,12 @@ function Get-FileTransferFallbackTailReconciliationProof {
         FrontierRepairStalledCount = $frontierRepairStalledEvents.Count
         FrontierRepairProgressObservedCount = $frontierRepairProgressObservedEvents.Count
         FrontierRepairVerdict = $frontierRepairVerdict
+        FrontierRequestDeliveryAcceptedCount = $frontierRequestDeliveryAcceptedEvents.Count
+        FrontierRequestReceiveDispatchAttemptedCount = $frontierRequestReceiveDispatchAttemptedEvents.Count
+        FrontierRequestReceiveDispatchedCount = $frontierRequestReceiveDispatchedEvents.Count
+        FrontierRequestReceiveDispatchRejectedCount = $frontierRequestReceiveDispatchRejectedEvents.Count
+        FrontierRequestDispatchMissingCount = $frontierRequestDispatchMissingEvents.Count
+        FrontierRequestDispatchVerdict = $frontierRequestDispatchVerdict
         RuntimeUnlockProbeRejectedByFallbackOwnerCount = $runtimeUnlockProbeRejectedByFallbackEvents.Count
         RuntimeUnlockProbeRejectedByInboundFallbackOwnerCount = $runtimeUnlockProbeRejectedByInboundFallbackEvents.Count
         QuiescenceTimeoutCount = $quiescenceTimeoutEvents.Count
@@ -5159,6 +5252,12 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("fallback_frontier_repair_stalled_count={0}" -f $fallbackTailProof.FrontierRepairStalledCount)) | Out-Null
     $lines.Add(("fallback_frontier_repair_progress_observed_count={0}" -f $fallbackTailProof.FrontierRepairProgressObservedCount)) | Out-Null
     $lines.Add(("fallback_frontier_repair_verdict={0}" -f $fallbackTailProof.FrontierRepairVerdict)) | Out-Null
+    $lines.Add(("fallback_frontier_request_delivery_accepted_count={0}" -f $fallbackTailProof.FrontierRequestDeliveryAcceptedCount)) | Out-Null
+    $lines.Add(("fallback_frontier_request_receive_dispatch_attempted_count={0}" -f $fallbackTailProof.FrontierRequestReceiveDispatchAttemptedCount)) | Out-Null
+    $lines.Add(("fallback_frontier_request_receive_dispatched_count={0}" -f $fallbackTailProof.FrontierRequestReceiveDispatchedCount)) | Out-Null
+    $lines.Add(("fallback_frontier_request_receive_dispatch_rejected_count={0}" -f $fallbackTailProof.FrontierRequestReceiveDispatchRejectedCount)) | Out-Null
+    $lines.Add(("fallback_frontier_request_dispatch_missing_count={0}" -f $fallbackTailProof.FrontierRequestDispatchMissingCount)) | Out-Null
+    $lines.Add(("fallback_frontier_request_dispatch_verdict={0}" -f $fallbackTailProof.FrontierRequestDispatchVerdict)) | Out-Null
     $lines.Add(("runtime_unlock_probe_rejected_by_fallback_owner_count={0}" -f $fallbackTailProof.RuntimeUnlockProbeRejectedByFallbackOwnerCount)) | Out-Null
     $lines.Add(("runtime_unlock_probe_rejected_by_inbound_fallback_owner_count={0}" -f $fallbackTailProof.RuntimeUnlockProbeRejectedByInboundFallbackOwnerCount)) | Out-Null
     $lines.Add(("fallback_tail_quiescence_timeout_count={0}" -f $fallbackTailProof.QuiescenceTimeoutCount)) | Out-Null
@@ -6930,6 +7029,7 @@ function New-FileTransferStabilityGateSummaryLines {
         ("regular_v4_frontier_repair_missing_dispatch_count={0}" -f $recoveryClassification.RegularV4FrontierRepairMissingDispatchCount),
         ("regular_v4_frontier_repair_progress_observed_count={0}" -f $recoveryClassification.RegularV4FrontierRepairProgressObservedCount),
         ("regular_v4_frontier_repair_stalled_count={0}" -f $recoveryClassification.RegularV4FrontierRepairStalledCount),
+        ("regular_v4_frontier_repair_settled_stalled_count={0}" -f $recoveryClassification.RegularV4FrontierRepairSettledStalledCount),
         ("regular_v4_frontier_repair_verdict={0}" -f $recoveryClassification.RegularV4FrontierRepairVerdict),
         ("regular_v4_repair_cache_pressure_count={0}" -f $recoveryClassification.RegularV4RepairCachePressureCount),
         ("listener_ready_unavailable_contradiction_count={0}" -f $recoveryClassification.ListenerReadyUnavailableContradictionCount),
@@ -6981,6 +7081,12 @@ function New-FileTransferStabilityGateSummaryLines {
         ("classification_fallback_frontier_repair_stalled_count={0}" -f $recoveryClassification.FallbackFrontierRepairStalledCount),
         ("classification_fallback_frontier_repair_progress_observed_count={0}" -f $recoveryClassification.FallbackFrontierRepairProgressObservedCount),
         ("classification_fallback_frontier_repair_verdict={0}" -f $recoveryClassification.FallbackFrontierRepairVerdict),
+        ("classification_fallback_frontier_request_delivery_accepted_count={0}" -f $recoveryClassification.FallbackFrontierRequestDeliveryAcceptedCount),
+        ("classification_fallback_frontier_request_receive_dispatch_attempted_count={0}" -f $recoveryClassification.FallbackFrontierRequestReceiveDispatchAttemptedCount),
+        ("classification_fallback_frontier_request_receive_dispatched_count={0}" -f $recoveryClassification.FallbackFrontierRequestReceiveDispatchedCount),
+        ("classification_fallback_frontier_request_receive_dispatch_rejected_count={0}" -f $recoveryClassification.FallbackFrontierRequestReceiveDispatchRejectedCount),
+        ("classification_fallback_frontier_request_dispatch_missing_count={0}" -f $recoveryClassification.FallbackFrontierRequestDispatchMissingCount),
+        ("classification_fallback_frontier_request_dispatch_verdict={0}" -f $recoveryClassification.FallbackFrontierRequestDispatchVerdict),
         ("classification_runtime_unlock_probe_rejected_by_fallback_owner_count={0}" -f $recoveryClassification.RuntimeUnlockProbeRejectedByFallbackOwnerCount),
         ("classification_runtime_unlock_probe_rejected_by_inbound_fallback_owner_count={0}" -f $recoveryClassification.RuntimeUnlockProbeRejectedByInboundFallbackOwnerCount),
         ("classification_fallback_tail_quiescence_timeout_count={0}" -f $recoveryClassification.FallbackTailQuiescenceTimeoutCount),
@@ -7060,6 +7166,12 @@ function New-FileTransferStabilityGateSummaryLines {
         ("fallback_frontier_repair_stalled_count={0}" -f $fallbackTailProof.FrontierRepairStalledCount),
         ("fallback_frontier_repair_progress_observed_count={0}" -f $fallbackTailProof.FrontierRepairProgressObservedCount),
         ("fallback_frontier_repair_verdict={0}" -f $fallbackTailProof.FrontierRepairVerdict),
+        ("fallback_frontier_request_delivery_accepted_count={0}" -f $fallbackTailProof.FrontierRequestDeliveryAcceptedCount),
+        ("fallback_frontier_request_receive_dispatch_attempted_count={0}" -f $fallbackTailProof.FrontierRequestReceiveDispatchAttemptedCount),
+        ("fallback_frontier_request_receive_dispatched_count={0}" -f $fallbackTailProof.FrontierRequestReceiveDispatchedCount),
+        ("fallback_frontier_request_receive_dispatch_rejected_count={0}" -f $fallbackTailProof.FrontierRequestReceiveDispatchRejectedCount),
+        ("fallback_frontier_request_dispatch_missing_count={0}" -f $fallbackTailProof.FrontierRequestDispatchMissingCount),
+        ("fallback_frontier_request_dispatch_verdict={0}" -f $fallbackTailProof.FrontierRequestDispatchVerdict),
         ("runtime_unlock_probe_rejected_by_fallback_owner_count={0}" -f $fallbackTailProof.RuntimeUnlockProbeRejectedByFallbackOwnerCount),
         ("runtime_unlock_probe_rejected_by_inbound_fallback_owner_count={0}" -f $fallbackTailProof.RuntimeUnlockProbeRejectedByInboundFallbackOwnerCount),
         ("fallback_tail_quiescence_timeout_count={0}" -f $fallbackTailProof.QuiescenceTimeoutCount),
@@ -7846,6 +7958,9 @@ function Get-FileTransferRecoveryFailureClassification {
         $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_stalled' -or
         $_.EventName -eq 'filetransfer_file_tuna_v4_frontier_repair_stalled'
     })
+    $regularV4FrontierRepairSettledStalledEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_settled_stalled'
+    })
     $regularV4RepairCachePressureEvents = @($events | Where-Object {
         $_.EventName -eq 'filetransfer_sender_repair_cache_pressure_entered'
     })
@@ -8438,6 +8553,7 @@ function Get-FileTransferRecoveryFailureClassification {
     $regularV4FrontierRepairStalled =
         $hasRegularOnlyRouteEvidence -and
         (
+            $regularV4FrontierRepairSettledStalledEvents.Count -gt 0 -or
             $regularV4FrontierRepairUnresolvedStalledEvents.Count -gt 0 -or
             (
                 $regularV4FrontierRepairUnresolvedDispatchEvents.Count -gt 0 -and
@@ -8551,6 +8667,9 @@ function Get-FileTransferRecoveryFailureClassification {
     elseif ($runtimeUnlockRetryRegularV4RecoverySettlementMissingCount -gt 0) {
         $class = 'runtime_unlock_retry_regular_v4_recovery_settlement_missing'
     }
+    elseif ($regularV4FrontierRepairSettledStalledEvents.Count -gt 0) {
+        $class = 'regular_v4_frontier_repair_liveness_settlement_missing'
+    }
     elseif ($regularV4FrontierRepairSendDeferred) {
         $class = 'regular_v4_frontier_repair_send_deferred_or_stalled'
     }
@@ -8572,6 +8691,10 @@ function Get-FileTransferRecoveryFailureClassification {
     elseif ($fallbackTailProof.OwnerGenerationMismatchCount -gt 0 -and
         $hasPostTunaFallbackEvidence) {
         $class = 'fallback_tail_owner_generation_mismatch'
+    }
+    elseif ($fallbackTailProof.FrontierRequestDispatchVerdict -eq 'fail' -and
+        $hasPostTunaFallbackEvidence) {
+        $class = 'fallback_frontier_request_dispatch_missing'
     }
     elseif ($fallbackTailProof.FrontierRepairVerdict -eq 'fail' -and
         $hasPostTunaFallbackEvidence) {
@@ -8981,6 +9104,7 @@ function Get-FileTransferRecoveryFailureClassification {
         RegularV4FrontierRepairMissingDispatchCount = $regularV4FrontierRepairMissingDispatchEvents.Count
         RegularV4FrontierRepairProgressObservedCount = $regularV4FrontierRepairProgressObservedEvents.Count
         RegularV4FrontierRepairStalledCount = $regularV4FrontierRepairStalledEvents.Count
+        RegularV4FrontierRepairSettledStalledCount = $regularV4FrontierRepairSettledStalledEvents.Count
         RegularV4FrontierRepairVerdict = if ($regularV4FrontierRepairSendDeferred -or $regularV4FrontierRepairStalled -or $regularV4RepairLivenessAuthorityMissing) {
             'fail'
         } elseif ($regularV4FrontierRepairProgressObservedEvents.Count -gt 0 -or
@@ -9055,6 +9179,12 @@ function Get-FileTransferRecoveryFailureClassification {
         FallbackFrontierRepairStalledCount = $fallbackTailProof.FrontierRepairStalledCount
         FallbackFrontierRepairProgressObservedCount = $fallbackTailProof.FrontierRepairProgressObservedCount
         FallbackFrontierRepairVerdict = $fallbackTailProof.FrontierRepairVerdict
+        FallbackFrontierRequestDeliveryAcceptedCount = $fallbackTailProof.FrontierRequestDeliveryAcceptedCount
+        FallbackFrontierRequestReceiveDispatchAttemptedCount = $fallbackTailProof.FrontierRequestReceiveDispatchAttemptedCount
+        FallbackFrontierRequestReceiveDispatchedCount = $fallbackTailProof.FrontierRequestReceiveDispatchedCount
+        FallbackFrontierRequestReceiveDispatchRejectedCount = $fallbackTailProof.FrontierRequestReceiveDispatchRejectedCount
+        FallbackFrontierRequestDispatchMissingCount = $fallbackTailProof.FrontierRequestDispatchMissingCount
+        FallbackFrontierRequestDispatchVerdict = $fallbackTailProof.FrontierRequestDispatchVerdict
         RuntimeUnlockProbeRejectedByFallbackOwnerCount = $fallbackTailProof.RuntimeUnlockProbeRejectedByFallbackOwnerCount
         RuntimeUnlockProbeRejectedByInboundFallbackOwnerCount = $fallbackTailProof.RuntimeUnlockProbeRejectedByInboundFallbackOwnerCount
         FallbackTailQuiescenceTimeoutCount = $fallbackTailProof.QuiescenceTimeoutCount
@@ -9546,6 +9676,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("regular_v4_frontier_repair_missing_dispatch_count={0}" -f $recoveryClassification.RegularV4FrontierRepairMissingDispatchCount),
         ("regular_v4_frontier_repair_progress_observed_count={0}" -f $recoveryClassification.RegularV4FrontierRepairProgressObservedCount),
         ("regular_v4_frontier_repair_stalled_count={0}" -f $recoveryClassification.RegularV4FrontierRepairStalledCount),
+        ("regular_v4_frontier_repair_settled_stalled_count={0}" -f $recoveryClassification.RegularV4FrontierRepairSettledStalledCount),
         ("regular_v4_frontier_repair_verdict={0}" -f $recoveryClassification.RegularV4FrontierRepairVerdict),
         ("regular_v4_repair_cache_pressure_count={0}" -f $recoveryClassification.RegularV4RepairCachePressureCount),
         ("listener_ready_unavailable_contradiction_count={0}" -f $recoveryClassification.ListenerReadyUnavailableContradictionCount),
@@ -9584,6 +9715,12 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("classification_fallback_frontier_repair_stalled_count={0}" -f $recoveryClassification.FallbackFrontierRepairStalledCount),
         ("classification_fallback_frontier_repair_progress_observed_count={0}" -f $recoveryClassification.FallbackFrontierRepairProgressObservedCount),
         ("classification_fallback_frontier_repair_verdict={0}" -f $recoveryClassification.FallbackFrontierRepairVerdict),
+        ("classification_fallback_frontier_request_delivery_accepted_count={0}" -f $recoveryClassification.FallbackFrontierRequestDeliveryAcceptedCount),
+        ("classification_fallback_frontier_request_receive_dispatch_attempted_count={0}" -f $recoveryClassification.FallbackFrontierRequestReceiveDispatchAttemptedCount),
+        ("classification_fallback_frontier_request_receive_dispatched_count={0}" -f $recoveryClassification.FallbackFrontierRequestReceiveDispatchedCount),
+        ("classification_fallback_frontier_request_receive_dispatch_rejected_count={0}" -f $recoveryClassification.FallbackFrontierRequestReceiveDispatchRejectedCount),
+        ("classification_fallback_frontier_request_dispatch_missing_count={0}" -f $recoveryClassification.FallbackFrontierRequestDispatchMissingCount),
+        ("classification_fallback_frontier_request_dispatch_verdict={0}" -f $recoveryClassification.FallbackFrontierRequestDispatchVerdict),
         ("classification_control_plane_isolation_verdict={0}" -f $recoveryClassification.ControlPlaneIsolationVerdict),
         ("classification_control_plane_peer_visible_count={0}" -f $recoveryClassification.ControlPlanePeerVisibleCount),
         ("classification_control_plane_local_only_rejected_count={0}" -f $recoveryClassification.ControlPlaneLocalOnlyRejectedCount),
@@ -9673,6 +9810,12 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("fallback_frontier_repair_stalled_count={0}" -f $fallbackTailProof.FrontierRepairStalledCount),
         ("fallback_frontier_repair_progress_observed_count={0}" -f $fallbackTailProof.FrontierRepairProgressObservedCount),
         ("fallback_frontier_repair_verdict={0}" -f $fallbackTailProof.FrontierRepairVerdict),
+        ("fallback_frontier_request_delivery_accepted_count={0}" -f $fallbackTailProof.FrontierRequestDeliveryAcceptedCount),
+        ("fallback_frontier_request_receive_dispatch_attempted_count={0}" -f $fallbackTailProof.FrontierRequestReceiveDispatchAttemptedCount),
+        ("fallback_frontier_request_receive_dispatched_count={0}" -f $fallbackTailProof.FrontierRequestReceiveDispatchedCount),
+        ("fallback_frontier_request_receive_dispatch_rejected_count={0}" -f $fallbackTailProof.FrontierRequestReceiveDispatchRejectedCount),
+        ("fallback_frontier_request_dispatch_missing_count={0}" -f $fallbackTailProof.FrontierRequestDispatchMissingCount),
+        ("fallback_frontier_request_dispatch_verdict={0}" -f $fallbackTailProof.FrontierRequestDispatchVerdict),
         ("runtime_unlock_probe_rejected_by_fallback_owner_count={0}" -f $fallbackTailProof.RuntimeUnlockProbeRejectedByFallbackOwnerCount),
         ("runtime_unlock_probe_rejected_by_inbound_fallback_owner_count={0}" -f $fallbackTailProof.RuntimeUnlockProbeRejectedByInboundFallbackOwnerCount),
         ("fallback_tail_quiescence_timeout_count={0}" -f $fallbackTailProof.QuiescenceTimeoutCount),

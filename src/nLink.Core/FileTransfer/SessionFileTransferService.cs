@@ -7836,6 +7836,11 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.PullRegularNknV4LastPeerSilenceSafetyReplayFrontierChunkIndex = -1;
         context.PullRegularNknV4LastPeerSilenceSafetyReplayEndChunkIndex = -1;
         context.PullRegularNknV4PeerSilenceSafetyReplayCount = 0;
+        context.PullRegularNknV4PeerSilenceMissingDispatchFrontierChunkIndex = -1;
+        context.PullRegularNknV4PeerSilenceMissingDispatchAcceptedUntilExclusive = -1;
+        context.PullRegularNknV4PeerSilenceMissingDispatchRepairKey = null;
+        context.PullRegularNknV4PeerSilenceMissingDispatchUtc = null;
+        context.PullRegularNknV4PeerSilenceMissingDispatchSettledStalledRepairKey = null;
         context.PullTransportLastSafetyReplayGeneration = 0;
         context.PullTransportLastSafetyReplayFrontierChunkIndex = -1;
         context.PullTransportLastSafetyReplayEndChunkIndex = -1;
@@ -7890,6 +7895,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.V6PostTunaFallbackProofReplayReceiverStatePending = false;
         context.V6PostTunaFallbackProofReplayFrontierRequestPending = false;
         context.V6LastReceiverStateSentUtc = null;
+        context.V6LastReceiverStateHighestReceivedChunkIndex = -1;
         context.V6LastFrontierRequestSentUtc = null;
         context.V6LastFrontierRequestChunkIndex = -1;
         context.V6LastFrontierRequestId = null;
@@ -8272,6 +8278,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.V6PostTunaFallbackProofReplayReceiverStatePending = false;
         context.V6PostTunaFallbackProofReplayFrontierRequestPending = false;
         context.V6LastReceiverStateSentUtc = null;
+        context.V6LastReceiverStateHighestReceivedChunkIndex = -1;
         context.V6LastFrontierRequestSentUtc = null;
         context.V6LastFrontierRequestChunkIndex = -1;
         context.V6LastFrontierRequestId = null;
@@ -16269,6 +16276,16 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public int PullRegularNknV4PeerSilenceSafetyReplayCount { get; set; }
 
+        public int PullRegularNknV4PeerSilenceMissingDispatchFrontierChunkIndex { get; set; } = -1;
+
+        public int PullRegularNknV4PeerSilenceMissingDispatchAcceptedUntilExclusive { get; set; } = -1;
+
+        public string? PullRegularNknV4PeerSilenceMissingDispatchRepairKey { get; set; }
+
+        public DateTimeOffset? PullRegularNknV4PeerSilenceMissingDispatchUtc { get; set; }
+
+        public string? PullRegularNknV4PeerSilenceMissingDispatchSettledStalledRepairKey { get; set; }
+
         public int PullFileTunaV4PostTunaReactivationGeneration { get; set; }
 
         public DateTimeOffset? PullFileTunaV4PostTunaReactivationStartedUtc { get; set; }
@@ -17021,6 +17038,8 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public DateTimeOffset? V6PostTunaFallbackFrontierRescueStartedUtc { get; set; }
 
+        public string? V6PostTunaFallbackFrontierRescueSettlementKey { get; set; }
+
         public HashSet<string> FallbackStaleProofSuppressionKeys { get; } = new(StringComparer.Ordinal);
 
         public HashSet<string> RetiredFallbackControlPlaneSendKeys { get; } = new(StringComparer.Ordinal);
@@ -17322,6 +17341,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         public DateTimeOffset? V6EpochLivenessDeferralUtc { get; set; }
 
         public int V6LastReceiverStateCommittedChunkIndex { get; set; } = -1;
+
+        public int V6LastReceiverStateHighestReceivedChunkIndex { get; set; } = -1;
 
         public FileTransferTransportProfileKind TransportProfileKind { get; set; } = FileTransferTransportProfileKind.Default;
 

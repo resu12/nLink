@@ -192,12 +192,22 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("fallback_frontier_state_missing", scriptText, StringComparison.Ordinal);
         Assert.Contains("FallbackFrontierRepairStalled", scriptText, StringComparison.Ordinal);
         Assert.Contains("fallback_frontier_repair_stalled", scriptText, StringComparison.Ordinal);
+        Assert.Contains("fallback_frontier_request_dispatch_missing", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Test-TunaGuiLatestFallbackFrontierRequestDispatchMissing", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Test-TunaGuiFallbackFrontierRequestDispatchTupleMatch", scriptText, StringComparison.Ordinal);
+        Assert.Contains("'live_route_epoch'", scriptText, StringComparison.Ordinal);
+        Assert.Contains("'transport_epoch'", scriptText, StringComparison.Ordinal);
+        Assert.Contains("'checkpoint_request_id'", scriptText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer_v6_frontier_request_receive_dispatched", scriptText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer_v6_frontier_request_receive_dispatch_rejected", scriptText, StringComparison.Ordinal);
         Assert.Contains("fallback_frontier_repair", scriptText, StringComparison.Ordinal);
         Assert.Contains("postTunaFallbackRouteEvidence", scriptText, StringComparison.Ordinal);
         Assert.Contains("postTunaFallbackFrontierRescueObserved", scriptText, StringComparison.Ordinal);
         Assert.Contains("normalToTunaEpochWaitAfterFallback", scriptText, StringComparison.Ordinal);
         Assert.Contains("filetransfer_v6_post_tuna_fallback_frontier_rescue_requested", scriptText, StringComparison.Ordinal);
-        Assert.Contains("(-not $fallbackFrontierRepairStalled) -and ($regularV4FrontierRepairStalledEvent", scriptText, StringComparison.Ordinal);
+        Assert.Contains("regularV4FrontierRepairSettledStalledEvent", scriptText, StringComparison.Ordinal);
+        Assert.Contains("regular_v4_frontier_repair_liveness_settlement_missing", scriptText, StringComparison.Ordinal);
+        Assert.Contains("(-not $fallbackFrontierRepairStalled) -and ($regularV4FrontierRepairSettledStalledEvent", scriptText, StringComparison.Ordinal);
         Assert.Contains("post_fallback_runtime_unlock_resume", scriptText, StringComparison.Ordinal);
         Assert.Contains("post_fallback_runtime_unlock_resume_blocked", scriptText, StringComparison.Ordinal);
         Assert.Contains("fallback_proof_replay_pending_after_paired_yield", scriptText, StringComparison.Ordinal);
@@ -209,9 +219,17 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("rawListenerUnavailable", scriptText, StringComparison.Ordinal);
         Assert.Contains("rawListenerReady", scriptText, StringComparison.Ordinal);
         Assert.True(
+            scriptText.IndexOf("elseif ($fallbackFrontierRequestDispatchMissing)", StringComparison.Ordinal) <
+            scriptText.IndexOf("elseif ($fallbackFrontierRepairStalled)", StringComparison.Ordinal),
+            "Missing fallback frontier request dispatch must classify before generic fallback frontier repair stalls.");
+        Assert.True(
             scriptText.IndexOf("elseif ($fallbackFrontierRepairStalled)", StringComparison.Ordinal) <
+            scriptText.IndexOf("elseif ($regularV4FrontierRepairSettledStalledEvent)", StringComparison.Ordinal),
+            "Fallback frontier repair classification must outrank settled regular V4 frontier labels after a fallback route is current.");
+        Assert.True(
+            scriptText.IndexOf("elseif ($regularV4FrontierRepairSettledStalledEvent)", StringComparison.Ordinal) <
             scriptText.IndexOf("elseif ($regularV4FrontierRepairStalled)", StringComparison.Ordinal),
-            "Fallback frontier repair classification must outrank stale regular V4 frontier labels after a fallback route is current.");
+            "Settled regular V4 frontier repair labels must outrank generic regular V4 frontier stalls.");
     }
 
     [Fact]
@@ -487,6 +505,13 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.DoesNotContain("Second-transfer retained analysis skipped because the scenario-specific retained slice is missing", wrapperText, StringComparison.Ordinal);
         Assert.DoesNotContain("Copy-Item -LiteralPath $retainedPath -Destination $secondRetainedPath", wrapperText, StringComparison.Ordinal);
         Assert.Contains("Invoke-TunaGuiLiveRetainedAnalysisBestEffort", wrapperText, StringComparison.Ordinal);
+        Assert.Contains("Write-TunaGuiFailureSummaryIfMissing", wrapperText, StringComparison.Ordinal);
+        Assert.Contains("$errorSummary.failurePhase", wrapperText, StringComparison.Ordinal);
+        Assert.Contains("$errorSummary.failureReason", wrapperText, StringComparison.Ordinal);
+        Assert.Contains("setupFailurePhase = $SetupFailurePhase", wrapperText, StringComparison.Ordinal);
+        Assert.Contains("setupFailureReason = $SetupFailureReason", wrapperText, StringComparison.Ordinal);
+        Assert.Contains("completed = $false", wrapperText, StringComparison.Ordinal);
+        Assert.Contains("integrityOk = $false", wrapperText, StringComparison.Ordinal);
         Assert.Contains("post_tuna_fallback_v6,file_tuna_v4", guiText, StringComparison.Ordinal);
         Assert.Contains("Second transfer after live reactivation failed route/integrity check", guiText, StringComparison.Ordinal);
     }

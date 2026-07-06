@@ -936,6 +936,70 @@ function Write-TunaGuiControlledRestartFailureSummary {
     $summary | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
 }
 
+function Write-TunaGuiFailureSummaryIfMissing {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [string]$RouteMode = 'v4-restart-v6-fallback',
+        [string]$SetupFailurePhase = 'progress_failure',
+        [string]$SetupFailureReason = 'gui_smoke_failed'
+    )
+
+    $summaryPath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json'
+    if (Test-Path -LiteralPath $summaryPath -PathType Leaf) {
+        return
+    }
+
+    $errorPath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-error.json'
+    $errorSummary = $null
+    if (Test-Path -LiteralPath $errorPath -PathType Leaf) {
+        try {
+            $errorSummary = Get-Content -LiteralPath $errorPath -Raw | ConvertFrom-Json
+        }
+        catch {
+            $errorSummary = $null
+        }
+    }
+
+    if ($null -ne $errorSummary) {
+        if ($errorSummary.PSObject.Properties.Name -contains 'setupFailurePhase' -and
+            -not [string]::IsNullOrWhiteSpace([string]$errorSummary.setupFailurePhase)) {
+            $SetupFailurePhase = [string]$errorSummary.setupFailurePhase
+        }
+        elseif ($errorSummary.PSObject.Properties.Name -contains 'failurePhase' -and
+            -not [string]::IsNullOrWhiteSpace([string]$errorSummary.failurePhase)) {
+            $SetupFailurePhase = [string]$errorSummary.failurePhase
+        }
+
+        if ($errorSummary.PSObject.Properties.Name -contains 'setupFailureReason' -and
+            -not [string]::IsNullOrWhiteSpace([string]$errorSummary.setupFailureReason)) {
+            $SetupFailureReason = [string]$errorSummary.setupFailureReason
+        }
+        elseif ($errorSummary.PSObject.Properties.Name -contains 'failureReason' -and
+            -not [string]::IsNullOrWhiteSpace([string]$errorSummary.failureReason)) {
+            $SetupFailureReason = [string]$errorSummary.failureReason
+        }
+        elseif ($errorSummary.PSObject.Properties.Name -contains 'error' -and
+            -not [string]::IsNullOrWhiteSpace([string]$errorSummary.error)) {
+            $SetupFailureReason = [string]$errorSummary.error
+        }
+    }
+
+    $summary = [ordered]@{
+        event = 'filetransfer_tuna_gui_handoff_summary'
+        routeMode = $RouteMode
+        completed = $false
+        integrityOk = $false
+        setupFailurePhase = $SetupFailurePhase
+        setupFailureReason = $SetupFailureReason
+        inboundState = '(unknown)'
+        outboundState = '(unknown)'
+        inboundErrorCode = '(unknown)'
+        outboundErrorCode = '(unknown)'
+    }
+
+    $summary | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
+}
+
 function Update-TunaGuiControlledRestartSummary {
     param(
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
@@ -1093,6 +1157,7 @@ try {
         }
         else {
             Invoke-TunaGuiLiveRetainedAnalysisBestEffort -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir -RouteMode $RouteMode
+            Write-TunaGuiFailureSummaryIfMissing -ArtifactDir $resolvedArtifactDir -RouteMode $RouteMode -SetupFailurePhase 'progress_failure' -SetupFailureReason 'gui_smoke_failed'
         }
 
         throw "GUI smoke failed with exit code $guiSmokeExitCode. Artifacts: $resolvedArtifactDir"
@@ -1106,6 +1171,7 @@ try {
         }
         else {
             Invoke-TunaGuiLiveRetainedAnalysisBestEffort -RepoRoot $repoRoot -ArtifactDir $resolvedArtifactDir -RouteMode $RouteMode
+            Write-TunaGuiFailureSummaryIfMissing -ArtifactDir $resolvedArtifactDir -RouteMode $RouteMode -SetupFailurePhase 'summary_missing' -SetupFailureReason 'gui_summary_missing'
         }
 
         throw "GUI smoke did not write file-transfer Tuna summary. Artifacts: $resolvedArtifactDir"

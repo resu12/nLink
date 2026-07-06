@@ -806,7 +806,7 @@ public sealed partial class SessionFileTransferService
                         SignalOutboundSparseSenderPump(context);
                         break;
                     case FileTransferFrontierRequestFrameV6 repairRequest:
-                        ApplyOutboundV6RepairRequest(context, repairRequest);
+                        ApplyOutboundV6RepairRequestCore(context, repairRequest, received.TransportKind);
                         SignalOutboundSparseSenderPump(context);
                         break;
                     case FileTransferRepairProofFrameV6 repairProof:
@@ -4739,6 +4739,30 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        if (context.PullRegularNknV4PeerSilenceMissingDispatchFrontierChunkIndex == remoteFrontier &&
+            context.PullRegularNknV4PeerSilenceMissingDispatchAcceptedUntilExclusive >= acceptedUntil)
+        {
+            var settledRepairKey = string.IsNullOrWhiteSpace(context.PullRegularNknV4PeerSilenceMissingDispatchRepairKey)
+                ? $"regular_v4_peer_silence_safety_replay:{remoteFrontier}:settled"
+                : context.PullRegularNknV4PeerSilenceMissingDispatchRepairKey!;
+            var stallAgeMs = context.PullRegularNknV4PeerSilenceMissingDispatchUtc is { } settledUtc
+                ? (long)Math.Max(0, (now - settledUtc).TotalMilliseconds)
+                : 0;
+            TryLogRegularV4PeerSilenceMissingDispatchSettledStalledLocked(
+                context,
+                settledRepairKey,
+                "peer_silence_replay_missing_dispatch_settled",
+                remoteFrontier,
+                Math.Max(-1, remoteFrontier - 1),
+                Math.Max(1, frontierLagChunks),
+                Math.Max(1, context.PullRegularNknV4PeerSilenceSafetyReplayCount),
+                stallAgeMs);
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_regular_v4_peer_silence_safety_replay_skipped; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; skip_reason=missing_dispatch_already_settled; remote_next_expected_chunk_index={remoteFrontier}; chunks_accepted_for_transport={acceptedUntil}; frontier_lag_chunks={frontierLagChunks}; previous_repair_request_key={FormatProtocolLogValue(settledRepairKey)}; feedback_silence_ms={(long)Math.Max(0, feedbackSilence.TotalMilliseconds)}");
+            return false;
+        }
+
         if (context.PullRegularNknV4LastPeerSilenceSafetyReplayUtc is { } lastReplayUtc &&
             now - lastReplayUtc < PullTransportRebindSafetyReplayRearmCooldown)
         {
@@ -5070,22 +5094,6 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        if (!TryAuthorizeRepairReplayLocked(
-                context,
-                repairSend.RuntimeOwner,
-                RepairReplayKind.PeerSilenceReplay,
-                "regular_v4_peer_silence_safety_replay",
-                "requeue_after_send_timeout",
-                context.CurrentTransferLeg,
-                context.CurrentTransferLeg?.TransportEpochId,
-                context.CurrentTransferLeg?.BridgeRecoveryGeneration,
-                null,
-                out var replayDecision) ||
-            replayDecision is not { } peerSilenceReplayDecision)
-        {
-            return false;
-        }
-
         if (!context.RouteRuntime.UsesRegularNknV4FastRuntime ||
             context.NegotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
             context.RouteRuntime.FrameFamily != FileTransferFrameFamily.V4 ||
@@ -5118,6 +5126,43 @@ public sealed partial class SessionFileTransferService
         var lastEndChunkExclusive = requeued.Max() + 1;
         var remoteFrontier = Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, context.ChunkCount);
         var acceptedUntil = ResolveOutboundRepairAcceptedUntilExclusiveLocked(context);
+        if (context.PullRegularNknV4PeerSilenceMissingDispatchFrontierChunkIndex == remoteFrontier &&
+            context.PullRegularNknV4PeerSilenceMissingDispatchAcceptedUntilExclusive >= acceptedUntil)
+        {
+            var settledRepairKey = string.IsNullOrWhiteSpace(context.PullRegularNknV4PeerSilenceMissingDispatchRepairKey)
+                ? repairSend.RepairRequestKey
+                : context.PullRegularNknV4PeerSilenceMissingDispatchRepairKey!;
+            var stallAgeMs = context.PullRegularNknV4PeerSilenceMissingDispatchUtc is { } settledUtc
+                ? (long)Math.Max(0, (DateTimeOffset.UtcNow - settledUtc).TotalMilliseconds)
+                : 0;
+            TryLogRegularV4PeerSilenceMissingDispatchSettledStalledLocked(
+                context,
+                settledRepairKey,
+                "peer_silence_requeue_missing_dispatch_settled",
+                remoteFrontier,
+                Math.Max(-1, remoteFrontier - 1),
+                Math.Max(1, requeued.Count),
+                Math.Max(1, context.PullRegularNknV4PeerSilenceSafetyReplayCount),
+                stallAgeMs);
+            return false;
+        }
+
+        if (!TryAuthorizeRepairReplayLocked(
+                context,
+                repairSend.RuntimeOwner,
+                RepairReplayKind.PeerSilenceReplay,
+                "regular_v4_peer_silence_safety_replay",
+                "requeue_after_send_timeout",
+                context.CurrentTransferLeg,
+                context.CurrentTransferLeg?.TransportEpochId,
+                context.CurrentTransferLeg?.BridgeRecoveryGeneration,
+                null,
+                out var replayDecision) ||
+            replayDecision is not { } peerSilenceReplayDecision)
+        {
+            return false;
+        }
+
         var replayOrdinal = context.PullRegularNknV4PeerSilenceSafetyReplayCount + 1;
         var repairKey = $"regular_v4_peer_silence_safety_replay:{remoteFrontier}:{firstStartChunkIndex}:{requeued.Count}:{replayOrdinal}";
         var regularAuthority = CreateRegularV4FrontierRepairAuthority(
@@ -5162,6 +5207,10 @@ public sealed partial class SessionFileTransferService
         }
 
         context.PullRegularNknV4PeerSilenceSafetyReplayCount = replayOrdinal;
+        context.PullRegularNknV4PeerSilenceMissingDispatchFrontierChunkIndex = remoteFrontier;
+        context.PullRegularNknV4PeerSilenceMissingDispatchAcceptedUntilExclusive = acceptedUntil;
+        context.PullRegularNknV4PeerSilenceMissingDispatchRepairKey = repairKey;
+        context.PullRegularNknV4PeerSilenceMissingDispatchUtc = DateTimeOffset.UtcNow;
         context.PullV4SenderPumpRepairQueue.Enqueue(
             revalidatedRepair with
             {
@@ -5177,6 +5226,46 @@ public sealed partial class SessionFileTransferService
         context.SparseSenderPumpLastWakeReason = "regular_v4_peer_silence_safety_replay_retry";
         context.SignalSparseSenderPump();
         requeuedChunkCount = requeued.Count;
+        return true;
+    }
+
+    private static bool TryLogRegularV4PeerSilenceMissingDispatchSettledStalledLocked(
+        OutboundTransferContext context,
+        string repairRequestKey,
+        string reason,
+        int frontierChunkIndex,
+        int durableReceivedHighestChunkIndex,
+        int requestedChunkCount,
+        int attemptCount,
+        long frontierStallAgeMs)
+    {
+        if (string.Equals(
+                context.PullRegularNknV4PeerSilenceMissingDispatchSettledStalledRepairKey,
+                repairRequestKey,
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        context.PullRegularNknV4PeerSilenceMissingDispatchSettledStalledRepairKey = repairRequestKey;
+        LogFileTransferRegularV4FrontierRepairStalled(
+            FileTransferDirection.Outbound,
+            context.TransferId,
+            context.SessionId,
+            context.CurrentTransferLeg,
+            repairRequestKey,
+            reason,
+            frontierChunkIndex,
+            durableReceivedHighestChunkIndex,
+            requestedChunkCount,
+            attemptCount,
+            frontierStallAgeMs);
+
+        var leg = context.CurrentTransferLeg;
+        var routeToken = leg?.RouteSelection.TelemetryToken ?? FileTransferRouteResolver.RegularNknV4FastToken;
+        LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_regular_v4_frontier_repair_settled_stalled; direction=outbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; route={FormatProtocolLogValue(routeToken)}; protocol_version={leg?.ProtocolVersion ?? FileTransferProtocol.ProtocolVersionV4}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; runtime_generation={context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; terminal_generation={context.TerminalGeneration}; leg_generation={leg?.Generation ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; route_publication_generation={context.LastRoutePublicationGeneration}; target_transport={FormatFileTransferTransportKind(ResolveV4FrontierRepairTargetTransport(routeToken))}; reason={FormatProtocolLogValue(reason)}; frontier_chunk_index={frontierChunkIndex}; durable_received_highest_chunk_index={durableReceivedHighestChunkIndex}; requested_chunk_count={requestedChunkCount}; attempt_count={attemptCount}; frontier_stall_age_ms={frontierStallAgeMs}; settlement=stalled; decision_reason=regular_v4_frontier_repair_missing_dispatch_settled");
         return true;
     }
 
@@ -6387,18 +6476,66 @@ public sealed partial class SessionFileTransferService
     }
 
     private void ApplyOutboundV6RepairRequest(OutboundTransferContext context, FileTransferFrontierRequestFrameV6 repairRequest)
+        => ApplyOutboundV6RepairRequestCore(context, repairRequest, FileTransferTransportKind.Unknown);
+
+    private void ApplyOutboundV6RepairRequestCore(
+        OutboundTransferContext context,
+        FileTransferFrontierRequestFrameV6 repairRequest,
+        FileTransferTransportKind receivedTransportKind)
     {
+        var rawFirstStartChunkIndex = repairRequest.MissingRanges.Count > 0
+            ? repairRequest.MissingRanges[0].StartChunkIndex
+            : -1;
+        var rawFirstChunkCount = repairRequest.MissingRanges.Count > 0
+            ? repairRequest.MissingRanges[0].ChunkCount
+            : 0;
         if (repairRequest.MissingRanges.Count == 0)
         {
+            LogOutboundV6FrontierRequestReceiveDispatch(
+                context,
+                repairRequest,
+                receivedTransportKind,
+                "attempted",
+                "empty_v6_frontier_request",
+                rawFirstStartChunkIndex,
+                rawFirstChunkCount,
+                repairRequest.MissingRanges.Count);
+            LogOutboundV6FrontierRequestReceiveDispatch(
+                context,
+                repairRequest,
+                receivedTransportKind,
+                "rejected",
+                "empty_v6_frontier_request",
+                rawFirstStartChunkIndex,
+                rawFirstChunkCount,
+                repairRequest.MissingRanges.Count);
             return;
         }
 
         var first = repairRequest.MissingRanges[0];
         lock (gate)
         {
+            LogOutboundV6FrontierRequestReceiveDispatch(
+                context,
+                repairRequest,
+                receivedTransportKind,
+                "attempted",
+                "core_receive",
+                first.StartChunkIndex,
+                first.ChunkCount,
+                repairRequest.MissingRanges.Count);
             if (!ReferenceEquals(outboundTransfer, context) ||
                 context.IsTerminal)
             {
+                LogOutboundV6FrontierRequestReceiveDispatch(
+                    context,
+                    repairRequest,
+                    receivedTransportKind,
+                    "rejected",
+                    context.IsTerminal ? "transfer_terminal" : "stale_outbound_context",
+                    first.StartChunkIndex,
+                    first.ChunkCount,
+                    repairRequest.MissingRanges.Count);
                 return;
             }
 
@@ -6408,6 +6545,15 @@ public sealed partial class SessionFileTransferService
                     FileTransferProtocol.FrontierRequestFrameTypeV6,
                     "peer_repair_request_after_fallback_yield"))
             {
+                LogOutboundV6FrontierRequestReceiveDispatch(
+                    context,
+                    repairRequest,
+                    receivedTransportKind,
+                    "rejected",
+                    "peer_repair_request_after_fallback_yield",
+                    first.StartChunkIndex,
+                    first.ChunkCount,
+                    repairRequest.MissingRanges.Count);
                 return;
             }
 
@@ -6415,6 +6561,15 @@ public sealed partial class SessionFileTransferService
                 IsEpochlessOutboundPostTunaFallbackV6FrontierRequestLocked(context, repairRequest, first);
             if (repairRequest.TransportEpoch <= 0 && !allowEpochlessPostTunaFallbackFrontier)
             {
+                LogOutboundV6FrontierRequestReceiveDispatch(
+                    context,
+                    repairRequest,
+                    receivedTransportKind,
+                    "rejected",
+                    "missing_transport_epoch",
+                    first.StartChunkIndex,
+                    first.ChunkCount,
+                    repairRequest.MissingRanges.Count);
                 LocalOperationalLog.Info(
                     "FileTransferService",
                     $"event=filetransfer_v6_recovery_frame_ignored; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; frame_type={FileTransferProtocol.FrontierRequestFrameTypeV6}; reason=missing_transport_epoch; frame_transport_epoch={repairRequest.TransportEpoch}; route={context.RouteSelection.TelemetryToken}; recovery_mode={FormatProtocolLogValue(repairRequest.RecoveryMode ?? "(none)")}; first_start_chunk_index={first.StartChunkIndex}; requested_chunk_count={first.ChunkCount}");
@@ -6437,6 +6592,15 @@ public sealed partial class SessionFileTransferService
                     null,
                     out _))
             {
+                LogOutboundV6FrontierRequestReceiveDispatch(
+                    context,
+                    repairRequest,
+                    receivedTransportKind,
+                    "rejected",
+                    "repair_replay_authority_rejected",
+                    first.StartChunkIndex,
+                    first.ChunkCount,
+                    repairRequest.MissingRanges.Count);
                 return;
             }
 
@@ -6474,6 +6638,15 @@ public sealed partial class SessionFileTransferService
                         first.StartChunkIndex + first.ChunkCount - 1,
                         requireFrontierEvidence: true))
                 {
+                    LogOutboundV6FrontierRequestReceiveDispatch(
+                        context,
+                        repairRequest,
+                        receivedTransportKind,
+                        "rejected",
+                        "recovered_epoch",
+                        first.StartChunkIndex,
+                        first.ChunkCount,
+                        repairRequest.MissingRanges.Count);
                     LocalOperationalLog.Info(
                         "FileTransferService",
                         $"event=filetransfer_v6_recovery_frame_ignored; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; frame_type={FileTransferProtocol.FrontierRequestFrameTypeV6}; reason=recovered_epoch; frame_transport_epoch={repairRequest.TransportEpoch}; last_recovered_transport_epoch={context.LastRecoveredV6TransportHandoffEpoch}");
@@ -6526,6 +6699,15 @@ public sealed partial class SessionFileTransferService
                             first.StartChunkIndex + first.ChunkCount - 1,
                             requireFrontierEvidence: true))
                     {
+                        LogOutboundV6FrontierRequestReceiveDispatch(
+                            context,
+                            repairRequest,
+                            receivedTransportKind,
+                            "rejected",
+                            "stale_or_mismatched_epoch",
+                            first.StartChunkIndex,
+                            first.ChunkCount,
+                            repairRequest.MissingRanges.Count);
                         LocalOperationalLog.Info(
                             "FileTransferService",
                             $"event=filetransfer_v6_recovery_frame_ignored; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; frame_type={FileTransferProtocol.FrontierRequestFrameTypeV6}; reason=stale_or_mismatched_epoch; frame_transport_epoch={repairRequest.TransportEpoch}; current_transport_epoch={context.V6TransportHandoff.EpochId}");
@@ -6578,6 +6760,15 @@ public sealed partial class SessionFileTransferService
             RecoveryMode = repairRequest.RecoveryMode,
         };
         EnqueueV4RepairsFromState(context, syntheticState);
+        LogOutboundV6FrontierRequestReceiveDispatch(
+            context,
+            repairRequest,
+            receivedTransportKind,
+            "dispatched",
+            "queued_for_legacy_sender_repair",
+            first.StartChunkIndex,
+            first.ChunkCount,
+            repairRequest.MissingRanges.Count);
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_v6_frontier_repair_requested; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={repairRequest.TransportEpoch}; repair_request_id={FormatProtocolLogValue(repairRequest.RepairRequestId ?? "(none)")}; priority={FormatProtocolLogValue(repairRequest.Priority ?? "(none)")}; first_start_chunk_index={first.StartChunkIndex}; requested_chunk_count={first.ChunkCount}; range_count={repairRequest.MissingRanges.Count}");
@@ -11029,6 +11220,31 @@ public sealed partial class SessionFileTransferService
                         MarkInboundV4PeerFrameReceived(context);
                         ApplyInboundFallbackTailYieldProof(context, yield);
                         break;
+                    case FileTransferManifestFrameV6 manifest when ShouldUseV6SparseCreditEnvelope(context):
+                        MarkInboundV4PeerFrameReceived(context);
+                        if (!await InitializeInboundV6ManifestAsync(context, manifest).ConfigureAwait(false))
+                        {
+                            return;
+                        }
+
+                        if (context.UserPaused)
+                        {
+                            await SendInboundV4PauseControlAsync(context, "user_paused_manifest_received").ConfigureAwait(false);
+                        }
+
+                        await SendInboundV6ReceiverStateAsync(context, "manifest_received", forceSend: true).ConfigureAwait(false);
+                        await SendInboundV6FrontierRequestAsync(context, "manifest_received", forceSend: true).ConfigureAwait(false);
+                        if (manifest.ChunkCount == 0)
+                        {
+                            await FinalizeInboundTransferAsync(context, context.LifetimeCts.Token).ConfigureAwait(false);
+                        }
+
+                        if (isPrimaryRegularNknBulkV6)
+                        {
+                            LogPrimaryRegularNknBulkV6State(context, PrimaryRegularNknBulkV6State.CreditGranted, "manifest_received");
+                        }
+
+                        break;
                     case FileTransferManifestFrameV4 manifest:
                         MarkInboundV4PeerFrameReceived(context);
                         if (!await InitializeInboundV4ManifestAsync(context, manifest).ConfigureAwait(false))
@@ -11053,7 +11269,8 @@ public sealed partial class SessionFileTransferService
                         }
 
                         break;
-                    case FileTransferChunkBatchFrameV6 batch when ShouldUsePostTunaFallbackV6SparseRuntimeLocked(context):
+                    case FileTransferChunkBatchFrameV6 batch when ShouldUseV6SparseCreditEnvelope(context) ||
+                                                                 ShouldUsePostTunaFallbackV6SparseRuntimeLocked(context):
                         MarkInboundV4PeerFrameReceived(context);
                         await HandleInboundV6ChunkBatchAsync(context, batch, received.TransportKind).ConfigureAwait(false);
                         break;

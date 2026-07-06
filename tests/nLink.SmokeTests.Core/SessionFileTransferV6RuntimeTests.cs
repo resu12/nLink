@@ -1297,7 +1297,10 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
             await senderSession.SendAsync(
                 CreateManifest(sessionId, transferId, "v6-post-fallback-paused-liveness.bin", payload.Length, chunkSize, sha256),
                 CancellationToken.None);
-            await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Any());
+            await WaitUntilAsync(() =>
+                ReadOperationalLogTail(logStart).Contains(
+                    "event=filetransfer_v6_manifest_received;",
+                    StringComparison.Ordinal));
 
             await senderSession.SendAsync(
                 new FileTransferChunkBatchFrameV6
@@ -1903,9 +1906,11 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
 
         var logTail = ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_v6_post_tuna_fallback_frontier_rescue_requested", logTail, StringComparison.Ordinal);
+        Assert.Contains($"repair_request_key={firstFrontierRequest.RepairRequestId}", logTail, StringComparison.Ordinal);
         Assert.Contains("rescue_step=0", logTail, StringComparison.Ordinal);
         Assert.Contains("rescue_step=1", logTail, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_v6_post_tuna_fallback_frontier_rescue_widened", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v6_post_tuna_fallback_frontier_rescue_coalesced", logTail, StringComparison.Ordinal);
     }
 
     [Fact]

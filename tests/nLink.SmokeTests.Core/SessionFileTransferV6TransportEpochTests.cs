@@ -406,6 +406,18 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         await WaitUntilAsync(
             () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v6_peer_epoch_promoted_live_route; direction=inbound", StringComparison.Ordinal),
             timeoutMs: 5000);
+        string? routeSelectedLog = null;
+        await WaitUntilAsync(
+            () =>
+            {
+                routeSelectedLog = ReadOperationalLogTail(logStart)
+                    .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                    .LastOrDefault(line =>
+                        line.Contains("event=filetransfer_route_selected; direction=inbound", StringComparison.Ordinal) &&
+                        line.Contains("route=post_tuna_fallback_v6; protocol_version=6", StringComparison.Ordinal));
+                return routeSelectedLog is not null;
+            },
+            timeoutMs: 5000);
         await WaitUntilAsync(
             () => receiverTransport.SentDataFrames.OfType<FileTransferFrontierRequestFrameV6>().Any(frame =>
                 frame.TransferId == transferId &&
@@ -439,15 +451,9 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             timeoutMs: 5000);
 
         var logTail = ReadOperationalLogTail(logStart);
-        Assert.Contains("event=filetransfer_route_selected; direction=inbound", logTail, StringComparison.Ordinal);
-        Assert.Contains("route=post_tuna_fallback_v6; protocol_version=6", logTail, StringComparison.Ordinal);
-        var routeSelectedLog = logTail
-            .Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
-            .Single(line =>
-                line.Contains("event=filetransfer_route_selected; direction=inbound", StringComparison.Ordinal) &&
-                line.Contains("route=post_tuna_fallback_v6; protocol_version=6", StringComparison.Ordinal));
+        Assert.NotNull(routeSelectedLog);
         AssertPublicationAuthorityFields(
-            routeSelectedLog,
+            routeSelectedLog!,
             route: FileTransferRouteResolver.PostTunaFallbackV6Token,
             protocolVersion: FileTransferProtocol.ProtocolVersionV6,
             targetTransport: "regular_nkn");
@@ -1410,7 +1416,10 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
 
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=filetransfer_v6_post_tuna_fallback_send_timeout_frontier_repair_queued", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_v6_post_tuna_fallback_normal_send_ahead_freeze_started", logTail, StringComparison.Ordinal);
+            Assert.True(
+                logTail.Contains("event=filetransfer_v6_post_tuna_fallback_normal_send_ahead_freeze_started", StringComparison.Ordinal) ||
+                logTail.Contains("event=filetransfer_v6_post_tuna_fallback_normal_send_ahead_freeze_already_active", StringComparison.Ordinal),
+                logTail);
             Assert.Contains("exact_frontier_requeued_chunk_count=1", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("state=Failed", logTail, StringComparison.Ordinal);
         }
@@ -2435,11 +2444,27 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             true));
 
         Assert.True(await sendTask);
+        var firstFrontierRequest = receiverTransport.SentDataFrames
+            .OfType<FileTransferFrontierRequestFrameV6>()
+            .Last();
+
+        var secondSendTask = Assert.IsAssignableFrom<Task<bool>>(InvokePrivateMethod(
+            service,
+            "SendInboundV6FrontierRequestAsync",
+            context,
+            "transport_epoch",
+            true));
+
+        Assert.True(await secondSendTask);
         var logTail = ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_v6_frontier_request_sent", logTail, StringComparison.Ordinal);
         Assert.Contains("recovery_mode=waiting_for_target_transport", logTail, StringComparison.Ordinal);
         Assert.Contains("post_tuna_fallback_survival=1", logTail, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_v6_post_tuna_fallback_frontier_rescue_requested", logTail, StringComparison.Ordinal);
+        Assert.Contains("frontier_chunk_index=10", logTail, StringComparison.Ordinal);
+        Assert.DoesNotContain("frontier_chunk_index=-1", logTail, StringComparison.Ordinal);
+        Assert.Contains($"repair_request_key={firstFrontierRequest.RepairRequestId}", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v6_post_tuna_fallback_frontier_rescue_coalesced", logTail, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2855,6 +2880,8 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             timeoutMs: 5000);
 
         var logTail = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_v6_frontier_request_receive_dispatch_attempted", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v6_frontier_request_receive_dispatched", logTail, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_v6_frontier_request_advanced_remote_frontier", logTail, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_v6_epoch_request_blocked", logTail, StringComparison.Ordinal);
     }

@@ -1225,6 +1225,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     public void RegularNknV4PeerSilenceSafetyReplay_RequeuesAfterSendTimeout()
     {
         const string transferId = "transfer_regular_v4_peer_silence_replay_requeue";
+        var logStart = GetOperationalLogLength();
         using var service = new SessionFileTransferService();
         using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
         service.AttachTransport(transport);
@@ -1265,6 +1266,29 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         var replay = Assert.Single(GetQueuedV4RepairSends(context));
         Assert.Equal(100, GetIntProperty(replay, "FirstStartChunkIndex"));
         Assert.Equal("regular_v4_peer_silence_safety_replay", GetStringProperty(replay, "DeliveryEscalationReason"));
+
+        var secondDequeuedRepair = repairQueue.GetType().GetMethod("Dequeue")!.Invoke(repairQueue, null)!;
+        queuedChunkIndices.GetType().GetMethod("Clear")!.Invoke(queuedChunkIndices, null);
+
+        args = [context, secondDequeuedRepair, 0];
+        requeued = (bool)typeof(SessionFileTransferService)
+            .GetMethod("TryRequeueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, args)!;
+
+        Assert.False(requeued);
+        Assert.Empty(GetQueuedV4RepairSends(context));
+
+        args = [context, secondDequeuedRepair, 0];
+        requeued = (bool)typeof(SessionFileTransferService)
+            .GetMethod("TryRequeueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, args)!;
+
+        Assert.False(requeued);
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_regular_v4_frontier_repair_stalled;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_regular_v4_frontier_repair_settled_stalled;", log, StringComparison.Ordinal);
+        Assert.Contains("reason=peer_silence_requeue_missing_dispatch_settled", log, StringComparison.Ordinal);
+        Assert.Equal(1, CountOccurrences(log, "event=filetransfer_regular_v4_frontier_repair_settled_stalled;"));
     }
 
     [Fact]
@@ -9975,6 +9999,9 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Equal(129, queuedRepairType.GetProperty("LastEndChunkExclusive")!.GetValue(queuedRepair));
         Assert.Equal([128], chunkIndices);
         var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_v6_frontier_request_receive_dispatch_attempted;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v6_frontier_request_receive_dispatched;", log, StringComparison.Ordinal);
+        Assert.Contains("decision_reason=queued_for_legacy_sender_repair", log, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_v6_epochless_post_tuna_fallback_frontier_request_accepted;", log, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_v6_frontier_request_advanced_remote_frontier;", log, StringComparison.Ordinal);
         Assert.Contains("transport_epoch=0", log, StringComparison.Ordinal);
@@ -10020,6 +10047,9 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
         Assert.Equal(100, GetPrivateProperty<int>(context, "RemoteNextExpectedChunkIndex"));
         var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_v6_frontier_request_receive_dispatch_attempted;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v6_frontier_request_receive_dispatch_rejected;", log, StringComparison.Ordinal);
+        Assert.Contains("decision_reason=missing_transport_epoch", log, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_v6_recovery_frame_ignored;", log, StringComparison.Ordinal);
         Assert.Contains("reason=missing_transport_epoch", log, StringComparison.Ordinal);
     }
