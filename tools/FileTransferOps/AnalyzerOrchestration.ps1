@@ -591,6 +591,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("gate_status={0}" -f $gateStatus),
         ("retained_analysis_mode=compact"),
         ("event_count={0}" -f $totalIndexedEventCount),
+        ("hard_failure_count={0}" -f $hardFailureCount),
         ("liveness_timeout_count={0}" -f $livenessTimeoutCount),
         ("liveness_timeout_before_terminal_count={0}" -f $preTerminalLivenessTimeoutCount),
         ("liveness_timeout_after_terminal_count={0}" -f $postTerminalLivenessTimeoutCount)

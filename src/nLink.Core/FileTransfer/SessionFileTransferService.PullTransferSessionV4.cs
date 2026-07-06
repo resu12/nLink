@@ -4520,6 +4520,26 @@ public sealed partial class SessionFileTransferService
                             regularDeferredAuthority,
                             repairSend.RequestedChunkCount,
                             "regular_v4_frontier_repair_send_deferred");
+
+                        if (requeuedRegularV4PeerSilenceRepair)
+                        {
+                            LogFileTransferRegularV4FrontierRepairMissingDispatch(
+                                FileTransferDirection.Outbound,
+                                context.TransferId,
+                                context.SessionId,
+                                regularDeferredAuthority,
+                                repairSend.ProtocolRepairRequestId ?? "(none)",
+                                "send",
+                                repairSend.ChunkIndices.Count,
+                                repairSend.RemoteNextExpectedChunkIndex,
+                                repairSend.ChunksAcceptedForTransport,
+                                "send_deferred_requeued_after_timeout");
+                            ObserveRegularV4FrontierRepairDispatchBlocker(
+                                context,
+                                regularDeferredAuthority,
+                                repairSend.RequestedChunkCount,
+                                "regular_v4_frontier_repair_missing_dispatch");
+                        }
                     }
 
                     LocalOperationalLog.Warn(

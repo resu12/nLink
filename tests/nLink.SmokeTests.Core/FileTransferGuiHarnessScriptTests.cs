@@ -513,6 +513,36 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public void RetainedAnalysisCompletedProofsReapLingeringAnalyzerProcess()
+    {
+        var repoRoot = FindRepoRoot();
+        var wrapperText = File.ReadAllText(Path.Combine(repoRoot, "tools", "Run-FileTransferTunaGuiSmoke.ps1"));
+        var routeAcceptanceText = File.ReadAllText(Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"));
+        var analyzerText = File.ReadAllText(Path.Combine(repoRoot, "tools", "FileTransferOps", "AnalyzerOrchestration.ps1"));
+
+        Assert.Contains("Test-TunaGuiRetainedAnalysisCompletedProofArtifacts", wrapperText, StringComparison.Ordinal);
+        Assert.Contains("Stop-TunaGuiRetainedAnalysisProcess", wrapperText, StringComparison.Ordinal);
+        Assert.Contains("Test-RouteAcceptanceRetainedAnalysisCompletedProofArtifacts", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("Stop-RouteAcceptanceRetainedAnalysisProcess", routeAcceptanceText, StringComparison.Ordinal);
+
+        foreach (var scriptText in new[] { wrapperText, routeAcceptanceText })
+        {
+            Assert.Contains("filetransfer-retained-analysis-completed-process-reaped.json", scriptText, StringComparison.Ordinal);
+            Assert.Contains("completed_artifacts_observed_while_process_alive", scriptText, StringComparison.Ordinal);
+            Assert.Contains("stability-gates-summary.txt", scriptText, StringComparison.Ordinal);
+            Assert.Contains("hard_failure_count", scriptText, StringComparison.Ordinal);
+            Assert.Contains("gate_status", scriptText, StringComparison.Ordinal);
+            Assert.Contains("StartsWith('FAIL'", scriptText, StringComparison.Ordinal);
+            Assert.Contains("StartsWith('INVALID'", scriptText, StringComparison.Ordinal);
+            Assert.Contains("StartsWith('INCONCLUSIVE'", scriptText, StringComparison.Ordinal);
+            Assert.Contains("$Process.WaitForExit(5000)", scriptText, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("'stability-gates-summary.txt'", analyzerText, StringComparison.Ordinal);
+        Assert.Contains("\"hard_failure_count={0}\" -f $hardFailureCount", analyzerText, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void RunFileTransferTunaGuiSmoke_MergesMilestoneEvidenceChronologically()
     {
         var repoRoot = FindRepoRoot();

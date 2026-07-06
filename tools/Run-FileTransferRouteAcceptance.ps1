@@ -3133,6 +3133,90 @@ function Write-RouteAcceptanceRetainedAnalysisTimeoutArtifacts {
     return $terminalSuccessWithProof
 }
 
+function Test-RouteAcceptanceRetainedAnalysisCompletedProofArtifacts {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [string]$LiveRouteProofMode = 'None'
+    )
+
+    $guiSummaryPath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json'
+    $routeSummaryPath = Join-Path $ArtifactDir 'filetransfer-route-consistency-summary.txt'
+    $operatorVerdictPath = Join-Path $ArtifactDir 'filetransfer-operator-verdict.txt'
+    $stabilitySummaryPath = Join-Path $ArtifactDir 'stability-gates-summary.txt'
+    if (-not (Test-Path -LiteralPath $guiSummaryPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $routeSummaryPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $operatorVerdictPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $stabilitySummaryPath -PathType Leaf)) {
+        return $false
+    }
+
+    try {
+        $summary = Get-Content -LiteralPath $guiSummaryPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if (-not [string]::Equals([string]$summary.completed, 'True', [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals([string]$summary.integrityOk, 'True', [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+    catch {
+        return $false
+    }
+
+    $operator = Read-RouteAcceptanceKeyValueArtifact -Path $operatorVerdictPath
+    $operatorVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'verdict' -DefaultValue '(missing)'
+    $operatorHardFailureCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'hard_failure_count' -DefaultValue '-1')
+    if ($operatorHardFailureCount -ne 0 -or
+        [string]::Equals($operatorVerdict, '(missing)', [System.StringComparison]::OrdinalIgnoreCase) -or
+        $operatorVerdict.StartsWith('FAIL', [System.StringComparison]::OrdinalIgnoreCase) -or
+        $operatorVerdict.StartsWith('INVALID', [System.StringComparison]::OrdinalIgnoreCase) -or
+        $operatorVerdict.StartsWith('INCONCLUSIVE', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+
+    $stability = Read-RouteAcceptanceKeyValueArtifact -Path $stabilitySummaryPath
+    $stabilityGateStatus = Get-RouteAcceptanceReportValue -Report $stability -Name 'gate_status' -DefaultValue '(missing)'
+    $stabilityHardFailureCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $stability -Name 'hard_failure_count' -DefaultValue '0')
+    if (-not [string]::Equals($stabilityGateStatus, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -or
+        $stabilityHardFailureCount -ne 0) {
+        return $false
+    }
+
+    $routeSummary = Read-RouteAcceptanceKeyValueArtifact -Path $routeSummaryPath
+    $routeConsistencyVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'route_consistency_verdict' -DefaultValue '(missing)'
+    $liveRouteEpochProofVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'live_route_epoch_proof_verdict' -DefaultValue '(missing)'
+    $fallbackLegAuthorityProofVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'fallback_leg_authority_proof_verdict' -DefaultValue '(missing)'
+    $cleanFallbackLegProofVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'clean_fallback_leg_proof_verdict' -DefaultValue $fallbackLegAuthorityProofVerdict
+    $bridgeLivenessIntegrationVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'bridge_liveness_integration_verdict' -DefaultValue '(missing)'
+    $controlPlaneIsolationVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'control_plane_isolation_verdict' -DefaultValue '(missing)'
+    $requiresLiveProof = -not [string]::Equals($LiveRouteProofMode, 'None', [System.StringComparison]::OrdinalIgnoreCase)
+    $hasFailedRouteProof = [string]::Equals($liveRouteEpochProofVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($fallbackLegAuthorityProofVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($cleanFallbackLegProofVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($bridgeLivenessIntegrationVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($controlPlaneIsolationVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase)
+
+    return [string]::Equals($routeConsistencyVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -and
+        (-not $hasFailedRouteProof) -and
+        (-not $requiresLiveProof -or [string]::Equals($liveRouteEpochProofVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase)) -and
+        (-not $requiresLiveProof -or [string]::Equals($fallbackLegAuthorityProofVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase)) -and
+        (-not $requiresLiveProof -or [string]::Equals($cleanFallbackLegProofVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase)) -and
+        (-not $requiresLiveProof -or [string]::Equals($bridgeLivenessIntegrationVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase)) -and
+        (-not $requiresLiveProof -or [string]::Equals($controlPlaneIsolationVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase))
+}
+
+function Stop-RouteAcceptanceRetainedAnalysisProcess {
+    param([Parameter(Mandatory = $true)]$Process)
+
+    try {
+        Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+    } catch {
+    }
+
+    try {
+        $Process.WaitForExit(5000) | Out-Null
+    } catch {
+    }
+}
+
 function Invoke-RouteAcceptanceRetainedAnalysis {
     param(
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
@@ -3190,12 +3274,29 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
 
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
-        if (-not $process.WaitForExit($analysisTimeoutSeconds * 1000)) {
-            try {
-                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-            } catch {
+        $deadlineUtc = $startedUtc.AddSeconds($analysisTimeoutSeconds)
+        while (-not $process.WaitForExit(5000)) {
+            if (Test-RouteAcceptanceRetainedAnalysisCompletedProofArtifacts -ArtifactDir $ArtifactDir -LiveRouteProofMode $LiveRouteProofMode) {
+                Stop-RouteAcceptanceRetainedAnalysisProcess -Process $process
+                $diagnostics = [ordered]@{
+                    completed_artifacts_observed_while_process_alive = 1
+                    timed_out = 0
+                    process_id = $process.Id
+                    started_utc = $startedUtc.ToString('O')
+                    ended_utc = [DateTimeOffset]::UtcNow.ToString('O')
+                    artifact_dir = $ArtifactDir
+                    log_path = $logPath
+                    live_route_proof_mode = $LiveRouteProofMode
+                }
+                $diagnostics | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-retained-analysis-completed-process-reaped.json') -Encoding UTF8
+                return
             }
 
+            if ([DateTimeOffset]::UtcNow -lt $deadlineUtc) {
+                continue
+            }
+
+            Stop-RouteAcceptanceRetainedAnalysisProcess -Process $process
             $diagnostics = [ordered]@{
                 timed_out = 1
                 timeout_seconds = $analysisTimeoutSeconds

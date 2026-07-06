@@ -271,6 +271,93 @@ function Write-TunaGuiRetainedAnalysisTimeoutArtifacts {
     return $terminalSuccessWithProof
 }
 
+function Test-TunaGuiRetainedAnalysisCompletedProofArtifacts {
+    param(
+        [Parameter(Mandatory = $true)][string]$AnalysisDir,
+        [Parameter(Mandatory = $true)][string]$LogPath,
+        [string]$LiveRouteProofMode = 'None'
+    )
+
+    $artifactDir = Split-Path -Parent $LogPath
+    $guiSummaryPath = Join-Path $artifactDir 'filetransfer-tuna-gui-summary.json'
+    $routeSummaryPath = Join-Path $AnalysisDir 'filetransfer-route-consistency-summary.txt'
+    $operatorVerdictPath = Join-Path $AnalysisDir 'filetransfer-operator-verdict.txt'
+    $stabilitySummaryPath = Join-Path $AnalysisDir 'stability-gates-summary.txt'
+    if (-not (Test-Path -LiteralPath $guiSummaryPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $routeSummaryPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $operatorVerdictPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $stabilitySummaryPath -PathType Leaf)) {
+        return $false
+    }
+
+    try {
+        $summary = Get-Content -LiteralPath $guiSummaryPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if (-not [string]::Equals([string]$summary.completed, 'True', [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals([string]$summary.integrityOk, 'True', [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+    catch {
+        return $false
+    }
+
+    $operatorVerdict = Read-TunaGuiReportValue -ReportPath $operatorVerdictPath -Key 'verdict' -DefaultValue '(missing)'
+    $operatorHardFailureCountText = Read-TunaGuiReportValue -ReportPath $operatorVerdictPath -Key 'hard_failure_count' -DefaultValue '(missing)'
+    $operatorHardFailureCount = 0
+    if (-not [int]::TryParse($operatorHardFailureCountText, [ref]$operatorHardFailureCount) -or
+        $operatorHardFailureCount -ne 0 -or
+        [string]::Equals($operatorVerdict, '(missing)', [System.StringComparison]::OrdinalIgnoreCase) -or
+        $operatorVerdict.StartsWith('FAIL', [System.StringComparison]::OrdinalIgnoreCase) -or
+        $operatorVerdict.StartsWith('INVALID', [System.StringComparison]::OrdinalIgnoreCase) -or
+        $operatorVerdict.StartsWith('INCONCLUSIVE', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+
+    $stabilityGateStatus = Read-TunaGuiReportValue -ReportPath $stabilitySummaryPath -Key 'gate_status' -DefaultValue '(missing)'
+    $stabilityHardFailureCountText = Read-TunaGuiReportValue -ReportPath $stabilitySummaryPath -Key 'hard_failure_count' -DefaultValue '0'
+    $stabilityHardFailureCount = 0
+    if (-not [string]::Equals($stabilityGateStatus, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not [int]::TryParse($stabilityHardFailureCountText, [ref]$stabilityHardFailureCount) -or
+        $stabilityHardFailureCount -ne 0) {
+        return $false
+    }
+
+    $routeConsistencyVerdict = Read-TunaGuiReportValue -ReportPath $routeSummaryPath -Key 'route_consistency_verdict' -DefaultValue '(missing)'
+    $liveRouteEpochProofVerdict = Read-TunaGuiReportValue -ReportPath $routeSummaryPath -Key 'live_route_epoch_proof_verdict' -DefaultValue '(missing)'
+    $fallbackLegAuthorityProofVerdict = Read-TunaGuiReportValue -ReportPath $routeSummaryPath -Key 'fallback_leg_authority_proof_verdict' -DefaultValue '(missing)'
+    $cleanFallbackLegProofVerdict = Read-TunaGuiReportValue -ReportPath $routeSummaryPath -Key 'clean_fallback_leg_proof_verdict' -DefaultValue $fallbackLegAuthorityProofVerdict
+    $bridgeLivenessIntegrationVerdict = Read-TunaGuiReportValue -ReportPath $routeSummaryPath -Key 'bridge_liveness_integration_verdict' -DefaultValue '(missing)'
+    $controlPlaneIsolationVerdict = Read-TunaGuiReportValue -ReportPath $routeSummaryPath -Key 'control_plane_isolation_verdict' -DefaultValue '(missing)'
+    $requiresLiveProof = -not [string]::Equals($LiveRouteProofMode, 'None', [System.StringComparison]::OrdinalIgnoreCase)
+    $hasFailedRouteProof = [string]::Equals($liveRouteEpochProofVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($fallbackLegAuthorityProofVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($cleanFallbackLegProofVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($bridgeLivenessIntegrationVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($controlPlaneIsolationVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase)
+
+    return [string]::Equals($routeConsistencyVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -and
+        (-not $hasFailedRouteProof) -and
+        (-not $requiresLiveProof -or [string]::Equals($liveRouteEpochProofVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase)) -and
+        (-not $requiresLiveProof -or [string]::Equals($fallbackLegAuthorityProofVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase)) -and
+        (-not $requiresLiveProof -or [string]::Equals($cleanFallbackLegProofVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase)) -and
+        (-not $requiresLiveProof -or [string]::Equals($bridgeLivenessIntegrationVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase)) -and
+        (-not $requiresLiveProof -or [string]::Equals($controlPlaneIsolationVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase))
+}
+
+function Stop-TunaGuiRetainedAnalysisProcess {
+    param([Parameter(Mandatory = $true)]$Process)
+
+    try {
+        Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+    } catch {
+    }
+
+    try {
+        $Process.WaitForExit(5000) | Out-Null
+    } catch {
+    }
+}
+
 function Invoke-TunaGuiRetainedAnalysis {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
@@ -329,12 +416,29 @@ function Invoke-TunaGuiRetainedAnalysis {
 
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
-        if (-not $process.WaitForExit($analysisTimeoutSeconds * 1000)) {
-            try {
-                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-            } catch {
+        $deadlineUtc = $startedUtc.AddSeconds($analysisTimeoutSeconds)
+        while (-not $process.WaitForExit(5000)) {
+            if (Test-TunaGuiRetainedAnalysisCompletedProofArtifacts -AnalysisDir $AnalysisDir -LogPath $LogPath -LiveRouteProofMode $LiveRouteProofMode) {
+                Stop-TunaGuiRetainedAnalysisProcess -Process $process
+                $diagnostics = [ordered]@{
+                    completed_artifacts_observed_while_process_alive = 1
+                    timed_out = 0
+                    process_id = $process.Id
+                    started_utc = $startedUtc.ToString('O')
+                    ended_utc = [DateTimeOffset]::UtcNow.ToString('O')
+                    artifact_dir = $AnalysisDir
+                    log_path = $LogPath
+                    live_route_proof_mode = $LiveRouteProofMode
+                }
+                $diagnostics | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $AnalysisDir 'filetransfer-retained-analysis-completed-process-reaped.json') -Encoding UTF8
+                return
             }
 
+            if ([DateTimeOffset]::UtcNow -lt $deadlineUtc) {
+                continue
+            }
+
+            Stop-TunaGuiRetainedAnalysisProcess -Process $process
             $diagnostics = [ordered]@{
                 timed_out = 1
                 timeout_seconds = $analysisTimeoutSeconds

@@ -367,6 +367,54 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
+    public void RegularNknV4PeerSilenceSafetyReplay_SendDeferralEmitsMissingDispatchProof()
+    {
+        static string FindRepoRoot()
+        {
+            var directory = new DirectoryInfo(AppContext.BaseDirectory);
+            while (directory is not null)
+            {
+                if (File.Exists(Path.Combine(directory.FullName, "nLink.sln")) &&
+                    Directory.Exists(Path.Combine(directory.FullName, "src")))
+                {
+                    return directory.FullName;
+                }
+
+                directory = directory.Parent;
+            }
+
+            throw new InvalidOperationException("Could not find repository root.");
+        }
+
+        var sourcePath = Path.Combine(
+            FindRepoRoot(),
+            "src",
+            "nLink.Core",
+            "FileTransfer",
+            "SessionFileTransferService.PullTransferSessionV4.cs");
+        var source = File.ReadAllText(sourcePath);
+        var requeueIndex = source.IndexOf(
+            "filetransfer_regular_v4_peer_silence_safety_replay_requeued_after_send_timeout",
+            StringComparison.Ordinal);
+        Assert.True(requeueIndex >= 0, "Expected peer-silence replay requeue logging to exist.");
+
+        var deferredIndex = source.LastIndexOf(
+            "LogFileTransferRegularV4FrontierRepairSendDeferred",
+            requeueIndex,
+            StringComparison.Ordinal);
+        var missingDispatchIndex = source.LastIndexOf(
+            "LogFileTransferRegularV4FrontierRepairMissingDispatch",
+            requeueIndex,
+            StringComparison.Ordinal);
+        Assert.True(deferredIndex >= 0, "Expected send-deferral proof before the requeue log.");
+        Assert.True(missingDispatchIndex > deferredIndex, "Expected missing-dispatch proof for deferred peer-silence replay sends.");
+
+        var proofBlock = source[missingDispatchIndex..requeueIndex];
+        Assert.Contains("send_deferred_requeued_after_timeout", proofBlock, StringComparison.Ordinal);
+        Assert.Contains("\"regular_v4_frontier_repair_missing_dispatch\"", proofBlock, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void FileTunaV4PostTunaReactivation_ArmsFrontierReplayForStalePeerState()
     {
         const string transferId = "transfer_file_tuna_v4_post_tuna_frontier_replay";
@@ -4300,7 +4348,30 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         var allowFrontierChunk = 0;
         var blockPostReenableV4Chunks = 0;
         var routeProofLog = string.Empty;
-        void CaptureRouteProofLog() => routeProofLog += ReadOperationalLogTail(logStart) + Environment.NewLine;
+        var routeProofLogCursor = logStart;
+        string ExtractLiveRouteProofLines(string logText)
+            => string.Join(
+                Environment.NewLine,
+                logText
+                    .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+                    .Where(line =>
+                        line.Contains("event=filetransfer_live_route_epoch_started;", StringComparison.Ordinal) ||
+                        line.Contains("event=filetransfer_live_route_epoch_recovered;", StringComparison.Ordinal) ||
+                        line.Contains("event=filetransfer_live_route_epoch_terminal;", StringComparison.Ordinal)));
+
+        void CaptureRouteProofLog()
+        {
+            var logText = ReadOperationalLogText();
+            var tail = routeProofLogCursor <= 0 || routeProofLogCursor > logText.Length
+                ? logText
+                : logText[routeProofLogCursor..];
+            routeProofLogCursor = logText.Length;
+            var proofLines = ExtractLiveRouteProofLines(tail);
+            if (!string.IsNullOrWhiteSpace(proofLines))
+            {
+                routeProofLog += proofLines + Environment.NewLine;
+            }
+        }
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
         senderTransport.OutboundDataFrameDeliveryOverrideAsync = async (_, frame, ct) =>
@@ -4462,7 +4533,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Equal(payload, destination.ToArray()[..payload.Length]);
         var log = ReadOperationalLogTail(logStart);
         CaptureRouteProofLog();
-        var routeProofLogText = routeProofLog + Environment.NewLine + log;
+        var routeProofLogText = routeProofLog + Environment.NewLine + ExtractLiveRouteProofLines(log);
         Assert.Single(senderTransport.SentOffers.Where(offer => offer.TransferId == transferId));
         Assert.Single(senderTransport.SentSessionOpens.Where(open => open.TransferId == transferId));
         Assert.Empty(senderTransport.SentCancels.Where(cancel => cancel.TransferId == transferId));
@@ -4470,10 +4541,10 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         AssertLiveRouteEpochProofSequence(
             routeProofLogText,
             "outbound",
-            (1, "regular_nkn_v4_fast", "file_tuna_v4", FileTransferProtocol.ProtocolVersionV4, "normal_to_tuna_activation", "tuna"),
-            (2, "file_tuna_v4", "post_tuna_fallback_v6", FileTransferProtocol.ProtocolVersionV6, "tuna_to_normal_fallback", "regular_nkn"),
-            (3, "post_tuna_fallback_v6", "file_tuna_v4", FileTransferProtocol.ProtocolVersionV4, "normal_to_tuna_activation", "tuna"),
-            (4, "file_tuna_v4", "post_tuna_fallback_v6", FileTransferProtocol.ProtocolVersionV6, "tuna_to_normal_fallback", "regular_nkn"));
+            (1, "regular_nkn_v4_fast", "file_tuna_v4", FileTransferProtocol.ProtocolVersionV4, "normal_to_tuna_activation", "tuna", "tuna_activation_answer_ack", "tuna_activation_answer_ack"),
+            (2, "file_tuna_v4", "post_tuna_fallback_v6", FileTransferProtocol.ProtocolVersionV6, "tuna_to_normal_fallback", "regular_nkn", "header_switch_off_first", "transport_probe_ack"),
+            (3, "post_tuna_fallback_v6", "file_tuna_v4", FileTransferProtocol.ProtocolVersionV4, "normal_to_tuna_activation", "tuna", "tuna_reenabled", "tuna_reenabled"),
+            (4, "file_tuna_v4", "post_tuna_fallback_v6", FileTransferProtocol.ProtocolVersionV6, "tuna_to_normal_fallback", "regular_nkn", "helper_switch_off_second", "transport_probe_ack"));
         Assert.Contains("live_route_epoch=1; previous_route=regular_nkn_v4_fast; route=file_tuna_v4", routeProofLogText, StringComparison.Ordinal);
         Assert.Contains("live_route_epoch=2; previous_route=file_tuna_v4; route=post_tuna_fallback_v6", routeProofLogText, StringComparison.Ordinal);
         Assert.Contains("live_route_epoch=3; previous_route=post_tuna_fallback_v6; route=file_tuna_v4", routeProofLogText, StringComparison.Ordinal);
@@ -19067,7 +19138,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     private static void AssertLiveRouteEpochProofSequence(
         string log,
         string direction,
-        params (int Epoch, string PreviousRoute, string Route, int ProtocolVersion, string HandoffKind, string TargetTransport)[] expectations)
+        params (int Epoch, string PreviousRoute, string Route, int ProtocolVersion, string HandoffKind, string TargetTransport, string StartedReason, string RecoveredReason)[] expectations)
     {
         var lines = log.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
         var cursor = -1;
@@ -19083,7 +19154,8 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                     line.Contains("previous_route=" + expectation.PreviousRoute + ";", StringComparison.Ordinal) &&
                     line.Contains("route=" + expectation.Route + "; protocol_version=" + expectation.ProtocolVersion, StringComparison.Ordinal) &&
                     line.Contains("handoff_kind=" + expectation.HandoffKind, StringComparison.Ordinal) &&
-                    line.Contains("target_transport=" + expectation.TargetTransport, StringComparison.Ordinal));
+                    line.Contains("target_transport=" + expectation.TargetTransport, StringComparison.Ordinal) &&
+                    line.Contains("reason=" + expectation.StartedReason, StringComparison.Ordinal));
             Assert.True(
                 startedIndex >= 0,
                 "Missing ordered live-route started proof for epoch " + expectation.Epoch + "." + Environment.NewLine + log);
@@ -19097,7 +19169,8 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                     line.Contains("live_route_epoch=" + expectation.Epoch + ";", StringComparison.Ordinal) &&
                     line.Contains("route=" + expectation.Route + "; protocol_version=" + expectation.ProtocolVersion, StringComparison.Ordinal) &&
                     line.Contains("handoff_kind=" + expectation.HandoffKind, StringComparison.Ordinal) &&
-                    line.Contains("target_transport=" + expectation.TargetTransport, StringComparison.Ordinal));
+                    line.Contains("target_transport=" + expectation.TargetTransport, StringComparison.Ordinal) &&
+                    line.Contains("reason=" + expectation.RecoveredReason, StringComparison.Ordinal));
             Assert.True(
                 recoveredIndex > startedIndex,
                 "Missing ordered live-route recovered proof for epoch " + expectation.Epoch + "." + Environment.NewLine + log);
