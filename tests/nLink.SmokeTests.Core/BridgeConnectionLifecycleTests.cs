@@ -2963,6 +2963,121 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public void Bridge_RegularV4FrontierRepairSettlement_ClearsCurrentPressure()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-regular-v4-frontier-settlement", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "regular-v4-frontier-settlement");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "regular-v4-frontier-settlement");
+            var identity = new NknIdentity("regular-v4-frontier-settlement", "regular-v4-frontier-settlement.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+
+            var transferId = $"transfer-regular-v4-frontier-settlement-{Guid.NewGuid():N}";
+            var repairKey = $"regular-v4-frontier-settlement:{Guid.NewGuid():N}";
+            var authority = CreateRegularV4FrontierRepairAuthority(
+                transferId,
+                repairKey: repairKey,
+                frontierChunkIndex: 144,
+                durableReceivedHighestChunkIndex: 5095,
+                pendingRepairCount: 3,
+                decisionGeneration: 42,
+                liveRouteEpoch: 0);
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.RegisterActiveFileTransferRuntime(transferId);
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                transferId,
+                "regular_v4_receiver_frontier_repair_due",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 128,
+                pendingRepairCount: 3,
+                repairAuthority: authority);
+
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out var blockerReason, out _));
+            Assert.Equal("regular_v4_control_feedback_pressure", blockerReason);
+
+            var rejected = adapter.ReportRegularV4FrontierRepairSettlement(new FileTransferRegularV4FrontierRepairSettlement(
+                authority.SessionId,
+                authority.TransferId,
+                authority.Direction,
+                authority.RouteToken,
+                authority.ProtocolVersion,
+                authority.LiveRouteEpoch,
+                authority.RuntimeGeneration,
+                authority.TerminalGeneration,
+                authority.LegGeneration,
+                authority.TransportEpoch,
+                authority.BridgeRecoveryGeneration,
+                authority.BridgeDecisionGeneration,
+                authority.RoutePublicationGeneration,
+                authority.RouteCommitGeneration,
+                "stale-" + authority.RepairKey,
+                authority.FrontierChunkIndex,
+                authority.DurableReceivedHighestChunkIndex,
+                authority.PendingRepairCount,
+                authority.DecisionGeneration,
+                "regular_v4_frontier_repair_liveness_settled_stalled",
+                FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled,
+                authority.TargetTransport));
+
+            Assert.False(rejected);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out _));
+            Assert.Equal("regular_v4_control_feedback_pressure", blockerReason);
+
+            var accepted = adapter.ReportRegularV4FrontierRepairSettlement(new FileTransferRegularV4FrontierRepairSettlement(
+                authority.SessionId,
+                authority.TransferId,
+                authority.Direction,
+                authority.RouteToken,
+                authority.ProtocolVersion,
+                authority.LiveRouteEpoch,
+                authority.RuntimeGeneration,
+                authority.TerminalGeneration,
+                authority.LegGeneration,
+                authority.TransportEpoch,
+                authority.BridgeRecoveryGeneration,
+                authority.BridgeDecisionGeneration,
+                authority.RoutePublicationGeneration,
+                authority.RouteCommitGeneration,
+                authority.RepairKey,
+                authority.FrontierChunkIndex,
+                authority.DurableReceivedHighestChunkIndex,
+                authority.PendingRepairCount,
+                authority.DecisionGeneration,
+                "regular_v4_frontier_repair_liveness_settled_stalled",
+                FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled,
+                authority.TargetTransport));
+
+            Assert.True(accepted);
+            Assert.False(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
+
+            var logText = LocalOperationalLog.GetRecentLogText();
+            Assert.True(
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_settlement_rejected", "route=regular_nkn_v4_fast", "protocol_version=4", "live_route_epoch=0", "cleared_pressure=0"),
+                logText);
+            Assert.True(
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_settlement_accepted", "route=regular_nkn_v4_fast", "protocol_version=4", "live_route_epoch=0", "outcome=settled_stalled", "cleared_pressure=1"),
+                logText);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public void Bridge_FileTunaV4ControlFeedbackPressure_AcceptsOnlyTunaTargetAuthority()
     {
         var tempDir = Path.Combine(Path.GetTempPath(), "nlink-file-tuna-v4-frontier-authority", Guid.NewGuid().ToString("N"));

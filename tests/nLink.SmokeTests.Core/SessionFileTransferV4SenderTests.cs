@@ -1258,8 +1258,8 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
         var args = new object?[] { context, dequeuedRepair, 0 };
         var requeued = (bool)typeof(SessionFileTransferService)
-            .GetMethod("TryRequeueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, args)!;
+            .GetMethod("TryRequeueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, args)!;
 
         Assert.True(requeued);
         Assert.Equal(GetIntProperty(queuedRepair, "RequestedChunkCount"), Assert.IsType<int>(args[2]));
@@ -1272,16 +1272,16 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
         args = [context, secondDequeuedRepair, 0];
         requeued = (bool)typeof(SessionFileTransferService)
-            .GetMethod("TryRequeueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, args)!;
+            .GetMethod("TryRequeueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, args)!;
 
         Assert.False(requeued);
         Assert.Empty(GetQueuedV4RepairSends(context));
 
         args = [context, secondDequeuedRepair, 0];
         requeued = (bool)typeof(SessionFileTransferService)
-            .GetMethod("TryRequeueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, args)!;
+            .GetMethod("TryRequeueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, args)!;
 
         Assert.False(requeued);
         var log = ReadOperationalLogTail(logStart);
@@ -1289,6 +1289,11 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Contains("event=filetransfer_regular_v4_frontier_repair_settled_stalled;", log, StringComparison.Ordinal);
         Assert.Contains("reason=peer_silence_requeue_missing_dispatch_settled", log, StringComparison.Ordinal);
         Assert.Equal(1, CountOccurrences(log, "event=filetransfer_regular_v4_frontier_repair_settled_stalled;"));
+        var settlement = Assert.Single(transport.RegularV4FrontierRepairSettlements);
+        Assert.Equal(FileTransferDirection.Outbound, settlement.Direction);
+        Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken, settlement.RouteToken);
+        Assert.Equal(FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled, settlement.Outcome);
+        Assert.Equal("regular_v4_frontier_repair_missing_dispatch_settled", settlement.DecisionReason);
     }
 
     [Fact]
@@ -1359,8 +1364,8 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
         var args = new object?[] { context, dequeuedRepair, 0 };
         var requeued = (bool)typeof(SessionFileTransferService)
-            .GetMethod("TryRequeueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, args)!;
+            .GetMethod("TryRequeueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, args)!;
 
         Assert.False(requeued);
         Assert.Empty(GetQueuedV4RepairSends(context));
@@ -1406,8 +1411,8 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
         var args = new object?[] { context, dequeuedRepair, 0 };
         var requeued = (bool)typeof(SessionFileTransferService)
-            .GetMethod("TryRequeueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, args)!;
+            .GetMethod("TryRequeueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, args)!;
 
         Assert.False(requeued);
         Assert.Empty(GetQueuedV4RepairSends(context));
@@ -2762,10 +2767,17 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 ]));
 
         Assert.True(settled);
-        var clearedPressure = Assert.Single(transport.RegularV4ControlFeedbackPressures);
-        Assert.Equal("regular_v4_frontier_repair_settled_stalled", clearedPressure.Reason);
-        Assert.Null(clearedPressure.RepairAuthority);
+        Assert.Empty(transport.RegularV4ControlFeedbackPressures);
+        var settlement = Assert.Single(transport.RegularV4FrontierRepairSettlements);
+        Assert.Equal("transfer_regular_v4_frontier_settled_stall", settlement.TransferId);
+        Assert.Equal(FileTransferDirection.Inbound, settlement.Direction);
+        Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken, settlement.RouteToken);
+        Assert.Equal(FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled, settlement.Outcome);
+        Assert.Equal("regular_v4_frontier_repair_liveness_settled_stalled", settlement.DecisionReason);
         while (transport.RegularV4ControlFeedbackPressures.TryDequeue(out _))
+        {
+        }
+        while (transport.RegularV4FrontierRepairSettlements.TryDequeue(out _))
         {
         }
 
@@ -9039,6 +9051,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     {
         const string transferId = "transfer_file_tuna_v4_live_switch_off_replay";
         var logStart = ReadOperationalLogText().Length;
+        using var timingOverrides = new FileTransferTimingOverrideReset();
         var payload = Enumerable.Range(0, 768_000).Select(static index => (byte)(index % 229)).ToArray();
         var allowFrontierChunk = 0;
         var droppedFrontierBatchCount = 0;
@@ -9131,6 +9144,45 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Contains(
             receiverTransport.SentDataFrames.Where(frame => frame.TransferId == transferId),
             static frame => frame is FileTransferReceiverStateFrameV6);
+    }
+
+    private sealed class FileTransferTimingOverrideReset : IDisposable
+    {
+        private readonly TimeSpan? previousV4PeerSilenceTimeout = SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests;
+        private readonly TimeSpan? previousV6HeartbeatInterval = SessionFileTransferService.V6HeartbeatIntervalOverrideForTests;
+        private readonly TimeSpan? previousV6PeerLivenessTimeout = SessionFileTransferService.V6PeerLivenessTimeoutOverrideForTests;
+        private readonly TimeSpan? previousV6TransportProbeAckSendTimeout = SessionFileTransferService.V6TransportProbeAckSendTimeoutOverrideForTests;
+        private readonly TimeSpan? previousV6SenderRequestFeedbackStallRecoveryDelay = SessionFileTransferService.V6SenderRequestFeedbackStallRecoveryDelayOverrideForTests;
+        private readonly TimeSpan? previousV6RegularNknSparseRuntimeStaleCreditReceiveRecoveryDelay = SessionFileTransferService.V6RegularNknSparseRuntimeStaleCreditReceiveRecoveryDelayOverrideForTests;
+        private readonly TimeSpan? previousV6RegularNknSparseRuntimeStateRefreshCooldown = SessionFileTransferService.V6RegularNknSparseRuntimeStateRefreshCooldownOverrideForTests;
+        private readonly TimeSpan? previousV6RegularNknSparseRuntimeV4TransportSendTimeout = SessionFileTransferService.V6RegularNknSparseRuntimeV4TransportSendTimeoutOverrideForTests;
+        private readonly TimeSpan? previousOfferSendTimeout = SessionFileTransferService.OfferSendTimeoutOverrideForTests;
+
+        public FileTransferTimingOverrideReset()
+        {
+            SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests = null;
+            SessionFileTransferService.V6HeartbeatIntervalOverrideForTests = null;
+            SessionFileTransferService.V6PeerLivenessTimeoutOverrideForTests = null;
+            SessionFileTransferService.V6TransportProbeAckSendTimeoutOverrideForTests = null;
+            SessionFileTransferService.V6SenderRequestFeedbackStallRecoveryDelayOverrideForTests = null;
+            SessionFileTransferService.V6RegularNknSparseRuntimeStaleCreditReceiveRecoveryDelayOverrideForTests = null;
+            SessionFileTransferService.V6RegularNknSparseRuntimeStateRefreshCooldownOverrideForTests = null;
+            SessionFileTransferService.V6RegularNknSparseRuntimeV4TransportSendTimeoutOverrideForTests = null;
+            SessionFileTransferService.OfferSendTimeoutOverrideForTests = null;
+        }
+
+        public void Dispose()
+        {
+            SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests = previousV4PeerSilenceTimeout;
+            SessionFileTransferService.V6HeartbeatIntervalOverrideForTests = previousV6HeartbeatInterval;
+            SessionFileTransferService.V6PeerLivenessTimeoutOverrideForTests = previousV6PeerLivenessTimeout;
+            SessionFileTransferService.V6TransportProbeAckSendTimeoutOverrideForTests = previousV6TransportProbeAckSendTimeout;
+            SessionFileTransferService.V6SenderRequestFeedbackStallRecoveryDelayOverrideForTests = previousV6SenderRequestFeedbackStallRecoveryDelay;
+            SessionFileTransferService.V6RegularNknSparseRuntimeStaleCreditReceiveRecoveryDelayOverrideForTests = previousV6RegularNknSparseRuntimeStaleCreditReceiveRecoveryDelay;
+            SessionFileTransferService.V6RegularNknSparseRuntimeStateRefreshCooldownOverrideForTests = previousV6RegularNknSparseRuntimeStateRefreshCooldown;
+            SessionFileTransferService.V6RegularNknSparseRuntimeV4TransportSendTimeoutOverrideForTests = previousV6RegularNknSparseRuntimeV4TransportSendTimeout;
+            SessionFileTransferService.OfferSendTimeoutOverrideForTests = previousOfferSendTimeout;
+        }
     }
 
     [Fact]

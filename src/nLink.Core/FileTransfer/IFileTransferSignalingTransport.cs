@@ -175,6 +175,39 @@ public sealed record FileTransferRegularV4FrontierRepairAuthority(
     string DecisionReason,
     FileTransferTransportKind TargetTransport = FileTransferTransportKind.Unknown);
 
+public enum FileTransferRegularV4FrontierRepairSettlementOutcome
+{
+    ProgressObserved,
+    MissingDispatch,
+    SettledStalled,
+    AuthorityRejected,
+    TerminalRejected,
+}
+
+public sealed record FileTransferRegularV4FrontierRepairSettlement(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    string RouteToken,
+    int ProtocolVersion,
+    int LiveRouteEpoch,
+    int RuntimeGeneration,
+    int TerminalGeneration,
+    long LegGeneration,
+    long TransportEpoch,
+    int BridgeRecoveryGeneration,
+    int BridgeDecisionGeneration,
+    int RoutePublicationGeneration,
+    int? RouteCommitGeneration,
+    string RepairKey,
+    int FrontierChunkIndex,
+    int DurableReceivedHighestChunkIndex,
+    int RequestedChunkCount,
+    int DecisionGeneration,
+    string DecisionReason,
+    FileTransferRegularV4FrontierRepairSettlementOutcome Outcome,
+    FileTransferTransportKind TargetTransport = FileTransferTransportKind.Unknown);
+
 public sealed record FileTransferRegularV4ControlFeedbackPressure(
     string SessionId,
     string TransferId,
@@ -187,6 +220,11 @@ public sealed record FileTransferRegularV4ControlFeedbackPressure(
 public interface IFileTransferRegularV4ControlFeedbackPressureObserver
 {
     void ObserveRegularV4ControlFeedbackPressure(FileTransferRegularV4ControlFeedbackPressure pressure);
+}
+
+public interface IFileTransferRegularV4FrontierRepairSettlementObserver
+{
+    void ObserveRegularV4FrontierRepairSettlement(FileTransferRegularV4FrontierRepairSettlement settlement);
 }
 
 public sealed record FileTransferPostTunaFallbackControlPlanePressure(

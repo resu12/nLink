@@ -1880,6 +1880,32 @@ public sealed partial class NknSignalingTransport
             pressure.RepairAuthority);
     }
 
+    public void ObserveRegularV4FrontierRepairSettlement(FileTransferRegularV4FrontierRepairSettlement settlement)
+    {
+        var sessionId = string.IsNullOrWhiteSpace(settlement.SessionId)
+            ? currentSessionSecurityState.SessionId?.Value
+            : settlement.SessionId.Trim();
+        var transferId = string.IsNullOrWhiteSpace(settlement.TransferId) ? "(none)" : settlement.TransferId.Trim();
+
+        if (client is not RealNknClientAdapter realClient)
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=filetransfer_regular_v4_frontier_repair_settlement_unsupported; session_id={SanitizeLogToken(sessionId ?? "none")}; transfer_id={SanitizeLogToken(transferId)}; repair_request_key={SanitizeLogToken(settlement.RepairKey)}; outcome={SanitizeLogToken(settlement.Outcome.ToString())}");
+            return;
+        }
+
+        var accepted = realClient.ReportRegularV4FrontierRepairSettlement(settlement with
+        {
+            SessionId = sessionId ?? "none",
+            TransferId = transferId,
+        });
+        if (accepted)
+        {
+            NotifyTransportAccelerationStateChanged("regular_v4_frontier_repair_settlement");
+        }
+    }
+
     public void ObservePostTunaFallbackControlPlanePressure(FileTransferPostTunaFallbackControlPlanePressure pressure)
     {
         var sessionId = string.IsNullOrWhiteSpace(pressure.SessionId)
@@ -11036,6 +11062,29 @@ public sealed partial class NknSignalingTransport
         var hasCurrentRuntimeUnlockRetryContract =
             capturedContractGeneration > 0 &&
             !string.IsNullOrWhiteSpace(capturedSessionId);
+
+        if (hasCurrentRuntimeUnlockRetryContract &&
+            TryGetActiveRegularV4RecoveryLivenessSnapshot(normalizedSessionId, out var currentRegularV4LivenessSnapshot) &&
+            string.Equals(currentRegularV4LivenessSnapshot.SessionId, SanitizeLogToken(capturedSessionId), StringComparison.Ordinal) &&
+            (string.IsNullOrWhiteSpace(capturedTransferId) ||
+             string.Equals(currentRegularV4LivenessSnapshot.TransferId, SanitizeLogToken(capturedTransferId), StringComparison.Ordinal)) &&
+            currentRegularV4LivenessSnapshot.Direction == expectedDispatchDirection &&
+            string.Equals(currentRegularV4LivenessSnapshot.RouteToken, FileTransferRouteResolver.RegularNknV4FastToken, StringComparison.Ordinal) &&
+            currentRegularV4LivenessSnapshot.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+            currentRegularV4LivenessSnapshot.Generation > 0 &&
+            (expectedLiveRouteEpoch <= 0 || currentRegularV4LivenessSnapshot.LiveRouteEpoch == expectedLiveRouteEpoch) &&
+            !currentRegularV4LivenessSnapshot.ReceiveProofObserved &&
+            !currentRegularV4LivenessSnapshot.Completed &&
+            !currentRegularV4LivenessSnapshot.RecoveryExhausted)
+        {
+            MarkRuntimeUnlockRecoveryContractDispatchDeferredForRegularV4ReceiveRecovery(
+                normalizedSessionId,
+                currentRegularV4LivenessSnapshot.StateReason);
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=runtime_unlock_retry_dispatch_held_by_regular_v4_receive_recovery; session_id={SanitizeLogToken(normalizedSessionId)}; transfer_id={SanitizeLogToken(currentRegularV4LivenessSnapshot.TransferId)}; trigger={SanitizeLogToken(reason)}; blocker_reason={SanitizeLogToken(currentRegularV4LivenessSnapshot.StateReason)}; route={SanitizeLogToken(currentRegularV4LivenessSnapshot.RouteToken)}; protocol_version={currentRegularV4LivenessSnapshot.ProtocolVersion}; live_route_epoch={currentRegularV4LivenessSnapshot.LiveRouteEpoch}; regular_v4_liveness_generation={currentRegularV4LivenessSnapshot.Generation}; bridge_decision_generation={currentRegularV4LivenessSnapshot.BridgeDecisionGeneration}; decision_reason=awaiting_regular_v4_recovery_settlement");
+            return RuntimeUnlockRetryDispatchAuthorityResult.Held;
+        }
 
         if (!string.IsNullOrWhiteSpace(capturedSessionId) &&
             TryGetActiveRegularV4RecoveryLivenessSnapshot(normalizedSessionId, out var preDispatchRegularV4LivenessSnapshot) &&

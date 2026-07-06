@@ -166,7 +166,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         return builder.ToString();
     }
 
-    protected class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRouteCompletionObserver, ITransportAccelerationStatus, IFileTransferSessionContextProvider, IFileTransferInitialTunaReadinessProvider, IRuntimeUnlockRouteCommitProofProvider
+    protected class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRegularV4FrontierRepairSettlementObserver, IFileTransferRouteCompletionObserver, ITransportAccelerationStatus, IFileTransferSessionContextProvider, IFileTransferInitialTunaReadinessProvider, IRuntimeUnlockRouteCommitProofProvider
     {
         private readonly string sessionId;
         private readonly ConcurrentDictionary<string, LoopbackDataSession> dataSessions = new(StringComparer.Ordinal);
@@ -237,6 +237,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         public ConcurrentQueue<FileTransferV6TransportEpochSnapshot> ObservedV6TransportEpochs { get; } = [];
         public ConcurrentQueue<FileTransferReceiveRecoveryRequest> ReceiveRecoveryRequests { get; } = [];
         public ConcurrentQueue<FileTransferRegularV4ControlFeedbackPressure> RegularV4ControlFeedbackPressures { get; } = [];
+        public ConcurrentQueue<FileTransferRegularV4FrontierRepairSettlement> RegularV4FrontierRepairSettlements { get; } = [];
         public ConcurrentQueue<FileTransferRouteCompletedNotification> RouteCompletionNotifications { get; } = [];
         public ConcurrentQueue<string> RuntimeUnlockProbeEvents { get; } = [];
         public ConcurrentQueue<string> RuntimeUnlockRouteCommitResults { get; } = [];
@@ -347,6 +348,9 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
 
         public void ObserveRegularV4ControlFeedbackPressure(FileTransferRegularV4ControlFeedbackPressure pressure)
             => RegularV4ControlFeedbackPressures.Enqueue(pressure);
+
+        public void ObserveRegularV4FrontierRepairSettlement(FileTransferRegularV4FrontierRepairSettlement settlement)
+            => RegularV4FrontierRepairSettlements.Enqueue(settlement);
 
         public void ObserveFileTransferRouteCompleted(FileTransferRouteCompletedNotification notification)
         {

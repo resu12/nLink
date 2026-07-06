@@ -790,14 +790,9 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             var rejectionReason = string.Equals(rawReason, "regular_v4_frontier_repair_settled_stalled", StringComparison.Ordinal)
                 ? "regular_v4_frontier_repair_settled_stalled"
                 : "missing_repair_authority";
-            LogRegularV4FrontierRepairAuthorityRejected(
-                normalizedTransferId,
-                rawReason,
-                creditExhaustedTimeMs,
-                frontierLagChunks,
-                pendingRepairCount,
-                rejectionReason,
-                null);
+            Log(
+                "event=filetransfer_regular_v4_control_feedback_pressure_rejected; source=nkn_bridge_pressure; stage=control_feedback_pressure; " +
+                $"transfer_id={SanitizeLogToken(normalizedTransferId)}; pressure_reason={SanitizeLogToken(rawReason)}; credit_exhausted_time_ms={Math.Max(0, creditExhaustedTimeMs)}; frontier_lag_chunks={Math.Max(0, frontierLagChunks)}; pending_repair_count={Math.Max(0, pendingRepairCount)}; rejection_reason={SanitizeLogToken(rejectionReason)}; decision_reason={SanitizeLogToken(rejectionReason)}; active_file_transfer_sessions={Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions))}; active_file_transfer_runtime_sessions={activeFileTransferRuntimeTransfers.Count}");
             return;
         }
 
@@ -902,6 +897,82 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             $"active_file_transfer_sessions={Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions))}; active_file_transfer_runtime_sessions={activeFileTransferRuntimeTransfers.Count}");
     }
 
+    internal bool ReportRegularV4FrontierRepairSettlement(FileTransferRegularV4FrontierRepairSettlement settlement)
+    {
+        var normalizedSessionId = string.IsNullOrWhiteSpace(settlement.SessionId) ? "none" : settlement.SessionId.Trim();
+        var normalizedTransferId = string.IsNullOrWhiteSpace(settlement.TransferId) ? "(unknown)" : settlement.TransferId.Trim();
+        var normalizedRoute = string.IsNullOrWhiteSpace(settlement.RouteToken) ? "(none)" : settlement.RouteToken.Trim();
+        var normalizedRepairKey = string.IsNullOrWhiteSpace(settlement.RepairKey) ? "(none)" : settlement.RepairKey.Trim();
+        var normalizedDecisionReason = string.IsNullOrWhiteSpace(settlement.DecisionReason)
+            ? FormatRegularV4FrontierRepairSettlementOutcomeForLog(settlement.Outcome)
+            : settlement.DecisionReason.Trim();
+        var expectedTargetTransport = ResolveV4FrontierRepairTargetTransport(normalizedRoute);
+        var settlementTargetTransport = settlement.TargetTransport == FileTransferTransportKind.Unknown
+            ? expectedTargetTransport
+            : settlement.TargetTransport;
+        var nowTick = Stopwatch.GetTimestamp();
+
+        RegularV4FrontierRepairPressureState? pressure = null;
+        var accepted = false;
+        var rejectionReason = string.Empty;
+        lock (gate)
+        {
+            if (regularV4FrontierRepairPressure is not { } current)
+            {
+                rejectionReason = "regular_v4_frontier_repair_pressure_missing";
+            }
+            else if (current.ExpiresTick <= nowTick)
+            {
+                regularV4FrontierRepairPressure = null;
+                Interlocked.CompareExchange(ref regularV4ControlFeedbackPressureExpiresTick, 0, current.ExpiresTick);
+                Interlocked.CompareExchange(ref regularV4ActivationSendPressureExpiresTick, 0, current.ExpiresTick);
+                rejectionReason = "regular_v4_frontier_repair_pressure_expired";
+                pressure = current;
+            }
+            else if (!string.Equals(current.SessionId, normalizedSessionId, StringComparison.Ordinal) ||
+                     !string.Equals(current.TransferId, normalizedTransferId, StringComparison.Ordinal) ||
+                     current.Direction != settlement.Direction ||
+                     !string.Equals(current.RouteToken, normalizedRoute, StringComparison.Ordinal) ||
+                     current.ProtocolVersion != settlement.ProtocolVersion ||
+                     current.LiveRouteEpoch != settlement.LiveRouteEpoch ||
+                     current.RuntimeGeneration != settlement.RuntimeGeneration ||
+                     current.TerminalGeneration != settlement.TerminalGeneration ||
+                     current.LegGeneration != settlement.LegGeneration ||
+                     current.TransportEpoch != settlement.TransportEpoch ||
+                     current.BridgeRecoveryGeneration != settlement.BridgeRecoveryGeneration ||
+                     current.BridgeDecisionGeneration != settlement.BridgeDecisionGeneration ||
+                     current.RoutePublicationGeneration != settlement.RoutePublicationGeneration ||
+                     (current.RouteCommitGeneration ?? 0) != (settlement.RouteCommitGeneration ?? 0) ||
+                     current.TargetTransport != settlementTargetTransport ||
+                     !string.Equals(current.RepairKey, normalizedRepairKey, StringComparison.Ordinal) ||
+                     current.DecisionGeneration != settlement.DecisionGeneration)
+            {
+                rejectionReason = "regular_v4_frontier_repair_settlement_authority_mismatch";
+                pressure = current;
+            }
+            else
+            {
+                pressure = current;
+                regularV4FrontierRepairPressure = null;
+                Interlocked.CompareExchange(ref regularV4ControlFeedbackPressureExpiresTick, 0, current.ExpiresTick);
+                if (current.ActivationSendOnly)
+                {
+                    Interlocked.CompareExchange(ref regularV4ActivationSendPressureExpiresTick, 0, current.ExpiresTick);
+                }
+
+                accepted = true;
+            }
+        }
+
+        var eventName = accepted
+            ? "filetransfer_regular_v4_frontier_repair_settlement_accepted"
+            : "filetransfer_regular_v4_frontier_repair_settlement_rejected";
+        Log(
+            $"event={eventName}; source=nkn_bridge_pressure; stage=settlement; " +
+            $"session_id={SanitizeLogToken(normalizedSessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; direction={settlement.Direction.ToString().ToLowerInvariant()}; route={SanitizeLogToken(normalizedRoute)}; protocol_version={settlement.ProtocolVersion}; live_route_epoch={settlement.LiveRouteEpoch}; runtime_generation={settlement.RuntimeGeneration}; terminal_generation={settlement.TerminalGeneration}; leg_generation={settlement.LegGeneration}; transport_epoch={settlement.TransportEpoch}; bridge_recovery_generation={settlement.BridgeRecoveryGeneration}; bridge_decision_generation={settlement.BridgeDecisionGeneration}; route_publication_generation={settlement.RoutePublicationGeneration}; route_commit_generation={settlement.RouteCommitGeneration ?? 0}; target_transport={FormatFileTransferTransportKindForLog(settlementTargetTransport)}; repair_request_key={SanitizeLogToken(normalizedRepairKey)}; frontier_chunk_index={settlement.FrontierChunkIndex}; durable_received_highest_chunk_index={settlement.DurableReceivedHighestChunkIndex}; requested_chunk_count={Math.Max(0, settlement.RequestedChunkCount)}; decision_generation={settlement.DecisionGeneration}; outcome={FormatRegularV4FrontierRepairSettlementOutcomeForLog(settlement.Outcome)}; settlement_reason={SanitizeLogToken(normalizedDecisionReason)}; pressure_pending_repair_count={pressure?.PendingRepairCount ?? 0}; pressure_reason={SanitizeLogToken(pressure?.PressureReason ?? "none")}; cleared_pressure={(accepted ? 1 : 0)}; rejection_reason={SanitizeLogToken(accepted ? "none" : rejectionReason)}; decision_reason={SanitizeLogToken(accepted ? normalizedDecisionReason : rejectionReason)}");
+        return accepted;
+    }
+
     private void ClearRegularV4FrontierRepairPressureAfterRejectedAuthority(
         string transferId,
         bool activationSendOnly)
@@ -973,6 +1044,17 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             FileTransferTransportKind.RegularNkn => "regular_nkn",
             FileTransferTransportKind.Tuna => "tuna",
             _ => "unknown",
+        };
+
+    private static string FormatRegularV4FrontierRepairSettlementOutcomeForLog(FileTransferRegularV4FrontierRepairSettlementOutcome outcome)
+        => outcome switch
+        {
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved => "progress_observed",
+            FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch => "missing_dispatch",
+            FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled => "settled_stalled",
+            FileTransferRegularV4FrontierRepairSettlementOutcome.AuthorityRejected => "authority_rejected",
+            FileTransferRegularV4FrontierRepairSettlementOutcome.TerminalRejected => "terminal_rejected",
+            _ => SanitizeLogToken(outcome.ToString()),
         };
 
     internal void ReportPostTunaFallbackControlPlanePressure(
