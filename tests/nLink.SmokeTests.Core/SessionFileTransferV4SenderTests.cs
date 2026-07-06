@@ -17228,6 +17228,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                     null,
                     FileTransferV4RepairDeliveryMode.BulkOnly,
                     "test_repair_obsolete_frontier",
+                    null,
                 ])!);
 
         Assert.True(await sendTask);

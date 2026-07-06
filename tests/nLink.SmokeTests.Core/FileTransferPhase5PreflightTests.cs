@@ -454,6 +454,65 @@ public sealed class FileTransferPhase5PreflightTests : FileTransferAcceptancePha
     }
 
     [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RunFileTransferRouteAcceptance_Phase5FilteredBridgeHostReadyConnectFailureIsQuarantined()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "phase5-filtered-preflight-host-ready-connect-quarantine");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-filtered-preflight-host-ready-connect-quarantine");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_BRIDGE_BOOTSTRAP_FAIL"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_FAILURE_REASON"] = "nkn_bridge_bootstrap_network_unready";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_FAILURE_SUBREASON"] = "helpee_bridge_host_ready_connect_failed";
+
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ScenarioName", "regular-v4-live-activation-off-on-off-256mb",
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"Expected filtered Phase 5 route acceptance to quarantine host-ready connect-denied preflight failure and run the requested scenario.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+
+            var quarantine = ReadArtifactReport(runRoot, "phase5-bridge-readiness-preflight-quarantine.txt");
+            Assert.Equal("QUARANTINED", quarantine["verdict"]);
+            Assert.Equal("preflight_bridge_bootstrap", quarantine["failure_class"]);
+            Assert.Equal("nkn_bridge_bootstrap_network_unready", quarantine["failure_reason"]);
+            Assert.Equal("helpee_bridge_host_ready_connect_failed", quarantine["failure_subreason"]);
+
+            var attempts = ReadArtifactReport(runRoot, "phase5-bridge-readiness-preflight-attempts.txt");
+            Assert.Equal("3", attempts["attempt_count"]);
+            Assert.Equal("helpee_bridge_host_ready_connect_failed", attempts["final_failure_subreason"]);
+            Assert.Equal("helpee_bridge_host_ready_connect_failed", attempts["first_failure_subreason"]);
+
+            var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal("PASS", summary["verdict"]);
+            Assert.Equal("1", summary["run_count"]);
+            Assert.Equal("0", summary["failure_count"]);
+            Assert.True(Directory.Exists(Path.Combine(runRoot, "regular-v4-live-activation-off-on-off-256mb")), "Expected filtered target scenario to run after quarantined host-ready connect failure.");
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
     public void RunFileTransferRouteAcceptance_Phase5ClassifiesHelpeeRequestFlowNotEnabledAsSetupBootstrap()
     {
         var repoRoot = FindRepoRoot();
@@ -473,6 +532,30 @@ public sealed class FileTransferPhase5PreflightTests : FileTransferAcceptancePha
         Assert.Contains("Test-Phase5BridgeReadinessPreflightRetryableFailure", scriptText, StringComparison.Ordinal);
         Assert.Contains("Test-Phase5BridgeReadinessPreflightQuarantinableFailure", scriptText, StringComparison.Ordinal);
         Assert.Contains("-not [string]::IsNullOrEmpty($retainedText)", scriptText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RunFileTransferRouteAcceptance_Phase5ScenarioBridgeBootstrapFailureIsSetupOnly()
+    {
+        var repoRoot = FindRepoRoot();
+        var routeAcceptanceText = File.ReadAllText(Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"));
+        var guiSmokeText = File.ReadAllText(Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1"));
+        var tunaWrapperText = File.ReadAllText(Path.Combine(repoRoot, "tools", "Run-FileTransferTunaGuiSmoke.ps1"));
+
+        Assert.Contains("Get-RouteAcceptanceTunaGuiSetupBootstrapFailure", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("$result.setupFailurePhase = [string]$setupBootstrapFailure.Phase", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("not [string]::Equals([string]$result.setupFailurePhase, 'preflight_bridge_bootstrap'", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("Equals([string]$Result.setupFailurePhase, 'preflight_bridge_bootstrap'", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("$routeSelected = ConvertTo-RouteAcceptanceBool", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("$scenarioRuntimeEvidence", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("if ($scenarioRuntimeEvidence)", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("nkn_bridge_bootstrap_network_unready", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("helpee_bridge_host_ready_connect_failed", routeAcceptanceText, StringComparison.Ordinal);
+
+        Assert.Contains("$phase = 'preflight_bridge_bootstrap'", guiSmokeText, StringComparison.Ordinal);
+        Assert.Contains("$reason = $bridgeBootstrapSubreason", guiSmokeText, StringComparison.Ordinal);
+        Assert.Contains("not [string]::Equals([string]$errorSummary.failurePhase, 'unknown'", tunaWrapperText, StringComparison.Ordinal);
+        Assert.Contains("not [string]::Equals([string]$errorSummary.failureReason, 'unknown'", tunaWrapperText, StringComparison.Ordinal);
     }
 }
 

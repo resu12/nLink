@@ -13,6 +13,23 @@ namespace NLink.SmokeTests;
 public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsScriptsTestBase
 {
     [Fact]
+    [Trait("RetainedFallbackSuite", "FrontierRequestDispatch")]
+    [Trait("Category", "Smoke")]
+    public void V4SenderFallbackRepairLogsUseScheduledDataPathAuthority()
+    {
+        var repoRoot = FindRepoRoot();
+        var servicePath = Path.Combine(repoRoot, "src", "nLink.Core", "FileTransfer", "SessionFileTransferService.cs");
+        var senderPath = Path.Combine(repoRoot, "src", "nLink.Core", "FileTransfer", "SessionFileTransferService.PullTransferSessionV4.cs");
+        var serviceSource = File.ReadAllText(servicePath);
+        var senderSource = File.ReadAllText(senderPath);
+
+        Assert.Contains("FileTransferDataPathSendAuthority? SendAuthority", serviceSource, StringComparison.Ordinal);
+        Assert.Contains("FormatV4DataPathAuthoritySuffix(context, \"filetransfer_v4_chunk_batch_sent\", pendingSend.SendAuthority)", senderSource, StringComparison.Ordinal);
+        Assert.Contains("FormatV4DataPathAuthoritySuffix(context, \"filetransfer_v4_repair_sent\", repairSendAuthority)", senderSource, StringComparison.Ordinal);
+        Assert.Contains("observeSendAuthority?.Invoke(sendAuthority)", senderSource, StringComparison.Ordinal);
+    }
+
+    [Fact]
     [Trait("RetainedFallbackSuite", "TerminalWins")]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_CompactPostTerminalLivenessTimeout_RemainsPass()

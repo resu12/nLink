@@ -4342,6 +4342,7 @@ public sealed partial class SessionFileTransferService
             if (repairSend is not null)
             {
                 var repairDelivered = true;
+                FileTransferDataPathSendAuthority? repairSendAuthority = null;
                 RepairReplayDecision? repairReplayDecisionForDispatch = null;
                 FileTransferLeg? repairReplayLegForDispatch = null;
                 var logFallbackFrontierRepairDispatchProof = false;
@@ -4487,7 +4488,8 @@ public sealed partial class SessionFileTransferService
                         protocolPriority: repairSend.ProtocolPriority,
                         protocolRecoveryMode: repairSend.ProtocolRecoveryMode,
                         repairDeliveryMode: repairSend.DeliveryMode,
-                        repairDeliveryReason: repairSend.DeliveryEscalationReason).ConfigureAwait(false);
+                        repairDeliveryReason: repairSend.DeliveryEscalationReason,
+                        observeSendAuthority: authority => repairSendAuthority ??= authority).ConfigureAwait(false);
                 }
 
                 var sentUtc = DateTimeOffset.UtcNow;
@@ -4666,7 +4668,7 @@ public sealed partial class SessionFileTransferService
 
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_v4_repair_sent; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairSend.RepairRequestKey}; protocol_repair_request_id={FormatProtocolLogValue(repairSend.ProtocolRepairRequestId ?? "(none)")}; range_count={repairSend.RangeCount}; requested_chunk_count={repairSend.RequestedChunkCount}; sent_chunk_count={repairSend.ChunkIndices.Count}; sent_chunk_indices={FormatV4ChunkIndicesForLog(repairSend.ChunkIndices)}; transport_sent_chunk_count={repairSend.ChunkIndices.Count * V4RepairBatchSendAttempts}; repair_batch_send_attempt_count={V4RepairBatchSendAttempts}; repair_delivery_mode={FormatV4RepairDeliveryMode(repairSend.DeliveryMode)}; repair_delivery_escalation_reason={repairSend.DeliveryEscalationReason}; first_start_chunk_index={repairSend.FirstStartChunkIndex}; last_end_chunk_exclusive={repairSend.LastEndChunkExclusive}; frontier_tail_repair={(repairSend.FrontierTailRepair ? 1 : 0)}; credit_exhausted_time_ms_at_repair={repairSend.CreditExhaustedTimeMsAtDecision}; remote_next_expected_chunk_index={repairSend.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={repairSend.ChunksAcceptedForTransport}; skipped_obsolete_count={repairSend.SkippedObsoleteCount}; skipped_future_count={repairSend.SkippedFutureCount}; skipped_out_of_bounds_count={repairSend.SkippedOutOfBoundsCount}; sent_unix_ms={sentUtc.ToUnixTimeMilliseconds()}; receiver_proof_status=pending{FormatV4DataPathAuthoritySuffix(context, "filetransfer_v4_repair_sent")}");
+                    $"event=filetransfer_v4_repair_sent; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairSend.RepairRequestKey}; protocol_repair_request_id={FormatProtocolLogValue(repairSend.ProtocolRepairRequestId ?? "(none)")}; range_count={repairSend.RangeCount}; requested_chunk_count={repairSend.RequestedChunkCount}; sent_chunk_count={repairSend.ChunkIndices.Count}; sent_chunk_indices={FormatV4ChunkIndicesForLog(repairSend.ChunkIndices)}; transport_sent_chunk_count={repairSend.ChunkIndices.Count * V4RepairBatchSendAttempts}; repair_batch_send_attempt_count={V4RepairBatchSendAttempts}; repair_delivery_mode={FormatV4RepairDeliveryMode(repairSend.DeliveryMode)}; repair_delivery_escalation_reason={repairSend.DeliveryEscalationReason}; first_start_chunk_index={repairSend.FirstStartChunkIndex}; last_end_chunk_exclusive={repairSend.LastEndChunkExclusive}; frontier_tail_repair={(repairSend.FrontierTailRepair ? 1 : 0)}; credit_exhausted_time_ms_at_repair={repairSend.CreditExhaustedTimeMsAtDecision}; remote_next_expected_chunk_index={repairSend.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={repairSend.ChunksAcceptedForTransport}; skipped_obsolete_count={repairSend.SkippedObsoleteCount}; skipped_future_count={repairSend.SkippedFutureCount}; skipped_out_of_bounds_count={repairSend.SkippedOutOfBoundsCount}; sent_unix_ms={sentUtc.ToUnixTimeMilliseconds()}; receiver_proof_status=pending{FormatV4DataPathAuthoritySuffix(context, "filetransfer_v4_repair_sent", repairSendAuthority)}");
                 continue;
             }
 
@@ -8012,7 +8014,8 @@ public sealed partial class SessionFileTransferService
         string? protocolPriority = null,
         string? protocolRecoveryMode = null,
         FileTransferV4RepairDeliveryMode repairDeliveryMode = FileTransferV4RepairDeliveryMode.BulkOnly,
-        string repairDeliveryReason = "normal")
+        string repairDeliveryReason = "normal",
+        Action<FileTransferDataPathSendAuthority?>? observeSendAuthority = null)
     {
         if (chunkIndices.Count == 0)
         {
@@ -8647,7 +8650,7 @@ public sealed partial class SessionFileTransferService
                 {
                     LocalOperationalLog.Info(
                         "FileTransferService",
-                        $"event=filetransfer_v4_chunk_batch_sent; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairRequestKey}; start_chunk_index={pendingSend.Prepared.StartChunkIndex}; batch_chunk_count={pendingSend.Prepared.ChunkCount}; raw_bytes={pendingSend.Prepared.RawBytes}; repair_send={(repairSend ? 1 : 0)}; mixed_screenshare={(IsV4MixedScreenShareActive() ? 1 : 0)}; screen_share_active={(sessionScreenShareActive ? 1 : 0)}; screen_share_degraded={(sessionScreenShareDegraded ? 1 : 0)}; screen_share_observed={(sessionScreenShareObserved ? 1 : 0)}; repair_delivery_mode={(repairSend ? FormatV4RepairDeliveryMode(repairDeliveryMode) : "none")}; repair_delivery_escalation_reason={(repairSend ? repairDeliveryReason : "none")}; repair_batch_send_attempt={pendingSend.SendAttempt}; repair_batch_send_attempt_count={pendingSend.SendAttemptCount}{FormatV4DataPathAuthoritySuffix(context, "filetransfer_v4_chunk_batch_sent")}");
+                        $"event=filetransfer_v4_chunk_batch_sent; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairRequestKey}; start_chunk_index={pendingSend.Prepared.StartChunkIndex}; batch_chunk_count={pendingSend.Prepared.ChunkCount}; raw_bytes={pendingSend.Prepared.RawBytes}; repair_send={(repairSend ? 1 : 0)}; mixed_screenshare={(IsV4MixedScreenShareActive() ? 1 : 0)}; screen_share_active={(sessionScreenShareActive ? 1 : 0)}; screen_share_degraded={(sessionScreenShareDegraded ? 1 : 0)}; screen_share_observed={(sessionScreenShareObserved ? 1 : 0)}; repair_delivery_mode={(repairSend ? FormatV4RepairDeliveryMode(repairDeliveryMode) : "none")}; repair_delivery_escalation_reason={(repairSend ? repairDeliveryReason : "none")}; repair_batch_send_attempt={pendingSend.SendAttempt}; repair_batch_send_attempt_count={pendingSend.SendAttemptCount}{FormatV4DataPathAuthoritySuffix(context, "filetransfer_v4_chunk_batch_sent", pendingSend.SendAuthority)}");
                 }
             }
 
@@ -8767,7 +8770,8 @@ public sealed partial class SessionFileTransferService
                     context.RouteRuntime.UsesRegularNknV4FastRuntime &&
                     context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
                     context.RouteRuntime.FrameFamily == FileTransferFrameFamily.V4;
-                pending.Enqueue(new PendingV4TransportSend(prepared, sendTask, sendCts, scheduledUtc, sendAttempt, sendAttemptCount, scheduledRegularNknV4FastRuntime));
+                observeSendAuthority?.Invoke(sendAuthority);
+                pending.Enqueue(new PendingV4TransportSend(prepared, sendTask, sendAuthority, sendCts, scheduledUtc, sendAttempt, sendAttemptCount, scheduledRegularNknV4FastRuntime));
                 pendingRawBytes += prepared.RawBytes;
 
                 lock (gate)

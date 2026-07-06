@@ -14892,7 +14892,19 @@ public sealed partial class SessionFileTransferService : IDisposable
     }
 
     private static string FormatV4DataPathAuthoritySuffix(OutboundTransferContext context, string source)
+        => FormatV4DataPathAuthoritySuffix(context, source, null);
+
+    private static string FormatV4DataPathAuthoritySuffix(
+        OutboundTransferContext context,
+        string source,
+        FileTransferDataPathSendAuthority? sendAuthority)
     {
+        if (sendAuthority is { } authority)
+        {
+            var authorityRouteCommitGeneration = authority.RouteCommitGeneration ?? 0;
+            return $"; direction=outbound; route={FormatProtocolLogValue(authority.RouteToken)}; protocol_version={authority.ProtocolVersion}; live_route_epoch={authority.LiveRouteEpoch}; runtime_generation={authority.RuntimeGeneration}; terminal_generation={authority.TerminalGeneration}; leg_generation={authority.LegGeneration}; route_publication_generation={authority.RoutePublicationGeneration}; route_commit_generation={authorityRouteCommitGeneration}; target_route={FormatProtocolLogValue(authority.TargetRouteToken)}; target_protocol_version={authority.TargetProtocolVersion}; target_transport={FormatFileTransferTransportKind(authority.TargetTransport)}; intended_target_transport={FormatFileTransferTransportKind(authority.TargetTransport)}; route_publication_action_kind={FormatProtocolLogValue(authority.RoutePublicationActionKind)}; coordinator_decision_reason={FormatProtocolLogValue(authority.CoordinatorDecisionReason)}";
+        }
+
         var token = context.CurrentRoutePublicationToken;
         var route = context.RouteSelection;
         var liveRouteEpoch = token is { IsDefault: false }
@@ -17567,6 +17579,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     private sealed record PendingV4TransportSend(
         PreparedV4TransportSend Prepared,
         Task SendTask,
+        FileTransferDataPathSendAuthority? SendAuthority,
         CancellationTokenSource? SendCts,
         DateTimeOffset ScheduledUtc,
         int SendAttempt,

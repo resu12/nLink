@@ -1920,6 +1920,97 @@ function Try-ApplySecondTransferSplitProofAcceptance {
     return $true
 }
 
+function Get-RouteAcceptanceTunaGuiSetupBootstrapFailure {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir
+    )
+
+    $errorPath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-error.json'
+    if (-not (Test-Path -LiteralPath $errorPath -PathType Leaf)) {
+        return $null
+    }
+
+    try {
+        $errorSummary = Get-Content -LiteralPath $errorPath -Raw | ConvertFrom-Json
+    }
+    catch {
+        return $null
+    }
+
+    $failurePhase = [string](Get-JsonPropertyValue -Object $errorSummary -Name 'failurePhase' -DefaultValue '')
+    $failureReason = [string](Get-JsonPropertyValue -Object $errorSummary -Name 'failureReason' -DefaultValue '')
+    $errorMessage = [string](Get-JsonPropertyValue -Object $errorSummary -Name 'error' -DefaultValue '')
+    $bridgeBootstrapNotReady = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $errorSummary -Name 'bridgeBootstrapNotReady' -DefaultValue $false)
+    $routeSelected = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $errorSummary -Name 'routeSelected' -DefaultValue $false)
+    $activationOfferSent = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $errorSummary -Name 'activationOfferSent' -DefaultValue $false)
+    $activationOfferReceived = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $errorSummary -Name 'activationOfferReceived' -DefaultValue $false)
+    $measuredOfferSent = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $errorSummary -Name 'measuredOfferSent' -DefaultValue $false)
+    $measuredOfferReceived = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $errorSummary -Name 'measuredOfferReceived' -DefaultValue $false)
+    $offerSent = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $errorSummary -Name 'offerSent' -DefaultValue $false)
+    $offerReceived = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $errorSummary -Name 'offerReceived' -DefaultValue $false)
+    $terminalObserved = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $errorSummary -Name 'terminalObserved' -DefaultValue $false)
+    $combined = @($failurePhase, $failureReason, $errorMessage) -join "`n"
+    $isBootstrapFailure =
+        [string]::Equals($failurePhase, 'preflight_bridge_bootstrap', [System.StringComparison]::OrdinalIgnoreCase) -or
+        $bridgeBootstrapNotReady -or
+        $combined.IndexOf('nkn_bridge_bootstrap_network_unready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('nkn_bridge_bootstrap_not_ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+    if (-not $isBootstrapFailure) {
+        return $null
+    }
+
+    $scenarioRuntimeEvidence =
+        $routeSelected -or
+        $activationOfferSent -or
+        $activationOfferReceived -or
+        $measuredOfferSent -or
+        $measuredOfferReceived -or
+        $offerSent -or
+        $offerReceived -or
+        $terminalObserved -or
+        $combined.IndexOf('live multi-toggle', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('filetransfer_tuna_gui_live_multi_toggle', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+    if ($scenarioRuntimeEvidence) {
+        return $null
+    }
+
+    $subreason = ''
+    foreach ($fieldName in @('failure_subreason', 'subreason')) {
+        $match = [regex]::Match($combined, "(?i)(?:^|[;`r`n]\s*)$fieldName=([^;`r`n]+)")
+        if ($match.Success) {
+            $subreason = $match.Groups[1].Value.Trim()
+            break
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($subreason) -or $subreason -eq '(none)') {
+        if (-not [string]::IsNullOrWhiteSpace($failureReason) -and
+            -not [string]::Equals($failureReason, 'unknown', [System.StringComparison]::OrdinalIgnoreCase) -and
+            -not [string]::Equals($failureReason, 'nkn_bridge_bootstrap_network_unready', [System.StringComparison]::OrdinalIgnoreCase) -and
+            -not [string]::Equals($failureReason, 'nkn_bridge_bootstrap_not_ready', [System.StringComparison]::OrdinalIgnoreCase)) {
+            $subreason = $failureReason
+        }
+        elseif ($combined.IndexOf('role=helper', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $subreason = 'helper_bridge_host_ready_connect_failed'
+        }
+        elseif ($combined.IndexOf('HostByAddressAsync failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $combined.IndexOf('Connect failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $combined.IndexOf('RPC call failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $combined.IndexOf('connect EACCES', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $subreason = 'helpee_bridge_host_ready_connect_failed'
+        }
+        else {
+            $subreason = 'nkn_bridge_bootstrap_not_ready'
+        }
+    }
+
+    return [pscustomobject]@{
+        Phase = 'preflight_bridge_bootstrap'
+        Reason = $subreason
+        Error = if ([string]::IsNullOrWhiteSpace($errorMessage)) { $failureReason } else { $errorMessage }
+    }
+}
+
 function Assert-Phase4ScenarioRun {
     param(
         [Parameter(Mandatory = $true)]$Scenario,
@@ -1930,6 +2021,19 @@ function Assert-Phase4ScenarioRun {
     $expectedFinalRoute = [string]$expectedRouteChanges[$expectedRouteChanges.Count - 1]
     $expectedMetadata = Get-RouteAcceptanceRouteMetadata -Route $expectedFinalRoute
     $result = New-RouteAcceptanceRunResult -Name ([string]$Scenario.Name) -ArtifactDir $ArtifactDir -ExpectedRoute $expectedFinalRoute -ExpectedProtocol ([int]$expectedMetadata.Protocol)
+    if ($Scenario.Kind -eq 'tuna') {
+        $setupBootstrapFailure = Get-RouteAcceptanceTunaGuiSetupBootstrapFailure -ArtifactDir $ArtifactDir
+        if ($null -ne $setupBootstrapFailure) {
+            $result.setupFailurePhase = [string]$setupBootstrapFailure.Phase
+            $result.setupFailureReason = [string]$setupBootstrapFailure.Reason
+            Add-RouteAcceptanceFailure -Result $result -Message ("Tuna GUI setup failure: phase={0}; reason={1}; error={2}" -f `
+                $result.setupFailurePhase,
+                $result.setupFailureReason,
+                ($(if ([string]::IsNullOrWhiteSpace([string]$setupBootstrapFailure.Error)) { '(none)' } else { [string]$setupBootstrapFailure.Error })))
+            return $result
+        }
+    }
+
     Assert-Phase4RouteSummary -Result $result -ExpectedRouteChanges $expectedRouteChanges
     if ($Scenario.Kind -eq 'tuna' -and $expectedRouteChanges.Count -gt 1) {
         $expectedLiveRouteChanges = @($expectedRouteChanges | Select-Object -Skip 1)
@@ -4404,10 +4508,13 @@ function Test-Phase5BridgeReadinessPreflightQuarantinableFailure {
     }
 
     $reason = [string]$PreflightResult.FailureReason
+    $subreason = if ($PreflightResult.PSObject.Properties.Name -contains 'FailureSubreason') { [string]$PreflightResult.FailureSubreason } else { '' }
     return $reason -eq 'helpee_invite_readiness_timeout' -or
         $reason -eq 'helpee_invite_connection_failed_before_ready' -or
         $reason -eq 'helpee_request_flow_not_enabled_after_identity_paste' -or
-        [string]$PreflightResult.FailureClass -eq 'preflight_helpee_invite_bootstrap'
+        [string]$PreflightResult.FailureClass -eq 'preflight_helpee_invite_bootstrap' -or
+        $subreason -eq 'helpee_bridge_host_ready_connect_failed' -or
+        $subreason -eq 'helper_bridge_host_ready_connect_failed'
 }
 
 function Write-Phase5BridgeReadinessPreflightQuarantineSummary {
@@ -5181,6 +5288,10 @@ function Test-Phase5RerunnableTransientSetupFailure {
     return $combined.IndexOf('activation_offer_not_observed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('activation_offer_sent_waiting_answer', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('regular_v4_receive_recovery_unproven', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('preflight_bridge_bootstrap', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('nkn_bridge_bootstrap_network_unready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('helpee_bridge_host_ready_connect_failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('helper_bridge_host_ready_connect_failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('helpee_invite_readiness_timeout', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('helpee_request_flow_not_enabled_after_identity_paste', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('helper_incoming_request_not_observed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
@@ -5207,6 +5318,10 @@ function Test-Phase5SingleScenarioSetupRerunAllowed {
         (Join-RouteAcceptanceTokenList -Values $Result.failures))
 
     return $combined.IndexOf('terminal_before_accept', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('preflight_bridge_bootstrap', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('nkn_bridge_bootstrap_network_unready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('helpee_bridge_host_ready_connect_failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('helper_bridge_host_ready_connect_failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('Timed out waiting for helpee Allow approval UI', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('The help request expired', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('Ack was not received', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
@@ -5535,6 +5650,10 @@ function Assert-Phase5ScenarioRun {
         [Parameter(Mandatory = $true)]$Result
     )
 
+    if ([string]::Equals([string]$Result.setupFailurePhase, 'preflight_bridge_bootstrap', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return
+    }
+
     if ($Result.liveRouteEpochProofVerdict -eq 'fail') {
         Add-RouteAcceptanceFailure -Result $Result -Message 'live route epoch proof verdict is fail'
     }
@@ -5726,7 +5845,8 @@ function Invoke-Phase4RouteAcceptanceScenario {
             Set-RouteAcceptanceScenarioIsolationResult -Result $result -IsolationResult $scenarioIsolationResult
         }
     }
-    if (-not [string]::IsNullOrWhiteSpace($scenarioExecutionFailure)) {
+    if (-not [string]::IsNullOrWhiteSpace($scenarioExecutionFailure) -and
+        -not [string]::Equals([string]$result.setupFailurePhase, 'preflight_bridge_bootstrap', [System.StringComparison]::OrdinalIgnoreCase)) {
         Add-RouteAcceptanceFailure -Result $result -Message ("scenario execution failed: {0}" -f $scenarioExecutionFailure)
     }
     if ($AcceptancePhase -eq 'phase5') {

@@ -962,20 +962,24 @@ function Write-TunaGuiFailureSummaryIfMissing {
 
     if ($null -ne $errorSummary) {
         if ($errorSummary.PSObject.Properties.Name -contains 'setupFailurePhase' -and
-            -not [string]::IsNullOrWhiteSpace([string]$errorSummary.setupFailurePhase)) {
+            -not [string]::IsNullOrWhiteSpace([string]$errorSummary.setupFailurePhase) -and
+            -not [string]::Equals([string]$errorSummary.setupFailurePhase, 'unknown', [System.StringComparison]::OrdinalIgnoreCase)) {
             $SetupFailurePhase = [string]$errorSummary.setupFailurePhase
         }
         elseif ($errorSummary.PSObject.Properties.Name -contains 'failurePhase' -and
-            -not [string]::IsNullOrWhiteSpace([string]$errorSummary.failurePhase)) {
+            -not [string]::IsNullOrWhiteSpace([string]$errorSummary.failurePhase) -and
+            -not [string]::Equals([string]$errorSummary.failurePhase, 'unknown', [System.StringComparison]::OrdinalIgnoreCase)) {
             $SetupFailurePhase = [string]$errorSummary.failurePhase
         }
 
         if ($errorSummary.PSObject.Properties.Name -contains 'setupFailureReason' -and
-            -not [string]::IsNullOrWhiteSpace([string]$errorSummary.setupFailureReason)) {
+            -not [string]::IsNullOrWhiteSpace([string]$errorSummary.setupFailureReason) -and
+            -not [string]::Equals([string]$errorSummary.setupFailureReason, 'unknown', [System.StringComparison]::OrdinalIgnoreCase)) {
             $SetupFailureReason = [string]$errorSummary.setupFailureReason
         }
         elseif ($errorSummary.PSObject.Properties.Name -contains 'failureReason' -and
-            -not [string]::IsNullOrWhiteSpace([string]$errorSummary.failureReason)) {
+            -not [string]::IsNullOrWhiteSpace([string]$errorSummary.failureReason) -and
+            -not [string]::Equals([string]$errorSummary.failureReason, 'unknown', [System.StringComparison]::OrdinalIgnoreCase)) {
             $SetupFailureReason = [string]$errorSummary.failureReason
         }
         elseif ($errorSummary.PSObject.Properties.Name -contains 'error' -and

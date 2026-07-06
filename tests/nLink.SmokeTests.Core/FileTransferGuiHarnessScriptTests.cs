@@ -65,6 +65,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("nkn_bridge_bootstrap_network_unready", scriptText, StringComparison.Ordinal);
         Assert.Contains("nkn_bridge_bootstrap_pair_retry_scheduled", scriptText, StringComparison.Ordinal);
         Assert.Contains("Test-HelpeeInviteBootstrapBridgeRetryableError", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Test-NknBridgeBootstrapFailureRequiresIdentityRotation", scriptText, StringComparison.Ordinal);
         Assert.Contains("nkn_identity_rotation_skipped_for_bridge_bootstrap_retry", scriptText, StringComparison.Ordinal);
         Assert.Contains("Wait-NknBridgeBootstrapReadyForCurrentPairWithRecovery -Context $Context", scriptText, StringComparison.Ordinal);
         Assert.Contains("Wait-NknBridgeBootstrapReadyForCurrentPair -Context $Context", scriptText, StringComparison.Ordinal);
@@ -105,6 +106,21 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("connect EACCES", bridgeRetryBody, StringComparison.Ordinal);
         Assert.Contains("Could not prepare invite", bridgeRetryBody, StringComparison.Ordinal);
 
+        var rotationPolicyStart = scriptText.IndexOf("function Test-NknBridgeBootstrapFailureRequiresIdentityRotation", StringComparison.Ordinal);
+        Assert.True(rotationPolicyStart >= 0, "Expected bridge bootstrap identity rotation policy to exist.");
+        var rotationPolicyEnd = scriptText.IndexOf("function Test-HelpeeInviteBootstrapPairRetryableError", rotationPolicyStart, StringComparison.Ordinal);
+        Assert.True(rotationPolicyEnd > rotationPolicyStart, "Expected to locate the end of the identity rotation policy.");
+        var rotationPolicyBody = scriptText[rotationPolicyStart..rotationPolicyEnd];
+        Assert.Contains("helpee_bridge_host_ready_connect_failed", rotationPolicyBody, StringComparison.Ordinal);
+        Assert.Contains("helper_bridge_host_ready_connect_failed", rotationPolicyBody, StringComparison.Ordinal);
+        Assert.Contains("HostByAddressAsync failed", rotationPolicyBody, StringComparison.Ordinal);
+        Assert.Contains("RPC call failed", rotationPolicyBody, StringComparison.Ordinal);
+        Assert.Contains("Connect failed", rotationPolicyBody, StringComparison.Ordinal);
+        Assert.Contains("connect EACCES", rotationPolicyBody, StringComparison.Ordinal);
+        Assert.Contains("$rotateIdentity = Test-NknBridgeBootstrapFailureRequiresIdentityRotation -Message $message", scriptText, StringComparison.Ordinal);
+        Assert.Contains("-RotateIdentity $rotateIdentity", scriptText, StringComparison.Ordinal);
+        Assert.Contains("$nextPairRestartRotateIdentity = if ($bridgeRetry) { Test-NknBridgeBootstrapFailureRequiresIdentityRotation -Message $message } else { $true }", scriptText, StringComparison.Ordinal);
+
         var identityRetryStart = scriptText.IndexOf("function Test-HelpeeInviteBootstrapPairRetryableError", StringComparison.Ordinal);
         Assert.True(identityRetryStart >= 0, "Expected helper identity retry classifier to exist.");
         var identityRetryEnd = scriptText.IndexOf("function Wait-HelpeeConnectionEntryMode", identityRetryStart, StringComparison.Ordinal);
@@ -124,6 +140,25 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("Connect-HelperAndHelpee -Context $Context", directConnectBody, StringComparison.Ordinal);
         Assert.Contains("Helper identity connect flow returned empty text.", directConnectBody, StringComparison.Ordinal);
         Assert.DoesNotContain("Enter-HelpeeHelperIdentityAndRequestHelp -HelpeeWindow $Context.HelpeeWindow -HelperIdentity $helperIdentity", directConnectBody, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NknBridge_BootstrapRetriesPlainRpcBeforeTlsFallback()
+    {
+        var repoRoot = FindRepoRoot();
+        var bridgePath = Path.Combine(repoRoot, "tools", "nkn-bridge", "index.js");
+        var bridgeText = File.ReadAllText(bridgePath);
+
+        Assert.Contains("function buildRpcBootstrapCandidates", bridgeText, StringComparison.Ordinal);
+        Assert.Contains("bootstrapCandidates.push({ rpc, tls: false, stage: plainStage })", bridgeText, StringComparison.Ordinal);
+        Assert.Contains("bootstrapCandidates.push({ rpc, tls: true, stage: 'tls_fallback' })", bridgeText, StringComparison.Ordinal);
+        Assert.Contains("function normalizeRpcBootstrapCandidate", bridgeText, StringComparison.Ordinal);
+        Assert.Contains("baseOptions.tls = initialCandidate.tls", bridgeText, StringComparison.Ordinal);
+        Assert.Contains("stage: bootstrapCandidate.stage", bridgeText, StringComparison.Ordinal);
+        Assert.Contains("tls: bootstrapCandidate.tls ? 1 : 0", bridgeText, StringComparison.Ordinal);
+        Assert.Contains("trackSelectedRpc(rpc, bootstrapCandidate.stage)", bridgeText, StringComparison.Ordinal);
+        Assert.Contains("state.selectedRpcStage = typeof stage === 'string' && stage.length > 0", bridgeText, StringComparison.Ordinal);
+        Assert.Contains("Creating NKN clients (rpc=${baseOptions.rpcServerAddr || 'default'}, tls=${baseOptions.tls ? 1 : 0}", bridgeText, StringComparison.Ordinal);
     }
 
     [Fact]

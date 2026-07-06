@@ -10238,6 +10238,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
         var previousSoftSettleDelay = NknSignalingTransport.RuntimeUnlockRecoverySoftSettleDelayOverrideForTests;
         var previousReceiveRecoveryBlocker = NknSignalingTransport.RuntimeUnlockRegularV4ReceiveRecoveryBlockerOverrideForTests;
         var previousObservedSendBlocker = NknSignalingTransport.RuntimeUnlockOfferObservedSendBlockerReasonOverrideForTests;
+        var previousPeerProofFreshness = NknSignalingTransport.RuntimeUnlockRetryAuthorityPeerProofFreshnessOverrideForTests;
+        var previousBulkProofBlocker = NknSignalingTransport.RuntimeUnlockBulkQueueObservedProofBlockerOverrideForTests;
+        var previousDirectObservedLaneBlocker = NknSignalingTransport.RuntimeUnlockOfferDirectObservedLaneBlockerOverrideForTests;
+        var previousPeerVisibleCopyTimeout = NknSignalingTransport.RuntimeUnlockPeerVisibleLifecycleCopyTimeoutOverrideForTests;
         NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = TimeSpan.Zero;
         NknSignalingTransport.RuntimeUnlockRegularV4BridgeRecoveryStartedAuthorityProbeDelayOverrideForTests =
             TimeSpan.FromSeconds(5);
@@ -10245,6 +10249,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
         NknSignalingTransport.RuntimeUnlockRecoverySoftSettleDelayOverrideForTests = TimeSpan.FromSeconds(20);
         NknSignalingTransport.RuntimeUnlockRegularV4ReceiveRecoveryBlockerOverrideForTests = null;
         NknSignalingTransport.RuntimeUnlockOfferObservedSendBlockerReasonOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockRetryAuthorityPeerProofFreshnessOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockBulkQueueObservedProofBlockerOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockOfferDirectObservedLaneBlockerOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockPeerVisibleLifecycleCopyTimeoutOverrideForTests = null;
         try
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
@@ -10388,6 +10396,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             NknSignalingTransport.RuntimeUnlockRecoverySoftSettleDelayOverrideForTests = previousSoftSettleDelay;
             NknSignalingTransport.RuntimeUnlockRegularV4ReceiveRecoveryBlockerOverrideForTests = previousReceiveRecoveryBlocker;
             NknSignalingTransport.RuntimeUnlockOfferObservedSendBlockerReasonOverrideForTests = previousObservedSendBlocker;
+            NknSignalingTransport.RuntimeUnlockRetryAuthorityPeerProofFreshnessOverrideForTests = previousPeerProofFreshness;
+            NknSignalingTransport.RuntimeUnlockBulkQueueObservedProofBlockerOverrideForTests = previousBulkProofBlocker;
+            NknSignalingTransport.RuntimeUnlockOfferDirectObservedLaneBlockerOverrideForTests = previousDirectObservedLaneBlocker;
+            NknSignalingTransport.RuntimeUnlockPeerVisibleLifecycleCopyTimeoutOverrideForTests = previousPeerVisibleCopyTimeout;
             FakeNknClient.ResetNetwork();
         }
     }
@@ -10691,11 +10703,44 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public void RegularV4FrontierRepairSettlementHandoffRequiresMatchingRecoveryTuple()
+    {
+        var repoRoot = FindRepoRoot();
+        var sourcePath = Path.Combine(repoRoot, "src", "nLink.Infra.Nkn", "NknSignalingTransport.Acceleration.cs");
+        var source = File.ReadAllText(sourcePath);
+
+        Assert.Contains("RuntimeUnlockRecoveryRetryStateMatchesRegularV4Settlement", source, StringComparison.Ordinal);
+        Assert.Contains("retry_contract_transfer_mismatch", source, StringComparison.Ordinal);
+        Assert.Contains("retry_contract_direction_mismatch", source, StringComparison.Ordinal);
+        Assert.Contains("retry_contract_route_mismatch", source, StringComparison.Ordinal);
+        Assert.Contains("retry_contract_protocol_mismatch", source, StringComparison.Ordinal);
+        Assert.Contains("retry_contract_live_epoch_mismatch", source, StringComparison.Ordinal);
+        Assert.Contains("retry_contract_bridge_generation_mismatch", source, StringComparison.Ordinal);
+        Assert.Contains("stateSnapshot is not null &&", source, StringComparison.Ordinal);
+        Assert.Contains("TryConsumePendingRuntimeUnlockAccelerationNegotiation(out var pendingReason)", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task RuntimeUnlockRetryBlockedByRegularV4Recovery_ReleasesOnceAfterReceiveProof()
     {
         FakeNknClient.ResetNetwork();
         var previousHelpeePriorityDelay = NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
+        var previousSoftSettleDelay = NknSignalingTransport.RuntimeUnlockRecoverySoftSettleDelayOverrideForTests;
+        var previousReceiveRecoveryBlocker = NknSignalingTransport.RuntimeUnlockRegularV4ReceiveRecoveryBlockerOverrideForTests;
+        var previousObservedSendBlocker = NknSignalingTransport.RuntimeUnlockOfferObservedSendBlockerReasonOverrideForTests;
+        var previousPeerProofFreshness = NknSignalingTransport.RuntimeUnlockRetryAuthorityPeerProofFreshnessOverrideForTests;
+        var previousBulkProofBlocker = NknSignalingTransport.RuntimeUnlockBulkQueueObservedProofBlockerOverrideForTests;
+        var previousDirectObservedLaneBlocker = NknSignalingTransport.RuntimeUnlockOfferDirectObservedLaneBlockerOverrideForTests;
+        var previousPeerVisibleCopyTimeout = NknSignalingTransport.RuntimeUnlockPeerVisibleLifecycleCopyTimeoutOverrideForTests;
         NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = TimeSpan.Zero;
+        NknSignalingTransport.RuntimeUnlockRecoverySoftSettleDelayOverrideForTests = TimeSpan.Zero;
+        NknSignalingTransport.RuntimeUnlockRegularV4ReceiveRecoveryBlockerOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockOfferObservedSendBlockerReasonOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockRetryAuthorityPeerProofFreshnessOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockBulkQueueObservedProofBlockerOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockOfferDirectObservedLaneBlockerOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockPeerVisibleLifecycleCopyTimeoutOverrideForTests = null;
         try
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
@@ -10836,6 +10881,13 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
         finally
         {
             NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = previousHelpeePriorityDelay;
+            NknSignalingTransport.RuntimeUnlockRecoverySoftSettleDelayOverrideForTests = previousSoftSettleDelay;
+            NknSignalingTransport.RuntimeUnlockRegularV4ReceiveRecoveryBlockerOverrideForTests = previousReceiveRecoveryBlocker;
+            NknSignalingTransport.RuntimeUnlockOfferObservedSendBlockerReasonOverrideForTests = previousObservedSendBlocker;
+            NknSignalingTransport.RuntimeUnlockRetryAuthorityPeerProofFreshnessOverrideForTests = previousPeerProofFreshness;
+            NknSignalingTransport.RuntimeUnlockBulkQueueObservedProofBlockerOverrideForTests = previousBulkProofBlocker;
+            NknSignalingTransport.RuntimeUnlockOfferDirectObservedLaneBlockerOverrideForTests = previousDirectObservedLaneBlocker;
+            NknSignalingTransport.RuntimeUnlockPeerVisibleLifecycleCopyTimeoutOverrideForTests = previousPeerVisibleCopyTimeout;
             FakeNknClient.ResetNetwork();
         }
     }

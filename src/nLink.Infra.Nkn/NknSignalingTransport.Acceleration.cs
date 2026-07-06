@@ -432,6 +432,16 @@ public sealed partial class NknSignalingTransport
 
         public bool BlockedByRegularV4ReceiveRecovery { get; set; }
 
+        public bool BlockedByRegularV4FrontierRepair { get; set; }
+
+        public string? RegularV4FrontierRepairTrigger { get; set; }
+
+        public long RegularV4FrontierRepairPayerDecisionId { get; set; }
+
+        public string? RegularV4FrontierRepairBlockerReason { get; set; }
+
+        public long RegularV4FrontierRepairBlockedUtcMs { get; set; }
+
         public string? RegularV4RecoveryBlockedTransferId { get; set; }
 
         public FileTransferDirection? RegularV4RecoveryDirection { get; set; }
@@ -1902,8 +1912,247 @@ public sealed partial class NknSignalingTransport
         });
         if (accepted)
         {
+            HandleAcceptedRegularV4FrontierRepairSettlement(
+                settlement with
+                {
+                    SessionId = sessionId ?? "none",
+                    TransferId = transferId,
+                });
             NotifyTransportAccelerationStateChanged("regular_v4_frontier_repair_settlement");
         }
+    }
+
+    private void HandleAcceptedRegularV4FrontierRepairSettlement(
+        FileTransferRegularV4FrontierRepairSettlement settlement)
+    {
+        var normalizedSessionId = string.IsNullOrWhiteSpace(settlement.SessionId)
+            ? currentSessionSecurityState.SessionId?.Value ?? string.Empty
+            : settlement.SessionId.Trim();
+        var normalizedTransferId = string.IsNullOrWhiteSpace(settlement.TransferId)
+            ? "(none)"
+            : settlement.TransferId.Trim();
+        const string settlementTrigger = "regular_v4_frontier_repair_settlement";
+
+        if (string.IsNullOrWhiteSpace(normalizedSessionId))
+        {
+            LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
+                "runtime_unlock_regular_v4_frontier_repair_settlement_rejected",
+                settlement,
+                normalizedSessionId,
+                normalizedTransferId,
+                "missing_session_id");
+            return;
+        }
+
+        if (client is RealNknClientAdapter realClient &&
+            realClient.TryGetFileTransferRegularV4ActivationSendBlocker(
+                out var blockerReason,
+                out var blockerRemainingMs,
+                includeRegularV4Pressure: true) &&
+            IsRegularV4PressureActivationSendBlocker(blockerReason))
+        {
+            LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
+                "runtime_unlock_regular_v4_frontier_repair_settlement_held",
+                settlement,
+                normalizedSessionId,
+                normalizedTransferId,
+                "regular_v4_frontier_repair_pressure_still_active",
+                blockerReason,
+                blockerRemainingMs);
+            MarkRuntimeUnlockRecoveryContractAuthorityBlocked(blockerReason);
+            return;
+        }
+
+        var regularRouteCurrent =
+            HasActiveRegularV4FileTransferRouteHint(normalizedSessionId) &&
+            !HasActivePostTunaFallbackFileTransferRouteHint(normalizedSessionId);
+        if (!regularRouteCurrent)
+        {
+            FailRuntimeUnlockRecoveryContractIfActive(
+                normalizedSessionId,
+                "regular_v4_frontier_repair_settlement_route_not_current");
+            LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
+                "runtime_unlock_regular_v4_frontier_repair_settlement_rejected",
+                settlement,
+                normalizedSessionId,
+                normalizedTransferId,
+                "regular_v4_route_not_current");
+            return;
+        }
+
+        RuntimeUnlockRecoveryRetryState? stateSnapshot = null;
+        var stateTerminal = false;
+        var stateSessionMismatch = false;
+        var stateTupleMismatch = false;
+        var stateMismatchReason = "none";
+        lock (accelerationGate)
+        {
+            var state = runtimeUnlockRecoveryRetryState;
+            if (state is not null)
+            {
+                stateSessionMismatch = !string.Equals(state.SessionId, normalizedSessionId, StringComparison.Ordinal);
+                stateTerminal = state.ContractState is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed;
+                stateTupleMismatch = !stateSessionMismatch &&
+                    !stateTerminal &&
+                    !RuntimeUnlockRecoveryRetryStateMatchesRegularV4Settlement(
+                        state,
+                        settlement,
+                        normalizedTransferId,
+                        out stateMismatchReason);
+                if (!stateSessionMismatch && !stateTerminal && !stateTupleMismatch)
+                {
+                    state.BlockedByRegularV4FrontierRepair = false;
+                    state.RegularV4FrontierRepairBlockerReason = null;
+                    state.RegularV4FrontierRepairTrigger = settlementTrigger;
+                    state.RegularV4FrontierRepairPayerDecisionId = 0;
+                    stateSnapshot = state;
+                }
+            }
+        }
+
+        if (stateSnapshot is not null &&
+            TryConsumePendingRuntimeUnlockAccelerationNegotiation(out var pendingReason))
+        {
+            LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
+                "runtime_unlock_regular_v4_frontier_repair_settlement_released",
+                settlement,
+                normalizedSessionId,
+                normalizedTransferId,
+                "pending_runtime_unlock_negotiation_released",
+                retryReason: pendingReason,
+                stateSnapshot: stateSnapshot);
+            ScheduleRuntimeUnlockAccelerationNegotiationWake(pendingReason, settlementTrigger);
+            return;
+        }
+
+        if (stateSnapshot is not null)
+        {
+            LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
+                "runtime_unlock_regular_v4_frontier_repair_settlement_released",
+                settlement,
+                normalizedSessionId,
+                normalizedTransferId,
+                "retry_contract_released",
+                retryReason: stateSnapshot.RetryReason,
+                stateSnapshot: stateSnapshot);
+            ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed(settlementTrigger);
+            return;
+        }
+
+        var decisionReason = stateSessionMismatch
+            ? "retry_contract_session_mismatch"
+            : stateTerminal
+                ? "retry_contract_terminal"
+                : stateTupleMismatch
+                    ? stateMismatchReason
+                    : "no_pending_runtime_unlock_activation";
+        if (stateTerminal || stateSessionMismatch || stateTupleMismatch)
+        {
+            if (stateTerminal || stateSessionMismatch)
+            {
+                FailRuntimeUnlockRecoveryContractIfActive(normalizedSessionId, decisionReason);
+            }
+
+            LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
+                "runtime_unlock_regular_v4_frontier_repair_settlement_rejected",
+                settlement,
+                normalizedSessionId,
+                normalizedTransferId,
+                decisionReason);
+            return;
+        }
+
+        LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
+            "runtime_unlock_regular_v4_frontier_repair_settlement_held",
+            settlement,
+            normalizedSessionId,
+            normalizedTransferId,
+            decisionReason);
+    }
+
+    private static bool RuntimeUnlockRecoveryRetryStateMatchesRegularV4Settlement(
+        RuntimeUnlockRecoveryRetryState state,
+        FileTransferRegularV4FrontierRepairSettlement settlement,
+        string transferId,
+        out string mismatchReason)
+    {
+        var normalizedStateTransferId = string.IsNullOrWhiteSpace(state.RegularV4RecoveryBlockedTransferId)
+            ? state.TransferId
+            : state.RegularV4RecoveryBlockedTransferId;
+        if (string.IsNullOrWhiteSpace(normalizedStateTransferId) ||
+            !string.Equals(normalizedStateTransferId.Trim(), transferId, StringComparison.Ordinal))
+        {
+            mismatchReason = "retry_contract_transfer_mismatch";
+            return false;
+        }
+
+        if (state.RegularV4RecoveryDirection is null)
+        {
+            mismatchReason = "retry_contract_direction_missing";
+            return false;
+        }
+
+        if (state.RegularV4RecoveryDirection.Value != settlement.Direction)
+        {
+            mismatchReason = "retry_contract_direction_mismatch";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(state.RegularV4RecoveryRouteToken) ||
+            !string.Equals(state.RegularV4RecoveryRouteToken.Trim(), settlement.RouteToken, StringComparison.Ordinal))
+        {
+            mismatchReason = "retry_contract_route_mismatch";
+            return false;
+        }
+
+        if (state.RegularV4RecoveryProtocolVersion != settlement.ProtocolVersion)
+        {
+            mismatchReason = "retry_contract_protocol_mismatch";
+            return false;
+        }
+
+        if (state.RegularV4RecoveryLiveRouteEpoch != settlement.LiveRouteEpoch)
+        {
+            mismatchReason = "retry_contract_live_epoch_mismatch";
+            return false;
+        }
+
+        if (state.RegularV4RecoveryBridgeDecisionGeneration != settlement.BridgeDecisionGeneration)
+        {
+            mismatchReason = "retry_contract_bridge_generation_mismatch";
+            return false;
+        }
+
+        mismatchReason = "none";
+        return true;
+    }
+
+    private static string FormatRegularV4FrontierRepairSettlementOutcomeForAccelerationLog(
+        FileTransferRegularV4FrontierRepairSettlementOutcome outcome)
+        => outcome switch
+        {
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved => "progress_observed",
+            FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch => "missing_dispatch",
+            FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled => "settled_stalled",
+            FileTransferRegularV4FrontierRepairSettlementOutcome.AuthorityRejected => "authority_rejected",
+            FileTransferRegularV4FrontierRepairSettlementOutcome.TerminalRejected => "terminal_rejected",
+            _ => SanitizeLogToken(outcome.ToString()),
+        };
+
+    private void LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
+        string eventName,
+        FileTransferRegularV4FrontierRepairSettlement settlement,
+        string sessionId,
+        string transferId,
+        string decisionReason,
+        string? blockerReason = null,
+        long blockerRemainingMs = 0,
+        string? retryReason = null,
+        RuntimeUnlockRecoveryRetryState? stateSnapshot = null)
+    {
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event={SanitizeLogToken(eventName)}; session_id={SanitizeLogToken(sessionId)}; transfer_id={SanitizeLogToken(transferId)}; direction={settlement.Direction.ToString().ToLowerInvariant()}; route={SanitizeLogToken(settlement.RouteToken)}; protocol_version={settlement.ProtocolVersion}; live_route_epoch={settlement.LiveRouteEpoch}; runtime_generation={settlement.RuntimeGeneration}; terminal_generation={settlement.TerminalGeneration}; leg_generation={settlement.LegGeneration}; transport_epoch={settlement.TransportEpoch}; bridge_recovery_generation={settlement.BridgeRecoveryGeneration}; bridge_decision_generation={settlement.BridgeDecisionGeneration}; route_publication_generation={settlement.RoutePublicationGeneration}; route_commit_generation={settlement.RouteCommitGeneration ?? 0}; target_transport={FormatFileTransferTransportKindForLog(settlement.TargetTransport)}; repair_request_key={SanitizeLogToken(settlement.RepairKey)}; frontier_chunk_index={settlement.FrontierChunkIndex}; durable_received_highest_chunk_index={settlement.DurableReceivedHighestChunkIndex}; requested_chunk_count={Math.Max(0, settlement.RequestedChunkCount)}; settlement_decision_generation={settlement.DecisionGeneration}; settlement_outcome={FormatRegularV4FrontierRepairSettlementOutcomeForAccelerationLog(settlement.Outcome)}; retry_reason={SanitizeLogToken(retryReason ?? stateSnapshot?.RetryReason ?? "(none)")}; recovery_reason={SanitizeLogToken(stateSnapshot?.RecoveryReason ?? "(none)")}; contract_generation={stateSnapshot?.ContractGeneration ?? 0}; offer_generation={(stateSnapshot is null ? 0 : stateSnapshot.CurrentOfferGeneration > 0 ? stateSnapshot.CurrentOfferGeneration : stateSnapshot.RetiredOfferGeneration)}; blocker_reason={SanitizeLogToken(blockerReason ?? stateSnapshot?.RegularV4FrontierRepairBlockerReason ?? "(none)")}; blocker_remaining_ms={Math.Max(0, blockerRemainingMs)}; decision_reason={SanitizeLogToken(decisionReason)}");
     }
 
     public void ObservePostTunaFallbackControlPlanePressure(FileTransferPostTunaFallbackControlPlanePressure pressure)
@@ -11487,6 +11736,21 @@ public sealed partial class NknSignalingTransport
         }
 
         MarkRuntimeUnlockRecoveryContractAuthorityBlocked(blockerReason);
+        lock (accelerationGate)
+        {
+            var state = runtimeUnlockRecoveryRetryState;
+            if (state is not null &&
+                state.ContractState is not (SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed) &&
+                string.Equals(state.SessionId, normalizedSessionId, StringComparison.Ordinal))
+            {
+                state.BlockedByRegularV4FrontierRepair = true;
+                state.RegularV4FrontierRepairTrigger = SanitizeLogToken(trigger);
+                state.RegularV4FrontierRepairPayerDecisionId = payerDecisionId;
+                state.RegularV4FrontierRepairBlockerReason = SanitizeLogToken(blockerReason);
+                state.RegularV4FrontierRepairBlockedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            }
+        }
+
         MarkPendingRuntimeUnlockAccelerationNegotiation(trigger);
         var retryScheduled = ScheduleAccelerationNegotiationRetry(trigger);
         LocalOperationalLog.Warn(

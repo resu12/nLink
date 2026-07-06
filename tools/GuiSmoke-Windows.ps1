@@ -2991,7 +2991,39 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $phase = 'unknown'
     $reason = 'unknown'
     $listenerReadyUnavailableContradiction = $listenerReady -and ($listenerUnavailable -or $listenerSidecarUnavailable)
-    if ($ErrorMessage.IndexOf('second_transfer_preactivation_readiness_missing', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+    $bridgeBootstrapSubreason = ''
+    if ($bridgeBootstrapNotReady -or
+        $ErrorMessage.IndexOf('nkn_bridge_bootstrap_network_unready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $ErrorMessage.IndexOf('nkn_bridge_bootstrap_not_ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        $bootstrapText = (@($ErrorMessage) + @($evidenceLines)) -join "`n"
+        foreach ($fieldName in @('failure_subreason', 'subreason')) {
+            $match = [regex]::Match($bootstrapText, "(?i)(?:^|[;`r`n]\s*)$fieldName=([^;`r`n]+)")
+            if ($match.Success) {
+                $bridgeBootstrapSubreason = $match.Groups[1].Value.Trim()
+                break
+            }
+        }
+
+        if ([string]::IsNullOrWhiteSpace($bridgeBootstrapSubreason) -or
+            $bridgeBootstrapSubreason -eq '(none)') {
+            if ($bootstrapText.IndexOf('role=helper', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $bridgeBootstrapSubreason = 'helper_bridge_host_ready_connect_failed'
+            }
+            elseif ($bootstrapText.IndexOf('HostByAddressAsync failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $bootstrapText.IndexOf('Connect failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $bootstrapText.IndexOf('RPC call failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $bootstrapText.IndexOf('connect EACCES', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $bridgeBootstrapSubreason = 'helpee_bridge_host_ready_connect_failed'
+            }
+            else {
+                $bridgeBootstrapSubreason = 'nkn_bridge_bootstrap_not_ready'
+            }
+        }
+
+        $phase = 'preflight_bridge_bootstrap'
+        $reason = $bridgeBootstrapSubreason
+    }
+    elseif ($ErrorMessage.IndexOf('second_transfer_preactivation_readiness_missing', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $ErrorMessage.IndexOf('second_transfer_tuna_readiness_unstable', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $ErrorMessage.IndexOf('Tuna GUI second-transfer readiness did not stabilize', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         $phase = 'preactivation_readiness'
@@ -8078,13 +8110,15 @@ function Wait-NknBridgeBootstrapReadyForCurrentPairWithRecovery {
                 throw
             }
 
-            Write-Host ("[GUI Smoke] event=nkn_bridge_bootstrap_pair_retry_scheduled; attempt={0}/{1}; reason={2}; rotate_identity=0; helpee_pid={3}; helper_pid={4}" -f `
+            $rotateIdentity = Test-NknBridgeBootstrapFailureRequiresIdentityRotation -Message $message
+            Write-Host ("[GUI Smoke] event=nkn_bridge_bootstrap_pair_retry_scheduled; attempt={0}/{1}; reason={2}; rotate_identity={3}; helpee_pid={4}; helper_pid={5}" -f `
                 $attempt,
                 $attempts,
                 $message,
+                ($(if ($rotateIdentity) { 1 } else { 0 })),
                 ($(if ($Context.HelpeeProc) { [int]$Context.HelpeeProc.Id } else { 0 })),
                 ($(if ($Context.HelperProc) { [int]$Context.HelperProc.Id } else { 0 }))) -ForegroundColor Yellow
-            Restart-HelperIdentityPairFlow -Context $Context -Reason 'nkn_bridge_bootstrap_pair_retry' -Attempt ($attempt + 1) -RotateIdentity $false
+            Restart-HelperIdentityPairFlow -Context $Context -Reason 'nkn_bridge_bootstrap_pair_retry' -Attempt ($attempt + 1) -RotateIdentity $rotateIdentity
         }
     }
 
@@ -9951,6 +9985,18 @@ function Test-HelpeeInviteBootstrapBridgeRetryableError {
         $Message.IndexOf('Could not prepare invite', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
 }
 
+function Test-NknBridgeBootstrapFailureRequiresIdentityRotation {
+    param([AllowNull()][string]$Message)
+
+    if ([string]::IsNullOrWhiteSpace($Message)) { return $false }
+    return $Message.IndexOf('helpee_bridge_host_ready_connect_failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $Message.IndexOf('helper_bridge_host_ready_connect_failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $Message.IndexOf('HostByAddressAsync failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $Message.IndexOf('RPC call failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $Message.IndexOf('Connect failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $Message.IndexOf('connect EACCES', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+}
+
 function Test-HelpeeInviteBootstrapPairRetryableError {
     param([AllowNull()][string]$Message)
 
@@ -10060,7 +10106,7 @@ function Connect-HelperAndHelpee {
                 $identityRetry = Test-HelpeeInviteBootstrapPairRetryableError -Message $message
                 if ($pairAttempt -lt $pairAttempts -and ($bridgeRetry -or $identityRetry)) {
                     $nextPairRestartReason = if ($bridgeRetry) { 'helpee_invite_bridge_bootstrap_retry' } else { 'helpee_invite_bootstrap_retry' }
-                    $nextPairRestartRotateIdentity = -not $bridgeRetry
+                    $nextPairRestartRotateIdentity = if ($bridgeRetry) { Test-NknBridgeBootstrapFailureRequiresIdentityRotation -Message $message } else { $true }
                     Write-Host ("[GUI Smoke] event=helper_identity_pair_retry_scheduled_after_helpee_invite_bootstrap_failure; attempt={0}/{1}; reason={2}; retry_family={3}; rotate_identity={4}; helpee_diagnostic={5}; helper_diagnostic={6}" -f `
                         $pairAttempt,
                         $pairAttempts,

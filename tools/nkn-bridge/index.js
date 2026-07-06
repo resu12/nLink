@@ -1442,7 +1442,9 @@ function trackSelectedRpc(rpc, stage) {
 
   state.selectedRpc = normalizedRpc;
   state.selectedRpcKey = computeStableKey(normalizedRpc);
-  state.selectedRpcStage = stage === 'fallback' ? 'fallback' : 'initial';
+  state.selectedRpcStage = typeof stage === 'string' && stage.length > 0
+    ? stage
+    : 'initial';
 }
 
 function normalizeSubClientCount(value, fallback = DEFAULT_NUM_SUBCLIENTS) {
@@ -2279,6 +2281,38 @@ function rotateCandidates(candidates) {
   return [...candidates.slice(offset), ...candidates.slice(0, offset)];
 }
 
+function buildRpcBootstrapCandidates(seedRpc) {
+  const rpcCandidates = rotateCandidates(parseRpcCandidates(seedRpc));
+  const bootstrapCandidates = [];
+
+  for (let i = 0; i < rpcCandidates.length; i += 1) {
+    const rpc = rpcCandidates[i];
+    const plainStage = i === 0 ? 'initial' : 'fallback';
+    bootstrapCandidates.push({ rpc, tls: false, stage: plainStage });
+    bootstrapCandidates.push({ rpc, tls: true, stage: 'tls_fallback' });
+  }
+
+  return bootstrapCandidates;
+}
+
+function normalizeRpcBootstrapCandidate(candidate, fallbackStage = 'fallback') {
+  if (typeof candidate === 'string') {
+    return { rpc: normalizeRpcCandidate(candidate), tls: false, stage: fallbackStage };
+  }
+
+  if (!candidate || typeof candidate.rpc !== 'string') {
+    return { rpc: '', tls: false, stage: fallbackStage };
+  }
+
+  return {
+    rpc: normalizeRpcCandidate(candidate.rpc),
+    tls: Boolean(candidate.tls),
+    stage: typeof candidate.stage === 'string' && candidate.stage.length > 0
+      ? candidate.stage
+      : fallbackStage
+  };
+}
+
 function resolveConnectFallbackDelayMs(command) {
   const preflightDelay = command && command.preflightRpcEnabled
     ? Number(command.preflightTimeoutMs)
@@ -2683,8 +2717,8 @@ async function handleConnect(command) {
     reconnectIntervalMin: 1000,
     reconnectIntervalMax: 16000,
     responseTimeout: 5000,
-    // Do not force WSS in the desktop bridge. Some predecessor nodes do not support
-    // WSS, and forcing tls=true causes bootstrap failures on otherwise healthy networks.
+    // Start with the historical plain-websocket path, then fall back to WSS per RPC
+    // candidate when setup bootstrap evidence shows the plain path is blocked.
     tls: false
   };
 
@@ -2696,12 +2730,14 @@ async function handleConnect(command) {
     ? command.identifier.trim()
     : '';
 
-  const rpcCandidates = rotateCandidates(parseRpcCandidates(command.seedRpc));
+  const rpcCandidates = buildRpcBootstrapCandidates(command.seedRpc);
   if (rpcCandidates.length > 0) {
+    const initialCandidate = normalizeRpcBootstrapCandidate(rpcCandidates[0], 'initial');
     // Keep both keys for compatibility with SDK versions/docs naming differences.
-    baseOptions.rpcServerAddr = rpcCandidates[0];
-    baseOptions.seedRPCServerAddr = rpcCandidates[0];
-    trackSelectedRpc(baseOptions.rpcServerAddr, 'initial');
+    baseOptions.rpcServerAddr = initialCandidate.rpc;
+    baseOptions.seedRPCServerAddr = initialCandidate.rpc;
+    baseOptions.tls = initialCandidate.tls;
+    trackSelectedRpc(baseOptions.rpcServerAddr, initialCandidate.stage);
   }
 
   if (state.preflightProgressEnabled) {
@@ -2718,13 +2754,14 @@ async function handleConnect(command) {
         event: 'rpc_selected',
         connectId: state.connectId || null,
         rpc: baseOptions.rpcServerAddr,
-        stage: 'initial',
+        stage: rpcCandidates.length > 0 ? normalizeRpcBootstrapCandidate(rpcCandidates[0], 'initial').stage : 'initial',
+        tls: baseOptions.tls ? 1 : 0,
         ts: Date.now()
       });
     }
   }
 
-  logStderr(`Creating NKN clients (rpc=${baseOptions.rpcServerAddr || 'default'}, control_subclients=${subClientTopology.control}, media_subclients=${subClientTopology.media}, bulk_subclients=${subClientTopology.bulk}, bulk_send_concurrency=${subClientTopology.bulkSendConcurrency}, bulk_send_mode=${state.bulkSendMode})`);
+  logStderr(`Creating NKN clients (rpc=${baseOptions.rpcServerAddr || 'default'}, tls=${baseOptions.tls ? 1 : 0}, control_subclients=${subClientTopology.control}, media_subclients=${subClientTopology.media}, bulk_subclients=${subClientTopology.bulk}, bulk_send_concurrency=${subClientTopology.bulkSendConcurrency}, bulk_send_mode=${state.bulkSendMode})`);
   const ClientCtor = nkn.MultiClient || nkn.Client;
   if (typeof ClientCtor !== 'function') {
     throw new Error('NKN Client constructor not found in SDK.');
@@ -2769,7 +2806,7 @@ async function handleConnect(command) {
 }
 
 async function tryFallbackRpcCandidates(connectAttemptId, originalCommand, remainingRpcCandidates, fallbackDelayMs = DEFAULT_CONNECT_READY_TIMEOUT_MS) {
-  for (const rpc of remainingRpcCandidates) {
+  for (const rawCandidate of remainingRpcCandidates) {
     await delay(fallbackDelayMs);
 
     if (state.shuttingDown) {
@@ -2785,13 +2822,21 @@ async function tryFallbackRpcCandidates(connectAttemptId, originalCommand, remai
     }
 
     try {
-      logStderr(`Retrying NKN client bootstrap with alternate rpc=${rpc}`);
+      const bootstrapCandidate = normalizeRpcBootstrapCandidate(rawCandidate, 'fallback');
+      const rpc = bootstrapCandidate.rpc;
+      if (!rpc) {
+        continue;
+      }
+
+      logStderr(`Retrying NKN client bootstrap with alternate rpc=${rpc}; tls=${bootstrapCandidate.tls ? 1 : 0}; stage=${bootstrapCandidate.stage}`);
       state.bridgeTransportHealthSummaryWindow.rpcFallbackAttemptCountSinceLast += 1;
       if (state.preflightProgressEnabled) {
         emitJson({
           event: 'rpc_fallback_attempt',
           connectId: state.connectId || null,
           rpc,
+          stage: bootstrapCandidate.stage,
+          tls: bootstrapCandidate.tls ? 1 : 0,
           fallbackDelayMs,
           ts: Date.now()
         });
@@ -2815,11 +2860,11 @@ async function tryFallbackRpcCandidates(connectAttemptId, originalCommand, remai
         reconnectIntervalMin: 1000,
         reconnectIntervalMax: 16000,
         responseTimeout: 5000,
-        tls: false,
+        tls: bootstrapCandidate.tls,
         rpcServerAddr: rpc,
         seedRPCServerAddr: rpc
       };
-      trackSelectedRpc(rpc, 'fallback');
+      trackSelectedRpc(rpc, bootstrapCandidate.stage);
 
       if (seed) {
         baseOptions.seed = seed;
@@ -2865,7 +2910,8 @@ async function tryFallbackRpcCandidates(connectAttemptId, originalCommand, remai
           event: 'rpc_selected',
           connectId: state.connectId || null,
           rpc,
-          stage: 'fallback',
+          stage: bootstrapCandidate.stage,
+          tls: bootstrapCandidate.tls ? 1 : 0,
           ts: Date.now()
         });
       }

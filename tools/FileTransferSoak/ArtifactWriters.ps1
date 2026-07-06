@@ -7961,6 +7961,14 @@ function Get-FileTransferRecoveryFailureClassification {
     $regularV4FrontierRepairSettledStalledEvents = @($events | Where-Object {
         $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_settled_stalled'
     })
+    $regularV4FrontierRepairSettlementAcceptedEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_settlement_accepted'
+    })
+    $runtimeUnlockRegularV4FrontierRepairSettlementHandoffEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_regular_v4_frontier_repair_settlement_released' -or
+        $_.EventName -eq 'runtime_unlock_regular_v4_frontier_repair_settlement_held' -or
+        $_.EventName -eq 'runtime_unlock_regular_v4_frontier_repair_settlement_rejected'
+    })
     $regularV4RepairCachePressureEvents = @($events | Where-Object {
         $_.EventName -eq 'filetransfer_sender_repair_cache_pressure_entered'
     })
@@ -8485,6 +8493,19 @@ function Get-FileTransferRecoveryFailureClassification {
         return $true
     }
 
+    $regularV4FrontierRepairAcceptedSettlementMissingHandoffEvents = @(
+        foreach ($accepted in $regularV4FrontierRepairSettlementAcceptedEvents) {
+            $acceptedSequence = [int64]$accepted.Sequence
+            $handoff = @($runtimeUnlockRegularV4FrontierRepairSettlementHandoffEvents | Where-Object {
+                [int64]$_.Sequence -gt $acceptedSequence -and
+                (Test-RegularV4FrontierRepairMatch -Source $accepted -Candidate $_)
+            })
+            if ($handoff.Count -eq 0) {
+                $accepted
+            }
+        }
+    )
+
     $regularV4FrontierRepairUnresolvedStalledEvents = @(
         foreach ($stalled in $regularV4FrontierRepairStalledEvents) {
             $stalledSequence = [int64]$stalled.Sequence
@@ -8553,7 +8574,11 @@ function Get-FileTransferRecoveryFailureClassification {
     $regularV4FrontierRepairStalled =
         $hasRegularOnlyRouteEvidence -and
         (
-            $regularV4FrontierRepairSettledStalledEvents.Count -gt 0 -or
+            $regularV4FrontierRepairAcceptedSettlementMissingHandoffEvents.Count -gt 0 -or
+            (
+                $regularV4FrontierRepairSettledStalledEvents.Count -gt 0 -and
+                $regularV4FrontierRepairSettlementAcceptedEvents.Count -eq 0
+            ) -or
             $regularV4FrontierRepairUnresolvedStalledEvents.Count -gt 0 -or
             (
                 $regularV4FrontierRepairUnresolvedDispatchEvents.Count -gt 0 -and
@@ -8667,7 +8692,11 @@ function Get-FileTransferRecoveryFailureClassification {
     elseif ($runtimeUnlockRetryRegularV4RecoverySettlementMissingCount -gt 0) {
         $class = 'runtime_unlock_retry_regular_v4_recovery_settlement_missing'
     }
-    elseif ($regularV4FrontierRepairSettledStalledEvents.Count -gt 0) {
+    elseif ($regularV4FrontierRepairAcceptedSettlementMissingHandoffEvents.Count -gt 0 -or
+        (
+            $regularV4FrontierRepairSettledStalledEvents.Count -gt 0 -and
+            $regularV4FrontierRepairSettlementAcceptedEvents.Count -eq 0
+        )) {
         $class = 'regular_v4_frontier_repair_liveness_settlement_missing'
     }
     elseif ($regularV4FrontierRepairSendDeferred) {
