@@ -193,6 +193,11 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("FallbackFrontierRepairStalled", scriptText, StringComparison.Ordinal);
         Assert.Contains("fallback_frontier_repair_stalled", scriptText, StringComparison.Ordinal);
         Assert.Contains("fallback_frontier_repair", scriptText, StringComparison.Ordinal);
+        Assert.Contains("postTunaFallbackRouteEvidence", scriptText, StringComparison.Ordinal);
+        Assert.Contains("postTunaFallbackFrontierRescueObserved", scriptText, StringComparison.Ordinal);
+        Assert.Contains("normalToTunaEpochWaitAfterFallback", scriptText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer_v6_post_tuna_fallback_frontier_rescue_requested", scriptText, StringComparison.Ordinal);
+        Assert.Contains("(-not $fallbackFrontierRepairStalled) -and ($regularV4FrontierRepairStalledEvent", scriptText, StringComparison.Ordinal);
         Assert.Contains("post_fallback_runtime_unlock_resume", scriptText, StringComparison.Ordinal);
         Assert.Contains("post_fallback_runtime_unlock_resume_blocked", scriptText, StringComparison.Ordinal);
         Assert.Contains("fallback_proof_replay_pending_after_paired_yield", scriptText, StringComparison.Ordinal);
@@ -477,12 +482,34 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("Ensure-TunaGuiSecondTransferRetainedLogSlice", wrapperText, StringComparison.Ordinal);
         Assert.Contains("filetransfer-second-transfer-retained-log-slice-source.txt", wrapperText, StringComparison.Ordinal);
         Assert.Contains("source=missing", wrapperText, StringComparison.Ordinal);
+        Assert.Contains("second_transfer_retained_slice_missing", wrapperText, StringComparison.Ordinal);
         Assert.Contains("refusing to analyze the full retained log as second-transfer proof", wrapperText, StringComparison.Ordinal);
-        Assert.Contains("Second-transfer retained analysis skipped because the scenario-specific retained slice is missing", wrapperText, StringComparison.Ordinal);
+        Assert.DoesNotContain("Second-transfer retained analysis skipped because the scenario-specific retained slice is missing", wrapperText, StringComparison.Ordinal);
         Assert.DoesNotContain("Copy-Item -LiteralPath $retainedPath -Destination $secondRetainedPath", wrapperText, StringComparison.Ordinal);
         Assert.Contains("Invoke-TunaGuiLiveRetainedAnalysisBestEffort", wrapperText, StringComparison.Ordinal);
         Assert.Contains("post_tuna_fallback_v6,file_tuna_v4", guiText, StringComparison.Ordinal);
         Assert.Contains("Second transfer after live reactivation failed route/integrity check", guiText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RunFileTransferTunaGuiSmoke_TerminalSuccessRetainedTimeoutIsWarning()
+    {
+        var repoRoot = FindRepoRoot();
+        var wrapperText = File.ReadAllText(Path.Combine(repoRoot, "tools", "Run-FileTransferTunaGuiSmoke.ps1"));
+        var routeAcceptanceText = File.ReadAllText(Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"));
+
+        foreach (var scriptText in new[] { wrapperText, routeAcceptanceText })
+        {
+            Assert.Contains("retained_analysis_timeout_after_terminal_success", scriptText, StringComparison.Ordinal);
+            Assert.Contains("$terminalSuccess", scriptText, StringComparison.Ordinal);
+            Assert.Contains("$terminalSuccessWithProof", scriptText, StringComparison.Ordinal);
+            Assert.Contains("$routeProofOk", scriptText, StringComparison.Ordinal);
+            Assert.Contains("terminal_success_without_retained_route_proof", scriptText, StringComparison.Ordinal);
+            Assert.Contains("route_consistency_verdict", scriptText, StringComparison.Ordinal);
+            Assert.Contains("'verdict={0}' -f $operatorVerdict", scriptText, StringComparison.Ordinal);
+            Assert.Contains("if ($terminalSuccessTimeout)", scriptText, StringComparison.Ordinal);
+            Assert.Contains("return", scriptText, StringComparison.Ordinal);
+        }
     }
 
     [Fact]

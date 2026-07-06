@@ -2559,6 +2559,24 @@ function Get-FileTransferFallbackTailReconciliationProof {
                 return $false
             }
     )
+    [object[]]$cleanTerminalEvents = @(
+        $events |
+            Where-Object {
+                if ($_.EventName -eq 'file_transfer_inbound_terminal' -or
+                    $_.EventName -eq 'file_transfer_outbound_terminal') {
+                    return (
+                        (Get-FileTransferEventField -Event $_ -Name 'state' -Default '') -eq 'Completed' -and
+                        (Get-FileTransferEventField -Event $_ -Name 'error_code' -Default '(none)') -in @('', '(none)', 'none')
+                    )
+                }
+
+                if ($_.EventName -eq 'transfer_terminal') {
+                    return (Get-FileTransferEventField -Event $_ -Name 'error_code' -Default '(none)') -in @('', '(none)', 'none')
+                }
+
+                return $false
+            }
+    )
 
     function Test-FallbackFrontierRepairScopeMatch {
         param(
@@ -2628,6 +2646,16 @@ function Get-FileTransferFallbackTailReconciliationProof {
 
         $anchorSequence = [int64]$Anchor.Sequence
         return @($failureEvents | Where-Object {
+            [int64]$_.Sequence -gt $anchorSequence -and
+            (Test-FallbackFrontierRepairScopeMatch -Anchor $Anchor -Candidate $_)
+        }).Count -gt 0
+    }
+
+    function Test-FallbackFrontierRepairHasLaterCleanTerminal {
+        param([Parameter(Mandatory = $true)]$Anchor)
+
+        $anchorSequence = [int64]$Anchor.Sequence
+        return @($cleanTerminalEvents | Where-Object {
             [int64]$_.Sequence -gt $anchorSequence -and
             (Test-FallbackFrontierRepairScopeMatch -Anchor $Anchor -Candidate $_)
         }).Count -gt 0
@@ -2772,12 +2800,16 @@ function Get-FileTransferFallbackTailReconciliationProof {
     [object[]]$frontierRepairProgressedDispatchEvents = @($frontierRepairDispatchedEvents | Where-Object {
         Test-FallbackFrontierRepairHasLaterProgress -DispatchEvent $_
     })
+    [object[]]$frontierRepairUnresolvedStalledEvents = @($frontierRepairStalledEvents | Where-Object {
+        -not (Test-FallbackFrontierRepairHasLaterProgress -DispatchEvent $_) -and
+        -not (Test-FallbackFrontierRepairHasLaterCleanTerminal -Anchor $_)
+    })
 
     $frontierRepairVerdict = 'none'
-    if ($frontierRepairStalledEvents.Count -gt 0) {
+    if ($frontierRepairUnresolvedStalledEvents.Count -gt 0) {
         $frontierRepairVerdict = 'fail'
         $quiescenceFindings.Add('fallback frontier repair explicitly stalled before terminal progress') | Out-Null
-        foreach ($event in @($frontierRepairStalledEvents + $failureEvents | Select-Object -First 10)) {
+        foreach ($event in @($frontierRepairUnresolvedStalledEvents + $failureEvents | Select-Object -First 10)) {
             $quiescenceEvidence.Add($event) | Out-Null
         }
     }
@@ -2796,6 +2828,9 @@ function Get-FileTransferFallbackTailReconciliationProof {
         }
     }
     elseif ($frontierRepairProgressedDispatchEvents.Count -gt 0) {
+        $frontierRepairVerdict = 'pass'
+    }
+    elseif ($frontierRepairStalledEvents.Count -gt 0 -and $frontierRepairUnresolvedStalledEvents.Count -eq 0) {
         $frontierRepairVerdict = 'pass'
     }
     elseif ($frontierRepairAuthorityRejectedEvents.Count -gt 0) {
@@ -6892,6 +6927,7 @@ function New-FileTransferStabilityGateSummaryLines {
         ("regular_v4_frontier_repair_authority_rejected_count={0}" -f $recoveryClassification.RegularV4FrontierRepairAuthorityRejectedCount),
         ("regular_v4_frontier_repair_dispatched_count={0}" -f $recoveryClassification.RegularV4FrontierRepairDispatchedCount),
         ("regular_v4_frontier_repair_send_deferred_count={0}" -f $recoveryClassification.RegularV4FrontierRepairSendDeferredCount),
+        ("regular_v4_frontier_repair_missing_dispatch_count={0}" -f $recoveryClassification.RegularV4FrontierRepairMissingDispatchCount),
         ("regular_v4_frontier_repair_progress_observed_count={0}" -f $recoveryClassification.RegularV4FrontierRepairProgressObservedCount),
         ("regular_v4_frontier_repair_stalled_count={0}" -f $recoveryClassification.RegularV4FrontierRepairStalledCount),
         ("regular_v4_frontier_repair_verdict={0}" -f $recoveryClassification.RegularV4FrontierRepairVerdict),
@@ -7798,6 +7834,10 @@ function Get-FileTransferRecoveryFailureClassification {
         $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_send_deferred' -or
         $_.EventName -eq 'filetransfer_file_tuna_v4_frontier_repair_send_deferred'
     })
+    $regularV4FrontierRepairMissingDispatchEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_missing_dispatch' -or
+        $_.EventName -eq 'filetransfer_file_tuna_v4_frontier_repair_missing_dispatch'
+    })
     $regularV4FrontierRepairProgressObservedEvents = @($events | Where-Object {
         $_.EventName -eq 'filetransfer_regular_v4_frontier_repair_progress_observed' -or
         $_.EventName -eq 'filetransfer_file_tuna_v4_frontier_repair_progress_observed'
@@ -8374,6 +8414,20 @@ function Get-FileTransferRecoveryFailureClassification {
             }
         }
     )
+    $regularV4FrontierRepairUnresolvedMissingDispatchEvents = @(
+        foreach ($missingDispatch in $regularV4FrontierRepairMissingDispatchEvents) {
+            $missingDispatchSequence = [int64]$missingDispatch.Sequence
+            $settled = @(
+                @($regularV4FrontierRepairDispatchedEvents + $regularV4FrontierRepairProgressObservedEvents + $regularV4FrontierRepairAuthorityRejectedEvents) | Where-Object {
+                    [int64]$_.Sequence -gt $missingDispatchSequence -and
+                    (Test-RegularV4FrontierRepairMatch -Source $missingDispatch -Candidate $_)
+                }
+            )
+            if ($settled.Count -eq 0) {
+                $missingDispatch
+            }
+        }
+    )
 
     $regularV4RepairLivenessAuthorityMissing =
         $hasRegularOnlyRouteEvidence -and
@@ -8392,7 +8446,8 @@ function Get-FileTransferRecoveryFailureClassification {
         )
     $regularV4FrontierRepairSendDeferred =
         $hasRegularOnlyRouteEvidence -and
-        $regularV4FrontierRepairUnresolvedSendDeferredEvents.Count -gt 0 -and
+        ($regularV4FrontierRepairUnresolvedSendDeferredEvents.Count -gt 0 -or
+            $regularV4FrontierRepairUnresolvedMissingDispatchEvents.Count -gt 0) -and
         ($sessionLivenessTimeoutEvents.Count -gt 0 -or $peerDisconnectedTerminalEvents.Count -gt 0)
     $runtimeUnlockFallbackProofReplayPendingAfterPairedYieldUnresolvedEvents = @(
         foreach ($pending in $runtimeUnlockFallbackProofReplayPendingAfterPairedYieldEvents) {
@@ -8923,6 +8978,7 @@ function Get-FileTransferRecoveryFailureClassification {
         RegularV4FrontierRepairAuthorityRejectedCount = $regularV4FrontierRepairAuthorityRejectedEvents.Count
         RegularV4FrontierRepairDispatchedCount = $regularV4FrontierRepairDispatchedEvents.Count
         RegularV4FrontierRepairSendDeferredCount = $regularV4FrontierRepairSendDeferredEvents.Count
+        RegularV4FrontierRepairMissingDispatchCount = $regularV4FrontierRepairMissingDispatchEvents.Count
         RegularV4FrontierRepairProgressObservedCount = $regularV4FrontierRepairProgressObservedEvents.Count
         RegularV4FrontierRepairStalledCount = $regularV4FrontierRepairStalledEvents.Count
         RegularV4FrontierRepairVerdict = if ($regularV4FrontierRepairSendDeferred -or $regularV4FrontierRepairStalled -or $regularV4RepairLivenessAuthorityMissing) {
@@ -8930,6 +8986,7 @@ function Get-FileTransferRecoveryFailureClassification {
         } elseif ($regularV4FrontierRepairProgressObservedEvents.Count -gt 0 -or
             $regularV4FrontierRepairAuthorityRejectedEvents.Count -gt 0 -or
             ($regularV4FrontierRepairSendDeferredEvents.Count -gt 0 -and $regularV4FrontierRepairUnresolvedSendDeferredEvents.Count -eq 0) -or
+            ($regularV4FrontierRepairMissingDispatchEvents.Count -gt 0 -and $regularV4FrontierRepairUnresolvedMissingDispatchEvents.Count -eq 0) -or
             ($regularV4FrontierRepairStalledEvents.Count -gt 0 -and $regularV4FrontierRepairUnresolvedStalledEvents.Count -eq 0)) {
             'pass'
         } else {
@@ -9486,6 +9543,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("regular_v4_frontier_repair_authority_rejected_count={0}" -f $recoveryClassification.RegularV4FrontierRepairAuthorityRejectedCount),
         ("regular_v4_frontier_repair_dispatched_count={0}" -f $recoveryClassification.RegularV4FrontierRepairDispatchedCount),
         ("regular_v4_frontier_repair_send_deferred_count={0}" -f $recoveryClassification.RegularV4FrontierRepairSendDeferredCount),
+        ("regular_v4_frontier_repair_missing_dispatch_count={0}" -f $recoveryClassification.RegularV4FrontierRepairMissingDispatchCount),
         ("regular_v4_frontier_repair_progress_observed_count={0}" -f $recoveryClassification.RegularV4FrontierRepairProgressObservedCount),
         ("regular_v4_frontier_repair_stalled_count={0}" -f $recoveryClassification.RegularV4FrontierRepairStalledCount),
         ("regular_v4_frontier_repair_verdict={0}" -f $recoveryClassification.RegularV4FrontierRepairVerdict),

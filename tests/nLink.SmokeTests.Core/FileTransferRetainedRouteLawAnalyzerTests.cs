@@ -684,6 +684,28 @@ public sealed class FileTransferRetainedRouteLawAnalyzerTests : FileTransferOpsS
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_LiveSwitchOffStaleV4LivenessSummary_IsDiagnostic()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildRouteAwareLiveSwitchOffFixture()
+            .Append(LogLine("event=filetransfer_v4_receive_liveness_summary; reason=sample; active_file_transfer_sessions=1; active_file_transfer_runtime_sessions=1; ready_emitted=1; control_ready=1; media_ready=1; bulk_ready=1; frames_sent_since_last=38; control_messages_received_since_last=7; bulk_messages_received_since_last=8; total_messages_received_since_last=15; control_last_received_age_ms=786; bulk_last_received_age_ms=236; all_zero_receive_consecutive_windows=0; bulk_zero_receive_consecutive_windows=0; control_zero_receive_consecutive_windows=0; filetransfer_fast_recovery_enabled=1; regular_v4_control_feedback_pressure=1; regular_v4_control_feedback_pressure_remaining_ms=18139; post_tuna_fallback_control_plane_pressure=0; post_tuna_fallback_control_plane_pressure_remaining_ms=0; sample_window_ms=2000; session_id=sess_redacted; transfer_id=[redacted]; direction=inbound; route=file_tuna_v4; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=0; route_publication_generation=3; route_commit_generation=0; target_transport=tuna; repair_request_key=0:12:0:12; frontier_chunk_index=0; durable_received_highest_chunk_index=-1; pending_repair_count=12; decision_generation=3; pressure_reason=regular_v4_frontier_repair; pressure_recovery_attempted=0", secondsOffset: 30))
+            .ToArray();
+
+        var result = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "SwitchOff"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("PASS", verdict["verdict"]);
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("pass", route["route_consistency_verdict"]);
+        Assert.Equal("0", route["route_mismatch_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_MetadataLessPayloadReceive_RemainsRouteFailure()
     {
         if (!OperatingSystem.IsWindows())

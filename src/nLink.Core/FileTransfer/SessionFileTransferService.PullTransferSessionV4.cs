@@ -4515,6 +4515,11 @@ public sealed partial class SessionFileTransferService
                             deferredEventName,
                             repairSend.DeliveryMode,
                             repairSend.DeliveryEscalationReason);
+                        ObserveRegularV4FrontierRepairDispatchBlocker(
+                            context,
+                            regularDeferredAuthority,
+                            repairSend.RequestedChunkCount,
+                            "regular_v4_frontier_repair_send_deferred");
                     }
 
                     LocalOperationalLog.Warn(
@@ -6944,6 +6949,8 @@ public sealed partial class SessionFileTransferService
             ShouldLogFallbackFrontierRepairProof(scheduleRepairReplayKind, context.CurrentTransferLeg, repairRequestKey);
         var shouldLogRegularV4FrontierRepairProof =
             ShouldLogRegularV4FrontierRepairProof(scheduleRepairReplayKind, context.CurrentTransferLeg, frontierRepair);
+        RepairReplayDecision? fallbackScheduleDecisionForSettlement = null;
+        FileTransferRegularV4FrontierRepairAuthority? regularScheduleAuthorityForSettlement = null;
         if (!TryAuthorizeRepairReplayLocked(
                 context,
                 queuedRepair.RuntimeOwner,
@@ -6992,6 +6999,7 @@ public sealed partial class SessionFileTransferService
         if (scheduleRepairDecision is { } scheduleDecision &&
             shouldLogFallbackFrontierRepairProof)
         {
+            fallbackScheduleDecisionForSettlement = scheduleDecision;
             LogFileTransferFallbackFrontierRepairAuthorityGranted(
                 FileTransferDirection.Outbound,
                 context.TransferId,
@@ -7019,6 +7027,7 @@ public sealed partial class SessionFileTransferService
                 regularScheduleDecision.Reason);
             if (regularAuthority is { } authority)
             {
+                regularScheduleAuthorityForSettlement = authority;
                 LogFileTransferRegularV4FrontierRepairAuthorityGranted(
                     FileTransferDirection.Outbound,
                     context.TransferId,
@@ -7127,6 +7136,44 @@ public sealed partial class SessionFileTransferService
             var senderRepairRepeatIntervalMs = ResolveV4SenderRepairRepeatIntervalMs(context, frontierRepair);
             if (!TryMarkOutboundV4RepairQueuedLocked(context, repairRequestKey, now, senderRepairRepeatIntervalMs, out var repairState, out var suppressionReason, out var lastSentAgeMs))
             {
+                if (shouldLogFallbackFrontierRepairProof &&
+                    fallbackScheduleDecisionForSettlement is not null)
+                {
+                    LogFileTransferFallbackFrontierRepairStalled(
+                        FileTransferDirection.Outbound,
+                        context.TransferId,
+                        context.SessionId,
+                        context.CurrentTransferLeg,
+                        repairRequestKey,
+                        $"repair_queue_suppressed_{suppressionReason}",
+                        firstStart,
+                        state.DurableReceivedHighestChunkIndex,
+                        requestedChunkCount,
+                        repairState.SuppressedCount,
+                        lastSentAgeMs);
+                }
+
+                if (shouldLogRegularV4FrontierRepairProof &&
+                    regularScheduleAuthorityForSettlement is { } regularSuppressedAuthority)
+                {
+                    LogFileTransferRegularV4FrontierRepairMissingDispatch(
+                        FileTransferDirection.Outbound,
+                        context.TransferId,
+                        context.SessionId,
+                        regularSuppressedAuthority,
+                        protocolRepairRequestId ?? "(none)",
+                        "schedule",
+                        chunkIndices.Count,
+                        stats.RemoteNextExpectedChunkIndex,
+                        stats.ChunksAcceptedForTransport,
+                        $"repair_queue_suppressed_{suppressionReason}");
+                    ObserveRegularV4FrontierRepairDispatchBlocker(
+                        context,
+                        regularSuppressedAuthority,
+                        requestedChunkCount,
+                        "regular_v4_frontier_repair_missing_dispatch");
+                }
+
                 LocalOperationalLog.Info(
                     "FileTransferService",
                     $"event=filetransfer_v4_repair_suppressed; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairRequestKey}; protocol_repair_request_id={FormatProtocolLogValue(protocolRepairRequestId ?? "(none)")}; reason={suppressionReason}; epoch={state.Epoch}; range_count={normalizedRanges.Count}; requested_chunk_count={requestedChunkCount}; scheduled_chunk_count={chunkIndices.Count}; first_start_chunk_index={firstStart}; last_end_chunk_exclusive={lastEndExclusive}; frontier_tail_repair={(frontierTailRepair ? 1 : 0)}; last_sent_age_ms={lastSentAgeMs}; repair_interval_ms={senderRepairRepeatIntervalMs}; remote_next_expected_chunk_index={stats.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={stats.ChunksAcceptedForTransport}");
@@ -7149,6 +7196,44 @@ public sealed partial class SessionFileTransferService
                 {
                     queuedState.Queued = false;
                     queuedState.QueuedUtc = null;
+                }
+
+                if (shouldLogFallbackFrontierRepairProof &&
+                    fallbackScheduleDecisionForSettlement is not null)
+                {
+                    LogFileTransferFallbackFrontierRepairStalled(
+                        FileTransferDirection.Outbound,
+                        context.TransferId,
+                        context.SessionId,
+                        context.CurrentTransferLeg,
+                        repairRequestKey,
+                        "chunks_already_queued_before_dispatch",
+                        firstStart,
+                        state.DurableReceivedHighestChunkIndex,
+                        requestedChunkCount,
+                        1,
+                        0);
+                }
+
+                if (shouldLogRegularV4FrontierRepairProof &&
+                    regularScheduleAuthorityForSettlement is { } regularDedupedAuthority)
+                {
+                    LogFileTransferRegularV4FrontierRepairMissingDispatch(
+                        FileTransferDirection.Outbound,
+                        context.TransferId,
+                        context.SessionId,
+                        regularDedupedAuthority,
+                        protocolRepairRequestId ?? "(none)",
+                        "schedule",
+                        0,
+                        stats.RemoteNextExpectedChunkIndex,
+                        stats.ChunksAcceptedForTransport,
+                        "chunks_already_queued");
+                    ObserveRegularV4FrontierRepairDispatchBlocker(
+                        context,
+                        regularDedupedAuthority,
+                        requestedChunkCount,
+                        "regular_v4_frontier_repair_missing_dispatch");
                 }
 
                 LocalOperationalLog.Info(
@@ -9182,6 +9267,40 @@ public sealed partial class SessionFileTransferService
                 pressureReason)));
         context.PullV4LastRegularNknControlFeedbackPressureObservedUtc = now;
         return true;
+    }
+
+    private void ObserveRegularV4FrontierRepairDispatchBlocker(
+        OutboundTransferContext context,
+        FileTransferRegularV4FrontierRepairAuthority authority,
+        int pendingRepairCount,
+        string reason)
+    {
+        if (!string.Equals(authority.RouteToken, FileTransferRouteResolver.RegularNknV4FastToken, StringComparison.Ordinal) ||
+            authority.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4)
+        {
+            return;
+        }
+
+        IFileTransferRegularV4ControlFeedbackPressureObserver? observer;
+        lock (gate)
+        {
+            if (!ReferenceEquals(outboundTransfer, context) ||
+                context.IsTerminal)
+            {
+                return;
+            }
+
+            observer = transport as IFileTransferRegularV4ControlFeedbackPressureObserver;
+        }
+
+        observer?.ObserveRegularV4ControlFeedbackPressure(new FileTransferRegularV4ControlFeedbackPressure(
+            authority.SessionId,
+            authority.TransferId,
+            CreditExhaustedTimeMs: 0,
+            Math.Max(0, authority.DurableReceivedHighestChunkIndex - authority.FrontierChunkIndex + 1),
+            Math.Max(1, pendingRepairCount),
+            reason,
+            authority));
     }
 
     private void MaybeObserveRegularV4ReceiverFrontierRepairPressure(

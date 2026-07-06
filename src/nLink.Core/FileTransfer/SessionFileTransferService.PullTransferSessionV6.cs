@@ -5683,6 +5683,7 @@ public sealed partial class SessionFileTransferService
         IFileTransferDataSession? dataSession;
         var postTunaFallbackSurvivalRequest = false;
         var postTunaFallbackRescueStep = -1;
+        var postTunaFallbackPreviousRescueRequestCount = 0;
         var postTunaFallbackRescueRequestCount = 0;
         var postTunaFallbackFrontierChunkIndex = -1;
         lock (gate)
@@ -5763,6 +5764,7 @@ public sealed partial class SessionFileTransferService
             if (postTunaFallbackSurvivalRequest)
             {
                 postTunaFallbackRescueStep = context.V6PostTunaFallbackFrontierRescueStep;
+                postTunaFallbackPreviousRescueRequestCount = context.V6PostTunaFallbackFrontierRescueRequestCount;
                 postTunaFallbackFrontierChunkIndex = context.V6PostTunaFallbackFrontierRescueChunkIndex;
             }
 
@@ -5853,6 +5855,25 @@ public sealed partial class SessionFileTransferService
                 LocalOperationalLog.Info(
                     "FileTransferService",
                     $"event=filetransfer_v6_post_tuna_fallback_frontier_rescue_requested; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; route={context.RouteSelection.TelemetryToken}; reason={FormatProtocolLogValue(reason)}; frontier_chunk_index={postTunaFallbackFrontierChunkIndex}; rescue_step={postTunaFallbackRescueStep}; rescue_request_count={postTunaFallbackRescueRequestCount}; transport_epoch={request.TransportEpoch}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId)}; recovery_mode={FormatProtocolLogValue(request.RecoveryMode ?? "(none)")}; requested_chunk_count={request.MissingRanges[0].ChunkCount}; total_requested_chunk_count={totalRequestedChunks}; range_count={request.MissingRanges.Count}");
+                if (postTunaFallbackPreviousRescueRequestCount > 0 ||
+                    postTunaFallbackRescueRequestCount > 1)
+                {
+                    var frontierStallAgeMs = context.V6PostTunaFallbackFrontierRescueStartedUtc is { } startedUtc
+                        ? (long)Math.Max(0, (DateTimeOffset.UtcNow - startedUtc).TotalMilliseconds)
+                        : 0;
+                    LogFileTransferFallbackFrontierRepairStalled(
+                        FileTransferDirection.Inbound,
+                        context.TransferId,
+                        context.SessionId,
+                        context.CurrentTransferLeg,
+                        request.RepairRequestId,
+                        "post_tuna_fallback_v6_frontier_rescue_without_progress",
+                        postTunaFallbackFrontierChunkIndex,
+                        context.PullHighestReceivedChunkIndex,
+                        totalRequestedChunks,
+                        postTunaFallbackRescueRequestCount,
+                        frontierStallAgeMs);
+                }
             }
 
             return true;

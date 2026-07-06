@@ -2207,4 +2207,34 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
         Assert.Equal("fallback_frontier_repair_stalled", verdict["recovery_failure_class"]);
         Assert.Equal("1", verdict["classification_fallback_frontier_repair_stalled_count"]);
     }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_ExplicitFallbackFrontierRepairStalledThenTerminalCompletion_DoesNotFail()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_frontier_repair_stalled_then_complete";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6_repair; selection_reason=post_tuna_file_fallback_active; file_tuna_active=0; post_tuna_fallback_active=1; diagnostic_regular_nkn_v6=0; transport_profile=nkn; live_route_epoch=6"),
+            LogLine($"event=filetransfer_fallback_frontier_repair_stalled; direction=inbound; transfer_id={transferId}; session_id=sess_a; repair_request_key=v6-frontier:2786:2; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=6; leg_generation=8; transport_epoch=3; bridge_recovery_generation=2; reason=post_tuna_fallback_v6_frontier_rescue_without_progress; frontier_chunk_index=2786; durable_received_highest_chunk_index=2785; requested_chunk_count=64; attempt_count=2; frontier_stall_age_ms=2000"),
+            LogLine($"event=transfer_terminal; direction=inbound; transfer_id={transferId}; session_id=sess_a; file_size_bytes=67108864; bytes_transferred=67108864; chunks_transferred=3121; chunk_count=3121; error_code=(none); reason=Transfer complete.; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6_repair; selection_reason=post_tuna_file_fallback_active"),
+            LogLine($"event=transfer_terminal; direction=outbound; transfer_id={transferId}; session_id=sess_a; file_size_bytes=67108864; bytes_transferred=67108864; chunks_transferred=3121; chunk_count=3121; error_code=(none); reason=Transfer complete.; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6_repair; selection_reason=post_tuna_file_fallback_active")
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("1", route["fallback_frontier_repair_stalled_count"]);
+        Assert.Equal("pass", route["fallback_frontier_repair_verdict"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.NotEqual("fallback_frontier_repair_stalled", verdict["recovery_failure_class"]);
+        Assert.Equal("pass", verdict["classification_fallback_frontier_repair_verdict"]);
+    }
 }

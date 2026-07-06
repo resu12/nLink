@@ -3044,9 +3044,50 @@ function Write-RouteAcceptanceRetainedAnalysisTimeoutArtifacts {
         }
     }
 
+    $routeSummaryPath = Join-Path $ArtifactDir 'filetransfer-route-consistency-summary.txt'
+    $routeSummaryPresent = Test-Path -LiteralPath $routeSummaryPath -PathType Leaf
+    $routeConsistencyVerdict = ''
+    $liveRouteEpochProofVerdict = ''
+    $fallbackLegAuthorityProofVerdict = ''
+    $cleanFallbackLegProofVerdict = ''
+    $bridgeLivenessIntegrationVerdict = ''
+    $controlPlaneIsolationVerdict = ''
+    if ($routeSummaryPresent) {
+        $routeSummary = Read-RouteAcceptanceKeyValueArtifact -Path $routeSummaryPath
+        $routeConsistencyVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'route_consistency_verdict' -DefaultValue '(missing)'
+        $liveRouteEpochProofVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'live_route_epoch_proof_verdict' -DefaultValue '(missing)'
+        $fallbackLegAuthorityProofVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'fallback_leg_authority_proof_verdict' -DefaultValue '(missing)'
+        $cleanFallbackLegProofVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'clean_fallback_leg_proof_verdict' -DefaultValue $fallbackLegAuthorityProofVerdict
+        $bridgeLivenessIntegrationVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'bridge_liveness_integration_verdict' -DefaultValue '(missing)'
+        $controlPlaneIsolationVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'control_plane_isolation_verdict' -DefaultValue '(missing)'
+    }
+
+    $requiresLiveProof = -not [string]::Equals($LiveRouteProofMode, 'None', [System.StringComparison]::OrdinalIgnoreCase)
+    $hasFailedRouteProof = [string]::Equals($liveRouteEpochProofVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($fallbackLegAuthorityProofVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($cleanFallbackLegProofVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($bridgeLivenessIntegrationVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($controlPlaneIsolationVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase)
+    $routeProofOk = $routeSummaryPresent -and
+        [string]::Equals($routeConsistencyVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -and
+        (-not $hasFailedRouteProof) -and
+        (-not $requiresLiveProof -or [string]::Equals($liveRouteEpochProofVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase)) -and
+        (-not $requiresLiveProof -or [string]::Equals($fallbackLegAuthorityProofVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase)) -and
+        (-not $requiresLiveProof -or [string]::Equals($cleanFallbackLegProofVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase)) -and
+        (-not $requiresLiveProof -or [string]::Equals($bridgeLivenessIntegrationVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase)) -and
+        (-not $requiresLiveProof -or [string]::Equals($controlPlaneIsolationVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase))
+
+    $terminalSuccess = [string]::Equals($guiCompleted, 'True', [System.StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals($guiIntegrityOk, 'True', [System.StringComparison]::OrdinalIgnoreCase)
+    $terminalSuccessWithProof = $terminalSuccess -and $routeProofOk
+    $failureClass = if ($terminalSuccessWithProof) { 'retained_analysis_timeout_after_terminal_success' } else { 'retained_analysis_timeout' }
+    $acceptanceFailureClass = if ($terminalSuccessWithProof) { 'none' } else { 'setup' }
+    $operatorVerdict = if ($terminalSuccessWithProof) { 'PASS' } else { 'INVALID_SETUP' }
+    $warningKinds = if ($terminalSuccessWithProof) { 'retained_analysis_timeout_after_terminal_success' } else { '(none)' }
+
     $dto = [ordered]@{
-        failure_class = 'retained_analysis_timeout'
-        acceptance_failure_class = 'setup'
+        failure_class = $failureClass
+        acceptance_failure_class = $acceptanceFailureClass
         timed_out = 1
         timeout_seconds = $TimeoutSeconds
         process_id = $ProcessId
@@ -3060,6 +3101,16 @@ function Write-RouteAcceptanceRetainedAnalysisTimeoutArtifacts {
         gui_integrity_ok = $guiIntegrityOk
         gui_inbound_terminal_state = $guiInboundTerminalState
         gui_outbound_terminal_state = $guiOutboundTerminalState
+        terminal_success_timeout = if ($terminalSuccessWithProof) { 1 } else { 0 }
+        terminal_success_without_retained_route_proof = if ($terminalSuccess -and -not $routeProofOk) { 1 } else { 0 }
+        route_summary_present = if ($routeSummaryPresent) { 1 } else { 0 }
+        route_consistency_verdict = $routeConsistencyVerdict
+        live_route_epoch_proof_verdict = $liveRouteEpochProofVerdict
+        fallback_leg_authority_proof_verdict = $fallbackLegAuthorityProofVerdict
+        clean_fallback_leg_proof_verdict = $cleanFallbackLegProofVerdict
+        bridge_liveness_integration_verdict = $bridgeLivenessIntegrationVerdict
+        control_plane_isolation_verdict = $controlPlaneIsolationVerdict
+        warning_kinds = $warningKinds
     }
 
     $lines = New-Object System.Collections.Generic.List[string]
@@ -3070,12 +3121,16 @@ function Write-RouteAcceptanceRetainedAnalysisTimeoutArtifacts {
     Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-retained-analysis-timeout-summary.txt') -Value $lines.ToArray() -Encoding UTF8
     $dto | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-retained-analysis-timeout-summary.json') -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-operator-verdict.txt') -Value @(
-        'verdict=INVALID_SETUP',
-        'acceptance_failure_class=setup',
-        'failure_class=retained_analysis_timeout',
+        ('verdict={0}' -f $operatorVerdict),
+        ('acceptance_failure_class={0}' -f $acceptanceFailureClass),
+        ('failure_class={0}' -f $failureClass),
+        ('hard_failure_count={0}' -f ($(if ($terminalSuccessWithProof) { 0 } else { 1 }))),
+        ('warning_kinds={0}' -f $warningKinds),
         ('timeout_seconds={0}' -f $TimeoutSeconds),
         ('log_path={0}' -f $LogPath)
     ) -Encoding UTF8
+
+    return $terminalSuccessWithProof
 }
 
 function Invoke-RouteAcceptanceRetainedAnalysis {
@@ -3152,13 +3207,17 @@ function Invoke-RouteAcceptanceRetainedAnalysis {
                 live_route_proof_mode = $LiveRouteProofMode
             }
             $diagnostics | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $analysisDiagnosticsPath -Encoding UTF8
-            Write-RouteAcceptanceRetainedAnalysisTimeoutArtifacts `
+            $terminalSuccessTimeout = Write-RouteAcceptanceRetainedAnalysisTimeoutArtifacts `
                 -ArtifactDir $ArtifactDir `
                 -LogPath $logPath `
                 -TimeoutSeconds $analysisTimeoutSeconds `
                 -ProcessId $process.Id `
                 -StartedUtc $startedUtc.ToString('O') `
                 -LiveRouteProofMode $LiveRouteProofMode
+            if ($terminalSuccessTimeout) {
+                return
+            }
+
             throw "FileTransfer-Ops retained analysis timed out after ${analysisTimeoutSeconds}s for $ArtifactDir"
         }
 

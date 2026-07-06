@@ -2850,6 +2850,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $fallbackFrontierRepairDispatched = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_frontier_repair_dispatched')
     $fallbackFrontierRepairStalledEvent = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_frontier_repair_stalled')
     $fallbackFrontierRepairProgressObserved = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_frontier_repair_progress_observed')
+    $postTunaFallbackRouteEvidence = (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('route=post_tuna_fallback_v6', 'protocol_version=6')) -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('phase=measured_post_tuna_fallback_v6'))
+    $postTunaFallbackFrontierRescueObserved = (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_v6_post_tuna_fallback_frontier_rescue_requested')) -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_v6_post_tuna_fallback_frontier_rescue_widened')) -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_v6_post_tuna_fallback_sender_frontier_rescue_queued'))
     $regularV4FrontierRepairAuthorityGranted = (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_authority_granted')) -or
         (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_file_tuna_v4_frontier_repair_authority_granted'))
     $regularV4FrontierRepairAuthorityRejected = (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_authority_rejected')) -or
@@ -2869,18 +2874,23 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $fallbackProgressTimeout = $ErrorMessage.IndexOf('no useful data progress', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_live_progress_timeout')) -or
         (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_gui_progress_timeout'))
+    $normalToTunaEpochWaitAfterFallback = $postTunaFallbackRouteEvidence -and
+        $ErrorMessage.IndexOf('live multi-toggle normal-to-Tuna route epoch started', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
     $fallbackFrontierRepairStalled = $fallbackFrontierRepairStalledEvent -or
+        ($postTunaFallbackFrontierRescueObserved -and ($fallbackProgressTimeout -or $normalToTunaEpochWaitAfterFallback)) -or
         (($fallbackFrontierRepairAuthorityGranted -or $fallbackFrontierRepairDispatched) -and
             (-not $fallbackFrontierRepairProgressObserved) -and
-            $fallbackProgressTimeout)
-    $regularV4FrontierRepairStalled = ($regularV4FrontierRepairStalledEvent -or
+            ($fallbackProgressTimeout -or $normalToTunaEpochWaitAfterFallback))
+    $regularV4FrontierRepairStalled = (-not $fallbackFrontierRepairStalled) -and ($regularV4FrontierRepairStalledEvent -or
         (($regularV4FrontierRepairAuthorityGranted -or $regularV4FrontierRepairDispatched) -and
             (-not $regularV4FrontierRepairProgressObserved) -and
             ($fallbackProgressTimeout -or $regularV4LivenessTimeoutWithoutAuthority)))
-    $regularV4FrontierRepairSendDeferred = $regularV4FrontierRepairSendDeferredEvent -and
+    $regularV4FrontierRepairSendDeferred = (-not $fallbackFrontierRepairStalled) -and
+        $regularV4FrontierRepairSendDeferredEvent -and
         (-not $regularV4FrontierRepairProgressObserved) -and
         ($fallbackProgressTimeout -or $regularV4LivenessTimeoutWithoutAuthority -or $terminalObserved)
-    $regularV4RepairLivenessAuthorityMissing = $regularV4FrontierMissingRanges -and
+    $regularV4RepairLivenessAuthorityMissing = (-not $fallbackFrontierRepairStalled) -and
+        $regularV4FrontierMissingRanges -and
         $regularV4RepairRequested -and
         (-not $regularV4FrontierRepairAuthorityGranted) -and
         ($regularV4LivenessTimeoutWithoutAuthority -or $terminalObserved)

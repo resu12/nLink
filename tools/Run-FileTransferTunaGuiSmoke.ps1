@@ -183,9 +183,49 @@ function Write-TunaGuiRetainedAnalysisTimeoutArtifacts {
         }
     }
 
+    $routeSummaryPath = Join-Path $AnalysisDir 'filetransfer-route-consistency-summary.txt'
+    $routeSummaryPresent = Test-Path -LiteralPath $routeSummaryPath -PathType Leaf
+    $routeConsistencyVerdict = ''
+    $liveRouteEpochProofVerdict = ''
+    $fallbackLegAuthorityProofVerdict = ''
+    $cleanFallbackLegProofVerdict = ''
+    $bridgeLivenessIntegrationVerdict = ''
+    $controlPlaneIsolationVerdict = ''
+    if ($routeSummaryPresent) {
+        $routeConsistencyVerdict = Read-TunaGuiReportValue -ReportPath $routeSummaryPath -Key 'route_consistency_verdict' -DefaultValue '(missing)'
+        $liveRouteEpochProofVerdict = Read-TunaGuiReportValue -ReportPath $routeSummaryPath -Key 'live_route_epoch_proof_verdict' -DefaultValue '(missing)'
+        $fallbackLegAuthorityProofVerdict = Read-TunaGuiReportValue -ReportPath $routeSummaryPath -Key 'fallback_leg_authority_proof_verdict' -DefaultValue '(missing)'
+        $cleanFallbackLegProofVerdict = Read-TunaGuiReportValue -ReportPath $routeSummaryPath -Key 'clean_fallback_leg_proof_verdict' -DefaultValue $fallbackLegAuthorityProofVerdict
+        $bridgeLivenessIntegrationVerdict = Read-TunaGuiReportValue -ReportPath $routeSummaryPath -Key 'bridge_liveness_integration_verdict' -DefaultValue '(missing)'
+        $controlPlaneIsolationVerdict = Read-TunaGuiReportValue -ReportPath $routeSummaryPath -Key 'control_plane_isolation_verdict' -DefaultValue '(missing)'
+    }
+
+    $requiresLiveProof = -not [string]::Equals($LiveRouteProofMode, 'None', [System.StringComparison]::OrdinalIgnoreCase)
+    $hasFailedRouteProof = [string]::Equals($liveRouteEpochProofVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($fallbackLegAuthorityProofVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($cleanFallbackLegProofVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($bridgeLivenessIntegrationVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($controlPlaneIsolationVerdict, 'fail', [System.StringComparison]::OrdinalIgnoreCase)
+    $routeProofOk = $routeSummaryPresent -and
+        [string]::Equals($routeConsistencyVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -and
+        (-not $hasFailedRouteProof) -and
+        (-not $requiresLiveProof -or [string]::Equals($liveRouteEpochProofVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase)) -and
+        (-not $requiresLiveProof -or [string]::Equals($fallbackLegAuthorityProofVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase)) -and
+        (-not $requiresLiveProof -or [string]::Equals($cleanFallbackLegProofVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase)) -and
+        (-not $requiresLiveProof -or [string]::Equals($bridgeLivenessIntegrationVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase)) -and
+        (-not $requiresLiveProof -or [string]::Equals($controlPlaneIsolationVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase))
+
+    $terminalSuccess = [string]::Equals($guiCompleted, 'True', [System.StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals($guiIntegrityOk, 'True', [System.StringComparison]::OrdinalIgnoreCase)
+    $terminalSuccessWithProof = $terminalSuccess -and $routeProofOk
+    $failureClass = if ($terminalSuccessWithProof) { 'retained_analysis_timeout_after_terminal_success' } else { 'retained_analysis_timeout' }
+    $acceptanceFailureClass = if ($terminalSuccessWithProof) { 'none' } else { 'setup' }
+    $operatorVerdict = if ($terminalSuccessWithProof) { 'PASS' } else { 'INVALID_SETUP' }
+    $warningKinds = if ($terminalSuccessWithProof) { 'retained_analysis_timeout_after_terminal_success' } else { '(none)' }
+
     $dto = [ordered]@{
-        failure_class = 'retained_analysis_timeout'
-        acceptance_failure_class = 'setup'
+        failure_class = $failureClass
+        acceptance_failure_class = $acceptanceFailureClass
         timed_out = 1
         timeout_seconds = $TimeoutSeconds
         process_id = $ProcessId
@@ -199,6 +239,16 @@ function Write-TunaGuiRetainedAnalysisTimeoutArtifacts {
         gui_integrity_ok = $guiIntegrityOk
         gui_inbound_terminal_state = $guiInboundTerminalState
         gui_outbound_terminal_state = $guiOutboundTerminalState
+        terminal_success_timeout = if ($terminalSuccessWithProof) { 1 } else { 0 }
+        terminal_success_without_retained_route_proof = if ($terminalSuccess -and -not $routeProofOk) { 1 } else { 0 }
+        route_summary_present = if ($routeSummaryPresent) { 1 } else { 0 }
+        route_consistency_verdict = $routeConsistencyVerdict
+        live_route_epoch_proof_verdict = $liveRouteEpochProofVerdict
+        fallback_leg_authority_proof_verdict = $fallbackLegAuthorityProofVerdict
+        clean_fallback_leg_proof_verdict = $cleanFallbackLegProofVerdict
+        bridge_liveness_integration_verdict = $bridgeLivenessIntegrationVerdict
+        control_plane_isolation_verdict = $controlPlaneIsolationVerdict
+        warning_kinds = $warningKinds
     }
 
     $lines = New-Object System.Collections.Generic.List[string]
@@ -209,12 +259,16 @@ function Write-TunaGuiRetainedAnalysisTimeoutArtifacts {
     Set-Content -LiteralPath (Join-Path $AnalysisDir 'filetransfer-retained-analysis-timeout-summary.txt') -Value $lines.ToArray() -Encoding UTF8
     $dto | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $AnalysisDir 'filetransfer-retained-analysis-timeout-summary.json') -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $AnalysisDir 'filetransfer-operator-verdict.txt') -Value @(
-        'verdict=INVALID_SETUP',
-        'acceptance_failure_class=setup',
-        'failure_class=retained_analysis_timeout',
+        ('verdict={0}' -f $operatorVerdict),
+        ('acceptance_failure_class={0}' -f $acceptanceFailureClass),
+        ('failure_class={0}' -f $failureClass),
+        ('hard_failure_count={0}' -f ($(if ($terminalSuccessWithProof) { 0 } else { 1 }))),
+        ('warning_kinds={0}' -f $warningKinds),
         ('timeout_seconds={0}' -f $TimeoutSeconds),
         ('log_path={0}' -f $LogPath)
     ) -Encoding UTF8
+
+    return $terminalSuccessWithProof
 }
 
 function Invoke-TunaGuiRetainedAnalysis {
@@ -292,13 +346,17 @@ function Invoke-TunaGuiRetainedAnalysis {
                 live_route_proof_mode = $LiveRouteProofMode
             }
             $diagnostics | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $diagnosticsPath -Encoding UTF8
-            Write-TunaGuiRetainedAnalysisTimeoutArtifacts `
+            $terminalSuccessTimeout = Write-TunaGuiRetainedAnalysisTimeoutArtifacts `
                 -AnalysisDir $AnalysisDir `
                 -LogPath $LogPath `
                 -TimeoutSeconds $analysisTimeoutSeconds `
                 -ProcessId $process.Id `
                 -StartedUtc $startedUtc.ToString('O') `
                 -LiveRouteProofMode $LiveRouteProofMode
+            if ($terminalSuccessTimeout) {
+                return
+            }
+
             throw "Retained analysis timed out after ${analysisTimeoutSeconds}s. Artifacts: $AnalysisDir"
         }
 
@@ -461,7 +519,7 @@ function Ensure-TunaGuiSecondTransferRetainedLogSlice {
     $sourcePath = Join-Path $ArtifactDir 'filetransfer-second-transfer-retained-log-slice-source.txt'
     $sourceLines = @(
         'source=missing',
-        'reason=second_transfer_specific_slice_missing',
+        'reason=second_transfer_retained_slice_missing',
         ('retained_log_slice={0}' -f $retainedPath),
         ('retained_log_slice_exists={0}' -f ($(if (Test-Path -LiteralPath $retainedPath -PathType Leaf) { '1' } else { '0' }))),
         ('second_transfer_retained_log_slice={0}' -f $secondRetainedPath),
@@ -497,7 +555,7 @@ function Invoke-TunaGuiLiveRetainedAnalysisBestEffort {
             Invoke-TunaGuiRetainedAnalysisBestEffort -RepoRoot $RepoRoot -AnalysisDir (Join-Path $ArtifactDir 'second-transfer-analysis') -LogPath $secondRetainedPath
         }
         else {
-            Write-Warning ("Second-transfer retained analysis skipped because the scenario-specific retained slice is missing. Artifact: {0}" -f (Join-Path $ArtifactDir 'filetransfer-second-transfer-retained-log-slice-source.txt'))
+            Write-Warning ("Second-transfer retained analysis could not be produced because retained evidence is missing. Artifact: {0}" -f (Join-Path $ArtifactDir 'filetransfer-second-transfer-retained-log-slice-source.txt'))
         }
     }
 }
@@ -967,7 +1025,7 @@ try {
         if ($RouteMode -eq 'live-reactivation-second-transfer') {
             $secondRetainedPath = Ensure-TunaGuiSecondTransferRetainedLogSlice -ArtifactDir $resolvedArtifactDir
             if ([string]::IsNullOrWhiteSpace([string]$secondRetainedPath)) {
-                throw ("Second-transfer retained log slice is missing; refusing to analyze the full retained log as second-transfer proof. Artifact: {0}" -f (Join-Path $resolvedArtifactDir 'filetransfer-second-transfer-retained-log-slice-source.txt'))
+                throw ("Second-transfer retained log slice is missing; refusing to analyze the full retained log as second-transfer proof. failure_class=second_transfer_retained_slice_missing Artifact: {0}" -f (Join-Path $resolvedArtifactDir 'filetransfer-second-transfer-retained-log-slice-source.txt'))
             }
 
             Invoke-TunaGuiRetainedAnalysis -RepoRoot $repoRoot -AnalysisDir (Join-Path $resolvedArtifactDir 'second-transfer-analysis') -LogPath $secondRetainedPath
