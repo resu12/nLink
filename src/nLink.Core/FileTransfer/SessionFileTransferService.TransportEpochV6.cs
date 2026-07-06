@@ -4743,6 +4743,46 @@ public sealed partial class SessionFileTransferService
            (string.Equals(reason, "frontier_caught_up_to_accepted_tail", StringComparison.Ordinal) ||
             string.Equals(reason, "frontier_repair_proof", StringComparison.Ordinal));
 
+    private static bool IsRegularNknRecoveryForCurrentPostTunaFallbackLiveRoute(
+        OutboundTransferContext context,
+        V6TransportEpoch epoch)
+        => epoch.Kind == FileTransferTransportHandoffKind.RegularNknRecovery &&
+           epoch.TargetTransport == FileTransferTransportKind.RegularNkn &&
+           context.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6 &&
+           context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
+           context.RouteRuntime.UsesPostTunaFallbackV6Runtime &&
+           IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg) &&
+           context.CurrentLiveRouteEpoch is
+           {
+               RouteSelection.Route: FileTransferRoute.PostTunaFallbackV6,
+               RouteSelection.ProtocolVersion: FileTransferProtocol.ProtocolVersionV6,
+               HandoffKind: FileTransferTransportHandoffKind.TunaToNormalFallback,
+               TargetTransport: FileTransferTransportKind.RegularNkn,
+           } liveRouteEpoch &&
+           !string.Equals(liveRouteEpoch.State, "recovered", StringComparison.OrdinalIgnoreCase) &&
+           !string.Equals(liveRouteEpoch.State, "terminal", StringComparison.OrdinalIgnoreCase) &&
+           !context.IsTerminal;
+
+    private static bool IsRegularNknRecoveryForCurrentPostTunaFallbackLiveRoute(
+        InboundTransferContext context,
+        V6TransportEpoch epoch)
+        => epoch.Kind == FileTransferTransportHandoffKind.RegularNknRecovery &&
+           epoch.TargetTransport == FileTransferTransportKind.RegularNkn &&
+           context.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6 &&
+           context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
+           context.RouteRuntime.UsesPostTunaFallbackV6Runtime &&
+           IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg) &&
+           context.CurrentLiveRouteEpoch is
+           {
+               RouteSelection.Route: FileTransferRoute.PostTunaFallbackV6,
+               RouteSelection.ProtocolVersion: FileTransferProtocol.ProtocolVersionV6,
+               HandoffKind: FileTransferTransportHandoffKind.TunaToNormalFallback,
+               TargetTransport: FileTransferTransportKind.RegularNkn,
+           } liveRouteEpoch &&
+           !string.Equals(liveRouteEpoch.State, "recovered", StringComparison.OrdinalIgnoreCase) &&
+           !string.Equals(liveRouteEpoch.State, "terminal", StringComparison.OrdinalIgnoreCase) &&
+           !context.IsTerminal;
+
     private bool CompleteOutboundV6TransportEpochLocked(OutboundTransferContext context, string reason)
     {
         var epoch = context.V6TransportEpoch;
@@ -4875,8 +4915,9 @@ public sealed partial class SessionFileTransferService
         context.SparseSenderPumpLastWakeReason = "transport_epoch_recovered";
         context.StatusMessage = GetOutboundResumeStatusMessage(context.State);
         context.SignalSparseSenderPump();
-        if (epoch.Kind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
-            epoch.TargetTransport == FileTransferTransportKind.RegularNkn)
+        if ((epoch.Kind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
+             epoch.TargetTransport == FileTransferTransportKind.RegularNkn) ||
+            IsRegularNknRecoveryForCurrentPostTunaFallbackLiveRoute(context, epoch))
         {
             TryPublishLiveRouteEpochRecoveredIfAuthorizedLocked(
                 context,
@@ -4986,8 +5027,9 @@ public sealed partial class SessionFileTransferService
 
         context.PullTransportRebindGeneration = 0;
         context.StatusMessage = GetInboundResumeStatusMessage(context.State);
-        if (epoch.Kind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
-            epoch.TargetTransport == FileTransferTransportKind.RegularNkn)
+        if ((epoch.Kind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
+             epoch.TargetTransport == FileTransferTransportKind.RegularNkn) ||
+            IsRegularNknRecoveryForCurrentPostTunaFallbackLiveRoute(context, epoch))
         {
             TryPublishLiveRouteEpochRecoveredIfAuthorizedLocked(
                 context,

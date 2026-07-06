@@ -2722,6 +2722,75 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
+    public void RegularNknV4FrontierRepairState_SettledStallClearsPressureAndSuppressesRefresh()
+    {
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport("session_regular_v4_frontier_settled_stall");
+        service.AttachTransport(transport);
+        var serviceType = typeof(SessionFileTransferService);
+        var context = CreateRegularNknV4InboundContext(
+            "transfer_regular_v4_frontier_settled_stall",
+            nextChunkIndex: 240,
+            durableHighestChunkIndex: 255,
+            creditUntilChunkIndexExclusive: 252);
+        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "unit_test_regular_v4_settled_stall");
+
+        var state = Assert.IsType<FileTransferStateFrameV4>(serviceType
+            .GetMethod("CreateInboundV4StateLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, "frontier_stall_repair_due", false, true]));
+        var repairs = Assert.IsAssignableFrom<System.Collections.IDictionary>(
+            GetPrivatePropertyValue(context, "V4ReceiverRepairRequests"));
+        var repairRequestKey = Assert.Single(repairs.Keys.Cast<string>());
+        while (transport.RegularV4ControlFeedbackPressures.TryDequeue(out _))
+        {
+        }
+
+        var settled = Assert.IsType<bool>(serviceType
+            .GetMethod("TrySettleInboundRegularV4FrontierRepairStalledLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    context,
+                    repairRequestKey,
+                    "unit_test_repeated_frontier_repair_without_progress",
+                    state.ContiguousCommittedChunkIndex,
+                    state.DurableReceivedHighestChunkIndex,
+                    state.MissingRanges[0].ChunkCount,
+                    2,
+                    11_000L,
+                ]));
+
+        Assert.True(settled);
+        var clearedPressure = Assert.Single(transport.RegularV4ControlFeedbackPressures);
+        Assert.Equal("regular_v4_frontier_repair_settled_stalled", clearedPressure.Reason);
+        Assert.Null(clearedPressure.RepairAuthority);
+        while (transport.RegularV4ControlFeedbackPressures.TryDequeue(out _))
+        {
+        }
+
+        serviceType
+            .GetMethod("MaybeObserveRegularV4ReceiverFrontierRepairPressure", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, 16, state.MissingRanges[0].ChunkCount]);
+
+        Assert.Empty(transport.RegularV4ControlFeedbackPressures);
+        SetPrivateProperty(context, "LastRoutePublicationGeneration", 2);
+        SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Inbound, "unit_test_regular_v4_fresh_publication");
+
+        serviceType
+            .GetMethod("MaybeObserveRegularV4ReceiverFrontierRepairPressure", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, 16, state.MissingRanges[0].ChunkCount]);
+
+        var refreshedPressure = Assert.Single(transport.RegularV4ControlFeedbackPressures);
+        Assert.Equal(repairRequestKey, refreshedPressure.RepairAuthority?.RepairKey);
+        Assert.Equal(2, refreshedPressure.RepairAuthority?.RoutePublicationGeneration);
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_regular_v4_frontier_repair_settled_stalled; direction=inbound;", log, StringComparison.Ordinal);
+        Assert.Contains("reason=unit_test_repeated_frontier_repair_without_progress", log, StringComparison.Ordinal);
+        Assert.Contains("settlement=stalled", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void PostTunaFallbackV6FrontierState_UsesCurrentFrontierRequestIdAndTransportEpoch()
     {
         using var service = new SessionFileTransferService();

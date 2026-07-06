@@ -787,13 +787,16 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         if (repairAuthority is null)
         {
             ClearRegularV4FrontierRepairPressureAfterRejectedAuthority(normalizedTransferId, activationSendOnly);
+            var rejectionReason = string.Equals(rawReason, "regular_v4_frontier_repair_settled_stalled", StringComparison.Ordinal)
+                ? "regular_v4_frontier_repair_settled_stalled"
+                : "missing_repair_authority";
             LogRegularV4FrontierRepairAuthorityRejected(
                 normalizedTransferId,
                 rawReason,
                 creditExhaustedTimeMs,
                 frontierLagChunks,
                 pendingRepairCount,
-                "missing_repair_authority",
+                rejectionReason,
                 null);
             return;
         }

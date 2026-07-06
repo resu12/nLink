@@ -16934,6 +16934,12 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public int V4RegularFrontierRepairSpamCoalescedCountTotal { get; set; }
 
+        public string? V4RegularFrontierRepairSettledStalledRepairKey { get; set; }
+
+        public string? V4RegularFrontierRepairSettledStalledAuthorityKey { get; set; }
+
+        public DateTimeOffset? V4RegularFrontierRepairSettledStalledUtc { get; set; }
+
         public bool V4ReceiverRepairSchedulerStarted { get; set; }
 
         public FileTransferSessionOpenV2? PendingSessionOpen { get; set; }
