@@ -3568,6 +3568,166 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public void Bridge_PostTunaFallbackControlPlanePressurePromotesPendingPressureWhenAuthorityRegisters()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-post-tuna-pending-pressure", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "post-tuna-pending-pressure");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "post-tuna-pending-pressure");
+            var identity = new NknIdentity("post-tuna-pending-pressure", "post-tuna-pending-pressure.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var transferId = $"transfer-post-tuna-pending-pressure-{Guid.NewGuid():N}";
+            var sessionId = $"session-post-tuna-pending-pressure-{Guid.NewGuid():N}";
+            var logStart = GetOperationalLogLength();
+
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.MarkActiveFileTransferPostTunaFallbackRuntime(transferId, "test_pending_pressure");
+            adapter.ReportPostTunaFallbackControlPlanePressure(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 4,
+                legGeneration: 6,
+                bridgeRecoveryGeneration: 2,
+                transportEpoch: 2,
+                checkpointRequestId: null,
+                kind: "frontier_request",
+                reason: "frontier_stall_repair_due");
+
+            var beforeAuthority = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_stale_ignored;",
+                beforeAuthority,
+                StringComparison.Ordinal);
+            Assert.Contains("reason=authority_mismatch", beforeAuthority, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_marked;",
+                beforeAuthority,
+                StringComparison.Ordinal);
+
+            adapter.MarkActiveFileTransferPostTunaFallbackLegAuthority(
+                transferId,
+                sessionId,
+                legGeneration: 6,
+                routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 4,
+                transportEpoch: 2,
+                bridgeRecoveryGeneration: 2,
+                checkpointRequestId: null,
+                authorityReason: "post_tuna_fallback_session_liveness_timeout_pending");
+
+            var afterAuthority = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "event=filetransfer_fallback_leg_authority_bridge_registered;",
+                afterAuthority,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_marked;",
+                afterAuthority,
+                StringComparison.Ordinal);
+            Assert.Contains("authority_source=bridge_authority_late_registered", afterAuthority, StringComparison.Ordinal);
+            Assert.Contains("kind=frontier_request", afterAuthority, StringComparison.Ordinal);
+            Assert.Contains("reason=frontier_stall_repair_due", afterAuthority, StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void Bridge_PostTunaFallbackControlPlanePressureDoesNotPromotePendingPressureForWrongAuthorityTuple()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-post-tuna-pending-pressure-mismatch", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "post-tuna-pending-pressure-mismatch");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "post-tuna-pending-pressure-mismatch");
+            var identity = new NknIdentity("post-tuna-pending-pressure-mismatch", "post-tuna-pending-pressure-mismatch.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var transferId = $"transfer-post-tuna-pending-pressure-mismatch-{Guid.NewGuid():N}";
+            var sessionId = $"session-post-tuna-pending-pressure-mismatch-{Guid.NewGuid():N}";
+            var logStart = GetOperationalLogLength();
+
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.MarkActiveFileTransferPostTunaFallbackRuntime(transferId, "test_pending_pressure_mismatch");
+            adapter.ReportPostTunaFallbackControlPlanePressure(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 4,
+                legGeneration: 6,
+                bridgeRecoveryGeneration: 2,
+                transportEpoch: 2,
+                checkpointRequestId: null,
+                kind: "frontier_request",
+                reason: "frontier_stall_repair_due");
+
+            adapter.MarkActiveFileTransferPostTunaFallbackLegAuthority(
+                transferId,
+                sessionId,
+                legGeneration: 7,
+                routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 4,
+                transportEpoch: 2,
+                bridgeRecoveryGeneration: 2,
+                checkpointRequestId: null,
+                authorityReason: "post_tuna_fallback_session_liveness_timeout_pending");
+
+            var logText = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_stale_ignored;",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=filetransfer_fallback_leg_authority_bridge_registered;",
+                logText,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_marked;",
+                logText,
+                StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public void Bridge_PostTunaFallbackControlPlanePressureRejectsNewerLegAuthorityRefresh()
     {
         var tempDir = Path.Combine(Path.GetTempPath(), "nlink-post-tuna-newer-leg-pressure", Guid.NewGuid().ToString("N"));
@@ -3806,6 +3966,102 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 StringComparison.Ordinal);
             Assert.Contains("authority_source=bridge_authority_completed_continuation", logText, StringComparison.Ordinal);
             Assert.DoesNotContain("reason=authority_completed", logText, StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void Bridge_PostTunaFallbackControlPlanePressurePromotesPendingCompletedContinuationAuthority()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-post-tuna-completed-continuation-pending-pressure", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "post-tuna-completed-continuation-pending-pressure");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "post-tuna-completed-continuation-pending-pressure");
+            var identity = new NknIdentity("post-tuna-completed-continuation-pending-pressure", "post-tuna-completed-continuation-pending-pressure.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var transferId = $"transfer-post-tuna-completed-continuation-pending-pressure-{Guid.NewGuid():N}";
+            var sessionId = $"session-post-tuna-completed-continuation-pending-pressure-{Guid.NewGuid():N}";
+            var logStart = GetOperationalLogLength();
+
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.MarkActiveFileTransferPostTunaFallbackRuntime(transferId, "test_completed_continuation_pending_authority");
+            adapter.MarkActiveFileTransferPostTunaFallbackLegAuthority(
+                transferId,
+                sessionId,
+                legGeneration: 3,
+                routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 2,
+                transportEpoch: 5,
+                bridgeRecoveryGeneration: 1,
+                checkpointRequestId: null,
+                authorityReason: "test_authority");
+            adapter.MarkPostTunaFallbackLegAuthorityCompleted(
+                transferId,
+                sessionId,
+                legGeneration: 3,
+                liveRouteEpoch: 2,
+                transportEpoch: 5,
+                bridgeRecoveryGeneration: 1,
+                checkpointRequestId: null,
+                reason: "frontier_request_control_plane",
+                allowFurtherControlPlanePressure: false);
+            adapter.ReportPostTunaFallbackControlPlanePressure(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 2,
+                legGeneration: 3,
+                bridgeRecoveryGeneration: 1,
+                transportEpoch: 5,
+                checkpointRequestId: null,
+                kind: "frontier_request",
+                reason: "frontier_stall_repair_due");
+
+            var beforeContinuation = ReadOperationalLogTail(logStart);
+            Assert.Contains("reason=authority_completed", beforeContinuation, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_marked;",
+                beforeContinuation,
+                StringComparison.Ordinal);
+
+            adapter.MarkPostTunaFallbackLegAuthorityCompleted(
+                transferId,
+                sessionId,
+                legGeneration: 3,
+                liveRouteEpoch: 2,
+                transportEpoch: 5,
+                bridgeRecoveryGeneration: 1,
+                checkpointRequestId: null,
+                reason: "frontier_request_control_plane",
+                allowFurtherControlPlanePressure: true);
+
+            var afterContinuation = ReadOperationalLogTail(logStart);
+            Assert.Contains("allow_control_plane_pressure_after_completion=1", afterContinuation, StringComparison.Ordinal);
+            Assert.Contains(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_marked;",
+                afterContinuation,
+                StringComparison.Ordinal);
+            Assert.Contains("authority_source=bridge_authority_completed_continuation_late_registered", afterContinuation, StringComparison.Ordinal);
 
             adapter.UnregisterActiveFileTransferDataSession(transferId);
         }

@@ -183,6 +183,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private readonly ConcurrentDictionary<string, byte> activePostTunaFallbackRuntimeTransfers = new(StringComparer.Ordinal);
     private PostTunaFallbackLegAuthorityState? postTunaFallbackLegAuthority;
     private PostTunaFallbackControlPlanePressureState? postTunaFallbackControlPlanePressure;
+    private PostTunaFallbackControlPlanePressureState? pendingPostTunaFallbackControlPlanePressure;
     private RegularV4FrontierRepairPressureState? regularV4FrontierRepairPressure;
     private RegularV4FrontierRepairPressureState? lastRegularV4FrontierRepairAuthority;
     private FileTransferBridgeRecoveryAuthority? activeFileTransferBridgeRecoveryAuthority;
@@ -617,6 +618,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         var normalizedReason = SanitizeLogToken(authorityReason);
         var shouldLog = false;
         var shouldResetEscalation = false;
+        PostTunaFallbackControlPlanePressureState? promotedPressure = null;
         lock (gate)
         {
             if (postTunaFallbackLegAuthority is not { } current ||
@@ -672,16 +674,32 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 postTunaFallbackUnprovenRecoveryEscalationUsed = 0;
                 postTunaFallbackUnprovenRecoveryEscalationUsedRecoveryCount = -1;
             }
+
+            if (postTunaFallbackLegAuthority is { } registeredAuthority)
+            {
+                promotedPressure = TryPromotePendingPostTunaFallbackControlPlanePressureUnsafe(
+                    registeredAuthority,
+                    Stopwatch.GetTimestamp(),
+                    "bridge_authority_late_registered");
+            }
         }
 
-        if (!shouldLog)
+        if (!shouldLog && promotedPressure is null)
         {
             return;
         }
 
-        Log(
-            "event=filetransfer_fallback_leg_authority_bridge_registered; " +
-            $"session_id={SanitizeLogToken(normalizedSessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; leg_generation={legGeneration}; route={SanitizeLogToken(routeToken)}; protocol_version={protocolVersion}; live_route_epoch={liveRouteEpoch}; transport_epoch={transportEpoch}; bridge_recovery_generation={bridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(checkpointRequestId ?? "none")}; authority_reason={normalizedReason}");
+        if (shouldLog)
+        {
+            Log(
+                "event=filetransfer_fallback_leg_authority_bridge_registered; " +
+                $"session_id={SanitizeLogToken(normalizedSessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; leg_generation={legGeneration}; route={SanitizeLogToken(routeToken)}; protocol_version={protocolVersion}; live_route_epoch={liveRouteEpoch}; transport_epoch={transportEpoch}; bridge_recovery_generation={bridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(checkpointRequestId ?? "none")}; authority_reason={normalizedReason}");
+        }
+
+        if (promotedPressure is not null)
+        {
+            LogPostTunaFallbackControlPlanePressureMarked(promotedPressure);
+        }
     }
 
     internal void MarkPostTunaFallbackLegAuthorityCompleted(
@@ -704,6 +722,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? "none" : sessionId.Trim();
         var normalizedCheckpointRequestId = string.IsNullOrWhiteSpace(checkpointRequestId) ? null : checkpointRequestId.Trim();
         var completed = false;
+        PostTunaFallbackControlPlanePressureState? promotedPressure = null;
         lock (gate)
         {
             if (postTunaFallbackLegAuthority is { } authority &&
@@ -720,6 +739,10 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 authority.Completed = true;
                 authority.AllowControlPlanePressureAfterCompletion = allowFurtherControlPlanePressure;
                 completed = true;
+                promotedPressure = TryPromotePendingPostTunaFallbackControlPlanePressureUnsafe(
+                    authority,
+                    Stopwatch.GetTimestamp(),
+                    "bridge_authority_completed_continuation_late_registered");
             }
         }
 
@@ -731,6 +754,11 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         Log(
             "event=filetransfer_fallback_leg_authority_bridge_completed; " +
             $"session_id={SanitizeLogToken(normalizedSessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; leg_generation={legGeneration}; route=post_tuna_fallback_v6; protocol_version={FileTransferProtocol.ProtocolVersionV6}; live_route_epoch={liveRouteEpoch}; transport_epoch={transportEpoch}; bridge_recovery_generation={bridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(normalizedCheckpointRequestId ?? "none")}; reason={SanitizeLogToken(reason)}; allow_control_plane_pressure_after_completion={(allowFurtherControlPlanePressure ? 1 : 0)}");
+
+        if (promotedPressure is not null)
+        {
+            LogPostTunaFallbackControlPlanePressureMarked(promotedPressure);
+        }
     }
 
     internal void ClearActiveFileTransferPostTunaFallbackRuntime(string transferId, string reason)
@@ -750,6 +778,11 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 string.Equals(pressure.TransferId, normalizedTransferId, StringComparison.Ordinal))
             {
                 postTunaFallbackControlPlanePressure = null;
+            }
+            if (pendingPostTunaFallbackControlPlanePressure is { } pendingPressure &&
+                string.Equals(pendingPressure.TransferId, normalizedTransferId, StringComparison.Ordinal))
+            {
+                pendingPostTunaFallbackControlPlanePressure = null;
             }
             if (regularV4FrontierRepairPressure is { } regularPressure &&
                 string.Equals(regularPressure.TransferId, normalizedTransferId, StringComparison.Ordinal))
@@ -1151,6 +1184,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         var shouldLogMarked = false;
         var authoritySource = string.Empty;
         var staleReason = string.Empty;
+        PostTunaFallbackControlPlanePressureState? markedPressure = null;
 
         lock (gate)
         {
@@ -1196,6 +1230,28 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 staleReason = "authority_mismatch";
             }
 
+            if (!string.IsNullOrEmpty(staleReason) &&
+                hasCurrentRuntime &&
+                (string.Equals(staleReason, "authority_mismatch", StringComparison.Ordinal) ||
+                 string.Equals(staleReason, "authority_completed", StringComparison.Ordinal) ||
+                 string.Equals(staleReason, "control_plane_pressure_authority_refresh_diagnostic_only", StringComparison.Ordinal)))
+            {
+                pendingPostTunaFallbackControlPlanePressure = CreatePostTunaFallbackControlPlanePressureState(
+                    normalizedSessionId,
+                    normalizedTransferId,
+                    protocolVersion,
+                    liveRouteEpoch,
+                    legGeneration,
+                    bridgeRecoveryGeneration,
+                    transportEpoch,
+                    normalizedCheckpointRequestId,
+                    normalizedKind,
+                    normalizedReason,
+                    "pending_bridge_authority",
+                    nowTick,
+                    expiresTick);
+            }
+
             if (string.IsNullOrEmpty(staleReason) &&
                 postTunaFallbackControlPlanePressure is { } current &&
                      string.Equals(current.SessionId, normalizedSessionId, StringComparison.Ordinal) &&
@@ -1209,23 +1265,21 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             }
             else if (string.IsNullOrEmpty(staleReason))
             {
-                postTunaFallbackControlPlanePressure = new PostTunaFallbackControlPlanePressureState
-                {
-                    SessionId = normalizedSessionId,
-                    TransferId = normalizedTransferId,
-                    RouteToken = "post_tuna_fallback_v6",
-                    ProtocolVersion = protocolVersion,
-                    LiveRouteEpoch = liveRouteEpoch,
-                    LegGeneration = legGeneration,
-                    BridgeRecoveryGeneration = bridgeRecoveryGeneration,
-                    TransportEpoch = transportEpoch,
-                    CheckpointRequestId = normalizedCheckpointRequestId,
-                    Kind = normalizedKind,
-                    Reason = normalizedReason,
-                    AuthoritySource = authoritySource,
-                    CreatedTick = nowTick,
-                    ExpiresTick = expiresTick,
-                };
+                markedPressure = CreatePostTunaFallbackControlPlanePressureState(
+                    normalizedSessionId,
+                    normalizedTransferId,
+                    protocolVersion,
+                    liveRouteEpoch,
+                    legGeneration,
+                    bridgeRecoveryGeneration,
+                    transportEpoch,
+                    normalizedCheckpointRequestId,
+                    normalizedKind,
+                    normalizedReason,
+                    authoritySource,
+                    nowTick,
+                    expiresTick);
+                postTunaFallbackControlPlanePressure = markedPressure;
                 shouldLogMarked = true;
             }
         }
@@ -1253,9 +1307,107 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             return;
         }
 
+        LogPostTunaFallbackControlPlanePressureMarked(markedPressure);
+    }
+
+    private static PostTunaFallbackControlPlanePressureState CreatePostTunaFallbackControlPlanePressureState(
+        string sessionId,
+        string transferId,
+        int protocolVersion,
+        int liveRouteEpoch,
+        int legGeneration,
+        int bridgeRecoveryGeneration,
+        long transportEpoch,
+        string? checkpointRequestId,
+        string kind,
+        string reason,
+        string authoritySource,
+        long createdTick,
+        long expiresTick)
+        => new()
+        {
+            SessionId = sessionId,
+            TransferId = transferId,
+            RouteToken = "post_tuna_fallback_v6",
+            ProtocolVersion = protocolVersion,
+            LiveRouteEpoch = liveRouteEpoch,
+            LegGeneration = legGeneration,
+            BridgeRecoveryGeneration = bridgeRecoveryGeneration,
+            TransportEpoch = transportEpoch,
+            CheckpointRequestId = checkpointRequestId,
+            Kind = kind,
+            Reason = reason,
+            AuthoritySource = authoritySource,
+            CreatedTick = createdTick,
+            ExpiresTick = expiresTick,
+        };
+
+    private PostTunaFallbackControlPlanePressureState? TryPromotePendingPostTunaFallbackControlPlanePressureUnsafe(
+        PostTunaFallbackLegAuthorityState authority,
+        long nowTick,
+        string authoritySource)
+    {
+        if (pendingPostTunaFallbackControlPlanePressure is not { } pending)
+        {
+            return null;
+        }
+
+        if (pending.ExpiresTick <= nowTick)
+        {
+            pendingPostTunaFallbackControlPlanePressure = null;
+            return null;
+        }
+
+        if (!PostTunaFallbackControlPlanePressureMatchesAuthority(pending, authority) ||
+            (authority.Completed && !authority.AllowControlPlanePressureAfterCompletion))
+        {
+            return null;
+        }
+
+        var promoted = CreatePostTunaFallbackControlPlanePressureState(
+            pending.SessionId,
+            pending.TransferId,
+            pending.ProtocolVersion,
+            pending.LiveRouteEpoch,
+            pending.LegGeneration,
+            pending.BridgeRecoveryGeneration,
+            pending.TransportEpoch,
+            pending.CheckpointRequestId,
+            pending.Kind,
+            pending.Reason,
+            authority.Completed ? "bridge_authority_completed_continuation_late_registered" : authoritySource,
+            nowTick,
+            AddStopwatchDuration(nowTick, PostTunaFallbackControlPlanePressureTtl));
+        postTunaFallbackControlPlanePressure = promoted;
+        pendingPostTunaFallbackControlPlanePressure = null;
+        return promoted;
+    }
+
+    private static bool PostTunaFallbackControlPlanePressureMatchesAuthority(
+        PostTunaFallbackControlPlanePressureState pressure,
+        PostTunaFallbackLegAuthorityState authority)
+        => string.Equals(authority.SessionId, pressure.SessionId, StringComparison.Ordinal) &&
+           string.Equals(authority.TransferId, pressure.TransferId, StringComparison.Ordinal) &&
+           string.Equals(authority.RouteToken, pressure.RouteToken, StringComparison.Ordinal) &&
+           authority.ProtocolVersion == pressure.ProtocolVersion &&
+           authority.LegGeneration == pressure.LegGeneration &&
+           authority.LiveRouteEpoch == pressure.LiveRouteEpoch &&
+           authority.TransportEpoch == pressure.TransportEpoch &&
+           authority.BridgeRecoveryGeneration == pressure.BridgeRecoveryGeneration &&
+           (authority.CheckpointRequestId is null ||
+            pressure.CheckpointRequestId is null ||
+            string.Equals(authority.CheckpointRequestId, pressure.CheckpointRequestId, StringComparison.Ordinal));
+
+    private void LogPostTunaFallbackControlPlanePressureMarked(PostTunaFallbackControlPlanePressureState? pressure)
+    {
+        if (pressure is null)
+        {
+            return;
+        }
+
         Log(
             "event=filetransfer_post_tuna_fallback_control_plane_pressure_marked; " +
-            $"session_id={SanitizeLogToken(normalizedSessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; route=post_tuna_fallback_v6; protocol_version={protocolVersion}; live_route_epoch={liveRouteEpoch}; leg_generation={legGeneration}; bridge_recovery_generation={bridgeRecoveryGeneration}; transport_epoch={transportEpoch}; checkpoint_request_id={SanitizeLogToken(normalizedCheckpointRequestId ?? "none")}; kind={normalizedKind}; reason={normalizedReason}; authority_source={authoritySource}; ttl_ms={(long)PostTunaFallbackControlPlanePressureTtl.TotalMilliseconds}; " +
+            $"session_id={SanitizeLogToken(pressure.SessionId)}; transfer_id={SanitizeLogToken(pressure.TransferId)}; route=post_tuna_fallback_v6; protocol_version={pressure.ProtocolVersion}; live_route_epoch={pressure.LiveRouteEpoch}; leg_generation={pressure.LegGeneration}; bridge_recovery_generation={pressure.BridgeRecoveryGeneration}; transport_epoch={pressure.TransportEpoch}; checkpoint_request_id={SanitizeLogToken(pressure.CheckpointRequestId ?? "none")}; kind={SanitizeLogToken(pressure.Kind)}; reason={SanitizeLogToken(pressure.Reason)}; authority_source={SanitizeLogToken(pressure.AuthoritySource)}; ttl_ms={(long)PostTunaFallbackControlPlanePressureTtl.TotalMilliseconds}; " +
             $"active_file_transfer_sessions={Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions))}; active_file_transfer_runtime_sessions={activeFileTransferRuntimeTransfers.Count}; active_post_tuna_fallback_runtime_sessions={activePostTunaFallbackRuntimeTransfers.Count}");
     }
 
@@ -1271,6 +1423,12 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             {
                 cleared = pressure;
                 postTunaFallbackControlPlanePressure = null;
+            }
+            if (pendingPostTunaFallbackControlPlanePressure is { } pendingPressure &&
+                (string.Equals(pendingPressure.TransferId, normalizedTransferId, StringComparison.Ordinal) ||
+                 string.Equals(normalizedTransferId, "(all)", StringComparison.Ordinal)))
+            {
+                pendingPostTunaFallbackControlPlanePressure = null;
             }
         }
 
@@ -1362,6 +1520,11 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             {
                 postTunaFallbackControlPlanePressure = null;
             }
+            if (pendingPostTunaFallbackControlPlanePressure is { } pendingPressure &&
+                string.Equals(pendingPressure.TransferId, normalizedTransferId, StringComparison.Ordinal))
+            {
+                pendingPostTunaFallbackControlPlanePressure = null;
+            }
             if (lastRegularV4FrontierRepairAuthority is { } regularAuthority &&
                 string.Equals(regularAuthority.TransferId, normalizedTransferId, StringComparison.Ordinal))
             {
@@ -1404,6 +1567,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         {
             postTunaFallbackLegAuthority = null;
             postTunaFallbackControlPlanePressure = null;
+            pendingPostTunaFallbackControlPlanePressure = null;
             regularV4FrontierRepairPressure = null;
             lastRegularV4FrontierRepairAuthority = null;
         }
@@ -1753,6 +1917,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         lock (gate)
         {
             postTunaFallbackControlPlanePressure = null;
+            pendingPostTunaFallbackControlPlanePressure = null;
             regularV4FrontierRepairPressure = null;
             lastRegularV4FrontierRepairAuthority = null;
         }
