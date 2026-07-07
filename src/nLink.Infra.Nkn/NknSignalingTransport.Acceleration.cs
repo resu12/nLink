@@ -2088,6 +2088,12 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
+        TryCloseRegularV4RecoveryLivenessForAcceptedFrontierSettlement(
+            settlement,
+            normalizedSessionId,
+            normalizedTransferId,
+            settlementTrigger);
+
         if (TryConsumePendingRuntimeUnlockAccelerationNegotiation(out var pendingReason))
         {
             LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
@@ -2151,6 +2157,86 @@ public sealed partial class NknSignalingTransport
             normalizedTransferId,
             decisionReason);
     }
+
+    private void TryCloseRegularV4RecoveryLivenessForAcceptedFrontierSettlement(
+        FileTransferRegularV4FrontierRepairSettlement settlement,
+        string sessionId,
+        string transferId,
+        string settlementTrigger)
+    {
+        if (!IsRegularV4FrontierRepairSettlementClosureOutcome(settlement.Outcome))
+        {
+            return;
+        }
+
+        if (!TryGetActiveRegularV4RecoveryLivenessSnapshot(sessionId, out var livenessSnapshot))
+        {
+            LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
+                "runtime_unlock_regular_v4_frontier_repair_settlement_held",
+                settlement,
+                sessionId,
+                transferId,
+                "regular_v4_recovery_liveness_missing");
+            return;
+        }
+
+        if (livenessSnapshot.Completed || livenessSnapshot.RecoveryExhausted)
+        {
+            LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
+                "runtime_unlock_regular_v4_frontier_repair_settlement_held",
+                settlement,
+                sessionId,
+                transferId,
+                "regular_v4_recovery_liveness_already_closed");
+            return;
+        }
+
+        if (!IsRegularV4FrontierRepairSettlementCurrentForReceiveRecovery(
+                livenessSnapshot,
+                settlement,
+                blockedState: null,
+                out var rejectionReason,
+                allowPreRecoveryBridgeDecisionGeneration: true,
+                allowClosureOutcomes: true))
+        {
+            LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
+                "runtime_unlock_regular_v4_frontier_repair_settlement_rejected",
+                settlement,
+                sessionId,
+                transferId,
+                rejectionReason);
+            return;
+        }
+
+        var decisionReason = FormatRegularV4FrontierRepairLivenessClosureReason(settlement.Outcome);
+        CloseRegularV4ReceiveRecoveryLivenessAfterContractFailure(
+            livenessSnapshot,
+            settlementTrigger,
+            decisionReason);
+    }
+
+    private static bool IsRegularV4FrontierRepairSettlementClosureOutcome(
+        FileTransferRegularV4FrontierRepairSettlementOutcome outcome)
+        => outcome is FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch or
+            FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled or
+            FileTransferRegularV4FrontierRepairSettlementOutcome.AuthorityRejected or
+            FileTransferRegularV4FrontierRepairSettlementOutcome.TerminalRejected;
+
+    private static bool IsRegularV4FrontierRepairSettlementExplicitFailureOutcome(
+        FileTransferRegularV4FrontierRepairSettlementOutcome outcome)
+        => outcome is FileTransferRegularV4FrontierRepairSettlementOutcome.AuthorityRejected or
+            FileTransferRegularV4FrontierRepairSettlementOutcome.TerminalRejected;
+
+    private static string FormatRegularV4FrontierRepairLivenessClosureReason(
+        FileTransferRegularV4FrontierRepairSettlementOutcome outcome)
+        => outcome switch
+        {
+            FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch => "v4_repair_missing_dispatch",
+            FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled => "v4_repair_settled_stalled",
+            FileTransferRegularV4FrontierRepairSettlementOutcome.AuthorityRejected => "v4_repair_authority_rejected",
+            FileTransferRegularV4FrontierRepairSettlementOutcome.TerminalRejected => "v4_repair_terminal_rejected",
+            _ => "v4_repair_settled",
+        };
 
     private void CachePendingRuntimeUnlockRegularV4FrontierRepairSettlement(
         FileTransferRegularV4FrontierRepairSettlement settlement,
@@ -12056,6 +12142,22 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId)
+            ? string.Empty
+            : sessionId.Trim();
+        if (!string.IsNullOrWhiteSpace(normalizedSessionId) &&
+            TryGetActiveRegularV4RecoveryLivenessSnapshot(normalizedSessionId, out var livenessSnapshot) &&
+            (livenessSnapshot.Completed || livenessSnapshot.RecoveryExhausted))
+        {
+            var livenessDecisionReason = livenessSnapshot.Completed
+                ? "regular_v4_recovery_liveness_completed"
+                : "regular_v4_recovery_liveness_exhausted";
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=runtime_unlock_regular_v4_receive_recovery_blocker_ignored; session_id={SanitizeLogToken(normalizedSessionId)}; trigger={SanitizeLogToken(trigger)}; payer_decision_id={payerDecisionId}; blocker_reason={SanitizeLogToken(blockerReason)}; blocker_remaining_ms={blockerRemainingMs}; decision_reason={SanitizeLogToken(livenessDecisionReason)}");
+            return false;
+        }
+
         if (ShouldBypassRuntimeUnlockRegularV4DispatchBlockerAfterReceiveProof(
             sessionId,
             blockerReason,
@@ -14211,7 +14313,8 @@ public sealed partial class NknSignalingTransport
         FileTransferRegularV4FrontierRepairSettlement? settlement,
         RuntimeUnlockRecoveryRetryState? blockedState,
         out string rejectionReason,
-        bool allowPreRecoveryBridgeDecisionGeneration = false)
+        bool allowPreRecoveryBridgeDecisionGeneration = false,
+        bool allowClosureOutcomes = false)
     {
         rejectionReason = "none";
         if (settlement is null)
@@ -14221,9 +14324,12 @@ public sealed partial class NknSignalingTransport
         }
 
         var candidate = settlement;
-        if (candidate.Outcome is not (
-                FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch or
-                FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled))
+        var allowedOutcome =
+            candidate.Outcome is FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch or
+                FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled ||
+            (allowClosureOutcomes &&
+             IsRegularV4FrontierRepairSettlementExplicitFailureOutcome(candidate.Outcome));
+        if (!allowedOutcome)
         {
             rejectionReason = "frontier_settlement_outcome_not_recovery_settlement";
             return false;
@@ -14547,7 +14653,11 @@ public sealed partial class NknSignalingTransport
                 frontierSettlement,
                 blockedState: null,
                 out var frontierSettlementRejectionReason,
-                allowPreRecoveryFrontierSettlement);
+                allowPreRecoveryFrontierSettlement,
+                allowClosureOutcomes: true);
+        var explicitFailureFrontierSettlement =
+            frontierSettlement is not null &&
+            IsRegularV4FrontierRepairSettlementExplicitFailureOutcome(frontierSettlement.Outcome);
         var isRegularV4RecoverySettlementTrigger =
             IsRegularV4RecoverySettlementTrigger(livenessSnapshot, settlementTrigger);
         if (!isRegularV4RecoverySettlementTrigger &&
@@ -14632,7 +14742,8 @@ public sealed partial class NknSignalingTransport
                         frontierSettlement,
                         state,
                         out frontierSettlementRejectionReason,
-                        allowPreRecoveryFrontierSettlement);
+                        allowPreRecoveryFrontierSettlement,
+                        allowClosureOutcomes: true);
             }
 
             if (state.ContractState is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed)
@@ -14658,6 +14769,10 @@ public sealed partial class NknSignalingTransport
             else if (frontierSettlement is not null && !frontierSettlementCurrent)
             {
                 decisionReason = frontierSettlementRejectionReason;
+            }
+            else if (explicitFailureFrontierSettlement)
+            {
+                decisionReason = FormatRegularV4FrontierRepairLivenessClosureReason(frontierSettlement!.Outcome);
             }
             else if (livenessSnapshot.RecoveryExhausted)
             {
@@ -14809,6 +14924,14 @@ public sealed partial class NknSignalingTransport
             if (string.Equals(
                     decisionReason,
                     "regular_v4_recovery_no_current_settlement_proof",
+                    StringComparison.Ordinal) ||
+                string.Equals(
+                    decisionReason,
+                    "v4_repair_authority_rejected",
+                    StringComparison.Ordinal) ||
+                string.Equals(
+                    decisionReason,
+                    "v4_repair_terminal_rejected",
                     StringComparison.Ordinal))
             {
                 CloseRegularV4ReceiveRecoveryLivenessAfterContractFailure(
