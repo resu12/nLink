@@ -8101,15 +8101,8 @@ function Get-FileTransferRecoveryFailureClassification {
             [int64]$_.Sequence -gt $blockedSequence -and
             (Test-RuntimeUnlockRetryDispatchMatch -Release $blockedRetry -Candidate $_)
         })
-        $matchingContractFailure = @($events | Where-Object {
-            [int64]$_.Sequence -gt $blockedSequence -and
-            $_.EventName -eq 'session_recovery_contract_failed' -and
-            (Test-RuntimeUnlockRetryDispatchMatch -Release $blockedRetry -Candidate $_)
-        })
-
         if ($matchingRelease.Count -eq 0 -and
-            $matchingRegularV4Rejection.Count -eq 0 -and
-            $matchingContractFailure.Count -eq 0) {
+            $matchingRegularV4Rejection.Count -eq 0) {
             $runtimeUnlockRetryRegularV4RecoverySettlementMissingCount++
         }
     }
