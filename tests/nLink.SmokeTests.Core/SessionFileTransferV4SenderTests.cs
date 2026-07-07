@@ -10129,6 +10129,112 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
+    public void PostTunaFallbackV6FrontierRequest_OnV4NegotiatedTransfer_DispatchesFromCurrentFallbackOwner()
+    {
+        using var service = new SessionFileTransferService();
+        using var senderTransport = new LoopbackFileTransferTransport("session_post_tuna_fallback_v6_v4_negotiated_frontier");
+        service.AttachTransport(senderTransport);
+        var serviceType = typeof(SessionFileTransferService);
+        var contextType = serviceType.GetNestedType("OutboundTransferContext", BindingFlags.NonPublic)!;
+        FileTransferReadStreamFactory openReadStreamAsync =
+            _ => Task.FromResult<Stream>(new MemoryStream(Array.Empty<byte>(), writable: false));
+        const int chunkSize = 21 * 1024;
+        var descriptor = new FileTransferSendDescriptor(
+            "post-tuna-fallback-v6-v4-negotiated-frontier.bin",
+            256L * chunkSize,
+            "transfer_post_tuna_fallback_v6_v4_negotiated_frontier");
+        var context = Activator.CreateInstance(
+            contextType,
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            binder: null,
+            args: [descriptor, openReadStreamAsync],
+            culture: null)!;
+        var routeSelection = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        SetPrivateProperty(context, "SessionId", "session_post_tuna_fallback_v6_v4_negotiated_frontier");
+        SetPrivateProperty(context, "RouteSelection", routeSelection);
+        SetPrivateProperty(context, "RouteRuntime", routeSelection.RuntimeDescriptor);
+        SetPrivateProperty(context, "NegotiatedDataProtocolVersion", FileTransferProtocol.ProtocolVersionV4);
+        SetPrivateProperty(context, "State", FileTransferTransferState.Sending);
+        SetPrivateProperty(context, "ChunkSizeBytes", chunkSize);
+        SetPrivateProperty(context, "ChunkCount", 256);
+        SetPrivateProperty(context, "PullSourceCanSeek", true);
+        SetPrivateProperty(context, "PullSessionActive", true);
+        SetPrivateProperty(context, "PullPostTunaRecoveryActive", true);
+        SetPrivateProperty(context, "PullTransportRebindGeneration", 3);
+        SetPrivateProperty(context, "RemoteNextExpectedChunkIndex", 100);
+        SetPrivateProperty(context, "RemoteGrantedUntilExclusive", 256);
+        SetPrivateProperty(context, "ChunksAcceptedForTransport", 256);
+        SetPrivateProperty(context, "PullTransportFrontierOnlyRepairActive", true);
+        SetPrivateProperty(context, "PullTransportFrontierOnlyRepairStartChunkIndex", 100);
+        var leg = SeedCurrentRuntimeOwnerForTest(context, FileTransferDirection.Outbound, "unit_test_post_tuna_fallback_v6_v4_negotiated");
+        leg.TransportEpochId = 3;
+        leg.BridgeRecoveryGeneration = 1;
+        serviceType
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var request = new FileTransferFrontierRequestFrameV6
+        {
+            SessionId = "session_post_tuna_fallback_v6_v4_negotiated_frontier",
+            TransferId = "transfer_post_tuna_fallback_v6_v4_negotiated_frontier",
+            TransportEpoch = 3,
+            RepairRequestId = "v6-frontier:3:128:1",
+            MissingRanges =
+            [
+                new FileTransferRangeV4
+                {
+                    StartChunkIndex = 128,
+                    ChunkCount = 1,
+                },
+            ],
+            Priority = "frontier",
+            RecoveryMode = "regular_nkn_frontier_stall_control_bulk",
+        };
+
+        var shouldAccept = (bool)serviceType
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(method =>
+            {
+                if (!string.Equals(method.Name, "ShouldAcceptSparseCreditRuntimeDataFrame", StringComparison.Ordinal))
+                {
+                    return false;
+                }
+
+                var parameters = method.GetParameters();
+                return parameters.Length == 2 &&
+                       parameters[0].ParameterType == contextType &&
+                       parameters[1].ParameterType == typeof(FileTransferDataFrame);
+            })
+            .Invoke(null, [context, request])!;
+        var keepReceiveLoopAlive = (bool)serviceType
+            .GetMethod("ShouldKeepOutboundV4ReceiveLoopAliveAfterSenderPumpCompleted", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context])!;
+
+        var logStart = GetOperationalLogLength();
+        serviceType
+            .GetMethod("ApplyOutboundV6RepairRequest", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, request]);
+
+        Assert.True(shouldAccept);
+        Assert.True(keepReceiveLoopAlive);
+        Assert.Equal(128, GetPrivateProperty<int>(context, "RemoteNextExpectedChunkIndex"));
+        var queue = (System.Collections.IEnumerable)contextType
+            .GetProperty("PullV4SenderPumpRepairQueue", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!
+            .GetValue(context)!;
+        var queuedRepair = queue.Cast<object>().Single();
+        var queuedRepairType = queuedRepair.GetType();
+        var chunkIndices = ((IEnumerable<int>)queuedRepairType.GetProperty("ChunkIndices")!.GetValue(queuedRepair)!).ToArray();
+
+        Assert.Equal(128, queuedRepairType.GetProperty("FirstStartChunkIndex")!.GetValue(queuedRepair));
+        Assert.Equal(129, queuedRepairType.GetProperty("LastEndChunkExclusive")!.GetValue(queuedRepair));
+        Assert.Equal([128], chunkIndices);
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_v6_frontier_request_receive_dispatch_attempted;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v6_frontier_request_receive_dispatched;", log, StringComparison.Ordinal);
+        Assert.Contains("decision_reason=queued_for_legacy_sender_repair", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void EpochlessV6FrontierRequest_OutsidePostTunaFallbackIsIgnored()
     {
         using var service = new SessionFileTransferService();

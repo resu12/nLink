@@ -159,6 +159,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("trackSelectedRpc(rpc, bootstrapCandidate.stage)", bridgeText, StringComparison.Ordinal);
         Assert.Contains("state.selectedRpcStage = typeof stage === 'string' && stage.length > 0", bridgeText, StringComparison.Ordinal);
         Assert.Contains("Creating NKN clients (rpc=${baseOptions.rpcServerAddr || 'default'}, tls=${baseOptions.tls ? 1 : 0}", bridgeText, StringComparison.Ordinal);
+        Assert.Contains("const CONNECT_FALLBACK_CLIENT_CLOSE_TIMEOUT_MS", bridgeText, StringComparison.Ordinal);
+        Assert.Contains("await closeClient(CONNECT_FALLBACK_CLIENT_CLOSE_TIMEOUT_MS)", bridgeText, StringComparison.Ordinal);
+        Assert.Contains("timed out during bootstrap fallback close", bridgeText, StringComparison.Ordinal);
     }
 
     [Fact]

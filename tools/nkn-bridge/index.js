@@ -38,6 +38,7 @@ const DEFAULT_SUBSCRIBE_DURATION = 1440;
 const DEFAULT_CONNECT_READY_TIMEOUT_MS = 12000;
 const MIN_CONNECT_FALLBACK_DELAY_MS = 1000;
 const MAX_CONNECT_FALLBACK_DELAY_MS = DEFAULT_CONNECT_READY_TIMEOUT_MS;
+const CONNECT_FALLBACK_CLIENT_CLOSE_TIMEOUT_MS = 750;
 const DEFAULT_NUM_SUBCLIENTS = 4;
 const DEFAULT_MEDIA_NUM_SUBCLIENTS = 8;
 const DEFAULT_BULK_NUM_SUBCLIENTS = 4;
@@ -2634,7 +2635,7 @@ function attachClientHandlers(client, channel) {
   // which causes a false-ready race ("client not ready" on subscribe/publish).
 }
 
-async function closeSingleClient(client) {
+async function closeSingleClient(client, closeTimeoutMs = 0) {
   if (!client) {
     return;
   }
@@ -2645,7 +2646,20 @@ async function closeSingleClient(client) {
       try {
         const result = client[fn]();
         if (result && typeof result.then === 'function') {
-          await result;
+          if (closeTimeoutMs > 0) {
+            let timedOut = false;
+            await Promise.race([
+              result,
+              delay(closeTimeoutMs).then(() => {
+                timedOut = true;
+              })
+            ]);
+            if (timedOut) {
+              logStderr(`Client ${fn} timed out during bootstrap fallback close after ${closeTimeoutMs}ms`);
+            }
+          } else {
+            await result;
+          }
         }
         return;
       } catch (error) {
@@ -2655,7 +2669,7 @@ async function closeSingleClient(client) {
   }
 }
 
-async function closeClient() {
+async function closeClient(closeTimeoutMs = 0) {
   const controlClient = state.controlClient;
   const mediaClient = state.mediaClient;
   const bulkClient = state.bulkClient;
@@ -2684,12 +2698,12 @@ async function closeClient() {
   clearScreenShareQueue('close_client');
   clearBulkSendQueue('close_client');
 
-  await closeSingleClient(controlClient);
+  await closeSingleClient(controlClient, closeTimeoutMs);
   if (mediaClient && mediaClient !== controlClient) {
-    await closeSingleClient(mediaClient);
+    await closeSingleClient(mediaClient, closeTimeoutMs);
   }
   if (bulkClient && bulkClient !== controlClient && bulkClient !== mediaClient) {
-    await closeSingleClient(bulkClient);
+    await closeSingleClient(bulkClient, closeTimeoutMs);
   }
 }
 
@@ -2841,7 +2855,7 @@ async function tryFallbackRpcCandidates(connectAttemptId, originalCommand, remai
           ts: Date.now()
         });
       }
-      await closeClient();
+      await closeClient(CONNECT_FALLBACK_CLIENT_CLOSE_TIMEOUT_MS);
       state.connectAttemptId = connectAttemptId;
       state.connectId = typeof originalCommand.connectId === 'string' ? originalCommand.connectId : '';
       state.preflightProgressEnabled = Boolean(originalCommand.preflightRpcEnabled);

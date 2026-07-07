@@ -41,16 +41,26 @@ public sealed partial class SessionFileTransferService
         OutboundTransferContext context,
         FileTransferDataFrame frame)
         => FileTransferProtocol.IsV6DataFrame(frame) &&
-           context.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6 &&
-           context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
-           IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg);
+           IsCurrentPostTunaFallbackV6RouteOwner(context);
 
     private static bool ShouldAcceptCurrentPostTunaFallbackV6RuntimeFrame(
         InboundTransferContext context,
         FileTransferDataFrame frame)
         => FileTransferProtocol.IsV6DataFrame(frame) &&
-           context.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6 &&
-           context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
+           IsCurrentPostTunaFallbackV6RouteOwner(context);
+
+    private static bool IsCurrentPostTunaFallbackV6RouteOwner(OutboundTransferContext context)
+        => context.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6 &&
+           context.RouteSelection.ProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
+           context.RouteRuntime.UsesPostTunaFallbackV6Runtime &&
+           context.RouteRuntime.FrameFamily == FileTransferFrameFamily.V6 &&
+           IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg);
+
+    private static bool IsCurrentPostTunaFallbackV6RouteOwner(InboundTransferContext context)
+        => context.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6 &&
+           context.RouteSelection.ProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
+           context.RouteRuntime.UsesPostTunaFallbackV6Runtime &&
+           context.RouteRuntime.FrameFamily == FileTransferFrameFamily.V6 &&
            IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg);
 
     private bool ShouldKeepOutboundV4ReceiveLoopAliveAfterSenderPumpCompleted(OutboundTransferContext context)
@@ -59,9 +69,7 @@ public sealed partial class SessionFileTransferService
         {
             return ReferenceEquals(outboundTransfer, context) &&
                    !context.IsTerminal &&
-                   context.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6 &&
-                   context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
-                   IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg);
+                   IsCurrentPostTunaFallbackV6RouteOwner(context);
         }
     }
 
@@ -3186,9 +3194,7 @@ public sealed partial class SessionFileTransferService
            IsOutboundPostTunaRecoveryActiveLocked(context);
 
     private static bool IsOutboundPostTunaFallbackV6LiveSparseRecoveryActiveLocked(OutboundTransferContext context)
-        => context.RouteRuntime.UsesPostTunaFallbackV6Runtime &&
-           context.RouteRuntime.FrameFamily == FileTransferFrameFamily.V6 &&
-           context.NegotiatedDataProtocolVersion >= FileTransferProtocol.ProtocolVersionV6 &&
+        => IsCurrentPostTunaFallbackV6RouteOwner(context) &&
            IsOutboundPostTunaRecoveryActiveLocked(context);
 
     private static bool HasCurrentOutboundPostTunaFallbackFrontierRepairAuthorityLocked(OutboundTransferContext context)
