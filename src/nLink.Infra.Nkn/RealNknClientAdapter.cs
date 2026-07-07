@@ -184,6 +184,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private PostTunaFallbackLegAuthorityState? postTunaFallbackLegAuthority;
     private PostTunaFallbackControlPlanePressureState? postTunaFallbackControlPlanePressure;
     private RegularV4FrontierRepairPressureState? regularV4FrontierRepairPressure;
+    private RegularV4FrontierRepairPressureState? lastRegularV4FrontierRepairAuthority;
     private FileTransferBridgeRecoveryAuthority? activeFileTransferBridgeRecoveryAuthority;
     private int activeFileTransferBridgeRecoveryAuthorityGeneration;
     private long activeFileTransferBridgeRecoveryAuthorityExpiresTick;
@@ -268,6 +269,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         public bool EscalationUsed { get; set; }
 
         public bool Completed { get; set; }
+
+        public bool AllowControlPlanePressureAfterCompletion { get; set; }
     }
 
     private sealed class PostTunaFallbackControlPlanePressureState
@@ -689,7 +692,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         long transportEpoch,
         int bridgeRecoveryGeneration,
         string? checkpointRequestId,
-        string reason)
+        string reason,
+        bool allowFurtherControlPlanePressure = false)
     {
         if (legGeneration <= 0)
         {
@@ -714,6 +718,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                  string.Equals(authority.CheckpointRequestId, normalizedCheckpointRequestId, StringComparison.Ordinal)))
             {
                 authority.Completed = true;
+                authority.AllowControlPlanePressureAfterCompletion = allowFurtherControlPlanePressure;
                 completed = true;
             }
         }
@@ -725,7 +730,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
         Log(
             "event=filetransfer_fallback_leg_authority_bridge_completed; " +
-            $"session_id={SanitizeLogToken(normalizedSessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; leg_generation={legGeneration}; route=post_tuna_fallback_v6; protocol_version={FileTransferProtocol.ProtocolVersionV6}; live_route_epoch={liveRouteEpoch}; transport_epoch={transportEpoch}; bridge_recovery_generation={bridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(normalizedCheckpointRequestId ?? "none")}; reason={SanitizeLogToken(reason)}");
+            $"session_id={SanitizeLogToken(normalizedSessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; leg_generation={legGeneration}; route=post_tuna_fallback_v6; protocol_version={FileTransferProtocol.ProtocolVersionV6}; live_route_epoch={liveRouteEpoch}; transport_epoch={transportEpoch}; bridge_recovery_generation={bridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(normalizedCheckpointRequestId ?? "none")}; reason={SanitizeLogToken(reason)}; allow_control_plane_pressure_after_completion={(allowFurtherControlPlanePressure ? 1 : 0)}");
     }
 
     internal void ClearActiveFileTransferPostTunaFallbackRuntime(string transferId, string reason)
@@ -750,6 +755,11 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 string.Equals(regularPressure.TransferId, normalizedTransferId, StringComparison.Ordinal))
             {
                 regularV4FrontierRepairPressure = null;
+            }
+            if (lastRegularV4FrontierRepairAuthority is { } regularAuthority &&
+                string.Equals(regularAuthority.TransferId, normalizedTransferId, StringComparison.Ordinal))
+            {
+                lastRegularV4FrontierRepairAuthority = null;
             }
         }
 
@@ -873,9 +883,10 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             CreatedTick = nowTick,
             ExpiresTick = expiresTick
         };
-        if (!activationSendOnly)
+        lock (gate)
         {
-            lock (gate)
+            lastRegularV4FrontierRepairAuthority = pressureState;
+            if (!activationSendOnly)
             {
                 regularV4FrontierRepairPressure = pressureState;
             }
@@ -919,33 +930,56 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         {
             if (regularV4FrontierRepairPressure is not { } current)
             {
-                rejectionReason = "regular_v4_frontier_repair_pressure_missing";
+                if (lastRegularV4FrontierRepairAuthority is not { } recentAuthority)
+                {
+                    rejectionReason = "regular_v4_frontier_repair_pressure_missing";
+                }
+                else if (recentAuthority.ExpiresTick <= nowTick)
+                {
+                    lastRegularV4FrontierRepairAuthority = null;
+                    rejectionReason = "regular_v4_frontier_repair_authority_expired";
+                    pressure = recentAuthority;
+                }
+                else if (!RegularV4FrontierRepairAuthorityMatchesSettlement(
+                             recentAuthority,
+                             normalizedSessionId,
+                             normalizedTransferId,
+                             normalizedRoute,
+                             normalizedRepairKey,
+                             settlement,
+                             settlementTargetTransport))
+                {
+                    rejectionReason = "regular_v4_frontier_repair_settlement_authority_mismatch";
+                    pressure = recentAuthority;
+                }
+                else
+                {
+                    pressure = recentAuthority;
+                    lastRegularV4FrontierRepairAuthority = null;
+                    accepted = true;
+                }
             }
             else if (current.ExpiresTick <= nowTick)
             {
                 regularV4FrontierRepairPressure = null;
+                if (ReferenceEquals(lastRegularV4FrontierRepairAuthority, current))
+                {
+                    lastRegularV4FrontierRepairAuthority = null;
+                }
+
                 Interlocked.CompareExchange(ref regularV4ControlFeedbackPressureExpiresTick, 0, current.ExpiresTick);
                 Interlocked.CompareExchange(ref regularV4ActivationSendPressureExpiresTick, 0, current.ExpiresTick);
                 rejectionReason = "regular_v4_frontier_repair_pressure_expired";
                 pressure = current;
             }
-            else if (!string.Equals(current.SessionId, normalizedSessionId, StringComparison.Ordinal) ||
-                     !string.Equals(current.TransferId, normalizedTransferId, StringComparison.Ordinal) ||
-                     current.Direction != settlement.Direction ||
-                     !string.Equals(current.RouteToken, normalizedRoute, StringComparison.Ordinal) ||
-                     current.ProtocolVersion != settlement.ProtocolVersion ||
-                     current.LiveRouteEpoch != settlement.LiveRouteEpoch ||
-                     current.RuntimeGeneration != settlement.RuntimeGeneration ||
-                     current.TerminalGeneration != settlement.TerminalGeneration ||
-                     current.LegGeneration != settlement.LegGeneration ||
-                     current.TransportEpoch != settlement.TransportEpoch ||
-                     current.BridgeRecoveryGeneration != settlement.BridgeRecoveryGeneration ||
-                     current.BridgeDecisionGeneration != settlement.BridgeDecisionGeneration ||
-                     current.RoutePublicationGeneration != settlement.RoutePublicationGeneration ||
-                     (current.RouteCommitGeneration ?? 0) != (settlement.RouteCommitGeneration ?? 0) ||
-                     current.TargetTransport != settlementTargetTransport ||
-                     !string.Equals(current.RepairKey, normalizedRepairKey, StringComparison.Ordinal) ||
-                     current.DecisionGeneration != settlement.DecisionGeneration)
+            else if (!RegularV4FrontierRepairAuthorityMatchesSettlement(
+                         current,
+                         normalizedSessionId,
+                         normalizedTransferId,
+                         normalizedRoute,
+                         normalizedRepairKey,
+                         settlement,
+                         settlementTargetTransport))
             {
                 rejectionReason = "regular_v4_frontier_repair_settlement_authority_mismatch";
                 pressure = current;
@@ -958,6 +992,10 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 if (current.ActivationSendOnly)
                 {
                     Interlocked.CompareExchange(ref regularV4ActivationSendPressureExpiresTick, 0, current.ExpiresTick);
+                }
+                if (ReferenceEquals(lastRegularV4FrontierRepairAuthority, current))
+                {
+                    lastRegularV4FrontierRepairAuthority = null;
                 }
 
                 accepted = true;
@@ -972,6 +1010,32 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             $"session_id={SanitizeLogToken(normalizedSessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; direction={settlement.Direction.ToString().ToLowerInvariant()}; route={SanitizeLogToken(normalizedRoute)}; protocol_version={settlement.ProtocolVersion}; live_route_epoch={settlement.LiveRouteEpoch}; runtime_generation={settlement.RuntimeGeneration}; terminal_generation={settlement.TerminalGeneration}; leg_generation={settlement.LegGeneration}; transport_epoch={settlement.TransportEpoch}; bridge_recovery_generation={settlement.BridgeRecoveryGeneration}; bridge_decision_generation={settlement.BridgeDecisionGeneration}; route_publication_generation={settlement.RoutePublicationGeneration}; route_commit_generation={settlement.RouteCommitGeneration ?? 0}; target_transport={FormatFileTransferTransportKindForLog(settlementTargetTransport)}; repair_request_key={SanitizeLogToken(normalizedRepairKey)}; frontier_chunk_index={settlement.FrontierChunkIndex}; durable_received_highest_chunk_index={settlement.DurableReceivedHighestChunkIndex}; requested_chunk_count={Math.Max(0, settlement.RequestedChunkCount)}; decision_generation={settlement.DecisionGeneration}; outcome={FormatRegularV4FrontierRepairSettlementOutcomeForLog(settlement.Outcome)}; settlement_reason={SanitizeLogToken(normalizedDecisionReason)}; pressure_pending_repair_count={pressure?.PendingRepairCount ?? 0}; pressure_reason={SanitizeLogToken(pressure?.PressureReason ?? "none")}; cleared_pressure={(accepted ? 1 : 0)}; rejection_reason={SanitizeLogToken(accepted ? "none" : rejectionReason)}; decision_reason={SanitizeLogToken(accepted ? normalizedDecisionReason : rejectionReason)}");
         return accepted;
     }
+
+    private static bool RegularV4FrontierRepairAuthorityMatchesSettlement(
+        RegularV4FrontierRepairPressureState current,
+        string normalizedSessionId,
+        string normalizedTransferId,
+        string normalizedRoute,
+        string normalizedRepairKey,
+        FileTransferRegularV4FrontierRepairSettlement settlement,
+        FileTransferTransportKind settlementTargetTransport)
+        => string.Equals(current.SessionId, normalizedSessionId, StringComparison.Ordinal) &&
+           string.Equals(current.TransferId, normalizedTransferId, StringComparison.Ordinal) &&
+           current.Direction == settlement.Direction &&
+           string.Equals(current.RouteToken, normalizedRoute, StringComparison.Ordinal) &&
+           current.ProtocolVersion == settlement.ProtocolVersion &&
+           current.LiveRouteEpoch == settlement.LiveRouteEpoch &&
+           current.RuntimeGeneration == settlement.RuntimeGeneration &&
+           current.TerminalGeneration == settlement.TerminalGeneration &&
+           current.LegGeneration == settlement.LegGeneration &&
+           current.TransportEpoch == settlement.TransportEpoch &&
+           current.BridgeRecoveryGeneration == settlement.BridgeRecoveryGeneration &&
+           current.BridgeDecisionGeneration == settlement.BridgeDecisionGeneration &&
+           current.RoutePublicationGeneration == settlement.RoutePublicationGeneration &&
+           (current.RouteCommitGeneration ?? 0) == (settlement.RouteCommitGeneration ?? 0) &&
+           current.TargetTransport == settlementTargetTransport &&
+           string.Equals(current.RepairKey, normalizedRepairKey, StringComparison.Ordinal) &&
+           current.DecisionGeneration == settlement.DecisionGeneration;
 
     private void ClearRegularV4FrontierRepairPressureAfterRejectedAuthority(
         string transferId,
@@ -1112,9 +1176,12 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 hasCurrentRuntime &&
                 (legGeneration > authority.LegGeneration ||
                  liveRouteEpoch > authority.LiveRouteEpoch);
-            if (hasExactAuthority && !authority.Completed)
+            if (hasExactAuthority &&
+                (!authority.Completed || authority.AllowControlPlanePressureAfterCompletion))
             {
-                authoritySource = "bridge_authority";
+                authoritySource = authority.Completed
+                    ? "bridge_authority_completed_continuation"
+                    : "bridge_authority";
             }
             else if (hasExactAuthority && authority.Completed)
             {
@@ -1295,6 +1362,11 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             {
                 postTunaFallbackControlPlanePressure = null;
             }
+            if (lastRegularV4FrontierRepairAuthority is { } regularAuthority &&
+                string.Equals(regularAuthority.TransferId, normalizedTransferId, StringComparison.Ordinal))
+            {
+                lastRegularV4FrontierRepairAuthority = null;
+            }
         }
 
         if (Volatile.Read(ref activeFileTransferBridgeRecoveryAuthority) is { } bridgeAuthority &&
@@ -1333,6 +1405,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             postTunaFallbackLegAuthority = null;
             postTunaFallbackControlPlanePressure = null;
             regularV4FrontierRepairPressure = null;
+            lastRegularV4FrontierRepairAuthority = null;
         }
 
         if (Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions)) == 0)
@@ -1638,6 +1711,11 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             {
                 regularV4FrontierRepairPressure = null;
             }
+            if (lastRegularV4FrontierRepairAuthority is { } authority &&
+                string.Equals(authority.TransferId, normalizedTransferId, StringComparison.Ordinal))
+            {
+                lastRegularV4FrontierRepairAuthority = null;
+            }
         }
 
         if (Volatile.Read(ref activeFileTransferBridgeRecoveryAuthority) is { } bridgeAuthority &&
@@ -1676,6 +1754,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         {
             postTunaFallbackControlPlanePressure = null;
             regularV4FrontierRepairPressure = null;
+            lastRegularV4FrontierRepairAuthority = null;
         }
         Volatile.Write(ref regularV4UnprovenRecoveryEscalationUsedRecoveryCount, -1);
         var nowTick = Stopwatch.GetTimestamp();
@@ -1730,6 +1809,11 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             if (current.ExpiresTick <= nowTick)
             {
                 regularV4FrontierRepairPressure = null;
+                if (ReferenceEquals(lastRegularV4FrontierRepairAuthority, current))
+                {
+                    lastRegularV4FrontierRepairAuthority = null;
+                }
+
                 Interlocked.CompareExchange(ref regularV4ControlFeedbackPressureExpiresTick, 0, current.ExpiresTick);
                 Interlocked.CompareExchange(ref regularV4ActivationSendPressureExpiresTick, 0, current.ExpiresTick);
                 return false;
@@ -1739,6 +1823,11 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 !activeFileTransferRuntimeTransfers.ContainsKey(current.TransferId))
             {
                 regularV4FrontierRepairPressure = null;
+                if (ReferenceEquals(lastRegularV4FrontierRepairAuthority, current))
+                {
+                    lastRegularV4FrontierRepairAuthority = null;
+                }
+
                 Interlocked.Exchange(ref regularV4ControlFeedbackPressureExpiresTick, 0);
                 Interlocked.Exchange(ref regularV4ActivationSendPressureExpiresTick, 0);
                 Log(
@@ -2591,6 +2680,55 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         }
 
         return false;
+    }
+
+    internal bool TryGetCurrentRegularV4FrontierRepairPressureBlocker(
+        string sessionId,
+        string transferId,
+        FileTransferDirection direction,
+        string routeToken,
+        int protocolVersion,
+        int liveRouteEpoch,
+        long legGeneration,
+        long transportEpoch,
+        int bridgeRecoveryGeneration,
+        int bridgeDecisionGeneration,
+        out string reason,
+        out long remainingMs)
+    {
+        reason = string.Empty;
+        remainingMs = 0;
+
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? "none" : sessionId.Trim();
+        var normalizedTransferId = string.IsNullOrWhiteSpace(transferId) ? "(unknown)" : transferId.Trim();
+        var normalizedRoute = string.IsNullOrWhiteSpace(routeToken) ? "(none)" : routeToken.Trim();
+        var nowTick = Stopwatch.GetTimestamp();
+        RegularV4FrontierRepairPressureState? pressure;
+        lock (gate)
+        {
+            pressure = regularV4FrontierRepairPressure;
+        }
+
+        if (pressure is null ||
+            pressure.ExpiresTick <= nowTick ||
+            pressure.ActivationSendOnly ||
+            !string.Equals(pressure.SessionId, normalizedSessionId, StringComparison.Ordinal) ||
+            !string.Equals(pressure.TransferId, normalizedTransferId, StringComparison.Ordinal) ||
+            pressure.Direction != direction ||
+            !string.Equals(pressure.RouteToken, normalizedRoute, StringComparison.Ordinal) ||
+            pressure.ProtocolVersion != protocolVersion ||
+            pressure.LiveRouteEpoch != liveRouteEpoch ||
+            pressure.LegGeneration != legGeneration ||
+            pressure.TransportEpoch != transportEpoch ||
+            pressure.BridgeRecoveryGeneration != bridgeRecoveryGeneration ||
+            pressure.BridgeDecisionGeneration != bridgeDecisionGeneration)
+        {
+            return false;
+        }
+
+        reason = "regular_v4_control_feedback_pressure";
+        remainingMs = Math.Max(0, (long)Stopwatch.GetElapsedTime(nowTick, pressure.ExpiresTick).TotalMilliseconds);
+        return true;
     }
 
     internal bool TryGetRuntimeUnlockBulkQueueObservedProofBlocker(out string reason)

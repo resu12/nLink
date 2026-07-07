@@ -11111,6 +11111,72 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
     [Fact]
     [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
+    public void OutboundPostYieldCurrentFallbackFrontierRequest_DispatchesToRepairAuthority()
+    {
+        using var service = new SessionFileTransferService();
+        var serviceType = typeof(SessionFileTransferService);
+        const string transferId = "transfer_fallback_tail_post_yield_frontier_request";
+        var context = CreatePostTunaFallbackV6OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 8349,
+            chunksAcceptedForTransport: 8927,
+            remoteGrantedUntilExclusive: 8927,
+            chunkCount: 16384);
+        serviceType
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+        serviceType
+            .GetMethod("StartOutboundPostTunaRecoveryLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, "test_post_yield_frontier_request"]);
+
+        var leg = GetPrivatePropertyValue(context, "CurrentTransferLeg")!;
+        SetPrivateProperty(leg, "CheckpointRequestId", null);
+        SetPrivateProperty(leg, "CanSendData", true);
+        SetPrivateProperty(leg, "State", FileTransferLegState.Active);
+        SetPrivateProperty(leg, "TransportEpochId", 4L);
+        SetPrivateProperty(leg, "BridgeRecoveryGeneration", 1);
+        serviceType
+            .GetMethod("ClearOutboundFallbackTailRecoveryOwnershipAfterYieldLocked", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [context, leg, "test_post_yield_frontier_request"]);
+
+        var request = new FileTransferFrontierRequestFrameV6
+        {
+            SessionId = $"session_{transferId}",
+            TransferId = transferId,
+            TransportEpoch = 4,
+            RepairRequestId = "v6-frontier:4:8349:59",
+            Priority = "frontier",
+            RecoveryMode = "regular_nkn_frontier_stall_control_bulk",
+            MissingRanges =
+            [
+                new FileTransferRangeV4
+                {
+                    StartChunkIndex = 8349,
+                    ChunkCount = 1,
+                },
+            ],
+        };
+
+        var logStart = GetOperationalLogLength();
+        serviceType
+            .GetMethod("ApplyOutboundV6RepairRequest", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(service, [context, request]);
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.True(log.Contains("event=filetransfer_v6_frontier_request_receive_dispatch_attempted;", StringComparison.Ordinal), log);
+        Assert.True(log.Contains("event=filetransfer_post_tuna_fallback_post_yield_frontier_request_current_owner_accepted;", StringComparison.Ordinal), log);
+        Assert.True(log.Contains("event=filetransfer_v6_frontier_request_receive_dispatched;", StringComparison.Ordinal), log);
+        Assert.True(
+            log.Contains("event=filetransfer_fallback_frontier_repair_authority_granted;", StringComparison.Ordinal) ||
+            log.Contains("event=filetransfer_fallback_frontier_repair_stalled;", StringComparison.Ordinal) ||
+            log.Contains("event=filetransfer_v4_repair_scheduled;", StringComparison.Ordinal),
+            log);
+        Assert.DoesNotContain("reason=peer_repair_request_after_fallback_yield", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_post_tuna_fallback_late_recovery_ignored_after_yield;", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
     public async Task InboundPostYieldFrontierStallState_IsSuppressedBeforeControlSend()
     {
         using var service = new SessionFileTransferService();

@@ -117,6 +117,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private const int FileTransferMaxBridgePayloadBytes = 64 * 1024;
     internal const int FileTransferDataSessionMaxQueuedFrames = 512;
     internal const long FileTransferDataSessionMaxQueuedBytes = 32L * 1024L * 1024L;
+    internal const int FileTransferDataSessionMaxPriorityControlFrames = 64;
+    internal const long FileTransferDataSessionMaxPriorityControlBytes = 256L * 1024L;
     private const int ScreenShareLaneMaxMessages = 32;
     private const int ScreenShareLaneMaxBytes = 768 * 1024;
     private const int ScreenShareLaneCongestionDepthThreshold = 12;

@@ -3078,6 +3078,135 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public void Bridge_RegularV4FrontierRepairSettlement_AcceptsRecentAuthorityAfterDiagnosticPressureClear()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-regular-v4-frontier-recent-authority", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "regular-v4-frontier-recent-authority");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "regular-v4-frontier-recent-authority");
+            var identity = new NknIdentity("regular-v4-frontier-recent-authority", "regular-v4-frontier-recent-authority.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+
+            var transferId = $"transfer-regular-v4-frontier-recent-authority-{Guid.NewGuid():N}";
+            var repairKey = $"regular-v4-frontier-recent-authority:{Guid.NewGuid():N}";
+            var authority = CreateRegularV4FrontierRepairAuthority(
+                transferId,
+                repairKey: repairKey,
+                frontierChunkIndex: 144,
+                durableReceivedHighestChunkIndex: 5095,
+                pendingRepairCount: 3,
+                decisionGeneration: 43,
+                liveRouteEpoch: 0,
+                bridgeDecisionGeneration: 2);
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.RegisterActiveFileTransferRuntime(transferId);
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                transferId,
+                "regular_v4_receiver_frontier_repair_due",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 128,
+                pendingRepairCount: 3,
+                repairAuthority: authority);
+
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out var blockerReason, out _));
+            Assert.Equal("regular_v4_control_feedback_pressure", blockerReason);
+
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                transferId,
+                "regular_v4_frontier_repair_settled_stalled",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 128,
+                pendingRepairCount: 3);
+
+            Assert.False(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
+
+            var wrongKeySettlement = new FileTransferRegularV4FrontierRepairSettlement(
+                authority.SessionId,
+                authority.TransferId,
+                authority.Direction,
+                authority.RouteToken,
+                authority.ProtocolVersion,
+                authority.LiveRouteEpoch,
+                authority.RuntimeGeneration,
+                authority.TerminalGeneration,
+                authority.LegGeneration,
+                authority.TransportEpoch,
+                authority.BridgeRecoveryGeneration,
+                authority.BridgeDecisionGeneration,
+                authority.RoutePublicationGeneration,
+                authority.RouteCommitGeneration,
+                "stale-" + authority.RepairKey,
+                authority.FrontierChunkIndex,
+                authority.DurableReceivedHighestChunkIndex,
+                authority.PendingRepairCount,
+                authority.DecisionGeneration,
+                "regular_v4_frontier_repair_liveness_settled_stalled",
+                FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled,
+                authority.TargetTransport);
+
+            Assert.False(adapter.ReportRegularV4FrontierRepairSettlement(wrongKeySettlement));
+
+            var currentSettlement = new FileTransferRegularV4FrontierRepairSettlement(
+                authority.SessionId,
+                authority.TransferId,
+                authority.Direction,
+                authority.RouteToken,
+                authority.ProtocolVersion,
+                authority.LiveRouteEpoch,
+                authority.RuntimeGeneration,
+                authority.TerminalGeneration,
+                authority.LegGeneration,
+                authority.TransportEpoch,
+                authority.BridgeRecoveryGeneration,
+                authority.BridgeDecisionGeneration,
+                authority.RoutePublicationGeneration,
+                authority.RouteCommitGeneration,
+                authority.RepairKey,
+                authority.FrontierChunkIndex,
+                authority.DurableReceivedHighestChunkIndex,
+                authority.PendingRepairCount,
+                authority.DecisionGeneration,
+                "regular_v4_frontier_repair_liveness_settled_stalled",
+                FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled,
+                authority.TargetTransport);
+
+            Assert.True(adapter.ReportRegularV4FrontierRepairSettlement(currentSettlement));
+            Assert.False(adapter.ReportRegularV4FrontierRepairSettlement(currentSettlement));
+
+            var logText = LocalOperationalLog.GetRecentLogText();
+            Assert.True(
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_control_feedback_pressure_rejected", "stage=control_feedback_pressure", "pending_repair_count=3"),
+                logText);
+            Assert.True(
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_settlement_rejected", "route=regular_nkn_v4_fast", "bridge_decision_generation=2", "cleared_pressure=0"),
+                logText);
+            Assert.True(
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_settlement_accepted", "route=regular_nkn_v4_fast", "bridge_decision_generation=2", "outcome=settled_stalled", "cleared_pressure=1"),
+                logText);
+            Assert.True(
+                ContainsLogLineWithTokens(logText, "filetransfer_regular_v4_frontier_repair_settlement_rejected", "route=regular_nkn_v4_fast", "bridge_decision_generation=2", "pressure_pending_repair_count=0", "pressure_reason=none"),
+                logText);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public void Bridge_FileTunaV4ControlFeedbackPressure_AcceptsOnlyTunaTargetAuthority()
     {
         var tempDir = Path.Combine(Path.GetTempPath(), "nlink-file-tuna-v4-frontier-authority", Guid.NewGuid().ToString("N"));
@@ -3597,6 +3726,86 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 "event=filetransfer_post_tuna_fallback_control_plane_pressure_marked;",
                 logText,
                 StringComparison.Ordinal);
+
+            adapter.UnregisterActiveFileTransferDataSession(transferId);
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void Bridge_PostTunaFallbackControlPlanePressureAcceptsCompletedContinuationAuthority()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-post-tuna-completed-continuation-pressure", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "post-tuna-completed-continuation-pressure");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "post-tuna-completed-continuation-pressure");
+            var identity = new NknIdentity("post-tuna-completed-continuation-pressure", "post-tuna-completed-continuation-pressure.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            var transferId = $"transfer-post-tuna-completed-continuation-pressure-{Guid.NewGuid():N}";
+            var sessionId = $"session-post-tuna-completed-continuation-pressure-{Guid.NewGuid():N}";
+            var logStart = GetOperationalLogLength();
+
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.MarkActiveFileTransferPostTunaFallbackRuntime(transferId, "test_completed_continuation_authority");
+            adapter.MarkActiveFileTransferPostTunaFallbackLegAuthority(
+                transferId,
+                sessionId,
+                legGeneration: 3,
+                routeToken: FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 2,
+                transportEpoch: 5,
+                bridgeRecoveryGeneration: 1,
+                checkpointRequestId: null,
+                authorityReason: "test_authority");
+            adapter.MarkPostTunaFallbackLegAuthorityCompleted(
+                transferId,
+                sessionId,
+                legGeneration: 3,
+                liveRouteEpoch: 2,
+                transportEpoch: 5,
+                bridgeRecoveryGeneration: 1,
+                checkpointRequestId: null,
+                reason: "frontier_request_control_plane",
+                allowFurtherControlPlanePressure: true);
+            adapter.ReportPostTunaFallbackControlPlanePressure(
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                liveRouteEpoch: 2,
+                legGeneration: 3,
+                bridgeRecoveryGeneration: 1,
+                transportEpoch: 5,
+                checkpointRequestId: null,
+                kind: "frontier_request",
+                reason: "frontier_stall_repair_due");
+
+            var logText = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=filetransfer_fallback_leg_authority_bridge_completed;", logText, StringComparison.Ordinal);
+            Assert.Contains("allow_control_plane_pressure_after_completion=1", logText, StringComparison.Ordinal);
+            Assert.Contains(
+                "event=filetransfer_post_tuna_fallback_control_plane_pressure_marked;",
+                logText,
+                StringComparison.Ordinal);
+            Assert.Contains("authority_source=bridge_authority_completed_continuation", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("reason=authority_completed", logText, StringComparison.Ordinal);
 
             adapter.UnregisterActiveFileTransferDataSession(transferId);
         }
@@ -7280,7 +7489,8 @@ rl.on('line', (line) => {{
         int decisionGeneration = 1,
         int liveRouteEpoch = 1,
         string routeToken = FileTransferRouteResolver.RegularNknV4FastToken,
-        FileTransferTransportKind targetTransport = FileTransferTransportKind.RegularNkn)
+        FileTransferTransportKind targetTransport = FileTransferTransportKind.RegularNkn,
+        int bridgeDecisionGeneration = 1)
         => new(
             sessionId,
             transferId,
@@ -7293,7 +7503,7 @@ rl.on('line', (line) => {{
             LegGeneration: 1,
             TransportEpoch: 1,
             BridgeRecoveryGeneration: 1,
-            BridgeDecisionGeneration: 1,
+            BridgeDecisionGeneration: bridgeDecisionGeneration,
             RoutePublicationGeneration: 1,
             RouteCommitGeneration: null,
             repairKey,

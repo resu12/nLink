@@ -5233,6 +5233,76 @@ function Test-Phase4SetupInvalidAttempt {
     return $false
 }
 
+function Test-Phase5ScenarioRuntimeRouteEvidence {
+    param([Parameter(Mandatory = $true)]$Result)
+
+    $selectedRouteChanges = @($Result.selectedRouteChanges | ForEach-Object { [string]$_ } | Where-Object {
+            -not [string]::IsNullOrWhiteSpace($_) -and
+            -not [string]::Equals($_, '(none)', [System.StringComparison]::OrdinalIgnoreCase) -and
+            -not [string]::Equals($_, '(unknown)', [System.StringComparison]::OrdinalIgnoreCase)
+        })
+    if ($selectedRouteChanges.Count -gt 1) {
+        return $true
+    }
+
+    if ($selectedRouteChanges.Count -gt 0 -and
+        ([string]::Equals([string]$Result.routeConsistencyVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -or
+         [string]::Equals([string]$Result.liveRouteEpochProofVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase) -or
+         [string]::Equals([string]$Result.fallbackLegAuthorityProofVerdict, 'pass', [System.StringComparison]::OrdinalIgnoreCase))) {
+        return $true
+    }
+
+    $finalRoute = [string]$Result.finalRoute
+    $protocol = [string]$Result.protocol
+    return -not [string]::IsNullOrWhiteSpace($finalRoute) -and
+        -not [string]::Equals($finalRoute, '(unknown)', [System.StringComparison]::OrdinalIgnoreCase) -and
+        -not [string]::Equals($finalRoute, '(none)', [System.StringComparison]::OrdinalIgnoreCase) -and
+        $protocol -match '^[1-9][0-9]*$'
+}
+
+function Clear-Phase5StaleSetupFailureAfterRuntimeEvidence {
+    param([Parameter(Mandatory = $true)]$Result)
+
+    $phase = [string]$Result.setupFailurePhase
+    $reason = [string]$Result.setupFailureReason
+    if ([string]::IsNullOrWhiteSpace($phase) -and
+        [string]::IsNullOrWhiteSpace($reason)) {
+        return $false
+    }
+
+    if (-not (Test-Phase5ScenarioRuntimeRouteEvidence -Result $Result)) {
+        return $false
+    }
+
+    $combinedSetup = "{0} {1}" -f $phase, $reason
+    $isPreflightSetupLabel =
+        $combinedSetup.IndexOf('preflight_bridge_bootstrap', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combinedSetup.IndexOf('nkn_bridge_bootstrap_network_unready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combinedSetup.IndexOf('helpee_bridge_host_ready_connect_failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combinedSetup.IndexOf('helper_bridge_host_ready_connect_failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+    if (-not $isPreflightSetupLabel) {
+        return $false
+    }
+
+    $keptFailures = @($Result.failures | ForEach-Object { [string]$_ } | Where-Object {
+            $line = [string]$_
+            -not (
+                $line.IndexOf('Tuna GUI setup failure:', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                ($line.IndexOf('preflight_bridge_bootstrap', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                 $line.IndexOf('nkn_bridge_bootstrap_network_unready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                 $line.IndexOf('helpee_bridge_host_ready_connect_failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                 $line.IndexOf('helper_bridge_host_ready_connect_failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+            )
+        })
+    $Result.failures.Clear()
+    foreach ($failure in $keptFailures) {
+        $Result.failures.Add($failure) | Out-Null
+    }
+    $Result.setupFailurePhase = ''
+    $Result.setupFailureReason = ''
+    return $true
+}
+
 function Test-Phase5RerunnableTransientSetupFailure {
     param(
         [Parameter(Mandatory = $true)]$Scenario,
@@ -5854,6 +5924,7 @@ function Invoke-Phase4RouteAcceptanceScenario {
         Set-Phase5RegularNknCompletedExternalTransportVariance -Scenario $Scenario -Result $result | Out-Null
         Set-Phase5CompletedLiveFallbackWarningVariance -Scenario $Scenario -Result $result | Out-Null
         Set-Phase5PostTerminalGuiCleanupWarning -Scenario $Scenario -Result $result | Out-Null
+        Clear-Phase5StaleSetupFailureAfterRuntimeEvidence -Result $result | Out-Null
     }
     $phase5CanonicalReceiveRecoveryExhaustion = $false
     if ($AcceptancePhase -eq 'phase5') {

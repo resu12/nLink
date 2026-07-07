@@ -7664,6 +7664,8 @@ public sealed partial class NknSignalingTransport
             });
         private int queuedFrameCount;
         private long queuedBytes;
+        private int queuedPriorityControlFrameCount;
+        private long queuedPriorityControlBytes;
         private int disposed;
         private int activeReader;
         private int available = 1;
@@ -7873,7 +7875,12 @@ public sealed partial class NknSignalingTransport
             try
             {
                 var queuedFrame = await ReadQueuedFrameAsync(ct).ConfigureAwait(false);
-                ReleaseQueuedFrame(queuedFrame.EstimatedBytes);
+                if (queuedFrame.CountsAgainstQueueBudget ||
+                    queuedFrame.CountsAgainstPriorityControlBudget)
+                {
+                    ReleaseQueuedFrame(queuedFrame.EstimatedBytes, queuedFrame.CountsAgainstPriorityControlBudget);
+                }
+
                 return queuedFrame.ReceivedFrame;
             }
             finally
@@ -8882,8 +8889,26 @@ public sealed partial class NknSignalingTransport
             }
 
             var estimatedBytes = EstimateQueuedFrameBytes(frame);
-            if (!TryReserveQueuedFrame(estimatedBytes, out var queuedFramesAfter, out var queuedBytesAfter))
+            var prioritized = ShouldPrioritizeQueuedFileTransferDataFrame(frame);
+            var bypassRegularQueueCapacity =
+                prioritized &&
+                ShouldBypassRegularQueueCapacityForPriorityControlFrame(frame);
+            if (!TryReserveQueuedFrame(estimatedBytes, bypassRegularQueueCapacity, out var queuedFramesAfter, out var queuedBytesAfter))
             {
+                if (bypassRegularQueueCapacity)
+                {
+                    LogPriorityControlFrameQueueOutcome(
+                        frame,
+                        channel,
+                        effectiveTransportKind,
+                        "rejected",
+                        "priority_control_queue_capacity_exceeded",
+                        bypassRegularQueueCapacity,
+                        queuedFramesAfter,
+                        queuedBytesAfter);
+                    return;
+                }
+
                 if (isRuntimeUnlockPreCommitFrame)
                 {
                     owner.LogRuntimeUnlockPreCommitProbeReceiveDispatch(
@@ -8897,19 +8922,28 @@ public sealed partial class NknSignalingTransport
                         queuedBytesAfter);
                 }
 
+                LogPriorityControlFrameQueueOutcome(
+                    frame,
+                    channel,
+                    effectiveTransportKind,
+                    "rejected",
+                    "queue_capacity_exceeded",
+                    bypassRegularQueueCapacity,
+                    queuedFramesAfter,
+                    queuedBytesAfter);
                 FailQueueOverflow(frame, channel, estimatedBytes);
                 return;
             }
 
-            var prioritized = ShouldPrioritizeQueuedFileTransferDataFrame(frame);
             var writer = isRuntimeUnlockPreCommitAckFrame
                 ? runtimeUnlockAuthorityFrames.Writer
                 : prioritized
                     ? priorityFrames.Writer
                     : frames.Writer;
-            if (!writer.TryWrite(new QueuedFileTransferDataFrame(receivedFrame, estimatedBytes)))
+            if (!writer.TryWrite(new QueuedFileTransferDataFrame(receivedFrame, estimatedBytes, !bypassRegularQueueCapacity, bypassRegularQueueCapacity)))
             {
-                ReleaseQueuedFrame(estimatedBytes);
+                ReleaseQueuedFrame(estimatedBytes, bypassRegularQueueCapacity);
+
                 if (isRuntimeUnlockPreCommitFrame)
                 {
                     owner.LogRuntimeUnlockPreCommitProbeReceiveDispatch(
@@ -8923,6 +8957,15 @@ public sealed partial class NknSignalingTransport
                         queuedBytesAfter);
                 }
 
+                LogPriorityControlFrameQueueOutcome(
+                    frame,
+                    channel,
+                    effectiveTransportKind,
+                    "rejected",
+                    "queue_write_failed",
+                    bypassRegularQueueCapacity,
+                    queuedFramesAfter,
+                    queuedBytesAfter);
                 if (disposed == 0)
                 {
                     FailQueueOverflow(frame, channel, estimatedBytes);
@@ -8944,6 +8987,16 @@ public sealed partial class NknSignalingTransport
                     queuedBytesAfter);
             }
 
+            LogPriorityControlFrameQueueOutcome(
+                frame,
+                channel,
+                effectiveTransportKind,
+                "queued",
+                isRuntimeUnlockPreCommitAckFrame ? "queued_for_core_authority_handler" : "queued_for_core",
+                bypassRegularQueueCapacity,
+                queuedFramesAfter,
+                queuedBytesAfter);
+
             if (frame is FileTransferFallbackTailYieldFrameV6 yieldFrame)
             {
                 owner.RaiseFileTransferFallbackTailYieldProofReceived(yieldFrame, peerId);
@@ -8963,6 +9016,29 @@ public sealed partial class NknSignalingTransport
                IsTerminalDataFrame(frame) ||
                IsRuntimeUnlockPreCommitProbeFrame(frame) ||
                frame is FileTransferPauseControlFrameV4;
+
+        private static bool ShouldBypassRegularQueueCapacityForPriorityControlFrame(FileTransferDataFrame frame)
+            => frame is FileTransferFrontierRequestFrameV6;
+
+        private static void LogPriorityControlFrameQueueOutcome(
+            FileTransferDataFrame frame,
+            NknBridgeChannel channel,
+            FileTransferTransportKind transportKind,
+            string outcome,
+            string reason,
+            bool bypassedQueueCapacity,
+            int queuedFramesAfter,
+            long queuedBytesAfter)
+        {
+            if (frame is not FileTransferFrontierRequestFrameV6 request)
+            {
+                return;
+            }
+
+            LocalOperationalLog.Info(
+                "SessionSecurity",
+                $"event=filetransfer_v6_frontier_request_transport_{outcome}; transport=nkn; transfer_id={SanitizeLogToken(request.TransferId)}; session_id={SanitizeLogToken(request.SessionId)}; frame_type={SanitizeLogToken(request.Type)}; lane={MapBridgeChannel(channel)}; actual_transport={FormatFileTransferTransportKindForLog(transportKind)}; priority=1; queue_capacity_bypassed={(bypassedQueueCapacity ? 1 : 0)}; queued_frames={queuedFramesAfter}; queued_bytes={queuedBytesAfter}; transport_epoch={request.TransportEpoch}; repair_request_id={SanitizeLogToken(request.RepairRequestId ?? "(none)")}; range_count={request.MissingRanges.Count}; first_start_chunk_index={(request.MissingRanges.Count > 0 ? request.MissingRanges[0].StartChunkIndex : -1)}; requested_chunk_count={(request.MissingRanges.Count > 0 ? request.MissingRanges[0].ChunkCount : 0)}; decision_reason={SanitizeLogToken(reason)}");
+        }
 
         private void RecordChunkBatchTransportSummary(
             long rawBytes,
@@ -9042,7 +9118,11 @@ public sealed partial class NknSignalingTransport
                     bridgePayloadFillPercent));
         }
 
-        private bool TryReserveQueuedFrame(long estimatedBytes, out int queuedFramesAfter, out long queuedBytesAfter)
+        private bool TryReserveQueuedFrame(
+            long estimatedBytes,
+            bool bypassRegularQueueCapacity,
+            out int queuedFramesAfter,
+            out long queuedBytesAfter)
         {
             lock (queueGate)
             {
@@ -9053,6 +9133,23 @@ public sealed partial class NknSignalingTransport
                     return false;
                 }
 
+                if (bypassRegularQueueCapacity)
+                {
+                    queuedFramesAfter = queuedFrameCount + queuedPriorityControlFrameCount;
+                    queuedBytesAfter = queuedBytes + queuedPriorityControlBytes;
+                    if (queuedPriorityControlFrameCount >= FileTransferDataSessionMaxPriorityControlFrames ||
+                        queuedPriorityControlBytes > FileTransferDataSessionMaxPriorityControlBytes - estimatedBytes)
+                    {
+                        return false;
+                    }
+
+                    queuedPriorityControlFrameCount++;
+                    queuedPriorityControlBytes += estimatedBytes;
+                    queuedFramesAfter = queuedFrameCount + queuedPriorityControlFrameCount;
+                    queuedBytesAfter = queuedBytes + queuedPriorityControlBytes;
+                    return true;
+                }
+
                 if (queuedFrameCount >= FileTransferDataSessionMaxQueuedFrames ||
                     queuedBytes > FileTransferDataSessionMaxQueuedBytes - estimatedBytes)
                 {
@@ -9061,16 +9158,27 @@ public sealed partial class NknSignalingTransport
 
                 queuedFrameCount++;
                 queuedBytes += estimatedBytes;
-                queuedFramesAfter = queuedFrameCount;
-                queuedBytesAfter = queuedBytes;
+                queuedFramesAfter = queuedFrameCount + queuedPriorityControlFrameCount;
+                queuedBytesAfter = queuedBytes + queuedPriorityControlBytes;
                 return true;
             }
         }
 
-        private void ReleaseQueuedFrame(long estimatedBytes)
+        private void ReleaseQueuedFrame(long estimatedBytes, bool priorityControlBudget)
         {
             lock (queueGate)
             {
+                if (priorityControlBudget)
+                {
+                    if (queuedPriorityControlFrameCount > 0)
+                    {
+                        queuedPriorityControlFrameCount--;
+                    }
+
+                    queuedPriorityControlBytes = Math.Max(0L, queuedPriorityControlBytes - estimatedBytes);
+                    return;
+                }
+
                 if (queuedFrameCount > 0)
                 {
                     queuedFrameCount--;
@@ -9091,8 +9199,8 @@ public sealed partial class NknSignalingTransport
             long queuedBytesSnapshot;
             lock (queueGate)
             {
-                queuedFramesSnapshot = queuedFrameCount;
-                queuedBytesSnapshot = queuedBytes;
+                queuedFramesSnapshot = queuedFrameCount + queuedPriorityControlFrameCount;
+                queuedBytesSnapshot = queuedBytes + queuedPriorityControlBytes;
             }
 
             Interlocked.Exchange(ref available, 0);
@@ -9319,7 +9427,11 @@ public sealed partial class NknSignalingTransport
             owner.RemoveFileTransferDataSession(this);
         }
 
-        private readonly record struct QueuedFileTransferDataFrame(FileTransferReceivedDataFrame ReceivedFrame, long EstimatedBytes);
+        private readonly record struct QueuedFileTransferDataFrame(
+            FileTransferReceivedDataFrame ReceivedFrame,
+            long EstimatedBytes,
+            bool CountsAgainstQueueBudget,
+            bool CountsAgainstPriorityControlBudget);
     }
 
     private static string GetFileTransferDataFrameChunkIndex(FileTransferDataFrame frame)
