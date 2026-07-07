@@ -12461,13 +12461,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             }
 
             observer = transport as IFileTransferPostTunaFallbackControlPlanePressureObserver;
-            if (HasPairedFallbackTailYieldForCurrentOwner(context))
-            {
-                ClearInboundPostTunaFallbackPressureDiagnosticLocked(context);
-                shouldObservePressure = false;
-                clearPairedYieldPressure = true;
-            }
-            else if (clearProgressPressure)
+            if (clearProgressPressure)
             {
                 if (!TryAuthorizeRuntimeOwnerLegActionLocked(
                         context,
@@ -12493,6 +12487,13 @@ public sealed partial class SessionFileTransferService : IDisposable
                 }
 
                 ClearInboundPostTunaFallbackPressureDiagnosticLocked(context);
+            }
+            else if (HasPairedFallbackTailYieldForCurrentOwner(context) &&
+                     !ShouldObserveInboundPostYieldFallbackControlPlanePressureLocked(context, request))
+            {
+                ClearInboundPostTunaFallbackPressureDiagnosticLocked(context);
+                shouldObservePressure = false;
+                clearPairedYieldPressure = true;
             }
             else
             {
@@ -12628,6 +12629,31 @@ public sealed partial class SessionFileTransferService : IDisposable
         FileTransferControlPlaneDeliveryRequest request)
         => request.Kind is (FileTransferControlPlaneKind.ReceiverState or FileTransferControlPlaneKind.FrontierRequest) &&
            string.Equals(request.Reason, "chunk_batch_committed", StringComparison.Ordinal);
+
+    private static bool ShouldObserveInboundPostYieldFallbackControlPlanePressureLocked(
+        InboundTransferContext context,
+        FileTransferControlPlaneDeliveryRequest request)
+    {
+        if (context.IsTerminal ||
+            !IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg) ||
+            request.Kind is not (FileTransferControlPlaneKind.ReceiverState or FileTransferControlPlaneKind.FrontierRequest))
+        {
+            return false;
+        }
+
+        var hasMissingRanges = request.Frame switch
+        {
+            FileTransferReceiverStateFrameV6 state => state.MissingRanges.Any(static range => range.ChunkCount > 0),
+            FileTransferFrontierRequestFrameV6 frontier => frontier.MissingRanges.Any(static range => range.ChunkCount > 0),
+            _ => false,
+        };
+        if (!hasMissingRanges)
+        {
+            return false;
+        }
+
+        return true;
+    }
 
     private static void ClearInboundPostTunaFallbackPressureDiagnosticLocked(InboundTransferContext context)
     {

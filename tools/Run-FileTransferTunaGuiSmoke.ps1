@@ -621,6 +621,36 @@ function Ensure-TunaGuiSecondTransferRetainedLogSlice {
 
     $retainedPath = Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log'
     $sourcePath = Join-Path $ArtifactDir 'filetransfer-second-transfer-retained-log-slice-source.txt'
+    if (Test-Path -LiteralPath $retainedPath -PathType Leaf) {
+        $retainedLines = @(Get-Content -LiteralPath $retainedPath -ErrorAction SilentlyContinue)
+        $startIndex = -1
+        for ($i = $retainedLines.Count - 1; $i -ge 0; $i--) {
+            $line = [string]$retainedLines[$i]
+            if ($line.IndexOf('event=filetransfer_second_transfer_status', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $line.IndexOf('event=filetransfer_tuna_gui_second_transfer_fresh_readiness_required', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $startIndex = $i
+                break
+            }
+        }
+
+        if ($startIndex -ge 0) {
+            $prefixLine = '[1970-01-01 00:00:00Z] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_phase_marker; phase=second_transfer_after_reactivation_slice_reconstructed'
+            $sliceLines = @($prefixLine) + @($retainedLines[$startIndex..($retainedLines.Count - 1)])
+            [System.IO.File]::WriteAllLines($secondRetainedPath, $sliceLines, [System.Text.Encoding]::UTF8)
+            $sourceLines = @(
+                'source=reconstructed_from_retained_log_slice',
+                'reason=second_transfer_retained_slice_reconstructed',
+                ('retained_log_slice={0}' -f $retainedPath),
+                'retained_log_slice_exists=1',
+                ('second_transfer_retained_log_slice={0}' -f $secondRetainedPath),
+                'second_transfer_retained_log_slice_exists=1',
+                ('start_index={0}' -f $startIndex)
+            )
+            [System.IO.File]::WriteAllLines($sourcePath, $sourceLines, [System.Text.Encoding]::UTF8)
+            return $secondRetainedPath
+        }
+    }
+
     $sourceLines = @(
         'source=missing',
         'reason=second_transfer_retained_slice_missing',

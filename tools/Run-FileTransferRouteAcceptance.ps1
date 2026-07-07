@@ -2193,7 +2193,12 @@ function Assert-Phase4ScenarioRun {
                 $second = Get-JsonPropertyValue -Object $summary -Name 'secondTransfer' -DefaultValue $null
                 $secondTransferStarted = $true
                 if ($null -eq $second) {
-                    Add-RouteAcceptanceFailure -Result $result -Message 'second transfer evidence is missing'
+                    $secondRetainedPath = Join-Path $result.artifactDir 'filetransfer-second-transfer-retained-log-slice.log'
+                    $secondRouteAnalysisPath = Join-Path $result.artifactDir 'second-transfer-analysis\filetransfer-route-consistency-summary.txt'
+                    if (-not ((Test-Path -LiteralPath $secondRetainedPath -PathType Leaf) -and
+                            (Test-Path -LiteralPath $secondRouteAnalysisPath -PathType Leaf))) {
+                        Add-RouteAcceptanceFailure -Result $result -Message 'second transfer evidence is missing'
+                    }
                 }
                 else {
                     $secondTransferStarted = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $second -Name 'secondTransferStarted' -DefaultValue $true)

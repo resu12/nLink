@@ -543,9 +543,15 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("[string]::Equals($secondSetupPhase, 'unknown'", routeAcceptanceText, StringComparison.Ordinal);
         Assert.Contains("$result.setupFailurePhase = $secondSetupPhase", routeAcceptanceText, StringComparison.Ordinal);
         Assert.Contains("$result.setupFailureReason = $secondSetupReason", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("$secondRetainedPath = Join-Path $result.artifactDir 'filetransfer-second-transfer-retained-log-slice.log'", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("$secondRouteAnalysisPath = Join-Path $result.artifactDir 'second-transfer-analysis\\filetransfer-route-consistency-summary.txt'", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("Add-RouteAcceptanceFailure -Result $result -Message 'second transfer evidence is missing'", routeAcceptanceText, StringComparison.Ordinal);
         Assert.Contains("second-transfer-analysis", wrapperText, StringComparison.Ordinal);
         Assert.Contains("Ensure-TunaGuiSecondTransferRetainedLogSlice", wrapperText, StringComparison.Ordinal);
         Assert.Contains("filetransfer-second-transfer-retained-log-slice-source.txt", wrapperText, StringComparison.Ordinal);
+        Assert.Contains("source=reconstructed_from_retained_log_slice", wrapperText, StringComparison.Ordinal);
+        Assert.Contains("second_transfer_retained_slice_reconstructed", wrapperText, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=file_transfer_send_requested", wrapperText, StringComparison.Ordinal);
         Assert.Contains("source=missing", wrapperText, StringComparison.Ordinal);
         Assert.Contains("second_transfer_retained_slice_missing", wrapperText, StringComparison.Ordinal);
         Assert.Contains("refusing to analyze the full retained log as second-transfer proof", wrapperText, StringComparison.Ordinal);
