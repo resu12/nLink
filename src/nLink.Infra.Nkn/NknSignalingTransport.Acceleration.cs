@@ -151,7 +151,7 @@ public sealed partial class NknSignalingTransport
     private int fileTransferTunaActivationBridgeRecoveryActive;
     private long runtimeUnlockRecoveryContractNextGeneration;
     private RuntimeUnlockRecoveryRetryState? runtimeUnlockRecoveryRetryState;
-    private FileTransferRegularV4FrontierRepairSettlement? pendingRuntimeUnlockRegularV4FrontierRepairSettlement;
+    private PendingRuntimeUnlockRegularV4FrontierRepairSettlement? pendingRuntimeUnlockRegularV4FrontierRepairSettlement;
     private long runtimeUnlockTransactionNextGeneration;
     private RuntimeUnlockTransactionSnapshot runtimeUnlockTransactionState = RuntimeUnlockTransactionSnapshot.Idle;
     private string? runtimeUnlockPublishedRouteCommitSessionId;
@@ -180,6 +180,7 @@ public sealed partial class NknSignalingTransport
     private int runtimeUnlockBrokenStateFreshRetriesUsed;
     private FileTransferFallbackLegAuthorityState? fileTransferFallbackLegAuthorityState;
     private FileTransferRegularV4RecoveryLivenessState? fileTransferRegularV4RecoveryLivenessState;
+    private FileTransferRegularV4RecoveryLivenessClosedOwner? fileTransferRegularV4RecoveryLivenessClosedOwner;
     private string? pendingAccelerationAnswerAckSessionId;
     private string? pendingAccelerationAnswerAckNonce;
     private string? pendingAccelerationAnswerAckTrigger;
@@ -569,6 +570,56 @@ public sealed partial class NknSignalingTransport
         public bool Completed { get; set; }
     }
 
+    private sealed class PendingRuntimeUnlockRegularV4FrontierRepairSettlement
+    {
+        public required FileTransferRegularV4FrontierRepairSettlement Settlement { get; init; }
+
+        public required int RuntimeGeneration { get; init; }
+
+        public required int TerminalGeneration { get; init; }
+
+        public required long LegGeneration { get; init; }
+
+        public required long TransportEpoch { get; init; }
+
+        public required int BridgeRecoveryGeneration { get; init; }
+
+        public required int BridgeDecisionGeneration { get; init; }
+
+        public required int RoutePublicationGeneration { get; init; }
+
+        public int? RouteCommitGeneration { get; init; }
+
+        public required int DecisionGeneration { get; init; }
+
+        public required string RepairKey { get; init; }
+    }
+
+    private sealed class FileTransferRegularV4RecoveryLivenessClosedOwner
+    {
+        public required string SessionId { get; init; }
+
+        public required string TransferId { get; init; }
+
+        public required FileTransferDirection Direction { get; init; }
+
+        public required string RouteToken { get; init; }
+
+        public required int ProtocolVersion { get; init; }
+
+        public required int LiveRouteEpoch { get; init; }
+
+        public required int TransferLegGeneration { get; init; }
+
+        public required long TransportEpoch { get; init; }
+
+        public required int BridgeRecoveryGeneration { get; init; }
+
+        public required int BridgeDecisionGeneration { get; init; }
+
+        public required string DecisionReason { get; init; }
+    }
+
     private readonly record struct FileTransferRegularV4RecoveryLivenessSnapshot(
         string SessionId,
         string TransferId,
@@ -837,6 +888,23 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
+        if (hasRegularV4RecoveryLiveness &&
+            ShouldRejectClosedRegularV4RecoveryLivenessRequest(
+                request,
+                sessionId,
+                transferId,
+                reason,
+                out var closedOwner))
+        {
+            LogClosedRegularV4RecoveryLivenessRequestRejected(
+                request,
+                sessionId,
+                transferId,
+                reason,
+                closedOwner);
+            return;
+        }
+
         if (client is not RealNknClientAdapter realClient)
         {
             LocalOperationalLog.Info(
@@ -922,6 +990,62 @@ public sealed partial class NknSignalingTransport
     private static bool HasFileTransferRegularV4RecoveryLiveness(FileTransferReceiveRecoveryRequest request)
         => request.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
            string.Equals(request.RouteToken, FileTransferRouteResolver.RegularNknV4FastToken, StringComparison.Ordinal);
+
+    private bool ShouldRejectClosedRegularV4RecoveryLivenessRequest(
+        FileTransferReceiveRecoveryRequest request,
+        string? sessionId,
+        string transferId,
+        string reason,
+        out FileTransferRegularV4RecoveryLivenessClosedOwner? closedOwner)
+    {
+        closedOwner = null;
+        var normalizedSessionId = SanitizeLogToken(sessionId ?? "none");
+        var normalizedTransferId = SanitizeLogToken(transferId);
+        var normalizedReason = SanitizeLogToken(reason);
+        lock (fileTransferFallbackProofGate)
+        {
+            var current = fileTransferRegularV4RecoveryLivenessClosedOwner;
+            if (current is null ||
+                !IsSessionLivenessReceiveRecoveryReason(normalizedReason) ||
+                !string.Equals(current.SessionId, normalizedSessionId, StringComparison.Ordinal) ||
+                !string.Equals(current.TransferId, normalizedTransferId, StringComparison.Ordinal) ||
+                current.Direction != request.Direction ||
+                !string.Equals(current.RouteToken, request.RouteToken, StringComparison.Ordinal) ||
+                current.ProtocolVersion != request.ProtocolVersion ||
+                current.LiveRouteEpoch != Math.Max(0, request.LiveRouteEpoch) ||
+                current.TransferLegGeneration != Math.Max(0, request.TransferLegGeneration) ||
+                current.TransportEpoch != Math.Max(0, request.TransportEpoch) ||
+                current.BridgeRecoveryGeneration != Math.Max(0, request.BridgeRecoveryGeneration) ||
+                current.BridgeDecisionGeneration != (request.BridgeRecoveryAuthority?.BridgeDecisionGeneration ?? 0))
+            {
+                return false;
+            }
+
+            closedOwner = current;
+            return true;
+        }
+    }
+
+    private static void LogClosedRegularV4RecoveryLivenessRequestRejected(
+        FileTransferReceiveRecoveryRequest request,
+        string? sessionId,
+        string transferId,
+        string reason,
+        FileTransferRegularV4RecoveryLivenessClosedOwner? closedOwner)
+    {
+        var normalizedSessionId = SanitizeLogToken(sessionId ?? "none");
+        var normalizedTransferId = SanitizeLogToken(transferId);
+        var bridgeDecisionGeneration = request.BridgeRecoveryAuthority?.BridgeDecisionGeneration ??
+                                       closedOwner?.BridgeDecisionGeneration ??
+                                       0;
+        var decisionReason = closedOwner?.DecisionReason ?? "regular_v4_recovery_contract_already_closed";
+        LocalOperationalLog.Warn(
+            "NKN.Tuna",
+            $"event=filetransfer_regular_v4_recovery_liveness_request_rejected_closed_owner; session_id={normalizedSessionId}; transfer_id={normalizedTransferId}; direction={request.Direction.ToString().ToLowerInvariant()}; route={SanitizeLogToken(request.RouteToken ?? "(none)")}; protocol_version={request.ProtocolVersion}; live_route_epoch={Math.Max(0, request.LiveRouteEpoch)}; leg_generation={Math.Max(0, request.TransferLegGeneration)}; transport_epoch={Math.Max(0, request.TransportEpoch)}; bridge_recovery_generation={Math.Max(0, request.BridgeRecoveryGeneration)}; bridge_decision_generation={bridgeDecisionGeneration}; reason={SanitizeLogToken(reason)}; decision_reason={SanitizeLogToken(decisionReason)}");
+        LocalOperationalLog.Warn(
+            "NKN.Tuna",
+            $"event=regular_v4_receive_recovery_contract_closed_no_deferral; session_id={normalizedSessionId}; transfer_id={normalizedTransferId}; direction={request.Direction.ToString().ToLowerInvariant()}; route={SanitizeLogToken(request.RouteToken ?? "(none)")}; protocol_version={request.ProtocolVersion}; live_route_epoch={Math.Max(0, request.LiveRouteEpoch)}; regular_v4_liveness_generation=0; leg_generation={Math.Max(0, request.TransferLegGeneration)}; transport_epoch={Math.Max(0, request.TransportEpoch)}; bridge_recovery_generation={Math.Max(0, request.BridgeRecoveryGeneration)}; bridge_decision_generation={bridgeDecisionGeneration}; receive_proof_observed=0; recovery_exhausted=0; settlement_trigger={SanitizeLogToken(reason)}; decision_reason={SanitizeLogToken(decisionReason)}");
+    }
 
     private static bool TryValidateFileTransferBridgeRecoveryAuthority(
         FileTransferReceiveRecoveryRequest request,
@@ -1245,6 +1369,7 @@ public sealed partial class NknSignalingTransport
         lock (fileTransferFallbackProofGate)
         {
             if (ReferenceEquals(fileTransferRegularV4RecoveryLivenessState, state) &&
+                !state.Completed &&
                 !state.BridgeRecoveryRequested)
             {
                 state.BridgeRecoveryRequested = true;
@@ -1261,6 +1386,72 @@ public sealed partial class NknSignalingTransport
         LocalOperationalLog.Warn(
             "NKN.Tuna",
             $"event=filetransfer_regular_v4_recovery_liveness_bridge_recovery_requested; session_id={state.SessionId}; transfer_id={state.TransferId}; generation={state.Generation}; route={state.RouteToken}; protocol_version={state.ProtocolVersion}; live_route_epoch={state.LiveRouteEpoch}; bridge_decision_generation={state.BridgeDecisionGeneration}; authority_reason={state.AuthorityReason}; reason={SanitizeLogToken(reason)}");
+        TryCloseRegularV4RecoveryLivenessFromPendingFrontierSettlement(
+            state,
+            "regular_v4_frontier_repair_precontract_settlement");
+    }
+
+    private void TryCloseRegularV4RecoveryLivenessFromPendingFrontierSettlement(
+        FileTransferRegularV4RecoveryLivenessState state,
+        string settlementTrigger)
+    {
+        if (state.Completed)
+        {
+            return;
+        }
+
+        PendingRuntimeUnlockRegularV4FrontierRepairSettlement? pendingSettlement;
+        lock (accelerationGate)
+        {
+            pendingSettlement = pendingRuntimeUnlockRegularV4FrontierRepairSettlement;
+        }
+
+        var settlement = pendingSettlement?.Settlement;
+        if (settlement is null ||
+            !IsRegularV4FrontierRepairSettlementClosureOutcome(settlement.Outcome))
+        {
+            return;
+        }
+
+        var snapshot = CreateFileTransferRegularV4RecoveryLivenessSnapshot(state);
+        var sameTransfer =
+            string.Equals(settlement.SessionId, snapshot.SessionId, StringComparison.Ordinal) &&
+            string.Equals(settlement.TransferId, snapshot.TransferId, StringComparison.Ordinal);
+        if (!IsRegularV4FrontierRepairSettlementCurrentForReceiveRecovery(
+                snapshot,
+                settlement,
+                blockedState: null,
+                out var rejectionReason,
+                allowPreRecoveryBridgeDecisionGeneration: true,
+                allowClosureOutcomes: true,
+                acceptedPrecontractAuthority: pendingSettlement))
+        {
+            if (sameTransfer)
+            {
+                ClearPendingRuntimeUnlockRegularV4FrontierRepairSettlementIfCurrent(settlement);
+                LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
+                    "runtime_unlock_regular_v4_frontier_repair_precontract_settlement_rejected",
+                    settlement,
+                    snapshot.SessionId,
+                    snapshot.TransferId,
+                    rejectionReason);
+            }
+
+            return;
+        }
+
+        ClearPendingRuntimeUnlockRegularV4FrontierRepairSettlementIfCurrent(settlement);
+        var decisionReason = FormatRegularV4FrontierRepairLivenessClosureReason(settlement.Outcome);
+        LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
+            "runtime_unlock_regular_v4_frontier_repair_precontract_settlement_consumed",
+            settlement,
+            snapshot.SessionId,
+            snapshot.TransferId,
+            decisionReason);
+        CloseRegularV4ReceiveRecoveryLivenessAfterContractFailure(
+            snapshot,
+            settlementTrigger,
+            decisionReason);
     }
 
     private void MarkFileTransferRegularV4RecoveryLivenessBridgeRecoveryLifecycle(
@@ -2253,7 +2444,21 @@ public sealed partial class NknSignalingTransport
 
         lock (accelerationGate)
         {
-            pendingRuntimeUnlockRegularV4FrontierRepairSettlement = settlement;
+            pendingRuntimeUnlockRegularV4FrontierRepairSettlement =
+                new PendingRuntimeUnlockRegularV4FrontierRepairSettlement
+                {
+                    Settlement = settlement,
+                    RuntimeGeneration = settlement.RuntimeGeneration,
+                    TerminalGeneration = settlement.TerminalGeneration,
+                    LegGeneration = settlement.LegGeneration,
+                    TransportEpoch = settlement.TransportEpoch,
+                    BridgeRecoveryGeneration = settlement.BridgeRecoveryGeneration,
+                    BridgeDecisionGeneration = settlement.BridgeDecisionGeneration,
+                    RoutePublicationGeneration = settlement.RoutePublicationGeneration,
+                    RouteCommitGeneration = settlement.RouteCommitGeneration,
+                    DecisionGeneration = settlement.DecisionGeneration,
+                    RepairKey = SanitizeLogToken(settlement.RepairKey),
+                };
         }
 
         LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
@@ -2536,6 +2741,20 @@ public sealed partial class NknSignalingTransport
 
             current.Completed = true;
             current.LivenessDeferralDeadlineUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            fileTransferRegularV4RecoveryLivenessClosedOwner = new FileTransferRegularV4RecoveryLivenessClosedOwner
+            {
+                SessionId = current.SessionId,
+                TransferId = current.TransferId,
+                Direction = current.Direction,
+                RouteToken = current.RouteToken,
+                ProtocolVersion = current.ProtocolVersion,
+                LiveRouteEpoch = current.LiveRouteEpoch,
+                TransferLegGeneration = current.TransferLegGeneration,
+                TransportEpoch = current.TransportEpoch,
+                BridgeRecoveryGeneration = current.BridgeRecoveryGeneration,
+                BridgeDecisionGeneration = current.BridgeDecisionGeneration,
+                DecisionReason = SanitizeLogToken(decisionReason),
+            };
             state = current;
             shouldLog = true;
         }
@@ -14159,14 +14378,15 @@ public sealed partial class NknSignalingTransport
         FileTransferRegularV4RecoveryLivenessSnapshot livenessSnapshot,
         string settlementTrigger)
     {
-        FileTransferRegularV4FrontierRepairSettlement? settlement;
+        PendingRuntimeUnlockRegularV4FrontierRepairSettlement? pendingSettlement;
         RuntimeUnlockRecoveryRetryState? stateSnapshot;
         lock (accelerationGate)
         {
-            settlement = pendingRuntimeUnlockRegularV4FrontierRepairSettlement;
+            pendingSettlement = pendingRuntimeUnlockRegularV4FrontierRepairSettlement;
             stateSnapshot = runtimeUnlockRecoveryRetryState;
         }
 
+        var settlement = pendingSettlement?.Settlement;
         if (settlement is null ||
             stateSnapshot is null ||
             !stateSnapshot.BlockedByRegularV4ReceiveRecovery ||
@@ -14230,7 +14450,8 @@ public sealed partial class NknSignalingTransport
     {
         lock (accelerationGate)
         {
-            if (Equals(pendingRuntimeUnlockRegularV4FrontierRepairSettlement, settlement))
+            if (pendingRuntimeUnlockRegularV4FrontierRepairSettlement is { } pendingSettlement &&
+                Equals(pendingSettlement.Settlement, settlement))
             {
                 pendingRuntimeUnlockRegularV4FrontierRepairSettlement = null;
             }
@@ -14314,7 +14535,8 @@ public sealed partial class NknSignalingTransport
         RuntimeUnlockRecoveryRetryState? blockedState,
         out string rejectionReason,
         bool allowPreRecoveryBridgeDecisionGeneration = false,
-        bool allowClosureOutcomes = false)
+        bool allowClosureOutcomes = false,
+        PendingRuntimeUnlockRegularV4FrontierRepairSettlement? acceptedPrecontractAuthority = null)
     {
         rejectionReason = "none";
         if (settlement is null)
@@ -14376,6 +14598,24 @@ public sealed partial class NknSignalingTransport
                 return false;
             }
         }
+        else if (acceptedPrecontractAuthority is not null)
+        {
+            if (!IsRegularV4FrontierRepairSettlementMatchingAcceptedPrecontractAuthority(
+                    candidate,
+                    acceptedPrecontractAuthority))
+            {
+                rejectionReason = "frontier_settlement_precontract_authority_mismatch";
+                return false;
+            }
+
+            if (IsRegularV4FrontierRepairSettlementSupersededByCurrentRoutePublication(
+                    livenessSnapshot,
+                    candidate))
+            {
+                rejectionReason = "frontier_settlement_route_publication_mismatch";
+                return false;
+            }
+        }
         else
         {
             FileTransferRouteHint routeHint;
@@ -14409,6 +14649,67 @@ public sealed partial class NknSignalingTransport
 
         rejectionReason = "accepted";
         return true;
+    }
+
+    private bool IsRegularV4FrontierRepairSettlementSupersededByCurrentRoutePublication(
+        FileTransferRegularV4RecoveryLivenessSnapshot livenessSnapshot,
+        FileTransferRegularV4FrontierRepairSettlement settlement)
+    {
+        FileTransferRouteHint routeHint;
+        lock (gate)
+        {
+            if (!TryGetFileTransferRouteHintUnsafe(
+                    livenessSnapshot.SessionId,
+                    livenessSnapshot.TransferId,
+                    livenessSnapshot.Direction,
+                    out routeHint))
+            {
+                return false;
+            }
+        }
+
+        if (routeHint.RoutePublicationGeneration > settlement.RoutePublicationGeneration)
+        {
+            return true;
+        }
+
+        if (routeHint.RoutePublicationGeneration < settlement.RoutePublicationGeneration)
+        {
+            return false;
+        }
+
+        return routeHint.Route != FileTransferRoute.RegularNknV4Fast ||
+               !string.Equals(routeHint.Token, settlement.RouteToken, StringComparison.Ordinal) ||
+               routeHint.ProtocolVersion != settlement.ProtocolVersion ||
+               routeHint.LiveRouteEpoch != settlement.LiveRouteEpoch ||
+               routeHint.RuntimeGeneration != settlement.RuntimeGeneration ||
+               routeHint.TerminalGeneration != settlement.TerminalGeneration ||
+               routeHint.PublicationLegGeneration != settlement.LegGeneration ||
+               (routeHint.RouteCommitGeneration ?? 0) != (settlement.RouteCommitGeneration ?? 0);
+    }
+
+    private static bool IsRegularV4FrontierRepairSettlementMatchingAcceptedPrecontractAuthority(
+        FileTransferRegularV4FrontierRepairSettlement settlement,
+        PendingRuntimeUnlockRegularV4FrontierRepairSettlement authority)
+    {
+        if (authority.RuntimeGeneration <= 0 ||
+            authority.LegGeneration <= 0 ||
+            authority.RoutePublicationGeneration <= 0 ||
+            authority.DecisionGeneration <= 0)
+        {
+            return false;
+        }
+
+        return authority.RuntimeGeneration == settlement.RuntimeGeneration &&
+               authority.TerminalGeneration == settlement.TerminalGeneration &&
+               authority.LegGeneration == settlement.LegGeneration &&
+               authority.TransportEpoch == settlement.TransportEpoch &&
+               authority.BridgeRecoveryGeneration == settlement.BridgeRecoveryGeneration &&
+               authority.BridgeDecisionGeneration == settlement.BridgeDecisionGeneration &&
+               authority.RoutePublicationGeneration == settlement.RoutePublicationGeneration &&
+               (authority.RouteCommitGeneration ?? 0) == (settlement.RouteCommitGeneration ?? 0) &&
+               authority.DecisionGeneration == settlement.DecisionGeneration &&
+               string.Equals(authority.RepairKey, SanitizeLogToken(settlement.RepairKey), StringComparison.Ordinal);
     }
 
     private static string GetRegularV4BlockedRetrySettlementRejectionReason(

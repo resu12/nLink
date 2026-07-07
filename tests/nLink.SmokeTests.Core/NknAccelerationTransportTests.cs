@@ -2329,7 +2329,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 0,
                 0,
                 0,
-                1,
+                3,
                 null,
                 "regular_v4_peer_silence_safety_replay:0:0:64:1",
                 0,
@@ -11216,6 +11216,366 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 "event=runtime_unlock_retry_dispatch_held_by_regular_v4_receive_recovery;",
                 tail,
                 StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AcceptedRegularV4ClosureSettlementBeforeLivenessStartClosesRequestedLivenessDeferral()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-regular-v4-precontract-liveness-close.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-regular-v4-precontract-liveness-close.address");
+            var hostLane = new RetryableTunaAccelerationSession(canListen: true, failedDialAttemptsBeforeSuccess: 0);
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-regular-v4-precontract-liveness-close-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                hostLane);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-runtime-unlock-regular-v4-precontract-liveness-close-id", helperClient.Address));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare);
+            const string transferId = "transfer_runtime_unlock_regular_v4_precontract_liveness_close";
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            InvokePrivateMethod(
+                host,
+                "TrackAuthorizedFileTransferRouteHintForTests",
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.RegularNknV4FastToken,
+                FileTransferProtocol.ProtocolVersionV4,
+                "test_regular_route",
+                FileTransferDirection.Inbound);
+
+            var logStart = GetOperationalLogLength();
+            var settlement = new FileTransferRegularV4FrontierRepairSettlement(
+                sessionId,
+                transferId,
+                FileTransferDirection.Inbound,
+                FileTransferRouteResolver.RegularNknV4FastToken,
+                FileTransferProtocol.ProtocolVersionV4,
+                0,
+                1,
+                0,
+                1,
+                0,
+                0,
+                0,
+                3,
+                null,
+                "441:12:441:12",
+                441,
+                440,
+                12,
+                3,
+                "regular_v4_frontier_repair_liveness_settled_stalled",
+                FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled,
+                FileTransferTransportKind.RegularNkn);
+            InvokePrivateMethod(host, "HandleAcceptedRegularV4FrontierRepairSettlement", settlement);
+
+            Assert.Contains(
+                "event=runtime_unlock_regular_v4_frontier_repair_precontract_settlement_cached;",
+                ReadOperationalLogTail(logStart),
+                StringComparison.Ordinal);
+
+            var recoveryRequest = new FileTransferReceiveRecoveryRequest(
+                sessionId,
+                transferId,
+                FileTransferDirection.Inbound,
+                "session_liveness_timeout_pending")
+            {
+                RouteToken = FileTransferRouteResolver.RegularNknV4FastToken,
+                ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                LiveRouteEpoch = 0,
+                TransferLegGeneration = 1,
+                BridgeRecoveryGeneration = 0,
+                TransportEpoch = 0,
+                AuthorityReason = "session_liveness_timeout_pending",
+                BridgeRecoveryAuthority = new FileTransferBridgeRecoveryAuthority(
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Inbound,
+                    FileTransferRouteResolver.RegularNknV4FastToken,
+                    FileTransferProtocol.ProtocolVersionV4,
+                    0,
+                    1,
+                    0,
+                    1,
+                    0,
+                    0,
+                    2,
+                    "ReceiveRecoveryRequest",
+                    "session_liveness_timeout_pending"),
+            };
+            var liveness = InvokePrivateMethod(
+                host,
+                "MarkFileTransferRegularV4RecoveryLivenessStarted",
+                recoveryRequest,
+                sessionId,
+                transferId,
+                "session_liveness_timeout_pending");
+            InvokePrivateMethod(
+                host,
+                "MarkFileTransferRegularV4RecoveryLivenessBridgeRecoveryRequested",
+                liveness!,
+                "session_liveness_timeout_pending");
+
+            await WaitUntilAsync(
+                () =>
+                {
+                    var tail = ReadOperationalLogTail(logStart);
+                    return tail.Contains(
+                               "event=runtime_unlock_regular_v4_frontier_repair_precontract_settlement_consumed;",
+                               StringComparison.Ordinal) &&
+                           tail.Contains(
+                               "event=regular_v4_receive_recovery_contract_closed_no_deferral;",
+                               StringComparison.Ordinal);
+                },
+                TimeSpan.FromSeconds(3));
+
+            var recoveryState = Assert.IsAssignableFrom<IFileTransferRecoveryLivenessState>(host);
+            Assert.False(recoveryState.TryGetActiveFileTransferRecoveryLivenessSnapshot(sessionId, out _));
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.Contains("decision_reason=v4_repair_settled_stalled", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "frontier_settlement_route_publication_mismatch",
+                tail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=session_liveness_timeout_deferred_for_current_filetransfer_recovery;",
+                tail,
+                StringComparison.Ordinal);
+
+            var rearmLogStart = GetOperationalLogLength();
+            var rearmRequest = recoveryRequest with
+            {
+                BridgeRecoveryAuthority = new FileTransferBridgeRecoveryAuthority(
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Inbound,
+                    FileTransferRouteResolver.RegularNknV4FastToken,
+                    FileTransferProtocol.ProtocolVersionV4,
+                    0,
+                    1,
+                    0,
+                    1,
+                    0,
+                    0,
+                    2,
+                    "ReceiveRecoveryRequest",
+                    "session_liveness_timeout_pending"),
+            };
+            host.RequestFileTransferReceiveRecovery(rearmRequest);
+
+            var rearmTail = ReadOperationalLogTail(rearmLogStart);
+            Assert.Contains(
+                "event=filetransfer_regular_v4_recovery_liveness_request_rejected_closed_owner;",
+                rearmTail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=regular_v4_receive_recovery_contract_closed_no_deferral;",
+                rearmTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=filetransfer_regular_v4_recovery_liveness_started;",
+                rearmTail,
+                StringComparison.Ordinal);
+            Assert.False(recoveryState.TryGetActiveFileTransferRecoveryLivenessSnapshot(sessionId, out _));
+
+            var freshDecisionLogStart = GetOperationalLogLength();
+            var freshDecisionRequest = recoveryRequest with
+            {
+                BridgeRecoveryAuthority = new FileTransferBridgeRecoveryAuthority(
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Inbound,
+                    FileTransferRouteResolver.RegularNknV4FastToken,
+                    FileTransferProtocol.ProtocolVersionV4,
+                    0,
+                    1,
+                    0,
+                    1,
+                    0,
+                    0,
+                    3,
+                    "ReceiveRecoveryRequest",
+                    "session_liveness_timeout_pending"),
+            };
+            host.RequestFileTransferReceiveRecovery(freshDecisionRequest);
+
+            var freshDecisionTail = ReadOperationalLogTail(freshDecisionLogStart);
+            Assert.DoesNotContain(
+                "event=filetransfer_regular_v4_recovery_liveness_request_rejected_closed_owner;",
+                freshDecisionTail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=filetransfer_v6_bridge_receive_recovery_request_unsupported;",
+                freshDecisionTail,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AcceptedRegularV4PrecontractSettlementRejectedAfterNewerRoutePublication()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-regular-v4-precontract-stale-publication.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-regular-v4-precontract-stale-publication.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-regular-v4-precontract-stale-publication-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-runtime-unlock-regular-v4-precontract-stale-publication-id", helperClient.Address));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare);
+            const string transferId = "transfer_runtime_unlock_regular_v4_precontract_stale_publication";
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            InvokePrivateMethod(
+                host,
+                "TrackAuthorizedFileTransferRouteHintForTests",
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.RegularNknV4FastToken,
+                FileTransferProtocol.ProtocolVersionV4,
+                "test_regular_route_initial",
+                FileTransferDirection.Inbound);
+
+            var logStart = GetOperationalLogLength();
+            var settlement = new FileTransferRegularV4FrontierRepairSettlement(
+                sessionId,
+                transferId,
+                FileTransferDirection.Inbound,
+                FileTransferRouteResolver.RegularNknV4FastToken,
+                FileTransferProtocol.ProtocolVersionV4,
+                0,
+                1,
+                0,
+                1,
+                0,
+                0,
+                0,
+                1,
+                null,
+                "441:12:441:12",
+                441,
+                440,
+                12,
+                3,
+                "regular_v4_frontier_repair_liveness_settled_stalled",
+                FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled,
+                FileTransferTransportKind.RegularNkn);
+            InvokePrivateMethod(host, "HandleAcceptedRegularV4FrontierRepairSettlement", settlement);
+            Assert.Contains(
+                "event=runtime_unlock_regular_v4_frontier_repair_precontract_settlement_cached;",
+                ReadOperationalLogTail(logStart),
+                StringComparison.Ordinal);
+
+            InvokePrivateMethod(
+                host,
+                "TrackAuthorizedFileTransferRouteHintForTests",
+                sessionId,
+                transferId,
+                FileTransferRouteResolver.RegularNknV4FastToken,
+                FileTransferProtocol.ProtocolVersionV4,
+                "test_regular_route_newer",
+                FileTransferDirection.Inbound);
+
+            var recoveryRequest = new FileTransferReceiveRecoveryRequest(
+                sessionId,
+                transferId,
+                FileTransferDirection.Inbound,
+                "session_liveness_timeout_pending")
+            {
+                RouteToken = FileTransferRouteResolver.RegularNknV4FastToken,
+                ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                LiveRouteEpoch = 0,
+                TransferLegGeneration = 1,
+                BridgeRecoveryGeneration = 0,
+                TransportEpoch = 0,
+                AuthorityReason = "session_liveness_timeout_pending",
+                BridgeRecoveryAuthority = new FileTransferBridgeRecoveryAuthority(
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Inbound,
+                    FileTransferRouteResolver.RegularNknV4FastToken,
+                    FileTransferProtocol.ProtocolVersionV4,
+                    0,
+                    1,
+                    0,
+                    1,
+                    0,
+                    0,
+                    2,
+                    "ReceiveRecoveryRequest",
+                    "session_liveness_timeout_pending"),
+            };
+            var liveness = InvokePrivateMethod(
+                host,
+                "MarkFileTransferRegularV4RecoveryLivenessStarted",
+                recoveryRequest,
+                sessionId,
+                transferId,
+                "session_liveness_timeout_pending");
+            InvokePrivateMethod(
+                host,
+                "MarkFileTransferRegularV4RecoveryLivenessBridgeRecoveryRequested",
+                liveness!,
+                "session_liveness_timeout_pending");
+
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "event=runtime_unlock_regular_v4_frontier_repair_precontract_settlement_rejected;",
+                tail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "decision_reason=frontier_settlement_route_publication_mismatch",
+                tail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_regular_v4_frontier_repair_precontract_settlement_consumed;",
+                tail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=regular_v4_receive_recovery_contract_closed_no_deferral;",
+                tail,
+                StringComparison.Ordinal);
+
+            var recoveryState = Assert.IsAssignableFrom<IFileTransferRecoveryLivenessState>(host);
+            Assert.True(recoveryState.TryGetActiveFileTransferRecoveryLivenessSnapshot(sessionId, out _));
         }
         finally
         {
