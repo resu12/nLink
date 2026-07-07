@@ -13691,6 +13691,7 @@ public sealed partial class NknSignalingTransport
 
         var normalizedTrigger = SanitizeLogToken(settlementTrigger);
         return normalizedTrigger.Contains("receive_resumed", StringComparison.OrdinalIgnoreCase) ||
+               normalizedTrigger.Contains("bridge_lifecycle_completed", StringComparison.OrdinalIgnoreCase) ||
                normalizedTrigger.Contains("receive_stall_recovery_completed", StringComparison.OrdinalIgnoreCase) ||
                normalizedTrigger.Contains("receive_stall_recovery_exhausted", StringComparison.OrdinalIgnoreCase) ||
                normalizedTrigger.Contains("regular_v4_receive_proof", StringComparison.OrdinalIgnoreCase);
@@ -14015,6 +14016,13 @@ public sealed partial class NknSignalingTransport
             else if (livenessSnapshot.RecoveryExhausted)
             {
                 decisionReason = "regular_v4_recovery_exhausted";
+            }
+            else if (!livenessSnapshot.ReceiveProofObserved &&
+                     !livenessSnapshot.Completed &&
+                     (sanitizedTrigger.Contains("bridge_lifecycle_completed", StringComparison.OrdinalIgnoreCase) ||
+                      sanitizedTrigger.Contains("receive_stall_recovery_completed", StringComparison.OrdinalIgnoreCase)))
+            {
+                decisionReason = "v4_recovery_terminal_no_proof";
             }
             else if (!hasDispatchAuthority)
             {
