@@ -2002,6 +2002,7 @@ public sealed partial class NknSignalingTransport
         }
 
         RuntimeUnlockRecoveryRetryState? stateSnapshot = null;
+        RuntimeUnlockRecoveryRetryState? blockedReceiveRecoveryStateSnapshot = null;
         var stateTerminal = false;
         var stateSessionMismatch = false;
         var stateTupleMismatch = false;
@@ -2020,6 +2021,13 @@ public sealed partial class NknSignalingTransport
                         settlement,
                         normalizedTransferId,
                         out stateMismatchReason);
+                if (!stateSessionMismatch &&
+                    !stateTerminal &&
+                    state.BlockedByRegularV4ReceiveRecovery)
+                {
+                    blockedReceiveRecoveryStateSnapshot = state;
+                }
+
                 if (!stateSessionMismatch && !stateTerminal && !stateTupleMismatch)
                 {
                     state.BlockedByRegularV4FrontierRepair = false;
@@ -2029,6 +2037,20 @@ public sealed partial class NknSignalingTransport
                     stateSnapshot = state;
                 }
             }
+        }
+
+        if (stateTupleMismatch &&
+            blockedReceiveRecoveryStateSnapshot is not null)
+        {
+            LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
+                "runtime_unlock_regular_v4_frontier_repair_settlement_rejected",
+                settlement,
+                normalizedSessionId,
+                normalizedTransferId,
+                stateMismatchReason,
+                retryReason: blockedReceiveRecoveryStateSnapshot.RetryReason,
+                stateSnapshot: blockedReceiveRecoveryStateSnapshot);
+            return;
         }
 
         if (stateSnapshot is { BlockedByRegularV4ReceiveRecovery: true } &&
@@ -14511,13 +14533,15 @@ public sealed partial class NknSignalingTransport
             !livenessSnapshot.Completed &&
             (sanitizedTrigger.Contains("bridge_lifecycle_completed", StringComparison.OrdinalIgnoreCase) ||
              sanitizedTrigger.Contains("receive_stall_recovery_completed", StringComparison.OrdinalIgnoreCase));
-        var hasCurrentRegularV4RepairPressure =
-            frontierSettlement is null &&
-            terminalNoProofTrigger &&
+        var hasActiveRegularV4RepairPressure =
             TryGetCurrentRegularV4RepairPressureBlocker(
                 livenessSnapshot,
                 out heldBlockerReason,
                 out heldBlockerRemainingMs);
+        var hasCurrentRegularV4RepairPressure =
+            frontierSettlement is null &&
+            terminalNoProofTrigger &&
+            hasActiveRegularV4RepairPressure;
         var routeStillRegular = HasAuthorizedRegularV4FileTransferRouteHint(
             livenessSnapshot.SessionId,
             livenessSnapshot.TransferId,
@@ -14595,6 +14619,45 @@ public sealed partial class NknSignalingTransport
             else if (livenessSnapshot.RecoveryExhausted)
             {
                 decisionReason = "regular_v4_recovery_exhausted";
+            }
+            else if (frontierSettlement is not null &&
+                     !livenessSnapshot.ReceiveProofObserved &&
+                     !livenessSnapshot.Completed &&
+                     !livenessSnapshot.RecoveryExhausted)
+            {
+                if (hasActiveRegularV4RepairPressure)
+                {
+                    var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    decisionReason = "awaiting_regular_v4_frontier_repair_settlement";
+                    if (string.IsNullOrWhiteSpace(heldBlockerReason))
+                    {
+                        heldBlockerReason = livenessSnapshot.StateReason;
+                    }
+
+                    if (heldBlockerRemainingMs <= 0 &&
+                        state.LivenessDeferralDeadlineUtcMs > 0)
+                    {
+                        heldBlockerRemainingMs = Math.Max(0, state.LivenessDeferralDeadlineUtcMs - nowMs);
+                    }
+
+                    state.Settled = true;
+                    state.ContractState = SessionRecoveryContractState.RecoverySettled;
+                    state.RetryQueued = false;
+                    state.RetryDispatching = false;
+                    state.RetryDispatched = false;
+                    state.RetryAuthorityPending = false;
+                    state.RetryAuthorityGranted = false;
+                    state.ObservedSendPending = false;
+                    state.ObservedSendDeadlineUtcMs = 0;
+                    state.AuthorizedObservedLane = null;
+                    state.AuthorityFailureReason = heldBlockerReason;
+                    state.RegularV4RecoveryBlockerReason = SanitizeLogToken(heldBlockerReason);
+                    heldState = state;
+                }
+                else
+                {
+                    decisionReason = "regular_v4_recovery_no_current_settlement_proof";
+                }
             }
             else if (hasCurrentRegularV4RepairPressure ||
                      (terminalNoProofTrigger &&

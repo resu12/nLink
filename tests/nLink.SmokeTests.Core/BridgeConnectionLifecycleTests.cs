@@ -6300,6 +6300,118 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
     }
 
     [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task BridgeBootstrapHealthFailure_PromotesHostReadinessTerminalSnapshot()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-bootstrap-health", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-bootstrap-health.js");
+        WriteBridgeScriptWithManifest(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: @"
+    emit({ event:'ok', id: msg.id ?? null, cmd:'connect' });
+    for (let i = 0; i < 3; i++) {
+      setTimeout(() => emit({
+        event: 'bridge_transport_health_summary',
+        selected_rpc: 'https://mock-bootstrap.example/mainnet/api/wallet',
+        selected_rpc_key: 'mock-bootstrap',
+        selected_rpc_stage: 'initial',
+        connect_id: msg.connectId ?? null,
+        connect_key: 'mock-bootstrap-key',
+        ready_emitted: 0,
+        client_ready_age_ms: -1,
+        disconnect_count_since_last: 0,
+        connect_failed_count_since_last: 1,
+        ws_error_count_since_last: 0,
+        rpc_fallback_attempt_count_since_last: 0,
+        control_ready: 0,
+        media_ready: 0,
+        bulk_ready: 0,
+        frames_sent_since_last: 0,
+        latest_disconnect_reason: '(none)',
+        sample_window_ms: 2000,
+        control_subclients: 4,
+        media_subclients: 8,
+        bulk_subclients: 4,
+        bulk_send_concurrency: 4,
+        control_messages_received_since_last: 0,
+        media_messages_received_since_last: 0,
+        bulk_messages_received_since_last: 0,
+        total_messages_received_since_last: 0,
+        control_bytes_received_since_last: 0,
+        media_bytes_received_since_last: 0,
+        bulk_bytes_received_since_last: 0,
+        total_bytes_received_since_last: 0,
+        control_last_received_age_ms: -1,
+        media_last_received_age_ms: -1,
+        bulk_last_received_age_ms: -1
+      }), 20 + i * 20);
+    }
+    return;
+    "));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            var options = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "id.json"), "mock-bootstrap-health");
+            var identity = NknIdentityStore.LoadOrCreate(options);
+            using var adapter = new RealNknClientAdapter(identity, options);
+            adapter.SetConnectReadyTimeoutForTests(TimeSpan.FromSeconds(5));
+            using var transport = new NknSignalingTransport(adapter, options, identity);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+            var hostTask = transport.HostByAddressAsync(cts.Token);
+
+            await WaitUntilAsync(
+                () => transport.GetBridgeBootstrapReadinessSnapshot().TerminalFailure,
+                TimeSpan.FromSeconds(2));
+
+            var snapshot = transport.GetBridgeBootstrapReadinessSnapshot();
+            Assert.False(snapshot.ReadyEmitted);
+            Assert.Equal("bridge_transport_connect_failed_before_ready", snapshot.FailureReason);
+            Assert.Contains("connect_failed=1", snapshot.LastError, StringComparison.OrdinalIgnoreCase);
+
+            cts.Cancel();
+            try
+            {
+                await hostTask;
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
     [Trait("Category", "BridgeStabilityPromotion")]
     [Fact]
     public async Task Bridge_Disconnect_WithUnresponsiveShutdownBridge_ForcesKill_AndCleansProcessHandles()

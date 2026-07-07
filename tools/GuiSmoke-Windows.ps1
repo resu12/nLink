@@ -2987,14 +2987,36 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $activationPhaseEvidence = (-not $tunaActive) -and ($activationOfferNotObserved -or $activationOfferWaitingAnswer -or $activationOfferSent -or $activationOfferReceived)
     $offerSent = if ($activationPhaseEvidence) { $activationOfferSent } else { $measuredOfferSent }
     $offerReceived = if ($activationPhaseEvidence) { $activationOfferReceived } else { $measuredOfferReceived }
+    $hasScenarioRuntimeEvidence = $routeSelected -or
+        $activationOfferNotObserved -or
+        $activationOfferWaitingAnswer -or
+        $activationOfferSent -or
+        $activationOfferReceived -or
+        $measuredOfferSent -or
+        $measuredOfferReceived -or
+        $terminalObserved -or
+        $runtimeUnlockRetryBlockedByRegularV4Recovery -or
+        $runtimeUnlockRetryHeldByRegularV4Recovery -or
+        $runtimeUnlockRetryReleasedAfterRegularV4Recovery -or
+        $runtimeUnlockRetryRejectedAfterRegularV4Recovery -or
+        $runtimeUnlockRetryRecoverySettlementMissingMarker -or
+        $runtimeUnlockRetryRegularV4RecoverySettlementMissing -or
+        $regularV4FrontierRepairSettledStalledEvent -or
+        $regularV4FrontierRepairSendDeferred -or
+        $regularV4FrontierRepairStalled -or
+        $fallbackFrontierRequestDispatchMissing -or
+        $fallbackFrontierRepairStalled -or
+        $postFallbackRuntimeUnlockResumeBlocked -or
+        $postTunaFallbackRouteEvidence
 
     $phase = 'unknown'
     $reason = 'unknown'
     $listenerReadyUnavailableContradiction = $listenerReady -and ($listenerUnavailable -or $listenerSidecarUnavailable)
     $bridgeBootstrapSubreason = ''
-    if ($bridgeBootstrapNotReady -or
-        $ErrorMessage.IndexOf('nkn_bridge_bootstrap_network_unready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-        $ErrorMessage.IndexOf('nkn_bridge_bootstrap_not_ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+    if ((-not $hasScenarioRuntimeEvidence) -and
+        ($bridgeBootstrapNotReady -or
+            $ErrorMessage.IndexOf('nkn_bridge_bootstrap_network_unready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $ErrorMessage.IndexOf('nkn_bridge_bootstrap_not_ready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0)) {
         $bootstrapText = (@($ErrorMessage) + @($evidenceLines)) -join "`n"
         foreach ($fieldName in @('failure_subreason', 'subreason')) {
             $match = [regex]::Match($bootstrapText, "(?i)(?:^|[;`r`n]\s*)$fieldName=([^;`r`n]+)")

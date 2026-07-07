@@ -261,6 +261,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("Get-TunaGuiReadinessStateAfterBookmark -Bookmark $Bookmark", scriptText, StringComparison.Ordinal);
         Assert.Contains("rawListenerUnavailable", scriptText, StringComparison.Ordinal);
         Assert.Contains("rawListenerReady", scriptText, StringComparison.Ordinal);
+        Assert.Contains("$hasScenarioRuntimeEvidence", scriptText, StringComparison.Ordinal);
+        Assert.Contains("$runtimeUnlockRetryRecoverySettlementMissingMarker -or", scriptText, StringComparison.Ordinal);
+        Assert.Contains("$runtimeUnlockRetryRegularV4RecoverySettlementMissing -or", scriptText, StringComparison.Ordinal);
+        Assert.Contains("(-not $hasScenarioRuntimeEvidence) -and", scriptText, StringComparison.Ordinal);
         Assert.True(
             scriptText.IndexOf("elseif ($fallbackFrontierRequestDispatchMissing)", StringComparison.Ordinal) <
             scriptText.IndexOf("elseif ($fallbackFrontierRepairStalled)", StringComparison.Ordinal),
