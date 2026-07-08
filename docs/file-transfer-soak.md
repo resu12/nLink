@@ -98,6 +98,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Run-FileTransferRout
 
 The gate writes `route-acceptance-summary.txt` and `route-acceptance-summary.json` under `artifacts/filetransfer-route-acceptance/<timestamp>/`.
 
+When running this gate from Codex or another sandboxed automation shell, use an unsandboxed/elevated execution path for the GUI wrapper, bridge readiness preflight, and live NKN connectivity checks. Restricted sandboxes can block outbound TCP and make NKN bridge bootstrap fail with host-ready/connect errors even when the host machine can reach the public NKN endpoints. Do not classify a sandbox-only bridge bootstrap failure as route/runtime evidence until it is confirmed outside the sandbox.
+
 Required Phase 4 matrix:
 
 - regular NKN 64 MiB: `regular_nkn_v4_fast`, protocol `4`,

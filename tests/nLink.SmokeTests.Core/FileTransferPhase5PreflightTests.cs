@@ -455,7 +455,7 @@ public sealed class FileTransferPhase5PreflightTests : FileTransferAcceptancePha
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task RunFileTransferRouteAcceptance_Phase5FilteredBridgeHostReadyConnectFailureIsQuarantined()
+    public async Task RunFileTransferRouteAcceptance_Phase5FilteredBridgeHostReadyConnectFailureFailsBeforeScenarios()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -464,11 +464,11 @@ public sealed class FileTransferPhase5PreflightTests : FileTransferAcceptancePha
 
         var repoRoot = FindRepoRoot();
         var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
-        var runRoot = Path.Combine(artifactRoot, "phase5-filtered-preflight-host-ready-connect-quarantine");
+        var runRoot = Path.Combine(artifactRoot, "phase5-filtered-preflight-host-ready-connect-fails");
 
         try
         {
-            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-filtered-preflight-host-ready-connect-quarantine");
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-filtered-preflight-host-ready-connect-fails");
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_BRIDGE_BOOTSTRAP_FAIL"] = "1";
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_FAILURE_REASON"] = "nkn_bridge_bootstrap_network_unready";
             environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE5_PREFLIGHT_FAILURE_SUBREASON"] = "helpee_bridge_host_ready_connect_failed";
@@ -485,26 +485,26 @@ public sealed class FileTransferPhase5PreflightTests : FileTransferAcceptancePha
                 ],
                 environment);
 
-            Assert.True(
-                result.ExitCode == 0,
-                $"Expected filtered Phase 5 route acceptance to quarantine host-ready connect-denied preflight failure and run the requested scenario.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
-
-            var quarantine = ReadArtifactReport(runRoot, "phase5-bridge-readiness-preflight-quarantine.txt");
-            Assert.Equal("QUARANTINED", quarantine["verdict"]);
-            Assert.Equal("preflight_bridge_bootstrap", quarantine["failure_class"]);
-            Assert.Equal("nkn_bridge_bootstrap_network_unready", quarantine["failure_reason"]);
-            Assert.Equal("helpee_bridge_host_ready_connect_failed", quarantine["failure_subreason"]);
+            Assert.NotEqual(0, result.ExitCode);
+            Assert.False(
+                File.Exists(Path.Combine(runRoot, "phase5-bridge-readiness-preflight-quarantine.txt")),
+                "Host-ready connect-denied failures are hard bridge-bootstrap failures after retries, not filtered-run quarantine evidence.");
 
             var attempts = ReadArtifactReport(runRoot, "phase5-bridge-readiness-preflight-attempts.txt");
+            Assert.Equal("FAIL", attempts["verdict"]);
             Assert.Equal("3", attempts["attempt_count"]);
             Assert.Equal("helpee_bridge_host_ready_connect_failed", attempts["final_failure_subreason"]);
             Assert.Equal("helpee_bridge_host_ready_connect_failed", attempts["first_failure_subreason"]);
 
             var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
-            Assert.Equal("PASS", summary["verdict"]);
-            Assert.Equal("1", summary["run_count"]);
-            Assert.Equal("0", summary["failure_count"]);
-            Assert.True(Directory.Exists(Path.Combine(runRoot, "regular-v4-live-activation-off-on-off-256mb")), "Expected filtered target scenario to run after quarantined host-ready connect failure.");
+            Assert.Equal("FAIL", summary["verdict"]);
+            Assert.Equal("FAIL", summary["preflight_verdict"]);
+            Assert.Equal("preflight_bridge_bootstrap", summary["preflight_failure_class"]);
+            Assert.Equal("nkn_bridge_bootstrap_network_unready", summary["preflight_failure_reason"]);
+            Assert.Equal("helpee_bridge_host_ready_connect_failed", summary["preflight_failure_subreason"]);
+            Assert.False(
+                Directory.Exists(Path.Combine(runRoot, "regular-v4-live-activation-off-on-off-256mb")),
+                "Host-ready connect-denied preflight failure should not consume the filtered target scenario.");
         }
         finally
         {

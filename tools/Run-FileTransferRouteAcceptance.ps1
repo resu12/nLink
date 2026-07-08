@@ -4666,13 +4666,10 @@ function Test-Phase5BridgeReadinessPreflightQuarantinableFailure {
     }
 
     $reason = [string]$PreflightResult.FailureReason
-    $subreason = if ($PreflightResult.PSObject.Properties.Name -contains 'FailureSubreason') { [string]$PreflightResult.FailureSubreason } else { '' }
     return $reason -eq 'helpee_invite_readiness_timeout' -or
         $reason -eq 'helpee_invite_connection_failed_before_ready' -or
         $reason -eq 'helpee_request_flow_not_enabled_after_identity_paste' -or
-        [string]$PreflightResult.FailureClass -eq 'preflight_helpee_invite_bootstrap' -or
-        $subreason -eq 'helpee_bridge_host_ready_connect_failed' -or
-        $subreason -eq 'helper_bridge_host_ready_connect_failed'
+        [string]$PreflightResult.FailureClass -eq 'preflight_helpee_invite_bootstrap'
 }
 
 function Write-Phase5BridgeReadinessPreflightQuarantineSummary {

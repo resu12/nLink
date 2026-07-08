@@ -37,6 +37,9 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private static readonly TimeSpan CommandAckTimeout = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan HelloTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan ConnectReadyTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan ConnectReadyMaxTimeout = TimeSpan.FromSeconds(120);
+    private static readonly TimeSpan ConnectReadyFallbackBudgetSlack = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan DefaultBridgeFallbackDelay = TimeSpan.FromSeconds(12);
     private static readonly TimeSpan BridgeBootstrapHealthFreshWindow = TimeSpan.FromSeconds(12);
     private static readonly TimeSpan PingInterval = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan PingTimeout = TimeSpan.FromSeconds(2);
@@ -3215,7 +3218,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             BridgeReadyInfo readyInfo;
             try
             {
-                readyInfo = await readyWait.Task.WaitAsync(connectReadyTimeoutOverrideForTests ?? ConnectReadyTimeout, ct);
+                readyInfo = await readyWait.Task.WaitAsync(connectReadyTimeoutOverrideForTests ?? ResolveConnectReadyTimeout(options), ct);
             }
             catch (TimeoutException ex)
             {
@@ -3281,6 +3284,95 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         return timeout > ConnectReadyTimeout
             ? ConnectReadyTimeout
             : timeout;
+    }
+
+    internal static TimeSpan ResolveConnectReadyTimeoutForOptions(NknTransportOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        return ResolveConnectReadyTimeout(options);
+    }
+
+    private static TimeSpan ResolveConnectReadyTimeout(NknTransportOptions options)
+    {
+        var candidateCount = EstimateBridgeBootstrapCandidateCount(options.SeedRpc);
+        var fallbackDelay = options.PreflightRpcEnabled
+            ? TimeSpan.FromMilliseconds(Math.Max(1, options.PreflightTimeoutMs))
+            : DefaultBridgeFallbackDelay;
+        var fallbackBudgetTicks = SaturatingMultiply(fallbackDelay.Ticks, Math.Max(1, candidateCount));
+        var fallbackBudget = TimeSpan.FromTicks(Math.Min(ConnectReadyMaxTimeout.Ticks, fallbackBudgetTicks));
+        var requiredBudgetTicks = SaturatingAdd(fallbackBudget.Ticks, ConnectReadyFallbackBudgetSlack.Ticks);
+        var requiredBudget = TimeSpan.FromTicks(Math.Min(ConnectReadyMaxTimeout.Ticks, requiredBudgetTicks));
+
+        return requiredBudget > ConnectReadyTimeout
+            ? requiredBudget
+            : ConnectReadyTimeout;
+    }
+
+    private static int EstimateBridgeBootstrapCandidateCount(string? seedRpc)
+    {
+        var rpcCandidateCount = 0;
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (!string.IsNullOrWhiteSpace(seedRpc))
+        {
+            foreach (var candidate in seedRpc.Split([';', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                var normalized = NormalizeRpcCandidateForBudget(candidate);
+                if (normalized.Length == 0 ||
+                    !seen.Add(normalized))
+                {
+                    continue;
+                }
+
+                rpcCandidateCount++;
+            }
+        }
+
+        if (rpcCandidateCount == 0)
+        {
+            rpcCandidateCount = 2;
+        }
+
+        return Math.Clamp(rpcCandidateCount * 2, 2, 64);
+    }
+
+    private static string NormalizeRpcCandidateForBudget(string candidate)
+    {
+        var normalized = candidate.Trim();
+        return normalized.Equals("https://seed.nkn.org:30003", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Equals("https://seed.nkn.org:30003/", StringComparison.OrdinalIgnoreCase)
+            ? "http://seed.nkn.org:30003"
+            : normalized;
+    }
+
+    private static long SaturatingMultiply(long value, int multiplier)
+    {
+        try
+        {
+            checked
+            {
+                return value * multiplier;
+            }
+        }
+        catch (OverflowException)
+        {
+            return long.MaxValue;
+        }
+    }
+
+    private static long SaturatingAdd(long left, long right)
+    {
+        try
+        {
+            checked
+            {
+                return left + right;
+            }
+        }
+        catch (OverflowException)
+        {
+            return long.MaxValue;
+        }
     }
 
     public async Task DisconnectAsync()

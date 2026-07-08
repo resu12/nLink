@@ -6257,6 +6257,77 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public void Bridge_ConnectReadyTimeout_CoversDefaultPreflightFallbackCandidates()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-ready-budget-default", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var prevSeedRpc = Environment.GetEnvironmentVariable("NLINK_NKN_SEED_RPC");
+        var prevEnabled = Environment.GetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED");
+        var prevTimeout = Environment.GetEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_SEED_RPC", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED", "true");
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS", "8000");
+
+            var options = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "id.json"), "mock-ready-budget-default");
+            var timeout = RealNknClientAdapter.ResolveConnectReadyTimeoutForOptions(options);
+
+            Assert.True(timeout > TimeSpan.FromSeconds(30));
+            Assert.True(timeout >= TimeSpan.FromSeconds(34));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_SEED_RPC", prevSeedRpc);
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED", prevEnabled);
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS", prevTimeout);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void Bridge_ConnectReadyTimeout_KeepsMinimumForSinglePreflightRpc()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-ready-budget-single", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var prevSeedRpc = Environment.GetEnvironmentVariable("NLINK_NKN_SEED_RPC");
+        var prevEnabled = Environment.GetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED");
+        var prevTimeout = Environment.GetEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_SEED_RPC", "https://mock-rpc.example/mainnet/api/wallet");
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED", "true");
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS", "8000");
+
+            var options = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "id.json"), "mock-ready-budget-single");
+            var timeout = RealNknClientAdapter.ResolveConnectReadyTimeoutForOptions(options);
+
+            Assert.Equal(TimeSpan.FromSeconds(30), timeout);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_SEED_RPC", prevSeedRpc);
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED", prevEnabled);
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS", prevTimeout);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public async Task Bridge_Connect_WithPreflight_AllowsDelayedConnectAck()
     {
         if (!OperatingSystem.IsWindows())
