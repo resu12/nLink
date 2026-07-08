@@ -14326,6 +14326,10 @@ public sealed partial class SessionFileTransferService
                             requestedChunkCount,
                             repairState.AttemptCount,
                             frontierStallAgeMs);
+                        ClearInboundPostTunaFallbackControlPlanePressureAfterFrontierSettlement(
+                            context,
+                            "fallback_frontier_repair_stalled",
+                            repairRequestKey);
                     }
 
                     if (FileTransferDiagnosticLogPolicy.TraceEnabled)
@@ -14396,6 +14400,10 @@ public sealed partial class SessionFileTransferService
                     requestedChunkCount,
                     repairState.AttemptCount,
                     frontierStallAgeMs);
+                ClearInboundPostTunaFallbackControlPlanePressureAfterFrontierSettlement(
+                    context,
+                    "fallback_frontier_repair_stalled",
+                    repairRequestKey);
             }
         }
 

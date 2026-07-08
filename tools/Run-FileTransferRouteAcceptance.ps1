@@ -1717,8 +1717,7 @@ function Test-RouteAcceptanceTerminalFallbackPrefixOutcome {
     $actualChanges = @($ActualRouteChanges)
     $expectedChanges = @($ExpectedRouteChanges)
     if ($actualChanges.Count -le 0 -or
-        $expectedChanges.Count -le $actualChanges.Count -or
-        [string]$actualChanges[$actualChanges.Count - 1] -ne 'post_tuna_fallback_v6') {
+        $expectedChanges.Count -le $actualChanges.Count) {
         return $false
     }
 
@@ -1741,9 +1740,7 @@ function Test-RouteAcceptanceTerminalFallbackPrefixOutcome {
     }
 
     $terminalBeforeReactivation = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $summary -Name 'firstTransferTerminalBeforeLiveReactivation' -DefaultValue $false)
-    if (-not $terminalBeforeReactivation) {
-        return $false
-    }
+    $terminalBeforeFallbackSwitchOff = ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $summary -Name 'firstTransferTerminalBeforeFallbackSwitchOff' -DefaultValue $false)
 
     $phase = Get-JsonPropertyValue -Object $summary -Name 'measuredPhase' -DefaultValue $null
     if ($null -eq $phase) {
@@ -1757,12 +1754,53 @@ function Test-RouteAcceptanceTerminalFallbackPrefixOutcome {
     $inboundError = [string](Get-JsonPropertyValue -Object $phase -Name 'inboundErrorCode' -DefaultValue '(missing)')
     $outboundError = [string](Get-JsonPropertyValue -Object $phase -Name 'outboundErrorCode' -DefaultValue '(missing)')
 
-    return $completed -and
+    $cleanTerminal = $completed -and
         $integrityOk -and
         $inboundState -eq 'Completed' -and
         $outboundState -eq 'Completed' -and
         $inboundError -eq '(none)' -and
         $outboundError -eq '(none)'
+    if (-not $cleanTerminal) {
+        return $false
+    }
+
+    if ($terminalBeforeReactivation) {
+        return $false
+    }
+
+    if ($terminalBeforeFallbackSwitchOff) {
+        return [string]$actualChanges[$actualChanges.Count - 1] -eq 'file_tuna_v4' -and
+            [string]$expectedChanges[$actualChanges.Count] -eq 'post_tuna_fallback_v6'
+    }
+
+    return $false
+}
+
+function Test-RouteAcceptanceTerminalFallbackMeasuredPhaseOutcome {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ActualRouteChanges,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ExpectedRouteChanges,
+        [Parameter(Mandatory = $true)][string]$PhaseRoute,
+        [Parameter(Mandatory = $true)][int]$PhaseProtocol
+    )
+
+    $actualChanges = @($ActualRouteChanges)
+    if ($actualChanges.Count -le 0) {
+        return $false
+    }
+
+    if (-not (Test-RouteAcceptanceTerminalFallbackPrefixOutcome -ArtifactDir $ArtifactDir -ActualRouteChanges $actualChanges -ExpectedRouteChanges $ExpectedRouteChanges)) {
+        return $false
+    }
+
+    $actualFinalRoute = [string]$actualChanges[$actualChanges.Count - 1]
+    if ($PhaseRoute -ne $actualFinalRoute) {
+        return $false
+    }
+
+    $metadata = Get-RouteAcceptanceRouteMetadata -Route $actualFinalRoute
+    return $PhaseProtocol -eq [int]$metadata.Protocol
 }
 
 function Assert-Phase4OperatorVerdict {
@@ -2168,12 +2206,18 @@ function Assert-Phase4ScenarioRun {
             $outboundState = [string](Get-JsonPropertyValue -Object $phase -Name 'outboundState' -DefaultValue '(missing)')
             $inboundError = [string](Get-JsonPropertyValue -Object $phase -Name 'inboundErrorCode' -DefaultValue '(missing)')
             $outboundError = [string](Get-JsonPropertyValue -Object $phase -Name 'outboundErrorCode' -DefaultValue '(missing)')
+            $acceptsTerminalFallbackMeasuredPhase = Test-RouteAcceptanceTerminalFallbackMeasuredPhaseOutcome `
+                -ArtifactDir $ArtifactDir `
+                -ActualRouteChanges $result.selectedRouteChanges `
+                -ExpectedRouteChanges $expectedRouteChanges `
+                -PhaseRoute $phaseRoute `
+                -PhaseProtocol $phaseProtocol
 
-            if ($phaseRoute -ne $expectedFinalRoute) {
+            if ($phaseRoute -ne $expectedFinalRoute -and -not $acceptsTerminalFallbackMeasuredPhase) {
                 Add-RouteAcceptanceFailure -Result $result -Message ("Tuna measured route mismatch: expected={0}; actual={1}" -f $expectedFinalRoute, $phaseRoute)
             }
 
-            if ($phaseProtocol -ne [int]$expectedMetadata.Protocol) {
+            if ($phaseProtocol -ne [int]$expectedMetadata.Protocol -and -not $acceptsTerminalFallbackMeasuredPhase) {
                 Add-RouteAcceptanceFailure -Result $result -Message ("Tuna measured protocol mismatch: expected={0}; actual={1}" -f $expectedMetadata.Protocol, $phaseProtocol)
             }
 
@@ -2662,6 +2706,10 @@ function Write-RouteAcceptanceFakePhase4Run {
 
     $routeChanges = @($routeChangeList.ToArray())
     $finalRoute = [string]$routeChanges[$routeChanges.Count - 1]
+    $terminalBeforeLiveReactivation = (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'TERMINAL_BEFORE_LIVE_REACTIVATION') -or
+        (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'TERMINAL_BEFORE_SECOND_TUNA_ACTIVATION')
+    $terminalBeforeFallbackSwitchOff = (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'TERMINAL_BEFORE_FALLBACK_BOUNDARY') -or
+        (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'TERMINAL_BEFORE_FINAL_FALLBACK')
     $defaultGoodput = if ($null -ne $Scenario.Baseline -and (ConvertTo-RouteAcceptanceDouble -Value $Scenario.Baseline.goodputBytesPerSecond) -gt 0) {
         [string]$Scenario.Baseline.goodputBytesPerSecond
     }
@@ -2881,6 +2929,28 @@ function Write-RouteAcceptanceFakePhase4Run {
     $liveMode = if ($Scenario.LiveProofMode) { [string]$Scenario.LiveProofMode } else { 'None' }
     Invoke-RouteAcceptanceRetainedAnalysis -ArtifactDir $ArtifactDir -LiveRouteProofMode $liveMode
 
+    if ($terminalBeforeFallbackSwitchOff -and $Scenario.Name -eq 'regular-v4-live-activation-off-on-off-256mb') {
+        $routeSummaryPath = Join-Path $ArtifactDir 'filetransfer-route-consistency-summary.txt'
+        if (Test-Path -LiteralPath $routeSummaryPath -PathType Leaf) {
+            $routeSummaryText = Get-Content -LiteralPath $routeSummaryPath -Raw
+            $routeSummaryText = $routeSummaryText `
+                -replace '(?m)^route_consistency_verdict=.*$', 'route_consistency_verdict=pass' `
+                -replace '(?m)^route_mismatch_count=.*$', 'route_mismatch_count=0' `
+                -replace '(?m)^live_route_epoch_proof_verdict=.*$', 'live_route_epoch_proof_verdict=pass' `
+                -replace '(?m)^control_plane_isolation_verdict=.*$', 'control_plane_isolation_verdict=pass' `
+                -replace '(?m)^fallback_control_plane_non_current_leg_generation_send_count=.*$', 'fallback_control_plane_non_current_leg_generation_send_count=0'
+            Set-Content -LiteralPath $routeSummaryPath -Value $routeSummaryText -Encoding UTF8
+        }
+
+        @(
+            'verdict=PASS',
+            'hard_failure_count=0',
+            'warning_count=0',
+            'warning_kinds=(none)',
+            'warning_cap_exceeded_kinds=(none)'
+        ) | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-operator-verdict.txt') -Encoding UTF8
+    }
+
     if ($Scenario.Name -eq 'second-transfer-after-reactivation' -and
         (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'COMBINED_ROUTE_ANALYSIS_CONTAMINATED')) {
         @(
@@ -3050,6 +3120,8 @@ function Write-RouteAcceptanceFakePhase4Run {
                 outboundErrorCode = $terminalError
             }
             liveRouteEpochRouteChanges = @($routeChanges | Select-Object -Skip 1)
+            firstTransferTerminalBeforeLiveReactivation = $terminalBeforeLiveReactivation
+            firstTransferTerminalBeforeFallbackSwitchOff = $terminalBeforeFallbackSwitchOff
             secondTransfer = if ($Scenario.Name -eq 'second-transfer-after-reactivation') {
                 $secondRoute = Get-RouteAcceptanceScenarioEnvValue -ScenarioName $scenarioName -Suffix 'SECOND_ROUTE' -DefaultValue 'file_tuna_v4'
                 $secondMetadata = Get-RouteAcceptanceRouteMetadata -Route $secondRoute
@@ -5436,6 +5508,29 @@ function Test-Phase5CanonicalRepeatedToggleScenario {
     return [string]$Scenario.Name -eq 'regular-v4-live-activation-off-on-off-256mb'
 }
 
+function Test-Phase5CanonicalSecondTunaActivationProven {
+    param([Parameter(Mandatory = $true)]$Result)
+
+    return @($Result.selectedRouteChanges | Where-Object { [string]$_ -eq 'file_tuna_v4' }).Count -ge 2
+}
+
+function Test-RouteAcceptanceFirstTransferTerminalBeforeLiveReactivation {
+    param([Parameter(Mandatory = $true)][string]$ArtifactDir)
+
+    $summaryPath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json'
+    if (-not (Test-Path -LiteralPath $summaryPath -PathType Leaf)) {
+        return $false
+    }
+
+    try {
+        $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+        return ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $summary -Name 'firstTransferTerminalBeforeLiveReactivation' -DefaultValue $false)
+    }
+    catch {
+        return $false
+    }
+}
+
 function Test-Phase5CanonicalRuntimeUnlockReceiveRecoveryExhaustion {
     param(
         [Parameter(Mandatory = $true)]$Scenario,
@@ -5604,6 +5699,13 @@ function Get-Phase5FailureClass {
     }
 
     foreach ($line in $failureLines) {
+        if ($line.IndexOf('second_tuna_activation_not_proven', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('terminal_before_second_tuna_activation', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'second_tuna_activation_not_proven'
+        }
+    }
+
+    foreach ($line in $failureLines) {
         if ($line.IndexOf('setup failure', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $line.IndexOf('transient setup failure', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $line.IndexOf('scenario isolation failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
@@ -5747,19 +5849,36 @@ function Assert-Phase5ScenarioRun {
 
     $canonicalRepeatedToggle = Test-Phase5CanonicalRepeatedToggleScenario -Scenario $Scenario
     if ($canonicalRepeatedToggle) {
+        $canonicalTerminalFallbackPrefix = Test-RouteAcceptanceTerminalFallbackPrefixOutcome `
+            -ArtifactDir $Result.artifactDir `
+            -ActualRouteChanges $Result.selectedRouteChanges `
+            -ExpectedRouteChanges $Scenario.ExpectedRouteChanges
+        $canonicalObservedFallback = @($Result.selectedRouteChanges) -contains 'post_tuna_fallback_v6'
+        $canonicalRequiresFallbackProof = $canonicalObservedFallback -or -not $canonicalTerminalFallbackPrefix
+
         if ($Result.liveRouteEpochProofVerdict -ne 'pass') {
             Add-RouteAcceptanceFailure -Result $Result -Message ("canonical repeated-toggle live route proof must pass, actual {0}" -f $Result.liveRouteEpochProofVerdict)
         }
 
-        if ($Result.fallbackLegAuthorityProofVerdict -ne 'pass') {
+        if (-not (Test-Phase5CanonicalSecondTunaActivationProven -Result $Result)) {
+            $actualCanonicalRouteText = Join-RouteAcceptanceTokenList -Values $Result.selectedRouteChanges
+            if (Test-RouteAcceptanceFirstTransferTerminalBeforeLiveReactivation -ArtifactDir $Result.artifactDir) {
+                Add-RouteAcceptanceFailure -Result $Result -Message ("terminal_before_second_tuna_activation: expected second file_tuna_v4 route before terminal; actual {0}" -f $actualCanonicalRouteText)
+            }
+            else {
+                Add-RouteAcceptanceFailure -Result $Result -Message ("second_tuna_activation_not_proven: expected second file_tuna_v4 route; actual {0}" -f $actualCanonicalRouteText)
+            }
+        }
+
+        if ($canonicalRequiresFallbackProof -and $Result.fallbackLegAuthorityProofVerdict -ne 'pass') {
             Add-RouteAcceptanceFailure -Result $Result -Message ("canonical repeated-toggle fallback leg authority proof must pass, actual {0}" -f $Result.fallbackLegAuthorityProofVerdict)
         }
 
-        if ($Result.bridgeLivenessIntegrationVerdict -ne 'pass') {
+        if ($canonicalRequiresFallbackProof -and $Result.bridgeLivenessIntegrationVerdict -ne 'pass') {
             Add-RouteAcceptanceFailure -Result $Result -Message ("canonical repeated-toggle bridge liveness integration proof must pass, actual {0}" -f $Result.bridgeLivenessIntegrationVerdict)
         }
 
-        if ($Result.controlPlaneIsolationVerdict -ne 'pass') {
+        if ($canonicalRequiresFallbackProof -and $Result.controlPlaneIsolationVerdict -ne 'pass') {
             Add-RouteAcceptanceFailure -Result $Result -Message ("canonical repeated-toggle control-plane isolation proof must pass, actual {0}" -f $Result.controlPlaneIsolationVerdict)
         }
     }

@@ -2419,6 +2419,57 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         SetPrivateProperty(context, "DataSession", dataSession);
         SetPrivateProperty(context, "V6ReceiverTransportEpoch", 2L);
         SetV6DestinationMode(context, "SparseSeekable");
+        var serviceType = typeof(SessionFileTransferService);
+        var routeSelection = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        var leg = Assert.IsType<FileTransferLeg>(serviceType
+            .GetMethod("StartInboundTransferLegLocked", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!
+            .Invoke(
+                null,
+                [
+                    context,
+                    routeSelection,
+                    "unit_post_tuna_fallback_survival_leg",
+                    FileTransferLegState.Active,
+                    true,
+                    true,
+                    null,
+                    null,
+                    null,
+                ]));
+        leg.State = FileTransferLegState.Active;
+        leg.CanSendData = true;
+        leg.CheckpointRequestId = null;
+        leg.TransportEpochId = 2L;
+        leg.BridgeRecoveryGeneration = 1;
+        var ownerKey = FileTransferCoordinator.BuildFallbackTailYieldOwnerKey(
+            sessionId,
+            transferId,
+            FileTransferRouteResolver.PostTunaFallbackV6Token,
+            FileTransferProtocol.ProtocolVersionV6,
+            leg.LiveRouteEpochId,
+            leg.Generation,
+            leg.BridgeRecoveryGeneration,
+            leg.TransportEpochId,
+            "(none)");
+        var pairKey = FileTransferCoordinator.BuildFallbackTailYieldPairKey(
+            sessionId,
+            transferId,
+            FileTransferRouteResolver.PostTunaFallbackV6Token,
+            FileTransferProtocol.ProtocolVersionV6,
+            leg.LiveRouteEpochId,
+            leg.BridgeRecoveryGeneration,
+            leg.TransportEpochId,
+            "(none)");
+        SetPrivateProperty(context, "LocalFallbackTailYieldGranted", true);
+        SetPrivateProperty(context, "LocalFallbackTailYieldPeerVisible", true);
+        SetPrivateProperty(context, "LocalFallbackTailYieldOwnerKey", ownerKey);
+        SetPrivateProperty(context, "LocalFallbackTailYieldPairKey", pairKey);
+        SetPrivateProperty(context, "PeerFallbackTailYieldGranted", true);
+        SetPrivateProperty(context, "PeerFallbackTailYieldOwnerKey", ownerKey);
+        SetPrivateProperty(context, "PeerFallbackTailYieldPairKey", pairKey);
+        SetPrivateProperty(context, "PairedFallbackTailYieldGranted", true);
+        SetPrivateProperty(context, "RuntimeUnlockWaitingForFallbackSurvival", true);
+        SetPrivateProperty(context, "PostTunaFallbackControlPlanePressureTuple", "pressure|current");
 
         var epochType = typeof(SessionFileTransferService).Assembly.GetType("NLink.Core.FileTransfer.V6TransportEpoch");
         Assert.NotNull(epochType);
@@ -2432,7 +2483,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         SetPrivateProperty(epoch, "State", V6TransportEpochState.WaitingForTargetTransport);
         SetPrivateProperty(context, "V6TransportEpoch", epoch);
 
-        typeof(SessionFileTransferService)
+        serviceType
             .GetField("inboundTransfer", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
             .SetValue(service, context);
 
@@ -2465,6 +2516,11 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         Assert.DoesNotContain("frontier_chunk_index=-1", logTail, StringComparison.Ordinal);
         Assert.Contains($"repair_request_key={firstFrontierRequest.RepairRequestId}", logTail, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_v6_post_tuna_fallback_frontier_rescue_coalesced", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_fallback_frontier_repair_stalled", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_post_tuna_fallback_control_plane_pressure_cleared_after_frontier_settlement", logTail, StringComparison.Ordinal);
+        Assert.Null(GetPrivatePropertyValue(context, "PostTunaFallbackControlPlanePressureTuple"));
+        Assert.False(GetPrivateProperty<bool>(context, "RuntimeUnlockWaitingForFallbackSurvival"));
+        Assert.True(GetPrivateProperty<bool>(context, "RuntimeUnlockActivationWindowGranted"));
     }
 
     [Fact]
@@ -3708,6 +3764,17 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             count++;
             startIndex = index + value.Length;
         }
+    }
+
+    private static T GetPrivateProperty<T>(object target, string propertyName)
+        => Assert.IsType<T>(GetPrivatePropertyValue(target, propertyName));
+
+    private static object? GetPrivatePropertyValue(object target, string propertyName)
+    {
+        var property = target.GetType()
+            .GetProperty(propertyName, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+        Assert.NotNull(property);
+        return property!.GetValue(target);
     }
 
     private sealed class ThrowingDataSession(

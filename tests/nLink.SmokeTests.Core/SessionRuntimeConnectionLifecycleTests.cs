@@ -846,6 +846,48 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
     }
 
     [Fact]
+    public void FileTransferRecoveryLiveness_RegularV4ClosedOwnerDoesNotArmGenericRecoveryDeferral()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var scripted = new ScriptedSignalingTransport();
+        using var runtime = new SessionRuntime(() => scripted, SessionRuntimeWatchdogOptions.Default, nowProvider: () => now);
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        var securityState = CreateApprovedSecurityState(
+            new PeerAddress(scripted.LocalPeerAddress),
+            new PeerAddress("scripted.helpee.regular-v4-closed-owner"));
+        var sessionId = securityState.SessionId!.Value.Value;
+        scripted.SetSessionSecurityStateForTests(securityState);
+        var request = new FileTransferReceiveRecoveryRequest(
+            sessionId,
+            "ft_regular_v4_closed_owner",
+            FileTransferDirection.Outbound,
+            "session_liveness_timeout_pending")
+        {
+            RouteToken = "regular_nkn_v4_fast",
+            ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+            LiveRouteEpoch = 0,
+            AuthorityReason = "regular_v4_startup_local_only_no_ack",
+        };
+
+        var logStart = GetOperationalLogLength();
+        var closed = Assert.IsType<bool>(InvokePrivateMethod(
+            runtime,
+            "TryRejectClosedRegularV4RecoveryLivenessDeferral",
+            sessionId,
+            request,
+            1L,
+            TimeSpan.FromSeconds(10),
+            "session_liveness_filetransfer_recovery"));
+
+        var tail = ReadOperationalLogTail(logStart) + Environment.NewLine + LocalOperationalLog.GetRecentLogText();
+        Assert.True(closed);
+        Assert.Contains("event=regular_v4_repair_liveness_closed_no_deferral;", tail, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=session_liveness_timeout_deferred_for_filetransfer_recovery;", tail, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void FileTransferRecoveryLiveness_StaleRegularV4SnapshotAfterTunaRouteIsNotCurrent()
     {
         var now = DateTimeOffset.UtcNow;

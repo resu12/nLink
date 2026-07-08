@@ -6024,6 +6024,12 @@ public sealed partial class SessionFileTransferService
                         totalRequestedChunks,
                         postTunaFallbackRescueRequestCount,
                         frontierStallAgeMs);
+                    ClearInboundPostTunaFallbackControlPlanePressureAfterFrontierSettlement(
+                        context,
+                        "fallback_frontier_repair_stalled",
+                        string.IsNullOrWhiteSpace(postTunaFallbackFrontierSettlementKey)
+                            ? request.RepairRequestId
+                            : postTunaFallbackFrontierSettlementKey);
                 }
 
                 if (reusedPostTunaFallbackRescueSettlementKey)

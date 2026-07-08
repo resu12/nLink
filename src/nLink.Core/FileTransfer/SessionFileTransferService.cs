@@ -12662,6 +12662,119 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.PostTunaFallbackControlPlanePressureSuppressedCount = 0;
     }
 
+    private void ClearInboundPostTunaFallbackControlPlanePressureAfterFrontierSettlement(
+        InboundTransferContext context,
+        string reason,
+        string repairRequestKey)
+    {
+        RuntimeUnlockAdmissionDecision? resumeAdmission = null;
+        FileTransferLeg? legSnapshot = null;
+        string? clearedTuple = null;
+        string? expectedTuple = null;
+        string rejectionReason = "";
+        lock (gate)
+        {
+            var currentLeg = context.CurrentTransferLeg;
+            if (!ReferenceEquals(inboundTransfer, context) ||
+                context.IsTerminal ||
+                !context.RouteRuntime.UsesPostTunaFallbackV6Runtime ||
+                context.RouteSelection.Route != FileTransferRoute.PostTunaFallbackV6 ||
+                context.NegotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+                !IsCurrentPostTunaFallbackLeg(currentLeg) ||
+                !HasPairedFallbackTailYieldForCurrentOwner(context) ||
+                string.IsNullOrWhiteSpace(context.PostTunaFallbackControlPlanePressureTuple))
+            {
+                return;
+            }
+
+            legSnapshot = currentLeg!;
+            expectedTuple = BuildFallbackChurnTuple(
+                context.SessionId,
+                context.TransferId,
+                legSnapshot.RouteSelection.TelemetryToken,
+                legSnapshot.ProtocolVersion,
+                legSnapshot.LiveRouteEpochId,
+                legSnapshot.Generation,
+                legSnapshot.TransportEpochId,
+                context.NextChunkIndex,
+                context.PullHighestReceivedChunkIndex,
+                frontierGap: 1,
+                missingRangeCount: 1,
+                legSnapshot.CheckpointRequestId);
+            clearedTuple = context.PostTunaFallbackControlPlanePressureTuple;
+            if (!string.Equals(clearedTuple, expectedTuple, StringComparison.Ordinal))
+            {
+                rejectionReason = "pressure_tuple_mismatch";
+            }
+            else if (!DoesFallbackPressureTupleMatchRepairKey(clearedTuple, repairRequestKey))
+            {
+                rejectionReason = "repair_key_mismatch";
+            }
+
+            if (!string.IsNullOrWhiteSpace(rejectionReason))
+            {
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=filetransfer_post_tuna_fallback_control_plane_pressure_clear_rejected_after_frontier_settlement; direction=inbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; route={FormatProtocolLogValue(legSnapshot.RouteSelection.TelemetryToken)}; protocol_version={legSnapshot.ProtocolVersion}; live_route_epoch={legSnapshot.LiveRouteEpochId}; leg_generation={legSnapshot.Generation}; transport_epoch={legSnapshot.TransportEpochId}; bridge_recovery_generation={legSnapshot.BridgeRecoveryGeneration}; checkpoint_request_id={FormatProtocolLogValue(legSnapshot.CheckpointRequestId ?? "(none)")}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; reason={FormatProtocolLogValue(reason)}; rejection_reason={FormatProtocolLogValue(rejectionReason)}; current_pressure_tuple={FormatProtocolLogValue(clearedTuple ?? "(none)")}; expected_pressure_tuple={FormatProtocolLogValue(expectedTuple ?? "(none)")}");
+                return;
+            }
+
+            ClearInboundPostTunaFallbackPressureDiagnosticLocked(context);
+            if (context.RuntimeUnlockWaitingForFallbackSurvival)
+            {
+                TryResumeInboundRuntimeUnlockAfterFallbackSurvivalProofLocked(
+                    context,
+                    "fallback_tail_quiescent");
+                if (context.RuntimeUnlockAdmissionToken is { } token)
+                {
+                    resumeAdmission = RuntimeUnlockAdmissionDecisionFromToken(
+                        context,
+                        token,
+                        "fallback_tail_quiescent");
+                }
+            }
+        }
+
+        ClearPostTunaFallbackControlPlanePressure(context.TransferId, reason);
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_post_tuna_fallback_control_plane_pressure_cleared_after_frontier_settlement; direction=inbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; route={FormatProtocolLogValue(legSnapshot?.RouteSelection.TelemetryToken ?? FileTransferRouteResolver.PostTunaFallbackV6Token)}; protocol_version={legSnapshot?.ProtocolVersion ?? FileTransferProtocol.ProtocolVersionV6}; live_route_epoch={legSnapshot?.LiveRouteEpochId ?? 0}; leg_generation={legSnapshot?.Generation ?? 0}; transport_epoch={legSnapshot?.TransportEpochId ?? 0}; bridge_recovery_generation={legSnapshot?.BridgeRecoveryGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(legSnapshot?.CheckpointRequestId ?? "(none)")}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; reason={FormatProtocolLogValue(reason)}; cleared_pressure_tuple={FormatProtocolLogValue(clearedTuple ?? "(none)")}; resume_admission_reason={FormatProtocolLogValue(resumeAdmission?.Reason ?? "(none)")}");
+    }
+
+    private static bool DoesFallbackPressureTupleMatchRepairKey(string pressureTuple, string repairRequestKey)
+    {
+        if (string.IsNullOrWhiteSpace(pressureTuple) ||
+            string.IsNullOrWhiteSpace(repairRequestKey))
+        {
+            return false;
+        }
+
+        var parts = pressureTuple.Split('|');
+        if (parts.Length < 12)
+        {
+            return false;
+        }
+
+        if (!int.TryParse(parts[7], NumberStyles.Integer, CultureInfo.InvariantCulture, out var committedChunk) ||
+            !int.TryParse(parts[10], NumberStyles.Integer, CultureInfo.InvariantCulture, out var missingRangeCount) ||
+            missingRangeCount <= 0)
+        {
+            return false;
+        }
+
+        if (repairRequestKey.StartsWith("v6-frontier:", StringComparison.Ordinal))
+        {
+            var keyParts = repairRequestKey.Split(':');
+            return keyParts.Length >= 3 &&
+                int.TryParse(keyParts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out var frontierChunk) &&
+                frontierChunk == committedChunk;
+        }
+
+        return repairRequestKey.StartsWith(
+            $"{committedChunk.ToString(CultureInfo.InvariantCulture)}:{missingRangeCount.ToString(CultureInfo.InvariantCulture)}:",
+            StringComparison.Ordinal);
+    }
+
     private static bool ShouldObserveInboundPostTunaFallbackControlPlanePressureLocked(
         InboundTransferContext context,
         FileTransferControlPlaneDeliveryRequest request,

@@ -528,6 +528,16 @@ public sealed partial class SessionRuntime
             {
                 return false;
             }
+
+            if (TryRejectClosedRegularV4RecoveryLivenessDeferral(
+                    sessionIdSnapshot,
+                    recoveryRequest,
+                    generation,
+                    silence,
+                    "session_liveness_filetransfer_recovery"))
+            {
+                return false;
+            }
         }
         catch (Exception ex)
         {
@@ -621,6 +631,16 @@ public sealed partial class SessionRuntime
             {
                 return false;
             }
+
+            if (TryRejectClosedRegularV4RecoveryLivenessDeferral(
+                    sessionIdSnapshot,
+                    recoveryRequest,
+                    generation,
+                    silence,
+                    "session_liveness_final_filetransfer_recovery"))
+            {
+                return false;
+            }
         }
         catch (Exception ex)
         {
@@ -656,6 +676,40 @@ public sealed partial class SessionRuntime
         LocalOperationalLog.Warn(
             "Session",
             $"event=session_liveness_timeout_deferred_for_final_active_filetransfer_recovery; session_id={sessionIdSnapshot}; transfer_id={recoveryRequest.TransferId}; direction={recoveryRequest.Direction.ToString().ToLowerInvariant()}; generation={generation}; silence_ms={(long)silence.TotalMilliseconds}; deferral_ms={(long)SessionLivenessActiveFileTransferFinalRecoveryDeferral.TotalMilliseconds}; progress_bytes={progressBytes}; active_progress=1; bytes_transferred={transfer.BytesTransferred}; bytes_accepted_for_transport={transfer.BytesAcceptedForTransport ?? -1}; bytes_acknowledged_by_receiver={transfer.BytesAcknowledgedByReceiver ?? -1}; chunks_transferred={transfer.ChunksTransferred}; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
+        return true;
+    }
+
+    private bool TryRejectClosedRegularV4RecoveryLivenessDeferral(
+        string sessionIdSnapshot,
+        FileTransferReceiveRecoveryRequest recoveryRequest,
+        long generation,
+        TimeSpan silence,
+        string source)
+    {
+        if (!string.Equals(recoveryRequest.RouteToken, FileTransferRouteResolver.RegularNknV4FastToken, StringComparison.Ordinal) ||
+            recoveryRequest.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+            recoveryRequest.LiveRouteEpoch != 0 ||
+            transport is not IFileTransferRecoveryLivenessState recoveryState)
+        {
+            return false;
+        }
+
+        var now = nowProvider();
+        if (recoveryState.TryGetActiveFileTransferRecoveryLivenessSnapshot(sessionIdSnapshot, out var snapshot) &&
+            string.Equals(snapshot.TransferId, recoveryRequest.TransferId, StringComparison.Ordinal) &&
+            string.Equals(snapshot.RouteToken, FileTransferRouteResolver.RegularNknV4FastToken, StringComparison.Ordinal) &&
+            snapshot.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+            snapshot.LiveRouteEpoch == 0 &&
+            IsValidFileTransferRecoveryLivenessSnapshot(sessionIdSnapshot, snapshot) &&
+            IsCurrentFileTransferRecoveryLivenessSnapshot(sessionIdSnapshot, snapshot, out _, out _, out _) &&
+            IsActiveFileTransferRecoveryLivenessSnapshot(snapshot, now))
+        {
+            return false;
+        }
+
+        LocalOperationalLog.Warn(
+            "Session",
+            $"event=regular_v4_repair_liveness_closed_no_deferral; session_id={sessionIdSnapshot}; transfer_id={recoveryRequest.TransferId}; direction={recoveryRequest.Direction.ToString().ToLowerInvariant()}; route={SanitizeSessionLivenessReason(recoveryRequest.RouteToken ?? "(none)")}; protocol_version={recoveryRequest.ProtocolVersion}; live_route_epoch={recoveryRequest.LiveRouteEpoch}; leg_generation={recoveryRequest.TransferLegGeneration}; transport_epoch={recoveryRequest.TransportEpoch}; bridge_recovery_generation={recoveryRequest.BridgeRecoveryGeneration}; generation={generation}; silence_ms={(long)silence.TotalMilliseconds}; source={SanitizeSessionLivenessReason(source)}; reason=no_current_regular_v4_recovery_liveness; role={role}; run_id={GetRunIdForLog()}; scenario={GetScenarioForLog()}");
         return true;
     }
 

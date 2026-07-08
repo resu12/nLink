@@ -2868,6 +2868,192 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $lines = @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)
     $processLines = @(Read-GuiSmokeProcessOutputLinesSnapshot)
     $evidenceLines = @($lines + $processLines)
+
+    function Get-TunaGuiLogLineFieldValue {
+        param(
+            [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Line,
+            [Parameter(Mandatory = $true)][string]$Name
+        )
+
+        if ([string]::IsNullOrWhiteSpace($Line) -or [string]::IsNullOrWhiteSpace($Name)) {
+            return ''
+        }
+
+        $escapedName = [regex]::Escape($Name)
+        $match = [regex]::Match($Line, "(?i)(?:^|;\s*)$escapedName=([^;`r`n]+)")
+        if (-not $match.Success) {
+            return ''
+        }
+
+        return $match.Groups[1].Value.Trim()
+    }
+
+    function Test-TunaGuiLogLineHasEvent {
+        param(
+            [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Line,
+            [Parameter(Mandatory = $true)][string[]]$Events
+        )
+
+        foreach ($eventName in $Events) {
+            if ($Line.IndexOf("event=$eventName", [System.StringComparison]::Ordinal) -ge 0) {
+                return $true
+            }
+        }
+
+        return $false
+    }
+
+    function Test-TunaGuiLogLineFieldMatch {
+        param(
+            [Parameter(Mandatory = $true)][AllowEmptyString()][string]$SourceLine,
+            [Parameter(Mandatory = $true)][AllowEmptyString()][string]$CandidateLine,
+            [Parameter(Mandatory = $true)][string]$FieldName,
+            [System.StringComparison]$Comparison = [System.StringComparison]::OrdinalIgnoreCase
+        )
+
+        $sourceValue = Get-TunaGuiLogLineFieldValue -Line $SourceLine -Name $FieldName
+        $candidateValue = Get-TunaGuiLogLineFieldValue -Line $CandidateLine -Name $FieldName
+        if ([string]::IsNullOrWhiteSpace($sourceValue) -or
+            [string]::IsNullOrWhiteSpace($candidateValue) -or
+            $sourceValue -eq '(none)' -or
+            $candidateValue -eq '(none)') {
+            return $true
+        }
+
+        return [string]::Equals($sourceValue, $candidateValue, $Comparison)
+    }
+
+    function Test-TunaGuiRegularV4FrontierRepairMatch {
+        param(
+            [Parameter(Mandatory = $true)][AllowEmptyString()][string]$SourceLine,
+            [Parameter(Mandatory = $true)][AllowEmptyString()][string]$CandidateLine
+        )
+
+        $sourceKey = Get-TunaGuiLogLineFieldValue -Line $SourceLine -Name 'repair_request_key'
+        $candidateKey = Get-TunaGuiLogLineFieldValue -Line $CandidateLine -Name 'repair_request_key'
+        if ([string]::IsNullOrWhiteSpace($sourceKey) -or
+            [string]::IsNullOrWhiteSpace($candidateKey) -or
+            -not [string]::Equals($sourceKey, $candidateKey, [System.StringComparison]::Ordinal)) {
+            return $false
+        }
+
+        foreach ($fieldName in @(
+                'transfer_id',
+                'session_id',
+                'direction',
+                'route',
+                'protocol_version',
+                'live_route_epoch',
+                'leg_generation',
+                'transport_epoch',
+                'bridge_recovery_generation',
+                'route_publication_generation')) {
+            if (-not (Test-TunaGuiLogLineFieldMatch -SourceLine $SourceLine -CandidateLine $CandidateLine -FieldName $fieldName)) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Test-TunaGuiRegularV4FrontierRepairPrecontractClosureMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Accepted,
+            [Parameter(Mandatory = $true)]$Consumed,
+            [Parameter(Mandatory = $true)]$Closure
+        )
+
+        if ($Consumed.Index -le $Accepted.Index -or $Closure.Index -le $Consumed.Index) {
+            return $false
+        }
+
+        if (-not (Test-TunaGuiRegularV4FrontierRepairMatch -SourceLine $Accepted.Line -CandidateLine $Consumed.Line)) {
+            return $false
+        }
+
+        foreach ($fieldName in @(
+                'session_id',
+                'transfer_id',
+                'direction',
+                'route',
+                'protocol_version',
+                'live_route_epoch',
+                'leg_generation',
+                'transport_epoch',
+                'bridge_recovery_generation')) {
+            if (-not (Test-TunaGuiLogLineFieldMatch -SourceLine $Consumed.Line -CandidateLine $Closure.Line -FieldName $fieldName)) {
+                return $false
+            }
+        }
+
+        $consumedBridgeDecision = Get-TunaGuiLogLineFieldValue -Line $Consumed.Line -Name 'bridge_decision_generation'
+        $closureBridgeDecision = Get-TunaGuiLogLineFieldValue -Line $Closure.Line -Name 'bridge_decision_generation'
+        if (-not [string]::IsNullOrWhiteSpace($consumedBridgeDecision) -and
+            -not [string]::IsNullOrWhiteSpace($closureBridgeDecision) -and
+            $consumedBridgeDecision -ne '0' -and
+            -not [string]::Equals($consumedBridgeDecision, $closureBridgeDecision, [System.StringComparison]::Ordinal)) {
+            return $false
+        }
+
+        return $true
+    }
+
+    function Test-TunaGuiRegularV4FrontierRepairSettlementClosed {
+        param(
+            [Parameter(Mandatory = $true)][string[]]$Lines
+        )
+
+        $indexedLines = @(
+            for ($i = 0; $i -lt $Lines.Count; $i++) {
+                [pscustomobject]@{
+                    Index = $i
+                    Line = [string]$Lines[$i]
+                }
+            }
+        )
+        $acceptedSettlements = @($indexedLines | Where-Object {
+            Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('filetransfer_regular_v4_frontier_repair_settlement_accepted')
+        })
+        if ($acceptedSettlements.Count -eq 0) {
+            return $false
+        }
+
+        foreach ($accepted in $acceptedSettlements) {
+            $handoff = @($indexedLines | Where-Object {
+                $_.Index -gt $accepted.Index -and
+                (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                    'runtime_unlock_regular_v4_frontier_repair_settlement_released',
+                    'runtime_unlock_regular_v4_frontier_repair_settlement_held',
+                    'runtime_unlock_regular_v4_frontier_repair_settlement_rejected')) -and
+                (Test-TunaGuiRegularV4FrontierRepairMatch -SourceLine $accepted.Line -CandidateLine $_.Line)
+            })
+            if ($handoff.Count -gt 0) {
+                continue
+            }
+
+            $precontractClosure = @(
+                foreach ($consumed in @($indexedLines | Where-Object {
+                    $_.Index -gt $accepted.Index -and
+                    (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('runtime_unlock_regular_v4_frontier_repair_precontract_settlement_consumed')) -and
+                    (Test-TunaGuiRegularV4FrontierRepairMatch -SourceLine $accepted.Line -CandidateLine $_.Line)
+                })) {
+                    $closure = @($indexedLines | Where-Object {
+                        Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('regular_v4_receive_recovery_contract_closed_no_deferral') -and
+                        (Test-TunaGuiRegularV4FrontierRepairPrecontractClosureMatch -Accepted $accepted -Consumed $consumed -Closure $_)
+                    })
+                    if ($closure.Count -gt 0) {
+                        $consumed
+                    }
+                }
+            )
+            if ($precontractClosure.Count -eq 0) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
     $bridgeBootstrapNotReady = Test-TunaGuiBridgeBootstrapNotReadyEvidence -Lines $evidenceLines
     $rawListenerUnavailable = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('listener_unavailable')
     $rawListenerSidecarUnavailable = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('listener_sidecar_unavailable')
@@ -2952,6 +3138,11 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $regularV4FrontierRepairStalledEvent = (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_stalled')) -or
         (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_file_tuna_v4_frontier_repair_stalled'))
     $regularV4FrontierRepairSettledStalledEvent = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_settled_stalled')
+    $regularV4FrontierRepairPrecontractSettlementConsumed = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_regular_v4_frontier_repair_precontract_settlement_consumed')
+    $regularV4ReceiveRecoveryClosedNoDeferral = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=regular_v4_receive_recovery_contract_closed_no_deferral')
+    $regularV4EvidenceLineText = [string[]]@($evidenceLines | ForEach-Object { [string]$_ })
+    $regularV4FrontierRepairSettlementClosed = Test-TunaGuiRegularV4FrontierRepairSettlementClosed -Lines $regularV4EvidenceLineText
+    $regularV4FrontierRepairSettledStalledUnclosed = $regularV4FrontierRepairSettledStalledEvent -and (-not $regularV4FrontierRepairSettlementClosed)
     $regularV4FrontierMissingRanges = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_v4_frontier_stall_missing_range_due')
     $regularV4RepairRequested = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_v4_repair_requested')
     $regularV4LivenessTimeoutWithoutAuthority = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('active_filetransfer_progress_observed_without_recovery_authority')
@@ -2970,12 +3161,13 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $fallbackFrontierRequestAccepted -and
         (Test-TunaGuiLatestFallbackFrontierRequestDispatchMissing -Lines $evidenceLines) -and
         ($fallbackProgressTimeout -or $normalToTunaEpochWaitAfterFallback)
-    $regularV4FrontierRepairStalled = (-not $fallbackFrontierRepairStalled) -and ($regularV4FrontierRepairSettledStalledEvent -or
+    $regularV4FrontierRepairStalled = (-not $fallbackFrontierRepairStalled) -and ($regularV4FrontierRepairSettledStalledUnclosed -or
         $regularV4FrontierRepairStalledEvent -or
         (($regularV4FrontierRepairAuthorityGranted -or $regularV4FrontierRepairDispatched) -and
             (-not $regularV4FrontierRepairProgressObserved) -and
             ($fallbackProgressTimeout -or $regularV4LivenessTimeoutWithoutAuthority)))
     $regularV4FrontierRepairSendDeferred = (-not $fallbackFrontierRepairStalled) -and
+        (-not $regularV4FrontierRepairSettlementClosed) -and
         $regularV4FrontierRepairSendDeferredEvent -and
         (-not $regularV4FrontierRepairProgressObserved) -and
         ($fallbackProgressTimeout -or $regularV4LivenessTimeoutWithoutAuthority -or $terminalObserved)
@@ -3001,7 +3193,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $runtimeUnlockRetryRejectedAfterRegularV4Recovery -or
         $runtimeUnlockRetryRecoverySettlementMissingMarker -or
         $runtimeUnlockRetryRegularV4RecoverySettlementMissing -or
-        $regularV4FrontierRepairSettledStalledEvent -or
+        $regularV4FrontierRepairSettledStalledUnclosed -or
         $regularV4FrontierRepairSendDeferred -or
         $regularV4FrontierRepairStalled -or
         $fallbackFrontierRequestDispatchMissing -or
@@ -3083,7 +3275,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $phase = 'fallback_frontier_repair'
         $reason = 'fallback_frontier_repair_stalled'
     }
-    elseif ($regularV4FrontierRepairSettledStalledEvent) {
+    elseif ($regularV4FrontierRepairSettledStalledUnclosed) {
         $phase = 'regular_v4_frontier_repair'
         $reason = 'regular_v4_frontier_repair_liveness_settlement_missing'
     }

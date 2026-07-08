@@ -7969,6 +7969,12 @@ function Get-FileTransferRecoveryFailureClassification {
         $_.EventName -eq 'runtime_unlock_regular_v4_frontier_repair_settlement_held' -or
         $_.EventName -eq 'runtime_unlock_regular_v4_frontier_repair_settlement_rejected'
     })
+    $runtimeUnlockRegularV4FrontierRepairPrecontractSettlementConsumedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_regular_v4_frontier_repair_precontract_settlement_consumed'
+    })
+    $regularV4ReceiveRecoveryClosedNoDeferralEvents = @($events | Where-Object {
+        $_.EventName -eq 'regular_v4_receive_recovery_contract_closed_no_deferral'
+    })
     $regularV4RepairCachePressureEvents = @($events | Where-Object {
         $_.EventName -eq 'filetransfer_sender_repair_cache_pressure_entered'
     })
@@ -8486,6 +8492,53 @@ function Get-FileTransferRecoveryFailureClassification {
         return $true
     }
 
+    function Test-RegularV4FrontierRepairPrecontractClosureMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Accepted,
+            [Parameter(Mandatory = $true)]$Consumed,
+            [Parameter(Mandatory = $true)]$Closure
+        )
+
+        if (-not (Test-RegularV4FrontierRepairMatch -Source $Accepted -Candidate $Consumed)) {
+            return $false
+        }
+
+        if ([int64]$Consumed.Sequence -le [int64]$Accepted.Sequence -or
+            [int64]$Closure.Sequence -le [int64]$Consumed.Sequence) {
+            return $false
+        }
+
+        foreach ($fieldName in @(
+                'session_id',
+                'transfer_id',
+                'direction',
+                'route',
+                'protocol_version',
+                'live_route_epoch',
+                'leg_generation',
+                'transport_epoch',
+                'bridge_recovery_generation')) {
+            $consumedValue = Get-FileTransferEventField -Event $Consumed -Name $fieldName -Default ''
+            $closureValue = Get-FileTransferEventField -Event $Closure -Name $fieldName -Default ''
+            if (-not [string]::IsNullOrWhiteSpace($consumedValue) -and
+                -not [string]::IsNullOrWhiteSpace($closureValue) -and
+                -not [string]::Equals($consumedValue, $closureValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        $consumedBridgeDecision = Get-FileTransferEventField -Event $Consumed -Name 'bridge_decision_generation' -Default ''
+        $closureBridgeDecision = Get-FileTransferEventField -Event $Closure -Name 'bridge_decision_generation' -Default ''
+        if (-not [string]::IsNullOrWhiteSpace($consumedBridgeDecision) -and
+            -not [string]::IsNullOrWhiteSpace($closureBridgeDecision) -and
+            $consumedBridgeDecision -ne '0' -and
+            -not [string]::Equals($consumedBridgeDecision, $closureBridgeDecision, [System.StringComparison]::Ordinal)) {
+            return $false
+        }
+
+        return $true
+    }
+
     $regularV4FrontierRepairAcceptedSettlementMissingHandoffEvents = @(
         foreach ($accepted in $regularV4FrontierRepairSettlementAcceptedEvents) {
             $acceptedSequence = [int64]$accepted.Sequence
@@ -8493,7 +8546,20 @@ function Get-FileTransferRecoveryFailureClassification {
                 [int64]$_.Sequence -gt $acceptedSequence -and
                 (Test-RegularV4FrontierRepairMatch -Source $accepted -Candidate $_)
             })
-            if ($handoff.Count -eq 0) {
+            $precontractClosure = @(
+                foreach ($consumed in @($runtimeUnlockRegularV4FrontierRepairPrecontractSettlementConsumedEvents | Where-Object {
+                    [int64]$_.Sequence -gt $acceptedSequence -and
+                    (Test-RegularV4FrontierRepairMatch -Source $accepted -Candidate $_)
+                })) {
+                    $closed = @($regularV4ReceiveRecoveryClosedNoDeferralEvents | Where-Object {
+                        Test-RegularV4FrontierRepairPrecontractClosureMatch -Accepted $accepted -Consumed $consumed -Closure $_
+                    })
+                    if ($closed.Count -gt 0) {
+                        $consumed
+                    }
+                }
+            )
+            if ($handoff.Count -eq 0 -and $precontractClosure.Count -eq 0) {
                 $accepted
             }
         }
