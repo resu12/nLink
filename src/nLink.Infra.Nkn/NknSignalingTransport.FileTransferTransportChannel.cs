@@ -2262,6 +2262,8 @@ public sealed partial class NknSignalingTransport
             fallbackLegGeneration,
             fallbackCheckpointRequestId,
             liveRouteEpoch,
+            fallbackTransportEpoch: 0,
+            fallbackBridgeRecoveryGeneration: 0,
             FileTransferDirection.Outbound);
 
     private void TrackAuthorizedFileTransferRouteHintForTests(
@@ -2284,6 +2286,8 @@ public sealed partial class NknSignalingTransport
             fallbackLegGeneration: 0,
             fallbackCheckpointRequestId: null,
             liveRouteEpoch: 0,
+            fallbackTransportEpoch: 0,
+            fallbackBridgeRecoveryGeneration: 0,
             direction);
 
     private void TrackAuthorizedFileTransferRouteHintForTestsCore(
@@ -2299,6 +2303,8 @@ public sealed partial class NknSignalingTransport
         long fallbackLegGeneration,
         string? fallbackCheckpointRequestId,
         int liveRouteEpoch,
+        long fallbackTransportEpoch,
+        int fallbackBridgeRecoveryGeneration,
         FileTransferDirection direction)
     {
         if (string.IsNullOrWhiteSpace(transferId) ||
@@ -2333,7 +2339,9 @@ public sealed partial class NknSignalingTransport
                 fallbackLegCanSendData,
                 fallbackLegGeneration,
                 fallbackCheckpointRequestId,
-                authority));
+                authority,
+                fallbackTransportEpoch,
+                fallbackBridgeRecoveryGeneration));
     }
 
     private FileTransferRoutePublicationAuthority CreateSyntheticRoutePublicationAuthorityForTests(
@@ -2660,6 +2668,8 @@ public sealed partial class NknSignalingTransport
                     notification.FallbackLegCanSendData,
                     notification.FallbackLegGeneration,
                     sanitizedCheckpointRequestId,
+                    notification.FallbackTransportEpoch,
+                    notification.FallbackBridgeRecoveryGeneration,
                     authority.RoutePublicationGeneration,
                     authority.RuntimeGeneration,
                     authority.TerminalGeneration,
@@ -2682,13 +2692,29 @@ public sealed partial class NknSignalingTransport
 
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=filetransfer_route_hint_authorized_publication_accepted; session_id={SanitizeLogToken(notification.SessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; direction={FormatFileTransferDirection(authority.Direction)}; route={selection.TelemetryToken}; protocol_version={normalizedProtocolVersion}; live_route_epoch={authority.LiveRouteEpoch}; source={normalizedSource}; route_publication_generation={authority.RoutePublicationGeneration}; runtime_generation={authority.RuntimeGeneration}; terminal_generation={authority.TerminalGeneration}; leg_generation={authority.LegGeneration}; route_commit_generation={authority.RouteCommitGeneration ?? 0}; target_route={SanitizeLogToken(authority.TargetRouteToken)}; target_protocol_version={authority.TargetProtocolVersion}; target_transport={FormatFileTransferTransportKindForLog(authority.TargetTransport)}; route_publication_action_kind={SanitizeLogToken(authority.RoutePublicationActionKind)}; coordinator_decision_reason={SanitizeLogToken(authority.CoordinatorDecisionReason)}");
+            $"event=filetransfer_route_hint_authorized_publication_accepted; session_id={SanitizeLogToken(notification.SessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; direction={FormatFileTransferDirection(authority.Direction)}; route={selection.TelemetryToken}; protocol_version={normalizedProtocolVersion}; live_route_epoch={authority.LiveRouteEpoch}; source={normalizedSource}; fallback_leg_generation={notification.FallbackLegGeneration}; fallback_transport_epoch={notification.FallbackTransportEpoch}; fallback_bridge_recovery_generation={notification.FallbackBridgeRecoveryGeneration}; route_publication_generation={authority.RoutePublicationGeneration}; runtime_generation={authority.RuntimeGeneration}; terminal_generation={authority.TerminalGeneration}; leg_generation={authority.LegGeneration}; route_commit_generation={authority.RouteCommitGeneration ?? 0}; target_route={SanitizeLogToken(authority.TargetRouteToken)}; target_protocol_version={authority.TargetProtocolVersion}; target_transport={FormatFileTransferTransportKindForLog(authority.TargetTransport)}; route_publication_action_kind={SanitizeLogToken(authority.RoutePublicationActionKind)}; coordinator_decision_reason={SanitizeLogToken(authority.CoordinatorDecisionReason)}");
 
         if (client is RealNknClientAdapter realClient)
         {
             if (route == FileTransferRoute.PostTunaFallbackV6)
             {
                 realClient.MarkActiveFileTransferPostTunaFallbackRuntime(normalizedTransferId, normalizedSource);
+                if (normalizedProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
+                    notification.FallbackLegGeneration is > 0 and <= int.MaxValue &&
+                    notification.FallbackTransportEpoch > 0)
+                {
+                    realClient.MarkActiveFileTransferPostTunaFallbackLegAuthority(
+                        normalizedTransferId,
+                        normalizedSessionId,
+                        (int)notification.FallbackLegGeneration,
+                        selection.TelemetryToken,
+                        normalizedProtocolVersion,
+                        authority.LiveRouteEpoch,
+                        notification.FallbackTransportEpoch,
+                        notification.FallbackBridgeRecoveryGeneration,
+                        sanitizedCheckpointRequestId,
+                        normalizedSource);
+                }
             }
             else
             {
@@ -3071,6 +3097,102 @@ public sealed partial class NknSignalingTransport
         }
 
         LocalOperationalLog.Info("SessionSecurity", message);
+    }
+
+    private void LogFallbackFrontierRequestReceiveDispatchRejectedFromTransportQueue(
+        FileTransferFrontierRequestFrameV6 request,
+        NknBridgeChannel channel,
+        FileTransferTransportKind transportKind,
+        string queueReason)
+    {
+        var hasRouteHint = TryResolveFallbackFrontierRequestRouteHintForDispatchProof(
+            request,
+            out var routeHint,
+            out var decisionReason);
+
+        var firstStartChunkIndex = request.MissingRanges.Count > 0 ? request.MissingRanges[0].StartChunkIndex : -1;
+        var firstChunkCount = request.MissingRanges.Count > 0 ? request.MissingRanges[0].ChunkCount : 0;
+        var resolvedDecisionReason = string.Equals(decisionReason, "current_fallback_frontier_request", StringComparison.Ordinal)
+            ? string.IsNullOrWhiteSpace(queueReason) ? "queue_rejected" : SanitizeLogToken(queueReason)
+            : decisionReason;
+        var routeToken = hasRouteHint ? routeHint.Token : "(none)";
+        var protocolVersion = hasRouteHint ? routeHint.ProtocolVersion : 0;
+        var liveRouteEpoch = hasRouteHint ? routeHint.LiveRouteEpoch : 0;
+        var fallbackLegGeneration = hasRouteHint ? routeHint.FallbackLegGeneration : 0;
+        var fallbackTransportEpoch = hasRouteHint ? routeHint.FallbackTransportEpoch : 0;
+        var fallbackBridgeRecoveryGeneration = hasRouteHint ? routeHint.FallbackBridgeRecoveryGeneration : 0;
+        var fallbackCheckpointRequestId = hasRouteHint ? routeHint.FallbackCheckpointRequestId : null;
+        var routePublicationGeneration = hasRouteHint ? routeHint.RoutePublicationGeneration : 0;
+        LocalOperationalLog.Warn(
+            "SessionSecurity",
+            $"event=filetransfer_v6_frontier_request_receive_dispatch_rejected; direction=outbound; transfer_id={SanitizeLogToken(request.TransferId)}; session_id={SanitizeLogToken(request.SessionId)}; route={SanitizeLogToken(routeToken)}; protocol_version={protocolVersion}; live_route_epoch={liveRouteEpoch}; leg_generation={fallbackLegGeneration}; transport_epoch={request.TransportEpoch}; current_transport_epoch={fallbackTransportEpoch}; bridge_recovery_generation={fallbackBridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(fallbackCheckpointRequestId ?? "(none)")}; route_publication_generation={routePublicationGeneration}; repair_request_id={SanitizeLogToken(request.RepairRequestId ?? "(none)")}; first_start_chunk_index={firstStartChunkIndex}; first_chunk_count={firstChunkCount}; range_count={request.MissingRanges.Count}; received_transport={FormatFileTransferTransportKindForLog(transportKind)}; lane={SanitizeLogToken(MapBridgeChannel(channel))}; decision_reason={SanitizeLogToken(resolvedDecisionReason)}");
+    }
+
+    private bool TryResolveFallbackFrontierRequestRouteHintForDispatchProof(
+        FileTransferFrontierRequestFrameV6 request,
+        out FileTransferRouteHint routeHint,
+        out string decisionReason)
+    {
+        routeHint = default;
+        decisionReason = "route_hint_missing";
+        lock (gate)
+        {
+            if (!TryGetFileTransferRouteHintUnsafe(request.SessionId, request.TransferId, FileTransferDirection.Outbound, out routeHint))
+            {
+                return false;
+            }
+        }
+
+        if (routeHint.Route != FileTransferRoute.PostTunaFallbackV6)
+        {
+            decisionReason = "fallback_owner_route_mismatch";
+            return true;
+        }
+
+        if (routeHint.ProtocolVersion != FileTransferProtocol.ProtocolVersionV6)
+        {
+            decisionReason = "fallback_owner_protocol_mismatch";
+            return true;
+        }
+
+        if (routeHint.LiveRouteEpoch <= 0)
+        {
+            decisionReason = "fallback_owner_live_epoch_missing";
+            return true;
+        }
+
+        if (routeHint.FallbackLegGeneration <= 0)
+        {
+            decisionReason = "fallback_owner_leg_generation_missing";
+            return true;
+        }
+
+        if (routeHint.FallbackTransportEpoch <= 0)
+        {
+            decisionReason = "fallback_owner_transport_epoch_missing";
+            return true;
+        }
+
+        if (request.TransportEpoch <= 0)
+        {
+            decisionReason = "frontier_request_transport_epoch_missing";
+            return true;
+        }
+
+        if (request.TransportEpoch != routeHint.FallbackTransportEpoch)
+        {
+            decisionReason = "fallback_owner_transport_epoch_mismatch";
+            return true;
+        }
+
+        if (routeHint.RoutePublicationGeneration <= 0)
+        {
+            decisionReason = "fallback_owner_route_publication_missing";
+            return true;
+        }
+
+        decisionReason = "current_fallback_frontier_request";
+        return true;
     }
 
     public void ObserveFileTransferRouteHint(FileTransferRouteHintNotification notification)
@@ -9020,7 +9142,7 @@ public sealed partial class NknSignalingTransport
         private static bool ShouldBypassRegularQueueCapacityForPriorityControlFrame(FileTransferDataFrame frame)
             => frame is FileTransferFrontierRequestFrameV6;
 
-        private static void LogPriorityControlFrameQueueOutcome(
+        private void LogPriorityControlFrameQueueOutcome(
             FileTransferDataFrame frame,
             NknBridgeChannel channel,
             FileTransferTransportKind transportKind,
@@ -9038,6 +9160,14 @@ public sealed partial class NknSignalingTransport
             LocalOperationalLog.Info(
                 "SessionSecurity",
                 $"event=filetransfer_v6_frontier_request_transport_{outcome}; transport=nkn; transfer_id={SanitizeLogToken(request.TransferId)}; session_id={SanitizeLogToken(request.SessionId)}; frame_type={SanitizeLogToken(request.Type)}; lane={MapBridgeChannel(channel)}; actual_transport={FormatFileTransferTransportKindForLog(transportKind)}; priority=1; queue_capacity_bypassed={(bypassedQueueCapacity ? 1 : 0)}; queued_frames={queuedFramesAfter}; queued_bytes={queuedBytesAfter}; transport_epoch={request.TransportEpoch}; repair_request_id={SanitizeLogToken(request.RepairRequestId ?? "(none)")}; range_count={request.MissingRanges.Count}; first_start_chunk_index={(request.MissingRanges.Count > 0 ? request.MissingRanges[0].StartChunkIndex : -1)}; requested_chunk_count={(request.MissingRanges.Count > 0 ? request.MissingRanges[0].ChunkCount : 0)}; decision_reason={SanitizeLogToken(reason)}");
+            if (string.Equals(outcome, "rejected", StringComparison.Ordinal))
+            {
+                owner.LogFallbackFrontierRequestReceiveDispatchRejectedFromTransportQueue(
+                    request,
+                    channel,
+                    transportKind,
+                    reason);
+            }
         }
 
         private void RecordChunkBatchTransportSummary(

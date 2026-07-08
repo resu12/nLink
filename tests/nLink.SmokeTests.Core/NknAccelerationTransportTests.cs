@@ -15293,6 +15293,65 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public void RouteHintObserver_AuthorizedFallbackPublicationRegistersControlPlaneAuthority()
+    {
+        var options = NknTransportOptions.Load();
+        var identity = new NknIdentity(
+            "route-hint-fallback-control-plane-authority-id",
+            "route-hint-fallback-control-plane-authority.fake");
+        using var adapter = new RealNknClientAdapter(identity, options);
+        using var transport = new NknSignalingTransport(
+            adapter,
+            options,
+            identity,
+            NknTunaAccelerationOptions.Disabled,
+            accelerationLane: null);
+
+        const string sessionId = "session_route_hint_fallback_control_plane_authority";
+        const string transferId = "transfer_route_hint_fallback_control_plane_authority";
+        var logStart = GetOperationalLogLength();
+        var routeHints = Assert.IsAssignableFrom<IFileTransferRouteHintObserver>(transport);
+        routeHints.ObserveFileTransferRouteHint(CreateAuthorizedRouteHintNotification(
+            sessionId,
+            transferId,
+            FileTransferRouteResolver.PostTunaFallbackV6Token,
+            FileTransferProtocol.ProtocolVersionV6,
+            "unit_test_authorized_fallback_control_plane_authority",
+            publicationGeneration: 7,
+            runtimeGeneration: 7,
+            legGeneration: 5,
+            liveRouteEpoch: 4,
+            fallbackLegState: "active",
+            fallbackLegCanSendData: true,
+            fallbackLegGeneration: 5,
+            fallbackTransportEpoch: 2,
+            fallbackBridgeRecoveryGeneration: 1));
+
+        adapter.ReportPostTunaFallbackControlPlanePressure(
+            sessionId,
+            transferId,
+            FileTransferRouteResolver.PostTunaFallbackV6Token,
+            protocolVersion: FileTransferProtocol.ProtocolVersionV6,
+            liveRouteEpoch: 4,
+            legGeneration: 5,
+            bridgeRecoveryGeneration: 1,
+            transportEpoch: 2,
+            checkpointRequestId: null,
+            kind: "frontier_request",
+            reason: "unit_test_current_fallback_route_hint_pressure");
+
+        var logTail = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_route_hint_authorized_publication_accepted;", logTail, StringComparison.Ordinal);
+        Assert.Contains("fallback_transport_epoch=2", logTail, StringComparison.Ordinal);
+        Assert.Contains("fallback_bridge_recovery_generation=1", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_fallback_leg_authority_bridge_registered;", logTail, StringComparison.Ordinal);
+        Assert.Contains("authority_reason=unit_test_authorized_fallback_control_plane_authority", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_post_tuna_fallback_control_plane_pressure_marked;", logTail, StringComparison.Ordinal);
+        Assert.DoesNotContain("reason=authority_mismatch", logTail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task RouteHintObserver_AuthorizedFileTunaV4PublicationDrivesRouteSelection()
     {
         FakeNknClient.ResetNetwork();
@@ -25743,7 +25802,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
         string fallbackLegState = "unknown",
         bool fallbackLegCanSendData = false,
         long fallbackLegGeneration = 0,
-        string? fallbackCheckpointRequestId = null)
+        string? fallbackCheckpointRequestId = null,
+        long fallbackTransportEpoch = 0,
+        int fallbackBridgeRecoveryGeneration = 0)
     {
         publicationGeneration = publicationGeneration <= 0
             ? 1
@@ -25788,7 +25849,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 protocolVersion,
                 targetTransport,
                 routeCommitGeneration.HasValue ? "RouteCommitPublication" : "RoutePublication",
-                coordinatorReason));
+                coordinatorReason),
+            FallbackTransportEpoch: fallbackTransportEpoch,
+            FallbackBridgeRecoveryGeneration: fallbackBridgeRecoveryGeneration);
     }
 
     private static T GetPrivatePropertyValue<T>(object target, string propertyName)

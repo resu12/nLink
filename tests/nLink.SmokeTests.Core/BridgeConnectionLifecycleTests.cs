@@ -2455,7 +2455,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
             await WaitUntilAsync(
                 () => File.Exists(countFile) &&
-                      int.TryParse(File.ReadAllText(countFile).Trim(), out var count) &&
+                      TryReadIntFileShared(countFile, out var count) &&
                       count >= 2 &&
                       LocalOperationalLog.GetRecentLogText().Contains("event=nkn_bridge_receive_stall_recovery_completed", StringComparison.Ordinal),
                 TimeSpan.FromSeconds(6));
@@ -2464,7 +2464,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
             Assert.True(recovered);
             await WaitUntilAsync(
-                () => File.Exists(countFile) && int.TryParse(File.ReadAllText(countFile).Trim(), out var count) && count >= 3,
+                () => File.Exists(countFile) && TryReadIntFileShared(countFile, out var count) && count >= 3,
                 TimeSpan.FromSeconds(5));
             await Task.Delay(150, cts.Token);
             Assert.Equal(0, Volatile.Read(ref disconnectedCount));

@@ -60,6 +60,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         bool FallbackLegCanSendData,
         long FallbackLegGeneration,
         string? FallbackCheckpointRequestId,
+        long FallbackTransportEpoch,
+        int FallbackBridgeRecoveryGeneration,
         int RoutePublicationGeneration,
         int RuntimeGeneration,
         int TerminalGeneration,

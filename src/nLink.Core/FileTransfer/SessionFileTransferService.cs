@@ -14866,7 +14866,9 @@ public sealed partial class SessionFileTransferService : IDisposable
                 currentLeg?.CheckpointRequestId,
                 CreateRoutePublicationAuthority(
                     routePublicationToken,
-                    coordinatorDecisionReason)));
+                    coordinatorDecisionReason),
+                currentLeg?.TransportEpochId ?? 0,
+                currentLeg?.BridgeRecoveryGeneration ?? 0));
         }
         catch (Exception ex)
         {

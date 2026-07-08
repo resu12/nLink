@@ -351,7 +351,9 @@ public sealed record FileTransferRouteHintNotification(
     bool FallbackLegCanSendData = false,
     long FallbackLegGeneration = 0,
     string? FallbackCheckpointRequestId = null,
-    FileTransferRoutePublicationAuthority? PublicationAuthority = null);
+    FileTransferRoutePublicationAuthority? PublicationAuthority = null,
+    long FallbackTransportEpoch = 0,
+    int FallbackBridgeRecoveryGeneration = 0);
 
 public interface IFileTransferRouteHintObserver
 {
