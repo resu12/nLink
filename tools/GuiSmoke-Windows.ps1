@@ -3043,7 +3043,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
 
     function Test-TunaGuiRegularV4FrontierRepairSettlementClosed {
         param(
-            [Parameter(Mandatory = $true)][string[]]$Lines
+            [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
         )
 
         $indexedLines = @(
@@ -5740,6 +5740,7 @@ function Get-TunaGuiEvidenceSummary {
         activationEpochStarted = $false
         activationEpochRecovered = $false
         fallbackEpochStarted = $false
+        fallbackEvidenceObserved = $false
         fallbackEpochRecovered = $false
         fallbackEpochWaiting = $false
         pauseSent = $false
@@ -5863,14 +5864,14 @@ function Get-TunaGuiEvidenceSummary {
 
         if ($line.IndexOf('event=filetransfer_v6_epoch_started', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
             $line.IndexOf('handoff_kind=tuna_to_normal_fallback', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-            $summary.fallbackEpochStarted = $true
+            $summary.fallbackEvidenceObserved = $true
         }
 
         if ($line.IndexOf('event=tuna_fallback_started', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $line.IndexOf('event=tuna_fallback_filetransfer_rebind_requested', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $line.IndexOf('event=tuna_acceleration_user_stop_filetransfer_fallback_forced', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $line.IndexOf('event=filetransfer_post_tuna_recovery_started', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-            $summary.fallbackEpochStarted = $true
+            $summary.fallbackEvidenceObserved = $true
         }
 
         if (($line.IndexOf('event=filetransfer_v6_epoch_recovered', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
@@ -5911,6 +5912,7 @@ function Get-TunaGuiEvidenceSummary {
 
         if ($line.IndexOf('event=filetransfer_route_selected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
             $line.IndexOf('route=post_tuna_fallback_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $summary.fallbackEpochStarted = $true
             $summary.postTunaFallbackV6RouteObserved = $true
         }
 
@@ -6931,7 +6933,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     }
     if ($activationEpochStartedObserved) { $evidence.activationEpochStarted = $true }
     if ($activationEpochRecoveredObserved) { $evidence.activationEpochRecovered = $true }
-    if ($fallbackEpochStartedObserved) { $evidence.fallbackEpochStarted = $true }
+    if ($fallbackEpochStartedObserved) { $evidence.fallbackEvidenceObserved = $true }
     if ($fallbackEpochRecoveredObserved) { $evidence.fallbackEpochRecovered = $true }
     if ($fallbackEpochWaitingObserved) { $evidence.fallbackEpochWaiting = $true }
     foreach ($line in @($observedEvidenceLines.ToArray())) {
@@ -6961,6 +6963,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         if ($line.IndexOf('event=filetransfer_route_selected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
             $line.IndexOf('route=post_tuna_fallback_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
             $line.IndexOf('protocol_version=6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $evidence.fallbackEpochStarted = $true
             $evidence.postTunaFallbackV6RouteObserved = $true
         }
 
@@ -7351,8 +7354,6 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         $joinedRouteSequence = ($liveRouteEpochRouteChanges.ToArray() -join ',')
         if ($firstTransferTerminalBeforeFallbackSwitchOff) {
             $terminalBeforeFallbackAllowedSequences = @(
-                'file_tuna_v4',
-                'file_tuna_v4,post_tuna_fallback_v6',
                 'file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4'
             )
             $terminalBeforeFallbackExpectedRoutes = @($joinedRouteSequence.Split(',', [System.StringSplitOptions]::RemoveEmptyEntries))
@@ -7361,14 +7362,15 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
             }
             $liveRouteProof = Get-TunaGuiLiveRouteEpochProof -Observations $liveRouteEpochObservations -ExpectedRoutes $terminalBeforeFallbackExpectedRoutes
             $terminalBeforeFallbackSequenceAllowed = $terminalBeforeFallbackAllowedSequences -contains $joinedRouteSequence
-            $terminalBeforeFallbackNeedsFallbackProof = $joinedRouteSequence.IndexOf('post_tuna_fallback_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
             if (-not $evidence.tunaNegotiated -or
                 -not $evidence.activationEpochStarted -or
                 -not $evidence.activationEpochRecovered -or
-                ($terminalBeforeFallbackNeedsFallbackProof -and (-not $evidence.fallbackEpochStarted -or -not $evidence.fallbackEpochRecovered -or -not $evidence.postTunaFallbackV6RouteObserved)) -or
+                -not $evidence.fallbackEpochStarted -or
+                -not $evidence.fallbackEpochRecovered -or
+                -not $evidence.postTunaFallbackV6RouteObserved -or
                 -not $liveRouteProof.Pass -or
                 -not $terminalBeforeFallbackSequenceAllowed) {
-                throw "Tuna GUI live regular activation cycle reached terminal completion before fallback takeover but did not prove the committed Tuna prefix. sequence=$joinedRouteSequence findings=$($liveRouteProof.Findings -join '|') metadata_missing=$($liveRouteProof.MetadataMissingCount) Summary: $($evidence | ConvertTo-Json -Compress)"
+                throw "Tuna GUI live regular activation cycle reached terminal completion before fallback switch-off proof. failure_class=terminal_before_fallback_switch_off sequence=$joinedRouteSequence findings=$($liveRouteProof.Findings -join '|') metadata_missing=$($liveRouteProof.MetadataMissingCount) Summary: $($evidence | ConvertTo-Json -Compress)"
             }
         }
         elseif ($firstTransferTerminalBeforeLiveReactivation) {

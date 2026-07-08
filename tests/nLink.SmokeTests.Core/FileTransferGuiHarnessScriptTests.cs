@@ -501,6 +501,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("$terminalBeforeFallbackAllowedSequences = @(", guiText, StringComparison.Ordinal);
         Assert.Contains("'file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4'", guiText, StringComparison.Ordinal);
         Assert.Contains("$terminalBeforeFallbackExpectedRoutes = @($joinedRouteSequence.Split(',', [System.StringSplitOptions]::RemoveEmptyEntries))", guiText, StringComparison.Ordinal);
+        Assert.Contains("fallbackEvidenceObserved", guiText, StringComparison.Ordinal);
+        Assert.Contains("failure_class=terminal_before_fallback_switch_off", guiText, StringComparison.Ordinal);
         Assert.Contains("regular-to-Tuna and fallback/reactivation strict live-route epoch cycling", guiText, StringComparison.Ordinal);
         Assert.Contains("filetransfer_tuna_gui_post_transfer_connected_header_wait_skipped", guiText, StringComparison.Ordinal);
         Assert.Contains("$skipPostTransferConnectedHeaderWait", guiText, StringComparison.Ordinal);

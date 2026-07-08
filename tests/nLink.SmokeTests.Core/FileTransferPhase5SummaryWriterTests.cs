@@ -72,6 +72,106 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task RunFileTransferRouteAcceptance_Phase5RegularActivationFailsTerminalBeforeFallbackSwitchOff()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "phase5-terminal-before-fallback-switch-off");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-terminal-before-fallback-switch-off");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_ROUTE"] = "regular_nkn_v4_fast,file_tuna_v4";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_TERMINAL_BEFORE_FALLBACK_BOUNDARY"] = "1";
+
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ScenarioName", "regular-v4-live-activation-off-on-off-256mb",
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.NotEqual(0, result.ExitCode);
+
+            var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal("FAIL", summary["verdict"]);
+            Assert.Equal("FAIL", summary["correctness_verdict"]);
+            Assert.Equal("file_tuna_v4", summary["regular-v4-live-activation-off-on-off-256mb.final_route"]);
+            Assert.Equal("regular_nkn_v4_fast,file_tuna_v4", summary["regular-v4-live-activation-off-on-off-256mb.route_sequence"]);
+            Assert.Equal("file_tuna_v4", summary["regular-v4-live-activation-off-on-off-256mb.live_epoch_route_changes"]);
+            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-256mb.completed"]);
+            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-256mb.sha_ok"]);
+            Assert.Equal("terminal_before_fallback_switch_off", summary["regular-v4-live-activation-off-on-off-256mb.acceptance_failure_class"]);
+            var summaryText = File.ReadAllText(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.txt"));
+            Assert.Contains("terminal_before_fallback_switch_off", summaryText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RunFileTransferRouteAcceptance_Phase5RegularActivationClassifiesRegularV4RepairBeforeSecondTuna()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "phase5-regular-v4-repair-before-second-tuna");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-regular-v4-repair-before-second-tuna");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_ROUTE"] = "regular_nkn_v4_fast";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_TRANSIENT_SETUP_FAILURE"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_TRANSIENT_SETUP_PHASE"] = "regular_v4_frontier_repair";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_TRANSIENT_SETUP_REASON"] = "regular_v4_frontier_repair_liveness_settlement_missing";
+
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ScenarioName", "regular-v4-live-activation-off-on-off-256mb",
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.NotEqual(0, result.ExitCode);
+
+            var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal("FAIL", summary["verdict"]);
+            Assert.Equal("FAIL", summary["correctness_verdict"]);
+            Assert.Equal("regular_nkn_v4_fast", summary["regular-v4-live-activation-off-on-off-256mb.final_route"]);
+            Assert.Equal("regular_nkn_v4_fast", summary["regular-v4-live-activation-off-on-off-256mb.route_sequence"]);
+            Assert.Equal("regular_v4_frontier_repair_liveness_settlement_missing", summary["regular-v4-live-activation-off-on-off-256mb.setup_failure_reason"]);
+            Assert.Equal("regular_v4_frontier_repair_liveness_settlement_missing", summary["regular-v4-live-activation-off-on-off-256mb.acceptance_failure_class"]);
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task RunFileTransferRouteAcceptance_Phase5RegularActivationFailsTerminalBeforeSecondTunaActivation()
     {
         if (!OperatingSystem.IsWindows())

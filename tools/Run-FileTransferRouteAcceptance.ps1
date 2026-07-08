@@ -1683,7 +1683,12 @@ function Assert-Phase4RouteSummary {
         -ArtifactDir $Result.artifactDir `
         -ActualRouteChanges $Result.selectedRouteChanges `
         -ExpectedRouteChanges $ExpectedRouteChanges
-    if ($actualChangesText -ne $expectedChangesText -and -not $acceptsTerminalFallbackPrefix) {
+    $acceptsCanonicalLiveRouteSuffix = Test-RouteAcceptanceLiveRegularActivationCycleRouteSuffix `
+        -ActualRouteChanges $Result.selectedRouteChanges `
+        -ExpectedRouteChanges $ExpectedRouteChanges
+    if ($actualChangesText -ne $expectedChangesText -and
+        -not $acceptsTerminalFallbackPrefix -and
+        -not $acceptsCanonicalLiveRouteSuffix) {
         Add-RouteAcceptanceFailure -Result $Result -Message ("selected route sequence mismatch: expected {0}, actual {1}" -f $expectedChangesText, $actualChangesText)
     }
 
@@ -1769,11 +1774,37 @@ function Test-RouteAcceptanceTerminalFallbackPrefixOutcome {
     }
 
     if ($terminalBeforeFallbackSwitchOff) {
-        return [string]$actualChanges[$actualChanges.Count - 1] -eq 'file_tuna_v4' -and
+        $minimumTerminalFallbackPrefixCount = if ([string]$actualChanges[0] -eq 'regular_nkn_v4_fast') { 4 } else { 3 }
+        return $actualChanges.Count -ge $minimumTerminalFallbackPrefixCount -and
+            [string]$actualChanges[$actualChanges.Count - 1] -eq 'file_tuna_v4' -and
+            [string]$actualChanges[$actualChanges.Count - 2] -eq 'post_tuna_fallback_v6' -and
             [string]$expectedChanges[$actualChanges.Count] -eq 'post_tuna_fallback_v6'
     }
 
     return $false
+}
+
+function Test-RouteAcceptanceLiveRegularActivationCycleRouteSuffix {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ActualRouteChanges,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ExpectedRouteChanges
+    )
+
+    $actualChanges = @($ActualRouteChanges)
+    $expectedChanges = @($ExpectedRouteChanges)
+    if ($expectedChanges.Count -lt 5 -or
+        [string]$expectedChanges[0] -ne 'regular_nkn_v4_fast' -or
+        $actualChanges.Count -ne ($expectedChanges.Count - 1)) {
+        return $false
+    }
+
+    for ($i = 0; $i -lt $actualChanges.Count; $i++) {
+        if ([string]$actualChanges[$i] -ne [string]$expectedChanges[$i + 1]) {
+            return $false
+        }
+    }
+
+    return $true
 }
 
 function Test-RouteAcceptanceTerminalFallbackMeasuredPhaseOutcome {
@@ -5531,6 +5562,23 @@ function Test-RouteAcceptanceFirstTransferTerminalBeforeLiveReactivation {
     }
 }
 
+function Test-RouteAcceptanceFirstTransferTerminalBeforeFallbackSwitchOff {
+    param([Parameter(Mandatory = $true)][string]$ArtifactDir)
+
+    $summaryPath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json'
+    if (-not (Test-Path -LiteralPath $summaryPath -PathType Leaf)) {
+        return $false
+    }
+
+    try {
+        $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+        return ConvertTo-RouteAcceptanceBool -Value (Get-JsonPropertyValue -Object $summary -Name 'firstTransferTerminalBeforeFallbackSwitchOff' -DefaultValue $false)
+    }
+    catch {
+        return $false
+    }
+}
+
 function Test-Phase5CanonicalRuntimeUnlockReceiveRecoveryExhaustion {
     param(
         [Parameter(Mandatory = $true)]$Scenario,
@@ -5699,6 +5747,21 @@ function Get-Phase5FailureClass {
     }
 
     foreach ($line in $failureLines) {
+        if ($line.IndexOf('terminal_before_fallback_switch_off', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('fault_window_missed_before_terminal', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'terminal_before_fallback_switch_off'
+        }
+    }
+
+    foreach ($line in $failureLines) {
+        if ($line.IndexOf('regular_v4_frontier_repair_liveness_settlement_missing', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('regular_v4_frontier_repair_send_deferred_or_stalled', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('regular_v4_receive_recovery_settlement_missing', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'regular_v4_frontier_repair_liveness_settlement_missing'
+        }
+    }
+
+    foreach ($line in $failureLines) {
         if ($line.IndexOf('second_tuna_activation_not_proven', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $line.IndexOf('terminal_before_second_tuna_activation', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             return 'second_tuna_activation_not_proven'
@@ -5862,7 +5925,10 @@ function Assert-Phase5ScenarioRun {
 
         if (-not (Test-Phase5CanonicalSecondTunaActivationProven -Result $Result)) {
             $actualCanonicalRouteText = Join-RouteAcceptanceTokenList -Values $Result.selectedRouteChanges
-            if (Test-RouteAcceptanceFirstTransferTerminalBeforeLiveReactivation -ArtifactDir $Result.artifactDir) {
+            if (Test-RouteAcceptanceFirstTransferTerminalBeforeFallbackSwitchOff -ArtifactDir $Result.artifactDir) {
+                Add-RouteAcceptanceFailure -Result $Result -Message ("terminal_before_fallback_switch_off: expected post_tuna_fallback_v6 and second file_tuna_v4 route before terminal; actual {0}" -f $actualCanonicalRouteText)
+            }
+            elseif (Test-RouteAcceptanceFirstTransferTerminalBeforeLiveReactivation -ArtifactDir $Result.artifactDir) {
                 Add-RouteAcceptanceFailure -Result $Result -Message ("terminal_before_second_tuna_activation: expected second file_tuna_v4 route before terminal; actual {0}" -f $actualCanonicalRouteText)
             }
             else {
