@@ -84,22 +84,26 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             SetPrivateField(host, "fileTransferSessionSharedKey", null);
             var logStart = GetOperationalLogLength();
             var controlPlane = Assert.IsAssignableFrom<IFileTransferControlPlaneDeliveryTransport>(host);
-            var frame = new FileTransferReceiverStateFrameV6
+            var frame = new FileTransferFrontierRequestFrameV6
             {
                 SessionId = sessionId,
                 TransferId = transferId,
-                Epoch = 1,
                 TransportEpoch = 2,
-                ContiguousCommittedChunkIndex = 7,
-                DurableReceivedHighestChunkIndex = 7,
-                CreditUntilChunkIndexExclusive = 16,
-                BytesCommitted = 7 * 1024L,
-                RecoveryMode = "regular_nkn_state_refresh",
-                Priority = "state_refresh",
-                RepairRequestId = "v6-regular-nkn-state-refresh:rederive",
+                RecoveryMode = "frontier_repair_only",
+                Priority = "frontier",
+                RepairRequestId = "v6-frontier:2:512:1",
+                RequestCorrelationId = "frq-unit-rederive",
+                MissingRanges =
+                [
+                    new FileTransferRangeV4
+                    {
+                        StartChunkIndex = 512,
+                        ChunkCount = 1,
+                    },
+                ],
             };
             var request = new FileTransferControlPlaneDeliveryRequest(
-                FileTransferControlPlaneKind.FallbackCheckpointProof,
+                FileTransferControlPlaneKind.FrontierRequest,
                 frame,
                 "unit_test_rederive_filetransfer_key")
             {
@@ -124,6 +128,11 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=filetransfer_session_key_rederived_from_control_key;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=filetransfer_control_plane_delivery_result;", logTail, StringComparison.Ordinal);
+            Assert.Contains("repair_request_id=v6-frontier:2:512:1", logTail, StringComparison.Ordinal);
+            Assert.Contains("request_correlation_id=frq-unit-rederive", logTail, StringComparison.Ordinal);
+            Assert.Contains("first_start_chunk_index=512", logTail, StringComparison.Ordinal);
+            Assert.Contains("first_chunk_count=1", logTail, StringComparison.Ordinal);
+            Assert.Contains("range_count=1", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("File transfer session shared key is not available", logTail, StringComparison.Ordinal);
         }
         finally

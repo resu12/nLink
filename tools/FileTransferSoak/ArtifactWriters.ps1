@@ -2699,7 +2699,50 @@ function Get-FileTransferFallbackTailReconciliationProof {
                 'session_id',
                 'route',
                 'protocol_version',
-                'live_route_epoch',
+                'live_route_epoch')) {
+            $anchorValue = Get-FileTransferEventField -Event $Anchor -Name $fieldName -Default ''
+            $candidateValue = Get-FileTransferEventField -Event $Candidate -Name $fieldName -Default ''
+            if ([string]::IsNullOrWhiteSpace($anchorValue) -or
+                [string]::IsNullOrWhiteSpace($candidateValue)) {
+                return $false
+            }
+
+            if ($anchorValue -ne $candidateValue) {
+                return $false
+            }
+        }
+
+        $anchorCorrelationId = Get-FileTransferEventField -Event $Anchor -Name 'request_correlation_id' -Default ''
+        $candidateCorrelationId = Get-FileTransferEventField -Event $Candidate -Name 'request_correlation_id' -Default ''
+        if (-not [string]::IsNullOrWhiteSpace($anchorCorrelationId) -and
+            -not [string]::IsNullOrWhiteSpace($candidateCorrelationId) -and
+            $anchorCorrelationId -ne '(none)' -and
+            $candidateCorrelationId -ne '(none)') {
+            if ($anchorCorrelationId -ne $candidateCorrelationId) {
+                return $false
+            }
+
+            foreach ($fieldName in @(
+                    'repair_request_id',
+                    'first_start_chunk_index',
+                    'first_chunk_count',
+                    'range_count')) {
+                $anchorValue = Get-FileTransferEventField -Event $Anchor -Name $fieldName -Default ''
+                $candidateValue = Get-FileTransferEventField -Event $Candidate -Name $fieldName -Default ''
+                if ([string]::IsNullOrWhiteSpace($anchorValue) -or
+                    [string]::IsNullOrWhiteSpace($candidateValue)) {
+                    return $false
+                }
+
+                if ($anchorValue -ne $candidateValue) {
+                    return $false
+                }
+            }
+
+            return $true
+        }
+
+        foreach ($fieldName in @(
                 'leg_generation',
                 'bridge_recovery_generation',
                 'transport_epoch',

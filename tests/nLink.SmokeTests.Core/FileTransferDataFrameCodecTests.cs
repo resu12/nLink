@@ -322,6 +322,7 @@ public sealed class FileTransferDataFrameCodecTests
                 TransferId = "transfer_handoff",
                 TransportEpoch = 12,
                 RepairRequestId = " repair-1 ",
+                RequestCorrelationId = " frq-unit-correlation ",
                 Priority = " frontier ",
                 RecoveryMode = " frontier_repair_only ",
                 MissingRanges =
@@ -365,6 +366,7 @@ public sealed class FileTransferDataFrameCodecTests
         var request = Assert.IsType<FileTransferFrontierRequestFrameV6>(requestFrame);
         Assert.Equal(12, request.TransportEpoch);
         Assert.Equal("repair-1", request.RepairRequestId);
+        Assert.Equal("frq-unit-correlation", request.RequestCorrelationId);
         Assert.Equal("frontier", request.Priority);
         var range = Assert.Single(request.MissingRanges);
         Assert.Equal(10, range.StartChunkIndex);

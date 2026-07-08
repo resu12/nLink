@@ -321,6 +321,8 @@ public record FileTransferFrontierRequestFrameV6 : FileTransferDataFrame
 
     public string? RepairRequestId { get; init; }
 
+    public string? RequestCorrelationId { get; init; }
+
     public IReadOnlyList<FileTransferRangeV4> MissingRanges { get; init; } = [];
 
     public string? Priority { get; init; }

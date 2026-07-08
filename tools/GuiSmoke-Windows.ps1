@@ -2773,7 +2773,50 @@ function Test-TunaGuiFallbackFrontierRequestDispatchTupleMatch {
             'session_id',
             'route',
             'protocol_version',
-            'live_route_epoch',
+            'live_route_epoch')) {
+        $acceptedValue = Get-GuiSmokeDelimitedLogField -Line $AcceptedLine -Name $fieldName
+        $dispatchValue = Get-GuiSmokeDelimitedLogField -Line $DispatchLine -Name $fieldName
+        if ([string]::IsNullOrWhiteSpace($acceptedValue) -or
+            [string]::IsNullOrWhiteSpace($dispatchValue)) {
+            return $false
+        }
+
+        if (-not [string]::Equals($acceptedValue, $dispatchValue, [System.StringComparison]::Ordinal)) {
+            return $false
+        }
+    }
+
+    $acceptedCorrelationId = Get-GuiSmokeDelimitedLogField -Line $AcceptedLine -Name 'request_correlation_id'
+    $dispatchCorrelationId = Get-GuiSmokeDelimitedLogField -Line $DispatchLine -Name 'request_correlation_id'
+    if (-not [string]::IsNullOrWhiteSpace($acceptedCorrelationId) -and
+        -not [string]::IsNullOrWhiteSpace($dispatchCorrelationId) -and
+        -not [string]::Equals($acceptedCorrelationId, '(none)', [System.StringComparison]::OrdinalIgnoreCase) -and
+        -not [string]::Equals($dispatchCorrelationId, '(none)', [System.StringComparison]::OrdinalIgnoreCase)) {
+        if (-not [string]::Equals($acceptedCorrelationId, $dispatchCorrelationId, [System.StringComparison]::Ordinal)) {
+            return $false
+        }
+
+        foreach ($fieldName in @(
+                'repair_request_id',
+                'first_start_chunk_index',
+                'first_chunk_count',
+                'range_count')) {
+            $acceptedValue = Get-GuiSmokeDelimitedLogField -Line $AcceptedLine -Name $fieldName
+            $dispatchValue = Get-GuiSmokeDelimitedLogField -Line $DispatchLine -Name $fieldName
+            if ([string]::IsNullOrWhiteSpace($acceptedValue) -or
+                [string]::IsNullOrWhiteSpace($dispatchValue)) {
+                return $false
+            }
+
+            if (-not [string]::Equals($acceptedValue, $dispatchValue, [System.StringComparison]::Ordinal)) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    foreach ($fieldName in @(
             'leg_generation',
             'bridge_recovery_generation',
             'transport_epoch',

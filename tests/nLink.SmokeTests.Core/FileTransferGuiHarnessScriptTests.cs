@@ -236,6 +236,11 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("Test-TunaGuiFallbackFrontierRequestDispatchTupleMatch", scriptText, StringComparison.Ordinal);
         Assert.Contains("'live_route_epoch'", scriptText, StringComparison.Ordinal);
         Assert.Contains("'transport_epoch'", scriptText, StringComparison.Ordinal);
+        Assert.Contains("'repair_request_id'", scriptText, StringComparison.Ordinal);
+        Assert.Contains("'request_correlation_id'", scriptText, StringComparison.Ordinal);
+        Assert.Contains("'first_start_chunk_index'", scriptText, StringComparison.Ordinal);
+        Assert.Contains("'first_chunk_count'", scriptText, StringComparison.Ordinal);
+        Assert.Contains("'range_count'", scriptText, StringComparison.Ordinal);
         Assert.Contains("'checkpoint_request_id'", scriptText, StringComparison.Ordinal);
         Assert.Contains("filetransfer_v6_frontier_request_receive_dispatched", scriptText, StringComparison.Ordinal);
         Assert.Contains("filetransfer_v6_frontier_request_receive_dispatch_rejected", scriptText, StringComparison.Ordinal);

@@ -249,6 +249,7 @@ public static class FileTransferDataFrameCodec
                     WriteInt32(buffer, range.StartChunkIndex);
                     WriteInt32(buffer, range.ChunkCount);
                 }
+                WriteOptionalString(buffer, frontierRequest.RequestCorrelationId);
                 break;
             case FileTransferRepairProofFrameV6 repairProof:
                 WriteInt32(buffer, repairProof.AppliedChunkCount);
@@ -766,6 +767,13 @@ public static class FileTransferDataFrameCodec
                     };
                 }
 
+                string? v6FrontierRequestCorrelationId = null;
+                if (!reader.IsFullyConsumed &&
+                    !reader.TryReadOptionalString(out v6FrontierRequestCorrelationId))
+                {
+                    return false;
+                }
+
                 if (!reader.IsFullyConsumed)
                 {
                     return false;
@@ -777,6 +785,7 @@ public static class FileTransferDataFrameCodec
                     TransferId = transferId,
                     TransportEpoch = metadata.TransportEpoch,
                     RepairRequestId = metadata.RepairRequestId,
+                    RequestCorrelationId = v6FrontierRequestCorrelationId,
                     MissingRanges = frontierRanges,
                     Priority = metadata.Priority,
                     RecoveryMode = metadata.RecoveryMode,
@@ -1184,6 +1193,7 @@ public static class FileTransferDataFrameCodec
                     SessionId = sessionId,
                     TransferId = transferId,
                     RepairRequestId = NormalizeTransportMetadataToken(frontierRequest.RepairRequestId),
+                    RequestCorrelationId = NormalizeTransportMetadataToken(frontierRequest.RequestCorrelationId),
                     MissingRanges = frontierRanges,
                     Priority = NormalizeTransportMetadataToken(frontierRequest.Priority),
                     RecoveryMode = NormalizeTransportMetadataToken(frontierRequest.RecoveryMode),

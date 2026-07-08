@@ -326,9 +326,10 @@ public sealed partial class NknSignalingTransport
 
         if (request.PreTransportDeliveryValidator is not null && !request.PreTransportDeliveryValidator())
         {
+            var frameCorrelation = FormatControlPlaneFrameCorrelationSuffix(frame);
             LocalOperationalLog.Warn(
                 "SessionSecurity",
-                $"event=filetransfer_control_plane_delivery_pre_send_validation_failed; transport=nkn; direction={FormatFileTransferDirection(request.Direction)}; kind={FormatFileTransferControlPlaneKind(request.Kind)}; transfer_id={normalizedTransferId}; session_id={SanitizeLogToken(frame.SessionId)}; route={SanitizeLogToken(request.RouteToken ?? "(none)")}; protocol_version={request.ProtocolVersion}; live_route_epoch={request.LiveRouteEpoch}; leg_generation={request.TransferLegGeneration}; bridge_recovery_generation={request.BridgeRecoveryGeneration}; transport_epoch={request.TransportEpoch}; checkpoint_request_id={SanitizeLogToken(request.CheckpointRequestId ?? "(none)")}; reason={SanitizeLogToken(request.Reason)}; frame_type={SanitizeLogToken(frame.Type)}");
+                $"event=filetransfer_control_plane_delivery_pre_send_validation_failed; transport=nkn; direction={FormatFileTransferDirection(request.Direction)}; kind={FormatFileTransferControlPlaneKind(request.Kind)}; transfer_id={normalizedTransferId}; session_id={SanitizeLogToken(frame.SessionId)}; route={SanitizeLogToken(request.RouteToken ?? "(none)")}; protocol_version={request.ProtocolVersion}; live_route_epoch={request.LiveRouteEpoch}; leg_generation={request.TransferLegGeneration}; bridge_recovery_generation={request.BridgeRecoveryGeneration}; transport_epoch={request.TransportEpoch}; checkpoint_request_id={SanitizeLogToken(request.CheckpointRequestId ?? "(none)")}; reason={SanitizeLogToken(request.Reason)}; frame_type={SanitizeLogToken(frame.Type)}{frameCorrelation}");
             return CreateFileTransferControlPlanePreSendValidationFailureResult(request, normalizedTransferId, frame.SessionId);
         }
 
@@ -398,9 +399,10 @@ public sealed partial class NknSignalingTransport
 
         RecordPostTunaFallbackControlPlaneProofHint(request, result);
 
+        var deliveryFrameCorrelation = FormatControlPlaneFrameCorrelationSuffix(frame);
         LocalOperationalLog.Info(
             "SessionSecurity",
-            $"event=filetransfer_control_plane_delivery_result; transport=nkn; direction={FormatFileTransferDirection(request.Direction)}; kind={FormatFileTransferControlPlaneKind(request.Kind)}; transfer_id={normalizedTransferId}; session_id={SanitizeLogToken(frame.SessionId)}; route={SanitizeLogToken(request.RouteToken ?? "(none)")}; protocol_version={request.ProtocolVersion}; live_route_epoch={request.LiveRouteEpoch}; leg_generation={request.TransferLegGeneration}; bridge_recovery_generation={request.BridgeRecoveryGeneration}; transport_epoch={request.TransportEpoch}; checkpoint_request_id={SanitizeLogToken(request.CheckpointRequestId ?? "(none)")}; reason={SanitizeLogToken(request.Reason)}; frame_type={SanitizeLogToken(frame.Type)}; msg_id={result.MessageId}; control_queue={(result.ControlQueue ? 1 : 0)}; control_copy={(result.ControlCopy ? 1 : 0)}; bulk_copy={(result.BulkCopy ? 1 : 0)}; peer_visible_any={(result.PeerVisibleAny ? 1 : 0)}; accepted_any={(result.AcceptedAny ? 1 : 0)}; local_only_rejected={(result.ControlQueue && !result.PeerVisibleAny && request.PeerVisibleRequired ? 1 : 0)}; control_queue_error={result.ControlQueueErrorName}; control_copy_error={result.ControlCopyErrorName}; bulk_copy_error={result.BulkCopyErrorName}");
+            $"event=filetransfer_control_plane_delivery_result; transport=nkn; direction={FormatFileTransferDirection(request.Direction)}; kind={FormatFileTransferControlPlaneKind(request.Kind)}; transfer_id={normalizedTransferId}; session_id={SanitizeLogToken(frame.SessionId)}; route={SanitizeLogToken(request.RouteToken ?? "(none)")}; protocol_version={request.ProtocolVersion}; live_route_epoch={request.LiveRouteEpoch}; leg_generation={request.TransferLegGeneration}; bridge_recovery_generation={request.BridgeRecoveryGeneration}; transport_epoch={request.TransportEpoch}; checkpoint_request_id={SanitizeLogToken(request.CheckpointRequestId ?? "(none)")}; reason={SanitizeLogToken(request.Reason)}; frame_type={SanitizeLogToken(frame.Type)}{deliveryFrameCorrelation}; msg_id={result.MessageId}; control_queue={(result.ControlQueue ? 1 : 0)}; control_copy={(result.ControlCopy ? 1 : 0)}; bulk_copy={(result.BulkCopy ? 1 : 0)}; peer_visible_any={(result.PeerVisibleAny ? 1 : 0)}; accepted_any={(result.AcceptedAny ? 1 : 0)}; local_only_rejected={(result.ControlQueue && !result.PeerVisibleAny && request.PeerVisibleRequired ? 1 : 0)}; control_queue_error={result.ControlQueueErrorName}; control_copy_error={result.ControlCopyErrorName}; bulk_copy_error={result.BulkCopyErrorName}");
 
         return new FileTransferControlPlaneDeliveryResult(
             request.Kind,
@@ -417,6 +419,19 @@ public sealed partial class NknSignalingTransport
             result.ControlAckErrorName,
             result.ControlCopyErrorName,
             result.BulkCopyErrorName);
+    }
+
+    private static string FormatControlPlaneFrameCorrelationSuffix(FileTransferDataFrame frame)
+    {
+        if (frame is not FileTransferFrontierRequestFrameV6 request)
+        {
+            return string.Empty;
+        }
+
+        var rangeCount = request.MissingRanges.Count;
+        var firstStartChunkIndex = rangeCount > 0 ? request.MissingRanges[0].StartChunkIndex : -1;
+        var firstChunkCount = rangeCount > 0 ? request.MissingRanges[0].ChunkCount : 0;
+        return $"; repair_request_id={SanitizeLogToken(request.RepairRequestId ?? "(none)")}; request_correlation_id={SanitizeLogToken(request.RequestCorrelationId ?? "(none)")}; first_start_chunk_index={firstStartChunkIndex}; first_chunk_count={firstChunkCount}; range_count={rangeCount}; recovery_mode={SanitizeLogToken(request.RecoveryMode ?? "(none)")}; priority={SanitizeLogToken(request.Priority ?? "(none)")}";
     }
 
     private static FileTransferControlPlaneDeliveryResult CreateFileTransferControlPlanePreSendValidationFailureResult(
@@ -3125,7 +3140,7 @@ public sealed partial class NknSignalingTransport
         var routePublicationGeneration = hasRouteHint ? routeHint.RoutePublicationGeneration : 0;
         LocalOperationalLog.Warn(
             "SessionSecurity",
-            $"event=filetransfer_v6_frontier_request_receive_dispatch_rejected; direction=outbound; transfer_id={SanitizeLogToken(request.TransferId)}; session_id={SanitizeLogToken(request.SessionId)}; route={SanitizeLogToken(routeToken)}; protocol_version={protocolVersion}; live_route_epoch={liveRouteEpoch}; leg_generation={fallbackLegGeneration}; transport_epoch={request.TransportEpoch}; current_transport_epoch={fallbackTransportEpoch}; bridge_recovery_generation={fallbackBridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(fallbackCheckpointRequestId ?? "(none)")}; route_publication_generation={routePublicationGeneration}; repair_request_id={SanitizeLogToken(request.RepairRequestId ?? "(none)")}; first_start_chunk_index={firstStartChunkIndex}; first_chunk_count={firstChunkCount}; range_count={request.MissingRanges.Count}; received_transport={FormatFileTransferTransportKindForLog(transportKind)}; lane={SanitizeLogToken(MapBridgeChannel(channel))}; decision_reason={SanitizeLogToken(resolvedDecisionReason)}");
+            $"event=filetransfer_v6_frontier_request_receive_dispatch_rejected; direction=outbound; transfer_id={SanitizeLogToken(request.TransferId)}; session_id={SanitizeLogToken(request.SessionId)}; route={SanitizeLogToken(routeToken)}; protocol_version={protocolVersion}; live_route_epoch={liveRouteEpoch}; leg_generation={fallbackLegGeneration}; transport_epoch={request.TransportEpoch}; current_transport_epoch={fallbackTransportEpoch}; bridge_recovery_generation={fallbackBridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(fallbackCheckpointRequestId ?? "(none)")}; route_publication_generation={routePublicationGeneration}; repair_request_id={SanitizeLogToken(request.RepairRequestId ?? "(none)")}; request_correlation_id={SanitizeLogToken(request.RequestCorrelationId ?? "(none)")}; first_start_chunk_index={firstStartChunkIndex}; first_chunk_count={firstChunkCount}; range_count={request.MissingRanges.Count}; received_transport={FormatFileTransferTransportKindForLog(transportKind)}; lane={SanitizeLogToken(MapBridgeChannel(channel))}; decision_reason={SanitizeLogToken(resolvedDecisionReason)}");
     }
 
     private bool TryResolveFallbackFrontierRequestRouteHintForDispatchProof(
@@ -9159,7 +9174,7 @@ public sealed partial class NknSignalingTransport
 
             LocalOperationalLog.Info(
                 "SessionSecurity",
-                $"event=filetransfer_v6_frontier_request_transport_{outcome}; transport=nkn; transfer_id={SanitizeLogToken(request.TransferId)}; session_id={SanitizeLogToken(request.SessionId)}; frame_type={SanitizeLogToken(request.Type)}; lane={MapBridgeChannel(channel)}; actual_transport={FormatFileTransferTransportKindForLog(transportKind)}; priority=1; queue_capacity_bypassed={(bypassedQueueCapacity ? 1 : 0)}; queued_frames={queuedFramesAfter}; queued_bytes={queuedBytesAfter}; transport_epoch={request.TransportEpoch}; repair_request_id={SanitizeLogToken(request.RepairRequestId ?? "(none)")}; range_count={request.MissingRanges.Count}; first_start_chunk_index={(request.MissingRanges.Count > 0 ? request.MissingRanges[0].StartChunkIndex : -1)}; requested_chunk_count={(request.MissingRanges.Count > 0 ? request.MissingRanges[0].ChunkCount : 0)}; decision_reason={SanitizeLogToken(reason)}");
+                $"event=filetransfer_v6_frontier_request_transport_{outcome}; transport=nkn; transfer_id={SanitizeLogToken(request.TransferId)}; session_id={SanitizeLogToken(request.SessionId)}; frame_type={SanitizeLogToken(request.Type)}; lane={MapBridgeChannel(channel)}; actual_transport={FormatFileTransferTransportKindForLog(transportKind)}; priority=1; queue_capacity_bypassed={(bypassedQueueCapacity ? 1 : 0)}; queued_frames={queuedFramesAfter}; queued_bytes={queuedBytesAfter}; transport_epoch={request.TransportEpoch}; repair_request_id={SanitizeLogToken(request.RepairRequestId ?? "(none)")}; request_correlation_id={SanitizeLogToken(request.RequestCorrelationId ?? "(none)")}; range_count={request.MissingRanges.Count}; first_start_chunk_index={(request.MissingRanges.Count > 0 ? request.MissingRanges[0].StartChunkIndex : -1)}; requested_chunk_count={(request.MissingRanges.Count > 0 ? request.MissingRanges[0].ChunkCount : 0)}; decision_reason={SanitizeLogToken(reason)}");
             if (string.Equals(outcome, "rejected", StringComparison.Ordinal))
             {
                 owner.LogFallbackFrontierRequestReceiveDispatchRejectedFromTransportQueue(
