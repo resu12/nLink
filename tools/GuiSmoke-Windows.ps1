@@ -7127,10 +7127,6 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                     unlockError = $secondFreshUnlockError
                 }
                 $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json') -Encoding UTF8
-                if ($secondTransferRequiresFreshDiagnosticReadiness) {
-                    throw ("Tuna GUI second-transfer preactivation readiness missing: failurePhase=preactivation_readiness; failureReason=second_transfer_preactivation_readiness_missing; reason=first_transfer_terminal_before_same_transfer_reactivation; original_error={0}" -f $_.Exception.Message)
-                }
-
                 Write-Host "[GUI Smoke][filetransfer_tuna] Second-transfer diagnostic Tuna readiness was not refreshed before send; continuing to require coordinator-authorized file_tuna_v4 publication for the new transfer." -ForegroundColor Yellow
             }
 

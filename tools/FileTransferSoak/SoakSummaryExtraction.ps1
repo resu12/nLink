@@ -586,6 +586,58 @@ function Test-FileTransferRouteEventCanPrecedeSelection {
         $reason -eq 'live_route_tuna_reactivated'
 }
 
+function Test-FileTransferFallbackLegStartRouteEvent {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    if ($Event.EventName -notin @(
+            'filetransfer_leg_started',
+            'filetransfer_clean_fallback_leg_started',
+            'filetransfer_fallback_leg_recovery_generation_started')) {
+        return $false
+    }
+
+    $route = Get-FileTransferEventField -Event $Event -Name 'route' -Default ''
+    $protocolVersion = Get-FileTransferEventField -Event $Event -Name 'protocol_version' -Default ''
+    return [string]::Equals($route, 'post_tuna_fallback_v6', [System.StringComparison]::OrdinalIgnoreCase) -and
+        $protocolVersion -eq '6'
+}
+
+function Test-FileTransferFallbackLegStartRouteEventBeforeSelection {
+    param(
+        [Parameter(Mandatory = $true)]$Event,
+        [Parameter(Mandatory = $true)]$RouteSelectedEvents
+    )
+
+    if (-not (Test-FileTransferFallbackLegStartRouteEvent -Event $Event)) {
+        return $false
+    }
+
+    $transferKey = Get-FileTransferRouteEventKey -Event $Event
+    $direction = Get-FileTransferRouteEventDirection -Event $Event
+    $eventLiveRouteEpoch = Get-FileTransferEventInt64Field -Event $Event -Name 'live_route_epoch' -Default 0
+    $eventLegGeneration = Get-FileTransferEventInt64Field -Event $Event -Name 'leg_generation' -Default 0
+    if ($eventLiveRouteEpoch -le 0 -or $eventLegGeneration -le 0) {
+        return $false
+    }
+
+    $matchingSelections = @(
+        $RouteSelectedEvents |
+            Where-Object {
+                (Get-FileTransferRouteEventKey -Event $_) -eq $transferKey -and
+                [string]::Equals((Get-FileTransferEventField -Event $_ -Name 'route' -Default ''), 'post_tuna_fallback_v6', [System.StringComparison]::OrdinalIgnoreCase) -and
+                (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -eq '6' -and
+                ([string]::IsNullOrWhiteSpace($direction) -or
+                    [string]::Equals((Get-FileTransferRouteEventDirection -Event $_), $direction, [System.StringComparison]::OrdinalIgnoreCase)) -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'live_route_epoch' -Default 0) -eq $eventLiveRouteEpoch -and
+                (Get-FileTransferEventInt64Field -Event $_ -Name 'leg_generation' -Default 0) -eq $eventLegGeneration
+            }
+    )
+
+    $matchingBefore = @($matchingSelections | Where-Object { $_.Sequence -le $Event.Sequence })
+    $matchingAfter = @($matchingSelections | Where-Object { $_.Sequence -gt $Event.Sequence })
+    return $matchingBefore.Count -eq 0 -and $matchingAfter.Count -gt 0
+}
+
 function Test-FileTransferFallbackAuthorityRouteEvent {
     param([Parameter(Mandatory = $true)]$Event)
 
@@ -1071,6 +1123,11 @@ function Get-FileTransferRouteConsistency {
 
         if (Test-FileTransferRouteEventCanPrecedeSelection -Event $event) {
             Add-FileTransferRouteSelfConsistencyFindings -Findings $findings -EvidenceEvents $evidenceEvents -Event $event -Context 'preselection transfer leg'
+            continue
+        }
+
+        if (Test-FileTransferFallbackLegStartRouteEventBeforeSelection -Event $event -RouteSelectedEvents $routeStateEvents) {
+            Add-FileTransferRouteSelfConsistencyFindings -Findings $findings -EvidenceEvents $evidenceEvents -Event $event -Context 'fallback preselection transfer leg'
             continue
         }
 

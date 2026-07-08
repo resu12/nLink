@@ -14411,7 +14411,8 @@ public sealed partial class NknSignalingTransport
                 settlement,
                 stateSnapshot,
                 out var rejectionReason,
-                allowPreRecoveryBridgeDecisionGeneration: true))
+                allowPreRecoveryBridgeDecisionGeneration: true,
+                acceptedByTransportAuthority: true))
         {
             if (sameTransfer)
             {
@@ -14610,8 +14611,15 @@ public sealed partial class NknSignalingTransport
 
         if (blockedState?.RegularV4RecoveryRoutePublicationGeneration > 0)
         {
-            if (candidate.RoutePublicationGeneration < blockedState.RegularV4RecoveryRoutePublicationGeneration ||
-                (blockedState.RegularV4RecoveryRouteCommitGeneration ?? 0) > (candidate.RouteCommitGeneration ?? 0))
+            var blockedRoutePublicationAhead =
+                candidate.RoutePublicationGeneration < blockedState.RegularV4RecoveryRoutePublicationGeneration;
+            var blockedRouteCommitAhead =
+                (blockedState.RegularV4RecoveryRouteCommitGeneration ?? 0) > (candidate.RouteCommitGeneration ?? 0);
+            if ((blockedRoutePublicationAhead || blockedRouteCommitAhead) &&
+                (!acceptedByTransportAuthority ||
+                 IsRegularV4FrontierRepairSettlementSupersededByCurrentRoutePublication(
+                     livenessSnapshot,
+                     candidate)))
             {
                 rejectionReason = "frontier_settlement_route_publication_mismatch";
                 return false;
@@ -14703,7 +14711,14 @@ public sealed partial class NknSignalingTransport
 
         if (routeHint.RoutePublicationGeneration > settlement.RoutePublicationGeneration)
         {
-            return true;
+            return routeHint.Route != FileTransferRoute.RegularNknV4Fast ||
+                   !string.Equals(routeHint.Token, settlement.RouteToken, StringComparison.Ordinal) ||
+                   routeHint.ProtocolVersion != settlement.ProtocolVersion ||
+                   routeHint.LiveRouteEpoch != settlement.LiveRouteEpoch ||
+                   routeHint.RuntimeGeneration != settlement.RuntimeGeneration ||
+                   routeHint.TerminalGeneration != settlement.TerminalGeneration ||
+                   routeHint.PublicationLegGeneration != settlement.LegGeneration ||
+                   (routeHint.RouteCommitGeneration ?? 0) != (settlement.RouteCommitGeneration ?? 0);
         }
 
         if (routeHint.RoutePublicationGeneration < settlement.RoutePublicationGeneration)
@@ -14988,7 +15003,8 @@ public sealed partial class NknSignalingTransport
                 blockedState: null,
                 out var frontierSettlementRejectionReason,
                 allowPreRecoveryFrontierSettlement,
-                allowClosureOutcomes: true);
+                allowClosureOutcomes: true,
+                acceptedByTransportAuthority: frontierSettlement is not null);
         var explicitFailureFrontierSettlement =
             frontierSettlement is not null &&
             IsRegularV4FrontierRepairSettlementExplicitFailureOutcome(frontierSettlement.Outcome);
@@ -15077,7 +15093,8 @@ public sealed partial class NknSignalingTransport
                         state,
                         out frontierSettlementRejectionReason,
                         allowPreRecoveryFrontierSettlement,
-                        allowClosureOutcomes: true);
+                        allowClosureOutcomes: true,
+                        acceptedByTransportAuthority: true);
             }
 
             if (state.ContractState is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed)

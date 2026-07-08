@@ -11073,6 +11073,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             "candidate.RoutePublicationGeneration < blockedState.RegularV4RecoveryRoutePublicationGeneration",
             source,
             StringComparison.Ordinal);
+        Assert.Contains("acceptedByTransportAuthority: true", source, StringComparison.Ordinal);
+        Assert.Contains("blockedRoutePublicationAhead", source, StringComparison.Ordinal);
+        Assert.Contains("routeHint.RoutePublicationGeneration > settlement.RoutePublicationGeneration", source, StringComparison.Ordinal);
+        Assert.Contains("routeHint.Route != FileTransferRoute.RegularNknV4Fast", source, StringComparison.Ordinal);
         Assert.Contains("blockedReceiveRecoveryStateSnapshot is not null", source, StringComparison.Ordinal);
         Assert.Contains("\"runtime_unlock_regular_v4_frontier_repair_settlement_rejected\"", source, StringComparison.Ordinal);
         Assert.Contains("retryReason: blockedReceiveRecoveryStateSnapshot.RetryReason", source, StringComparison.Ordinal);
