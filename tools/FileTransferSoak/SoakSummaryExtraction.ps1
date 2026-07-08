@@ -739,10 +739,19 @@ function Get-FileTransferSelectedRouteForEvent {
             } |
             Sort-Object Sequence
     )
+    $routeMatchCandidates = $candidates
+    if (-not [string]::IsNullOrWhiteSpace($direction)) {
+        $routeMatchCandidates = @(
+            $candidates |
+                Where-Object {
+                    [string]::Equals((Get-FileTransferRouteEventDirection -Event $_), $direction, [System.StringComparison]::OrdinalIgnoreCase)
+                }
+        )
+    }
 
     if (-not [string]::IsNullOrWhiteSpace($eventRoute) -and $eventLiveRouteEpoch -gt 0) {
         $epochCandidates = @(
-            $candidates |
+            $routeMatchCandidates |
                 Where-Object {
                     (Get-FileTransferEventInt64Field -Event $_ -Name 'live_route_epoch' -Default 0) -eq $eventLiveRouteEpoch -and
                     [string]::Equals((Get-FileTransferEventField -Event $_ -Name 'route' -Default ''), $eventRoute, [System.StringComparison]::OrdinalIgnoreCase)
@@ -754,8 +763,23 @@ function Get-FileTransferSelectedRouteForEvent {
         }
     }
 
-    if (-not [string]::IsNullOrWhiteSpace($eventRoute) -and $candidates.Count -gt 0) {
-        $latestCandidate = $candidates[-1]
+    if (-not [string]::IsNullOrWhiteSpace($eventRoute) -and $routeMatchCandidates.Count -gt 0) {
+        $eventRoutePublicationGeneration = Get-FileTransferEventInt64Field -Event $Event -Name 'route_publication_generation' -Default 0
+        if ($eventRoutePublicationGeneration -gt 0) {
+            $publicationCandidates = @(
+                $routeMatchCandidates |
+                    Where-Object {
+                        [string]::Equals((Get-FileTransferEventField -Event $_ -Name 'route' -Default ''), $eventRoute, [System.StringComparison]::OrdinalIgnoreCase) -and
+                        (Get-FileTransferEventInt64Field -Event $_ -Name 'route_publication_generation' -Default 0) -le $eventRoutePublicationGeneration
+                    } |
+                    Sort-Object @{ Expression = { Get-FileTransferEventInt64Field -Event $_ -Name 'route_publication_generation' -Default 0 } }, Sequence
+            )
+            if ($publicationCandidates.Count -gt 0) {
+                return $publicationCandidates[-1]
+            }
+        }
+
+        $latestCandidate = $routeMatchCandidates[-1]
         $latestRoute = Get-FileTransferEventField -Event $latestCandidate -Name 'route' -Default ''
         if ([string]::Equals($latestRoute, $eventRoute, [System.StringComparison]::OrdinalIgnoreCase)) {
             return $latestCandidate
@@ -775,7 +799,7 @@ function Get-FileTransferSelectedRouteForEvent {
         }
     }
 
-    if ($candidates.Count -gt 0) {
+    if ([string]::IsNullOrWhiteSpace($direction) -and $candidates.Count -gt 0) {
         return $candidates[-1]
     }
 

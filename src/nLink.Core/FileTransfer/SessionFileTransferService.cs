@@ -12813,7 +12813,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             return false;
         }
 
-        if (!int.TryParse(parts[7], NumberStyles.Integer, CultureInfo.InvariantCulture, out var committedChunk) ||
+        if (!long.TryParse(parts[6], NumberStyles.Integer, CultureInfo.InvariantCulture, out var transportEpoch) ||
+            !int.TryParse(parts[7], NumberStyles.Integer, CultureInfo.InvariantCulture, out var committedChunk) ||
             !int.TryParse(parts[10], NumberStyles.Integer, CultureInfo.InvariantCulture, out var missingRangeCount) ||
             missingRangeCount <= 0)
         {
@@ -12823,8 +12824,16 @@ public sealed partial class SessionFileTransferService : IDisposable
         if (repairRequestKey.StartsWith("v6-frontier:", StringComparison.Ordinal))
         {
             var keyParts = repairRequestKey.Split(':');
+            if (keyParts.Length >= 4 &&
+                long.TryParse(keyParts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var keyTransportEpoch) &&
+                keyTransportEpoch == transportEpoch &&
+                int.TryParse(keyParts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out var epochFrontierChunk))
+            {
+                return epochFrontierChunk == committedChunk;
+            }
+
             return keyParts.Length >= 3 &&
-                int.TryParse(keyParts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out var frontierChunk) &&
+                int.TryParse(keyParts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var frontierChunk) &&
                 frontierChunk == committedChunk;
         }
 

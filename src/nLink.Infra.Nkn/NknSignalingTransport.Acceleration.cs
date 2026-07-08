@@ -2395,7 +2395,8 @@ public sealed partial class NknSignalingTransport
                 blockedState: null,
                 out var rejectionReason,
                 allowPreRecoveryBridgeDecisionGeneration: true,
-                allowClosureOutcomes: true))
+                allowClosureOutcomes: true,
+                acceptedByTransportAuthority: true))
         {
             LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
                 "runtime_unlock_regular_v4_frontier_repair_settlement_rejected",
@@ -14552,7 +14553,8 @@ public sealed partial class NknSignalingTransport
         out string rejectionReason,
         bool allowPreRecoveryBridgeDecisionGeneration = false,
         bool allowClosureOutcomes = false,
-        PendingRuntimeUnlockRegularV4FrontierRepairSettlement? acceptedPrecontractAuthority = null)
+        PendingRuntimeUnlockRegularV4FrontierRepairSettlement? acceptedPrecontractAuthority = null,
+        bool acceptedByTransportAuthority = false)
     {
         rejectionReason = "none";
         if (settlement is null)
@@ -14563,7 +14565,8 @@ public sealed partial class NknSignalingTransport
 
         var candidate = settlement;
         var allowedOutcome =
-            candidate.Outcome is FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch or
+            candidate.Outcome is FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved or
+                FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch or
                 FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled ||
             (allowClosureOutcomes &&
              IsRegularV4FrontierRepairSettlementExplicitFailureOutcome(candidate.Outcome));
@@ -14634,6 +14637,20 @@ public sealed partial class NknSignalingTransport
         }
         else
         {
+            if (acceptedByTransportAuthority)
+            {
+                if (IsRegularV4FrontierRepairSettlementSupersededByCurrentRoutePublication(
+                        livenessSnapshot,
+                        candidate))
+                {
+                    rejectionReason = "frontier_settlement_route_publication_mismatch";
+                    return false;
+                }
+
+                rejectionReason = "accepted";
+                return true;
+            }
+
             FileTransferRouteHint routeHint;
             lock (gate)
             {

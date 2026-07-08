@@ -561,6 +561,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("$secondRetainedPath = Join-Path $result.artifactDir 'filetransfer-second-transfer-retained-log-slice.log'", routeAcceptanceText, StringComparison.Ordinal);
         Assert.Contains("$secondRouteAnalysisPath = Join-Path $result.artifactDir 'second-transfer-analysis\\filetransfer-route-consistency-summary.txt'", routeAcceptanceText, StringComparison.Ordinal);
         Assert.Contains("Add-RouteAcceptanceFailure -Result $result -Message 'second transfer evidence is missing'", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("$status.ContainsKey('second_transfer_started')", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("$statusStartedValue = Get-RouteAcceptanceReportValue -Report $status -Name 'second_transfer_started'", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("$hasSecondTransferStartedStatus -and -not $secondTransferStartedFromStatus", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("second transfer did not start because first transfer setup failed", routeAcceptanceText, StringComparison.Ordinal);
         Assert.Contains("second-transfer-analysis", wrapperText, StringComparison.Ordinal);
         Assert.Contains("Ensure-TunaGuiSecondTransferRetainedLogSlice", wrapperText, StringComparison.Ordinal);
         Assert.Contains("filetransfer-second-transfer-retained-log-slice-source.txt", wrapperText, StringComparison.Ordinal);
@@ -603,6 +607,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             Assert.Contains("if ($terminalSuccessTimeout)", scriptText, StringComparison.Ordinal);
             Assert.Contains("return", scriptText, StringComparison.Ordinal);
         }
+
+        Assert.Contains("$guiSummaryRaw", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("\"completed\"\\s*:\\s*(true|false)", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("\"integrityOk\"\\s*:\\s*(true|false)", routeAcceptanceText, StringComparison.Ordinal);
     }
 
     [Fact]

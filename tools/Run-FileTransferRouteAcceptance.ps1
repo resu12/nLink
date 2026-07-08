@@ -2266,13 +2266,30 @@ function Assert-Phase4ScenarioRun {
 
             if ($Scenario.Name -eq 'second-transfer-after-reactivation') {
                 $second = Get-JsonPropertyValue -Object $summary -Name 'secondTransfer' -DefaultValue $null
+                $statusPath = Join-Path $result.artifactDir 'filetransfer-second-transfer-status.txt'
+                $status = $null
+                $hasSecondTransferStartedStatus = $false
+                $secondTransferStartedFromStatus = $true
+                if (Test-Path -LiteralPath $statusPath -PathType Leaf) {
+                    $status = Read-RouteAcceptanceKeyValueArtifact -Path $statusPath
+                    if ($status.ContainsKey('second_transfer_started')) {
+                        $statusStartedValue = Get-RouteAcceptanceReportValue -Report $status -Name 'second_transfer_started' -DefaultValue ''
+                        $hasSecondTransferStartedStatus = $true
+                        $secondTransferStartedFromStatus = ConvertTo-RouteAcceptanceBool -Value $statusStartedValue
+                    }
+                }
                 $secondTransferStarted = $true
                 if ($null -eq $second) {
-                    $secondRetainedPath = Join-Path $result.artifactDir 'filetransfer-second-transfer-retained-log-slice.log'
-                    $secondRouteAnalysisPath = Join-Path $result.artifactDir 'second-transfer-analysis\filetransfer-route-consistency-summary.txt'
-                    if (-not ((Test-Path -LiteralPath $secondRetainedPath -PathType Leaf) -and
-                            (Test-Path -LiteralPath $secondRouteAnalysisPath -PathType Leaf))) {
-                        Add-RouteAcceptanceFailure -Result $result -Message 'second transfer evidence is missing'
+                    if ($hasSecondTransferStartedStatus -and -not $secondTransferStartedFromStatus) {
+                        $secondTransferStarted = $false
+                    }
+                    else {
+                        $secondRetainedPath = Join-Path $result.artifactDir 'filetransfer-second-transfer-retained-log-slice.log'
+                        $secondRouteAnalysisPath = Join-Path $result.artifactDir 'second-transfer-analysis\filetransfer-route-consistency-summary.txt'
+                        if (-not ((Test-Path -LiteralPath $secondRetainedPath -PathType Leaf) -and
+                                (Test-Path -LiteralPath $secondRouteAnalysisPath -PathType Leaf))) {
+                            Add-RouteAcceptanceFailure -Result $result -Message 'second transfer evidence is missing'
+                        }
                     }
                 }
                 else {
@@ -2309,9 +2326,7 @@ function Assert-Phase4ScenarioRun {
                 }
 
                 if (-not $secondTransferStarted) {
-                    $statusPath = Join-Path $result.artifactDir 'filetransfer-second-transfer-status.txt'
-                    if (Test-Path -LiteralPath $statusPath -PathType Leaf) {
-                        $status = Read-RouteAcceptanceKeyValueArtifact -Path $statusPath
+                    if ($null -ne $status) {
                         $failureClass = Get-RouteAcceptanceReportValue -Report $status -Name 'failure_class' -DefaultValue 'first_transfer_reactivation_or_fallback_incomplete'
                         $failureReason = Get-RouteAcceptanceReportValue -Report $status -Name 'failure_reason' -DefaultValue '(unknown)'
                         Add-RouteAcceptanceFailure -Result $result -Message ("second transfer did not start because first transfer setup failed: class={0}; reason={1}" -f $failureClass, $failureReason)
@@ -3243,15 +3258,50 @@ function Write-RouteAcceptanceRetainedAnalysisTimeoutArtifacts {
     $guiInboundTerminalState = ''
     $guiOutboundTerminalState = ''
     if ($guiSummaryPresent) {
-        try {
-            $summary = Get-Content -LiteralPath $guiSummaryPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-            $guiCompleted = [string]$summary.completed
-            $guiIntegrityOk = [string]$summary.integrityOk
-            $guiInboundTerminalState = [string]$summary.inboundTerminalState
-            $guiOutboundTerminalState = [string]$summary.outboundTerminalState
+        $guiSummaryRaw = ''
+        for ($readAttempt = 0; $readAttempt -lt 3; $readAttempt++) {
+            try {
+                $guiSummaryRaw = Get-Content -LiteralPath $guiSummaryPath -Raw -ErrorAction Stop
+                $summary = $guiSummaryRaw | ConvertFrom-Json -ErrorAction Stop
+                $guiCompleted = [string]$summary.completed
+                $guiIntegrityOk = [string]$summary.integrityOk
+                $guiInboundTerminalState = [string]$summary.inboundTerminalState
+                $guiOutboundTerminalState = [string]$summary.outboundTerminalState
+                break
+            }
+            catch {
+                if ($readAttempt -lt 2) {
+                    Start-Sleep -Milliseconds 200
+                }
+            }
         }
-        catch {
+
+        if ([string]::IsNullOrWhiteSpace($guiCompleted) -and -not [string]::IsNullOrWhiteSpace($guiSummaryRaw)) {
+            $completedMatch = [regex]::Match($guiSummaryRaw, '"completed"\s*:\s*(true|false)', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            if ($completedMatch.Success) {
+                $guiCompleted = if ([string]::Equals($completedMatch.Groups[1].Value, 'true', [System.StringComparison]::OrdinalIgnoreCase)) { 'True' } else { 'False' }
+            }
+
+            $integrityMatch = [regex]::Match($guiSummaryRaw, '"integrityOk"\s*:\s*(true|false)', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            if ($integrityMatch.Success) {
+                $guiIntegrityOk = if ([string]::Equals($integrityMatch.Groups[1].Value, 'true', [System.StringComparison]::OrdinalIgnoreCase)) { 'True' } else { 'False' }
+            }
+
+            $inboundStateMatch = [regex]::Match($guiSummaryRaw, '"inboundTerminalState"\s*:\s*"([^"]*)"', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            if ($inboundStateMatch.Success) {
+                $guiInboundTerminalState = $inboundStateMatch.Groups[1].Value
+            }
+
+            $outboundStateMatch = [regex]::Match($guiSummaryRaw, '"outboundTerminalState"\s*:\s*"([^"]*)"', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            if ($outboundStateMatch.Success) {
+                $guiOutboundTerminalState = $outboundStateMatch.Groups[1].Value
+            }
+        }
+
+        if ([string]::IsNullOrWhiteSpace($guiCompleted)) {
             $guiCompleted = 'unreadable'
+        }
+        if ([string]::IsNullOrWhiteSpace($guiIntegrityOk)) {
             $guiIntegrityOk = 'unreadable'
         }
     }

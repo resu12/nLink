@@ -23,6 +23,23 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
     }
 
     [Fact]
+    public void FallbackPressureTupleMatch_UsesFrontierChunkFromV6FrontierRepairKey()
+    {
+        var method = typeof(SessionFileTransferService).GetMethod(
+            "DoesFallbackPressureTupleMatchRepairKey",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+
+        Assert.NotNull(method);
+        const string pressureTuple = "session|transfer|inbound|post_tuna_fallback_v6|6|2|1|5940|3|bridge|22|checkpoint";
+
+        Assert.True((bool)method.Invoke(null, [pressureTuple, "v6-frontier:5940:22"])!);
+        Assert.True((bool)method.Invoke(null, [pressureTuple, "v6-frontier:1:5940:22"])!);
+        Assert.False((bool)method.Invoke(null, [pressureTuple, "v6-frontier:22:5940"])!);
+        Assert.False((bool)method.Invoke(null, [pressureTuple, "v6-frontier:2:5940:22"])!);
+        Assert.False((bool)method.Invoke(null, [pressureTuple, "v6-frontier:5940"])!);
+    }
+
+    [Fact]
     public async Task V6Epoch_RegularNknRecoveryFrontierRequestOverTargetTransportRecoversOutboundEpoch()
     {
         const string transferId = "transfer_v6_epoch_regular_nkn_frontier_control_proof";
