@@ -11398,6 +11398,43 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 StringComparison.Ordinal);
             Assert.False(recoveryState.TryGetActiveFileTransferRecoveryLivenessSnapshot(sessionId, out _));
 
+            var nonLivenessRearmLogStart = GetOperationalLogLength();
+            var nonLivenessRearmRequest = recoveryRequest with
+            {
+                Reason = "regular_v4_peer_silence_safety_replay",
+                BridgeRecoveryAuthority = new FileTransferBridgeRecoveryAuthority(
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Inbound,
+                    FileTransferRouteResolver.RegularNknV4FastToken,
+                    FileTransferProtocol.ProtocolVersionV4,
+                    0,
+                    1,
+                    0,
+                    1,
+                    0,
+                    0,
+                    2,
+                    "ReceiveRecoveryRequest",
+                    "regular_v4_peer_silence_safety_replay"),
+            };
+            host.RequestFileTransferReceiveRecovery(nonLivenessRearmRequest);
+
+            var nonLivenessRearmTail = ReadOperationalLogTail(nonLivenessRearmLogStart);
+            Assert.Contains(
+                "event=filetransfer_regular_v4_recovery_liveness_request_rejected_closed_owner;",
+                nonLivenessRearmTail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "reason=regular_v4_peer_silence_safety_replay",
+                nonLivenessRearmTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=filetransfer_regular_v4_recovery_liveness_started;",
+                nonLivenessRearmTail,
+                StringComparison.Ordinal);
+            Assert.False(recoveryState.TryGetActiveFileTransferRecoveryLivenessSnapshot(sessionId, out _));
+
             var freshDecisionLogStart = GetOperationalLogLength();
             var freshDecisionRequest = recoveryRequest with
             {
@@ -11734,10 +11771,13 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Contains("settlement_trigger=regular_v4_frontier_repair_settlement", rejectedTail, StringComparison.Ordinal);
             Assert.Contains("event=runtime_unlock_regular_v4_frontier_repair_settlement_rejected;", rejectedTail, StringComparison.Ordinal);
             Assert.Contains("decision_reason=receive_recovery_contract_rejected", rejectedTail, StringComparison.Ordinal);
+            Assert.Contains("event=regular_v4_receive_recovery_contract_closed_no_deferral;", rejectedTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=runtime_unlock_retry_released_after_regular_v4_receive_recovery;", rejectedTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_authority_granted;", rejectedTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", rejectedTail, StringComparison.Ordinal);
             Assert.DoesNotContain("frontier_settlement_route_publication_mismatch", rejectedTail, StringComparison.Ordinal);
+            var recoveryState = Assert.IsAssignableFrom<IFileTransferRecoveryLivenessState>(host);
+            Assert.False(recoveryState.TryGetActiveFileTransferRecoveryLivenessSnapshot(sessionId, out _));
         }
         finally
         {

@@ -1001,12 +1001,10 @@ public sealed partial class NknSignalingTransport
         closedOwner = null;
         var normalizedSessionId = SanitizeLogToken(sessionId ?? "none");
         var normalizedTransferId = SanitizeLogToken(transferId);
-        var normalizedReason = SanitizeLogToken(reason);
         lock (fileTransferFallbackProofGate)
         {
             var current = fileTransferRegularV4RecoveryLivenessClosedOwner;
             if (current is null ||
-                !IsSessionLivenessReceiveRecoveryReason(normalizedReason) ||
                 !string.Equals(current.SessionId, normalizedSessionId, StringComparison.Ordinal) ||
                 !string.Equals(current.TransferId, normalizedTransferId, StringComparison.Ordinal) ||
                 current.Direction != request.Direction ||
@@ -2253,6 +2251,15 @@ public sealed partial class NknSignalingTransport
                     settlement,
                     out var receiveRecoveryReleased))
             {
+                if (!receiveRecoveryReleased &&
+                    IsRegularV4FrontierRepairSettlementClosureOutcome(settlement.Outcome))
+                {
+                    CloseRegularV4ReceiveRecoveryLivenessAfterContractFailure(
+                        livenessSnapshot,
+                        settlementTrigger,
+                        FormatRegularV4FrontierRepairLivenessClosureReason(settlement.Outcome));
+                }
+
                 LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
                     receiveRecoveryReleased
                         ? "runtime_unlock_regular_v4_frontier_repair_settlement_released"
@@ -14442,6 +14449,15 @@ public sealed partial class NknSignalingTransport
                 : "receive_recovery_contract_rejected",
             retryReason: stateSnapshot.RetryReason,
             stateSnapshot: stateSnapshot);
+        if (!receiveRecoveryReleased &&
+            IsRegularV4FrontierRepairSettlementClosureOutcome(settlement.Outcome))
+        {
+            CloseRegularV4ReceiveRecoveryLivenessAfterContractFailure(
+                livenessSnapshot,
+                settlementTrigger,
+                FormatRegularV4FrontierRepairLivenessClosureReason(settlement.Outcome));
+        }
+
         return true;
     }
 
