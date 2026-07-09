@@ -3324,6 +3324,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $phase = 'fallback_frontier_repair'
         $reason = 'fallback_frontier_repair_stalled'
     }
+    elseif ($runtimeUnlockRetryRegularV4RecoverySettlementMissing) {
+        $phase = 'runtime_unlock_retry'
+        $reason = 'runtime_unlock_retry_regular_v4_recovery_settlement_missing'
+    }
     elseif ($regularV4FrontierRepairSettledStalledUnclosed) {
         $phase = 'regular_v4_frontier_repair'
         $reason = 'regular_v4_frontier_repair_liveness_settlement_missing'
@@ -3339,10 +3343,6 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     elseif ($regularV4RepairLivenessAuthorityMissing) {
         $phase = 'regular_v4_frontier_repair'
         $reason = 'regular_v4_repair_liveness_authority_missing'
-    }
-    elseif ($runtimeUnlockRetryRegularV4RecoverySettlementMissing) {
-        $phase = 'runtime_unlock_retry'
-        $reason = 'runtime_unlock_retry_regular_v4_recovery_settlement_missing'
     }
     elseif ($fallbackTailLocalYieldBlocked) {
         $phase = 'fallback_tail_quiescence'

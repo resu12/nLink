@@ -12740,6 +12740,7 @@ public sealed partial class NknSignalingTransport
     {
         RuntimeUnlockRecoveryRetryState? stateSnapshot = null;
         var markedBlockedByRegularV4Recovery = false;
+        var logRecoverySettledContract = false;
         var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? string.Empty : sessionId.Trim();
         var hasLivenessSnapshot = TryGetActiveRegularV4RecoveryLivenessSnapshot(
             normalizedSessionId,
@@ -12763,43 +12764,58 @@ public sealed partial class NknSignalingTransport
                 return;
             }
 
-            if (state.ObservedSendPending ||
-                state.CutThroughPending ||
-                state.CutThroughActive)
-            {
-                stateSnapshot = state;
-                return;
-            }
-
-            state.Settled = true;
-            state.ContractState = SessionRecoveryContractState.RecoverySettled;
-            state.RetryQueued = false;
-            state.RetryDispatching = false;
-            state.RetryDispatched = false;
-            state.RetryAuthorityPending = false;
-            state.RetryAuthorityGranted = false;
-            state.ObservedSendPending = false;
-            state.ObservedSendDeadlineUtcMs = 0;
-            state.AuthorizedObservedLane = null;
-            state.AuthorityFailureReason = SanitizeLogToken(reason);
-            if (hasLivenessSnapshot &&
+            var canBindRegularV4Recovery =
+                hasLivenessSnapshot &&
                 IsRegularV4RecoveryLivenessSnapshotCurrentForRetryDispatch(
                     livenessSnapshot,
                     state.SessionId,
                     state.TransferId,
                     GetRuntimeUnlockRetryExpectedDispatchDirection(state),
-                    GetRuntimeUnlockRetryExpectedDispatchLiveRouteEpoch(state)))
+                    GetRuntimeUnlockRetryExpectedDispatchLiveRouteEpoch(state));
+            if (state.ObservedSendPending ||
+                state.CutThroughPending ||
+                state.CutThroughActive)
             {
-                MarkRuntimeUnlockRetryBlockedByRegularV4ReceiveRecoveryUnsafe(
-                    state,
-                    livenessSnapshot,
-                    reason,
-                    hasRoutePublicationTuple ? routePublicationGeneration : 0,
-                    hasRoutePublicationTuple ? routeCommitGeneration : null);
-                markedBlockedByRegularV4Recovery = true;
-            }
+                if (canBindRegularV4Recovery)
+                {
+                    MarkRuntimeUnlockRetryBlockedByRegularV4ReceiveRecoveryUnsafe(
+                        state,
+                        livenessSnapshot,
+                        reason,
+                        hasRoutePublicationTuple ? routePublicationGeneration : 0,
+                        hasRoutePublicationTuple ? routeCommitGeneration : null);
+                    markedBlockedByRegularV4Recovery = true;
+                }
 
-            stateSnapshot = state;
+                stateSnapshot = state;
+            }
+            else
+            {
+                state.Settled = true;
+                state.ContractState = SessionRecoveryContractState.RecoverySettled;
+                state.RetryQueued = false;
+                state.RetryDispatching = false;
+                state.RetryDispatched = false;
+                state.RetryAuthorityPending = false;
+                state.RetryAuthorityGranted = false;
+                state.ObservedSendPending = false;
+                state.ObservedSendDeadlineUtcMs = 0;
+                state.AuthorizedObservedLane = null;
+                state.AuthorityFailureReason = SanitizeLogToken(reason);
+                logRecoverySettledContract = true;
+                if (canBindRegularV4Recovery)
+                {
+                    MarkRuntimeUnlockRetryBlockedByRegularV4ReceiveRecoveryUnsafe(
+                        state,
+                        livenessSnapshot,
+                        reason,
+                        hasRoutePublicationTuple ? routePublicationGeneration : 0,
+                        hasRoutePublicationTuple ? routeCommitGeneration : null);
+                    markedBlockedByRegularV4Recovery = true;
+                }
+
+                stateSnapshot = state;
+            }
         }
 
         if (markedBlockedByRegularV4Recovery)
@@ -12809,7 +12825,11 @@ public sealed partial class NknSignalingTransport
                 $"event=runtime_unlock_retry_blocked_by_regular_v4_receive_recovery; session_id={SanitizeLogToken(stateSnapshot!.SessionId)}; transfer_id={SanitizeLogToken(livenessSnapshot.TransferId)}; retry_reason={SanitizeLogToken(stateSnapshot.RetryReason)}; recovery_reason={SanitizeLogToken(stateSnapshot.RecoveryReason)}; retired_generation={stateSnapshot.RetiredOfferGeneration}; contract_generation={stateSnapshot.ContractGeneration}; offer_generation={(stateSnapshot.CurrentOfferGeneration > 0 ? stateSnapshot.CurrentOfferGeneration : stateSnapshot.RetiredOfferGeneration)}; route={SanitizeLogToken(livenessSnapshot.RouteToken)}; protocol_version={livenessSnapshot.ProtocolVersion}; live_route_epoch={livenessSnapshot.LiveRouteEpoch}; regular_v4_liveness_generation={livenessSnapshot.Generation}; bridge_decision_generation={livenessSnapshot.BridgeDecisionGeneration}; blocker_reason={SanitizeLogToken(reason)}; settlement_trigger=dispatch_deferred; decision_reason=awaiting_regular_v4_recovery_settlement");
         }
 
-        LogRuntimeUnlockRecoveryContract("session_recovery_contract_recovery_settled", stateSnapshot!.SessionId);
+        if (logRecoverySettledContract)
+        {
+            LogRuntimeUnlockRecoveryContract("session_recovery_contract_recovery_settled", stateSnapshot!.SessionId);
+        }
+
         if (markedBlockedByRegularV4Recovery)
         {
             TryConsumePendingRuntimeUnlockRegularV4FrontierRepairSettlementForReceiveRecovery(
