@@ -2628,6 +2628,7 @@ public sealed partial class NknSignalingTransport
         foreach (var key in staleKeys)
         {
             fileTransferRouteHints.Remove(key);
+            fileTransferRoutePublicationAuthorities.Remove(key);
         }
     }
 
@@ -2696,6 +2697,12 @@ public sealed partial class NknSignalingTransport
                     SanitizeLogToken(authority.RoutePublicationActionKind),
                     SanitizeLogToken(authority.CoordinatorDecisionReason),
                     DateTimeOffset.UtcNow);
+                fileTransferRoutePublicationAuthorities[routeHintKey] = authority;
+                fileTransferRuntimeUnlockAuthorityRequirements[normalizedSessionId] =
+                    new FileTransferRuntimeUnlockAuthorityRequirement(
+                        authority.TransferId,
+                        authority.Direction,
+                        authority.RoutePublicationGeneration);
             }
         }
 

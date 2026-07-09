@@ -2569,6 +2569,7 @@ public sealed partial class NknSignalingTransport
         CompleteTunaFallbackProof("reset_session_tracking");
         ClearUnresolvedFileTransferV6TransportEpochs("reset_session_tracking");
         ClearPendingFileTransferV6Handoffs("reset_session_tracking");
+        ClearFileTransferRuntimeUnlockAuthorityRequirements();
         FlushAllControlOutboundQueues("reset_session_tracking");
         ClearScreenShareOutboundQueue("reset_session_tracking");
         ResetControlSecureState();
@@ -2586,6 +2587,14 @@ public sealed partial class NknSignalingTransport
 
         DisposeEphemeralKeyState();
         UpdateSessionSecurityState(SessionSecurityState.Empty);
+    }
+
+    private void ClearFileTransferRuntimeUnlockAuthorityRequirements()
+    {
+        lock (gate)
+        {
+            fileTransferRuntimeUnlockAuthorityRequirements.Clear();
+        }
     }
 
     private void DisposeEphemeralKeyState(bool preserveHelpeeHostKeyPair = false)

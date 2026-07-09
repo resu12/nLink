@@ -5807,6 +5807,19 @@ function Test-Phase5RegularNknStartupPeerDisconnect {
 function Get-Phase5FailureClass {
     param([Parameter(Mandatory = $true)]$Failures)
 
+    function Test-Phase5FailureClassMarker {
+        param(
+            [Parameter(Mandatory = $true)][string]$Line,
+            [Parameter(Mandatory = $true)][string]$Class
+        )
+
+        $escapedClass = [regex]::Escape($Class)
+        return [regex]::IsMatch(
+            $Line,
+            "(?i)(?:failure_class|class|reason|setup_failure_reason)\s*[=:]\s*$escapedClass(?:\b|$)") -or
+            [string]::Equals($Line.Trim(), $Class, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+
     $failureLines = @($Failures | ForEach-Object { [string]$_ })
     if ($failureLines.Count -eq 0) {
         return 'none'
@@ -5816,6 +5829,16 @@ function Get-Phase5FailureClass {
         if ($line.IndexOf('terminal_before_fallback_switch_off', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $line.IndexOf('fault_window_missed_before_terminal', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             return 'terminal_before_fallback_switch_off'
+        }
+    }
+
+    foreach ($line in $failureLines) {
+        if (Test-Phase5FailureClassMarker -Line $line -Class 'runtime_unlock_filetransfer_owner_missing_before_path_lease') {
+            return 'runtime_unlock_filetransfer_owner_missing_before_path_lease'
+        }
+
+        if (Test-Phase5FailureClassMarker -Line $line -Class 'runtime_unlock_filetransfer_owner_stale_before_offer_dispatch') {
+            return 'runtime_unlock_filetransfer_owner_stale_before_offer_dispatch'
         }
     }
 

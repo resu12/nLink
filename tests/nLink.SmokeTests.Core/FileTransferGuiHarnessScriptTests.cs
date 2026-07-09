@@ -266,6 +266,11 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("regularV4FrontierRepairSettledStalledUnclosed", scriptText, StringComparison.Ordinal);
         Assert.Contains("runtimeUnlockRetryDispatchMissingAfterAuthorityGranted", scriptText, StringComparison.Ordinal);
         Assert.Contains("runtime_unlock_retry_dispatch_missing_after_authority_granted", scriptText, StringComparison.Ordinal);
+        Assert.Contains("runtimeUnlockFileTransferOwnerMissingBeforePathLease", scriptText, StringComparison.Ordinal);
+        Assert.Contains("runtime_unlock_filetransfer_owner_missing_before_path_lease", scriptText, StringComparison.Ordinal);
+        Assert.Contains("runtimeUnlockFileTransferOwnerStaleBeforeOfferDispatch", scriptText, StringComparison.Ordinal);
+        Assert.Contains("runtime_unlock_filetransfer_owner_stale_before_offer_dispatch", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Test-TunaGuiRuntimeUnlockFileTransferOwnerRejectionUnresolved", scriptText, StringComparison.Ordinal);
         Assert.Contains("Test-TunaGuiRegularV4FrontierRepairSettlementClosed", scriptText, StringComparison.Ordinal);
         Assert.Contains("Test-TunaGuiRegularV4FrontierRepairPrecontractClosureMatch", scriptText, StringComparison.Ordinal);
         Assert.Contains("Test-TunaGuiRegularV4FrontierRepairMatch", scriptText, StringComparison.Ordinal);
@@ -294,6 +299,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             scriptText.IndexOf("elseif ($fallbackFrontierRepairStalled)", StringComparison.Ordinal) <
             scriptText.IndexOf("elseif ($regularV4FrontierRepairSettledStalledUnclosed)", StringComparison.Ordinal),
             "Fallback frontier repair classification must outrank settled regular V4 frontier labels after a fallback route is current.");
+        Assert.True(
+            scriptText.IndexOf("elseif ($runtimeUnlockFileTransferOwnerMissingBeforePathLease)", StringComparison.Ordinal) <
+            scriptText.IndexOf("elseif ($runtimeUnlockRetryDispatchMissingAfterAuthorityGranted)", StringComparison.Ordinal),
+            "A missing coordinator file-transfer owner must classify before downstream retry-dispatch failures.");
         Assert.True(
             scriptText.IndexOf("elseif ($runtimeUnlockRetryDispatchMissingAfterAuthorityGranted)", StringComparison.Ordinal) <
             scriptText.IndexOf("elseif ($regularV4FrontierRepairSettledStalledUnclosed)", StringComparison.Ordinal),

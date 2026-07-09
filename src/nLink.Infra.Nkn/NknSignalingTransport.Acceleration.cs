@@ -6420,8 +6420,242 @@ public sealed partial class NknSignalingTransport
             _ => "runtime_unlock_probe_event",
         };
 
+    private bool IsFileTransferRuntimeUnlockContextObserved(string sessionId)
+    {
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? string.Empty : sessionId.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedSessionId))
+        {
+            return false;
+        }
+
+        lock (gate)
+        {
+            if (fileTransferRuntimeUnlockAuthorityRequirements.ContainsKey(normalizedSessionId))
+            {
+                return true;
+            }
+        }
+
+        lock (accelerationGate)
+        {
+            if (runtimeUnlockRecoveryRetryState is { } state &&
+                state.ContractState is not (SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed) &&
+                string.Equals(state.SessionId, normalizedSessionId, StringComparison.Ordinal) &&
+                (!string.IsNullOrWhiteSpace(state.TransferId) ||
+                 !string.IsNullOrWhiteSpace(state.RegularV4RecoveryBlockedTransferId)))
+            {
+                return true;
+            }
+
+            if (fileTransferRegularV4RecoveryLivenessState is { } liveness &&
+                string.Equals(liveness.SessionId, normalizedSessionId, StringComparison.Ordinal) &&
+                !liveness.Completed)
+            {
+                return true;
+            }
+        }
+
+        if (HasActiveFileTransferDataSessionForSession(normalizedSessionId))
+        {
+            return true;
+        }
+
+        lock (gate)
+        {
+            return fileTransferRoutePublicationAuthorities.Any(pair =>
+                string.Equals(pair.Key.SessionId, normalizedSessionId, StringComparison.Ordinal) &&
+                string.Equals(
+                    pair.Value.SessionId,
+                    normalizedSessionId,
+                    StringComparison.Ordinal));
+        }
+    }
+
+    private bool TryCaptureCurrentRuntimeUnlockFileTransferOwnerAuthority(
+        string sessionId,
+        out FileTransferRoutePublicationAuthority authority,
+        out string rejectionReason)
+    {
+        authority = null!;
+        rejectionReason = "unknown";
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? string.Empty : sessionId.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedSessionId))
+        {
+            rejectionReason = "missing_session_id";
+            return false;
+        }
+
+        var (expectedTransferId, expectedDirection) =
+            ResolveExpectedRuntimeUnlockFileTransferOwner(normalizedSessionId);
+
+        List<FileTransferRoutePublicationAuthority> candidates;
+        var hasSessionRoutePublicationAuthority = false;
+        lock (gate)
+        {
+            hasSessionRoutePublicationAuthority = fileTransferRoutePublicationAuthorities.Any(pair =>
+                string.Equals(pair.Key.SessionId, normalizedSessionId, StringComparison.Ordinal) &&
+                string.Equals(
+                    pair.Value.SessionId,
+                    normalizedSessionId,
+                    StringComparison.Ordinal));
+            candidates = fileTransferRoutePublicationAuthorities
+                .Where(pair =>
+                    IsCurrentRuntimeUnlockFileTransferOwnerAuthority(
+                        pair.Key,
+                        pair.Value,
+                        normalizedSessionId,
+                        expectedTransferId,
+                        expectedDirection))
+                .Select(pair => pair.Value)
+                .ToList();
+        }
+
+        if (candidates.Count == 0)
+        {
+            rejectionReason = hasSessionRoutePublicationAuthority
+                ? "current_filetransfer_owner_authority_mismatch"
+                : "missing_current_filetransfer_route_publication_authority";
+            return false;
+        }
+
+        var distinctTransferIds = candidates
+            .Select(candidate => candidate.TransferId)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (distinctTransferIds.Length != 1)
+        {
+            rejectionReason = "ambiguous_current_filetransfer_owner_authority";
+            return false;
+        }
+
+        authority = candidates
+            .OrderByDescending(candidate => candidate.Direction == FileTransferDirection.Outbound)
+            .ThenByDescending(candidate => candidate.RoutePublicationGeneration)
+            .First();
+        rejectionReason = "accepted";
+        return true;
+    }
+
+    private (string? TransferId, FileTransferDirection? Direction) ResolveExpectedRuntimeUnlockFileTransferOwner(
+        string sessionId)
+    {
+        string? expectedTransferId = null;
+        FileTransferDirection? expectedDirection = null;
+        lock (accelerationGate)
+        {
+            if (runtimeUnlockRecoveryRetryState is { } state &&
+                state.ContractState is not (SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed) &&
+                string.Equals(state.SessionId, sessionId, StringComparison.Ordinal))
+            {
+                expectedTransferId = string.IsNullOrWhiteSpace(state.TransferId)
+                    ? state.RegularV4RecoveryBlockedTransferId
+                    : state.TransferId;
+                expectedDirection = state.RegularV4RecoveryDirection ??
+                    GetRuntimeUnlockRetryExpectedDispatchDirection(state);
+            }
+
+            if (string.IsNullOrWhiteSpace(expectedTransferId) &&
+                fileTransferRegularV4RecoveryLivenessState is { } liveness &&
+                string.Equals(liveness.SessionId, sessionId, StringComparison.Ordinal) &&
+                !liveness.Completed)
+            {
+                expectedTransferId = liveness.TransferId;
+                expectedDirection = liveness.Direction;
+            }
+        }
+
+        expectedTransferId = string.IsNullOrWhiteSpace(expectedTransferId)
+            ? ResolveSingleActiveFileTransferDataSessionTransferId(sessionId, transferId: null)
+            : expectedTransferId.Trim();
+        var hasActiveFileTransferDataSession = HasActiveFileTransferDataSessionForSession(sessionId);
+
+        lock (gate)
+        {
+            if (fileTransferRuntimeUnlockAuthorityRequirements.TryGetValue(sessionId, out var requirement) &&
+                ((!string.IsNullOrWhiteSpace(expectedTransferId) &&
+                  string.Equals(expectedTransferId, requirement.TransferId, StringComparison.Ordinal)) ||
+                 (string.IsNullOrWhiteSpace(expectedTransferId) && !hasActiveFileTransferDataSession)))
+            {
+                if (string.IsNullOrWhiteSpace(expectedTransferId))
+                {
+                    expectedTransferId = requirement.TransferId;
+                }
+
+                expectedDirection ??= requirement.Direction;
+            }
+        }
+
+        return (expectedTransferId, expectedDirection);
+    }
+
+    private static bool IsCurrentRuntimeUnlockFileTransferOwnerAuthority(
+        FileTransferRouteHintKey key,
+        FileTransferRoutePublicationAuthority authority,
+        string sessionId,
+        string? expectedTransferId,
+        FileTransferDirection? expectedDirection)
+    {
+        if (!string.Equals(key.SessionId, sessionId, StringComparison.Ordinal) ||
+            !string.Equals(authority.SessionId, sessionId, StringComparison.Ordinal) ||
+            !string.Equals(key.TransferId, authority.TransferId, StringComparison.Ordinal) ||
+            key.Direction != authority.Direction ||
+            (!string.IsNullOrWhiteSpace(expectedTransferId) &&
+             !string.Equals(authority.TransferId, expectedTransferId, StringComparison.Ordinal)) ||
+            (expectedDirection.HasValue && authority.Direction != expectedDirection.Value) ||
+            authority.RuntimeGeneration <= 0 ||
+            authority.LegGeneration <= 0 ||
+            authority.RoutePublicationGeneration <= 0)
+        {
+            return false;
+        }
+
+        return (string.Equals(authority.RouteToken, FileTransferRouteResolver.RegularNknV4FastToken, StringComparison.Ordinal) &&
+                authority.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+                authority.TargetTransport == FileTransferTransportKind.RegularNkn) ||
+               (string.Equals(authority.RouteToken, FileTransferRouteResolver.PostTunaFallbackV6Token, StringComparison.Ordinal) &&
+                authority.ProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
+                authority.TargetTransport == FileTransferTransportKind.RegularNkn);
+    }
+
+    private static void LogRuntimeUnlockFileTransferOwnerAcceptedBeforePathLease(
+        FileTransferRoutePublicationAuthority authority,
+        string trigger)
+        => LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_filetransfer_owner_accepted_before_path_lease; session_id={SanitizeLogToken(authority.SessionId)}; transfer_id={SanitizeLogToken(authority.TransferId)}; direction={authority.Direction.ToString().ToLowerInvariant()}; route={SanitizeLogToken(authority.RouteToken)}; protocol_version={authority.ProtocolVersion}; live_route_epoch={authority.LiveRouteEpoch}; runtime_generation={authority.RuntimeGeneration}; terminal_generation={authority.TerminalGeneration}; leg_generation={authority.LegGeneration}; route_publication_generation={authority.RoutePublicationGeneration}; route_commit_generation={authority.RouteCommitGeneration ?? 0}; target_route={SanitizeLogToken(authority.TargetRouteToken)}; target_protocol_version={authority.TargetProtocolVersion}; target_transport={FormatFileTransferTransportKindForLog(authority.TargetTransport)}; trigger={SanitizeLogToken(trigger)}; decision_reason=current_coordinator_route_publication_authority");
+
+    private void LogRuntimeUnlockFileTransferOwnerRejectedBeforePathLease(
+        string sessionId,
+        string trigger,
+        string rejectionReason)
+    {
+        var normalizedSessionId = SanitizeLogToken(sessionId);
+        var normalizedTrigger = SanitizeLogToken(trigger);
+        var normalizedReason = SanitizeLogToken(rejectionReason);
+        var (expectedTransferId, expectedDirection) =
+            ResolveExpectedRuntimeUnlockFileTransferOwner(sessionId);
+        var normalizedTransferId = SanitizeLogToken(expectedTransferId ?? "(none)");
+        var normalizedDirection = expectedDirection?.ToString().ToLowerInvariant() ?? "(none)";
+        LocalOperationalLog.Warn(
+            "NKN.Tuna",
+            $"event=runtime_unlock_filetransfer_owner_missing_before_path_lease; session_id={normalizedSessionId}; transfer_id={normalizedTransferId}; direction={normalizedDirection}; trigger={normalizedTrigger}; rejection_reason={normalizedReason}; decision_reason=coordinator_filetransfer_owner_required");
+        LocalOperationalLog.Warn(
+            "NKN.Tuna",
+            $"event=runtime_unlock_filetransfer_path_lease_rejected_no_current_owner; session_id={normalizedSessionId}; transfer_id={normalizedTransferId}; direction={normalizedDirection}; trigger={normalizedTrigger}; rejection_reason={normalizedReason}; decision_reason=no_listener_or_path_lease_effect");
+    }
+
+    private static void LogRuntimeUnlockFileTransferOwnerRejectedBeforeOfferDispatch(
+        string sessionId,
+        string? transferId,
+        string trigger,
+        string rejectionReason)
+        => LocalOperationalLog.Warn(
+            "NKN.Tuna",
+            $"event=runtime_unlock_filetransfer_owner_stale_before_offer_dispatch; session_id={SanitizeLogToken(sessionId)}; transfer_id={SanitizeLogToken(transferId ?? "(none)")}; trigger={SanitizeLogToken(trigger)}; rejection_reason={SanitizeLogToken(rejectionReason)}; decision_reason=no_offer_or_route_effect");
+
     private RuntimeUnlockTunaPathLeaseSnapshot StartRuntimeUnlockTunaPathLeaseUnsafe(
         string sessionId,
+        string? transferId,
         long payerDecisionId,
         string reason)
     {
@@ -6429,7 +6663,7 @@ public sealed partial class NknSignalingTransport
         var listenerRunId = $"listener-start-{leaseGeneration.ToString(CultureInfo.InvariantCulture)}";
         var lease = RuntimeUnlockTunaPathLease.Start(
             sessionId,
-            transferId: null,
+            transferId,
             leaseGeneration,
             listenerRunId,
             payerDecisionId,
@@ -6437,7 +6671,7 @@ public sealed partial class NknSignalingTransport
         runtimeUnlockTunaPathLeaseState = lease;
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=tuna_path_lease_started; session_id={SanitizeLogToken(lease.SessionId)}; transfer_id=(none); transaction_generation={lease.TransactionGeneration}; offer_generation={lease.OfferGeneration}; lease_generation={lease.LeaseGeneration}; listener_run_id={SanitizeLogToken(lease.ListenerRunId ?? "(none)")}; payer_decision_id={lease.PayerDecisionId}; state={lease.State.ToString().ToLowerInvariant()}; reason={SanitizeLogToken(reason)}");
+            $"event=tuna_path_lease_started; session_id={SanitizeLogToken(lease.SessionId)}; transfer_id={SanitizeLogToken(lease.TransferId ?? "(none)")}; transaction_generation={lease.TransactionGeneration}; offer_generation={lease.OfferGeneration}; lease_generation={lease.LeaseGeneration}; listener_run_id={SanitizeLogToken(lease.ListenerRunId ?? "(none)")}; payer_decision_id={lease.PayerDecisionId}; state={lease.State.ToString().ToLowerInvariant()}; reason={SanitizeLogToken(reason)}");
         return lease;
     }
 
@@ -6464,7 +6698,7 @@ public sealed partial class NknSignalingTransport
         runtimeUnlockTransactionState = AttachRuntimeUnlockTunaPathLeaseUnsafe(runtimeUnlockTransactionState);
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=tuna_path_lease_listener_starting; session_id={SanitizeLogToken(bound.SessionId)}; transfer_id=(none); transaction_generation={bound.TransactionGeneration}; offer_generation={bound.OfferGeneration}; lease_generation={bound.LeaseGeneration}; listener_run_id={SanitizeLogToken(bound.ListenerRunId ?? "(none)")}; payer_decision_id={bound.PayerDecisionId}; state={bound.State.ToString().ToLowerInvariant()}; reason={SanitizeLogToken(reason)}");
+            $"event=tuna_path_lease_listener_starting; session_id={SanitizeLogToken(bound.SessionId)}; transfer_id={SanitizeLogToken(bound.TransferId ?? "(none)")}; transaction_generation={bound.TransactionGeneration}; offer_generation={bound.OfferGeneration}; lease_generation={bound.LeaseGeneration}; listener_run_id={SanitizeLogToken(bound.ListenerRunId ?? "(none)")}; payer_decision_id={bound.PayerDecisionId}; state={bound.State.ToString().ToLowerInvariant()}; reason={SanitizeLogToken(reason)}");
         return bound;
     }
 
@@ -9570,6 +9804,33 @@ public sealed partial class NknSignalingTransport
                         return;
                     }
 
+                    if (!TryCaptureCurrentRuntimeUnlockFileTransferOwnerAuthority(
+                            sessionId,
+                            out var listenerRearmOwnerAuthority,
+                            out var listenerRearmOwnerRejectionReason) ||
+                        (!string.IsNullOrWhiteSpace(state.TransferId) &&
+                         !string.Equals(
+                             state.TransferId,
+                             listenerRearmOwnerAuthority.TransferId,
+                             StringComparison.Ordinal)))
+                    {
+                        var rejectionReason = string.Equals(listenerRearmOwnerRejectionReason, "accepted", StringComparison.Ordinal)
+                            ? "runtime_unlock_listener_rearm_transfer_owner_mismatch"
+                            : listenerRearmOwnerRejectionReason;
+                        LogRuntimeUnlockFileTransferOwnerRejectedBeforePathLease(
+                            sessionId,
+                            retryReason,
+                            rejectionReason);
+                        FailRuntimeUnlockRecoveryContractIfActive(
+                            sessionId,
+                            "runtime_unlock_filetransfer_owner_missing_before_path_lease");
+                        return;
+                    }
+
+                    LogRuntimeUnlockFileTransferOwnerAcceptedBeforePathLease(
+                        listenerRearmOwnerAuthority,
+                        retryReason);
+
                     LocalOperationalLog.Info(
                         "NKN.Tuna",
                         $"event=runtime_unlock_precommit_probe_sidecar_rearm_started; session_id={SanitizeLogToken(sessionId)}; retired_generation={retiredOfferGeneration}; contract_generation={contractGeneration}; retry_reason={retryReason}; trigger={SanitizeLogToken(trigger)}; decision_reason=listener_rearm_required_before_dispatch_authority");
@@ -9590,6 +9851,7 @@ public sealed partial class NknSignalingTransport
 
                         lease = StartRuntimeUnlockTunaPathLeaseUnsafe(
                             sessionId,
+                            listenerRearmOwnerAuthority.TransferId,
                             ResolvePayerDecisionIdForNegotiation(retryReason),
                             retryReason);
                     }
@@ -9606,6 +9868,32 @@ public sealed partial class NknSignalingTransport
                         LocalOperationalLog.Warn(
                             "NKN.Tuna",
                             $"event=session_recovery_contract_listener_rearm_failed; session_id={SanitizeLogToken(sessionId)}; reason={RuntimeUnlockProbeSidecarClosedListenerRearmFailedReason}; trigger=precommit_probe_sidecar_rearm; decision_reason=listener_sidecar_unavailable");
+                        return;
+                    }
+
+                    if (!TryCaptureCurrentRuntimeUnlockFileTransferOwnerAuthority(
+                            sessionId,
+                            out var currentListenerRearmOwnerAuthority,
+                            out var currentListenerRearmOwnerRejectionReason) ||
+                        !Equals(currentListenerRearmOwnerAuthority, listenerRearmOwnerAuthority))
+                    {
+                        var rejectionReason = string.Equals(
+                                currentListenerRearmOwnerRejectionReason,
+                                "accepted",
+                                StringComparison.Ordinal)
+                            ? "current_filetransfer_owner_changed_after_listener_rearm"
+                            : currentListenerRearmOwnerRejectionReason;
+                        LogRuntimeUnlockFileTransferOwnerRejectedBeforeOfferDispatch(
+                            sessionId,
+                            listenerRearmOwnerAuthority.TransferId,
+                            retryReason,
+                            rejectionReason);
+                        FailRuntimeUnlockTunaPathLeaseIfCurrent(
+                            sessionId,
+                            offerGeneration: 0,
+                            rejectionReason,
+                            failTransaction: false);
+                        FailRuntimeUnlockRecoveryContractIfActive(sessionId, rejectionReason);
                         return;
                     }
 
@@ -10115,6 +10403,31 @@ public sealed partial class NknSignalingTransport
         }
 
         var isRuntimeUnlockActivation = IsRuntimeUnlockActivationReason(reason);
+        FileTransferRoutePublicationAuthority? runtimeUnlockFileTransferOwnerAuthority = null;
+        if (isRuntimeUnlockActivation &&
+            IsFileTransferRuntimeUnlockContextObserved(sessionId))
+        {
+            if (!TryCaptureCurrentRuntimeUnlockFileTransferOwnerAuthority(
+                    sessionId,
+                    out var capturedOwnerAuthority,
+                    out var ownerRejectionReason))
+            {
+                LogRuntimeUnlockFileTransferOwnerRejectedBeforePathLease(
+                    sessionId,
+                    reason,
+                    ownerRejectionReason);
+                RejectRuntimeUnlockRecoveryRetryBeforeDispatchIfActive(
+                    sessionId,
+                    "runtime_unlock_filetransfer_owner_missing_before_path_lease");
+                return;
+            }
+
+            runtimeUnlockFileTransferOwnerAuthority = capturedOwnerAuthority;
+            LogRuntimeUnlockFileTransferOwnerAcceptedBeforePathLease(
+                capturedOwnerAuthority,
+                reason);
+        }
+
         var requiresContractLocalListenerRetry = false;
         if (isRuntimeUnlockActivation &&
             ShouldPauseRegularNknV4FileTransferBeforeRuntimeUnlockPayerIntent(sessionId, reason))
@@ -10227,6 +10540,7 @@ public sealed partial class NknSignalingTransport
             {
                 runtimeUnlockTunaPathLease = StartRuntimeUnlockTunaPathLeaseUnsafe(
                     sessionId,
+                    runtimeUnlockFileTransferOwnerAuthority?.TransferId,
                     payerDecisionId,
                     reason);
             }
@@ -10338,6 +10652,38 @@ public sealed partial class NknSignalingTransport
             ResumeActivationPauseIfNeeded("tuna_activation_failed_regular_v4_resumed", "no_supported_lane");
             ScheduleAccelerationNegotiationRetry("listener_sidecar_unavailable");
             return;
+        }
+
+        if (isRuntimeUnlockActivation &&
+            runtimeUnlockFileTransferOwnerAuthority is not null)
+        {
+            if (!TryCaptureCurrentRuntimeUnlockFileTransferOwnerAuthority(
+                    sessionId,
+                    out var currentOwnerAuthority,
+                    out var currentOwnerRejectionReason) ||
+                !Equals(currentOwnerAuthority, runtimeUnlockFileTransferOwnerAuthority))
+            {
+                var rejectionReason = string.Equals(currentOwnerRejectionReason, "accepted", StringComparison.Ordinal)
+                    ? "current_filetransfer_owner_changed_after_listener_start"
+                    : currentOwnerRejectionReason;
+                LogRuntimeUnlockFileTransferOwnerRejectedBeforeOfferDispatch(
+                    sessionId,
+                    runtimeUnlockFileTransferOwnerAuthority.TransferId,
+                    reason,
+                    rejectionReason);
+                FailRuntimeUnlockTunaPathLeaseIfCurrent(
+                    sessionId,
+                    offerGeneration: 0,
+                    rejectionReason,
+                    failTransaction: false);
+                RejectRuntimeUnlockRecoveryRetryBeforeDispatchIfActive(
+                    sessionId,
+                    rejectionReason);
+                ResumeActivationPauseIfNeeded(
+                    "tuna_activation_failed_regular_v4_resumed",
+                    rejectionReason);
+                return;
+            }
         }
 
         if (isRuntimeUnlockActivation &&
@@ -11998,6 +12344,27 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
+        FileTransferRoutePublicationAuthority? runtimeUnlockFileTransferOwnerAuthority = null;
+        if (IsFileTransferRuntimeUnlockContextObserved(sessionId))
+        {
+            if (!TryCaptureCurrentRuntimeUnlockFileTransferOwnerAuthority(
+                    sessionId,
+                    out var capturedOwnerAuthority,
+                    out var ownerRejectionReason))
+            {
+                LogRuntimeUnlockFileTransferOwnerRejectedBeforePathLease(
+                    sessionId,
+                    offer.Trigger,
+                    ownerRejectionReason);
+                return;
+            }
+
+            runtimeUnlockFileTransferOwnerAuthority = capturedOwnerAuthority;
+            LogRuntimeUnlockFileTransferOwnerAcceptedBeforePathLease(
+                capturedOwnerAuthority,
+                offer.Trigger);
+        }
+
         RuntimeUnlockTransactionDecision? started;
         RuntimeUnlockTransactionDecision? peerReceived;
         RuntimeUnlockTransactionDecision? answerReceived;
@@ -12009,6 +12376,7 @@ public sealed partial class NknSignalingTransport
                 "peer_runtime_unlock_offer_accepted");
             StartPeerOfferRuntimeUnlockTunaPathLeaseUnsafe(
                 sessionId,
+                runtimeUnlockFileTransferOwnerAuthority?.TransferId,
                 started.State.TransactionGeneration,
                 answerAckGeneration,
                 offer.PayerDecisionId,
@@ -12036,6 +12404,7 @@ public sealed partial class NknSignalingTransport
 
     private RuntimeUnlockTunaPathLeaseSnapshot StartPeerOfferRuntimeUnlockTunaPathLeaseUnsafe(
         string sessionId,
+        string? transferId,
         long transactionGeneration,
         long offerGeneration,
         long payerDecisionId,
@@ -12046,7 +12415,7 @@ public sealed partial class NknSignalingTransport
         var listenerRunId = $"peer-offer-dialer-{leaseGeneration.ToString(CultureInfo.InvariantCulture)}";
         var lease = RuntimeUnlockTunaPathLease.Start(
             sessionId,
-            transferId: null,
+            transferId,
             leaseGeneration,
             listenerRunId,
             payerDecisionId,

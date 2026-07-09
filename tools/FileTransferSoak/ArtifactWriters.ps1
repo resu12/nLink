@@ -303,6 +303,66 @@ function Get-FileTransferObservedDurationMs {
     return [long][Math]::Max(0, ($timestamped[-1].TimestampUtc - $timestamped[0].TimestampUtc).TotalMilliseconds)
 }
 
+function Test-FileTransferEventOccursAfter {
+    param(
+        [Parameter(Mandatory = $true)]$Candidate,
+        [Parameter(Mandatory = $true)]$Anchor
+    )
+
+    $candidateFile = [string]$Candidate.FilePath
+    $anchorFile = [string]$Anchor.FilePath
+    if (-not [string]::IsNullOrWhiteSpace($candidateFile) -and
+        -not [string]::IsNullOrWhiteSpace($anchorFile) -and
+        -not [string]::Equals($candidateFile, $anchorFile, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+
+    if ($null -ne $Candidate.TimestampUtc -and $null -ne $Anchor.TimestampUtc) {
+        return $Candidate.TimestampUtc -gt $Anchor.TimestampUtc
+    }
+
+    return [int64]$Candidate.Sequence -gt [int64]$Anchor.Sequence
+}
+
+function Get-FileTransferUnresolvedRuntimeUnlockOwnerRejections {
+    param(
+        [object[]]$RejectionEvents,
+        [object[]]$AcceptedEvents
+    )
+
+    $unresolved = New-Object System.Collections.Generic.List[object]
+    foreach ($rejection in @($RejectionEvents)) {
+        $rejectionSessionId = Get-FileTransferEventField -Event $rejection -Name 'session_id' -Default ''
+        $rejectionTransferId = Get-FileTransferEventField -Event $rejection -Name 'transfer_id' -Default ''
+        $rejectionDirection = Get-FileTransferEventField -Event $rejection -Name 'direction' -Default ''
+        $matchingAcceptance = @($AcceptedEvents | Where-Object {
+            (Test-FileTransferEventOccursAfter -Candidate $_ -Anchor $rejection) -and
+            ([string]::IsNullOrWhiteSpace($rejectionSessionId) -or
+             [string]::Equals(
+                 (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default ''),
+                 $rejectionSessionId,
+                 [System.StringComparison]::Ordinal)) -and
+            ([string]::IsNullOrWhiteSpace($rejectionTransferId) -or
+             $rejectionTransferId -eq '(none)' -or
+             [string]::Equals(
+                 (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default ''),
+                 $rejectionTransferId,
+                 [System.StringComparison]::Ordinal)) -and
+            ([string]::IsNullOrWhiteSpace($rejectionDirection) -or
+             $rejectionDirection -eq '(none)' -or
+             [string]::Equals(
+                 (Get-FileTransferEventField -Event $_ -Name 'direction' -Default ''),
+                 $rejectionDirection,
+                 [System.StringComparison]::OrdinalIgnoreCase))
+        })
+        if ($matchingAcceptance.Count -eq 0) {
+            $unresolved.Add($rejection) | Out-Null
+        }
+    }
+
+    return $unresolved.ToArray()
+}
+
 function Get-FileTransferSparseCreditStats {
     param([object[]]$GrantEvents)
 
@@ -7063,6 +7123,9 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_transaction_failed_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionFailedCount),
         ("runtime_unlock_transaction_local_only_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionLocalOnlyRejectedCount),
         ("runtime_unlock_transaction_proof_verdict={0}" -f $recoveryClassification.RuntimeUnlockTransactionProofVerdict),
+        ("runtime_unlock_filetransfer_owner_accepted_before_path_lease_count={0}" -f $recoveryClassification.RuntimeUnlockFileTransferOwnerAcceptedBeforePathLeaseCount),
+        ("runtime_unlock_filetransfer_owner_missing_before_path_lease_count={0}" -f $recoveryClassification.RuntimeUnlockFileTransferOwnerMissingBeforePathLeaseCount),
+        ("runtime_unlock_filetransfer_owner_stale_before_offer_dispatch_count={0}" -f $recoveryClassification.RuntimeUnlockFileTransferOwnerStaleBeforeOfferDispatchCount),
         ("runtime_unlock_tuna_path_lease_started_count={0}" -f $recoveryClassification.RuntimeUnlockTunaPathLeaseStartedCount),
         ("runtime_unlock_tuna_path_lease_ready_count={0}" -f $recoveryClassification.RuntimeUnlockTunaPathLeaseReadyCount),
         ("runtime_unlock_tuna_path_lease_failed_count={0}" -f $recoveryClassification.RuntimeUnlockTunaPathLeaseFailedCount),
@@ -7778,6 +7841,23 @@ function Get-FileTransferRecoveryFailureClassification {
         $_.EventName -eq 'filetransfer_tuna_gui_handoff_fallback_failure' -and
         (Get-FileTransferEventField -Event $_ -Name 'failureReason' -Default '') -eq 'listener_ready_unavailable_contradiction'
     })
+    $runtimeUnlockFileTransferOwnerAcceptedBeforePathLeaseEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_filetransfer_owner_accepted_before_path_lease'
+    })
+    $runtimeUnlockFileTransferOwnerMissingBeforePathLeaseEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_filetransfer_owner_missing_before_path_lease'
+    })
+    $runtimeUnlockFileTransferOwnerStaleBeforeOfferDispatchEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_filetransfer_owner_stale_before_offer_dispatch'
+    })
+    $runtimeUnlockFileTransferOwnerMissingBeforePathLeaseUnresolvedEvents = @(
+        Get-FileTransferUnresolvedRuntimeUnlockOwnerRejections `
+            -RejectionEvents $runtimeUnlockFileTransferOwnerMissingBeforePathLeaseEvents `
+            -AcceptedEvents $runtimeUnlockFileTransferOwnerAcceptedBeforePathLeaseEvents)
+    $runtimeUnlockFileTransferOwnerStaleBeforeOfferDispatchUnresolvedEvents = @(
+        Get-FileTransferUnresolvedRuntimeUnlockOwnerRejections `
+            -RejectionEvents $runtimeUnlockFileTransferOwnerStaleBeforeOfferDispatchEvents `
+            -AcceptedEvents $runtimeUnlockFileTransferOwnerAcceptedBeforePathLeaseEvents)
     $tunaPathLeaseStartedEvents = @($events | Where-Object { $_.EventName -eq 'tuna_path_lease_started' })
     $tunaPathLeaseReadyEvents = @($events | Where-Object { $_.EventName -eq 'tuna_path_lease_listener_ready' })
     $tunaPathLeaseFailedEvents = @($events | Where-Object { $_.EventName -eq 'tuna_path_lease_failed' })
@@ -8827,7 +8907,13 @@ function Get-FileTransferRecoveryFailureClassification {
         $runtimeUnlockPreCommitRouteEpochRecoveredEvents.Count -gt 0
 
     $class = '(none)'
-    if ($publicationAuthorityFieldCoverageProof.Verdict -eq 'fail') {
+    if ($runtimeUnlockFileTransferOwnerMissingBeforePathLeaseUnresolvedEvents.Count -gt 0) {
+        $class = 'runtime_unlock_filetransfer_owner_missing_before_path_lease'
+    }
+    elseif ($runtimeUnlockFileTransferOwnerStaleBeforeOfferDispatchUnresolvedEvents.Count -gt 0) {
+        $class = 'runtime_unlock_filetransfer_owner_stale_before_offer_dispatch'
+    }
+    elseif ($publicationAuthorityFieldCoverageProof.Verdict -eq 'fail') {
         $class = 'publication_authority_missing'
     }
     elseif ($fileTunaV4DataPathProof.Verdict -eq 'fail') {
@@ -9269,6 +9355,9 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockTransactionCommittedCount = $runtimeUnlockTransactionCommittedEvents.Count
         RuntimeUnlockTransactionFailedCount = $runtimeUnlockTransactionFailedEvents.Count
         RuntimeUnlockTransactionLocalOnlyRejectedCount = $runtimeUnlockTransactionLocalOnlyRejectedEvents.Count
+        RuntimeUnlockFileTransferOwnerAcceptedBeforePathLeaseCount = $runtimeUnlockFileTransferOwnerAcceptedBeforePathLeaseEvents.Count
+        RuntimeUnlockFileTransferOwnerMissingBeforePathLeaseCount = $runtimeUnlockFileTransferOwnerMissingBeforePathLeaseEvents.Count
+        RuntimeUnlockFileTransferOwnerStaleBeforeOfferDispatchCount = $runtimeUnlockFileTransferOwnerStaleBeforeOfferDispatchEvents.Count
         RuntimeUnlockTunaPathLeaseStartedCount = $tunaPathLeaseStartedEvents.Count
         RuntimeUnlockTunaPathLeaseReadyCount = $tunaPathLeaseReadyEvents.Count
         RuntimeUnlockTunaPathLeaseFailedCount = $tunaPathLeaseFailedEvents.Count
@@ -9852,6 +9941,9 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_transaction_failed_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionFailedCount),
         ("runtime_unlock_transaction_local_only_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockTransactionLocalOnlyRejectedCount),
         ("runtime_unlock_transaction_proof_verdict={0}" -f $recoveryClassification.RuntimeUnlockTransactionProofVerdict),
+        ("runtime_unlock_filetransfer_owner_accepted_before_path_lease_count={0}" -f $recoveryClassification.RuntimeUnlockFileTransferOwnerAcceptedBeforePathLeaseCount),
+        ("runtime_unlock_filetransfer_owner_missing_before_path_lease_count={0}" -f $recoveryClassification.RuntimeUnlockFileTransferOwnerMissingBeforePathLeaseCount),
+        ("runtime_unlock_filetransfer_owner_stale_before_offer_dispatch_count={0}" -f $recoveryClassification.RuntimeUnlockFileTransferOwnerStaleBeforeOfferDispatchCount),
         ("runtime_unlock_tuna_path_lease_started_count={0}" -f $recoveryClassification.RuntimeUnlockTunaPathLeaseStartedCount),
         ("runtime_unlock_tuna_path_lease_ready_count={0}" -f $recoveryClassification.RuntimeUnlockTunaPathLeaseReadyCount),
         ("runtime_unlock_tuna_path_lease_failed_count={0}" -f $recoveryClassification.RuntimeUnlockTunaPathLeaseFailedCount),

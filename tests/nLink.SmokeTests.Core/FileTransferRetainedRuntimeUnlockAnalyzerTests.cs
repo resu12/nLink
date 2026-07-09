@@ -643,6 +643,65 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockFileTransferOwnerMissingBeforePathLease_ClassifiesFirstEdge()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_owner_missing";
+        const string sessionId = "sess_runtime_unlock_owner_missing";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id={sessionId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4; file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=conservative_nkn_startup", secondsOffset: 0),
+            LogLine($"event=runtime_unlock_filetransfer_owner_missing_before_path_lease; session_id={sessionId}; transfer_id=(none); trigger=runtime_unlock; rejection_reason=missing_current_filetransfer_route_publication_authority; decision_reason=coordinator_filetransfer_owner_required", secondsOffset: 10),
+            LogLine($"event=runtime_unlock_filetransfer_path_lease_rejected_no_current_owner; session_id={sessionId}; transfer_id=(none); trigger=runtime_unlock; rejection_reason=missing_current_filetransfer_route_publication_authority; decision_reason=no_listener_or_path_lease_effect", secondsOffset: 11),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_settled_stalled; session_id={sessionId}; transfer_id={transferId}; direction=outbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; decision_reason=repair_stalled", secondsOffset: 20),
+            LogLine($"event=file_transfer_outbound_terminal; role=Helpee; session_id={sessionId}; transfer_id={transferId}; state=Failed; error_code=peer_disconnected; route=regular_nkn_v4_fast; protocol_version=4", secondsOffset: 89),
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "RegularActivationCycle"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("runtime_unlock_filetransfer_owner_missing_before_path_lease", verdict["recovery_failure_class"]);
+        Assert.Equal("1", verdict["runtime_unlock_filetransfer_owner_missing_before_path_lease_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_tuna_path_lease_started_count"]);
+
+        var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
+        Assert.Equal("runtime_unlock_filetransfer_owner_missing_before_path_lease", stability["recovery_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockFileTransferOwnerMissingThenAccepted_ClassifiesNextUnresolvedEdge()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_owner_recovered";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                $"event=runtime_unlock_filetransfer_owner_missing_before_path_lease; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=outbound; trigger=runtime_unlock; rejection_reason=missing_current_filetransfer_route_publication_authority; decision_reason=coordinator_filetransfer_owner_required",
+                $"event=runtime_unlock_filetransfer_owner_accepted_before_path_lease; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=outbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=4; terminal_generation=0; leg_generation=9; route_publication_generation=3; route_commit_generation=0; target_route=regular_nkn_v4_fast; target_protocol_version=4; target_transport=regular_nkn; trigger=runtime_unlock; decision_reason=current_coordinator_route_publication_authority",
+                RuntimeUnlockRetryReleasedLine(transferId),
+                RuntimeUnlockRetryDispatchGrantedLine(transferId, queuedBehindActiveNegotiation: false),
+                RuntimeUnlockRetryDispatchMissingAfterAuthorityGrantedLine(transferId),
+                RuntimeUnlockRetryContractFailedDispatchMissingAfterAuthorityGrantedLine(transferId)),
+            ["-LiveRouteProofMode", "None"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("runtime_unlock_retry_dispatch_missing_after_authority_granted", verdict["recovery_failure_class"]);
+        Assert.Equal("1", verdict["runtime_unlock_filetransfer_owner_missing_before_path_lease_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_filetransfer_owner_accepted_before_path_lease_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_RuntimeUnlockRetryBlockedByRegularV4RecoveryWithExplicitNoProofRejection_ClassifiesRejectedBeforeRuntimeUnlock()
     {
         if (!OperatingSystem.IsWindows())

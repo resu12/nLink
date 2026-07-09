@@ -46,6 +46,11 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         string TransferId,
         FileTransferDirection Direction);
 
+    private readonly record struct FileTransferRuntimeUnlockAuthorityRequirement(
+        string TransferId,
+        FileTransferDirection Direction,
+        int RoutePublicationGeneration);
+
     private readonly record struct FileTransferRouteHint(
         FileTransferRoute Route,
         string Token,
@@ -182,6 +187,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private readonly Dictionary<string, DateTimeOffset> fileTransferCompleteEchoLastSent = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TransportFileTransferDataSession> fileTransferDataSessions = new(StringComparer.Ordinal);
     private readonly Dictionary<FileTransferRouteHintKey, FileTransferRouteHint> fileTransferRouteHints = new();
+    private readonly Dictionary<FileTransferRouteHintKey, FileTransferRoutePublicationAuthority> fileTransferRoutePublicationAuthorities = new();
+    private readonly Dictionary<string, FileTransferRuntimeUnlockAuthorityRequirement> fileTransferRuntimeUnlockAuthorityRequirements = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FileTransferPostTunaFallbackRepairProofHint> fileTransferPostTunaFallbackRepairProofHints = new(StringComparer.Ordinal);
     private readonly HashSet<string> fileTransferPostTunaFallbackYieldRuntimeUnlockRetries = new(StringComparer.Ordinal);
     private int fileTransferRoutePublicationAuthorityForTestsGeneration;
