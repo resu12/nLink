@@ -6609,12 +6609,89 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 ) -TimeoutMs 90000 -Description 'live multi-toggle post-Tuna fallback V6 route selection')
                 $observedEvidenceLines.Add($fallbackRouteLine) | Out-Null
 
-                $fallbackResolutionLine = Wait-TunaGuiLiveRouteEpochRecovered -Bookmark $stepBookmark -FallbackBookmark $bookmark -Route 'post_tuna_fallback_v6' -ProtocolVersion 6 -HandoffKind 'tuna_to_normal_fallback' -TargetTransport 'regular_nkn' -Description 'live multi-toggle Tuna-to-normal fallback route epoch recovered' -LiveRouteEpoch $fallbackStartedEpoch -AfterLiveRouteEpoch $lastObservedLiveRouteEpoch -AfterLine $fallbackStartedLine
+                $fallbackRecoveryAfterLine = if ($RouteMode -eq 'live-regular-activation-cycle') { '' } else { $fallbackStartedLine }
+                $fallbackResolutionLine = Wait-TunaGuiLiveRouteEpochRecovered -Bookmark $stepBookmark -FallbackBookmark $bookmark -Route 'post_tuna_fallback_v6' -ProtocolVersion 6 -HandoffKind 'tuna_to_normal_fallback' -TargetTransport 'regular_nkn' -Description 'live multi-toggle Tuna-to-normal fallback route epoch recovered' -LiveRouteEpoch $fallbackStartedEpoch -AfterLiveRouteEpoch $lastObservedLiveRouteEpoch -AfterLine $fallbackRecoveryAfterLine
                 $observedEvidenceLines.Add($fallbackResolutionLine) | Out-Null
                 Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'off_recovered' -Line $fallbackResolutionLine
                 $fallbackEpochRecoveredObserved = $true
                 if ($fallbackStartedEpoch -gt $lastObservedLiveRouteEpoch) {
                     $lastObservedLiveRouteEpoch = $fallbackStartedEpoch
+                }
+
+                if ($RouteMode -eq 'live-regular-activation-cycle' -and
+                    [string]::Equals($nextAction, 'on', [System.StringComparison]::OrdinalIgnoreCase) -and
+                    $null -ne $prearmedActivationBookmark) {
+                    $stepIndex++
+                    $stepNumber = $stepIndex + 1
+                    Write-Host ("[GUI Smoke][filetransfer_tuna] Live toggle step {0}/{1}: immediately re-enabling Tuna after fallback recovery proof." -f $stepNumber, $sequence.Count) -ForegroundColor DarkGray
+                    $stepBookmark = $prearmedActivationBookmark
+                    $prearmedActivationBookmark = $null
+                    $lastActivationPayloadBookmark = $stepBookmark
+                    $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step; step={1}; action=on; prearmed=1; immediate_after_fallback_recovered=1" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber)) | Out-Null
+                    [void](Submit-TunaWalletPasswordDialogsForPayersIfPresent -Context $Context -PayerMode $PayerMode -Password $WalletPassword -Reason ("prearmed_on_step_{0}_immediate_after_fallback_recovered" -f $stepNumber))
+
+                    $activationProofTimeoutMs = 240000
+                    $serviceWalletPrompts = {
+                        Submit-TunaWalletPasswordDialogsForPayersIfPresent -Context $Context -PayerMode $PayerMode -Password $WalletPassword -Reason ("activation_route_wait_step_{0}" -f $stepNumber)
+                    }
+                    try {
+                        $activationStartedLine = Wait-TunaGuiLiveRouteEpochStarted -Bookmark $stepBookmark -FallbackBookmark $bookmark -Route 'file_tuna_v4' -ProtocolVersion 4 -HandoffKind 'normal_to_tuna_activation' -TargetTransport 'tuna' -Description 'live regular activation cycle immediate normal-to-Tuna route epoch started' -AfterLiveRouteEpoch $lastObservedLiveRouteEpoch -TimeoutMs $activationProofTimeoutMs -OnPoll $serviceWalletPrompts
+                    }
+                    catch {
+                        $terminalProbeInboundRole = if ($Direction -eq 'helper-to-helpee') { 'helpee' } else { 'helper' }
+                        $terminalProbeOutboundRole = if ($Direction -eq 'helper-to-helpee') { 'helper' } else { 'helpee' }
+                        try {
+                            $terminalProbe = Wait-FileTransferTerminalPairAfterBookmark `
+                                -Bookmark $bookmark `
+                                -TimeoutMs 10000 `
+                                -ProgressTimeoutMs 10000 `
+                                -ExpectedFileName ([System.IO.Path]::GetFileName($AutopickPath)) `
+                                -ExpectedSizeBytes $PayloadSizeBytes `
+                                -ExpectedInboundRole $terminalProbeInboundRole `
+                                -ExpectedOutboundRole $terminalProbeOutboundRole `
+                                -NotBeforeUtc $cycleStartedUtc `
+                                -ArtifactDir $ArtifactDir
+                            $terminalProbeInboundState = Get-GuiSmokeFieldValue -Fields $terminalProbe.Inbound -Name 'state' -Default '(unknown)'
+                            $terminalProbeOutboundState = Get-GuiSmokeFieldValue -Fields $terminalProbe.Outbound -Name 'state' -Default '(unknown)'
+                            $terminalProbeInboundError = Get-GuiSmokeFieldValue -Fields $terminalProbe.Inbound -Name 'error_code' -Default '(none)'
+                            $terminalProbeOutboundError = Get-GuiSmokeFieldValue -Fields $terminalProbe.Outbound -Name 'error_code' -Default '(none)'
+                            if ($terminalProbeInboundState -eq 'Completed' -and
+                                $terminalProbeOutboundState -eq 'Completed' -and
+                                $terminalProbeInboundError -eq '(none)' -and
+                                $terminalProbeOutboundError -eq '(none)') {
+                                $firstTransferTerminalBeforeLiveReactivation = $true
+                                $firstTransferTerminalBeforeLiveReactivationTransferId = [string]$terminalProbe.TransferId
+                                $terminalRouteSequence = ((Get-TunaGuiLiveRouteEpochRouteChanges -Observations $liveRouteEpochObservations) -join ',')
+                                $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_reactivation_first_transfer_terminal_before_activation; route_mode={1}; transfer_id={2}; step={3}; action=on; reason=terminal_before_same_transfer_reactivation_immediate_probe; fallback_epoch_recovered={4}; route_sequence={5}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $RouteMode, $firstTransferTerminalBeforeLiveReactivationTransferId, $stepNumber, ($(if ($fallbackEpochRecoveredObserved) { 1 } else { 0 })), $terminalRouteSequence)) | Out-Null
+                                Write-TunaGuiMilestoneEvidence -ArtifactDir $ArtifactDir -ObservedEvidenceLines $observedEvidenceLines
+                                Copy-FileTransferLiveLogSlice -ArtifactDir $ArtifactDir -Bookmark $bookmark
+                                Write-Host '[GUI Smoke][filetransfer_tuna] Transfer terminalized before the second Tuna activation proof; preserving terminal-before-second-activation evidence.' -ForegroundColor Yellow
+                                break
+                            }
+                        }
+                        catch {
+                        }
+
+                        throw
+                    }
+                    $observedEvidenceLines.Add($activationStartedLine) | Out-Null
+                    Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'on_started' -Line $activationStartedLine
+                    $activationEpochStartedObserved = $true
+                    $activationStartedFields = ConvertFrom-GuiSmokeSemicolonFields -Message $activationStartedLine
+                    $activationStartedEpoch = ConvertTo-GuiSmokeInt -Value (Get-GuiSmokeFieldValue -Fields $activationStartedFields -Name 'live_route_epoch' -Default '0') -Default 0
+
+                    $activationRouteLine = [string](Wait-TunaGuiFileTunaV4PublicationAfterBookmark -Bookmark $stepBookmark -TimeoutMs $activationProofTimeoutMs -Description 'live regular activation cycle immediate coordinator-authorized file Tuna V4 route publication' -ActionKind 'RouteCommitPublication' -RequirePositiveRouteCommitGeneration $true)
+                    $observedEvidenceLines.Add($activationRouteLine) | Out-Null
+                    $fileTunaV4PublicationObserved = $true
+
+                    $activationRecoveredLine = Wait-TunaGuiLiveRouteEpochRecovered -Bookmark $stepBookmark -FallbackBookmark $bookmark -Route 'file_tuna_v4' -ProtocolVersion 4 -HandoffKind 'normal_to_tuna_activation' -TargetTransport 'tuna' -Description 'live regular activation cycle immediate normal-to-Tuna route epoch recovered' -LiveRouteEpoch $activationStartedEpoch -AfterLiveRouteEpoch $lastObservedLiveRouteEpoch -AfterLine $activationStartedLine -TimeoutMs $activationProofTimeoutMs
+                    $observedEvidenceLines.Add($activationRecoveredLine) | Out-Null
+                    Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'on_recovered' -Line $activationRecoveredLine
+                    $activationEpochRecoveredObserved = $true
+                    $tunaNegotiatedObserved = $true
+                    if ($activationStartedEpoch -gt $lastObservedLiveRouteEpoch) {
+                        $lastObservedLiveRouteEpoch = $activationStartedEpoch
+                    }
                 }
             }
             else {
@@ -6698,7 +6775,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                                 }
 
                                 if ($terminalFallbackPrefixObserved) {
-                                    Write-Host '[GUI Smoke][filetransfer_tuna] Transfer completed cleanly in fallback before same-transfer reactivation; accepting terminal fallback outcome for regular activation cycle.' -ForegroundColor Yellow
+                                    Write-Host '[GUI Smoke][filetransfer_tuna] Transfer completed cleanly in fallback before the second Tuna activation proof; preserving terminal-before-second-activation evidence.' -ForegroundColor Yellow
                                 }
                                 else {
                                     Write-Host '[GUI Smoke][filetransfer_tuna] Transfer completed cleanly on regular V4 before Tuna activation commit; preserving terminal/SHA evidence and failing route proof deterministically.' -ForegroundColor Yellow
@@ -6735,7 +6812,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                                 Copy-FileTransferLiveLogSlice -ArtifactDir $ArtifactDir -Bookmark $bookmark
 
                                 if ($terminalFallbackPrefixObserved) {
-                                    Write-Host '[GUI Smoke][filetransfer_tuna] Transfer terminalized in fallback before same-transfer reactivation; accepting terminal fallback outcome from retained terminal log evidence.' -ForegroundColor Yellow
+                                    Write-Host '[GUI Smoke][filetransfer_tuna] Transfer terminalized in fallback before the second Tuna activation proof; preserving terminal-before-second-activation retained evidence.' -ForegroundColor Yellow
                                     break
                                 }
 
