@@ -253,6 +253,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("Test-Phase5ScenarioRuntimeRouteEvidence", routeAcceptanceText, StringComparison.Ordinal);
         Assert.Contains("Clear-Phase5StaleSetupFailureAfterRuntimeEvidence", routeAcceptanceText, StringComparison.Ordinal);
         Assert.Contains("Clear-Phase5StaleSetupFailureAfterRuntimeEvidence -Result $result", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("Tuna GUI runtime failure: phase={0}; reason={1}", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("fallback_frontier_request_dispatch_missing", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("fallback_frontier_repair_stalled", routeAcceptanceText, StringComparison.Ordinal);
         Assert.Contains("Tuna GUI setup failure:", routeAcceptanceText, StringComparison.Ordinal);
         Assert.Contains("regularV4FrontierRepairSettledStalledEvent", scriptText, StringComparison.Ordinal);
         Assert.Contains("regularV4FrontierRepairPrecontractSettlementConsumed", scriptText, StringComparison.Ordinal);

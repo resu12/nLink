@@ -4573,6 +4573,10 @@ public sealed partial class SessionFileTransferService
         context.V6PostTunaFallbackFrontierRescueStep = 0;
         context.V6PostTunaFallbackFrontierRescueRequestCount = 0;
         context.V6PostTunaFallbackFrontierRescueStartedUtc = null;
+        context.V6PostTunaFallbackFrontierRescueSettlementKey = null;
+        context.V6PostTunaFallbackFrontierRepairSettledStalledRepairKey = null;
+        context.V6PostTunaFallbackFrontierRepairSettledStalledAuthorityKey = null;
+        context.V6PostTunaFallbackFrontierRepairSettledStalledUtc = null;
         context.PullTransportRebindFrontierRepairCommittedChunks = 0;
         context.PullTransportRebindFrontierRepairWindowChunks = V4PostFallbackEmergencyFrontierRepairChunks;
         context.PullTransportRebindFrontierRepairLastCommittedChunkIndex = -1;

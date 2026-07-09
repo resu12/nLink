@@ -2524,6 +2524,15 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             true));
 
         Assert.True(await secondSendTask);
+
+        var thirdSendTask = Assert.IsAssignableFrom<Task<bool>>(InvokePrivateMethod(
+            service,
+            "SendInboundV6FrontierRequestAsync",
+            context,
+            "transport_epoch",
+            true));
+
+        Assert.True(await thirdSendTask);
         var logTail = ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_v6_frontier_request_sent", logTail, StringComparison.Ordinal);
         Assert.Contains("recovery_mode=waiting_for_target_transport", logTail, StringComparison.Ordinal);
@@ -2536,6 +2545,10 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         Assert.Contains("request_correlation_id=frq-", logTail, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_v6_post_tuna_fallback_frontier_rescue_coalesced", logTail, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_fallback_frontier_repair_stalled", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_fallback_frontier_repair_settled_stalled", logTail, StringComparison.Ordinal);
+        Assert.Contains("decision_reason=post_tuna_fallback_frontier_repair_settled_stalled", logTail, StringComparison.Ordinal);
+        Assert.Contains("decision_reason=same_frontier_rescue_settled_stalled", logTail, StringComparison.Ordinal);
+        Assert.Equal(1, CountOccurrences(logTail, "event=filetransfer_fallback_frontier_repair_settled_stalled;"));
         Assert.Contains("event=filetransfer_post_tuna_fallback_control_plane_pressure_cleared_after_frontier_settlement", logTail, StringComparison.Ordinal);
         Assert.Null(GetPrivatePropertyValue(context, "PostTunaFallbackControlPlanePressureTuple"));
         Assert.False(GetPrivateProperty<bool>(context, "RuntimeUnlockWaitingForFallbackSurvival"));

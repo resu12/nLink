@@ -17280,6 +17280,12 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public string? V6PostTunaFallbackFrontierRescueSettlementKey { get; set; }
 
+        public string? V6PostTunaFallbackFrontierRepairSettledStalledRepairKey { get; set; }
+
+        public string? V6PostTunaFallbackFrontierRepairSettledStalledAuthorityKey { get; set; }
+
+        public DateTimeOffset? V6PostTunaFallbackFrontierRepairSettledStalledUtc { get; set; }
+
         public HashSet<string> FallbackStaleProofSuppressionKeys { get; } = new(StringComparer.Ordinal);
 
         public HashSet<string> RetiredFallbackControlPlaneSendKeys { get; } = new(StringComparer.Ordinal);

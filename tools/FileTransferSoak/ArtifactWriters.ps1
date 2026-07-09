@@ -2480,6 +2480,7 @@ function Get-FileTransferFallbackTailReconciliationProof {
     [object[]]$frontierRepairAuthorityRejectedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_frontier_repair_authority_rejected' })
     [object[]]$frontierRepairDispatchedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_frontier_repair_dispatched' })
     [object[]]$frontierRepairStalledEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_frontier_repair_stalled' })
+    [object[]]$frontierRepairSettledStalledEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_frontier_repair_settled_stalled' })
     [object[]]$frontierRepairProgressObservedEvents = @($events | Where-Object {
         $_.EventName -eq 'filetransfer_fallback_frontier_repair_progress_observed' -or
         $_.EventName -eq 'filetransfer_v4_frontier_stall_missing_range_filled' -or
@@ -3004,6 +3005,7 @@ function Get-FileTransferFallbackTailReconciliationProof {
         FrontierRepairAuthorityRejectedCount = $frontierRepairAuthorityRejectedEvents.Count
         FrontierRepairDispatchedCount = $frontierRepairDispatchedEvents.Count
         FrontierRepairStalledCount = $frontierRepairStalledEvents.Count
+        FrontierRepairSettledStalledCount = $frontierRepairSettledStalledEvents.Count
         FrontierRepairProgressObservedCount = $frontierRepairProgressObservedEvents.Count
         FrontierRepairVerdict = $frontierRepairVerdict
         FrontierRequestDeliveryAcceptedCount = $frontierRequestDeliveryAcceptedEvents.Count
@@ -3025,7 +3027,7 @@ function Get-FileTransferFallbackTailReconciliationProof {
         Findings = $findings
         QuiescenceFindings = $quiescenceFindings
         EvidenceEvents = @(@($evidence.ToArray()) + @($zeroCreditBreakerEvents + $requestedEvents + $acceptedEvents + $normalZeroCreditTailStateRefreshEvents) | Select-Object -First 20)
-        QuiescenceEvidenceEvents = @(@($quiescenceEvidence.ToArray()) + @($terminalProofConsumedEvents + $quiescentYieldEvents + $pairedYieldGrantedEvents + $ownerGenerationMismatchEvents + $localYieldBlockedEvents + $proofReplayLocalYieldBlockedEvents + $quiescenceTimeoutEvents + $progressForcedEvents + $frontierRepairAuthorityGrantedEvents + $frontierRepairDispatchedEvents + $frontierRepairStalledEvents + $frontierRepairProgressObservedEvents) | Select-Object -First 20)
+        QuiescenceEvidenceEvents = @(@($quiescenceEvidence.ToArray()) + @($terminalProofConsumedEvents + $quiescentYieldEvents + $pairedYieldGrantedEvents + $ownerGenerationMismatchEvents + $localYieldBlockedEvents + $proofReplayLocalYieldBlockedEvents + $quiescenceTimeoutEvents + $progressForcedEvents + $frontierRepairAuthorityGrantedEvents + $frontierRepairDispatchedEvents + $frontierRepairStalledEvents + $frontierRepairSettledStalledEvents + $frontierRepairProgressObservedEvents) | Select-Object -First 20)
     }
 }
 
@@ -5297,6 +5299,7 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("fallback_frontier_repair_authority_rejected_count={0}" -f $fallbackTailProof.FrontierRepairAuthorityRejectedCount)) | Out-Null
     $lines.Add(("fallback_frontier_repair_dispatched_count={0}" -f $fallbackTailProof.FrontierRepairDispatchedCount)) | Out-Null
     $lines.Add(("fallback_frontier_repair_stalled_count={0}" -f $fallbackTailProof.FrontierRepairStalledCount)) | Out-Null
+    $lines.Add(("fallback_frontier_repair_settled_stalled_count={0}" -f $fallbackTailProof.FrontierRepairSettledStalledCount)) | Out-Null
     $lines.Add(("fallback_frontier_repair_progress_observed_count={0}" -f $fallbackTailProof.FrontierRepairProgressObservedCount)) | Out-Null
     $lines.Add(("fallback_frontier_repair_verdict={0}" -f $fallbackTailProof.FrontierRepairVerdict)) | Out-Null
     $lines.Add(("fallback_frontier_request_delivery_accepted_count={0}" -f $fallbackTailProof.FrontierRequestDeliveryAcceptedCount)) | Out-Null
@@ -7128,6 +7131,7 @@ function New-FileTransferStabilityGateSummaryLines {
         ("classification_fallback_frontier_repair_authority_rejected_count={0}" -f $recoveryClassification.FallbackFrontierRepairAuthorityRejectedCount),
         ("classification_fallback_frontier_repair_dispatched_count={0}" -f $recoveryClassification.FallbackFrontierRepairDispatchedCount),
         ("classification_fallback_frontier_repair_stalled_count={0}" -f $recoveryClassification.FallbackFrontierRepairStalledCount),
+        ("classification_fallback_frontier_repair_settled_stalled_count={0}" -f $recoveryClassification.FallbackFrontierRepairSettledStalledCount),
         ("classification_fallback_frontier_repair_progress_observed_count={0}" -f $recoveryClassification.FallbackFrontierRepairProgressObservedCount),
         ("classification_fallback_frontier_repair_verdict={0}" -f $recoveryClassification.FallbackFrontierRepairVerdict),
         ("classification_fallback_frontier_request_delivery_accepted_count={0}" -f $recoveryClassification.FallbackFrontierRequestDeliveryAcceptedCount),
@@ -7214,6 +7218,7 @@ function New-FileTransferStabilityGateSummaryLines {
         ("fallback_frontier_repair_authority_rejected_count={0}" -f $fallbackTailProof.FrontierRepairAuthorityRejectedCount),
         ("fallback_frontier_repair_dispatched_count={0}" -f $fallbackTailProof.FrontierRepairDispatchedCount),
         ("fallback_frontier_repair_stalled_count={0}" -f $fallbackTailProof.FrontierRepairStalledCount),
+        ("fallback_frontier_repair_settled_stalled_count={0}" -f $fallbackTailProof.FrontierRepairSettledStalledCount),
         ("fallback_frontier_repair_progress_observed_count={0}" -f $fallbackTailProof.FrontierRepairProgressObservedCount),
         ("fallback_frontier_repair_verdict={0}" -f $fallbackTailProof.FrontierRepairVerdict),
         ("fallback_frontier_request_delivery_accepted_count={0}" -f $fallbackTailProof.FrontierRequestDeliveryAcceptedCount),
@@ -9355,6 +9360,7 @@ function Get-FileTransferRecoveryFailureClassification {
         FallbackFrontierRepairAuthorityRejectedCount = $fallbackTailProof.FrontierRepairAuthorityRejectedCount
         FallbackFrontierRepairDispatchedCount = $fallbackTailProof.FrontierRepairDispatchedCount
         FallbackFrontierRepairStalledCount = $fallbackTailProof.FrontierRepairStalledCount
+        FallbackFrontierRepairSettledStalledCount = $fallbackTailProof.FrontierRepairSettledStalledCount
         FallbackFrontierRepairProgressObservedCount = $fallbackTailProof.FrontierRepairProgressObservedCount
         FallbackFrontierRepairVerdict = $fallbackTailProof.FrontierRepairVerdict
         FallbackFrontierRequestDeliveryAcceptedCount = $fallbackTailProof.FrontierRequestDeliveryAcceptedCount
@@ -9901,6 +9907,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("classification_fallback_frontier_repair_authority_rejected_count={0}" -f $recoveryClassification.FallbackFrontierRepairAuthorityRejectedCount),
         ("classification_fallback_frontier_repair_dispatched_count={0}" -f $recoveryClassification.FallbackFrontierRepairDispatchedCount),
         ("classification_fallback_frontier_repair_stalled_count={0}" -f $recoveryClassification.FallbackFrontierRepairStalledCount),
+        ("classification_fallback_frontier_repair_settled_stalled_count={0}" -f $recoveryClassification.FallbackFrontierRepairSettledStalledCount),
         ("classification_fallback_frontier_repair_progress_observed_count={0}" -f $recoveryClassification.FallbackFrontierRepairProgressObservedCount),
         ("classification_fallback_frontier_repair_verdict={0}" -f $recoveryClassification.FallbackFrontierRepairVerdict),
         ("classification_fallback_frontier_request_delivery_accepted_count={0}" -f $recoveryClassification.FallbackFrontierRequestDeliveryAcceptedCount),
@@ -9997,6 +10004,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("fallback_frontier_repair_authority_rejected_count={0}" -f $fallbackTailProof.FrontierRepairAuthorityRejectedCount),
         ("fallback_frontier_repair_dispatched_count={0}" -f $fallbackTailProof.FrontierRepairDispatchedCount),
         ("fallback_frontier_repair_stalled_count={0}" -f $fallbackTailProof.FrontierRepairStalledCount),
+        ("fallback_frontier_repair_settled_stalled_count={0}" -f $fallbackTailProof.FrontierRepairSettledStalledCount),
         ("fallback_frontier_repair_progress_observed_count={0}" -f $fallbackTailProof.FrontierRepairProgressObservedCount),
         ("fallback_frontier_repair_verdict={0}" -f $fallbackTailProof.FrontierRepairVerdict),
         ("fallback_frontier_request_delivery_accepted_count={0}" -f $fallbackTailProof.FrontierRequestDeliveryAcceptedCount),

@@ -5435,24 +5435,43 @@ function Clear-Phase5StaleSetupFailureAfterRuntimeEvidence {
         $combinedSetup.IndexOf('nkn_bridge_bootstrap_network_unready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combinedSetup.IndexOf('helpee_bridge_host_ready_connect_failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combinedSetup.IndexOf('helper_bridge_host_ready_connect_failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
-    if (-not $isPreflightSetupLabel) {
+    $isRuntimeFailureLabel =
+        $combinedSetup.IndexOf('fallback_frontier_request_dispatch_missing', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combinedSetup.IndexOf('fallback_frontier_repair', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combinedSetup.IndexOf('runtime_unlock_retry', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combinedSetup.IndexOf('regular_v4_frontier_repair', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combinedSetup.IndexOf('regular_v4_receive_recovery', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combinedSetup.IndexOf('post_fallback_runtime_unlock_resume', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combinedSetup.IndexOf('fallback_tail_quiescence', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+    if (-not $isPreflightSetupLabel -and -not $isRuntimeFailureLabel) {
         return $false
     }
 
     $keptFailures = @($Result.failures | ForEach-Object { [string]$_ } | Where-Object {
             $line = [string]$_
-            -not (
+            $removePreflightSetupLine =
                 $line.IndexOf('Tuna GUI setup failure:', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
                 ($line.IndexOf('preflight_bridge_bootstrap', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
                  $line.IndexOf('nkn_bridge_bootstrap_network_unready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
                  $line.IndexOf('helpee_bridge_host_ready_connect_failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
                  $line.IndexOf('helper_bridge_host_ready_connect_failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
-            )
+            $removeRuntimeSetupLine =
+                $line.IndexOf('Tuna GUI setup failure:', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                $isRuntimeFailureLabel -and
+                ($line.IndexOf($phase, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                 $line.IndexOf($reason, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+            -not ($removePreflightSetupLine -or $removeRuntimeSetupLine)
         })
     $Result.failures.Clear()
     foreach ($failure in $keptFailures) {
         $Result.failures.Add($failure) | Out-Null
     }
+    if ($isRuntimeFailureLabel) {
+        $runtimeReason = if ([string]::IsNullOrWhiteSpace($reason)) { $phase } else { $reason }
+        $runtimePhase = if ([string]::IsNullOrWhiteSpace($phase)) { 'runtime' } else { $phase }
+        Add-RouteAcceptanceFailure -Result $Result -Message ("Tuna GUI runtime failure: phase={0}; reason={1}" -f $runtimePhase, $runtimeReason)
+    }
+
     $Result.setupFailurePhase = ''
     $Result.setupFailureReason = ''
     return $true
@@ -5823,6 +5842,34 @@ function Get-Phase5FailureClass {
             $line.IndexOf('regular_v4_frontier_repair_send_deferred_or_stalled', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $line.IndexOf('regular_v4_receive_recovery_settlement_missing', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             return 'regular_v4_frontier_repair_liveness_settlement_missing'
+        }
+    }
+
+    foreach ($line in $failureLines) {
+        if ($line.IndexOf('route consistency', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('route mismatch', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('selected route mismatch', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('measured route mismatch', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('protocol mismatch', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('measured protocol mismatch', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('route selected protocol mismatch', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('route selected runtime mismatch', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('active file_tuna_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('file_tuna_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('diagnostic_regular_nkn_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'route_runtime'
+        }
+    }
+
+    foreach ($line in $failureLines) {
+        if ($line.IndexOf('fallback_frontier_request_dispatch_missing', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'fallback_frontier_request_dispatch_missing'
+        }
+    }
+
+    foreach ($line in $failureLines) {
+        if ($line.IndexOf('fallback_frontier_repair_stalled', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'fallback_frontier_repair_stalled'
         }
     }
 
