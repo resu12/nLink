@@ -8762,7 +8762,21 @@ public sealed partial class SessionFileTransferService : IDisposable
             highestChunk.ToString(CultureInfo.InvariantCulture),
             frontierGap.ToString(CultureInfo.InvariantCulture),
             missingRangeCount.ToString(CultureInfo.InvariantCulture),
-            string.IsNullOrWhiteSpace(checkpointRequestId) ? "(none)" : checkpointRequestId);
+            NormalizeFallbackCheckpointRequestIdForTuple(checkpointRequestId));
+
+    private static string NormalizeFallbackCheckpointRequestIdForTuple(string? checkpointRequestId)
+    {
+        if (string.IsNullOrWhiteSpace(checkpointRequestId))
+        {
+            return "(none)";
+        }
+
+        var trimmed = checkpointRequestId.Trim();
+        return string.Equals(trimmed, "none", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(trimmed, "(none)", StringComparison.OrdinalIgnoreCase)
+            ? "(none)"
+            : trimmed;
+    }
 
     private static string BuildFallbackOwnerKey(
         string sessionId,

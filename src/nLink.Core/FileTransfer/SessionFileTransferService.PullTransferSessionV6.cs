@@ -1635,6 +1635,7 @@ public sealed partial class SessionFileTransferService
         {
             "attempted" => "filetransfer_v6_frontier_request_receive_dispatch_attempted",
             "dispatched" => "filetransfer_v6_frontier_request_receive_dispatched",
+            "coalesced" => "filetransfer_v6_frontier_request_receive_dispatch_coalesced",
             _ => "filetransfer_v6_frontier_request_receive_dispatch_rejected",
         };
         var leg = context.CurrentTransferLeg;
@@ -5971,11 +5972,15 @@ public sealed partial class SessionFileTransferService
                     !context.IsTerminal &&
                     ShouldUseFallbackControlPlaneForInboundFrame(context, request))
                 {
-                    controlPlaneRequest = CreateInboundControlPlaneDeliveryRequestLocked(
+                    controlPlaneRequest = EnsureControlPlaneDeliveryRequestCorrelation(CreateInboundControlPlaneDeliveryRequestLocked(
                         context,
                         FileTransferControlPlaneKind.FrontierRequest,
                         request,
-                        reason);
+                        reason));
+                    if (controlPlaneRequest.Frame is FileTransferFrontierRequestFrameV6 correlatedRequest)
+                    {
+                        request = correlatedRequest;
+                    }
                 }
             }
 
@@ -6003,9 +6008,12 @@ public sealed partial class SessionFileTransferService
                 $"event=filetransfer_v6_frontier_request_sent; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={reason}; transport_epoch={request.TransportEpoch}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId)}; recovery_mode={FormatProtocolLogValue(request.RecoveryMode ?? "(none)")}; start_chunk_index={request.MissingRanges[0].StartChunkIndex}; requested_chunk_count={request.MissingRanges[0].ChunkCount}; total_requested_chunk_count={totalRequestedChunks}; range_count={request.MissingRanges.Count}; post_tuna_fallback_survival={(postTunaFallbackSurvivalRequest ? 1 : 0)}");
             if (postTunaFallbackSurvivalRequest)
             {
+                var postTunaFallbackRepairRequestKey = string.IsNullOrWhiteSpace(postTunaFallbackFrontierSettlementKey)
+                    ? request.RepairRequestId ?? "(none)"
+                    : postTunaFallbackFrontierSettlementKey;
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_v6_post_tuna_fallback_frontier_rescue_requested; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; route={context.RouteSelection.TelemetryToken}; reason={FormatProtocolLogValue(reason)}; frontier_chunk_index={postTunaFallbackFrontierChunkIndex}; rescue_step={postTunaFallbackRescueStep}; rescue_request_count={postTunaFallbackRescueRequestCount}; transport_epoch={request.TransportEpoch}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId)}; repair_request_key={FormatProtocolLogValue(string.IsNullOrWhiteSpace(postTunaFallbackFrontierSettlementKey) ? request.RepairRequestId : postTunaFallbackFrontierSettlementKey)}; recovery_mode={FormatProtocolLogValue(request.RecoveryMode ?? "(none)")}; requested_chunk_count={request.MissingRanges[0].ChunkCount}; total_requested_chunk_count={totalRequestedChunks}; range_count={request.MissingRanges.Count}");
+                    $"event=filetransfer_v6_post_tuna_fallback_frontier_rescue_requested; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; route={context.RouteSelection.TelemetryToken}; reason={FormatProtocolLogValue(reason)}; frontier_chunk_index={postTunaFallbackFrontierChunkIndex}; rescue_step={postTunaFallbackRescueStep}; rescue_request_count={postTunaFallbackRescueRequestCount}; transport_epoch={request.TransportEpoch}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId)}; repair_request_key={FormatProtocolLogValue(postTunaFallbackRepairRequestKey)}; recovery_mode={FormatProtocolLogValue(request.RecoveryMode ?? "(none)")}; requested_chunk_count={request.MissingRanges[0].ChunkCount}; total_requested_chunk_count={totalRequestedChunks}; range_count={request.MissingRanges.Count}");
                 if (postTunaFallbackPreviousRescueRequestCount > 0 ||
                     postTunaFallbackRescueRequestCount > 1)
                 {
@@ -6017,7 +6025,7 @@ public sealed partial class SessionFileTransferService
                         context.TransferId,
                         context.SessionId,
                         context.CurrentTransferLeg,
-                        string.IsNullOrWhiteSpace(postTunaFallbackFrontierSettlementKey) ? request.RepairRequestId : postTunaFallbackFrontierSettlementKey,
+                        postTunaFallbackRepairRequestKey,
                         "post_tuna_fallback_v6_frontier_rescue_without_progress",
                         postTunaFallbackFrontierChunkIndex,
                         context.PullHighestReceivedChunkIndex,
@@ -6027,13 +6035,16 @@ public sealed partial class SessionFileTransferService
                     ClearInboundPostTunaFallbackControlPlanePressureAfterFrontierSettlement(
                         context,
                         "fallback_frontier_repair_stalled",
-                        string.IsNullOrWhiteSpace(postTunaFallbackFrontierSettlementKey)
-                            ? request.RepairRequestId
-                            : postTunaFallbackFrontierSettlementKey);
+                        postTunaFallbackRepairRequestKey);
                 }
 
                 if (reusedPostTunaFallbackRescueSettlementKey)
                 {
+                    LogInboundV6PostTunaFallbackFrontierRequestReceiveDispatchCoalesced(
+                        context,
+                        request,
+                        postTunaFallbackRepairRequestKey,
+                        "same_frontier_rescue_unsettled");
                     LocalOperationalLog.Info(
                         "FileTransferService",
                         $"event=filetransfer_v6_post_tuna_fallback_frontier_rescue_coalesced; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; route={context.RouteSelection.TelemetryToken}; frontier_chunk_index={postTunaFallbackFrontierChunkIndex}; rescue_step={postTunaFallbackRescueStep}; rescue_request_count={postTunaFallbackRescueRequestCount}; transport_epoch={request.TransportEpoch}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId)}; repair_request_key={FormatProtocolLogValue(postTunaFallbackFrontierSettlementKey)}; reason=same_frontier_rescue_unsettled");
@@ -6065,6 +6076,20 @@ public sealed partial class SessionFileTransferService
                 $"event=filetransfer_v6_frontier_request_failed; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; error={FormatProtocolLogValue(ex.Message)}");
             return false;
         }
+    }
+
+    private static void LogInboundV6PostTunaFallbackFrontierRequestReceiveDispatchCoalesced(
+        InboundTransferContext context,
+        FileTransferFrontierRequestFrameV6 request,
+        string? coalescedRepairRequestKey,
+        string decisionReason)
+    {
+        var leg = context.CurrentTransferLeg;
+        var firstStartChunkIndex = request.MissingRanges.Count > 0 ? request.MissingRanges[0].StartChunkIndex : -1;
+        var firstChunkCount = request.MissingRanges.Count > 0 ? request.MissingRanges[0].ChunkCount : 0;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_v6_frontier_request_receive_dispatch_coalesced; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={leg?.LiveRouteEpochId ?? context.CurrentLiveRouteEpoch?.EpochId ?? 0}; leg_generation={leg?.Generation ?? 0}; transport_epoch={request.TransportEpoch}; current_transport_epoch={leg?.TransportEpochId ?? context.V6ReceiverTransportEpoch}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(leg?.CheckpointRequestId ?? "(none)")}; route_publication_generation={context.LastRoutePublicationGeneration}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId ?? "(none)")}; repair_request_key={FormatProtocolLogValue(coalescedRepairRequestKey ?? request.RepairRequestId ?? "(none)")}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId ?? "(none)")}; first_start_chunk_index={firstStartChunkIndex}; first_chunk_count={firstChunkCount}; range_count={request.MissingRanges.Count}; received_transport=post_tuna_fallback_control_plane; decision_reason={FormatProtocolLogValue(decisionReason)}");
     }
 
     private static bool ShouldCoalesceForcedInboundV6PostTunaFallbackControlLocked(

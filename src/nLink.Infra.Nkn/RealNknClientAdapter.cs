@@ -619,6 +619,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         var normalizedTransferId = string.IsNullOrWhiteSpace(transferId) ? "(unknown)" : transferId.Trim();
         var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? "none" : sessionId.Trim();
         var normalizedReason = SanitizeLogToken(authorityReason);
+        var normalizedCheckpointRequestId = NormalizePostTunaFallbackCheckpointRequestId(checkpointRequestId);
         var shouldLog = false;
         var shouldResetEscalation = false;
         PostTunaFallbackControlPlanePressureState? promotedPressure = null;
@@ -639,7 +640,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                     LiveRouteEpoch = liveRouteEpoch,
                     TransportEpoch = transportEpoch,
                     BridgeRecoveryGeneration = bridgeRecoveryGeneration,
-                    CheckpointRequestId = checkpointRequestId,
+                    CheckpointRequestId = normalizedCheckpointRequestId,
                     AuthorityReason = normalizedReason,
                 };
                 shouldLog = true;
@@ -648,7 +649,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             else if (liveRouteEpoch >= current.LiveRouteEpoch &&
                      transportEpoch >= current.TransportEpoch &&
                      bridgeRecoveryGeneration >= current.BridgeRecoveryGeneration &&
-                     (!string.Equals(current.CheckpointRequestId ?? string.Empty, checkpointRequestId ?? string.Empty, StringComparison.Ordinal) ||
+                     (!PostTunaFallbackCheckpointRequestIdsEqual(current.CheckpointRequestId, normalizedCheckpointRequestId) ||
                       current.LiveRouteEpoch != liveRouteEpoch ||
                       current.TransportEpoch != transportEpoch ||
                       current.BridgeRecoveryGeneration != bridgeRecoveryGeneration ||
@@ -665,7 +666,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                     LiveRouteEpoch = liveRouteEpoch,
                     TransportEpoch = transportEpoch,
                     BridgeRecoveryGeneration = bridgeRecoveryGeneration,
-                    CheckpointRequestId = checkpointRequestId,
+                    CheckpointRequestId = normalizedCheckpointRequestId,
                     AuthorityReason = normalizedReason,
                     EscalationUsed = shouldResetEscalation ? false : current.EscalationUsed,
                 };
@@ -696,7 +697,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         {
             Log(
                 "event=filetransfer_fallback_leg_authority_bridge_registered; " +
-                $"session_id={SanitizeLogToken(normalizedSessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; leg_generation={legGeneration}; route={SanitizeLogToken(routeToken)}; protocol_version={protocolVersion}; live_route_epoch={liveRouteEpoch}; transport_epoch={transportEpoch}; bridge_recovery_generation={bridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(checkpointRequestId ?? "none")}; authority_reason={normalizedReason}");
+                $"session_id={SanitizeLogToken(normalizedSessionId)}; transfer_id={SanitizeLogToken(normalizedTransferId)}; leg_generation={legGeneration}; route={SanitizeLogToken(routeToken)}; protocol_version={protocolVersion}; live_route_epoch={liveRouteEpoch}; transport_epoch={transportEpoch}; bridge_recovery_generation={bridgeRecoveryGeneration}; checkpoint_request_id={SanitizeLogToken(normalizedCheckpointRequestId ?? "none")}; authority_reason={normalizedReason}");
         }
 
         if (promotedPressure is not null)
@@ -723,7 +724,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
         var normalizedTransferId = string.IsNullOrWhiteSpace(transferId) ? "(unknown)" : transferId.Trim();
         var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? "none" : sessionId.Trim();
-        var normalizedCheckpointRequestId = string.IsNullOrWhiteSpace(checkpointRequestId) ? null : checkpointRequestId.Trim();
+        var normalizedCheckpointRequestId = NormalizePostTunaFallbackCheckpointRequestId(checkpointRequestId);
         var completed = false;
         PostTunaFallbackControlPlanePressureState? promotedPressure = null;
         lock (gate)
@@ -735,9 +736,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 authority.LiveRouteEpoch == liveRouteEpoch &&
                 authority.TransportEpoch == transportEpoch &&
                 authority.BridgeRecoveryGeneration == bridgeRecoveryGeneration &&
-                (authority.CheckpointRequestId is null ||
-                 normalizedCheckpointRequestId is null ||
-                 string.Equals(authority.CheckpointRequestId, normalizedCheckpointRequestId, StringComparison.Ordinal)))
+                PostTunaFallbackCheckpointRequestIdsEqual(authority.CheckpointRequestId, normalizedCheckpointRequestId))
             {
                 authority.Completed = true;
                 authority.AllowControlPlanePressureAfterCompletion = allowFurtherControlPlanePressure;
@@ -1181,7 +1180,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         var normalizedTransferId = string.IsNullOrWhiteSpace(transferId) ? "(unknown)" : transferId.Trim();
         var normalizedKind = SanitizeLogToken(string.IsNullOrWhiteSpace(kind) ? "control_plane" : kind);
         var normalizedReason = SanitizeLogToken(string.IsNullOrWhiteSpace(reason) ? "post_tuna_fallback_control_plane_pressure" : reason);
-        var normalizedCheckpointRequestId = string.IsNullOrWhiteSpace(checkpointRequestId) ? null : checkpointRequestId.Trim();
+        var normalizedCheckpointRequestId = NormalizePostTunaFallbackCheckpointRequestId(checkpointRequestId);
         var nowTick = Stopwatch.GetTimestamp();
         var expiresTick = AddStopwatchDuration(nowTick, PostTunaFallbackControlPlanePressureTtl);
         var shouldLogMarked = false;
@@ -1202,9 +1201,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 authority.LiveRouteEpoch == liveRouteEpoch &&
                 authority.TransportEpoch == transportEpoch &&
                 authority.BridgeRecoveryGeneration == bridgeRecoveryGeneration &&
-                (authority.CheckpointRequestId is null ||
-                 normalizedCheckpointRequestId is null ||
-                 string.Equals(authority.CheckpointRequestId, normalizedCheckpointRequestId, StringComparison.Ordinal));
+                PostTunaFallbackCheckpointRequestIdsEqual(authority.CheckpointRequestId, normalizedCheckpointRequestId);
             var hasCurrentRuntime =
                 activePostTunaFallbackRuntimeTransfers.ContainsKey(normalizedTransferId) &&
                 Volatile.Read(ref activeFileTransferDataSessions) > 0;
@@ -1262,7 +1259,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                      current.LegGeneration == legGeneration &&
                      current.BridgeRecoveryGeneration == bridgeRecoveryGeneration &&
                      current.TransportEpoch == transportEpoch &&
-                     string.Equals(current.CheckpointRequestId ?? string.Empty, normalizedCheckpointRequestId ?? string.Empty, StringComparison.Ordinal))
+                     PostTunaFallbackCheckpointRequestIdsEqual(current.CheckpointRequestId, normalizedCheckpointRequestId))
             {
                 current.ExpiresTick = expiresTick;
             }
@@ -1345,6 +1342,28 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             ExpiresTick = expiresTick,
         };
 
+    private static string NormalizePostTunaFallbackCheckpointRequestId(string? checkpointRequestId)
+    {
+        if (string.IsNullOrWhiteSpace(checkpointRequestId))
+        {
+            return "none";
+        }
+
+        var trimmed = checkpointRequestId.Trim();
+        return string.Equals(trimmed, "none", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(trimmed, "(none)", StringComparison.OrdinalIgnoreCase)
+            ? "none"
+            : trimmed;
+    }
+
+    private static bool PostTunaFallbackCheckpointRequestIdsEqual(
+        string? expectedCheckpointRequestId,
+        string? actualCheckpointRequestId)
+        => string.Equals(
+            NormalizePostTunaFallbackCheckpointRequestId(expectedCheckpointRequestId),
+            NormalizePostTunaFallbackCheckpointRequestId(actualCheckpointRequestId),
+            StringComparison.Ordinal);
+
     private PostTunaFallbackControlPlanePressureState? TryPromotePendingPostTunaFallbackControlPlanePressureUnsafe(
         PostTunaFallbackLegAuthorityState authority,
         long nowTick,
@@ -1397,9 +1416,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
            authority.LiveRouteEpoch == pressure.LiveRouteEpoch &&
            authority.TransportEpoch == pressure.TransportEpoch &&
            authority.BridgeRecoveryGeneration == pressure.BridgeRecoveryGeneration &&
-           (authority.CheckpointRequestId is null ||
-            pressure.CheckpointRequestId is null ||
-            string.Equals(authority.CheckpointRequestId, pressure.CheckpointRequestId, StringComparison.Ordinal));
+           PostTunaFallbackCheckpointRequestIdsEqual(authority.CheckpointRequestId, pressure.CheckpointRequestId);
 
     private void LogPostTunaFallbackControlPlanePressureMarked(PostTunaFallbackControlPlanePressureState? pressure)
     {

@@ -2856,7 +2856,8 @@ function Test-TunaGuiLatestFallbackFrontierRequestDispatchMissing {
     for ($i = $latestAcceptedIndex + 1; $i -lt @($Lines).Count; $i++) {
         $line = [string]$Lines[$i]
         if ((Test-TunaGuiLogLineContainsAll -Line $line -Needles @('event=filetransfer_v6_frontier_request_receive_dispatched')) -or
-            (Test-TunaGuiLogLineContainsAll -Line $line -Needles @('event=filetransfer_v6_frontier_request_receive_dispatch_rejected'))) {
+            (Test-TunaGuiLogLineContainsAll -Line $line -Needles @('event=filetransfer_v6_frontier_request_receive_dispatch_rejected')) -or
+            (Test-TunaGuiLogLineContainsAll -Line $line -Needles @('event=filetransfer_v6_frontier_request_receive_dispatch_coalesced'))) {
             if (Test-TunaGuiFallbackFrontierRequestDispatchTupleMatch -AcceptedLine $acceptedLine -DispatchLine $line) {
                 return $false
             }

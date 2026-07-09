@@ -2532,6 +2532,8 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         Assert.Contains("frontier_chunk_index=10", logTail, StringComparison.Ordinal);
         Assert.DoesNotContain("frontier_chunk_index=-1", logTail, StringComparison.Ordinal);
         Assert.Contains($"repair_request_key={firstFrontierRequest.RepairRequestId}", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v6_frontier_request_receive_dispatch_coalesced", logTail, StringComparison.Ordinal);
+        Assert.Contains("request_correlation_id=frq-", logTail, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_v6_post_tuna_fallback_frontier_rescue_coalesced", logTail, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_fallback_frontier_repair_stalled", logTail, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_post_tuna_fallback_control_plane_pressure_cleared_after_frontier_settlement", logTail, StringComparison.Ordinal);

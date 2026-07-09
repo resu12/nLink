@@ -244,6 +244,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("'checkpoint_request_id'", scriptText, StringComparison.Ordinal);
         Assert.Contains("filetransfer_v6_frontier_request_receive_dispatched", scriptText, StringComparison.Ordinal);
         Assert.Contains("filetransfer_v6_frontier_request_receive_dispatch_rejected", scriptText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer_v6_frontier_request_receive_dispatch_coalesced", scriptText, StringComparison.Ordinal);
         Assert.Contains("fallback_frontier_repair", scriptText, StringComparison.Ordinal);
         Assert.Contains("postTunaFallbackRouteEvidence", scriptText, StringComparison.Ordinal);
         Assert.Contains("postTunaFallbackFrontierRescueObserved", scriptText, StringComparison.Ordinal);

@@ -2168,6 +2168,39 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
     }
 
     [Fact]
+    [Trait("RetainedFallbackSuite", "FrontierRequestDispatch")]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_PeerVisibleFallbackFrontierRequestWithCoalescedDispatchProof_PassesDispatchEdge()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_frontier_request_coalesced_dispatch_pass";
+        const string repairRequestId = "v6-frontier:3:5733:351";
+        const string repairKey = "v6-frontier:5733:150";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; live_route_epoch=4", secondsOffset: 0),
+            LogLine($"event=filetransfer_fallback_leg_authority_started; direction=outbound; transfer_id={transferId}; session_id=sess_a; leg_generation=5; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; transport_epoch=3; bridge_recovery_generation=1; checkpoint_request_id=(none)", secondsOffset: 1),
+            LogLine($"event=filetransfer_control_plane_delivery_result; direction=inbound; kind=frontier_request; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; leg_generation=5; bridge_recovery_generation=1; transport_epoch=3; checkpoint_request_id=(none); reason=frontier_stall_repair_due; frame_type=filetransfer.frontier_request.v6; repair_request_id={repairRequestId}; request_correlation_id=frq-coalesced; first_start_chunk_index=5733; first_chunk_count=1; range_count=1; control_queue=1; control_copy=1; bulk_copy=1; peer_visible_any=1; accepted_any=1; local_only_rejected=0", secondsOffset: 2),
+            LogLine($"event=filetransfer_v6_frontier_request_receive_dispatch_coalesced; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; leg_generation=5; transport_epoch=3; current_transport_epoch=3; bridge_recovery_generation=1; checkpoint_request_id=(none); route_publication_generation=8; repair_request_id={repairRequestId}; repair_request_key={repairKey}; request_correlation_id=frq-coalesced; first_start_chunk_index=5733; first_chunk_count=1; range_count=1; received_transport=post_tuna_fallback_control_plane; decision_reason=same_frontier_rescue_unsettled", secondsOffset: 3),
+            LogLine($"event=filetransfer_fallback_frontier_repair_stalled; direction=inbound; transfer_id={transferId}; session_id=sess_a; repair_request_key={repairKey}; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; leg_generation=5; transport_epoch=3; bridge_recovery_generation=1; checkpoint_request_id=(none); frontier_chunk_index=5733; durable_received_highest_chunk_index=5732; requested_chunk_count=1; attempt_count=2; frontier_stall_age_ms=30000", secondsOffset: 4),
+            LogLine($"event=filetransfer_live_progress_timeout; transfer_id={transferId}; reason=no useful data progress for 180s; total_wait_s=218; progress_timeout_seconds=180; receiver_next_chunk=5733; receiver_highest_chunk=5732; progress_events=297", secondsOffset: 190)
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.NotEqual("fallback_frontier_request_dispatch_missing", verdict["recovery_failure_class"]);
+        Assert.Equal("1", verdict["fallback_frontier_request_delivery_accepted_count"]);
+        Assert.Equal("1", verdict["fallback_frontier_request_receive_dispatch_coalesced_count"]);
+        Assert.Equal("0", verdict["fallback_frontier_request_dispatch_missing_count"]);
+        Assert.Equal("pass", verdict["fallback_frontier_request_dispatch_verdict"]);
+    }
+
+    [Fact]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_ProactiveFrontierRepair_PopulatesRepairSummary()
     {
