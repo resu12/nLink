@@ -2444,6 +2444,7 @@ public sealed partial class NknSignalingTransport
         string decisionReason)
     {
         if (settlement.Outcome is not (
+                FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved or
                 FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch or
                 FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled))
         {
@@ -11241,6 +11242,12 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
+        if (snapshot.Completed ||
+            snapshot.RecoveryExhausted)
+        {
+            return false;
+        }
+
         if (!string.IsNullOrWhiteSpace(transferId) &&
             !string.Equals(snapshot.TransferId, SanitizeLogToken(transferId), StringComparison.Ordinal))
         {
@@ -14731,7 +14738,9 @@ public sealed partial class NknSignalingTransport
     private static bool IsRegularV4RecoveryLivenessSnapshotMatchingBlockedRetry(
         RuntimeUnlockRecoveryRetryState state,
         FileTransferRegularV4RecoveryLivenessSnapshot livenessSnapshot)
-        => string.Equals(state.RegularV4RecoveryBlockedTransferId, livenessSnapshot.TransferId, StringComparison.Ordinal) &&
+        => !livenessSnapshot.Completed &&
+           !livenessSnapshot.RecoveryExhausted &&
+           string.Equals(state.RegularV4RecoveryBlockedTransferId, livenessSnapshot.TransferId, StringComparison.Ordinal) &&
            state.RegularV4RecoveryDirection == livenessSnapshot.Direction &&
            state.RegularV4RecoveryLivenessGeneration == livenessSnapshot.Generation &&
            string.Equals(state.RegularV4RecoveryRouteToken, livenessSnapshot.RouteToken, StringComparison.Ordinal) &&
@@ -15325,6 +15334,7 @@ public sealed partial class NknSignalingTransport
                 decisionReason = "regular_v4_recovery_exhausted";
             }
             else if (frontierSettlement is not null &&
+                     frontierSettlement.Outcome != FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved &&
                      !livenessSnapshot.ReceiveProofObserved &&
                      !livenessSnapshot.Completed &&
                      !livenessSnapshot.RecoveryExhausted)

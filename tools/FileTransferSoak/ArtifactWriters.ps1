@@ -8787,6 +8787,26 @@ function Get-FileTransferRecoveryFailureClassification {
             $runtimeUnlockFallbackProofReplayPendingAfterPairedYieldUnresolvedEvents.Count -gt 0 -or
             $runtimeUnlockPostFallbackResumeBlockedEvents.Count -gt 0
         )
+    $regularV4ReceiveRecoveryRejectedBeforeRuntimeUnlock =
+        $runtimeUnlockRetryRejectedAfterRegularV4RecoveryEvents.Count -gt 0 -and
+        $runtimeUnlockTransactionStartedEvents.Count -eq 0 -and
+        @($events | Where-Object {
+            $_.EventName -eq 'session_recovery_contract_failed' -and
+            (
+                (Get-FileTransferEventField -Event $_ -Name 'retry_reason' -Default '') -like '*runtime_unlock*' -or
+                (Get-FileTransferEventField -Event $_ -Name 'kind' -Default '') -eq 'runtime_unlock_activation'
+            )
+        }).Count -gt 0 -and
+        (
+            $regularV4ReceiveRecoveryClosedNoDeferralEvents.Count -gt 0 -or
+            @($runtimeUnlockRetryRejectedAfterRegularV4RecoveryEvents | Where-Object {
+                (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -in @(
+                    'regular_v4_recovery_no_current_settlement_proof',
+                    'receive_recovery_contract_rejected',
+                    'v4_repair_missing_dispatch',
+                    'v4_repair_settled_stalled')
+            }).Count -gt 0
+        )
 
     $runtimeUnlockHasPreCommitAckProof =
         $runtimeUnlockProbeAckedEvents.Count -gt 0 -or
@@ -8806,6 +8826,9 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     elseif ($runtimeUnlockRetryDispatchProofVerdict -eq 'fail') {
         $class = 'runtime_unlock_retry_dispatch_missing'
+    }
+    elseif ($regularV4ReceiveRecoveryRejectedBeforeRuntimeUnlock) {
+        $class = 'regular_v4_receive_recovery_rejected_before_runtime_unlock'
     }
     elseif ($runtimeUnlockRetryRegularV4RecoverySettlementMissingCount -gt 0) {
         $class = 'runtime_unlock_retry_regular_v4_recovery_settlement_missing'

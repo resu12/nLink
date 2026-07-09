@@ -3132,8 +3132,9 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $runtimeUnlockRetryReleasedAfterRegularV4Recovery = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_retry_released_after_regular_v4_receive_recovery')
     $runtimeUnlockRetryRejectedAfterRegularV4Recovery = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_retry_rejected_after_regular_v4_receive_recovery')
     $runtimeUnlockRetryDispatchMissingAfterAuthorityGranted = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_retry_dispatch_missing_after_authority_granted')
+    $runtimeUnlockTransactionStarted = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_transaction_started')
     $runtimeUnlockRetryRecoverySettlementMissingMarker = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_retry_regular_v4_recovery_settlement_missing')
-    $runtimeUnlockRetryContractFailed = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=session_recovery_contract_failed')
+    $runtimeUnlockRetryContractFailed = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=session_recovery_contract_failed', 'runtime_unlock')
     $runtimeUnlockRetryRegularV4RecoverySettled = $runtimeUnlockRetryReleasedAfterRegularV4Recovery -or
         $runtimeUnlockRetryRejectedAfterRegularV4Recovery -or
         $runtimeUnlockRetryContractFailed
@@ -3184,6 +3185,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $regularV4FrontierRepairSettledStalledEvent = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_settled_stalled')
     $regularV4FrontierRepairPrecontractSettlementConsumed = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_regular_v4_frontier_repair_precontract_settlement_consumed')
     $regularV4ReceiveRecoveryClosedNoDeferral = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=regular_v4_receive_recovery_contract_closed_no_deferral')
+    $regularV4ReceiveRecoveryRejectedBeforeRuntimeUnlock = $runtimeUnlockRetryRejectedAfterRegularV4Recovery -and
+        $runtimeUnlockRetryContractFailed -and
+        $regularV4ReceiveRecoveryClosedNoDeferral -and
+        (-not $runtimeUnlockTransactionStarted)
     $regularV4EvidenceLineText = [string[]]@($evidenceLines | ForEach-Object { [string]$_ })
     $regularV4FrontierRepairSettlementClosed = Test-TunaGuiRegularV4FrontierRepairSettlementClosed -Lines $regularV4EvidenceLineText
     $regularV4FrontierRepairSettledStalledUnclosed = $regularV4FrontierRepairSettledStalledEvent -and (-not $regularV4FrontierRepairSettlementClosed)
@@ -3315,6 +3320,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     elseif ($runtimeUnlockRetryDispatchMissingAfterAuthorityGranted) {
         $phase = 'runtime_unlock_retry'
         $reason = 'runtime_unlock_retry_dispatch_missing_after_authority_granted'
+    }
+    elseif ($regularV4ReceiveRecoveryRejectedBeforeRuntimeUnlock) {
+        $phase = 'runtime_unlock_retry'
+        $reason = 'regular_v4_receive_recovery_rejected_before_runtime_unlock'
     }
     elseif ($fallbackFrontierRequestDispatchMissing) {
         $phase = 'fallback_frontier_repair'

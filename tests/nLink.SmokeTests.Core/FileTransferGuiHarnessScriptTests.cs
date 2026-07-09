@@ -256,6 +256,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("regularV4FrontierRepairSettledStalledEvent", scriptText, StringComparison.Ordinal);
         Assert.Contains("regularV4FrontierRepairPrecontractSettlementConsumed", scriptText, StringComparison.Ordinal);
         Assert.Contains("regularV4ReceiveRecoveryClosedNoDeferral", scriptText, StringComparison.Ordinal);
+        Assert.Contains("regularV4ReceiveRecoveryRejectedBeforeRuntimeUnlock", scriptText, StringComparison.Ordinal);
+        Assert.Contains("regular_v4_receive_recovery_rejected_before_runtime_unlock", scriptText, StringComparison.Ordinal);
         Assert.Contains("regularV4FrontierRepairSettlementClosed", scriptText, StringComparison.Ordinal);
         Assert.Contains("regularV4FrontierRepairSettledStalledUnclosed", scriptText, StringComparison.Ordinal);
         Assert.Contains("runtimeUnlockRetryDispatchMissingAfterAuthorityGranted", scriptText, StringComparison.Ordinal);
@@ -292,6 +294,14 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             scriptText.IndexOf("elseif ($runtimeUnlockRetryDispatchMissingAfterAuthorityGranted)", StringComparison.Ordinal) <
             scriptText.IndexOf("elseif ($regularV4FrontierRepairSettledStalledUnclosed)", StringComparison.Ordinal),
             "Runtime-unlock dispatch authority gaps must outrank broader regular V4 frontier settlement labels.");
+        Assert.True(
+            scriptText.IndexOf("elseif ($regularV4ReceiveRecoveryRejectedBeforeRuntimeUnlock)", StringComparison.Ordinal) <
+            scriptText.IndexOf("elseif ($runtimeUnlockRetryRegularV4RecoverySettlementMissing)", StringComparison.Ordinal),
+            "Explicit regular V4 receive-recovery rejection must classify before missing-settlement buckets.");
+        Assert.True(
+            scriptText.IndexOf("elseif ($regularV4ReceiveRecoveryRejectedBeforeRuntimeUnlock)", StringComparison.Ordinal) <
+            scriptText.IndexOf("elseif ($regularV4FrontierRepairSettledStalledUnclosed)", StringComparison.Ordinal),
+            "Explicit regular V4 receive-recovery rejection must classify before generic regular V4 liveness labels.");
         Assert.True(
             scriptText.IndexOf("elseif ($regularV4FrontierRepairSettledStalledUnclosed)", StringComparison.Ordinal) <
             scriptText.IndexOf("elseif ($regularV4FrontierRepairStalled)", StringComparison.Ordinal),

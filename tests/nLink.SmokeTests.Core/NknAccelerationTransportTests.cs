@@ -12434,6 +12434,178 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryBlockedByRegularV4Recovery_ConsumesProgressPrecontractSettlementAsRelease()
+    {
+        FakeNknClient.ResetNetwork();
+        var previousHelpeePriorityDelay = NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
+        var previousSoftSettleDelay = NknSignalingTransport.RuntimeUnlockRecoverySoftSettleDelayOverrideForTests;
+        var previousReceiveRecoveryBlocker = NknSignalingTransport.RuntimeUnlockRegularV4ReceiveRecoveryBlockerOverrideForTests;
+        var previousObservedSendBlocker = NknSignalingTransport.RuntimeUnlockOfferObservedSendBlockerReasonOverrideForTests;
+        var previousPeerProofFreshness = NknSignalingTransport.RuntimeUnlockRetryAuthorityPeerProofFreshnessOverrideForTests;
+        var previousBulkProofBlocker = NknSignalingTransport.RuntimeUnlockBulkQueueObservedProofBlockerOverrideForTests;
+        var previousDirectObservedLaneBlocker = NknSignalingTransport.RuntimeUnlockOfferDirectObservedLaneBlockerOverrideForTests;
+        var previousPeerVisibleCopyTimeout = NknSignalingTransport.RuntimeUnlockPeerVisibleLifecycleCopyTimeoutOverrideForTests;
+        NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = TimeSpan.Zero;
+        NknSignalingTransport.RuntimeUnlockRecoverySoftSettleDelayOverrideForTests = TimeSpan.Zero;
+        NknSignalingTransport.RuntimeUnlockRegularV4ReceiveRecoveryBlockerOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockOfferObservedSendBlockerReasonOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockRetryAuthorityPeerProofFreshnessOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockBulkQueueObservedProofBlockerOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockOfferDirectObservedLaneBlockerOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockPeerVisibleLifecycleCopyTimeoutOverrideForTests = null;
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-regular-v4-precontract-progress.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-regular-v4-precontract-progress.address");
+            var hostLane = new RetryableTunaAccelerationSession(canListen: true, failedDialAttemptsBeforeSuccess: 0);
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-regular-v4-precontract-progress-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                hostLane);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-runtime-unlock-regular-v4-precontract-progress-id", helperClient.Address));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare);
+            const string transferId = "transfer_runtime_unlock_regular_v4_precontract_progress";
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            InvokePrivateMethod(
+                host,
+                "TrackAuthorizedFileTransferRouteHintForTests",
+                transferId,
+                FileTransferRouteResolver.RegularNknV4FastToken,
+                FileTransferProtocol.ProtocolVersionV4,
+                "test_regular_route",
+                false,
+                "unknown",
+                "unknown",
+                false,
+                0L,
+                null,
+                0);
+
+            var logStart = GetOperationalLogLength();
+            var precontractSettlement = new FileTransferRegularV4FrontierRepairSettlement(
+                sessionId,
+                transferId,
+                FileTransferDirection.Outbound,
+                FileTransferRouteResolver.RegularNknV4FastToken,
+                FileTransferProtocol.ProtocolVersionV4,
+                0,
+                1,
+                0,
+                1,
+                0,
+                0,
+                0,
+                1,
+                null,
+                "regular_v4_peer_silence_safety_replay:0:0:64:1",
+                0,
+                3,
+                64,
+                1,
+                "frontier_advanced",
+                FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved,
+                FileTransferTransportKind.RegularNkn);
+            InvokePrivateMethod(host, "HandleAcceptedRegularV4FrontierRepairSettlement", precontractSettlement);
+
+            var recoveryRequest = new FileTransferReceiveRecoveryRequest(
+                sessionId,
+                transferId,
+                FileTransferDirection.Outbound,
+                "session_liveness_timeout_pending")
+            {
+                RouteToken = FileTransferRouteResolver.RegularNknV4FastToken,
+                ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                LiveRouteEpoch = 0,
+                TransferLegGeneration = 1,
+                BridgeRecoveryGeneration = 0,
+                TransportEpoch = 0,
+                AuthorityReason = "regular_v4_startup_local_only_no_ack",
+            };
+            InvokePrivateMethod(
+                host,
+                "MarkFileTransferRegularV4RecoveryLivenessStarted",
+                recoveryRequest,
+                sessionId,
+                transferId,
+                "session_liveness_timeout_pending");
+            InvokePrivateMethod(host, "MarkFileTransferTunaActivationBridgeRecoveryStarted", "session_liveness_timeout_pending");
+
+            SetPrivateField(host, "accelerationNegotiationRetryAttempts", 0);
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                323L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "session_liveness_timeout_pending");
+            InvokePrivateMethod(host, "MarkFileTransferTunaActivationBridgeRecoverySettled", "test_recovery_settled");
+
+            try
+            {
+                await WaitUntilAsync(
+                    () =>
+                    {
+                        var tail = ReadOperationalLogTail(logStart);
+                        return tail.Contains(
+                                   "event=runtime_unlock_regular_v4_frontier_repair_precontract_settlement_consumed;",
+                                   StringComparison.Ordinal) &&
+                               tail.Contains(
+                                   "event=runtime_unlock_retry_released_after_regular_v4_receive_recovery;",
+                                   StringComparison.Ordinal) &&
+                               tail.Contains(
+                                   "event=runtime_unlock_retry_dispatch_authority_granted;",
+                                   StringComparison.Ordinal) &&
+                               tail.Contains(
+                                   "event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;",
+                                   StringComparison.Ordinal);
+                    },
+                    TimeSpan.FromSeconds(3));
+            }
+            catch (TimeoutException ex)
+            {
+                throw new TimeoutException(ReadOperationalLogTail(logStart), ex);
+            }
+
+            var releaseTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=runtime_unlock_regular_v4_frontier_repair_precontract_settlement_cached;", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_regular_v4_frontier_repair_precontract_settlement_consumed;", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("settlement_outcome=progress_observed", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("decision_reason=receive_recovery_contract_released", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_retry_released_after_regular_v4_receive_recovery;", releaseTail, StringComparison.Ordinal);
+            AssertRuntimeUnlockDispatchGrantBeforeSchedule(releaseTail);
+            Assert.Contains("route=regular_nkn_v4_fast", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("protocol_version=4", releaseTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_rejected_after_regular_v4_receive_recovery;", releaseTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=session_recovery_contract_failed;", releaseTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = previousHelpeePriorityDelay;
+            NknSignalingTransport.RuntimeUnlockRecoverySoftSettleDelayOverrideForTests = previousSoftSettleDelay;
+            NknSignalingTransport.RuntimeUnlockRegularV4ReceiveRecoveryBlockerOverrideForTests = previousReceiveRecoveryBlocker;
+            NknSignalingTransport.RuntimeUnlockOfferObservedSendBlockerReasonOverrideForTests = previousObservedSendBlocker;
+            NknSignalingTransport.RuntimeUnlockRetryAuthorityPeerProofFreshnessOverrideForTests = previousPeerProofFreshness;
+            NknSignalingTransport.RuntimeUnlockBulkQueueObservedProofBlockerOverrideForTests = previousBulkProofBlocker;
+            NknSignalingTransport.RuntimeUnlockOfferDirectObservedLaneBlockerOverrideForTests = previousDirectObservedLaneBlocker;
+            NknSignalingTransport.RuntimeUnlockPeerVisibleLifecycleCopyTimeoutOverrideForTests = previousPeerVisibleCopyTimeout;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task RuntimeUnlockRetryBlockedByRegularV4Recovery_ReleasesOnceAfterReceiveProof()
     {
         FakeNknClient.ResetNetwork();

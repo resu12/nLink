@@ -5813,6 +5813,12 @@ function Get-Phase5FailureClass {
     }
 
     foreach ($line in $failureLines) {
+        if ($line.IndexOf('regular_v4_receive_recovery_rejected_before_runtime_unlock', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'regular_v4_receive_recovery_rejected_before_runtime_unlock'
+        }
+    }
+
+    foreach ($line in $failureLines) {
         if ($line.IndexOf('regular_v4_frontier_repair_liveness_settlement_missing', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $line.IndexOf('regular_v4_frontier_repair_send_deferred_or_stalled', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $line.IndexOf('regular_v4_receive_recovery_settlement_missing', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
