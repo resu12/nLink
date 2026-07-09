@@ -426,6 +426,58 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryGrantWithoutObservedSend_ClassifiesMissingAfterAuthorityGranted()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                "transfer_runtime_unlock_dispatch_grant_missing_observed",
+                RuntimeUnlockRetryDispatchGrantedLine(
+                    "transfer_runtime_unlock_dispatch_grant_missing_observed",
+                    queuedBehindActiveNegotiation: false),
+                RuntimeUnlockRetryOfferGenerationLine()),
+            ["-LiveRouteProofMode", "None"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("runtime_unlock_retry_dispatch_missing", verdict["recovery_failure_class"]);
+        Assert.Equal("fail", verdict["runtime_unlock_retry_dispatch_proof_verdict"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_missing_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockRetryExplicitMissingAfterAuthorityGranted_ClassifiesSpecificEdge()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                "transfer_runtime_unlock_dispatch_missing_after_grant",
+                RuntimeUnlockRetryDispatchGrantedLine(
+                    "transfer_runtime_unlock_dispatch_missing_after_grant",
+                    queuedBehindActiveNegotiation: false),
+                RuntimeUnlockRetryDispatchMissingAfterAuthorityGrantedLine("transfer_runtime_unlock_dispatch_missing_after_grant"),
+                RuntimeUnlockRetryContractFailedDispatchMissingAfterAuthorityGrantedLine("transfer_runtime_unlock_dispatch_missing_after_grant")),
+            ["-LiveRouteProofMode", "None"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("runtime_unlock_retry_dispatch_missing_after_authority_granted", verdict["recovery_failure_class"]);
+        Assert.Equal("fail", verdict["runtime_unlock_retry_dispatch_proof_verdict"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_missing_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_missing_after_authority_granted_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_RuntimeUnlockRetryReleaseWithDispatchGrantAndObserved_PassesDispatchProof()
     {
         if (!OperatingSystem.IsWindows())
@@ -1358,11 +1410,16 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     private static string RuntimeUnlockRetryOfferGenerationLine()
         => "event=runtime_unlock_transaction_offer_generation_created; session_id=sess_runtime_unlock_dispatch_proof; transaction_generation=4; offer_generation=12; state=offerpreparing; peer_visible_proof=0; peer_received=0; answer_received=0; route_commit_pending=0; route_committed=0; failure_reason=(none); retired_reason=(none); reason=runtime_unlock";
 
-    private static string RuntimeUnlockRetryDispatchGrantedLine(string transferId)
-        => $"event=runtime_unlock_retry_dispatch_authority_granted; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; contract_generation=7; retired_generation=11; offer_generation=12; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; runtime_generation=4; terminal_generation=0; leg_generation=9; regular_v4_liveness_generation=3; bridge_decision_generation=5; queued_behind_active_negotiation=1; decision_reason=regular_v4_recovery_released";
+    private static string RuntimeUnlockRetryDispatchGrantedLine(
+        string transferId,
+        bool queuedBehindActiveNegotiation = true)
+        => $"event=runtime_unlock_retry_dispatch_authority_granted; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; contract_generation=7; retired_generation=11; offer_generation=12; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; runtime_generation=4; terminal_generation=0; leg_generation=9; regular_v4_liveness_generation=3; bridge_decision_generation=5; queued_behind_active_negotiation={(queuedBehindActiveNegotiation ? 1 : 0)}; decision_reason=regular_v4_recovery_released";
 
     private static string RuntimeUnlockRetryDispatchObservedLine(string transferId)
         => $"event=runtime_unlock_retry_dispatch_observed; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; contract_generation=7; retired_generation=11; offer_generation=12; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; runtime_generation=4; terminal_generation=0; leg_generation=9; regular_v4_liveness_generation=3; bridge_decision_generation=5; queued_behind_active_negotiation=1; decision_reason=retry_observed_send";
+
+    private static string RuntimeUnlockRetryDispatchMissingAfterAuthorityGrantedLine(string transferId)
+        => $"event=runtime_unlock_retry_dispatch_missing_after_authority_granted; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; contract_generation=7; retired_generation=11; offer_generation=12; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; runtime_generation=4; terminal_generation=0; leg_generation=9; regular_v4_liveness_generation=3; bridge_decision_generation=5; queued_behind_active_negotiation=0; decision_reason=runtime_unlock_retry_dispatch_missing_after_authority_granted";
 
     private static string RuntimeUnlockRetryDispatchRejectedLine(string transferId)
         => $"event=runtime_unlock_retry_dispatch_authority_rejected; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; contract_generation=7; retired_generation=11; offer_generation=12; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; runtime_generation=4; terminal_generation=0; leg_generation=9; regular_v4_liveness_generation=3; bridge_decision_generation=5; queued_behind_active_negotiation=1; decision_reason=terminal_retry_contract";
@@ -1372,6 +1429,9 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
     private static string RuntimeUnlockRetryContractFailedMissingAuthorityLine(string transferId)
         => $"event=session_recovery_contract_failed; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; contract_generation=7; offer_generation=12; retired_offer_generation=11; kind=runtime_unlock_activation; state=failed; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=session_liveness_timeout_pending; recovery_pending=0; recovery_settled=1; retry_required=0; retry_dispatching=0; retry_dispatched=0; retry_observed=0; queued_behind_active_negotiation=1; retry_authority_pending=0; retry_authority_granted=0; observed_send_pending=0; authority_attempt=1; authorized_observed_lane=(none); authority_failure_reason=missing_runtime_unlock_retry_authority";
+
+    private static string RuntimeUnlockRetryContractFailedDispatchMissingAfterAuthorityGrantedLine(string transferId)
+        => $"event=session_recovery_contract_failed; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; contract_generation=7; offer_generation=12; retired_offer_generation=11; kind=runtime_unlock_activation; state=failed; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=session_liveness_timeout_pending; recovery_pending=0; recovery_settled=1; retry_required=0; retry_dispatching=0; retry_dispatched=0; retry_observed=0; queued_behind_active_negotiation=0; retry_authority_pending=0; retry_authority_granted=0; observed_send_pending=0; authority_attempt=1; authorized_observed_lane=(none); authority_failure_reason=runtime_unlock_retry_dispatch_missing_after_authority_granted";
 
     private static string RuntimeUnlockRetryMissingAuthorityLine(string transferId)
         => $"event=session_recovery_contract_retry_authority_observed; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; contract_generation=7; offer_generation=12; retired_offer_generation=11; kind=runtime_unlock_activation; state=retrydispatched; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=session_liveness_timeout_pending; recovery_pending=0; recovery_settled=1; retry_required=0; retry_dispatching=0; retry_dispatched=1; retry_observed=0; queued_behind_active_negotiation=1; retry_authority_pending=0; retry_authority_granted=0; observed_send_pending=1; authority_attempt=1; authorized_observed_lane=(none); authority_failure_reason=missing_runtime_unlock_retry_authority";

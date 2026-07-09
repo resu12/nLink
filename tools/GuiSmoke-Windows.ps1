@@ -3131,6 +3131,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $runtimeUnlockRetryHeldByRegularV4Recovery = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_retry_dispatch_held_by_regular_v4_receive_recovery')
     $runtimeUnlockRetryReleasedAfterRegularV4Recovery = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_retry_released_after_regular_v4_receive_recovery')
     $runtimeUnlockRetryRejectedAfterRegularV4Recovery = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_retry_rejected_after_regular_v4_receive_recovery')
+    $runtimeUnlockRetryDispatchMissingAfterAuthorityGranted = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_retry_dispatch_missing_after_authority_granted')
     $runtimeUnlockRetryRecoverySettlementMissingMarker = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_retry_regular_v4_recovery_settlement_missing')
     $runtimeUnlockRetryContractFailed = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=session_recovery_contract_failed')
     $runtimeUnlockRetryRegularV4RecoverySettled = $runtimeUnlockRetryReleasedAfterRegularV4Recovery -or
@@ -3234,6 +3235,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $runtimeUnlockRetryHeldByRegularV4Recovery -or
         $runtimeUnlockRetryReleasedAfterRegularV4Recovery -or
         $runtimeUnlockRetryRejectedAfterRegularV4Recovery -or
+        $runtimeUnlockRetryDispatchMissingAfterAuthorityGranted -or
         $runtimeUnlockRetryRecoverySettlementMissingMarker -or
         $runtimeUnlockRetryRegularV4RecoverySettlementMissing -or
         $regularV4FrontierRepairSettledStalledUnclosed -or
@@ -3309,6 +3311,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     elseif ($postFallbackRuntimeUnlockResumeBlocked) {
         $phase = 'post_fallback_runtime_unlock_resume'
         $reason = if ($fallbackProofReplayPendingAfterPairedYield) { 'fallback_proof_replay_pending_after_paired_yield' } else { 'post_fallback_runtime_unlock_resume_blocked' }
+    }
+    elseif ($runtimeUnlockRetryDispatchMissingAfterAuthorityGranted) {
+        $phase = 'runtime_unlock_retry'
+        $reason = 'runtime_unlock_retry_dispatch_missing_after_authority_granted'
     }
     elseif ($fallbackFrontierRequestDispatchMissing) {
         $phase = 'fallback_frontier_repair'

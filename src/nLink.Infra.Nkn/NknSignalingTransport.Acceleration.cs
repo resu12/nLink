@@ -6735,6 +6735,152 @@ public sealed partial class NknSignalingTransport
             $"event={SanitizeLogToken(eventName)}; session_id={SanitizeLogToken(state.SessionId)}; transfer_id={SanitizeLogToken(state.TransferId ?? "(none)")}; contract_generation={state.ContractGeneration}; retired_generation={state.RetiredOfferGeneration}; offer_generation={(state.CurrentOfferGeneration > 0 ? state.CurrentOfferGeneration : state.RetiredOfferGeneration)}; route={SanitizeLogToken(route)}; protocol_version={protocolVersion}; live_route_epoch={liveRouteEpoch}; runtime_generation={state.DispatchRuntimeGeneration}; terminal_generation={state.DispatchTerminalGeneration}; leg_generation={state.DispatchLegGeneration}; regular_v4_liveness_generation={state.RegularV4RecoveryLivenessGeneration}; bridge_decision_generation={state.RegularV4RecoveryBridgeDecisionGeneration}; queued_behind_active_negotiation={(state.QueuedBehindActiveNegotiation ? 1 : 0)}; decision_reason={SanitizeLogToken(decisionReason)}");
     }
 
+    private void LogRuntimeUnlockRetryDispatchAuthorityGrantedProof(
+        RuntimeUnlockRecoveryRetryState state,
+        string decisionReason)
+    {
+        LogRuntimeUnlockRetryDispatchProof(
+            "runtime_unlock_retry_dispatch_authority_granted",
+            state,
+            decisionReason);
+        ScheduleRuntimeUnlockRetryDispatchAuthoritySettlementCheck(state);
+    }
+
+    private void ScheduleRuntimeUnlockRetryDispatchAuthoritySettlementCheck(
+        RuntimeUnlockRecoveryRetryState state)
+    {
+        if (!state.DispatchAuthorityGranted ||
+            state.DispatchAuthorityRejected ||
+            state.DispatchObserved ||
+            ShouldDeferRuntimeUnlockRetryDispatchMissingSettlementForListenerOrCutThrough(state))
+        {
+            return;
+        }
+
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var deadlineUtcMs = state.DispatchDeadlineUtcMs > nowMs
+            ? state.DispatchDeadlineUtcMs
+            : nowMs + (long)(RuntimeUnlockRetryAuthorityDeadlineOverrideForTests ?? RuntimeUnlockRetryAuthorityDeadline).TotalMilliseconds;
+        var delayMs = Math.Clamp(deadlineUtcMs - nowMs + 50, 50, 60_000);
+        var sessionId = state.SessionId;
+        var transferId = state.TransferId;
+        var contractGeneration = state.ContractGeneration;
+        var retiredOfferGeneration = state.RetiredOfferGeneration;
+        var dispatchRoute = state.DispatchRoute;
+        var dispatchProtocolVersion = state.DispatchProtocolVersion;
+        var dispatchLiveRouteEpoch = state.DispatchLiveRouteEpoch;
+        var dispatchRuntimeGeneration = state.DispatchRuntimeGeneration;
+        var dispatchTerminalGeneration = state.DispatchTerminalGeneration;
+        var dispatchLegGeneration = state.DispatchLegGeneration;
+
+        _ = Task.Run(
+            async () =>
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(delayMs), CancellationToken.None)
+                    .ConfigureAwait(false);
+                SettleRuntimeUnlockRetryDispatchAuthorityIfUnobserved(
+                    sessionId,
+                    transferId,
+                    contractGeneration,
+                    retiredOfferGeneration,
+                    dispatchRoute,
+                    dispatchProtocolVersion,
+                    dispatchLiveRouteEpoch,
+                    dispatchRuntimeGeneration,
+                    dispatchTerminalGeneration,
+                    dispatchLegGeneration);
+            },
+            CancellationToken.None);
+    }
+
+    private void SettleRuntimeUnlockRetryDispatchAuthorityIfUnobserved(
+        string sessionId,
+        string? transferId,
+        long contractGeneration,
+        long retiredOfferGeneration,
+        string? dispatchRoute,
+        int dispatchProtocolVersion,
+        int dispatchLiveRouteEpoch,
+        int dispatchRuntimeGeneration,
+        int dispatchTerminalGeneration,
+        long dispatchLegGeneration)
+    {
+        RuntimeUnlockRecoveryRetryState? rejectedState = null;
+        RuntimeUnlockRecoveryRetryState? rescheduleState = null;
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        lock (accelerationGate)
+        {
+            var state = runtimeUnlockRecoveryRetryState;
+            if (state is null ||
+                state.ContractGeneration != contractGeneration ||
+                state.RetiredOfferGeneration != retiredOfferGeneration ||
+                !string.Equals(state.SessionId, sessionId, StringComparison.Ordinal) ||
+                !string.Equals(state.TransferId ?? string.Empty, transferId ?? string.Empty, StringComparison.Ordinal) ||
+                !string.Equals(state.DispatchRoute ?? string.Empty, dispatchRoute ?? string.Empty, StringComparison.Ordinal) ||
+                state.DispatchProtocolVersion != dispatchProtocolVersion ||
+                state.DispatchLiveRouteEpoch != dispatchLiveRouteEpoch ||
+                state.DispatchRuntimeGeneration != dispatchRuntimeGeneration ||
+                state.DispatchTerminalGeneration != dispatchTerminalGeneration ||
+                state.DispatchLegGeneration != dispatchLegGeneration ||
+                state.ContractState is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed ||
+                state.DispatchAuthorityRejected ||
+                state.DispatchObserved ||
+                !state.DispatchAuthorityGranted ||
+                ShouldDeferRuntimeUnlockRetryDispatchMissingSettlementForListenerOrCutThrough(state))
+            {
+                return;
+            }
+
+            if (state.ObservedSendPending)
+            {
+                var inFlightDeadlineUtcMs = state.ObservedSendDeadlineUtcMs > 0
+                    ? state.ObservedSendDeadlineUtcMs + (long)RuntimeUnlockRetryAuthorityInFlightSendGrace.TotalMilliseconds
+                    : 0;
+                if (inFlightDeadlineUtcMs > nowMs)
+                {
+                    state.DispatchDeadlineUtcMs = Math.Max(state.DispatchDeadlineUtcMs, inFlightDeadlineUtcMs);
+                    rescheduleState = state;
+                }
+            }
+
+            if (rescheduleState is null)
+            {
+                MarkRuntimeUnlockRetryDispatchAuthorityRejectedUnsafe(
+                    state,
+                    "runtime_unlock_retry_dispatch_missing_after_authority_granted");
+                rejectedState = state;
+            }
+        }
+
+        if (rescheduleState is not null)
+        {
+            ScheduleRuntimeUnlockRetryDispatchAuthoritySettlementCheck(rescheduleState);
+            return;
+        }
+
+        if (rejectedState is null)
+        {
+            return;
+        }
+
+        LogRuntimeUnlockRetryDispatchProof(
+            "runtime_unlock_retry_dispatch_missing_after_authority_granted",
+            rejectedState,
+            rejectedState.DispatchDecisionReason ?? "runtime_unlock_retry_dispatch_missing_after_authority_granted");
+        LogRuntimeUnlockRetryDispatchProof(
+            "runtime_unlock_retry_dispatch_authority_rejected",
+            rejectedState,
+            rejectedState.DispatchDecisionReason ?? "runtime_unlock_retry_dispatch_missing_after_authority_granted");
+        LogRuntimeUnlockRecoveryContract("session_recovery_contract_failed", rejectedState.SessionId);
+    }
+
+    private static bool ShouldDeferRuntimeUnlockRetryDispatchMissingSettlementForListenerOrCutThrough(
+        RuntimeUnlockRecoveryRetryState state)
+        => (state.RequiresLocalListenerRetry || state.CutThroughPending) &&
+           !state.ListenerRearmCompleted &&
+           !state.CutThroughActive &&
+           !state.ObservedSendPending;
+
     private string? TryGetFirstActiveFileTransferIdForSession(string sessionId)
     {
         var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? string.Empty : sessionId.Trim();
@@ -10962,7 +11108,12 @@ public sealed partial class NknSignalingTransport
         state.DispatchRuntimeGeneration = authority.RuntimeGeneration;
         state.DispatchTerminalGeneration = authority.TerminalGeneration;
         state.DispatchLegGeneration = authority.LegGeneration;
-        state.DispatchDeadlineUtcMs = state.ObservedSendDeadlineUtcMs;
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var authorityDeadlineUtcMs = nowMs +
+            (long)(RuntimeUnlockRetryAuthorityDeadlineOverrideForTests ?? RuntimeUnlockRetryAuthorityDeadline).TotalMilliseconds;
+        state.DispatchDeadlineUtcMs = state.ObservedSendDeadlineUtcMs > nowMs
+            ? Math.Max(state.ObservedSendDeadlineUtcMs, authorityDeadlineUtcMs)
+            : authorityDeadlineUtcMs;
         state.AuthorityFailureReason = null;
     }
 
@@ -11008,10 +11159,33 @@ public sealed partial class NknSignalingTransport
              state.ObservedSendPending));
 
     private static bool ShouldDeferRuntimeUnlockRetryCompletionUntilListenerRearm(
-        RuntimeUnlockRecoveryRetryState state)
-        => state.RequiresLocalListenerRetry &&
-           !state.ListenerRearmCompleted &&
-           state.ContractState is not (SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed);
+        RuntimeUnlockRecoveryRetryState state,
+        out string decisionReason)
+    {
+        decisionReason = string.Empty;
+        if (state.ContractState is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed)
+        {
+            return false;
+        }
+
+        if (state.RequiresLocalListenerRetry &&
+            !state.ListenerRearmCompleted)
+        {
+            decisionReason = "listener_rearm_required_before_dispatch_completion";
+            return true;
+        }
+
+        if (state.CutThroughPending &&
+            !state.CutThroughActive &&
+            !state.CutThroughCompleted &&
+            !state.DispatchObserved)
+        {
+            decisionReason = "cutthrough_pending_before_dispatch_completion";
+            return true;
+        }
+
+        return false;
+    }
 
     private static bool RequiresRuntimeUnlockRetryDispatchAuthority(string? reason)
         => IsRuntimeUnlockActivationRetryReason(reason) ||
@@ -11521,6 +11695,7 @@ public sealed partial class NknSignalingTransport
             "NKN.Tuna",
             $"event=runtime_unlock_cutthrough_started; session_id={SanitizeLogToken(sessionId)}; offer_generation={offerGeneration}; contract_generation={stateSnapshot!.ContractGeneration}; attempt={stateSnapshot.CutThroughAttempt}; trigger={SanitizeLogToken(trigger)}; reason=peer_response_timeout_under_regular_v4_recovery");
         LogRuntimeUnlockRecoveryContract("session_recovery_contract_cutthrough_started", stateSnapshot.SessionId);
+        ScheduleRuntimeUnlockRetryDispatchAuthoritySettlementCheck(stateSnapshot);
         return true;
     }
 
@@ -12307,8 +12482,7 @@ public sealed partial class NknSignalingTransport
 
         if (dispatchAuthorityGranted)
         {
-            LogRuntimeUnlockRetryDispatchProof(
-                "runtime_unlock_retry_dispatch_authority_granted",
+            LogRuntimeUnlockRetryDispatchAuthorityGrantedProof(
                 stateSnapshot!,
                 dispatchDecisionReason);
         }
@@ -13281,8 +13455,7 @@ public sealed partial class NknSignalingTransport
         LogRuntimeUnlockRecoveryContract("session_recovery_contract_retry_authority_observed", stateSnapshot!.SessionId);
         if (dispatchAuthorityGranted)
         {
-            LogRuntimeUnlockRetryDispatchProof(
-                "runtime_unlock_retry_dispatch_authority_granted",
+            LogRuntimeUnlockRetryDispatchAuthorityGrantedProof(
                 stateSnapshot,
                 stateSnapshot.DispatchDecisionReason ?? "retry_observed_reacquired");
         }
@@ -13348,9 +13521,9 @@ public sealed partial class NknSignalingTransport
                 return;
             }
 
-            if (ShouldDeferRuntimeUnlockRetryCompletionUntilListenerRearm(state))
+            if (ShouldDeferRuntimeUnlockRetryCompletionUntilListenerRearm(state, out var completionDeferReason))
             {
-                state.AuthorityFailureReason = "listener_rearm_required_before_dispatch_completion";
+                state.AuthorityFailureReason = completionDeferReason;
                 deferredState = state;
                 stateSnapshot = state;
             }
@@ -13387,7 +13560,7 @@ public sealed partial class NknSignalingTransport
         {
             LocalOperationalLog.Info(
                 "NKN.Tuna",
-                $"event=runtime_unlock_retry_completion_deferred_listener_rearm_pending; session_id={SanitizeLogToken(deferredState.SessionId)}; transfer_id={SanitizeLogToken(deferredState.TransferId ?? "(none)")}; contract_generation={deferredState.ContractGeneration}; offer_generation={(deferredState.CurrentOfferGeneration > 0 ? deferredState.CurrentOfferGeneration : deferredState.RetiredOfferGeneration)}; retry_reason={SanitizeLogToken(deferredState.RetryReason)}; recovery_reason={SanitizeLogToken(deferredState.RecoveryReason)}; completion_reason={SanitizeLogToken(reason)}; decision_reason=listener_rearm_required_before_dispatch_completion");
+                $"event=runtime_unlock_retry_completion_deferred_listener_rearm_pending; session_id={SanitizeLogToken(deferredState.SessionId)}; transfer_id={SanitizeLogToken(deferredState.TransferId ?? "(none)")}; contract_generation={deferredState.ContractGeneration}; offer_generation={(deferredState.CurrentOfferGeneration > 0 ? deferredState.CurrentOfferGeneration : deferredState.RetiredOfferGeneration)}; retry_reason={SanitizeLogToken(deferredState.RetryReason)}; recovery_reason={SanitizeLogToken(deferredState.RecoveryReason)}; completion_reason={SanitizeLogToken(reason)}; decision_reason={SanitizeLogToken(deferredState.AuthorityFailureReason ?? "listener_rearm_required_before_dispatch_completion")}");
             LogRuntimeUnlockRecoveryContract("session_recovery_contract_completion_deferred", deferredState.SessionId);
             return;
         }
@@ -13475,6 +13648,8 @@ public sealed partial class NknSignalingTransport
         {
             ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed("listener_rearm_completed");
         }
+
+        ScheduleRuntimeUnlockRetryDispatchAuthoritySettlementCheck(stateSnapshot);
     }
 
     private void FailRuntimeUnlockRecoveryContractIfActive(string? sessionId, string reason)
@@ -15355,8 +15530,7 @@ public sealed partial class NknSignalingTransport
             $"event=runtime_unlock_retry_released_after_regular_v4_receive_recovery; session_id={SanitizeLogToken(releasedState.SessionId)}; transfer_id={SanitizeLogToken(livenessSnapshot.TransferId)}; retry_reason={SanitizeLogToken(releasedState.RetryReason)}; recovery_reason={SanitizeLogToken(releasedState.RecoveryReason)}; retired_generation={releasedState.RetiredOfferGeneration}; contract_generation={releasedState.ContractGeneration}; offer_generation={(releasedState.CurrentOfferGeneration > 0 ? releasedState.CurrentOfferGeneration : releasedState.RetiredOfferGeneration)}; route={SanitizeLogToken(releasedRoute)}; protocol_version={releasedProtocolVersion}; live_route_epoch={releasedLiveRouteEpoch}; regular_v4_liveness_generation={livenessSnapshot.Generation}; bridge_decision_generation={livenessSnapshot.BridgeDecisionGeneration}; blocker_reason={SanitizeLogToken(blockedReason)}; settlement_trigger={sanitizedTrigger}; decision_reason=accepted; queued_behind_active_negotiation={(queuedBehindActiveNegotiation ? 1 : 0)}");
         if (dispatchAuthorityGranted)
         {
-            LogRuntimeUnlockRetryDispatchProof(
-                "runtime_unlock_retry_dispatch_authority_granted",
+            LogRuntimeUnlockRetryDispatchAuthorityGrantedProof(
                 releasedState,
                 releasedState.DispatchDecisionReason ?? "retry_dispatch_reacquired_for_recovery_settlement");
         }
@@ -16616,8 +16790,7 @@ public sealed partial class NknSignalingTransport
 
         if (dispatchAuthorityGranted)
         {
-            LogRuntimeUnlockRetryDispatchProof(
-                "runtime_unlock_retry_dispatch_authority_granted",
+            LogRuntimeUnlockRetryDispatchAuthorityGrantedProof(
                 stateToSchedule,
                 stateToSchedule.DispatchDecisionReason ?? "retry_dispatch_reacquired_for_recovery_schedule");
         }
