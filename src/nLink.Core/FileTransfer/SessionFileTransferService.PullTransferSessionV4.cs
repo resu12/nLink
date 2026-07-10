@@ -4527,27 +4527,18 @@ public sealed partial class SessionFileTransferService
 
                 if (!repairDelivered)
                 {
+                    var regularV4PeerSilenceRepair = string.Equals(
+                        repairSend.DeliveryEscalationReason,
+                        "regular_v4_peer_silence_safety_replay",
+                        StringComparison.Ordinal);
                     var requeuedRegularV4PeerSilenceRepair = false;
                     var requeuedRegularV4PeerSilenceRepairChunkCount = 0;
-                    if (string.Equals(repairSend.DeliveryEscalationReason, "regular_v4_peer_silence_safety_replay", StringComparison.Ordinal))
-                    {
-                        lock (gate)
-                        {
-                            if (ReferenceEquals(outboundTransfer, context) &&
-                                !context.IsTerminal)
-                            {
-                                requeuedRegularV4PeerSilenceRepair =
-                                    TryRequeueOutboundRegularNknV4PeerSilenceSafetyReplayLocked(
-                                        context,
-                                        repairSend,
-                                        out requeuedRegularV4PeerSilenceRepairChunkCount);
-                            }
-                        }
-                    }
+                    var requeueSettlementObserved = false;
+                    FileTransferRegularV4FrontierRepairAuthority? successorRegularV4RepairAuthority = null;
 
                     var deferredEventName = IsFileTunaV4PostTunaRecoveryActiveLocked(context)
                         ? "filetransfer_v4_repair_send_deferred_for_file_tuna_v4_post_tuna_recovery"
-                        : string.Equals(repairSend.DeliveryEscalationReason, "regular_v4_peer_silence_safety_replay", StringComparison.Ordinal)
+                        : regularV4PeerSilenceRepair
                             ? "filetransfer_v4_repair_send_deferred_for_regular_v4_peer_silence_repair"
                             : "filetransfer_v4_repair_send_deferred_for_v6_regular_nkn_sparse_runtime";
                     if (logRegularV4FrontierRepairDispatchProof && regularV4RepairAuthorityForDispatch is { } regularDeferredAuthority)
@@ -4565,13 +4556,7 @@ public sealed partial class SessionFileTransferService
                             deferredEventName,
                             repairSend.DeliveryMode,
                             repairSend.DeliveryEscalationReason);
-                        ObserveRegularV4FrontierRepairDispatchBlocker(
-                            context,
-                            regularDeferredAuthority,
-                            repairSend.RequestedChunkCount,
-                            "regular_v4_frontier_repair_send_deferred");
-
-                        if (requeuedRegularV4PeerSilenceRepair)
+                        if (regularV4PeerSilenceRepair)
                         {
                             LogFileTransferRegularV4FrontierRepairMissingDispatch(
                                 FileTransferDirection.Outbound,
@@ -4583,17 +4568,65 @@ public sealed partial class SessionFileTransferService
                                 repairSend.ChunkIndices.Count,
                                 repairSend.RemoteNextExpectedChunkIndex,
                                 repairSend.ChunksAcceptedForTransport,
-                                "send_deferred_requeued_after_timeout");
+                                "send_deferred_successor_decision_pending");
+                        }
+                    }
+
+                    if (regularV4PeerSilenceRepair)
+                    {
+                        lock (gate)
+                        {
+                            if (ReferenceEquals(outboundTransfer, context) &&
+                                !context.IsTerminal)
+                            {
+                                requeuedRegularV4PeerSilenceRepair =
+                                    TryRequeueOutboundRegularNknV4PeerSilenceSafetyReplayLocked(
+                                        context,
+                                        repairSend,
+                                        out requeuedRegularV4PeerSilenceRepairChunkCount,
+                                        out successorRegularV4RepairAuthority,
+                                        out requeueSettlementObserved);
+                            }
+                        }
+                    }
+
+                    if (logRegularV4FrontierRepairDispatchProof && regularV4RepairAuthorityForDispatch is { } currentDeferredAuthority)
+                    {
+                        if (requeuedRegularV4PeerSilenceRepair && successorRegularV4RepairAuthority is { } successorAuthority)
+                        {
+                            LogFileTransferRegularV4FrontierRepairSuccessorAuthorized(
+                                FileTransferDirection.Outbound,
+                                context.TransferId,
+                                context.SessionId,
+                                currentDeferredAuthority,
+                                successorAuthority,
+                                repairSend.ChunkIndices.Count,
+                                requeuedRegularV4PeerSilenceRepairChunkCount,
+                                "send_timeout_successor_authorized");
                             ObserveRegularV4FrontierRepairDispatchBlocker(
                                 context,
-                                regularDeferredAuthority,
+                                successorAuthority,
+                                requeuedRegularV4PeerSilenceRepairChunkCount,
+                                "regular_v4_frontier_repair_successor_authorized");
+                        }
+                        else if (!requeueSettlementObserved)
+                        {
+                            ObserveRegularV4FrontierRepairDispatchBlocker(
+                                context,
+                                currentDeferredAuthority,
                                 repairSend.RequestedChunkCount,
-                                "regular_v4_frontier_repair_missing_dispatch");
-                            ObserveRegularV4FrontierRepairSettlement(
-                                regularDeferredAuthority,
-                                FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch,
-                                repairSend.RequestedChunkCount,
-                                "regular_v4_frontier_repair_missing_dispatch");
+                                regularV4PeerSilenceRepair
+                                    ? "regular_v4_frontier_repair_missing_dispatch"
+                                    : "regular_v4_frontier_repair_send_deferred");
+
+                            if (regularV4PeerSilenceRepair)
+                            {
+                                ObserveRegularV4FrontierRepairSettlement(
+                                    currentDeferredAuthority,
+                                    FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch,
+                                    repairSend.RequestedChunkCount,
+                                    "regular_v4_frontier_repair_missing_dispatch");
+                            }
                         }
                     }
 
@@ -4604,7 +4637,7 @@ public sealed partial class SessionFileTransferService
                     {
                         LocalOperationalLog.Warn(
                             "FileTransferService",
-                            $"event=filetransfer_regular_v4_peer_silence_safety_replay_requeued_after_send_timeout; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairSend.RepairRequestKey}; requeued_chunk_count={requeuedRegularV4PeerSilenceRepairChunkCount}; first_start_chunk_index={repairSend.FirstStartChunkIndex}; last_end_chunk_exclusive={repairSend.LastEndChunkExclusive}; remote_next_expected_chunk_index={repairSend.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={repairSend.ChunksAcceptedForTransport}");
+                            $"event=filetransfer_regular_v4_peer_silence_safety_replay_requeued_after_send_timeout; transfer_id={context.TransferId}; session_id={context.SessionId}; predecessor_repair_request_key={repairSend.RepairRequestKey}; successor_repair_request_key={FormatProtocolLogValue(successorRegularV4RepairAuthority?.RepairKey ?? "(none)")}; requeued_chunk_count={requeuedRegularV4PeerSilenceRepairChunkCount}; first_start_chunk_index={repairSend.FirstStartChunkIndex}; last_end_chunk_exclusive={repairSend.LastEndChunkExclusive}; remote_next_expected_chunk_index={repairSend.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={repairSend.ChunksAcceptedForTransport}");
                     }
 
                     continue;
@@ -5139,9 +5172,13 @@ public sealed partial class SessionFileTransferService
     private bool TryRequeueOutboundRegularNknV4PeerSilenceSafetyReplayLocked(
         OutboundTransferContext context,
         PullV4QueuedRepairSend repairSend,
-        out int requeuedChunkCount)
+        out int requeuedChunkCount,
+        out FileTransferRegularV4FrontierRepairAuthority? successorAuthority,
+        out bool settlementObserved)
     {
         requeuedChunkCount = 0;
+        successorAuthority = null;
+        settlementObserved = false;
         if (context.IsTerminal ||
             context.UserPaused ||
             context.PeerPaused)
@@ -5210,7 +5247,7 @@ public sealed partial class SessionFileTransferService
             var stallAgeMs = context.PullRegularNknV4PeerSilenceMissingDispatchUtc is { } settledUtc
                 ? (long)Math.Max(0, (DateTimeOffset.UtcNow - settledUtc).TotalMilliseconds)
                 : 0;
-            TryLogRegularV4PeerSilenceMissingDispatchSettledStalledLocked(
+            settlementObserved = TryLogRegularV4PeerSilenceMissingDispatchSettledStalledLocked(
                 context,
                 settledRepairKey,
                 "peer_silence_requeue_missing_dispatch_settled",
@@ -5270,6 +5307,9 @@ public sealed partial class SessionFileTransferService
         context.PullRegularNknV4PeerSilenceMissingDispatchAcceptedUntilExclusive = acceptedUntil;
         context.PullRegularNknV4PeerSilenceMissingDispatchRepairKey = repairKey;
         context.PullRegularNknV4PeerSilenceMissingDispatchUtc = DateTimeOffset.UtcNow;
+        context.PullRegularNknV4PeerSilenceMissingDispatchSettlementAuthority = regularAuthority;
+        context.PullRegularNknV4PeerSilenceMissingDispatchSettledStalledRepairKey = null;
+        successorAuthority = regularAuthority;
         context.PullV4SenderPumpRepairQueue.Enqueue(
             revalidatedRepair with
             {
@@ -5325,15 +5365,27 @@ public sealed partial class SessionFileTransferService
         LocalOperationalLog.Warn(
             "FileTransferService",
             $"event=filetransfer_regular_v4_frontier_repair_settled_stalled; direction=outbound; transfer_id={FormatProtocolLogValue(context.TransferId)}; session_id={FormatProtocolLogValue(context.SessionId)}; repair_request_key={FormatProtocolLogValue(repairRequestKey)}; route={FormatProtocolLogValue(routeToken)}; protocol_version={leg?.ProtocolVersion ?? FileTransferProtocol.ProtocolVersionV4}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; runtime_generation={context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; terminal_generation={context.TerminalGeneration}; leg_generation={leg?.Generation ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; route_publication_generation={context.LastRoutePublicationGeneration}; target_transport={FormatFileTransferTransportKind(ResolveV4FrontierRepairTargetTransport(routeToken))}; reason={FormatProtocolLogValue(reason)}; frontier_chunk_index={frontierChunkIndex}; durable_received_highest_chunk_index={durableReceivedHighestChunkIndex}; requested_chunk_count={requestedChunkCount}; attempt_count={attemptCount}; frontier_stall_age_ms={frontierStallAgeMs}; settlement=stalled; decision_reason=regular_v4_frontier_repair_missing_dispatch_settled");
-        ObserveRegularV4FrontierRepairSettlement(
-            CreateRegularV4FrontierRepairAuthority(
-                context,
+        var settlementAuthority = context.PullRegularNknV4PeerSilenceMissingDispatchSettlementAuthority;
+        if (settlementAuthority is null ||
+            !string.Equals(settlementAuthority.RepairKey, repairRequestKey, StringComparison.Ordinal))
+        {
+            LogFileTransferRegularV4FrontierRepairAuthorityRejected(
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentTransferLeg,
                 repairRequestKey,
+                "regular_v4_peer_silence_safety_replay",
+                "settlement",
+                "repair_settlement_authority_missing",
                 frontierChunkIndex,
                 durableReceivedHighestChunkIndex,
-                requestedChunkCount,
-                context.LastRoutePublicationGeneration,
-                "regular_v4_frontier_repair_missing_dispatch_settled"),
+                requestedChunkCount);
+            return true;
+        }
+
+        ObserveRegularV4FrontierRepairSettlement(
+            settlementAuthority,
             FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled,
             requestedChunkCount,
             "regular_v4_frontier_repair_missing_dispatch_settled");

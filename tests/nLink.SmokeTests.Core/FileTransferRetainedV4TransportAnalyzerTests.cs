@@ -674,6 +674,41 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RegularV4TimedOutRepairWithAuthorizedSuccessor_DoesNotFailPredecessor()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_regular_v4_repair_successor";
+        const string predecessorKey = "regular_v4_peer_silence_safety_replay:0:0:64:1";
+        const string successorKey = "regular_v4_peer_silence_safety_replay:0:0:64:2";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; bridge_recovery_policy=regular_nkn_v4_fast; liveness_terminal_policy=regular_nkn_v4_fast; selection_reason=regular_nkn_default_v4; file_tuna_active=0; post_tuna_fallback_active=0; diagnostic_regular_nkn_v6=0; transport_profile=nkn; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; route_publication_generation=3", secondsOffset: 0),
+            LogLine($"event=filetransfer_runtime_started; direction=outbound; role=sender; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; bridge_recovery_policy=regular_nkn_v4_fast; live_route_epoch=0; runtime_generation=1; leg_generation=1", secondsOffset: 1),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_authority_granted; direction=outbound; transfer_id={transferId}; session_id=sess_a; source=v4_repair_send; stage=send; repair_request_key={predecessorKey}; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=3; route_commit_generation=0; target_transport=regular_nkn; frontier_chunk_index=0; durable_received_highest_chunk_index=-1; pending_repair_count=64; decision_generation=3; range_count=1; requested_chunk_count=64; scheduled_chunk_count=64; decision_reason=regular_v4_peer_silence_safety_replay", secondsOffset: 10),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_send_deferred; direction=outbound; transfer_id={transferId}; session_id=sess_a; stage=send; repair_request_key={predecessorKey}; protocol_repair_request_id=(none); route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=3; route_commit_generation=0; target_transport=regular_nkn; decision_generation=3; scheduled_chunk_count=64; remote_next_expected_chunk_index=0; chunks_accepted_for_transport=507; deferral_reason=filetransfer_v4_repair_send_deferred_for_regular_v4_peer_silence_repair; repair_delivery_mode=control_bulk_escalated; repair_delivery_escalation_reason=regular_v4_peer_silence_safety_replay", secondsOffset: 11),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_missing_dispatch; direction=outbound; transfer_id={transferId}; session_id=sess_a; stage=send; repair_request_key={predecessorKey}; protocol_repair_request_id=(none); route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=3; route_commit_generation=0; target_transport=regular_nkn; decision_generation=3; scheduled_chunk_count=64; remote_next_expected_chunk_index=0; chunks_accepted_for_transport=507; suppression_reason=send_deferred_successor_decision_pending; decision_reason=repair_dispatch_not_observed", secondsOffset: 12),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_successor_authorized; direction=outbound; transfer_id={transferId}; session_id=sess_a; predecessor_repair_request_key={predecessorKey}; predecessor_decision_generation=3; predecessor_scheduled_chunk_count=64; successor_repair_request_key={successorKey}; successor_decision_generation=4; successor_scheduled_chunk_count=64; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=3; route_commit_generation=0; target_transport=regular_nkn; frontier_chunk_index=0; durable_received_highest_chunk_index=-1; decision_reason=send_timeout_successor_authorized", secondsOffset: 13),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_dispatched; direction=outbound; transfer_id={transferId}; session_id=sess_a; stage=send; repair_request_key={successorKey}; protocol_repair_request_id=(none); route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=1; route_publication_generation=3; route_commit_generation=0; target_transport=regular_nkn; decision_generation=4; sent_chunk_count=64; remote_next_expected_chunk_index=0; chunks_accepted_for_transport=507", secondsOffset: 14),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_progress_observed; direction=outbound; transfer_id={transferId}; session_id=sess_a; repair_request_key={successorKey}; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; target_transport=regular_nkn; reason=frontier_advanced; committed_frontier_before=0; committed_frontier_after=64; requested_chunk_count=64", secondsOffset: 15),
+            LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_a; transfer_id={transferId}; state=Completed; route=regular_nkn_v4_fast; protocol_version=4; integrity_ok=1", secondsOffset: 20)
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("(none)", verdict["recovery_failure_class"]);
+        Assert.Equal("1", verdict["regular_v4_frontier_repair_missing_dispatch_count"]);
+        Assert.Equal("1", verdict["regular_v4_frontier_repair_successor_authorized_count"]);
+        Assert.Equal("pass", verdict["regular_v4_frontier_repair_verdict"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_BridgeConfigSummary_RecordsFrozenDefaults()
     {
         if (!OperatingSystem.IsWindows())

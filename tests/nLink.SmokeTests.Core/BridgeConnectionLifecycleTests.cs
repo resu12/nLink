@@ -3078,6 +3078,113 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public void Bridge_RegularV4FrontierRepairSettlement_PredecessorCannotClearAuthorizedSuccessor()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-regular-v4-frontier-successor", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "regular-v4-frontier-successor");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "regular-v4-frontier-successor");
+            var identity = new NknIdentity("regular-v4-frontier-successor", "regular-v4-frontier-successor.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+
+            var transferId = $"transfer-regular-v4-frontier-successor-{Guid.NewGuid():N}";
+            var predecessor = CreateRegularV4FrontierRepairAuthority(
+                transferId,
+                repairKey: "regular_v4_peer_silence_safety_replay:0:0:64:1",
+                frontierChunkIndex: 0,
+                durableReceivedHighestChunkIndex: -1,
+                pendingRepairCount: 64,
+                decisionGeneration: 3,
+                liveRouteEpoch: 0,
+                bridgeDecisionGeneration: 1);
+            var successor = predecessor with
+            {
+                RepairKey = "regular_v4_peer_silence_safety_replay:0:0:64:2",
+                DecisionGeneration = 4,
+                DecisionReason = "requeue_after_send_timeout",
+            };
+            adapter.RegisterActiveFileTransferDataSession(transferId);
+            adapter.RegisterActiveFileTransferRuntime(transferId);
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                transferId,
+                "regular_v4_frontier_repair_send_deferred",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 64,
+                pendingRepairCount: 64,
+                repairAuthority: predecessor);
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                transferId,
+                "regular_v4_frontier_repair_successor_authorized",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 64,
+                pendingRepairCount: 64,
+                repairAuthority: successor);
+
+            var predecessorAccepted = adapter.ReportRegularV4FrontierRepairSettlement(CreateSettlement(
+                predecessor,
+                FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch,
+                "repair_dispatch_not_observed"));
+
+            Assert.False(predecessorAccepted);
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out var blockerReason, out _));
+            Assert.Equal("regular_v4_control_feedback_pressure", blockerReason);
+
+            var successorAccepted = adapter.ReportRegularV4FrontierRepairSettlement(CreateSettlement(
+                successor,
+                FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled,
+                "regular_v4_frontier_repair_missing_dispatch_settled"));
+
+            Assert.True(successorAccepted);
+            Assert.False(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
+        }
+        finally
+        {
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+
+        static FileTransferRegularV4FrontierRepairSettlement CreateSettlement(
+            FileTransferRegularV4FrontierRepairAuthority authority,
+            FileTransferRegularV4FrontierRepairSettlementOutcome outcome,
+            string reason)
+            => new(
+                authority.SessionId,
+                authority.TransferId,
+                authority.Direction,
+                authority.RouteToken,
+                authority.ProtocolVersion,
+                authority.LiveRouteEpoch,
+                authority.RuntimeGeneration,
+                authority.TerminalGeneration,
+                authority.LegGeneration,
+                authority.TransportEpoch,
+                authority.BridgeRecoveryGeneration,
+                authority.BridgeDecisionGeneration,
+                authority.RoutePublicationGeneration,
+                authority.RouteCommitGeneration,
+                authority.RepairKey,
+                authority.FrontierChunkIndex,
+                authority.DurableReceivedHighestChunkIndex,
+                authority.PendingRepairCount,
+                authority.DecisionGeneration,
+                reason,
+                outcome,
+                authority.TargetTransport);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public void Bridge_RegularV4FrontierRepairSettlement_AcceptsRecentAuthorityAfterDiagnosticPressureClear()
     {
         var tempDir = Path.Combine(Path.GetTempPath(), "nlink-regular-v4-frontier-recent-authority", Guid.NewGuid().ToString("N"));

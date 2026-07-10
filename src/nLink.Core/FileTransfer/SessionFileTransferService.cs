@@ -7665,6 +7665,21 @@ public sealed partial class SessionFileTransferService : IDisposable
             $"event={eventName}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; stage={FormatProtocolLogValue(stage)}; repair_request_key={FormatProtocolLogValue(authority.RepairKey)}; protocol_repair_request_id={FormatProtocolLogValue(protocolRepairRequestId)}; route={FormatProtocolLogValue(authority.RouteToken)}; protocol_version={authority.ProtocolVersion}; live_route_epoch={authority.LiveRouteEpoch}; runtime_generation={authority.RuntimeGeneration}; terminal_generation={authority.TerminalGeneration}; leg_generation={authority.LegGeneration}; transport_epoch={authority.TransportEpoch}; bridge_recovery_generation={authority.BridgeRecoveryGeneration}; bridge_decision_generation={authority.BridgeDecisionGeneration}; route_publication_generation={authority.RoutePublicationGeneration}; route_commit_generation={authority.RouteCommitGeneration ?? 0}; target_transport={FormatFileTransferTransportKind(authority.TargetTransport)}; decision_generation={authority.DecisionGeneration}; sent_chunk_count={sentChunkCount}; remote_next_expected_chunk_index={remoteNextExpectedChunkIndex}; chunks_accepted_for_transport={chunksAcceptedForTransport}");
     }
 
+    private static void LogFileTransferRegularV4FrontierRepairSuccessorAuthorized(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        FileTransferRegularV4FrontierRepairAuthority predecessor,
+        FileTransferRegularV4FrontierRepairAuthority successor,
+        int predecessorScheduledChunkCount,
+        int successorScheduledChunkCount,
+        string decisionReason)
+    {
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_regular_v4_frontier_repair_successor_authorized; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; predecessor_repair_request_key={FormatProtocolLogValue(predecessor.RepairKey)}; predecessor_decision_generation={predecessor.DecisionGeneration}; predecessor_scheduled_chunk_count={Math.Max(0, predecessorScheduledChunkCount)}; successor_repair_request_key={FormatProtocolLogValue(successor.RepairKey)}; successor_decision_generation={successor.DecisionGeneration}; successor_scheduled_chunk_count={Math.Max(0, successorScheduledChunkCount)}; route={FormatProtocolLogValue(successor.RouteToken)}; protocol_version={successor.ProtocolVersion}; live_route_epoch={successor.LiveRouteEpoch}; runtime_generation={successor.RuntimeGeneration}; terminal_generation={successor.TerminalGeneration}; leg_generation={successor.LegGeneration}; transport_epoch={successor.TransportEpoch}; bridge_recovery_generation={successor.BridgeRecoveryGeneration}; bridge_decision_generation={successor.BridgeDecisionGeneration}; route_publication_generation={successor.RoutePublicationGeneration}; route_commit_generation={successor.RouteCommitGeneration ?? 0}; target_transport={FormatFileTransferTransportKind(successor.TargetTransport)}; frontier_chunk_index={successor.FrontierChunkIndex}; durable_received_highest_chunk_index={successor.DurableReceivedHighestChunkIndex}; decision_reason={FormatProtocolLogValue(decisionReason)}");
+    }
+
     private static void LogFileTransferRegularV4FrontierRepairSendDeferred(
         FileTransferDirection direction,
         string transferId,
@@ -7841,6 +7856,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.PullRegularNknV4PeerSilenceMissingDispatchAcceptedUntilExclusive = -1;
         context.PullRegularNknV4PeerSilenceMissingDispatchRepairKey = null;
         context.PullRegularNknV4PeerSilenceMissingDispatchUtc = null;
+        context.PullRegularNknV4PeerSilenceMissingDispatchSettlementAuthority = null;
         context.PullRegularNknV4PeerSilenceMissingDispatchSettledStalledRepairKey = null;
         context.PullTransportLastSafetyReplayGeneration = 0;
         context.PullTransportLastSafetyReplayFrontierChunkIndex = -1;
@@ -16517,6 +16533,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         public string? PullRegularNknV4PeerSilenceMissingDispatchRepairKey { get; set; }
 
         public DateTimeOffset? PullRegularNknV4PeerSilenceMissingDispatchUtc { get; set; }
+
+        public FileTransferRegularV4FrontierRepairAuthority? PullRegularNknV4PeerSilenceMissingDispatchSettlementAuthority { get; set; }
 
         public string? PullRegularNknV4PeerSilenceMissingDispatchSettledStalledRepairKey { get; set; }
 

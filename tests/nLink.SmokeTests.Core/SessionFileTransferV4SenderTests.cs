@@ -410,8 +410,10 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.True(missingDispatchIndex > deferredIndex, "Expected missing-dispatch proof for deferred peer-silence replay sends.");
 
         var proofBlock = source[missingDispatchIndex..requeueIndex];
-        Assert.Contains("send_deferred_requeued_after_timeout", proofBlock, StringComparison.Ordinal);
+        Assert.Contains("send_deferred_successor_decision_pending", proofBlock, StringComparison.Ordinal);
         Assert.Contains("\"regular_v4_frontier_repair_missing_dispatch\"", proofBlock, StringComparison.Ordinal);
+        Assert.Contains("LogFileTransferRegularV4FrontierRepairSuccessorAuthorized", source, StringComparison.Ordinal);
+        Assert.Contains("regular_v4_frontier_repair_successor_authorized", source, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1256,13 +1258,16 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             .GetValue(context)!;
         queuedChunkIndices.GetType().GetMethod("Clear")!.Invoke(queuedChunkIndices, null);
 
-        var args = new object?[] { context, dequeuedRepair, 0 };
+        var args = new object?[] { context, dequeuedRepair, 0, null, false };
         var requeued = (bool)typeof(SessionFileTransferService)
             .GetMethod("TryRequeueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, args)!;
 
         Assert.True(requeued);
         Assert.Equal(GetIntProperty(queuedRepair, "RequestedChunkCount"), Assert.IsType<int>(args[2]));
+        var successorAuthority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(args[3]);
+        Assert.Equal(GetStringProperty(Assert.Single(GetQueuedV4RepairSends(context)), "RepairRequestKey"), successorAuthority.RepairKey);
+        Assert.False(Assert.IsType<bool>(args[4]));
         var replay = Assert.Single(GetQueuedV4RepairSends(context));
         Assert.Equal(100, GetIntProperty(replay, "FirstStartChunkIndex"));
         Assert.Equal("regular_v4_peer_silence_safety_replay", GetStringProperty(replay, "DeliveryEscalationReason"));
@@ -1270,15 +1275,16 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         var secondDequeuedRepair = repairQueue.GetType().GetMethod("Dequeue")!.Invoke(repairQueue, null)!;
         queuedChunkIndices.GetType().GetMethod("Clear")!.Invoke(queuedChunkIndices, null);
 
-        args = [context, secondDequeuedRepair, 0];
+        args = [context, secondDequeuedRepair, 0, null, false];
         requeued = (bool)typeof(SessionFileTransferService)
             .GetMethod("TryRequeueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, args)!;
 
         Assert.False(requeued);
         Assert.Empty(GetQueuedV4RepairSends(context));
+        Assert.True(Assert.IsType<bool>(args[4]));
 
-        args = [context, secondDequeuedRepair, 0];
+        args = [context, secondDequeuedRepair, 0, null, false];
         requeued = (bool)typeof(SessionFileTransferService)
             .GetMethod("TryRequeueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, args)!;
@@ -1292,6 +1298,8 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         var settlement = Assert.Single(transport.RegularV4FrontierRepairSettlements);
         Assert.Equal(FileTransferDirection.Outbound, settlement.Direction);
         Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken, settlement.RouteToken);
+        Assert.Equal(successorAuthority.DecisionGeneration, settlement.DecisionGeneration);
+        Assert.Equal(successorAuthority.RepairKey, settlement.RepairKey);
         Assert.Equal(FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled, settlement.Outcome);
         Assert.Equal("regular_v4_frontier_repair_missing_dispatch_settled", settlement.DecisionReason);
     }
@@ -1362,7 +1370,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         SetPrivateProperty(context, "CurrentRuntimeOwner", tunaOwner);
         SetPrivateProperty(context, "LastRuntimeOwnerGeneration", 2);
 
-        var args = new object?[] { context, dequeuedRepair, 0 };
+        var args = new object?[] { context, dequeuedRepair, 0, null, false };
         var requeued = (bool)typeof(SessionFileTransferService)
             .GetMethod("TryRequeueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, args)!;
@@ -1409,7 +1417,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         queuedChunkIndices.GetType().GetMethod("Clear")!.Invoke(queuedChunkIndices, null);
         SetPrivateProperty(context, "CurrentRuntimeOwner", null);
 
-        var args = new object?[] { context, dequeuedRepair, 0 };
+        var args = new object?[] { context, dequeuedRepair, 0, null, false };
         var requeued = (bool)typeof(SessionFileTransferService)
             .GetMethod("TryRequeueOutboundRegularNknV4PeerSilenceSafetyReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, args)!;

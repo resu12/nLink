@@ -2969,7 +2969,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
 
     function Test-TunaGuiRuntimeUnlockFileTransferOwnerRejectionUnresolved {
         param(
-            [Parameter(Mandatory = $true)][string[]]$Lines,
+            [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines,
             [Parameter(Mandatory = $true)][string]$RejectionEvent
         )
 
@@ -3215,6 +3215,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_file_tuna_v4_frontier_repair_dispatched'))
     $regularV4FrontierRepairSendDeferredEvent = (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_send_deferred')) -or
         (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_file_tuna_v4_frontier_repair_send_deferred'))
+    $regularV4FrontierRepairSuccessorAuthorized = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_successor_authorized')
     $regularV4FrontierRepairProgressObserved = (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_progress_observed')) -or
         (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_file_tuna_v4_frontier_repair_progress_observed'))
     $regularV4FrontierRepairStalledEvent = (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_regular_v4_frontier_repair_stalled')) -or
@@ -3255,6 +3256,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $regularV4FrontierRepairSendDeferred = (-not $fallbackFrontierRepairStalled) -and
         (-not $regularV4FrontierRepairSettlementClosed) -and
         $regularV4FrontierRepairSendDeferredEvent -and
+        (-not $regularV4FrontierRepairSuccessorAuthorized) -and
         (-not $regularV4FrontierRepairProgressObserved) -and
         ($fallbackProgressTimeout -or $regularV4LivenessTimeoutWithoutAuthority -or $terminalObserved)
     $regularV4RepairLivenessAuthorityMissing = (-not $fallbackFrontierRepairStalled) -and
