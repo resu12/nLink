@@ -6,6 +6,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'FileTransferAuthorityMatching.ps1')
+. (Join-Path $PSScriptRoot 'GuiSmokeLogLedger.ps1')
+
+$script:GuiSmokeAppLogLedger = New-GuiSmokeLogLedgerState
 
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
@@ -1239,6 +1242,7 @@ function Copy-AppLogsIfPresent {
 }
 
 function Clear-AppLogsIfPresent {
+    Reset-GuiSmokeLogLedgerState -State $script:GuiSmokeAppLogLedger
     $logsDir = Join-Path $env:LOCALAPPDATA 'nLink\logs'
     if (-not (Test-Path $logsDir)) { return }
 
@@ -1248,10 +1252,11 @@ function Clear-AppLogsIfPresent {
 
 function Get-AppLogBookmark {
     try {
-        return (Read-AppLogLinesSnapshot).Length
+        Sync-GuiSmokeAppLogLedger
+        return Get-GuiSmokeLogLedgerBookmark -State $script:GuiSmokeAppLogLedger
     }
     catch {
-        return 0
+        throw
     }
 }
 
@@ -1382,17 +1387,8 @@ function Get-AppLogLinesAfterBookmark {
         [Parameter(Mandatory = $true)][int]$Bookmark
     )
 
-    $lines = Read-AppLogLinesSnapshot
-    if ($lines.Length -eq 0) {
-        return @()
-    }
-
-    $start = Get-AppLogReadStartIndex -Bookmark $Bookmark -LineCount $lines.Length
-    if ($start -ge $lines.Length) {
-        return @()
-    }
-
-    return @($lines[$start..($lines.Length - 1)])
+    Sync-GuiSmokeAppLogLedger
+    return @(Get-GuiSmokeLogLedgerLinesAfterBookmark -State $script:GuiSmokeAppLogLedger -Bookmark $Bookmark)
 }
 
 function Wait-AppLogRegexAfterBookmark {
@@ -1422,14 +1418,14 @@ function Wait-AppLogRegexAfterBookmark {
 }
 
 function Read-AppLogLinesSnapshot {
-    $lines = New-Object System.Collections.Generic.List[string]
-    foreach ($path in @(Get-AppLogPaths)) {
-        foreach ($line in @(Read-AppLogLinesSafe -Path $path)) {
-            $lines.Add([string]$line) | Out-Null
-        }
-    }
+    Sync-GuiSmokeAppLogLedger
+    return @(Get-GuiSmokeLogLedgerLines -State $script:GuiSmokeAppLogLedger)
+}
 
-    return $lines.ToArray()
+function Sync-GuiSmokeAppLogLedger {
+    Sync-GuiSmokeLogLedger `
+        -State $script:GuiSmokeAppLogLedger `
+        -Paths @(Get-AppLogPaths)
 }
 
 function Read-AppLogLinesSafe {
@@ -2841,6 +2837,61 @@ function Test-TunaGuiBridgeBootstrapNotReadyEvidence {
     return $bridgeConnectFailure -or ($readyNeverEmitted -and $lanesNotReady)
 }
 
+function Get-TunaGuiExplicitFailureClassification {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$ErrorMessage)
+
+    $failureClassMatch = [regex]::Match($ErrorMessage, '(?i)(?:^|[;\s])failure_class=(?<value>[a-z0-9_-]+)')
+    if ($failureClassMatch.Success) {
+        $failureClass = $failureClassMatch.Groups['value'].Value.ToLowerInvariant()
+        switch ($failureClass) {
+            'terminal_before_fallback_switch_off' {
+                return [pscustomobject]@{ Phase = 'live_route_proof'; Reason = $failureClass }
+            }
+            'regular_v4_terminal_before_tuna_activation_commit' {
+                return [pscustomobject]@{ Phase = 'live_route_proof'; Reason = $failureClass }
+            }
+            'terminal_fallback_prefix_missing' {
+                return [pscustomobject]@{ Phase = 'live_route_proof'; Reason = $failureClass }
+            }
+        }
+    }
+
+    $cursorFailureMatch = [regex]::Match($ErrorMessage, '(?i)(?<value>gui_smoke_log_cursor_[a-z0-9_-]+)')
+    if ($cursorFailureMatch.Success) {
+        return [pscustomobject]@{
+            Phase = 'harness_log_cursor'
+            Reason = $cursorFailureMatch.Groups['value'].Value.ToLowerInvariant()
+        }
+    }
+
+    if ($ErrorMessage.IndexOf('gui_smoke_switch_off_control_not_ready_before_fault_window', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return [pscustomobject]@{
+            Phase = 'live_toggle_window'
+            Reason = 'gui_smoke_switch_off_control_not_ready_before_fault_window'
+        }
+    }
+
+    return $null
+}
+
+function Resolve-TunaGuiFailureClassification {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$ErrorMessage,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$HistoricalPhase,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$HistoricalReason
+    )
+
+    $explicit = Get-TunaGuiExplicitFailureClassification -ErrorMessage $ErrorMessage
+    if ($null -ne $explicit) {
+        return $explicit
+    }
+
+    return [pscustomobject]@{
+        Phase = $HistoricalPhase
+        Reason = $HistoricalReason
+    }
+}
+
 function Get-TunaGuiFileTransferSetupFailureClassification {
     param(
         [Parameter(Mandatory = $true)][int]$Bookmark,
@@ -2848,7 +2899,19 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         [Parameter(Mandatory = $true)][string]$RouteMode
     )
 
-    $lines = @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)
+    $lines = @()
+    try {
+        $lines = @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)
+    }
+    catch {
+        $cursorReadClassification = Get-TunaGuiExplicitFailureClassification -ErrorMessage ([string]$_.Exception.Message)
+        if ($null -eq $cursorReadClassification -or
+            -not [string]::Equals([string]$cursorReadClassification.Phase, 'harness_log_cursor', [System.StringComparison]::Ordinal)) {
+            throw
+        }
+
+        $ErrorMessage = "{0}; {1}" -f $ErrorMessage, $_.Exception.Message
+    }
     $processLines = @(Read-GuiSmokeProcessOutputLinesSnapshot)
     $evidenceLines = @($lines + $processLines)
 
@@ -3470,6 +3533,13 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $phase = 'measured_terminal'
         $reason = 'terminal_before_accept'
     }
+
+    $resolvedClassification = Resolve-TunaGuiFailureClassification `
+        -ErrorMessage $ErrorMessage `
+        -HistoricalPhase $phase `
+        -HistoricalReason $reason
+    $phase = [string]$resolvedClassification.Phase
+    $reason = [string]$resolvedClassification.Reason
 
     return [pscustomobject]@{
         Phase = $phase
@@ -4930,11 +5000,182 @@ function Get-TunaGuiFaultTarget {
     return 'helpee'
 }
 
+function Get-TunaGuiCompletedTerminalPairAfterBookmark {
+    param([Parameter(Mandatory = $true)][int]$Bookmark)
+
+    $inboundCompletedByTransfer = @{}
+    $outboundCompletedByTransfer = @{}
+    foreach ($line in @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)) {
+        $terminal = Get-TunaGuiCompletedTerminalFromLogLine -Line ([string]$line)
+        if ($null -eq $terminal) {
+            continue
+        }
+
+        $completedTransferId = Add-TunaGuiCompletedTerminalToTracker `
+            -InboundCompletedByTransfer $inboundCompletedByTransfer `
+            -OutboundCompletedByTransfer $outboundCompletedByTransfer `
+            -Terminal $terminal
+        if (-not [string]::IsNullOrWhiteSpace([string]$completedTransferId)) {
+            return [pscustomobject]@{
+                TransferId = [string]$completedTransferId
+                Line = [string]$terminal.Line
+            }
+        }
+    }
+
+    return $null
+}
+
+function Test-TunaGuiSwitchOffToggleReady {
+    param($Toggle)
+
+    if ($null -eq $Toggle) {
+        return $false
+    }
+
+    try {
+        return [bool]$Toggle.Current.IsEnabled -and -not [bool]$Toggle.Current.IsOffscreen
+    }
+    catch {
+        return $false
+    }
+}
+
+function Wait-TunaGuiSwitchOffToggleOrTerminal {
+    param(
+        [Parameter(Mandatory = $true)]$Window,
+        [Parameter(Mandatory = $true)][int]$Bookmark,
+        $PrearmedToggle = $null,
+        [int]$TimeoutMs = 5000,
+        [int]$PollIntervalMs = 100
+    )
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+        $terminalPair = Get-TunaGuiCompletedTerminalPairAfterBookmark -Bookmark $Bookmark
+        if ($null -ne $terminalPair) {
+            return [pscustomobject]@{
+                Kind = 'terminal'
+                Toggle = $null
+                TransferId = [string]$terminalPair.TransferId
+                WaitMs = [long]$sw.ElapsedMilliseconds
+                Prearmed = $false
+            }
+        }
+
+        if (Test-TunaGuiSwitchOffToggleReady -Toggle $PrearmedToggle) {
+            return [pscustomobject]@{
+                Kind = 'toggle'
+                Toggle = $PrearmedToggle
+                TransferId = '(none)'
+                WaitMs = [long]$sw.ElapsedMilliseconds
+                Prearmed = $true
+            }
+        }
+
+        $freshToggle = Find-VisibleByAutomationId -Root $Window -AutomationId 'SessionHeader.TunaUnlockToggle'
+        if (Test-TunaGuiSwitchOffToggleReady -Toggle $freshToggle) {
+            return [pscustomobject]@{
+                Kind = 'toggle'
+                Toggle = $freshToggle
+                TransferId = '(none)'
+                WaitMs = [long]$sw.ElapsedMilliseconds
+                Prearmed = $false
+            }
+        }
+
+        Start-Sleep -Milliseconds ([Math]::Max(10, $PollIntervalMs))
+    }
+
+    $terminalPair = Get-TunaGuiCompletedTerminalPairAfterBookmark -Bookmark $Bookmark
+    if ($null -ne $terminalPair) {
+        return [pscustomobject]@{
+            Kind = 'terminal'
+            Toggle = $null
+            TransferId = [string]$terminalPair.TransferId
+            WaitMs = [long]$sw.ElapsedMilliseconds
+            Prearmed = $false
+        }
+    }
+
+    throw ("gui_smoke_switch_off_control_not_ready_before_fault_window: timeout_ms={0}; terminal_pair=0" -f $TimeoutMs)
+}
+
+function Try-PrearmTunaGuiSwitchOffToggle {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][string]$PayerMode,
+        [Parameter(Mandatory = $true)][int]$Bookmark,
+        [int]$TimeoutMs = 5000
+    )
+
+    $target = Get-TunaGuiFaultTarget -PayerMode $PayerMode
+    $targetWindow = if ($target -eq 'helper') { $Context.HelperWindow } else { $Context.HelpeeWindow }
+    try {
+        return Wait-TunaGuiSwitchOffToggleOrTerminal `
+            -Window $targetWindow `
+            -Bookmark $Bookmark `
+            -TimeoutMs $TimeoutMs
+    }
+    catch {
+        if ($_.Exception.Message.IndexOf('gui_smoke_log_cursor_', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            throw
+        }
+
+        return [pscustomobject]@{
+            Kind = 'unavailable'
+            Toggle = $null
+            TransferId = '(none)'
+            WaitMs = [long]$TimeoutMs
+            Prearmed = $false
+            Error = [string]$_.Exception.Message
+        }
+    }
+}
+
+function Get-TunaGuiLogLineUtcText {
+    param([AllowEmptyString()][string]$Line)
+
+    if (-not [string]::IsNullOrWhiteSpace($Line)) {
+        $match = [regex]::Match($Line, '^\[(?<utc>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}Z)\]')
+        if ($match.Success) {
+            return $match.Groups['utc'].Value
+        }
+    }
+
+    return '(none)'
+}
+
+function New-TunaGuiFaultWindowDiagnosticLine {
+    param(
+        [AllowEmptyString()][string]$ActivationLine,
+        [AllowEmptyString()][string]$ActivationObservedUtc,
+        [Parameter(Mandatory = $true)]$FaultResult
+    )
+
+    $cursor = Get-GuiSmokeLogLedgerDiagnostics -State $script:GuiSmokeAppLogLedger
+    return "[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_fault_window; activation_event_utc={1}; activation_observed_utc={2}; prearmed={3}; toggle_wait_ms={4}; cursor_generation_count={5}; cursor_rotation_count={6}; cursor_gap_count={7}; click_utc={8}; terminal_before_click={9}; fault_injected={10}" -f `
+        ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')),
+        (Get-TunaGuiLogLineUtcText -Line $ActivationLine),
+        $(if ([string]::IsNullOrWhiteSpace($ActivationObservedUtc)) { '(none)' } else { $ActivationObservedUtc }),
+        $(if ([bool]$FaultResult.Prearmed) { 1 } else { 0 }),
+        [long]$FaultResult.ToggleWaitMs,
+        [int]$cursor.GenerationCount,
+        [int]$cursor.RotationCount,
+        [int]$cursor.GapCount,
+        [string]$FaultResult.ClickUtc,
+        $(if ([bool]$FaultResult.TerminalCompletedBeforeFault) { 1 } else { 0 }),
+        $(if ([bool]$FaultResult.Injected) { 1 } else { 0 })
+}
+
 function Invoke-TunaGuiFallbackFault {
     param(
         [Parameter(Mandatory = $true)]$Context,
         [Parameter(Mandatory = $true)][string]$FaultMode,
-        [Parameter(Mandatory = $true)][string]$PayerMode
+        [Parameter(Mandatory = $true)][string]$PayerMode,
+        [Parameter(Mandatory = $true)][int]$Bookmark,
+        $PrearmedToggle = $null,
+        [long]$PrearmedToggleWaitMs = 0
     )
 
     $target = Get-TunaGuiFaultTarget -PayerMode $PayerMode
@@ -4942,10 +5183,68 @@ function Invoke-TunaGuiFallbackFault {
     $targetProc = if ($target -eq 'helper') { $Context.HelperProc } else { $Context.HelpeeProc }
 
     if ($FaultMode -eq 'switch-off') {
-        $toggle = Wait-ControlEnabledStateByAutomationId -Window $targetWindow -AutomationId 'SessionHeader.TunaUnlockToggle' -IsEnabled $true -TimeoutMs 30000
-        Click-Element $toggle
+        $faultBookmark = Get-AppLogBookmark
+        $ready = Wait-TunaGuiSwitchOffToggleOrTerminal `
+            -Window $targetWindow `
+            -Bookmark $Bookmark `
+            -PrearmedToggle $PrearmedToggle `
+            -TimeoutMs 5000
+        $totalToggleWaitMs = [Math]::Max(0L, $PrearmedToggleWaitMs) + [Math]::Max(0L, [long]$ready.WaitMs)
+        if ([string]::Equals([string]$ready.Kind, 'terminal', [System.StringComparison]::OrdinalIgnoreCase)) {
+            return [pscustomobject]@{
+                Injected = $false
+                TerminalCompletedBeforeFault = $true
+                TransferId = [string]$ready.TransferId
+                Prearmed = $false
+                ToggleWaitMs = $totalToggleWaitMs
+                ClickUtc = '(none)'
+                RuntimeEvidenceLine = '(none)'
+            }
+        }
+
+        $terminalPair = Get-TunaGuiCompletedTerminalPairAfterBookmark -Bookmark $Bookmark
+        if ($null -ne $terminalPair) {
+            return [pscustomobject]@{
+                Injected = $false
+                TerminalCompletedBeforeFault = $true
+                TransferId = [string]$terminalPair.TransferId
+                Prearmed = [bool]$ready.Prearmed
+                ToggleWaitMs = $totalToggleWaitMs
+                ClickUtc = '(none)'
+                RuntimeEvidenceLine = '(none)'
+            }
+        }
+
+        $clickUtc = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')
+        Click-Element $ready.Toggle
+        $runtimeEvidenceLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $faultBookmark -NeedleSets @(
+            @('event=tuna_acceleration_reset', 'reason=header_switch_off'),
+            @('event=tuna_acceleration_timeline', 'status=header_switch_off'),
+            @('event=tuna_runtime_locked', 'source=header', 'reason=header_switch_off')
+        ) -TimeoutMs 15000 -Description 'fresh header switch-off runtime evidence')
         Write-Host "[GUI Smoke][filetransfer_tuna] Triggered Tuna fallback by switching off $target." -ForegroundColor Yellow
-        return
+        return [pscustomobject]@{
+            Injected = $true
+            TerminalCompletedBeforeFault = $false
+            TransferId = '(none)'
+            Prearmed = [bool]$ready.Prearmed
+            ToggleWaitMs = $totalToggleWaitMs
+            ClickUtc = $clickUtc
+            RuntimeEvidenceLine = $runtimeEvidenceLine
+        }
+    }
+
+    $terminalPair = Get-TunaGuiCompletedTerminalPairAfterBookmark -Bookmark $Bookmark
+    if ($null -ne $terminalPair) {
+        return [pscustomobject]@{
+            Injected = $false
+            TerminalCompletedBeforeFault = $true
+            TransferId = [string]$terminalPair.TransferId
+            Prearmed = $false
+            ToggleWaitMs = 0L
+            ClickUtc = '(none)'
+            RuntimeEvidenceLine = '(none)'
+        }
     }
 
     $children = @(
@@ -4956,10 +5255,32 @@ function Invoke-TunaGuiFallbackFault {
         throw "No Tuna sidecar child process found for $target."
     }
 
+    $terminalPair = Get-TunaGuiCompletedTerminalPairAfterBookmark -Bookmark $Bookmark
+    if ($null -ne $terminalPair) {
+        return [pscustomobject]@{
+            Injected = $false
+            TerminalCompletedBeforeFault = $true
+            TransferId = [string]$terminalPair.TransferId
+            Prearmed = $false
+            ToggleWaitMs = 0L
+            ClickUtc = '(none)'
+            RuntimeEvidenceLine = '(none)'
+        }
+    }
+
     foreach ($child in $children) {
         Stop-Process -Id $child.ProcessId -Force -ErrorAction Stop
     }
     Write-Host "[GUI Smoke][filetransfer_tuna] Triggered Tuna fallback by killing $target sidecar child process(es)." -ForegroundColor Yellow
+    return [pscustomobject]@{
+        Injected = $true
+        TerminalCompletedBeforeFault = $false
+        TransferId = '(none)'
+        Prearmed = $false
+        ToggleWaitMs = 0L
+        ClickUtc = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')
+        RuntimeEvidenceLine = '(sidecar_kill)'
+    }
 }
 
 function Add-TunaGuiLiveRouteEpochObservation {
@@ -6020,6 +6341,10 @@ function Invoke-FileTransferTunaPostFallbackPrecondition {
         @('event=filetransfer_v4_sender_started', 'route=file_tuna_v4')
     ) -TimeoutMs 90000 -Description 'post-fallback precondition active file Tuna route')
     $observedEvidenceLines.Add($routeLine) | Out-Null
+    $routeObservedUtc = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')
+    $prearmResult = Try-PrearmTunaGuiSwitchOffToggle -Context $Context -PayerMode $PayerMode -Bookmark $bookmark
+    $prearmedSwitchOffToggle = if ([string]::Equals([string]$prearmResult.Kind, 'toggle', [System.StringComparison]::OrdinalIgnoreCase)) { $prearmResult.Toggle } else { $null }
+    $prearmedSwitchOffToggleWaitMs = [long]$prearmResult.WaitMs
 
     [void](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
         @('event=filetransfer_v6_sender_started'),
@@ -6034,7 +6359,11 @@ function Invoke-FileTransferTunaPostFallbackPrecondition {
     $acceleratedPayloadLine = [string](Wait-TunaGuiAcceleratedFilePayloadBeforeFault -Bookmark $bookmark -MinimumTotalPayloadBytes $minimumFaultPayloadBytes -TimeoutMs 90000)
     $observedEvidenceLines.Add($acceleratedPayloadLine) | Out-Null
 
-    Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode
+    $faultResult = Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode -Bookmark $bookmark -PrearmedToggle $prearmedSwitchOffToggle -PrearmedToggleWaitMs $prearmedSwitchOffToggleWaitMs
+    $observedEvidenceLines.Add((New-TunaGuiFaultWindowDiagnosticLine -ActivationLine $routeLine -ActivationObservedUtc $routeObservedUtc -FaultResult $faultResult)) | Out-Null
+    if (-not [bool]$faultResult.Injected) {
+        throw ("Post-fallback precondition transfer completed before fault injection. failure_class=terminal_before_fallback_switch_off; transfer_id={0}" -f $faultResult.TransferId)
+    }
     $fallbackStartedLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
         @('event=filetransfer_v6_epoch_started', 'handoff_kind=tuna_to_normal_fallback'),
         @('event=filetransfer_v6_epoch_observed', 'handoff_kind=tuna_to_normal_fallback'),
@@ -6157,6 +6486,10 @@ function Invoke-FileTransferTunaV4RestartV6FallbackPrecondition {
         @('event=filetransfer_v4_sender_started', 'route=file_tuna_v4')
     ) -TimeoutMs 90000 -Description 'V4 restart precondition active Tuna V4 route')
     $observedEvidenceLines.Add($routeLine) | Out-Null
+    $routeObservedUtc = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')
+    $prearmResult = Try-PrearmTunaGuiSwitchOffToggle -Context $Context -PayerMode $PayerMode -Bookmark $bookmark
+    $prearmedSwitchOffToggle = if ([string]::Equals([string]$prearmResult.Kind, 'toggle', [System.StringComparison]::OrdinalIgnoreCase)) { $prearmResult.Toggle } else { $null }
+    $prearmedSwitchOffToggleWaitMs = [long]$prearmResult.WaitMs
 
     [void](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
         @('event=filetransfer_v4_sender_started'),
@@ -6171,7 +6504,11 @@ function Invoke-FileTransferTunaV4RestartV6FallbackPrecondition {
     $acceleratedPayloadLine = [string](Wait-TunaGuiAcceleratedFilePayloadBeforeFault -Bookmark $bookmark -MinimumTotalPayloadBytes $minimumFaultPayloadBytes -TimeoutMs 90000)
     $observedEvidenceLines.Add($acceleratedPayloadLine) | Out-Null
 
-    Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode
+    $faultResult = Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode -Bookmark $bookmark -PrearmedToggle $prearmedSwitchOffToggle -PrearmedToggleWaitMs $prearmedSwitchOffToggleWaitMs
+    $observedEvidenceLines.Add((New-TunaGuiFaultWindowDiagnosticLine -ActivationLine $routeLine -ActivationObservedUtc $routeObservedUtc -FaultResult $faultResult)) | Out-Null
+    if (-not [bool]$faultResult.Injected) {
+        throw ("V4 restart precondition transfer completed before fault injection. failure_class=terminal_before_fallback_switch_off; transfer_id={0}" -f $faultResult.TransferId)
+    }
     $fallbackStartedLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
         @('event=tuna_fallback_started'),
         @('event=tuna_fallback_filetransfer_rebind_requested'),
@@ -6391,6 +6728,10 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         $observedEvidenceLines.Add($routeLine) | Out-Null
         $fileTunaV4PublicationObserved = $true
         $liveSwitchOffRoutePublicationObserved = $true
+        $routeObservedUtc = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')
+        $prearmResult = Try-PrearmTunaGuiSwitchOffToggle -Context $Context -PayerMode $PayerMode -Bookmark $bookmark
+        $prearmedSwitchOffToggle = if ([string]::Equals([string]$prearmResult.Kind, 'toggle', [System.StringComparison]::OrdinalIgnoreCase)) { $prearmResult.Toggle } else { $null }
+        $prearmedSwitchOffToggleWaitMs = [long]$prearmResult.WaitMs
 
         $liveSwitchOffMinimumCommittedBytes = Resolve-TunaGuiLiveSwitchOffMinimumCommittedBytes -PayloadSizeBytes $PayloadSizeBytes
         $liveSwitchOffMinimumFaultPayloadBytes = $liveSwitchOffMinimumCommittedBytes
@@ -6412,24 +6753,32 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         }
 
         if (-not $liveSwitchOffTerminalCompletedBeforeFault) {
-            Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode
-            $liveSwitchOffFaultInjected = $true
-            $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_switch_off_fault_injected; route_mode={1}; fault_mode={2}; receiver_committed_progress_observed={3}; peer_visible_tuna_payload_observed={4}; data_path_proof_missing={5}; committed_bytes={6}; accelerated_payload_bytes={7}; elapsed_ms={8}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $RouteMode, $FaultMode, ($(if ($liveSwitchOffReceiverCommittedProgressObserved) { 1 } else { 0 })), ($(if ($liveSwitchOffPeerVisibleTunaPayloadObserved) { 1 } else { 0 })), ($(if ($liveSwitchOffDataPathProofMissing) { 1 } else { 0 })), $progressResult.CommittedBytes, $progressResult.AcceleratedPayloadBytes, $progressResult.ElapsedMs)) | Out-Null
-            $fallbackStartedLine = Wait-TunaGuiLiveRouteEpochStarted -Bookmark $bookmark -Route 'post_tuna_fallback_v6' -ProtocolVersion 6 -HandoffKind 'tuna_to_normal_fallback' -TargetTransport 'regular_nkn' -Description 'live switch-off post-Tuna fallback route epoch started'
-            $observedEvidenceLines.Add($fallbackStartedLine) | Out-Null
-            Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'off_started' -Line $fallbackStartedLine
-            $fallbackEpochStartedObserved = $true
+            $faultResult = Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode -Bookmark $bookmark -PrearmedToggle $prearmedSwitchOffToggle -PrearmedToggleWaitMs $prearmedSwitchOffToggleWaitMs
+            $observedEvidenceLines.Add((New-TunaGuiFaultWindowDiagnosticLine -ActivationLine $routeLine -ActivationObservedUtc $routeObservedUtc -FaultResult $faultResult)) | Out-Null
+            if (-not [bool]$faultResult.Injected) {
+                $liveSwitchOffTerminalCompletedBeforeFault = $true
+                $firstTransferTerminalBeforeFallbackSwitchOff = $true
+                $firstTransferTerminalBeforeFallbackSwitchOffTransferId = [string]$faultResult.TransferId
+            }
+            else {
+                $liveSwitchOffFaultInjected = $true
+                $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_switch_off_fault_injected; route_mode={1}; fault_mode={2}; receiver_committed_progress_observed={3}; peer_visible_tuna_payload_observed={4}; data_path_proof_missing={5}; committed_bytes={6}; accelerated_payload_bytes={7}; elapsed_ms={8}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $RouteMode, $FaultMode, ($(if ($liveSwitchOffReceiverCommittedProgressObserved) { 1 } else { 0 })), ($(if ($liveSwitchOffPeerVisibleTunaPayloadObserved) { 1 } else { 0 })), ($(if ($liveSwitchOffDataPathProofMissing) { 1 } else { 0 })), $progressResult.CommittedBytes, $progressResult.AcceleratedPayloadBytes, $progressResult.ElapsedMs)) | Out-Null
+                $fallbackStartedLine = Wait-TunaGuiLiveRouteEpochStarted -Bookmark $bookmark -Route 'post_tuna_fallback_v6' -ProtocolVersion 6 -HandoffKind 'tuna_to_normal_fallback' -TargetTransport 'regular_nkn' -Description 'live switch-off post-Tuna fallback route epoch started'
+                $observedEvidenceLines.Add($fallbackStartedLine) | Out-Null
+                Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'off_started' -Line $fallbackStartedLine
+                $fallbackEpochStartedObserved = $true
 
-            $fallbackRouteLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
-                @('event=filetransfer_route_selected', 'route=post_tuna_fallback_v6', 'protocol_version=6'),
-                @('event=filetransfer_protocol_negotiated', 'route=post_tuna_fallback_v6', 'protocol_version=6')
-            ) -TimeoutMs 90000 -Description 'live switch-off post-Tuna fallback V6 route')
-            $observedEvidenceLines.Add($fallbackRouteLine) | Out-Null
+                $fallbackRouteLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
+                    @('event=filetransfer_route_selected', 'route=post_tuna_fallback_v6', 'protocol_version=6'),
+                    @('event=filetransfer_protocol_negotiated', 'route=post_tuna_fallback_v6', 'protocol_version=6')
+                ) -TimeoutMs 90000 -Description 'live switch-off post-Tuna fallback V6 route')
+                $observedEvidenceLines.Add($fallbackRouteLine) | Out-Null
 
-            $fallbackResolutionLine = Wait-TunaGuiLiveRouteEpochRecovered -Bookmark $bookmark -Route 'post_tuna_fallback_v6' -ProtocolVersion 6 -HandoffKind 'tuna_to_normal_fallback' -TargetTransport 'regular_nkn' -Description 'live switch-off post-Tuna fallback route epoch recovered' -AfterLine $fallbackStartedLine
-            $observedEvidenceLines.Add($fallbackResolutionLine) | Out-Null
-            Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'off_recovered' -Line $fallbackResolutionLine
-            $fallbackEpochRecoveredObserved = $true
+                $fallbackResolutionLine = Wait-TunaGuiLiveRouteEpochRecovered -Bookmark $bookmark -Route 'post_tuna_fallback_v6' -ProtocolVersion 6 -HandoffKind 'tuna_to_normal_fallback' -TargetTransport 'regular_nkn' -Description 'live switch-off post-Tuna fallback route epoch recovered' -AfterLine $fallbackStartedLine
+                $observedEvidenceLines.Add($fallbackResolutionLine) | Out-Null
+                Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'off_recovered' -Line $fallbackResolutionLine
+                $fallbackEpochRecoveredObserved = $true
+            }
         }
     }
     elseif ($RouteMode -eq 'live-multi-toggle' -or $RouteMode -eq 'live-reactivation-second-transfer' -or $RouteMode -eq 'live-regular-activation-cycle') {
@@ -6461,6 +6810,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
             $fileTunaV4PublicationObserved = $true
             $liveSwitchOffRoutePublicationObserved = $true
         }
+        $routeObservedUtc = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')
 
         $liveSwitchOffMinimumCommittedBytes = Resolve-TunaGuiLiveSwitchOffMinimumCommittedBytes -PayloadSizeBytes $PayloadSizeBytes
         $liveSwitchOffMinimumOverride = [string][Environment]::GetEnvironmentVariable('NLINK_TUNA_GUI_LIVE_SWITCH_OFF_MIN_COMMITTED_BYTES')
@@ -6481,6 +6831,19 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         $lastActivationPayloadBookmark = $null
         $lastObservedLiveRouteEpoch = 0
         $prearmedActivationBookmark = $null
+        $prearmedSwitchOffToggle = $null
+        $prearmedSwitchOffToggleWaitMs = 0L
+        $lastActivationEvidenceLine = ''
+        $lastActivationObservedUtc = ''
+        if ($RouteMode -ne 'live-regular-activation-cycle') {
+            $lastActivationEvidenceLine = $routeLine
+            $lastActivationObservedUtc = $routeObservedUtc
+            $prearmResult = Try-PrearmTunaGuiSwitchOffToggle -Context $Context -PayerMode $PayerMode -Bookmark $bookmark
+            $prearmedSwitchOffToggleWaitMs = [long]$prearmResult.WaitMs
+            if ([string]::Equals([string]$prearmResult.Kind, 'toggle', [System.StringComparison]::OrdinalIgnoreCase)) {
+                $prearmedSwitchOffToggle = $prearmResult.Toggle
+            }
+        }
         for ($stepIndex = 0; $stepIndex -lt $sequence.Count; $stepIndex++) {
             $action = [string]$sequence[$stepIndex]
             $stepNumber = $stepIndex + 1
@@ -6538,7 +6901,18 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 $stepBookmark = if ($earlyFallbackAccepted) { $bookmark } else { Get-AppLogBookmark }
                 $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step; step={1}; action=off; early_fallback={2}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber, ($(if ($earlyFallbackAccepted) { 1 } else { 0 })))) | Out-Null
                 if (-not $earlyFallbackAccepted) {
-                    Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode
+                    $faultResult = Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode -Bookmark $bookmark -PrearmedToggle $prearmedSwitchOffToggle -PrearmedToggleWaitMs $prearmedSwitchOffToggleWaitMs
+                    $prearmedSwitchOffToggle = $null
+                    $prearmedSwitchOffToggleWaitMs = 0L
+                    $observedEvidenceLines.Add((New-TunaGuiFaultWindowDiagnosticLine -ActivationLine $lastActivationEvidenceLine -ActivationObservedUtc $lastActivationObservedUtc -FaultResult $faultResult)) | Out-Null
+                    if (-not [bool]$faultResult.Injected) {
+                        $liveSwitchOffTerminalCompletedBeforeFault = $true
+                        $firstTransferTerminalBeforeFallbackSwitchOff = $true
+                        $firstTransferTerminalBeforeFallbackSwitchOffTransferId = [string]$faultResult.TransferId
+                        Write-TunaGuiMilestoneEvidence -ArtifactDir $ArtifactDir -ObservedEvidenceLines $observedEvidenceLines
+                        break
+                    }
+
                     $liveSwitchOffFaultInjected = $true
                     $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_switch_off_fault_injected; route_mode={1}; step={2}; fault_mode={3}; receiver_committed_progress_observed={4}; peer_visible_tuna_payload_observed={5}; data_path_proof_missing={6}" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $RouteMode, $stepNumber, $FaultMode, ($(if ($liveSwitchOffReceiverCommittedProgressObserved) { 1 } else { 0 })), ($(if ($liveSwitchOffPeerVisibleTunaPayloadObserved) { 1 } else { 0 })), ($(if ($liveSwitchOffDataPathProofMissing) { 1 } else { 0 })))) | Out-Null
                 }
@@ -6632,6 +7006,9 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                     $lastActivationPayloadBookmark = $stepBookmark
                     $observedEvidenceLines.Add(("[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_live_multi_toggle_step; step={1}; action=on; prearmed=1; immediate_after_fallback_recovered=1" -f ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')), $stepNumber)) | Out-Null
                     [void](Submit-TunaWalletPasswordDialogsForPayersIfPresent -Context $Context -PayerMode $PayerMode -Password $WalletPassword -Reason ("prearmed_on_step_{0}_immediate_after_fallback_recovered" -f $stepNumber))
+                    $switchOffPrearmResult = Try-PrearmTunaGuiSwitchOffToggle -Context $Context -PayerMode $PayerMode -Bookmark $bookmark
+                    $prearmedSwitchOffToggle = if ([string]::Equals([string]$switchOffPrearmResult.Kind, 'toggle', [System.StringComparison]::OrdinalIgnoreCase)) { $switchOffPrearmResult.Toggle } else { $null }
+                    $prearmedSwitchOffToggleWaitMs = [long]$switchOffPrearmResult.WaitMs
 
                     $activationProofTimeoutMs = 240000
                     $serviceWalletPrompts = {
@@ -6692,6 +7069,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                     Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'on_recovered' -Line $activationRecoveredLine
                     $activationEpochRecoveredObserved = $true
                     $tunaNegotiatedObserved = $true
+                    $lastActivationEvidenceLine = $activationRecoveredLine
+                    $lastActivationObservedUtc = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')
                     if ($activationStartedEpoch -gt $lastObservedLiveRouteEpoch) {
                         $lastObservedLiveRouteEpoch = $activationStartedEpoch
                     }
@@ -6717,6 +7096,9 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 else {
                     [void](Submit-TunaWalletPasswordDialogsForPayersIfPresent -Context $Context -PayerMode $PayerMode -Password $WalletPassword -Reason ("prearmed_on_step_{0}_existing_prompt" -f $stepNumber))
                 }
+                $switchOffPrearmResult = Try-PrearmTunaGuiSwitchOffToggle -Context $Context -PayerMode $PayerMode -Bookmark $bookmark
+                $prearmedSwitchOffToggle = if ([string]::Equals([string]$switchOffPrearmResult.Kind, 'toggle', [System.StringComparison]::OrdinalIgnoreCase)) { $switchOffPrearmResult.Toggle } else { $null }
+                $prearmedSwitchOffToggleWaitMs = [long]$switchOffPrearmResult.WaitMs
 
                 $activationProofTimeoutMs = if ($RouteMode -eq 'live-regular-activation-cycle' -or $RouteMode -eq 'live-reactivation-second-transfer') { 240000 } else { 90000 }
                 $serviceWalletPrompts = {
@@ -6856,6 +7238,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                 Add-TunaGuiLiveRouteEpochObservation -Observations $liveRouteEpochObservations -Action 'on_recovered' -Line $activationRecoveredLine
                 $activationEpochRecoveredObserved = $true
                 $tunaNegotiatedObserved = $true
+                $lastActivationEvidenceLine = $activationRecoveredLine
+                $lastActivationObservedUtc = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')
                 if ($activationStartedEpoch -gt $lastObservedLiveRouteEpoch) {
                     $lastObservedLiveRouteEpoch = $activationStartedEpoch
                 }
@@ -6866,6 +7250,9 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         [void](Wait-FileTransferTerminalOrProgressBeforeAction -Bookmark $bookmark -ProgressTimeoutMs $ProgressTimeoutMs -MinProgressEvents 2 -TimeoutMs 60000)
 
         Unlock-TunaPayers -Context $Context -PayerMode $PayerMode -Password $WalletPassword
+        $switchOffPrearmResult = Try-PrearmTunaGuiSwitchOffToggle -Context $Context -PayerMode $PayerMode -Bookmark $bookmark
+        $prearmedSwitchOffToggle = if ([string]::Equals([string]$switchOffPrearmResult.Kind, 'toggle', [System.StringComparison]::OrdinalIgnoreCase)) { $switchOffPrearmResult.Toggle } else { $null }
+        $prearmedSwitchOffToggleWaitMs = [long]$switchOffPrearmResult.WaitMs
         $tunaNegotiatedLine = [string](Wait-AppLogContainsAfterBookmark -Bookmark $bookmark -Needle 'event=tuna_acceleration_negotiated' -TimeoutMs 150000 -Description 'Tuna negotiated during active GUI file transfer')
         $observedEvidenceLines.Add($tunaNegotiatedLine) | Out-Null
         $tunaNegotiatedObserved = $true
@@ -6880,6 +7267,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
             @('event=filetransfer_v6_epoch_started', 'handoff_kind=regular_nkn_recovery')
         ) -TimeoutMs 150000 -Description 'V6 NormalToTunaActivation epoch recovered or early fallback started')
         $observedEvidenceLines.Add($activationResolutionLine) | Out-Null
+        $activationResolutionObservedUtc = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')
         if (($activationResolutionLine.IndexOf('handoff_kind=tuna_to_normal_fallback', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -or
             ($activationResolutionLine.IndexOf('handoff_kind=regular_nkn_recovery', [System.StringComparison]::OrdinalIgnoreCase) -ge 0)) {
             Write-Host '[GUI Smoke][filetransfer_tuna] Tuna dropped before activation proof; continuing as early-fallback coverage.' -ForegroundColor Yellow
@@ -6893,7 +7281,11 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
             $minimumFaultPayloadBytes = [Math]::Min(16777216L, [Math]::Max(1048576L, [long]($PayloadSizeBytes / 8)))
             $acceleratedPayloadLine = [string](Wait-TunaGuiAcceleratedFilePayloadBeforeFault -Bookmark $bookmark -MinimumTotalPayloadBytes $minimumFaultPayloadBytes)
             $observedEvidenceLines.Add($acceleratedPayloadLine) | Out-Null
-            Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode
+            $faultResult = Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode -Bookmark $bookmark -PrearmedToggle $prearmedSwitchOffToggle -PrearmedToggleWaitMs $prearmedSwitchOffToggleWaitMs
+            $observedEvidenceLines.Add((New-TunaGuiFaultWindowDiagnosticLine -ActivationLine $activationResolutionLine -ActivationObservedUtc $activationResolutionObservedUtc -FaultResult $faultResult)) | Out-Null
+            if (-not [bool]$faultResult.Injected) {
+                throw ("Handoff fallback transfer completed before fault injection. failure_class=terminal_before_fallback_switch_off; transfer_id={0}" -f $faultResult.TransferId)
+            }
             $fallbackStartedLine = [string](Wait-AppLogContainsAllAfterBookmark -Bookmark $bookmark -Needles @('event=filetransfer_v6_epoch_started', 'handoff_kind=tuna_to_normal_fallback') -TimeoutMs 90000 -Description 'V6 TunaToNormalFallback epoch started')
             $observedEvidenceLines.Add($fallbackStartedLine) | Out-Null
             $fallbackEpochStartedObserved = $true
@@ -7429,25 +7821,12 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     elseif ($RouteMode -eq 'live-regular-activation-cycle') {
         $joinedRouteSequence = ($liveRouteEpochRouteChanges.ToArray() -join ',')
         if ($firstTransferTerminalBeforeFallbackSwitchOff) {
-            $terminalBeforeFallbackAllowedSequences = @(
-                'file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4'
-            )
             $terminalBeforeFallbackExpectedRoutes = @($joinedRouteSequence.Split(',', [System.StringSplitOptions]::RemoveEmptyEntries))
             if ($terminalBeforeFallbackExpectedRoutes.Count -eq 0) {
                 $terminalBeforeFallbackExpectedRoutes = @('file_tuna_v4')
             }
             $liveRouteProof = Get-TunaGuiLiveRouteEpochProof -Observations $liveRouteEpochObservations -ExpectedRoutes $terminalBeforeFallbackExpectedRoutes
-            $terminalBeforeFallbackSequenceAllowed = $terminalBeforeFallbackAllowedSequences -contains $joinedRouteSequence
-            if (-not $evidence.tunaNegotiated -or
-                -not $evidence.activationEpochStarted -or
-                -not $evidence.activationEpochRecovered -or
-                -not $evidence.fallbackEpochStarted -or
-                -not $evidence.fallbackEpochRecovered -or
-                -not $evidence.postTunaFallbackV6RouteObserved -or
-                -not $liveRouteProof.Pass -or
-                -not $terminalBeforeFallbackSequenceAllowed) {
-                throw "Tuna GUI live regular activation cycle reached terminal completion before fallback switch-off proof. failure_class=terminal_before_fallback_switch_off sequence=$joinedRouteSequence findings=$($liveRouteProof.Findings -join '|') metadata_missing=$($liveRouteProof.MetadataMissingCount) Summary: $($evidence | ConvertTo-Json -Compress)"
-            }
+            throw "Tuna GUI live regular activation cycle reached terminal completion before fallback switch-off proof. failure_class=terminal_before_fallback_switch_off sequence=$joinedRouteSequence findings=$($liveRouteProof.Findings -join '|') metadata_missing=$($liveRouteProof.MetadataMissingCount) Summary: $($evidence | ConvertTo-Json -Compress)"
         }
         elseif ($firstTransferTerminalBeforeLiveReactivation) {
             $liveRouteProof = Get-TunaGuiLiveRouteEpochProof -Observations $liveRouteEpochObservations -ExpectedRoutes @('file_tuna_v4', 'post_tuna_fallback_v6')

@@ -189,6 +189,265 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task GuiSmokeLogLedger_PreservesAppendAndRotationOrderWithoutReplay()
+    {
+        var repoRoot = FindRepoRoot();
+        var helperPath = Path.Combine(repoRoot, "tools", "GuiSmokeLogLedger.ps1")
+            .Replace("'", "''", StringComparison.Ordinal);
+        var guiText = File.ReadAllText(Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1"));
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            . '{{helperPath}}'
+
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-ledger-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $utf8 = [Text.UTF8Encoding]::new($false)
+                $nl = [Environment]::NewLine
+                $active = Join-Path $tempRoot 'nlink.log'
+                $rotated1 = Join-Path $tempRoot 'nlink.1.log'
+                $rotated2 = Join-Path $tempRoot 'nlink.2.log'
+                $rotated3 = Join-Path $tempRoot 'nlink.3.log'
+                $rotated4 = Join-Path $tempRoot 'nlink.4.log'
+                $state = New-GuiSmokeLogLedgerState -MaxLines 100 -MaxGenerations 20
+
+                [IO.File]::WriteAllText($active, "event=a${nl}event=b${nl}", $utf8)
+                Sync-GuiSmokeLogLedger -State $state -Paths @($active)
+                $bookmark = Get-GuiSmokeLogLedgerBookmark -State $state
+                [IO.File]::AppendAllText($active, "event=c${nl}", $utf8)
+                Sync-GuiSmokeLogLedger -State $state -Paths @($active)
+                $afterAppend = @(Get-GuiSmokeLogLedgerLinesAfterBookmark -State $state -Bookmark $bookmark)
+                if ($afterAppend.Count -ne 1 -or $afterAppend[0] -ne 'event=c') { throw "append mismatch: $($afterAppend -join '|')" }
+
+                Move-Item -LiteralPath $active -Destination $rotated1
+                [IO.File]::WriteAllText($active, "event=d${nl}", $utf8)
+                Sync-GuiSmokeLogLedger -State $state -Paths @($rotated1, $active)
+
+                Move-Item -LiteralPath $rotated1 -Destination $rotated3
+                Move-Item -LiteralPath $active -Destination $rotated2
+                [IO.File]::WriteAllText($rotated1, "event=e${nl}", $utf8)
+                [IO.File]::WriteAllText($active, "event=f${nl}", $utf8)
+                Sync-GuiSmokeLogLedger -State $state -Paths @($rotated3, $rotated2, $rotated1, $active)
+
+                Move-Item -LiteralPath $rotated3 -Destination $rotated4
+                Sync-GuiSmokeLogLedger -State $state -Paths @($rotated4, $rotated2, $rotated1, $active)
+
+                $duplicateBookmark = Get-GuiSmokeLogLedgerBookmark -State $state
+                [IO.File]::AppendAllText($active, "event=duplicate${nl}event=duplicate${nl}", $utf8)
+                Sync-GuiSmokeLogLedger -State $state -Paths @($rotated4, $rotated2, $rotated1, $active)
+                $duplicates = @(Get-GuiSmokeLogLedgerLinesAfterBookmark -State $state -Bookmark $duplicateBookmark)
+                if ($duplicates.Count -ne 2 -or $duplicates[0] -ne 'event=duplicate' -or $duplicates[1] -ne 'event=duplicate') {
+                    throw "duplicate mismatch: $($duplicates -join '|')"
+                }
+
+                $expected = @('event=a', 'event=b', 'event=c', 'event=d', 'event=e', 'event=f', 'event=duplicate', 'event=duplicate')
+                $actual = @(Get-GuiSmokeLogLedgerLines -State $state)
+                if (($actual -join '|') -ne ($expected -join '|')) { throw "ledger mismatch: $($actual -join '|')" }
+
+                $settledBookmark = Get-GuiSmokeLogLedgerBookmark -State $state
+                Sync-GuiSmokeLogLedger -State $state -Paths @($rotated4, $rotated2, $rotated1, $active)
+                if (@(Get-GuiSmokeLogLedgerLinesAfterBookmark -State $state -Bookmark $settledBookmark).Count -ne 0) { throw 'consumed lines replayed' }
+                if ((Get-GuiSmokeLogLedgerDiagnostics -State $state).GapCount -ne 0) { throw 'unexpected cursor gap' }
+                Write-Output 'gui-log-ledger-rotation-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(result.ExitCode == 0, $"Ledger rotation test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-log-ledger-rotation-ok", result.Stdout, StringComparison.Ordinal);
+        Assert.Contains("GuiSmokeLogLedger.ps1", guiText, StringComparison.Ordinal);
+        Assert.Contains("Reset-GuiSmokeLogLedgerState -State $script:GuiSmokeAppLogLedger", guiText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeLogLedger_ReportsTruncationOverflowAndGenerationGap()
+    {
+        var helperPath = Path.Combine(FindRepoRoot(), "tools", "GuiSmokeLogLedger.ps1")
+            .Replace("'", "''", StringComparison.Ordinal);
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            . '{{helperPath}}'
+
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-ledger-failures-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $utf8 = [Text.UTF8Encoding]::new($false)
+                $nl = [Environment]::NewLine
+
+                $truncatePath = Join-Path $tempRoot 'truncate.log'
+                $truncateState = New-GuiSmokeLogLedgerState -MaxLines 20 -MaxGenerations 10
+                [IO.File]::WriteAllText($truncatePath, "same-first${nl}second${nl}third${nl}", $utf8)
+                Sync-GuiSmokeLogLedger -State $truncateState -Paths @($truncatePath)
+                [IO.File]::WriteAllText($truncatePath, "same-first${nl}", $utf8)
+                $truncateError = try { Sync-GuiSmokeLogLedger -State $truncateState -Paths @($truncatePath); '' } catch { $_.Exception.Message }
+                if ($truncateError -notlike 'gui_smoke_log_cursor_truncated*') { throw "missing truncation failure: $truncateError" }
+
+                $overflowPath = Join-Path $tempRoot 'overflow.log'
+                $overflowState = New-GuiSmokeLogLedgerState -MaxLines 2 -MaxGenerations 10
+                [IO.File]::WriteAllText($overflowPath, "one${nl}two${nl}three${nl}", $utf8)
+                $overflowError = try { Sync-GuiSmokeLogLedger -State $overflowState -Paths @($overflowPath); '' } catch { $_.Exception.Message }
+                if ($overflowError -notlike 'gui_smoke_log_cursor_overflow*') { throw "missing overflow failure: $overflowError" }
+
+                $gapPath = Join-Path $tempRoot 'nlink.log'
+                $discardedPath = Join-Path $tempRoot 'discarded.log'
+                $gapState = New-GuiSmokeLogLedgerState -MaxLines 20 -MaxGenerations 10
+                [IO.File]::WriteAllText($gapPath, "old-generation${nl}", $utf8)
+                Sync-GuiSmokeLogLedger -State $gapState -Paths @($gapPath)
+                Move-Item -LiteralPath $gapPath -Destination $discardedPath
+                [IO.File]::WriteAllText($gapPath, "new-generation${nl}", $utf8)
+                $gapError = try { Sync-GuiSmokeLogLedger -State $gapState -Paths @($gapPath); '' } catch { $_.Exception.Message }
+                if ($gapError -notlike 'gui_smoke_log_cursor_gap*') { throw "missing gap failure: $gapError" }
+
+                Write-Output 'gui-log-ledger-failures-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(result.ExitCode == 0, $"Ledger failure test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-log-ledger-failures-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeSwitchOffWait_IsTerminalAwareAndNeverClicksAfterTerminal()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var trackerBody = ExtractPowerShellFunctionBody(guiText, "Add-TunaGuiCompletedTerminalToTracker", "New-TunaGuiLiveSwitchOffProgressGateResult");
+        var pairBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiCompletedTerminalPairAfterBookmark", "Test-TunaGuiSwitchOffToggleReady");
+        var toggleBody = ExtractPowerShellFunctionBody(guiText, "Test-TunaGuiSwitchOffToggleReady", "Wait-TunaGuiSwitchOffToggleOrTerminal");
+        var waitBody = ExtractPowerShellFunctionBody(guiText, "Wait-TunaGuiSwitchOffToggleOrTerminal", "Try-PrearmTunaGuiSwitchOffToggle");
+        var prearmBody = ExtractPowerShellFunctionBody(guiText, "Try-PrearmTunaGuiSwitchOffToggle", "Get-TunaGuiLogLineUtcText");
+        var invokeBody = ExtractPowerShellFunctionBody(guiText, "Invoke-TunaGuiFallbackFault", "Add-TunaGuiLiveRouteEpochObservation");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+
+            function Add-TunaGuiCompletedTerminalToTracker { {{trackerBody}} }
+            function Get-TunaGuiCompletedTerminalPairAfterBookmark { {{pairBody}} }
+            function Test-TunaGuiSwitchOffToggleReady { {{toggleBody}} }
+            function Wait-TunaGuiSwitchOffToggleOrTerminal { {{waitBody}} }
+            function Try-PrearmTunaGuiSwitchOffToggle { {{prearmBody}} }
+            function Invoke-TunaGuiFallbackFault { {{invokeBody}} }
+
+            function Get-TunaGuiCompletedTerminalFromLogLine {
+                param([string]$Line)
+                $match = [regex]::Match($Line, 'direction=(?<direction>inbound|outbound);\s*transfer_id=(?<transfer>[^;]+)')
+                if (-not $match.Success) { return $null }
+                return [pscustomobject]@{ Direction = $match.Groups['direction'].Value; TransferId = $match.Groups['transfer'].Value; Line = $Line }
+            }
+            function Get-AppLogLinesAfterBookmark {
+                param([int]$Bookmark)
+                $script:logPoll++
+                if ($script:logPoll -ge $script:terminalAt) { return @($script:terminalLines) }
+                return @()
+            }
+            function Find-VisibleByAutomationId {
+                param($Root, [string]$AutomationId)
+                $script:findPoll++
+                if ($script:findPoll -ge $script:toggleAt) { return $script:testToggle }
+                return $null
+            }
+            function Start-Sleep { param([int]$Milliseconds) }
+            function Invoke-WaitCase {
+                param([int]$ToggleAt, [int]$TerminalAt, [string[]]$TerminalLines)
+                $script:findPoll = 0
+                $script:logPoll = 0
+                $script:toggleAt = $ToggleAt
+                $script:terminalAt = $TerminalAt
+                $script:terminalLines = @($TerminalLines)
+                return Wait-TunaGuiSwitchOffToggleOrTerminal -Window ([pscustomobject]@{}) -Bookmark 0 -TimeoutMs 100 -PollIntervalMs 1
+            }
+
+            $script:testToggle = [pscustomobject]@{ Current = [pscustomobject]@{ IsEnabled = $true; IsOffscreen = $false } }
+            $both = @('event=terminal; direction=inbound; transfer_id=tx-1', 'event=terminal; direction=outbound; transfer_id=tx-1')
+            $inboundOnly = @('event=terminal; direction=inbound; transfer_id=tx-1')
+
+            $immediate = Invoke-WaitCase -ToggleAt 1 -TerminalAt 99 -TerminalLines @()
+            if ($immediate.Kind -ne 'toggle') { throw 'immediate toggle was not selected' }
+            $toggleBeforeTerminal = Invoke-WaitCase -ToggleAt 2 -TerminalAt 3 -TerminalLines $both
+            if ($toggleBeforeTerminal.Kind -ne 'toggle') { throw 'toggle available before terminal was not selected' }
+            $terminalFirst = Invoke-WaitCase -ToggleAt 2 -TerminalAt 1 -TerminalLines $both
+            if ($terminalFirst.Kind -ne 'terminal' -or $terminalFirst.TransferId -ne 'tx-1') { throw 'terminal pair did not win' }
+            $singleDirection = Invoke-WaitCase -ToggleAt 2 -TerminalAt 1 -TerminalLines $inboundOnly
+            if ($singleDirection.Kind -ne 'toggle') { throw 'single terminal direction stopped the fault window' }
+
+            function Get-TunaGuiFaultTarget { param([string]$PayerMode) return 'helpee' }
+            function Get-AppLogBookmark { return 0 }
+            function Click-Element { param($Element) $script:clickCount++ }
+            $context = [pscustomobject]@{ HelperWindow = $null; HelpeeWindow = [pscustomobject]@{}; HelperProc = $null; HelpeeProc = [pscustomobject]@{} }
+            function Wait-TunaGuiSwitchOffToggleOrTerminal { throw 'gui_smoke_log_cursor_gap: generation missing' }
+            $cursorPropagated = $false
+            try { [void](Try-PrearmTunaGuiSwitchOffToggle -Context $context -PayerMode 'helpee' -Bookmark 0) } catch { $cursorPropagated = $_.Exception.Message -like 'gui_smoke_log_cursor_gap*' }
+            if (-not $cursorPropagated) { throw 'prearm swallowed cursor failure' }
+
+            $script:clickCount = 0
+            function Wait-TunaGuiSwitchOffToggleOrTerminal {
+                return [pscustomobject]@{ Kind = 'terminal'; Toggle = $null; TransferId = 'tx-before-click'; WaitMs = 1L; Prearmed = $false }
+            }
+            $noClick = Invoke-TunaGuiFallbackFault -Context $context -FaultMode 'switch-off' -PayerMode 'helpee' -Bookmark 0
+            if ($noClick.Injected -or -not $noClick.TerminalCompletedBeforeFault -or $script:clickCount -ne 0) { throw 'terminal-first fault attempted a click' }
+
+            function Wait-TunaGuiSwitchOffToggleOrTerminal {
+                return [pscustomobject]@{ Kind = 'toggle'; Toggle = $script:testToggle; TransferId = '(none)'; WaitMs = 1L; Prearmed = $true }
+            }
+            function Get-TunaGuiCompletedTerminalPairAfterBookmark {
+                return [pscustomobject]@{ TransferId = 'tx-immediate-check'; Line = 'terminal' }
+            }
+            $noLateClick = Invoke-TunaGuiFallbackFault -Context $context -FaultMode 'switch-off' -PayerMode 'helpee' -Bookmark 0 -PrearmedToggle $script:testToggle
+            if ($noLateClick.Injected -or -not $noLateClick.TerminalCompletedBeforeFault -or $script:clickCount -ne 0) { throw 'immediate pre-click terminal check attempted a click' }
+
+            Write-Output 'gui-switch-off-terminal-aware-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(result.ExitCode == 0, $"Terminal-aware switch-off test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-switch-off-terminal-aware-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeFailureClassification_ExplicitClassPrecedesHistoricalRepairEvidence()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var explicitBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiExplicitFailureClassification", "Resolve-TunaGuiFailureClassification");
+        var resolveBody = ExtractPowerShellFunctionBody(guiText, "Resolve-TunaGuiFailureClassification", "Get-TunaGuiFileTransferSetupFailureClassification");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
+            function Resolve-TunaGuiFailureClassification { {{resolveBody}} }
+
+            $resolved = Resolve-TunaGuiFailureClassification `
+                -ErrorMessage 'route failed; failure_class=terminal_before_fallback_switch_off; retained_event=filetransfer_regular_v4_frontier_repair_stalled' `
+                -HistoricalPhase 'regular_v4_frontier_repair' `
+                -HistoricalReason 'regular_v4_frontier_repair_stalled'
+            if ($resolved.Phase -ne 'live_route_proof' -or $resolved.Reason -ne 'terminal_before_fallback_switch_off') { throw 'explicit failure class lost precedence' }
+
+            $regularTerminal = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=regular_v4_terminal_before_tuna_activation_commit' -HistoricalPhase 'unknown' -HistoricalReason 'unknown'
+            if ($regularTerminal.Phase -ne 'live_route_proof') { throw 'regular V4 terminal class not mapped' }
+            $fallbackPrefix = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=terminal_fallback_prefix_missing' -HistoricalPhase 'regular_v4_frontier_repair' -HistoricalReason 'regular_v4_frontier_repair_stalled'
+            if ($fallbackPrefix.Phase -ne 'live_route_proof' -or $fallbackPrefix.Reason -ne 'terminal_fallback_prefix_missing') { throw 'terminal fallback prefix class lost precedence' }
+            $cursor = Resolve-TunaGuiFailureClassification -ErrorMessage 'gui_smoke_log_cursor_truncated: path=x' -HistoricalPhase 'regular_v4_frontier_repair' -HistoricalReason 'regular_v4_frontier_repair_stalled'
+            if ($cursor.Phase -ne 'harness_log_cursor' -or $cursor.Reason -ne 'gui_smoke_log_cursor_truncated') { throw 'cursor failure not classified as harness evidence' }
+            $historical = Resolve-TunaGuiFailureClassification -ErrorMessage 'unmapped failure' -HistoricalPhase 'fallback_frontier_repair' -HistoricalReason 'fallback_frontier_repair_stalled'
+            if ($historical.Phase -ne 'fallback_frontier_repair') { throw 'historical fallback changed without explicit class' }
+
+            Write-Output 'gui-failure-classification-precedence-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(result.ExitCode == 0, $"Failure classification test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-failure-classification-precedence-ok", result.Stdout, StringComparison.Ordinal);
+        Assert.Contains("Resolve-TunaGuiFailureClassification", guiText, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task FallbackAuthorityMatcher_CurrentSchemaRequiresCompleteIdentityAndIsolatesLegacy()
     {
         var matcherPath = Path.Combine(FindRepoRoot(), "tools", "FileTransferAuthorityMatching.ps1")
@@ -610,14 +869,17 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("final_off_after_reactivation", guiText, StringComparison.Ordinal);
         Assert.Contains("regular_activation_cycle_off_after_live_tuna_epoch", guiText, StringComparison.Ordinal);
         Assert.Contains("file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4,post_tuna_fallback_v6", guiText, StringComparison.Ordinal);
-        Assert.Contains("$terminalBeforeFallbackAllowedSequences = @(", guiText, StringComparison.Ordinal);
-        Assert.Contains("'file_tuna_v4,post_tuna_fallback_v6,file_tuna_v4'", guiText, StringComparison.Ordinal);
+        Assert.DoesNotContain("$terminalBeforeFallbackAllowedSequences", guiText, StringComparison.Ordinal);
+        Assert.DoesNotContain("$terminalBeforeFallbackSequenceAllowed", guiText, StringComparison.Ordinal);
         Assert.Contains("$terminalBeforeFallbackExpectedRoutes = @($joinedRouteSequence.Split(',', [System.StringSplitOptions]::RemoveEmptyEntries))", guiText, StringComparison.Ordinal);
         Assert.Contains("fallbackEvidenceObserved", guiText, StringComparison.Ordinal);
         Assert.Contains("failure_class=terminal_before_fallback_switch_off", guiText, StringComparison.Ordinal);
         Assert.Contains("regular-to-Tuna and fallback/reactivation strict live-route epoch cycling", guiText, StringComparison.Ordinal);
         Assert.Contains("immediate_after_fallback_recovered=1", guiText, StringComparison.Ordinal);
         Assert.Contains("prearmed_on_step_{0}_immediate_after_fallback_recovered", guiText, StringComparison.Ordinal);
+        Assert.Contains("Try-PrearmTunaGuiSwitchOffToggle", guiText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer_tuna_gui_fault_window", guiText, StringComparison.Ordinal);
+        Assert.Contains("fresh header switch-off runtime evidence", guiText, StringComparison.Ordinal);
         Assert.Contains("terminal-before-second-activation evidence", guiText, StringComparison.Ordinal);
         Assert.DoesNotContain("accepting terminal fallback outcome for regular activation cycle", guiText, StringComparison.Ordinal);
         Assert.DoesNotContain("accepting terminal fallback outcome from retained terminal log evidence", guiText, StringComparison.Ordinal);
