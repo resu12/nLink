@@ -312,6 +312,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
     private sealed class RegularV4FrontierRepairPressureState
     {
+        public required FileTransferAuthorityId AuthorityId { get; init; }
+
         public required string SessionId { get; init; }
 
         public required string TransferId { get; init; }
@@ -849,6 +851,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             : repairAuthority.SessionId.Trim();
         var expectedTargetTransport = ResolveV4FrontierRepairTargetTransport(repairAuthority.RouteToken);
         var authorityValid =
+            !repairAuthority.AuthorityId.IsDefault &&
             string.Equals(authorityTransferId, normalizedTransferId, StringComparison.Ordinal) &&
             repairAuthority.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
             IsV4FrontierRepairRouteToken(repairAuthority.RouteToken) &&
@@ -892,6 +895,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             : Interlocked.Exchange(ref regularV4ControlFeedbackPressureExpiresTick, expiresTick);
         var pressureState = new RegularV4FrontierRepairPressureState
         {
+            AuthorityId = repairAuthority.AuthorityId,
             SessionId = authoritySessionId,
             TransferId = authorityTransferId,
             Direction = repairAuthority.Direction,
@@ -1054,7 +1058,9 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         string normalizedRepairKey,
         FileTransferRegularV4FrontierRepairSettlement settlement,
         FileTransferTransportKind settlementTargetTransport)
-        => string.Equals(current.SessionId, normalizedSessionId, StringComparison.Ordinal) &&
+        => !settlement.AuthorityId.IsDefault &&
+           current.AuthorityId == settlement.AuthorityId &&
+           string.Equals(current.SessionId, normalizedSessionId, StringComparison.Ordinal) &&
            string.Equals(current.TransferId, normalizedTransferId, StringComparison.Ordinal) &&
            current.Direction == settlement.Direction &&
            string.Equals(current.RouteToken, normalizedRoute, StringComparison.Ordinal) &&

@@ -5968,7 +5968,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         long? transportEpochId,
         int? bridgeRecoveryGeneration,
         int? recoveryDecisionGeneration,
-        out RepairReplayDecision? repairDecision)
+        out RepairReplayDecision? repairDecision,
+        FileTransferAuthorityId? predecessorAuthorityId = null)
     {
         repairDecision = null;
         if (token is not { } owner)
@@ -6016,7 +6017,8 @@ public sealed partial class SessionFileTransferService : IDisposable
                 TransportEpochId: transportEpochId,
                 BridgeRecoveryGeneration: bridgeRecoveryGeneration,
                 RepairReplayKind: repairKind,
-                RecoveryDecisionGeneration: recoveryDecisionGeneration));
+                RecoveryDecisionGeneration: recoveryDecisionGeneration,
+                PredecessorAuthorityId: predecessorAuthorityId));
         if (!decision.Accepted || decision.RepairReplayDecision is null)
         {
             if (IsRecoveryOwnerAuthorityRejection(decision.Accepted ? "repair_replay_decision_missing" : decision.RejectionReason))
@@ -6069,7 +6071,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         long? transportEpochId,
         int? bridgeRecoveryGeneration,
         int? recoveryDecisionGeneration,
-        out RepairReplayDecision? repairDecision)
+        out RepairReplayDecision? repairDecision,
+        FileTransferAuthorityId? predecessorAuthorityId = null)
     {
         repairDecision = null;
         if (token is not { } owner)
@@ -6117,7 +6120,8 @@ public sealed partial class SessionFileTransferService : IDisposable
                 TransportEpochId: transportEpochId,
                 BridgeRecoveryGeneration: bridgeRecoveryGeneration,
                 RepairReplayKind: repairKind,
-                RecoveryDecisionGeneration: recoveryDecisionGeneration));
+                RecoveryDecisionGeneration: recoveryDecisionGeneration,
+                PredecessorAuthorityId: predecessorAuthorityId));
         if (!decision.Accepted || decision.RepairReplayDecision is null)
         {
             if (IsRecoveryOwnerAuthorityRejection(decision.Accepted ? "repair_replay_decision_missing" : decision.RejectionReason))
@@ -7856,7 +7860,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.PullRegularNknV4PeerSilenceMissingDispatchAcceptedUntilExclusive = -1;
         context.PullRegularNknV4PeerSilenceMissingDispatchRepairKey = null;
         context.PullRegularNknV4PeerSilenceMissingDispatchUtc = null;
-        context.PullRegularNknV4PeerSilenceMissingDispatchSettlementAuthority = null;
+        context.PullRegularNknV4PeerSilenceMissingDispatchSettlementContract = null;
         context.PullRegularNknV4PeerSilenceMissingDispatchSettledStalledRepairKey = null;
         context.PullTransportLastSafetyReplayGeneration = 0;
         context.PullTransportLastSafetyReplayFrontierChunkIndex = -1;
@@ -16304,6 +16308,8 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public RepairReplayDecision? CurrentRepairReplayDecision { get; set; }
 
+        public RegularV4FrontierRepairContract? CurrentRegularV4FrontierRepairContract { get; set; }
+
         public int LastRepairReplayGeneration { get; set; }
 
         public TransportEpochDecision? CurrentTransportEpochDecision { get; set; }
@@ -16534,7 +16540,7 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public DateTimeOffset? PullRegularNknV4PeerSilenceMissingDispatchUtc { get; set; }
 
-        public FileTransferRegularV4FrontierRepairAuthority? PullRegularNknV4PeerSilenceMissingDispatchSettlementAuthority { get; set; }
+        public RegularV4FrontierRepairContract? PullRegularNknV4PeerSilenceMissingDispatchSettlementContract { get; set; }
 
         public string? PullRegularNknV4PeerSilenceMissingDispatchSettledStalledRepairKey { get; set; }
 
@@ -16844,7 +16850,17 @@ public sealed partial class SessionFileTransferService : IDisposable
         FileTransferV4RepairDeliveryMode DeliveryMode,
         string DeliveryEscalationReason,
         long CreditExhaustedTimeMsAtDecision,
-        RuntimeOwnerToken? RuntimeOwner = null);
+        RuntimeOwnerToken? RuntimeOwner = null,
+        RegularV4FrontierRepairContract? RegularV4RepairContract = null);
+
+    private sealed class RegularV4FrontierRepairContract
+    {
+        public required RepairReplayDecision RepairDecision { get; init; }
+
+        public required FileTransferRegularV4FrontierRepairAuthority Authority { get; init; }
+
+        public required FileTransferAuthorityLifecycle<FileTransferRegularV4FrontierRepairSettlementOutcome> Lifecycle { get; init; }
+    }
 
     private sealed class V4SenderRepairRequestState
     {
@@ -16888,6 +16904,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         public bool FrontierRepair { get; init; }
 
         public bool FrontierTailRepair { get; init; }
+
+        public RegularV4FrontierRepairContract? RegularV4RepairContract { get; set; }
     }
 
     private enum V6ReceiveDestinationMode
@@ -17188,7 +17206,9 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public string? V4RegularFrontierRepairSettledStalledRepairKey { get; set; }
 
-        public string? V4RegularFrontierRepairSettledStalledAuthorityKey { get; set; }
+        public FileTransferAuthorityId? V4RegularFrontierRepairSettledStalledAuthorityId { get; set; }
+
+        public RegularV4FrontierRepairContract? V4RegularFrontierRepairSettledStalledContract { get; set; }
 
         public DateTimeOffset? V4RegularFrontierRepairSettledStalledUtc { get; set; }
 
@@ -17327,6 +17347,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         public int LastFallbackTailYieldGeneration { get; set; }
 
         public RepairReplayDecision? CurrentRepairReplayDecision { get; set; }
+
+        public RegularV4FrontierRepairContract? CurrentRegularV4FrontierRepairContract { get; set; }
 
         public int LastRepairReplayGeneration { get; set; }
 

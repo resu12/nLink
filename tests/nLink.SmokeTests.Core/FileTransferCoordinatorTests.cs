@@ -912,6 +912,139 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void RegularV4RepairAuthority_ForwardsCoordinatorIdentityAndFullTuple()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var started = StartRegular(regular);
+        var owner = started.State.CurrentRuntimeOwner!.Value;
+        var leg = started.State.CurrentLeg!;
+        var publication = FileTransferCoordinator.AuthorizeAction(
+            started.State,
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RoutePublication,
+                Source: "test",
+                Reason: "regular_v4_repair_publication",
+                RuntimeOwner: owner,
+                Route: regular.Route,
+                ProtocolVersion: regular.ProtocolVersion,
+                LiveRouteEpoch: leg.LiveRouteEpochId,
+                LegGeneration: leg.Generation,
+                RuntimeGeneration: owner.RuntimeGeneration,
+                TerminalGeneration: started.State.TerminalGeneration));
+
+        Assert.True(publication.Accepted);
+        var repair = FileTransferCoordinator.AuthorizeAction(
+            publication.State,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RepairReplay,
+                owner,
+                publication.State.CurrentLeg!,
+                repairReplayKind: RepairReplayKind.V4Repair,
+                predecessorAuthorityId: new FileTransferAuthorityId("fta2-repair-replay-predecessor")));
+
+        Assert.True(repair.Accepted);
+        Assert.NotNull(repair.RepairReplayDecision);
+        var repairDecision = repair.RepairReplayDecision!.Value;
+        Assert.False(repairDecision.AuthorityId.IsDefault);
+        Assert.Equal(
+            "fta2-repair-replay-predecessor",
+            repairDecision.PredecessorAuthorityId!.Value.Value);
+
+        Assert.True(FileTransferCoordinator.TryIssueRegularV4FrontierRepairAuthority(
+            repairDecision,
+            new RegularV4FrontierRepairAuthorityRequest(
+                "regular-v4-test-repair",
+                FrontierChunkIndex: 12,
+                DurableReceivedHighestChunkIndex: 11,
+                PendingRepairCount: 2,
+                DecisionReason: "regular_v4_frontier_repair"),
+            out var authority,
+            out var rejectionReason));
+        Assert.Equal("accepted", rejectionReason);
+        Assert.NotNull(authority);
+        Assert.Equal(repairDecision.AuthorityId, authority!.AuthorityId);
+        Assert.Equal(repairDecision.PredecessorAuthorityId, authority.PredecessorAuthorityId);
+        Assert.Equal(regular.TelemetryToken, authority.RouteToken);
+        Assert.True(FileTransferCoordinator.IsRepairReplayDecisionCurrent(
+            repair.State,
+            repairDecision,
+            out var currentReason));
+        Assert.Equal("accepted", currentReason);
+    }
+
+    [Fact]
+    public void AuthorityLifecycle_RejectsDuplicateDispatchAndSettlement()
+    {
+        var authorityId = new FileTransferAuthorityId("fta2-lifecycle-test");
+        var successorId = new FileTransferAuthorityId("fta2-lifecycle-successor");
+        var lifecycle = new FileTransferAuthorityLifecycle<FileTransferRegularV4FrontierRepairSettlementOutcome>(authorityId);
+
+        Assert.True(lifecycle.TryMarkDispatched());
+        Assert.False(lifecycle.TryMarkDispatched());
+        Assert.True(lifecycle.TrySettle(
+            FileTransferRegularV4FrontierRepairSettlementOutcome.Superseded,
+            "send_timeout_successor_authorized",
+            successorId));
+        Assert.False(lifecycle.TrySettle(
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved,
+            "late_progress"));
+        Assert.True(lifecycle.IsSettled);
+        Assert.Equal(FileTransferRegularV4FrontierRepairSettlementOutcome.Superseded, lifecycle.SettlementOutcome);
+        Assert.Equal(successorId, lifecycle.SuccessorAuthorityId);
+    }
+
+    [Fact]
+    public void RegularV4RepairAuthority_SuccessorSupersedesPredecessor()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var started = StartRegular(regular);
+        var owner = started.State.CurrentRuntimeOwner!.Value;
+        var leg = started.State.CurrentLeg!;
+        var publication = FileTransferCoordinator.AuthorizeAction(
+            started.State,
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RoutePublication,
+                Source: "test",
+                Reason: "regular_v4_repair_publication",
+                RuntimeOwner: owner,
+                Route: regular.Route,
+                ProtocolVersion: regular.ProtocolVersion,
+                LiveRouteEpoch: leg.LiveRouteEpochId,
+                LegGeneration: leg.Generation,
+                RuntimeGeneration: owner.RuntimeGeneration,
+                TerminalGeneration: started.State.TerminalGeneration));
+        var predecessor = FileTransferCoordinator.AuthorizeAction(
+            publication.State,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RepairReplay,
+                owner,
+                publication.State.CurrentLeg!,
+                repairReplayKind: RepairReplayKind.V4Repair));
+        var predecessorDecision = predecessor.RepairReplayDecision!.Value;
+        var successor = FileTransferCoordinator.AuthorizeAction(
+            predecessor.State,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RepairReplay,
+                owner,
+                predecessor.State.CurrentLeg!,
+                repairReplayKind: RepairReplayKind.V4Repair,
+                predecessorAuthorityId: predecessorDecision.AuthorityId));
+        var successorDecision = successor.RepairReplayDecision!.Value;
+
+        Assert.Equal(predecessorDecision.AuthorityId, successorDecision.PredecessorAuthorityId);
+        Assert.True(FileTransferCoordinator.IsRepairReplayDecisionCurrent(
+            successor.State,
+            successorDecision,
+            out var successorReason));
+        Assert.Equal("accepted", successorReason);
+        Assert.False(FileTransferCoordinator.IsRepairReplayDecisionCurrent(
+            successor.State,
+            predecessorDecision,
+            out var predecessorReason));
+        Assert.Equal("repair_replay_decision_superseded", predecessorReason);
+    }
+
+    [Fact]
     public void RecoveryAuthorityActions_AcceptCurrentRequests()
     {
         var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
@@ -3828,7 +3961,8 @@ public sealed class FileTransferCoordinatorTests
         int? recoveryDecisionGeneration = null,
         FileTransferRoute? targetRoute = null,
         int? targetProtocolVersion = null,
-        FileTransferTransportKind? targetTransport = null)
+        FileTransferTransportKind? targetTransport = null,
+        FileTransferAuthorityId? predecessorAuthorityId = null)
         => new(
             kind,
             Source: "test",
@@ -3848,7 +3982,8 @@ public sealed class FileTransferCoordinatorTests
             TransportEpochActionKind: transportEpochActionKind,
             BridgeRecoveryKind: bridgeRecoveryKind,
             RecoveryLivenessLease: recoveryLivenessLease,
-            RecoveryDecisionGeneration: recoveryDecisionGeneration);
+            RecoveryDecisionGeneration: recoveryDecisionGeneration,
+            PredecessorAuthorityId: predecessorAuthorityId);
 
     private static FileTransferCoordinatorState StateWithRecoveryAuthority(FileTransferCoordinatorState state)
     {

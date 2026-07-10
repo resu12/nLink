@@ -223,6 +223,9 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Equal(100, GetIntProperty(replay, "FirstStartChunkIndex"));
         Assert.Equal(164, GetIntProperty(replay, "LastEndChunkExclusive"));
         Assert.Equal("regular_v4_peer_silence_safety_replay", GetStringProperty(replay, "DeliveryEscalationReason"));
+        var repairAuthority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(pressure.RepairAuthority);
+        Assert.False(repairAuthority.AuthorityId.IsDefault);
+        Assert.Equal(GetStringProperty(replay, "RepairRequestKey"), repairAuthority.RepairKey);
 
         var log = ReadV4SenderLogSnapshot(logStart);
         Assert.Contains("event=filetransfer_regular_v4_feedback_pressure_replay_armed;", log, StringComparison.Ordinal);
@@ -299,7 +302,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
-    public void RegularNknV4PeerSilenceSafetyReplay_RollsForwardAcrossAcceptedTail()
+    public void RegularNknV4PeerSilenceSafetyReplay_DoesNotSupersedeQueuedAuthority()
     {
         var logStart = GetOperationalLogLength();
         using var service = new SessionFileTransferService();
@@ -330,12 +333,12 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         method.Invoke(service, [context, "regular_v4_sender_wait"]);
 
         var queued = GetQueuedV4RepairSends(context);
-        Assert.Equal(2, queued.Length);
-        Assert.Equal(164, GetIntProperty(queued[1], "FirstStartChunkIndex"));
-        Assert.Equal(228, GetIntProperty(queued[1], "LastEndChunkExclusive"));
+        Assert.Single(queued);
+        Assert.Same(firstReplay, queued[0]);
 
         var log = ReadV4SenderLogSnapshot(logStart);
         Assert.Contains("event=filetransfer_regular_v4_peer_silence_safety_replay_started;", log, StringComparison.Ordinal);
+        Assert.Contains("skip_reason=current_authority_pending", log, StringComparison.Ordinal);
         Assert.Contains("route=regular_nkn_v4_fast; protocol_version=4", log, StringComparison.Ordinal);
         Assert.DoesNotContain("file_tuna_v6", log, StringComparison.Ordinal);
     }
@@ -438,7 +441,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             .GetMethod("MaybeQueueOutboundFileTunaV4PostTunaFrontierReplayLocked", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(service, [context, "unit_test_file_tuna_v4_post_tuna_sender_wait"])!;
 
-        Assert.True(queued);
+        Assert.True(queued, ReadV4SenderLogSnapshot(logStart));
         var replay = Assert.Single(GetQueuedV4RepairSends(context));
         Assert.Equal(100, GetIntProperty(replay, "FirstStartChunkIndex"));
         Assert.Equal(101, GetIntProperty(replay, "LastEndChunkExclusive"));
@@ -1249,6 +1252,10 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             .Invoke(service, [context, "session_liveness_timeout_pending"]);
 
         var queuedRepair = Assert.Single(GetQueuedV4RepairSends(context));
+        var predecessorContract = GetPrivatePropertyValue(queuedRepair, "RegularV4RepairContract");
+        Assert.NotNull(predecessorContract);
+        var predecessorAuthority = Assert.IsType<FileTransferRegularV4FrontierRepairAuthority>(
+            GetPrivatePropertyValue(predecessorContract!, "Authority"));
         var repairQueue = context.GetType()
             .GetProperty("PullV4SenderPumpRepairQueue", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)!
             .GetValue(context)!;
@@ -1269,6 +1276,11 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Equal(GetStringProperty(Assert.Single(GetQueuedV4RepairSends(context)), "RepairRequestKey"), successorAuthority.RepairKey);
         Assert.False(Assert.IsType<bool>(args[4]));
         var replay = Assert.Single(GetQueuedV4RepairSends(context));
+        var successorContract = GetPrivatePropertyValue(replay, "RegularV4RepairContract");
+        Assert.NotNull(successorContract);
+        var successorDecision = Assert.IsType<RepairReplayDecision>(
+            GetPrivatePropertyValue(successorContract!, "RepairDecision"));
+        Assert.Equal(predecessorAuthority.AuthorityId, successorDecision.PredecessorAuthorityId);
         Assert.Equal(100, GetIntProperty(replay, "FirstStartChunkIndex"));
         Assert.Equal("regular_v4_peer_silence_safety_replay", GetStringProperty(replay, "DeliveryEscalationReason"));
 
@@ -2136,7 +2148,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 owner.RuntimeGeneration,
                 owner.TerminalGeneration,
                 leg.Generation,
-                null,
+                routeSelection.Route == FileTransferRoute.FileTunaV4 ? 1 : null,
                 routeSelection.Route,
                 routeSelection.ProtocolVersion,
                 targetTransport,
@@ -2802,8 +2814,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             .Invoke(service, [context, 16, state.MissingRanges[0].ChunkCount]);
 
         var refreshedPressure = Assert.Single(transport.RegularV4ControlFeedbackPressures);
-        Assert.Equal(repairRequestKey, refreshedPressure.RepairAuthority?.RepairKey);
-        Assert.Equal(2, refreshedPressure.RepairAuthority?.RoutePublicationGeneration);
+        Assert.Null(refreshedPressure.RepairAuthority);
         var log = ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_regular_v4_frontier_repair_settled_stalled; direction=inbound;", log, StringComparison.Ordinal);
         Assert.Contains("reason=unit_test_repeated_frontier_repair_without_progress", log, StringComparison.Ordinal);

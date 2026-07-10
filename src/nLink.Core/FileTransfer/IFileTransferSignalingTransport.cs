@@ -173,7 +173,15 @@ public sealed record FileTransferRegularV4FrontierRepairAuthority(
     int PendingRepairCount,
     int DecisionGeneration,
     string DecisionReason,
-    FileTransferTransportKind TargetTransport = FileTransferTransportKind.Unknown);
+    FileTransferTransportKind TargetTransport = FileTransferTransportKind.Unknown)
+{
+    // Coordinator-issued runtime contracts always populate this value. It is
+    // optional here to preserve source compatibility for diagnostic-only DTO
+    // fixtures and older transport adapters.
+    public FileTransferAuthorityId AuthorityId { get; init; }
+
+    public FileTransferAuthorityId? PredecessorAuthorityId { get; init; }
+}
 
 public enum FileTransferRegularV4FrontierRepairSettlementOutcome
 {
@@ -182,6 +190,9 @@ public enum FileTransferRegularV4FrontierRepairSettlementOutcome
     SettledStalled,
     AuthorityRejected,
     TerminalRejected,
+    Superseded,
+    StaleRejected,
+    TransferTerminal,
 }
 
 public sealed record FileTransferRegularV4FrontierRepairSettlement(
@@ -206,7 +217,12 @@ public sealed record FileTransferRegularV4FrontierRepairSettlement(
     int DecisionGeneration,
     string DecisionReason,
     FileTransferRegularV4FrontierRepairSettlementOutcome Outcome,
-    FileTransferTransportKind TargetTransport = FileTransferTransportKind.Unknown);
+    FileTransferTransportKind TargetTransport = FileTransferTransportKind.Unknown)
+{
+    public FileTransferAuthorityId AuthorityId { get; init; }
+
+    public FileTransferAuthorityId? SuccessorAuthorityId { get; init; }
+}
 
 public sealed record FileTransferRegularV4ControlFeedbackPressure(
     string SessionId,

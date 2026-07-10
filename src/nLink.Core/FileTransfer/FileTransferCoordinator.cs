@@ -397,10 +397,21 @@ internal readonly record struct RepairReplayDecision(
     int CurrentLegGeneration,
     long TransportEpoch,
     int BridgeRecoveryGeneration,
-    RuntimeOwnerToken RuntimeOwner)
+    RuntimeOwnerToken RuntimeOwner,
+    FileTransferAuthorityId AuthorityId,
+    FileTransferAuthorityId? PredecessorAuthorityId,
+    int BridgeDecisionGeneration,
+    RoutePublicationToken? RoutePublicationToken)
 {
     public bool IsDefault => RepairGeneration <= 0 || RuntimeOwner.IsDefault;
 }
+
+internal readonly record struct RegularV4FrontierRepairAuthorityRequest(
+    string RepairKey,
+    int FrontierChunkIndex,
+    int DurableReceivedHighestChunkIndex,
+    int PendingRepairCount,
+    string DecisionReason);
 
 internal readonly record struct TransportEpochDecision(
     bool Accepted,
@@ -581,7 +592,8 @@ internal readonly record struct FileTransferCoordinatorActionRequest(
     int? RuntimeGeneration = null,
     int? TerminalGeneration = null,
     RoutePublicationToken? RoutePublicationToken = null,
-    RuntimeUnlockPendingPreCommitProbeRequest? RuntimeUnlockPendingPreCommitProbeRequest = null);
+    RuntimeUnlockPendingPreCommitProbeRequest? RuntimeUnlockPendingPreCommitProbeRequest = null,
+    FileTransferAuthorityId? PredecessorAuthorityId = null);
 
 internal readonly record struct FileTransferCoordinatorActionDecision(
     FileTransferCoordinatorActionKind Kind,
@@ -1109,7 +1121,8 @@ internal static class FileTransferCoordinator
                 state,
                 request.RepairReplayKind ?? RepairReplayKind.Unknown,
                 request.Reason,
-                Math.Max(1, state.LastRepairReplayGeneration + 1))
+                Math.Max(1, state.LastRepairReplayGeneration + 1),
+                request.PredecessorAuthorityId)
             : (RepairReplayDecision?)null;
         var transportEpochDecision = IsTransportEpochAuthorityAction(request.Kind)
             ? CreateTransportEpochDecision(
@@ -3217,7 +3230,8 @@ internal static class FileTransferCoordinator
         FileTransferCoordinatorState state,
         RepairReplayKind repairKind,
         string reason,
-        int repairGeneration)
+        int repairGeneration,
+        FileTransferAuthorityId? predecessorAuthorityId)
     {
         if (state.CurrentRuntimeOwner is not { } owner ||
             state.CurrentLeg is not { } leg)
@@ -3225,6 +3239,10 @@ internal static class FileTransferCoordinator
             return null;
         }
 
+        var authorityId = IssueAuthorityId(
+            "repair_replay",
+            state,
+            repairGeneration);
         return new RepairReplayDecision(
             true,
             repairKind,
@@ -3238,7 +3256,181 @@ internal static class FileTransferCoordinator
             leg.Generation,
             leg.TransportEpochId,
             leg.BridgeRecoveryGeneration,
-            owner);
+            owner,
+            authorityId,
+            predecessorAuthorityId is { IsDefault: false } ? predecessorAuthorityId : null,
+            state.CurrentBridgeRecoveryDecision?.BridgeDecisionGeneration ?? 0,
+            state.CurrentRoutePublicationToken);
+    }
+
+    internal static bool TryIssueRegularV4FrontierRepairAuthority(
+        RepairReplayDecision repairDecision,
+        RegularV4FrontierRepairAuthorityRequest request,
+        out FileTransferRegularV4FrontierRepairAuthority? authority,
+        out string rejectionReason)
+    {
+        authority = null;
+        rejectionReason = "accepted";
+        if (repairDecision.IsDefault || repairDecision.AuthorityId.IsDefault)
+        {
+            rejectionReason = "repair_replay_decision_missing";
+            return false;
+        }
+
+        if (repairDecision.RoutePublicationToken is not { IsDefault: false } publication)
+        {
+            rejectionReason = "route_publication_authority_missing";
+            return false;
+        }
+
+        var owner = repairDecision.RuntimeOwner;
+        if (!string.Equals(owner.SessionId, publication.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(owner.TransferId, publication.TransferId, StringComparison.Ordinal) ||
+            owner.Direction != publication.Direction ||
+            owner.RuntimeGeneration != publication.RuntimeGeneration ||
+            owner.TerminalGeneration != publication.TerminalGeneration ||
+            repairDecision.CurrentRoute != publication.Route ||
+            repairDecision.CurrentProtocolVersion != publication.ProtocolVersion ||
+            repairDecision.CurrentLiveRouteEpoch != publication.LiveRouteEpoch ||
+            repairDecision.CurrentLegGeneration != publication.LegGeneration)
+        {
+            rejectionReason = "repair_route_publication_authority_mismatch";
+            return false;
+        }
+
+        var expectedTransport = repairDecision.CurrentRoute switch
+        {
+            FileTransferRoute.RegularNknV4Fast => FileTransferTransportKind.RegularNkn,
+            FileTransferRoute.FileTunaV4 => FileTransferTransportKind.Tuna,
+            _ => FileTransferTransportKind.Unknown,
+        };
+        if (repairDecision.CurrentProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+            expectedTransport == FileTransferTransportKind.Unknown ||
+            publication.TargetTransport != expectedTransport ||
+            (repairDecision.CurrentRoute == FileTransferRoute.FileTunaV4 &&
+             publication.RouteCommitGeneration is not > 0))
+        {
+            rejectionReason = "regular_v4_repair_route_invariant_mismatch";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(request.RepairKey))
+        {
+            rejectionReason = "repair_key_missing";
+            return false;
+        }
+
+        authority = new FileTransferRegularV4FrontierRepairAuthority(
+            owner.SessionId,
+            owner.TransferId,
+            owner.Direction,
+            publication.RouteToken,
+            publication.ProtocolVersion,
+            publication.LiveRouteEpoch,
+            publication.RuntimeGeneration,
+            publication.TerminalGeneration,
+            publication.LegGeneration,
+            repairDecision.TransportEpoch,
+            repairDecision.BridgeRecoveryGeneration,
+            repairDecision.BridgeDecisionGeneration,
+            publication.PublicationGeneration,
+            publication.RouteCommitGeneration,
+            request.RepairKey.Trim(),
+            Math.Max(0, request.FrontierChunkIndex),
+            Math.Max(-1, request.DurableReceivedHighestChunkIndex),
+            Math.Max(0, request.PendingRepairCount),
+            repairDecision.RepairGeneration,
+            string.IsNullOrWhiteSpace(request.DecisionReason)
+                ? repairDecision.Reason
+                : request.DecisionReason.Trim(),
+            publication.TargetTransport)
+        {
+            AuthorityId = repairDecision.AuthorityId,
+            PredecessorAuthorityId = repairDecision.PredecessorAuthorityId,
+        };
+        return true;
+    }
+
+    internal static bool IsRepairReplayDecisionCurrent(
+        FileTransferCoordinatorState state,
+        RepairReplayDecision repairDecision,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (state.IsTerminal)
+        {
+            rejectionReason = "terminal_state";
+            return false;
+        }
+
+        if (repairDecision.IsDefault || repairDecision.AuthorityId.IsDefault)
+        {
+            rejectionReason = "repair_replay_decision_missing";
+            return false;
+        }
+
+        if (state.CurrentRepairReplayDecision is not { } currentRepair ||
+            currentRepair.AuthorityId != repairDecision.AuthorityId ||
+            currentRepair.RepairGeneration != repairDecision.RepairGeneration)
+        {
+            rejectionReason = "repair_replay_decision_superseded";
+            return false;
+        }
+
+        if (!IsRuntimeOwnerCurrent(state, repairDecision.RuntimeOwner, out rejectionReason))
+        {
+            return false;
+        }
+
+        var leg = state.CurrentLeg;
+        if (leg is null ||
+            repairDecision.CurrentRoute != state.RouteSelection.Route ||
+            repairDecision.CurrentProtocolVersion != state.RouteSelection.ProtocolVersion ||
+            repairDecision.CurrentLiveRouteEpoch != (state.CurrentLiveRouteEpoch?.EpochId ?? 0) ||
+            repairDecision.CurrentRuntimeGeneration != (state.CurrentRuntimeOwner?.RuntimeGeneration ?? 0) ||
+            repairDecision.CurrentTerminalGeneration != state.TerminalGeneration ||
+            repairDecision.CurrentLegGeneration != leg.Generation ||
+            repairDecision.TransportEpoch != leg.TransportEpochId ||
+            repairDecision.BridgeRecoveryGeneration != leg.BridgeRecoveryGeneration)
+        {
+            rejectionReason = "repair_replay_decision_stale";
+            return false;
+        }
+
+        if (repairDecision.RoutePublicationToken is not { } publication ||
+            !IsRoutePublicationTokenCurrent(state, publication, out rejectionReason))
+        {
+            rejectionReason = string.IsNullOrWhiteSpace(rejectionReason)
+                ? "route_publication_authority_stale"
+                : rejectionReason;
+            return false;
+        }
+
+        return true;
+    }
+
+    private static FileTransferAuthorityId IssueAuthorityId(
+        string authorityKind,
+        FileTransferCoordinatorState state,
+        int generation)
+    {
+        var owner = state.CurrentRuntimeOwner;
+        var leg = state.CurrentLeg;
+        var canonical = string.Join(
+            "|",
+            FileTransferAuthoritySchema.Current.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            NormalizeReason(authorityKind),
+            state.SessionId,
+            state.TransferId,
+            state.Direction.ToString(),
+            (owner?.RuntimeGeneration ?? 0).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            state.TerminalGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            (leg?.Generation ?? 0).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            generation.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        var hash = System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(canonical));
+        return new FileTransferAuthorityId(
+            $"fta{FileTransferAuthoritySchema.Current}-{NormalizeReason(authorityKind)}-{Convert.ToHexString(hash.AsSpan(0, 12)).ToLowerInvariant()}");
     }
 
     private static TransportEpochDecision? CreateTransportEpochDecision(

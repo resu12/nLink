@@ -2996,6 +2996,15 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 creditExhaustedTimeMs: 0,
                 frontierLagChunks: 128,
                 pendingRepairCount: 3,
+                repairAuthority: authority with { AuthorityId = default });
+            Assert.False(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
+
+            adapter.ReportRegularV4ControlFeedbackPressure(
+                transferId,
+                "regular_v4_receiver_frontier_repair_due",
+                creditExhaustedTimeMs: 0,
+                frontierLagChunks: 128,
+                pendingRepairCount: 3,
                 repairAuthority: authority);
 
             Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out var blockerReason, out _));
@@ -3023,13 +3032,16 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 authority.DecisionGeneration,
                 "regular_v4_frontier_repair_liveness_settled_stalled",
                 FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled,
-                authority.TargetTransport));
+                authority.TargetTransport)
+            {
+                AuthorityId = authority.AuthorityId,
+            });
 
             Assert.False(rejected);
             Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out _));
             Assert.Equal("regular_v4_control_feedback_pressure", blockerReason);
 
-            var accepted = adapter.ReportRegularV4FrontierRepairSettlement(new FileTransferRegularV4FrontierRepairSettlement(
+            var acceptedSettlement = new FileTransferRegularV4FrontierRepairSettlement(
                 authority.SessionId,
                 authority.TransferId,
                 authority.Direction,
@@ -3051,7 +3063,18 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 authority.DecisionGeneration,
                 "regular_v4_frontier_repair_liveness_settled_stalled",
                 FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled,
-                authority.TargetTransport));
+                authority.TargetTransport)
+            {
+                AuthorityId = authority.AuthorityId,
+            };
+            var mismatchedAuthoritySettlement = acceptedSettlement with
+            {
+                AuthorityId = new FileTransferAuthorityId("fta2-test-mismatched-authority"),
+            };
+
+            Assert.False(adapter.ReportRegularV4FrontierRepairSettlement(mismatchedAuthoritySettlement));
+            Assert.True(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out blockerReason, out _));
+            var accepted = adapter.ReportRegularV4FrontierRepairSettlement(acceptedSettlement);
 
             Assert.True(accepted);
             Assert.False(adapter.TryGetFileTransferRegularV4ActivationSendBlocker(out _, out _));
@@ -3105,6 +3128,8 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 bridgeDecisionGeneration: 1);
             var successor = predecessor with
             {
+                AuthorityId = new FileTransferAuthorityId($"fta2-test-{transferId}-4-successor"),
+                PredecessorAuthorityId = predecessor.AuthorityId,
                 RepairKey = "regular_v4_peer_silence_safety_replay:0:0:64:2",
                 DecisionGeneration = 4,
                 DecisionReason = "requeue_after_send_timeout",
@@ -3180,7 +3205,10 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 authority.DecisionGeneration,
                 reason,
                 outcome,
-                authority.TargetTransport);
+                authority.TargetTransport)
+            {
+                AuthorityId = authority.AuthorityId,
+            };
     }
 
     [Trait("Category", "LegacySmoke")]
@@ -3255,7 +3283,10 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 authority.DecisionGeneration,
                 "regular_v4_frontier_repair_liveness_settled_stalled",
                 FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled,
-                authority.TargetTransport);
+                authority.TargetTransport)
+            {
+                AuthorityId = authority.AuthorityId,
+            };
 
             Assert.False(adapter.ReportRegularV4FrontierRepairSettlement(wrongKeySettlement));
 
@@ -3281,7 +3312,10 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 authority.DecisionGeneration,
                 "regular_v4_frontier_repair_liveness_settled_stalled",
                 FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled,
-                authority.TargetTransport);
+                authority.TargetTransport)
+            {
+                AuthorityId = authority.AuthorityId,
+            };
 
             Assert.True(adapter.ReportRegularV4FrontierRepairSettlement(currentSettlement));
             Assert.False(adapter.ReportRegularV4FrontierRepairSettlement(currentSettlement));
@@ -8200,6 +8234,10 @@ rl.on('line', (line) => {{
             pendingRepairCount,
             decisionGeneration,
             "test_regular_v4_frontier_repair_authority",
-            targetTransport);
+            targetTransport)
+        {
+            AuthorityId = new FileTransferAuthorityId(
+                $"fta2-test-{transferId}-{decisionGeneration}-{repairKey}"),
+        };
 
 }
