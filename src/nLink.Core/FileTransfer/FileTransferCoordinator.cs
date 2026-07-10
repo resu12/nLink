@@ -317,7 +317,9 @@ internal readonly record struct FallbackControlPlaneToken(
     int TokenGeneration,
     string Reason)
 {
-    public bool IsDefault => TokenGeneration <= 0 || RuntimeOwner.IsDefault;
+    public FileTransferAuthorityId AuthorityId { get; init; }
+
+    public bool IsDefault => TokenGeneration <= 0 || RuntimeOwner.IsDefault || AuthorityId.IsDefault;
 }
 
 internal readonly record struct FallbackControlPlanePressureToken(
@@ -382,7 +384,14 @@ internal readonly record struct FallbackTailYieldDecision(
     int CurrentTerminalGeneration,
     int CurrentLegGeneration,
     FallbackCheckpointLease? CheckpointLease,
-    RuntimeUnlockFallbackSurvivalState FallbackSurvivalState);
+    RuntimeUnlockFallbackSurvivalState FallbackSurvivalState)
+{
+    public FileTransferAuthorityId AuthorityId { get; init; }
+
+    public FileTransferAuthorityId? PredecessorAuthorityId { get; init; }
+
+    public bool IsDefault => YieldGeneration <= 0 || AuthorityId.IsDefault;
+}
 
 internal readonly record struct RepairReplayDecision(
     bool Accepted,
@@ -1114,7 +1123,8 @@ internal static class FileTransferCoordinator
                     Math.Max(1, state.LastFallbackTailYieldGeneration + 1),
                     checkpointSnapshotOverride: request.Kind == FileTransferCoordinatorActionKind.FallbackTailQuiescent
                         ? "(none)"
-                        : null)
+                        : null,
+                    predecessorAuthorityId: request.PredecessorAuthorityId)
                 : (FallbackTailYieldDecision?)null;
         var repairReplayDecision = request.Kind == FileTransferCoordinatorActionKind.RepairReplay
             ? CreateRepairReplayDecision(
@@ -1716,6 +1726,17 @@ internal static class FileTransferCoordinator
             allowIssuedGeneration: false,
             out rejectionReason);
 
+    public static bool IsFallbackControlPlaneTokenIssued(
+        FileTransferCoordinatorState state,
+        FallbackControlPlaneToken token,
+        out string rejectionReason)
+        => IsFallbackControlPlaneTokenCurrent(
+            state,
+            token,
+            allowNextGeneration: false,
+            allowIssuedGeneration: true,
+            out rejectionReason);
+
     private static bool IsFallbackControlPlaneTokenCurrent(
         FileTransferCoordinatorState state,
         FallbackControlPlaneToken token,
@@ -1743,6 +1764,16 @@ internal static class FileTransferCoordinator
             return false;
         }
 
+        var expectedAuthorityId = IssueAuthorityId(
+            "fallback_control_plane",
+            state,
+            token.TokenGeneration);
+        if (token.AuthorityId != expectedAuthorityId)
+        {
+            rejectionReason = "fallback_control_plane_authority_id_mismatch";
+            return false;
+        }
+
         if (allowIssuedGeneration)
         {
             if (token.TokenGeneration <= 0 ||
@@ -1755,7 +1786,8 @@ internal static class FileTransferCoordinator
         else if (!allowNextGeneration)
         {
             if (state.CurrentFallbackControlPlaneToken is not { } current ||
-                current.TokenGeneration != token.TokenGeneration)
+                current.TokenGeneration != token.TokenGeneration ||
+                current.AuthorityId != token.AuthorityId)
             {
                 rejectionReason = "fallback_control_plane_token_generation_mismatch";
                 return false;
@@ -3052,7 +3084,10 @@ internal static class FileTransferCoordinator
             controlPlaneKind,
             NormalizeReason(sendPurpose),
             tokenGeneration,
-            NormalizeReason(reason));
+            NormalizeReason(reason))
+        {
+            AuthorityId = IssueAuthorityId("fallback_control_plane", state, tokenGeneration),
+        };
     }
 
     private static FallbackControlPlanePressureToken? IssueFallbackControlPlanePressureToken(
@@ -3130,7 +3165,8 @@ internal static class FileTransferCoordinator
         FallbackTailYieldKind yieldKind,
         string reason,
         int yieldGeneration,
-        string? checkpointSnapshotOverride = null)
+        string? checkpointSnapshotOverride = null,
+        FileTransferAuthorityId? predecessorAuthorityId = null)
     {
         var leg = state.CurrentLeg;
         var checkpointSnapshot = string.IsNullOrWhiteSpace(checkpointSnapshotOverride)
@@ -3175,7 +3211,57 @@ internal static class FileTransferCoordinator
             state.TerminalGeneration,
             leg?.Generation ?? 0,
             state.CurrentFallbackCheckpointLease,
-            NormalizeRuntimeUnlockFallbackSurvivalState(state));
+            NormalizeRuntimeUnlockFallbackSurvivalState(state))
+        {
+            AuthorityId = IssueAuthorityId("fallback_tail_yield", state, yieldGeneration),
+            PredecessorAuthorityId = predecessorAuthorityId is { IsDefault: false }
+                ? predecessorAuthorityId
+                : state.LastFallbackTailYieldDecision is { IsDefault: false } predecessor
+                    ? predecessor.AuthorityId
+                    : null,
+        };
+    }
+
+    public static bool IsFallbackTailYieldDecisionCurrent(
+        FileTransferCoordinatorState state,
+        FallbackTailYieldDecision decision,
+        out string rejectionReason)
+    {
+        rejectionReason = "current";
+        if (decision.IsDefault)
+        {
+            rejectionReason = "fallback_tail_yield_authority_missing";
+            return false;
+        }
+
+        if (state.LastFallbackTailYieldDecision is not { } current ||
+            current != decision)
+        {
+            rejectionReason = "fallback_tail_yield_authority_stale";
+            return false;
+        }
+
+        if (decision.AuthorityId != IssueAuthorityId("fallback_tail_yield", state, decision.YieldGeneration))
+        {
+            rejectionReason = "fallback_tail_yield_authority_id_mismatch";
+            return false;
+        }
+
+        var leg = state.CurrentLeg;
+        if (!decision.Accepted ||
+            leg is null ||
+            decision.CurrentRoute != state.RouteSelection.Route ||
+            decision.CurrentProtocolVersion != state.RouteSelection.ProtocolVersion ||
+            decision.CurrentLiveRouteEpoch != (state.CurrentLiveRouteEpoch?.EpochId ?? 0) ||
+            decision.CurrentRuntimeGeneration != (state.CurrentRuntimeOwner?.RuntimeGeneration ?? 0) ||
+            decision.CurrentTerminalGeneration != state.TerminalGeneration ||
+            decision.CurrentLegGeneration != leg.Generation)
+        {
+            rejectionReason = "fallback_tail_yield_authority_tuple_mismatch";
+            return false;
+        }
+
+        return true;
     }
 
     internal static string NormalizeFallbackTailYieldCheckpointRequestId(FallbackCheckpointLease? checkpointLease)
@@ -4098,6 +4184,12 @@ internal static class FileTransferCoordinator
             {
                 return MutationRejected(state, reason, tokenRejectionReason);
             }
+
+            if (coordinatorEvent.ControlPlaneKind != FileTransferControlPlaneKind.Unknown &&
+                coordinatorEvent.ControlPlaneKind != suppliedToken.ControlPlaneKind)
+            {
+                return MutationRejected(state, reason, "fallback_control_plane_kind_mismatch");
+            }
         }
         else
         {
@@ -4145,6 +4237,12 @@ internal static class FileTransferCoordinator
                 out var tokenRejectionReason))
         {
             return MutationRejected(state, reason, tokenRejectionReason);
+        }
+
+        if (coordinatorEvent.ControlPlaneKind != FileTransferControlPlaneKind.Unknown &&
+            coordinatorEvent.ControlPlaneKind != token.ControlPlaneKind)
+        {
+            return MutationRejected(state, reason, "fallback_control_plane_kind_mismatch");
         }
 
         if (!coordinatorEvent.ControlPlanePeerVisible)
@@ -4805,6 +4903,24 @@ internal static class FileTransferCoordinator
                     allowIssuedGeneration: true,
                     out rejectionReason))
             {
+                return false;
+            }
+
+            var completionToken = request.FallbackControlPlaneToken.Value;
+            if (request.ControlPlaneKind is { } controlPlaneKind &&
+                controlPlaneKind != completionToken.ControlPlaneKind)
+            {
+                rejectionReason = "fallback_control_plane_kind_mismatch";
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(request.ControlPlanePurpose) &&
+                !string.Equals(
+                    NormalizeReason(request.ControlPlanePurpose),
+                    completionToken.SendPurpose,
+                    StringComparison.Ordinal))
+            {
+                rejectionReason = "fallback_control_plane_purpose_mismatch";
                 return false;
             }
 

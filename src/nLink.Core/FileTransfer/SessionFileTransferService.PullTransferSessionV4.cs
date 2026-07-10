@@ -5253,6 +5253,35 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        if (repairSend.RuntimeOwner is not { } queuedOwner)
+        {
+            RejectMissingRuntimeOwnerActionLocked(
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentRuntimeOwner,
+                "regular_v4_peer_silence_safety_replay",
+                "requeue_after_send_timeout");
+            return false;
+        }
+
+        if (!FileTransferCoordinator.IsRuntimeOwnerCurrent(
+                CreateCoordinatorStateLocked(context),
+                queuedOwner,
+                out var ownerRejectionReason))
+        {
+            RejectStaleRuntimeOwnerUpdateLocked(
+                FileTransferDirection.Outbound,
+                context.TransferId,
+                context.SessionId,
+                context.CurrentRuntimeOwner,
+                queuedOwner,
+                "regular_v4_peer_silence_safety_replay",
+                "requeue_after_send_timeout",
+                ownerRejectionReason);
+            return false;
+        }
+
         if (!context.RouteRuntime.UsesRegularNknV4FastRuntime ||
             context.NegotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
             context.RouteRuntime.FrameFamily != FileTransferFrameFamily.V4)
@@ -6729,10 +6758,7 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
-            var allowCurrentPostYieldFallbackFrontierRequest =
-                ShouldAllowCurrentPostYieldFallbackFrontierRequestLocked(context, repairRequest, first);
-            if (!allowCurrentPostYieldFallbackFrontierRequest &&
-                ShouldIgnoreOutboundPostYieldFallbackRecoveryFrameLocked(
+            if (ShouldIgnoreOutboundPostYieldFallbackRecoveryFrameLocked(
                     context,
                     repairRequest.TransportEpoch,
                     FileTransferProtocol.FrontierRequestFrameTypeV6,
@@ -6748,13 +6774,6 @@ public sealed partial class SessionFileTransferService
                     first.ChunkCount,
                     repairRequest.MissingRanges.Count);
                 return;
-            }
-
-            if (allowCurrentPostYieldFallbackFrontierRequest)
-            {
-                LocalOperationalLog.Info(
-                    "FileTransferService",
-                    $"event=filetransfer_post_tuna_fallback_post_yield_frontier_request_current_owner_accepted; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.RouteSelection.ProtocolVersion}; live_route_epoch={context.CurrentTransferLeg?.LiveRouteEpochId ?? 0}; leg_generation={context.CurrentTransferLeg?.Generation ?? 0}; transport_epoch={repairRequest.TransportEpoch}; current_transport_epoch={context.CurrentTransferLeg?.TransportEpochId ?? 0}; bridge_recovery_generation={context.CurrentTransferLeg?.BridgeRecoveryGeneration ?? 0}; repair_request_id={FormatProtocolLogValue(repairRequest.RepairRequestId ?? "(none)")}; recovery_mode={FormatProtocolLogValue(repairRequest.RecoveryMode ?? "(none)")}; first_start_chunk_index={first.StartChunkIndex}; requested_chunk_count={first.ChunkCount}; remote_next_expected_chunk_index={context.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}; decision_reason=current_incomplete_fallback_owner_after_yield");
             }
 
             var allowEpochlessPostTunaFallbackFrontier =
@@ -6972,48 +6991,6 @@ public sealed partial class SessionFileTransferService
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_v6_frontier_repair_requested; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={repairRequest.TransportEpoch}; repair_request_id={FormatProtocolLogValue(repairRequest.RepairRequestId ?? "(none)")}; priority={FormatProtocolLogValue(repairRequest.Priority ?? "(none)")}; first_start_chunk_index={first.StartChunkIndex}; requested_chunk_count={first.ChunkCount}; range_count={repairRequest.MissingRanges.Count}");
-    }
-
-    private static bool ShouldAllowCurrentPostYieldFallbackFrontierRequestLocked(
-        OutboundTransferContext context,
-        FileTransferFrontierRequestFrameV6 request,
-        FileTransferRangeV4 firstRange)
-    {
-        if (string.IsNullOrWhiteSpace(context.RetiredFallbackTailOwnerKey) ||
-            !IsCurrentPostTunaFallbackV6RouteOwner(context) ||
-            context.CurrentTransferLeg is not { } leg ||
-            leg.State != FileTransferLegState.Active ||
-            !leg.CanSendData ||
-            !string.IsNullOrWhiteSpace(leg.CheckpointRequestId) ||
-            context.RemoteNextExpectedChunkIndex >= context.ChunkCount ||
-            firstRange.ChunkCount <= 0 ||
-            firstRange.StartChunkIndex < context.RemoteNextExpectedChunkIndex ||
-            firstRange.StartChunkIndex >= context.ChunkCount)
-        {
-            return false;
-        }
-
-        if (!string.Equals(request.SessionId, context.SessionId, StringComparison.Ordinal) ||
-            !string.Equals(request.TransferId, context.TransferId, StringComparison.Ordinal) ||
-            request.TransportEpoch <= 0 ||
-            request.TransportEpoch != leg.TransportEpochId ||
-            string.Equals(request.Priority, "backfill", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        var ownerKey = BuildFallbackTailYieldOwnerSnapshot(context, leg).OwnerKey;
-        if (!string.Equals(ownerKey, context.RetiredFallbackTailOwnerKey, StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        if (string.IsNullOrWhiteSpace(request.RecoveryMode))
-        {
-            return true;
-        }
-
-        return IsV6RegularNknRecoveryMode(request.RecoveryMode);
     }
 
     private static bool IsEpochlessOutboundPostTunaFallbackV6FrontierRequestLocked(
@@ -7244,57 +7221,6 @@ public sealed partial class SessionFileTransferService
         }
     }
 
-    private static bool ShouldAllowCurrentPostYieldFallbackFrontierRepairLocked(
-        OutboundTransferContext context,
-        FileTransferStateFrameV4 state,
-        IReadOnlyList<FileTransferRangeV4> normalizedRanges)
-    {
-        if (state is not FileTransferReceiverStateFrameV6 v6State ||
-            normalizedRanges.Count == 0 ||
-            string.IsNullOrWhiteSpace(context.RetiredFallbackTailOwnerKey) ||
-            !IsCurrentPostTunaFallbackV6RouteOwner(context) ||
-            context.CurrentTransferLeg is not { } leg ||
-            leg.State != FileTransferLegState.Active ||
-            !leg.CanSendData ||
-            !string.IsNullOrWhiteSpace(leg.CheckpointRequestId) ||
-            context.RemoteNextExpectedChunkIndex >= context.ChunkCount ||
-            state.ContiguousCommittedChunkIndex < context.RemoteNextExpectedChunkIndex ||
-            state.ContiguousCommittedChunkIndex >= context.ChunkCount ||
-            v6State.TransportEpoch <= 0 ||
-            v6State.TransportEpoch != leg.TransportEpochId ||
-            string.Equals(v6State.Priority, "backfill", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        if (!string.Equals(v6State.SessionId, context.SessionId, StringComparison.Ordinal) ||
-            !string.Equals(v6State.TransferId, context.TransferId, StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        if (!normalizedRanges.Any(range =>
-                range.ChunkCount > 0 &&
-                range.StartChunkIndex <= state.ContiguousCommittedChunkIndex &&
-                state.ContiguousCommittedChunkIndex < range.StartChunkIndex + range.ChunkCount))
-        {
-            return false;
-        }
-
-        var ownerKey = BuildFallbackTailYieldOwnerSnapshot(context, leg).OwnerKey;
-        if (!string.Equals(ownerKey, context.RetiredFallbackTailOwnerKey, StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        if (string.IsNullOrWhiteSpace(v6State.RecoveryMode))
-        {
-            return true;
-        }
-
-        return IsV6RegularNknRecoveryMode(v6State.RecoveryMode);
-    }
-
     private void EnqueueV4RepairsFromState(OutboundTransferContext context, FileTransferStateFrameV4 state)
     {
         if (state.MissingRanges.Count == 0)
@@ -7311,11 +7237,7 @@ public sealed partial class SessionFileTransferService
             normalizedInputRanges.Any(range =>
                 range.StartChunkIndex <= state.ContiguousCommittedChunkIndex &&
                 state.ContiguousCommittedChunkIndex < range.StartChunkIndex + range.ChunkCount);
-        var allowCurrentPostYieldFallbackFrontierRepair =
-            postRebindFrontierRepair &&
-            ShouldAllowCurrentPostYieldFallbackFrontierRepairLocked(context, state, normalizedInputRanges);
         if (postRebindFrontierRepair &&
-            !allowCurrentPostYieldFallbackFrontierRepair &&
             TrySuppressRetiredFallbackTailOwnerUpdateLocked(
                 context,
                 context.CurrentTransferLeg,
@@ -7324,14 +7246,6 @@ public sealed partial class SessionFileTransferService
                 "post_yield_receiver_state"))
         {
             return;
-        }
-
-        if (allowCurrentPostYieldFallbackFrontierRepair &&
-            state is FileTransferReceiverStateFrameV6 allowedState)
-        {
-            LocalOperationalLog.Info(
-                "FileTransferService",
-                $"event=filetransfer_post_tuna_fallback_post_yield_frontier_repair_current_owner_accepted; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.RouteSelection.ProtocolVersion}; live_route_epoch={context.CurrentTransferLeg?.LiveRouteEpochId ?? 0}; leg_generation={context.CurrentTransferLeg?.Generation ?? 0}; transport_epoch={allowedState.TransportEpoch}; current_transport_epoch={context.CurrentTransferLeg?.TransportEpochId ?? 0}; bridge_recovery_generation={context.CurrentTransferLeg?.BridgeRecoveryGeneration ?? 0}; repair_request_id={FormatProtocolLogValue(allowedState.RepairRequestId ?? "(none)")}; recovery_mode={FormatProtocolLogValue(allowedState.RecoveryMode ?? "(none)")}; frontier_chunk_index={allowedState.ContiguousCommittedChunkIndex}; missing_range_count={normalizedInputRanges.Count}; remote_next_expected_chunk_index={context.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}; decision_reason=current_incomplete_fallback_owner_after_yield");
         }
 
         var normalizedRanges = SelectV4RepairRangesForSend(

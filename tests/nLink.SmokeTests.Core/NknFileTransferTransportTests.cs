@@ -142,6 +142,107 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
     }
 
     [Fact]
+    public async Task FileTransferControlPlane_LateAuthorityRejectionSkipsPostSendProofSideEffects()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfer.control-plane.late-authority.address");
+            var helperClient = new FakeNknClient("helper.filetransfer.control-plane.late-authority.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-filetransfer-control-plane-late-authority", hostClient.Address));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-filetransfer-control-plane-late-authority", helperClient.Address));
+            var sessionId = await ApproveNknSessionAsync(
+                    host,
+                    helper,
+                    cts.Token,
+                    InviteCapabilities.Chat | InviteCapabilities.FileTransfer)
+                .ConfigureAwait(false);
+            const string transferId = "transfer_control_plane_late_authority";
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token).ConfigureAwait(false);
+            _ = await helper.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token).ConfigureAwait(false);
+            InvokePrivateMethod(
+                host,
+                "TrackAuthorizedFileTransferRouteHintForTests",
+                transferId,
+                FileTransferRouteResolver.PostTunaFallbackV6Token,
+                FileTransferProtocol.ProtocolVersionV6,
+                "test_post_tuna_fallback_route");
+
+            var authorityCurrent = true;
+            hostClient.BeforeSendCoreAsync = (_, payload, _, _) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(payload, out var envelope) &&
+                    envelope.Type == MsgType.FileTransferDataFrame)
+                {
+                    authorityCurrent = false;
+                }
+
+                return Task.CompletedTask;
+            };
+            var frame = new FileTransferReceiverStateFrameV6
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                TransportEpoch = 2,
+                Epoch = 1,
+                ContiguousCommittedChunkIndex = 100,
+                DurableReceivedHighestChunkIndex = 99,
+                CreditUntilChunkIndexExclusive = 128,
+                RecoveryMode = "regular_nkn_state_refresh",
+            };
+            var authorityId = Assert.IsType<FileTransferAuthorityId>(Activator.CreateInstance(
+                typeof(FileTransferAuthorityId),
+                BindingFlags.Instance | BindingFlags.NonPublic,
+                binder: null,
+                args: [$"fta{FileTransferAuthoritySchema.Current}-fallback_control_plane-0123456789abcdef01234567"],
+                culture: null));
+            var request = new FileTransferControlPlaneDeliveryRequest(
+                FileTransferControlPlaneKind.ReceiverState,
+                frame,
+                "unit_test_late_authority_rejection")
+            {
+                AuthorityId = authorityId,
+                AuthoritySchema = FileTransferAuthoritySchema.Current,
+                ControlPlaneGeneration = 1,
+                Direction = FileTransferDirection.Outbound,
+                RouteToken = FileTransferRouteResolver.PostTunaFallbackV6Token,
+                ProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                LiveRouteEpoch = 1,
+                TransferLegGeneration = 1,
+                BridgeRecoveryGeneration = 1,
+                TransportEpoch = 2,
+                PeerVisibleRequired = true,
+                PeerCopyAttempts = 1,
+                PreTransportDeliveryValidator = () => authorityCurrent,
+            };
+
+            var logStart = GetOperationalLogLength();
+            var result = await Assert.IsAssignableFrom<IFileTransferControlPlaneDeliveryTransport>(host)
+                .SendFileTransferControlPlaneFrameAsync(request, cts.Token)
+                .ConfigureAwait(false);
+
+            Assert.True(result.AcceptedAny);
+            Assert.True(result.PeerVisibleAny);
+            var log = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=filetransfer_control_plane_delivery_post_send_validation_failed;", log, StringComparison.Ordinal);
+            Assert.Contains("diagnostic_only=1", log, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_fallback_leg_authority_completed;", log, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
     public async Task NknTransport_SessionHeartbeat_ControlAckRaisesLivenessProof()
     {
         FakeNknClient.ResetNetwork();

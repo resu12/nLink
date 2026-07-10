@@ -8945,7 +8945,12 @@ public sealed partial class SessionFileTransferService : IDisposable
     }
 
     private static bool HasPairedFallbackTailYieldForCurrentOwner(OutboundTransferContext context)
-        => HasPairedFallbackTailYieldForCurrentOwner(
+        => context.LastFallbackTailYieldDecision is { } decision &&
+           FileTransferCoordinator.IsFallbackTailYieldDecisionCurrent(
+               CreateCoordinatorStateLocked(context),
+               decision,
+               out _) &&
+           HasPairedFallbackTailYieldForCurrentOwner(
             context.SessionId,
             context.TransferId,
             context.CurrentTransferLeg,
@@ -8958,7 +8963,12 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.PeerFallbackTailYieldPairKey);
 
     private static bool HasPairedFallbackTailYieldForCurrentOwner(InboundTransferContext context)
-        => HasPairedFallbackTailYieldForCurrentOwner(
+        => context.LastFallbackTailYieldDecision is { } decision &&
+           FileTransferCoordinator.IsFallbackTailYieldDecisionCurrent(
+               CreateCoordinatorStateLocked(context),
+               decision,
+               out _) &&
+           HasPairedFallbackTailYieldForCurrentOwner(
             context.SessionId,
             context.TransferId,
             context.CurrentTransferLeg,
@@ -9025,7 +9035,9 @@ public sealed partial class SessionFileTransferService : IDisposable
         string? localOwnerKey,
         string? localPairKey)
     {
-        if (!localYieldGranted || !IsCurrentPostTunaFallbackLeg(leg))
+        if (!localYieldGranted ||
+            !IsCurrentPostTunaFallbackLeg(leg) ||
+            lastTailYieldDecision is not { Accepted: true, IsDefault: false })
         {
             return false;
         }
@@ -9193,6 +9205,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         string pairKey,
         string checkpointRequestIdSnapshot,
         long yieldGeneration,
+        FileTransferAuthorityId authorityId,
+        FileTransferAuthorityId? predecessorAuthorityId,
         int committedChunk,
         int highestObservedChunk)
         => new()
@@ -9209,6 +9223,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             PairKey = pairKey,
             Direction = direction.ToString().ToLowerInvariant(),
             YieldGeneration = yieldGeneration,
+            AuthorityId = authorityId.ToString(),
+            PredecessorAuthorityId = predecessorAuthorityId?.ToString(),
             LiveRouteEpoch = leg.LiveRouteEpochId,
             FallbackLegGeneration = leg.Generation,
             BridgeRecoveryGeneration = leg.BridgeRecoveryGeneration,
@@ -9243,6 +9259,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             {
                 context.PeerFallbackTailYieldOwnerKey = null;
                 context.PeerFallbackTailYieldPairKey = null;
+                context.PeerFallbackTailYieldAuthorityId = null;
+                context.PeerFallbackTailYieldPredecessorAuthorityId = null;
                 context.PeerFallbackTailYieldGeneration = 0;
                 context.PeerFallbackTailYieldCommittedChunkIndex = -1;
                 context.PeerFallbackTailYieldHighestObservedChunkIndex = -1;
@@ -9281,6 +9299,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             pairKey,
             ownerSnapshot.CheckpointRequestIdSnapshot,
             context.FallbackTailYieldGeneration,
+            context.LastFallbackTailYieldDecision?.AuthorityId ?? default,
+            context.LastFallbackTailYieldDecision?.PredecessorAuthorityId,
             committedChunk,
             highestObservedChunk);
         var request = CreateOutboundControlPlaneDeliveryRequestLocked(
@@ -9327,6 +9347,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             {
                 context.PeerFallbackTailYieldOwnerKey = null;
                 context.PeerFallbackTailYieldPairKey = null;
+                context.PeerFallbackTailYieldAuthorityId = null;
+                context.PeerFallbackTailYieldPredecessorAuthorityId = null;
                 context.PeerFallbackTailYieldGeneration = 0;
                 context.PeerFallbackTailYieldCommittedChunkIndex = -1;
                 context.PeerFallbackTailYieldHighestObservedChunkIndex = -1;
@@ -9365,6 +9387,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             pairKey,
             ownerSnapshot.CheckpointRequestIdSnapshot,
             context.FallbackTailYieldGeneration,
+            context.LastFallbackTailYieldDecision?.AuthorityId ?? default,
+            context.LastFallbackTailYieldDecision?.PredecessorAuthorityId,
             committedChunk,
             highestObservedChunk);
         var request = CreateInboundControlPlaneDeliveryRequestLocked(
@@ -9452,12 +9476,18 @@ public sealed partial class SessionFileTransferService : IDisposable
         string reason)
     {
         FileTransferControlPlaneDeliveryResult? result = null;
-        FallbackControlPlaneToken? controlPlaneToken;
+        FallbackControlPlaneDeliveryContract? deliveryContract = null;
         try
         {
             lock (gate)
             {
-                if (!TryAuthorizeOutboundFallbackControlPlaneSendLocked(context, request, out controlPlaneToken))
+                if (!TryAuthorizeOutboundFallbackControlPlaneSendLocked(context, request, out deliveryContract))
+                {
+                    return;
+                }
+
+                request = deliveryContract?.Request ?? request;
+                if (deliveryContract is not null && request.PreTransportDeliveryValidator?.Invoke() != true)
                 {
                     return;
                 }
@@ -9473,18 +9503,28 @@ public sealed partial class SessionFileTransferService : IDisposable
             {
                 lock (gate)
                 {
-                    if (!TryCompleteOutboundFallbackControlPlaneSendLocked(context, request, controlPlaneToken, result))
+                    if (!TryCompleteOutboundFallbackControlPlaneSendLocked(context, request, deliveryContract, result))
                     {
-                        LogFileTransferControlPlaneDeliveryResult(request, result);
+                        LogFileTransferControlPlaneDeliveryResult(
+                            request,
+                            result,
+                            diagnosticOnly: IsDiagnosticOnlyRejectedFallbackControlPlaneContract(deliveryContract));
                         return;
                     }
                 }
 
                 LogFileTransferControlPlaneDeliveryResult(request, result);
             }
+            else
+            {
+                deliveryContract?.Lifecycle.TrySettle(
+                    FallbackControlPlaneDeliveryOutcome.DataSessionFallbackCompleted,
+                    "data_session_fallback_completed");
+            }
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex)
         {
+            SettleFallbackControlPlaneDeliveryFailure(deliveryContract, ex);
             LogFileTransferFallbackTailYieldProofStaleIgnored(
                 FileTransferDirection.Outbound,
                 context.TransferId,
@@ -9536,12 +9576,18 @@ public sealed partial class SessionFileTransferService : IDisposable
         string reason)
     {
         FileTransferControlPlaneDeliveryResult? result = null;
-        FallbackControlPlaneToken? controlPlaneToken;
+        FallbackControlPlaneDeliveryContract? deliveryContract = null;
         try
         {
             lock (gate)
             {
-                if (!TryAuthorizeInboundFallbackControlPlaneSendLocked(context, request, out controlPlaneToken))
+                if (!TryAuthorizeInboundFallbackControlPlaneSendLocked(context, request, out deliveryContract))
+                {
+                    return;
+                }
+
+                request = deliveryContract?.Request ?? request;
+                if (deliveryContract is not null && request.PreTransportDeliveryValidator?.Invoke() != true)
                 {
                     return;
                 }
@@ -9557,18 +9603,28 @@ public sealed partial class SessionFileTransferService : IDisposable
             {
                 lock (gate)
                 {
-                    if (!TryCompleteInboundFallbackControlPlaneSendLocked(context, request, controlPlaneToken, result))
+                    if (!TryCompleteInboundFallbackControlPlaneSendLocked(context, request, deliveryContract, result))
                     {
-                        LogFileTransferControlPlaneDeliveryResult(request, result);
+                        LogFileTransferControlPlaneDeliveryResult(
+                            request,
+                            result,
+                            diagnosticOnly: IsDiagnosticOnlyRejectedFallbackControlPlaneContract(deliveryContract));
                         return;
                     }
                 }
 
                 LogFileTransferControlPlaneDeliveryResult(request, result);
             }
+            else
+            {
+                deliveryContract?.Lifecycle.TrySettle(
+                    FallbackControlPlaneDeliveryOutcome.DataSessionFallbackCompleted,
+                    "data_session_fallback_completed");
+            }
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex)
         {
+            SettleFallbackControlPlaneDeliveryFailure(deliveryContract, ex);
             LogFileTransferFallbackTailYieldProofStaleIgnored(
                 FileTransferDirection.Inbound,
                 context.TransferId,
@@ -9640,27 +9696,30 @@ public sealed partial class SessionFileTransferService : IDisposable
 
             var currentLeg = context.CurrentTransferLeg;
             var peerPairKey = NormalizeFallbackTailYieldPairKey(frame.PairKey, frame.OwnerKey);
-            if (context.PeerFallbackTailYieldGranted &&
-                string.Equals(context.PeerFallbackTailYieldPairKey, peerPairKey, StringComparison.Ordinal))
+            if (!TryAcceptPeerFallbackTailYieldAuthority(
+                    frame,
+                    context.PeerFallbackTailYieldGranted,
+                    context.PeerFallbackTailYieldAuthorityId,
+                    context.PeerFallbackTailYieldPredecessorAuthorityId,
+                    context.PeerFallbackTailYieldGeneration,
+                    out var duplicate,
+                    out reason))
             {
-                if (frame.YieldGeneration < context.PeerFallbackTailYieldGeneration)
-                {
-                    LogFileTransferFallbackTailYieldProofStaleIgnored(
-                        FileTransferDirection.Outbound,
-                        context.TransferId,
-                        context.SessionId,
-                        currentLeg,
-                        frame,
-                        "peer_yield_generation_regressed",
-                        context.FallbackTailYieldProofSuppressionKeys);
-                    return;
-                }
+                context.FallbackTailYieldMismatchReason = reason;
+                LogFileTransferFallbackTailYieldProofStaleIgnored(
+                    FileTransferDirection.Outbound,
+                    context.TransferId,
+                    context.SessionId,
+                    currentLeg,
+                    frame,
+                    reason,
+                    context.FallbackTailYieldProofSuppressionKeys);
+                return;
+            }
 
-                if (string.Equals(context.PeerFallbackTailYieldOwnerKey, frame.OwnerKey, StringComparison.Ordinal) &&
-                    frame.YieldGeneration == context.PeerFallbackTailYieldGeneration)
-                {
-                    return;
-                }
+            if (duplicate)
+            {
+                return;
             }
 
             var checkpointSnapshot = NormalizeFallbackTailYieldFrameCheckpointSnapshot(frame);
@@ -9701,6 +9760,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.PeerFallbackTailYieldGranted = true;
             context.PeerFallbackTailYieldOwnerKey = frame.OwnerKey;
             context.PeerFallbackTailYieldPairKey = peerPairKey;
+            context.PeerFallbackTailYieldAuthorityId = frame.AuthorityId;
+            context.PeerFallbackTailYieldPredecessorAuthorityId = frame.PredecessorAuthorityId;
             context.PeerFallbackTailYieldGeneration = frame.YieldGeneration;
             context.PeerFallbackTailYieldCommittedChunkIndex = frame.CommittedChunkIndex;
             context.PeerFallbackTailYieldHighestObservedChunkIndex = frame.HighestObservedChunkIndex;
@@ -9743,27 +9804,30 @@ public sealed partial class SessionFileTransferService : IDisposable
 
             var currentLeg = context.CurrentTransferLeg;
             var peerPairKey = NormalizeFallbackTailYieldPairKey(frame.PairKey, frame.OwnerKey);
-            if (context.PeerFallbackTailYieldGranted &&
-                string.Equals(context.PeerFallbackTailYieldPairKey, peerPairKey, StringComparison.Ordinal))
+            if (!TryAcceptPeerFallbackTailYieldAuthority(
+                    frame,
+                    context.PeerFallbackTailYieldGranted,
+                    context.PeerFallbackTailYieldAuthorityId,
+                    context.PeerFallbackTailYieldPredecessorAuthorityId,
+                    context.PeerFallbackTailYieldGeneration,
+                    out var duplicate,
+                    out reason))
             {
-                if (frame.YieldGeneration < context.PeerFallbackTailYieldGeneration)
-                {
-                    LogFileTransferFallbackTailYieldProofStaleIgnored(
-                        FileTransferDirection.Inbound,
-                        context.TransferId,
-                        context.SessionId,
-                        currentLeg,
-                        frame,
-                        "peer_yield_generation_regressed",
-                        context.FallbackTailYieldProofSuppressionKeys);
-                    return;
-                }
+                context.FallbackTailYieldMismatchReason = reason;
+                LogFileTransferFallbackTailYieldProofStaleIgnored(
+                    FileTransferDirection.Inbound,
+                    context.TransferId,
+                    context.SessionId,
+                    currentLeg,
+                    frame,
+                    reason,
+                    context.FallbackTailYieldProofSuppressionKeys);
+                return;
+            }
 
-                if (string.Equals(context.PeerFallbackTailYieldOwnerKey, frame.OwnerKey, StringComparison.Ordinal) &&
-                    frame.YieldGeneration == context.PeerFallbackTailYieldGeneration)
-                {
-                    return;
-                }
+            if (duplicate)
+            {
+                return;
             }
 
             var checkpointSnapshot = NormalizeFallbackTailYieldFrameCheckpointSnapshot(frame);
@@ -9804,6 +9868,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.PeerFallbackTailYieldGranted = true;
             context.PeerFallbackTailYieldOwnerKey = frame.OwnerKey;
             context.PeerFallbackTailYieldPairKey = peerPairKey;
+            context.PeerFallbackTailYieldAuthorityId = frame.AuthorityId;
+            context.PeerFallbackTailYieldPredecessorAuthorityId = frame.PredecessorAuthorityId;
             context.PeerFallbackTailYieldGeneration = frame.YieldGeneration;
             context.PeerFallbackTailYieldCommittedChunkIndex = frame.CommittedChunkIndex;
             context.PeerFallbackTailYieldHighestObservedChunkIndex = frame.HighestObservedChunkIndex;
@@ -9815,6 +9881,90 @@ public sealed partial class SessionFileTransferService : IDisposable
                 frame);
             ResolveInboundFallbackTailSurvivalLocked(context, "fallback_tail_peer_yield");
         }
+    }
+
+    private static bool TryAcceptPeerFallbackTailYieldAuthority(
+        FileTransferFallbackTailYieldFrameV6 frame,
+        bool peerYieldGranted,
+        string? currentAuthorityId,
+        string? currentPredecessorAuthorityId,
+        long currentYieldGeneration,
+        out bool duplicate,
+        out string reason)
+    {
+        duplicate = false;
+        reason = "current";
+        if (frame.YieldGeneration <= 0 ||
+            !IsFallbackTailYieldAuthorityId(frame.AuthorityId) ||
+            (!string.IsNullOrWhiteSpace(frame.PredecessorAuthorityId) &&
+             !IsFallbackTailYieldAuthorityId(frame.PredecessorAuthorityId)) ||
+            string.Equals(frame.AuthorityId, frame.PredecessorAuthorityId, StringComparison.Ordinal))
+        {
+            reason = "peer_yield_authority_invalid";
+            return false;
+        }
+
+        if (!peerYieldGranted)
+        {
+            return true;
+        }
+
+        if (!IsFallbackTailYieldAuthorityId(currentAuthorityId))
+        {
+            reason = "peer_yield_authority_state_missing";
+            return false;
+        }
+
+        if (string.Equals(frame.AuthorityId, currentAuthorityId, StringComparison.Ordinal))
+        {
+            if (frame.YieldGeneration != currentYieldGeneration ||
+                !string.Equals(
+                    frame.PredecessorAuthorityId,
+                    currentPredecessorAuthorityId,
+                    StringComparison.Ordinal))
+            {
+                reason = "peer_yield_authority_tuple_mismatch";
+                return false;
+            }
+
+            duplicate = true;
+            return true;
+        }
+
+        if (!string.Equals(frame.PredecessorAuthorityId, currentAuthorityId, StringComparison.Ordinal))
+        {
+            reason = "peer_yield_authority_predecessor_mismatch";
+            return false;
+        }
+
+        if (frame.YieldGeneration < currentYieldGeneration)
+        {
+            reason = "peer_yield_generation_regressed";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool IsFallbackTailYieldAuthorityId(string? authorityId)
+    {
+        var prefix = $"fta{FileTransferAuthoritySchema.Current}-fallback_tail_yield-";
+        if (string.IsNullOrWhiteSpace(authorityId) ||
+            authorityId.Length != prefix.Length + 24 ||
+            !authorityId.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        foreach (var character in authorityId.AsSpan(prefix.Length))
+        {
+            if (character is not (>= '0' and <= '9') and not (>= 'a' and <= 'f'))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static bool TryAcceptFallbackTailYieldProofLocked(
@@ -10454,6 +10604,11 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.PeerFallbackTailYieldPairKey,
             context.PeerFallbackTailYieldOwnerKey);
         if (context.PairedFallbackTailYieldGranted ||
+            context.LastFallbackTailYieldDecision is not { } currentYieldDecision ||
+            !FileTransferCoordinator.IsFallbackTailYieldDecisionCurrent(
+                CreateCoordinatorStateLocked(context),
+                currentYieldDecision,
+                out _) ||
             !context.LocalFallbackTailYieldGranted ||
             !context.LocalFallbackTailYieldPeerVisible ||
             !context.PeerFallbackTailYieldGranted ||
@@ -10527,6 +10682,11 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.PeerFallbackTailYieldPairKey,
             context.PeerFallbackTailYieldOwnerKey);
         if (context.PairedFallbackTailYieldGranted ||
+            context.LastFallbackTailYieldDecision is not { } currentYieldDecision ||
+            !FileTransferCoordinator.IsFallbackTailYieldDecisionCurrent(
+                CreateCoordinatorStateLocked(context),
+                currentYieldDecision,
+                out _) ||
             !context.LocalFallbackTailYieldGranted ||
             !context.LocalFallbackTailYieldPeerVisible ||
             !context.PeerFallbackTailYieldGranted ||
@@ -11961,18 +12121,19 @@ public sealed partial class SessionFileTransferService : IDisposable
 
     private static void LogFileTransferControlPlaneDeliveryResult(
         FileTransferControlPlaneDeliveryRequest request,
-        FileTransferControlPlaneDeliveryResult result)
+        FileTransferControlPlaneDeliveryResult result,
+        bool diagnosticOnly = false)
     {
         var frameCorrelation = FormatControlPlaneFrameCorrelationSuffix(request.Frame);
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_control_plane_delivery_observed; direction={FormatFileTransferDirection(request.Direction)}; kind={FormatFileTransferControlPlaneKind(request.Kind)}; transfer_id={request.Frame.TransferId}; session_id={request.Frame.SessionId}; route={FormatProtocolLogValue(request.RouteToken ?? "(none)")}; protocol_version={request.ProtocolVersion}; live_route_epoch={request.LiveRouteEpoch}; leg_generation={request.TransferLegGeneration}; bridge_recovery_generation={request.BridgeRecoveryGeneration}; transport_epoch={request.TransportEpoch}; checkpoint_request_id={FormatProtocolLogValue(request.CheckpointRequestId ?? "(none)")}; reason={FormatProtocolLogValue(request.Reason)}; frame_type={FormatProtocolLogValue(request.Frame.Type)}{frameCorrelation}; control_queue={(result.ControlQueue ? 1 : 0)}; control_copy={(result.ControlCopy ? 1 : 0)}; bulk_copy={(result.BulkCopy ? 1 : 0)}; peer_visible_any={(result.PeerVisibleAny ? 1 : 0)}; accepted_any={(result.AcceptedAny ? 1 : 0)}; local_only_rejected={(result.ControlQueue && !result.PeerVisibleAny && request.PeerVisibleRequired ? 1 : 0)}");
+            $"event=filetransfer_control_plane_delivery_observed; direction={FormatFileTransferDirection(request.Direction)}; kind={FormatFileTransferControlPlaneKind(request.Kind)}; transfer_id={request.Frame.TransferId}; session_id={request.Frame.SessionId}; authority_id={request.AuthorityId}; authority_schema={request.AuthoritySchema}; control_plane_generation={request.ControlPlaneGeneration}; route={FormatProtocolLogValue(request.RouteToken ?? "(none)")}; protocol_version={request.ProtocolVersion}; live_route_epoch={request.LiveRouteEpoch}; leg_generation={request.TransferLegGeneration}; bridge_recovery_generation={request.BridgeRecoveryGeneration}; transport_epoch={request.TransportEpoch}; checkpoint_request_id={FormatProtocolLogValue(request.CheckpointRequestId ?? "(none)")}; reason={FormatProtocolLogValue(request.Reason)}; frame_type={FormatProtocolLogValue(request.Frame.Type)}{frameCorrelation}; control_queue={(result.ControlQueue ? 1 : 0)}; control_copy={(result.ControlCopy ? 1 : 0)}; bulk_copy={(result.BulkCopy ? 1 : 0)}; peer_visible_any={(result.PeerVisibleAny ? 1 : 0)}; accepted_any={(result.AcceptedAny ? 1 : 0)}; local_only_rejected={(result.ControlQueue && !result.PeerVisibleAny && request.PeerVisibleRequired ? 1 : 0)}");
         if (!result.AcceptedAny)
         {
             LocalOperationalLog.Warn(
                 "FileTransferService",
-                $"event=filetransfer_control_plane_delivery_failed; direction={FormatFileTransferDirection(request.Direction)}; kind={FormatFileTransferControlPlaneKind(request.Kind)}; transfer_id={request.Frame.TransferId}; session_id={request.Frame.SessionId}; route={FormatProtocolLogValue(request.RouteToken ?? "(none)")}; protocol_version={request.ProtocolVersion}; live_route_epoch={request.LiveRouteEpoch}; leg_generation={request.TransferLegGeneration}; bridge_recovery_generation={request.BridgeRecoveryGeneration}; transport_epoch={request.TransportEpoch}; checkpoint_request_id={FormatProtocolLogValue(request.CheckpointRequestId ?? "(none)")}; reason={FormatProtocolLogValue(request.Reason)}; frame_type={FormatProtocolLogValue(request.Frame.Type)}{frameCorrelation}; control_queue_error={FormatProtocolLogValue(result.ControlQueueErrorName)}; control_copy_error={FormatProtocolLogValue(result.ControlCopyErrorName)}; bulk_copy_error={FormatProtocolLogValue(result.BulkCopyErrorName)}");
-            if (!IsDiagnosticOnlyControlPlaneDeliveryFailure(request))
+                $"event=filetransfer_control_plane_delivery_failed; direction={FormatFileTransferDirection(request.Direction)}; kind={FormatFileTransferControlPlaneKind(request.Kind)}; transfer_id={request.Frame.TransferId}; session_id={request.Frame.SessionId}; authority_id={request.AuthorityId}; authority_schema={request.AuthoritySchema}; control_plane_generation={request.ControlPlaneGeneration}; route={FormatProtocolLogValue(request.RouteToken ?? "(none)")}; protocol_version={request.ProtocolVersion}; live_route_epoch={request.LiveRouteEpoch}; leg_generation={request.TransferLegGeneration}; bridge_recovery_generation={request.BridgeRecoveryGeneration}; transport_epoch={request.TransportEpoch}; checkpoint_request_id={FormatProtocolLogValue(request.CheckpointRequestId ?? "(none)")}; reason={FormatProtocolLogValue(request.Reason)}; frame_type={FormatProtocolLogValue(request.Frame.Type)}{frameCorrelation}; control_queue_error={FormatProtocolLogValue(result.ControlQueueErrorName)}; control_copy_error={FormatProtocolLogValue(result.ControlCopyErrorName)}; bulk_copy_error={FormatProtocolLogValue(result.BulkCopyErrorName)}");
+            if (!diagnosticOnly && !IsDiagnosticOnlyControlPlaneDeliveryFailure(request))
             {
                 throw new InvalidOperationException($"File-transfer control-plane delivery failed for {request.Kind}.");
             }
@@ -12023,6 +12184,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             $"{request.RouteToken ?? string.Empty}|{request.ProtocolVersion.ToString(CultureInfo.InvariantCulture)}|" +
             $"{request.LiveRouteEpoch.ToString(CultureInfo.InvariantCulture)}|{request.TransferLegGeneration.ToString(CultureInfo.InvariantCulture)}|" +
             $"{request.BridgeRecoveryGeneration.ToString(CultureInfo.InvariantCulture)}|{request.TransportEpoch.ToString(CultureInfo.InvariantCulture)}|" +
+            $"{request.AuthorityId}|{request.AuthoritySchema.ToString(CultureInfo.InvariantCulture)}|{request.ControlPlaneGeneration.ToString(CultureInfo.InvariantCulture)}|" +
             $"{request.CheckpointRequestId ?? string.Empty}|{frontier.TransportEpoch.ToString(CultureInfo.InvariantCulture)}|" +
             $"{frontier.RepairRequestId ?? string.Empty}|{firstStartChunkIndex.ToString(CultureInfo.InvariantCulture)}|" +
             $"{firstChunkCount.ToString(CultureInfo.InvariantCulture)}|{rangeCount.ToString(CultureInfo.InvariantCulture)}|" +
@@ -12046,12 +12208,206 @@ public sealed partial class SessionFileTransferService : IDisposable
             !string.IsNullOrWhiteSpace(request.CheckpointRequestId);
     }
 
+    private enum FallbackControlPlaneDeliveryOutcome
+    {
+        PeerVisibleCompleted = 1,
+        DataSessionFallbackCompleted = 2,
+        AuthorityRejected = 3,
+        StaleRejected = 4,
+        TerminalRejected = 5,
+        TransportFailed = 6,
+        Canceled = 7,
+    }
+
+    private sealed class FallbackControlPlaneDeliveryContract(
+        FallbackControlPlaneToken token,
+        FileTransferControlPlaneDeliveryRequest request)
+    {
+        public FallbackControlPlaneToken Token { get; } = token;
+
+        public FileTransferControlPlaneDeliveryRequest Request { get; set; } = request;
+
+        public FileTransferAuthorityLifecycle<FallbackControlPlaneDeliveryOutcome> Lifecycle { get; } =
+            new(token.AuthorityId);
+    }
+
+    private static bool IsDiagnosticOnlyRejectedFallbackControlPlaneContract(
+        FallbackControlPlaneDeliveryContract? contract)
+        => contract?.Lifecycle.SettlementOutcome is
+            FallbackControlPlaneDeliveryOutcome.StaleRejected or
+            FallbackControlPlaneDeliveryOutcome.TerminalRejected;
+
+    private void SettleFallbackControlPlaneDeliveryFailure(
+        FallbackControlPlaneDeliveryContract? contract,
+        Exception exception)
+    {
+        if (contract is null)
+        {
+            return;
+        }
+
+        lock (gate)
+        {
+            contract.Lifecycle.TrySettle(
+                exception is OperationCanceledException
+                    ? FallbackControlPlaneDeliveryOutcome.Canceled
+                    : FallbackControlPlaneDeliveryOutcome.TransportFailed,
+                exception.GetType().Name);
+        }
+    }
+
+    private FallbackControlPlaneDeliveryContract CreateOutboundFallbackControlPlaneDeliveryContractLocked(
+        OutboundTransferContext context,
+        FileTransferControlPlaneDeliveryRequest request,
+        FallbackControlPlaneToken token)
+    {
+        var contract = new FallbackControlPlaneDeliveryContract(
+            token,
+            BindFallbackControlPlaneDeliveryRequest(request, token));
+        contract.Request = EnsureControlPlaneDeliveryRequestCorrelation(contract.Request) with
+        {
+            PreTransportDeliveryValidator = () =>
+            {
+                lock (gate)
+                {
+                    if (contract.Lifecycle.IsSettled)
+                    {
+                        return false;
+                    }
+
+                    if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
+                    {
+                        contract.Lifecycle.TrySettle(
+                            context.IsTerminal
+                                ? FallbackControlPlaneDeliveryOutcome.TerminalRejected
+                                : FallbackControlPlaneDeliveryOutcome.StaleRejected,
+                            context.IsTerminal ? "transfer_terminal" : "stale_outbound_context");
+                        return false;
+                    }
+
+                    if (!FileTransferCoordinator.IsFallbackControlPlaneTokenIssued(
+                            CreateCoordinatorStateLocked(context),
+                            contract.Token,
+                            out var authorityReason))
+                    {
+                        contract.Lifecycle.TrySettle(
+                            FallbackControlPlaneDeliveryOutcome.StaleRejected,
+                            authorityReason);
+                        return false;
+                    }
+
+                    if (!TryValidateOutboundFallbackControlPlaneSendLocked(
+                            context,
+                            contract.Request,
+                            out var tupleReason,
+                            out _))
+                    {
+                        contract.Lifecycle.TrySettle(
+                            FallbackControlPlaneDeliveryOutcome.StaleRejected,
+                            tupleReason);
+                        return false;
+                    }
+
+                    if (!contract.Lifecycle.DispatchObserved)
+                    {
+                        contract.Lifecycle.TryMarkDispatched();
+                    }
+
+                    return true;
+                }
+            },
+        };
+        return contract;
+    }
+
+    private FallbackControlPlaneDeliveryContract CreateInboundFallbackControlPlaneDeliveryContractLocked(
+        InboundTransferContext context,
+        FileTransferControlPlaneDeliveryRequest request,
+        FallbackControlPlaneToken token)
+    {
+        var contract = new FallbackControlPlaneDeliveryContract(
+            token,
+            BindFallbackControlPlaneDeliveryRequest(request, token));
+        contract.Request = EnsureControlPlaneDeliveryRequestCorrelation(contract.Request) with
+        {
+            PreTransportDeliveryValidator = () =>
+            {
+                lock (gate)
+                {
+                    if (contract.Lifecycle.IsSettled)
+                    {
+                        return false;
+                    }
+
+                    if (!ReferenceEquals(inboundTransfer, context) || context.IsTerminal)
+                    {
+                        contract.Lifecycle.TrySettle(
+                            context.IsTerminal
+                                ? FallbackControlPlaneDeliveryOutcome.TerminalRejected
+                                : FallbackControlPlaneDeliveryOutcome.StaleRejected,
+                            context.IsTerminal ? "transfer_terminal" : "stale_inbound_context");
+                        return false;
+                    }
+
+                    if (!FileTransferCoordinator.IsFallbackControlPlaneTokenIssued(
+                            CreateCoordinatorStateLocked(context),
+                            contract.Token,
+                            out var authorityReason))
+                    {
+                        contract.Lifecycle.TrySettle(
+                            FallbackControlPlaneDeliveryOutcome.StaleRejected,
+                            authorityReason);
+                        return false;
+                    }
+
+                    if (!TryValidateInboundFallbackControlPlaneSendLocked(
+                            context,
+                            contract.Request,
+                            out var tupleReason,
+                            out _))
+                    {
+                        contract.Lifecycle.TrySettle(
+                            FallbackControlPlaneDeliveryOutcome.StaleRejected,
+                            tupleReason);
+                        return false;
+                    }
+
+                    if (!contract.Lifecycle.DispatchObserved)
+                    {
+                        contract.Lifecycle.TryMarkDispatched();
+                    }
+
+                    return true;
+                }
+            },
+        };
+        return contract;
+    }
+
+    private static FileTransferControlPlaneDeliveryRequest BindFallbackControlPlaneDeliveryRequest(
+        FileTransferControlPlaneDeliveryRequest request,
+        FallbackControlPlaneToken token)
+        => request with
+        {
+            AuthorityId = token.AuthorityId,
+            AuthoritySchema = FileTransferAuthoritySchema.Current,
+            ControlPlaneGeneration = token.TokenGeneration,
+            Direction = token.Direction,
+            RouteToken = token.RouteToken,
+            ProtocolVersion = token.ProtocolVersion,
+            LiveRouteEpoch = token.LiveRouteEpoch,
+            TransferLegGeneration = token.LegGeneration,
+            BridgeRecoveryGeneration = token.BridgeRecoveryGeneration,
+            TransportEpoch = token.TransportEpoch,
+            CheckpointRequestId = token.CheckpointRequestId,
+        };
+
     private bool TryAuthorizeOutboundFallbackControlPlaneSendLocked(
         OutboundTransferContext context,
         FileTransferControlPlaneDeliveryRequest request,
-        out FallbackControlPlaneToken? token)
+        out FallbackControlPlaneDeliveryContract? contract)
     {
-        token = null;
+        contract = null;
         if (!IsFallbackControlPlaneGenerationBound(request))
         {
             return true;
@@ -12134,16 +12490,17 @@ public sealed partial class SessionFileTransferService : IDisposable
         }
 
         ApplyCoordinatorDecisionToContextLocked(context, applyDecision);
-        token = applyDecision.FallbackControlPlaneToken ?? authorizedToken;
-        return token is not null;
+        var token = applyDecision.FallbackControlPlaneToken ?? authorizedToken;
+        contract = CreateOutboundFallbackControlPlaneDeliveryContractLocked(context, request, token);
+        return true;
     }
 
     private bool TryAuthorizeInboundFallbackControlPlaneSendLocked(
         InboundTransferContext context,
         FileTransferControlPlaneDeliveryRequest request,
-        out FallbackControlPlaneToken? token)
+        out FallbackControlPlaneDeliveryContract? contract)
     {
-        token = null;
+        contract = null;
         if (!IsFallbackControlPlaneGenerationBound(request))
         {
             return true;
@@ -12226,14 +12583,15 @@ public sealed partial class SessionFileTransferService : IDisposable
         }
 
         ApplyCoordinatorDecisionToContextLocked(context, applyDecision);
-        token = applyDecision.FallbackControlPlaneToken ?? authorizedToken;
-        return token is not null;
+        var token = applyDecision.FallbackControlPlaneToken ?? authorizedToken;
+        contract = CreateInboundFallbackControlPlaneDeliveryContractLocked(context, request, token);
+        return true;
     }
 
     private bool TryCompleteOutboundFallbackControlPlaneSendLocked(
         OutboundTransferContext context,
         FileTransferControlPlaneDeliveryRequest request,
-        FallbackControlPlaneToken? token,
+        FallbackControlPlaneDeliveryContract? contract,
         FileTransferControlPlaneDeliveryResult result)
     {
         if (!IsFallbackControlPlaneGenerationBound(request))
@@ -12241,11 +12599,18 @@ public sealed partial class SessionFileTransferService : IDisposable
             return true;
         }
 
-        if (token is not { } controlPlaneToken)
+        if (contract is null)
         {
             LogRuntimeOwnerRejectedForFallbackControlPlaneLocked(context, request, "fallback_control_plane_token_missing");
             return false;
         }
+
+        if (contract.Lifecycle.IsSettled)
+        {
+            return false;
+        }
+
+        var controlPlaneToken = contract.Token;
 
         if (!TryValidateOutboundFallbackControlPlaneSendLocked(context, request, out var reason, out var currentLeg))
         {
@@ -12259,6 +12624,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 context.RetiredFallbackControlPlaneSendKeys);
             LogRuntimeOwnerRejectedForFallbackControlPlaneLocked(context, request, reason);
             ClearPostTunaFallbackControlPlanePressure(context.TransferId, reason);
+            contract.Lifecycle.TrySettle(FallbackControlPlaneDeliveryOutcome.StaleRejected, reason);
             return false;
         }
 
@@ -12285,6 +12651,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         if (!decision.Accepted)
         {
             LogRuntimeOwnerRejectedForFallbackControlPlaneLocked(context, request, decision.RejectionReason);
+            contract.Lifecycle.TrySettle(FallbackControlPlaneDeliveryOutcome.AuthorityRejected, decision.RejectionReason);
             return false;
         }
 
@@ -12322,17 +12689,21 @@ public sealed partial class SessionFileTransferService : IDisposable
                 request.CheckpointRequestId,
                 request.TransportEpoch,
                 request.Reason);
+            contract.Lifecycle.TrySettle(
+                FallbackControlPlaneDeliveryOutcome.AuthorityRejected,
+                applyDecision.MutationRejectedReason);
             return false;
         }
 
         ApplyCoordinatorDecisionToContextLocked(context, applyDecision);
+        contract.Lifecycle.TrySettle(FallbackControlPlaneDeliveryOutcome.PeerVisibleCompleted, "peer_visible_completed");
         return true;
     }
 
     private bool TryCompleteInboundFallbackControlPlaneSendLocked(
         InboundTransferContext context,
         FileTransferControlPlaneDeliveryRequest request,
-        FallbackControlPlaneToken? token,
+        FallbackControlPlaneDeliveryContract? contract,
         FileTransferControlPlaneDeliveryResult result)
     {
         if (!IsFallbackControlPlaneGenerationBound(request))
@@ -12340,11 +12711,18 @@ public sealed partial class SessionFileTransferService : IDisposable
             return true;
         }
 
-        if (token is not { } controlPlaneToken)
+        if (contract is null)
         {
             LogRuntimeOwnerRejectedForFallbackControlPlaneLocked(context, request, "fallback_control_plane_token_missing");
             return false;
         }
+
+        if (contract.Lifecycle.IsSettled)
+        {
+            return false;
+        }
+
+        var controlPlaneToken = contract.Token;
 
         if (!TryValidateInboundFallbackControlPlaneSendLocked(context, request, out var reason, out var currentLeg))
         {
@@ -12358,6 +12736,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 context.RetiredFallbackControlPlaneSendKeys);
             LogRuntimeOwnerRejectedForFallbackControlPlaneLocked(context, request, reason);
             ClearPostTunaFallbackControlPlanePressure(context.TransferId, reason);
+            contract.Lifecycle.TrySettle(FallbackControlPlaneDeliveryOutcome.StaleRejected, reason);
             return false;
         }
 
@@ -12384,6 +12763,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         if (!decision.Accepted)
         {
             LogRuntimeOwnerRejectedForFallbackControlPlaneLocked(context, request, decision.RejectionReason);
+            contract.Lifecycle.TrySettle(FallbackControlPlaneDeliveryOutcome.AuthorityRejected, decision.RejectionReason);
             return false;
         }
 
@@ -12421,10 +12801,14 @@ public sealed partial class SessionFileTransferService : IDisposable
                 request.CheckpointRequestId,
                 request.TransportEpoch,
                 request.Reason);
+            contract.Lifecycle.TrySettle(
+                FallbackControlPlaneDeliveryOutcome.AuthorityRejected,
+                applyDecision.MutationRejectedReason);
             return false;
         }
 
         ApplyCoordinatorDecisionToContextLocked(context, applyDecision);
+        contract.Lifecycle.TrySettle(FallbackControlPlaneDeliveryOutcome.PeerVisibleCompleted, "peer_visible_completed");
         return true;
     }
 
@@ -12434,33 +12818,54 @@ public sealed partial class SessionFileTransferService : IDisposable
         FileTransferControlPlaneDeliveryRequest request,
         CancellationToken ct)
     {
-        request = EnsureControlPlaneDeliveryRequestCorrelation(request);
-        FallbackControlPlaneToken? controlPlaneToken;
+        FallbackControlPlaneDeliveryContract? deliveryContract;
         lock (gate)
         {
-            if (!TryAuthorizeOutboundFallbackControlPlaneSendLocked(context, request, out controlPlaneToken))
+            if (!TryAuthorizeOutboundFallbackControlPlaneSendLocked(context, request, out deliveryContract))
+            {
+                return false;
+            }
+
+            request = deliveryContract?.Request ?? request;
+            if (deliveryContract is not null && request.PreTransportDeliveryValidator?.Invoke() != true)
             {
                 return false;
             }
         }
 
-        var result = await SendFileTransferControlPlaneOrDataSessionCoreAsync(dataSession, request, ct).ConfigureAwait(false);
-        if (result is null)
+        request = EnsureControlPlaneDeliveryRequestCorrelation(request);
+
+        try
         {
+            var result = await SendFileTransferControlPlaneOrDataSessionCoreAsync(dataSession, request, ct).ConfigureAwait(false);
+            if (result is null)
+            {
+                deliveryContract?.Lifecycle.TrySettle(
+                    FallbackControlPlaneDeliveryOutcome.DataSessionFallbackCompleted,
+                    "data_session_fallback_completed");
+                return true;
+            }
+
+            lock (gate)
+            {
+                if (!TryCompleteOutboundFallbackControlPlaneSendLocked(context, request, deliveryContract, result))
+                {
+                    LogFileTransferControlPlaneDeliveryResult(
+                        request,
+                        result,
+                        diagnosticOnly: IsDiagnosticOnlyRejectedFallbackControlPlaneContract(deliveryContract));
+                    return false;
+                }
+            }
+
+            LogFileTransferControlPlaneDeliveryResult(request, result);
             return true;
         }
-
-        lock (gate)
+        catch (Exception ex)
         {
-            if (!TryCompleteOutboundFallbackControlPlaneSendLocked(context, request, controlPlaneToken, result))
-            {
-                LogFileTransferControlPlaneDeliveryResult(request, result);
-                return false;
-            }
+            SettleFallbackControlPlaneDeliveryFailure(deliveryContract, ex);
+            throw;
         }
-
-        LogFileTransferControlPlaneDeliveryResult(request, result);
-        return true;
     }
 
     private async Task<(bool Sent, FileTransferControlPlaneDeliveryResult? Result)> SendInboundFallbackControlPlaneOrDataSessionAsync(
@@ -12469,15 +12874,22 @@ public sealed partial class SessionFileTransferService : IDisposable
         FileTransferControlPlaneDeliveryRequest request,
         CancellationToken ct)
     {
-        request = EnsureControlPlaneDeliveryRequestCorrelation(request);
-        FallbackControlPlaneToken? controlPlaneToken;
+        FallbackControlPlaneDeliveryContract? deliveryContract;
         lock (gate)
         {
-            if (!TryAuthorizeInboundFallbackControlPlaneSendLocked(context, request, out controlPlaneToken))
+            if (!TryAuthorizeInboundFallbackControlPlaneSendLocked(context, request, out deliveryContract))
+            {
+                return (false, null);
+            }
+
+            request = deliveryContract?.Request ?? request;
+            if (deliveryContract is not null && request.PreTransportDeliveryValidator?.Invoke() != true)
             {
                 return (false, null);
             }
         }
+
+        request = EnsureControlPlaneDeliveryRequestCorrelation(request);
 
         try
         {
@@ -12486,9 +12898,12 @@ public sealed partial class SessionFileTransferService : IDisposable
             {
                 lock (gate)
                 {
-                    if (!TryCompleteInboundFallbackControlPlaneSendLocked(context, request, controlPlaneToken, result))
+                    if (!TryCompleteInboundFallbackControlPlaneSendLocked(context, request, deliveryContract, result))
                     {
-                        LogFileTransferControlPlaneDeliveryResult(request, result);
+                        LogFileTransferControlPlaneDeliveryResult(
+                            request,
+                            result,
+                            diagnosticOnly: IsDiagnosticOnlyRejectedFallbackControlPlaneContract(deliveryContract));
                         return (false, null);
                     }
                 }
@@ -12499,27 +12914,40 @@ public sealed partial class SessionFileTransferService : IDisposable
                     return (false, result);
                 }
             }
+            else
+            {
+                deliveryContract?.Lifecycle.TrySettle(
+                    FallbackControlPlaneDeliveryOutcome.DataSessionFallbackCompleted,
+                    "data_session_fallback_completed");
+            }
 
             MaybeObserveInboundPostTunaFallbackControlPlanePressure(context, request);
             return (true, result);
         }
-        catch (Exception ex) when (request.Kind == FileTransferControlPlaneKind.ReceiverState &&
-                                   TryDeferInboundV6ControlSendFailureForRecovery(
-                                       context,
-                                       "receiver_state",
-                                       request.Reason,
-                                       ex,
-                                       requireRecoverableFailure: false))
+        catch (Exception ex)
         {
-            return (false, null);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException &&
-                                   IsRegularNknV4CriticalReceiverStateControlPlaneRequest(request))
-        {
-            LocalOperationalLog.Warn(
-                "FileTransferService",
-                $"event=filetransfer_regular_v4_receiver_state_control_plane_delivery_failed; direction=inbound; transfer_id={context.TransferId}; session_id={FormatProtocolLogValue(context.SessionId)}; route={FormatProtocolLogValue(request.RouteToken ?? "(none)")}; protocol_version={request.ProtocolVersion}; reason={FormatProtocolLogValue(request.Reason)}; epoch={(request.Frame is FileTransferStateFrameV4 state ? state.Epoch : 0)}; missing_range_count={(request.Frame is FileTransferStateFrameV4 stateFrame ? stateFrame.MissingRanges.Count : 0)}; error={FormatProtocolLogValue(ex.GetType().Name)}; message={FormatProtocolLogValue(ex.Message)}");
-            return (false, null);
+            SettleFallbackControlPlaneDeliveryFailure(deliveryContract, ex);
+            if (request.Kind == FileTransferControlPlaneKind.ReceiverState &&
+                TryDeferInboundV6ControlSendFailureForRecovery(
+                    context,
+                    "receiver_state",
+                    request.Reason,
+                    ex,
+                    requireRecoverableFailure: false))
+            {
+                return (false, null);
+            }
+
+            if (ex is not OperationCanceledException &&
+                IsRegularNknV4CriticalReceiverStateControlPlaneRequest(request))
+            {
+                LocalOperationalLog.Warn(
+                    "FileTransferService",
+                    $"event=filetransfer_regular_v4_receiver_state_control_plane_delivery_failed; direction=inbound; transfer_id={context.TransferId}; session_id={FormatProtocolLogValue(context.SessionId)}; route={FormatProtocolLogValue(request.RouteToken ?? "(none)")}; protocol_version={request.ProtocolVersion}; reason={FormatProtocolLogValue(request.Reason)}; epoch={(request.Frame is FileTransferStateFrameV4 state ? state.Epoch : 0)}; missing_range_count={(request.Frame is FileTransferStateFrameV4 stateFrame ? stateFrame.MissingRanges.Count : 0)}; error={FormatProtocolLogValue(ex.GetType().Name)}; message={FormatProtocolLogValue(ex.Message)}");
+                return (false, null);
+            }
+
+            throw;
         }
     }
 
@@ -16262,6 +16690,10 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public string? PeerFallbackTailYieldPairKey { get; set; }
 
+        public string? PeerFallbackTailYieldAuthorityId { get; set; }
+
+        public string? PeerFallbackTailYieldPredecessorAuthorityId { get; set; }
+
         public long PeerFallbackTailYieldGeneration { get; set; }
 
         public int PeerFallbackTailYieldCommittedChunkIndex { get; set; } = -1;
@@ -17423,6 +17855,10 @@ public sealed partial class SessionFileTransferService : IDisposable
         public string? PeerFallbackTailYieldOwnerKey { get; set; }
 
         public string? PeerFallbackTailYieldPairKey { get; set; }
+
+        public string? PeerFallbackTailYieldAuthorityId { get; set; }
+
+        public string? PeerFallbackTailYieldPredecessorAuthorityId { get; set; }
 
         public long PeerFallbackTailYieldGeneration { get; set; }
 

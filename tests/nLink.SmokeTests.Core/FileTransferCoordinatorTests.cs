@@ -465,6 +465,7 @@ public sealed class FileTransferCoordinatorTests
         Assert.True(authorized.Accepted);
         Assert.NotNull(authorized.FallbackControlPlaneToken);
         Assert.Equal(FileTransferControlPlaneKind.FallbackCheckpointRequest, authorized.FallbackControlPlaneToken!.Value.ControlPlaneKind);
+        Assert.False(authorized.FallbackControlPlaneToken.Value.AuthorityId.IsDefault);
 
         var stored = FileTransferCoordinator.Apply(
             CoordinatorEvent(
@@ -480,6 +481,14 @@ public sealed class FileTransferCoordinatorTests
                 controlPlanePurpose: "checkpoint_request"),
             state);
         Assert.NotNull(stored.State.CurrentFallbackControlPlaneToken);
+        Assert.True(FileTransferCoordinator.IsFallbackControlPlaneTokenIssued(
+            stored.State,
+            stored.State.CurrentFallbackControlPlaneToken.Value,
+            out _));
+        Assert.False(FileTransferCoordinator.IsFallbackControlPlaneTokenIssued(
+            stored.State,
+            stored.State.CurrentFallbackControlPlaneToken.Value with { AuthorityId = default },
+            out _));
 
         var completed = FileTransferCoordinator.AuthorizeAction(
             stored.State,
@@ -778,6 +787,7 @@ public sealed class FileTransferCoordinatorTests
         Assert.True(quiescent.Accepted);
         Assert.NotNull(quiescent.FallbackTailYieldDecision);
         Assert.True(quiescent.FallbackTailYieldDecision!.Value.Accepted);
+        Assert.False(quiescent.FallbackTailYieldDecision.Value.AuthorityId.IsDefault);
         Assert.Equal(FallbackTailYieldKind.Quiescent, quiescent.FallbackTailYieldDecision.Value.YieldKind);
         Assert.Equal("(none)", quiescent.FallbackTailYieldDecision.Value.CheckpointRequestIdSnapshot);
         Assert.EndsWith("|(none)", quiescent.FallbackTailYieldDecision.Value.OwnerKey, StringComparison.Ordinal);
@@ -786,6 +796,19 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(8, quiescent.FallbackTailYieldDecision.Value.PairKey.Split('|').Length);
         Assert.DoesNotContain("checkpoint:tail", quiescent.FallbackTailYieldDecision.Value.OwnerKey, StringComparison.Ordinal);
         Assert.DoesNotContain("checkpoint:tail", quiescent.FallbackTailYieldDecision.Value.PairKey, StringComparison.Ordinal);
+
+        var firstYield = MarkFallbackTailQuiescent(accepted.State, fallback, 4, 12, 18);
+        var successor = FileTransferCoordinator.AuthorizeAction(
+            firstYield.State,
+            FallbackActionRequest(
+                FileTransferCoordinatorActionKind.FallbackTailQuiescent,
+                firstYield.State.CurrentRuntimeOwner!.Value,
+                firstYield.State.CurrentLeg!,
+                fallbackTailYieldKind: FallbackTailYieldKind.Quiescent));
+        Assert.True(successor.Accepted);
+        Assert.Equal(
+            firstYield.FallbackTailYieldDecision!.Value.AuthorityId,
+            successor.FallbackTailYieldDecision!.Value.PredecessorAuthorityId);
 
         var failed = FileTransferCoordinator.AuthorizeAction(
             accepted.State,

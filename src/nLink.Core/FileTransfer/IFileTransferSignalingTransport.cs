@@ -514,6 +514,12 @@ public sealed record FileTransferControlPlaneDeliveryRequest(
     FileTransferDataFrame Frame,
     string Reason)
 {
+    public FileTransferAuthorityId AuthorityId { get; init; }
+
+    public int AuthoritySchema { get; init; }
+
+    public int ControlPlaneGeneration { get; init; }
+
     public FileTransferDirection? Direction { get; init; }
 
     public string? RouteToken { get; init; }

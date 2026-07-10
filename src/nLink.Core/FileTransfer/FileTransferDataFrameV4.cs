@@ -297,6 +297,10 @@ public record FileTransferFallbackTailYieldFrameV6 : FileTransferDataFrame, IFil
 
     public long YieldGeneration { get; init; }
 
+    public string AuthorityId { get; init; } = string.Empty;
+
+    public string? PredecessorAuthorityId { get; init; }
+
     public int LiveRouteEpoch { get; init; }
 
     public int FallbackLegGeneration { get; init; }

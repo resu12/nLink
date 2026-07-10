@@ -8266,6 +8266,9 @@ public sealed partial class NknSignalingTransport
     {
         if (!result.AcceptedAny ||
             !result.PeerVisibleAny ||
+            request.AuthorityId.IsDefault ||
+            request.AuthoritySchema != FileTransferAuthoritySchema.Current ||
+            request.ControlPlaneGeneration <= 0 ||
             request.Kind is not (FileTransferControlPlaneKind.ReceiverState or FileTransferControlPlaneKind.FrontierRequest) ||
             !string.Equals(request.RouteToken, FileTransferRouteResolver.PostTunaFallbackV6Token, StringComparison.Ordinal) ||
             request.ProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
