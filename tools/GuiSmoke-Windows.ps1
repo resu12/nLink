@@ -5168,6 +5168,22 @@ function New-TunaGuiFaultWindowDiagnosticLine {
         $(if ([bool]$FaultResult.Injected) { 1 } else { 0 })
 }
 
+function Add-TunaGuiFaultWindowEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)]$ObservedEvidenceLines,
+        [AllowEmptyString()][string]$ActivationLine,
+        [AllowEmptyString()][string]$ActivationObservedUtc,
+        [Parameter(Mandatory = $true)]$FaultResult
+    )
+
+    $ObservedEvidenceLines.Add((New-TunaGuiFaultWindowDiagnosticLine `
+        -ActivationLine $ActivationLine `
+        -ActivationObservedUtc $ActivationObservedUtc `
+        -FaultResult $FaultResult)) | Out-Null
+    Write-TunaGuiMilestoneEvidence -ArtifactDir $ArtifactDir -ObservedEvidenceLines $ObservedEvidenceLines
+}
+
 function Invoke-TunaGuiFallbackFault {
     param(
         [Parameter(Mandatory = $true)]$Context,
@@ -6360,7 +6376,7 @@ function Invoke-FileTransferTunaPostFallbackPrecondition {
     $observedEvidenceLines.Add($acceleratedPayloadLine) | Out-Null
 
     $faultResult = Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode -Bookmark $bookmark -PrearmedToggle $prearmedSwitchOffToggle -PrearmedToggleWaitMs $prearmedSwitchOffToggleWaitMs
-    $observedEvidenceLines.Add((New-TunaGuiFaultWindowDiagnosticLine -ActivationLine $routeLine -ActivationObservedUtc $routeObservedUtc -FaultResult $faultResult)) | Out-Null
+    Add-TunaGuiFaultWindowEvidence -ArtifactDir $ArtifactDir -ObservedEvidenceLines $observedEvidenceLines -ActivationLine $routeLine -ActivationObservedUtc $routeObservedUtc -FaultResult $faultResult
     if (-not [bool]$faultResult.Injected) {
         throw ("Post-fallback precondition transfer completed before fault injection. failure_class=terminal_before_fallback_switch_off; transfer_id={0}" -f $faultResult.TransferId)
     }
@@ -6505,7 +6521,7 @@ function Invoke-FileTransferTunaV4RestartV6FallbackPrecondition {
     $observedEvidenceLines.Add($acceleratedPayloadLine) | Out-Null
 
     $faultResult = Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode -Bookmark $bookmark -PrearmedToggle $prearmedSwitchOffToggle -PrearmedToggleWaitMs $prearmedSwitchOffToggleWaitMs
-    $observedEvidenceLines.Add((New-TunaGuiFaultWindowDiagnosticLine -ActivationLine $routeLine -ActivationObservedUtc $routeObservedUtc -FaultResult $faultResult)) | Out-Null
+    Add-TunaGuiFaultWindowEvidence -ArtifactDir $ArtifactDir -ObservedEvidenceLines $observedEvidenceLines -ActivationLine $routeLine -ActivationObservedUtc $routeObservedUtc -FaultResult $faultResult
     if (-not [bool]$faultResult.Injected) {
         throw ("V4 restart precondition transfer completed before fault injection. failure_class=terminal_before_fallback_switch_off; transfer_id={0}" -f $faultResult.TransferId)
     }
@@ -6754,7 +6770,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
 
         if (-not $liveSwitchOffTerminalCompletedBeforeFault) {
             $faultResult = Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode -Bookmark $bookmark -PrearmedToggle $prearmedSwitchOffToggle -PrearmedToggleWaitMs $prearmedSwitchOffToggleWaitMs
-            $observedEvidenceLines.Add((New-TunaGuiFaultWindowDiagnosticLine -ActivationLine $routeLine -ActivationObservedUtc $routeObservedUtc -FaultResult $faultResult)) | Out-Null
+            Add-TunaGuiFaultWindowEvidence -ArtifactDir $ArtifactDir -ObservedEvidenceLines $observedEvidenceLines -ActivationLine $routeLine -ActivationObservedUtc $routeObservedUtc -FaultResult $faultResult
             if (-not [bool]$faultResult.Injected) {
                 $liveSwitchOffTerminalCompletedBeforeFault = $true
                 $firstTransferTerminalBeforeFallbackSwitchOff = $true
@@ -6904,7 +6920,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
                     $faultResult = Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode -Bookmark $bookmark -PrearmedToggle $prearmedSwitchOffToggle -PrearmedToggleWaitMs $prearmedSwitchOffToggleWaitMs
                     $prearmedSwitchOffToggle = $null
                     $prearmedSwitchOffToggleWaitMs = 0L
-                    $observedEvidenceLines.Add((New-TunaGuiFaultWindowDiagnosticLine -ActivationLine $lastActivationEvidenceLine -ActivationObservedUtc $lastActivationObservedUtc -FaultResult $faultResult)) | Out-Null
+                    Add-TunaGuiFaultWindowEvidence -ArtifactDir $ArtifactDir -ObservedEvidenceLines $observedEvidenceLines -ActivationLine $lastActivationEvidenceLine -ActivationObservedUtc $lastActivationObservedUtc -FaultResult $faultResult
                     if (-not [bool]$faultResult.Injected) {
                         $liveSwitchOffTerminalCompletedBeforeFault = $true
                         $firstTransferTerminalBeforeFallbackSwitchOff = $true
@@ -7282,7 +7298,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
             $acceleratedPayloadLine = [string](Wait-TunaGuiAcceleratedFilePayloadBeforeFault -Bookmark $bookmark -MinimumTotalPayloadBytes $minimumFaultPayloadBytes)
             $observedEvidenceLines.Add($acceleratedPayloadLine) | Out-Null
             $faultResult = Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode -Bookmark $bookmark -PrearmedToggle $prearmedSwitchOffToggle -PrearmedToggleWaitMs $prearmedSwitchOffToggleWaitMs
-            $observedEvidenceLines.Add((New-TunaGuiFaultWindowDiagnosticLine -ActivationLine $activationResolutionLine -ActivationObservedUtc $activationResolutionObservedUtc -FaultResult $faultResult)) | Out-Null
+            Add-TunaGuiFaultWindowEvidence -ArtifactDir $ArtifactDir -ObservedEvidenceLines $observedEvidenceLines -ActivationLine $activationResolutionLine -ActivationObservedUtc $activationResolutionObservedUtc -FaultResult $faultResult
             if (-not [bool]$faultResult.Injected) {
                 throw ("Handoff fallback transfer completed before fault injection. failure_class=terminal_before_fallback_switch_off; transfer_id={0}" -f $faultResult.TransferId)
             }

@@ -412,6 +412,69 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task GuiSmokeFaultWindowTelemetry_IsPersistedBeforeLaterFailure()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var utcBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiLogLineUtcText", "New-TunaGuiFaultWindowDiagnosticLine");
+        var diagnosticBody = ExtractPowerShellFunctionBody(guiText, "New-TunaGuiFaultWindowDiagnosticLine", "Add-TunaGuiFaultWindowEvidence");
+        var persistBody = ExtractPowerShellFunctionBody(guiText, "Add-TunaGuiFaultWindowEvidence", "Invoke-TunaGuiFallbackFault");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Get-TunaGuiLogLineUtcText { {{utcBody}} }
+            function New-TunaGuiFaultWindowDiagnosticLine { {{diagnosticBody}} }
+            function Add-TunaGuiFaultWindowEvidence { {{persistBody}} }
+            function Get-GuiSmokeLogLedgerDiagnostics {
+                param($State)
+                return [pscustomobject]@{ GenerationCount = 3; RotationCount = 2; GapCount = 0 }
+            }
+            function Write-TunaGuiMilestoneEvidence {
+                param([string]$ArtifactDir, $ObservedEvidenceLines)
+                [IO.File]::WriteAllText(
+                    (Join-Path $ArtifactDir 'filetransfer-tuna-gui-milestone-evidence.log'),
+                    (@($ObservedEvidenceLines.ToArray()) -join [Environment]::NewLine))
+            }
+
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-fault-window-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $script:GuiSmokeAppLogLedger = [pscustomobject]@{}
+                $lines = [Collections.Generic.List[string]]::new()
+                $fault = [pscustomobject]@{
+                    Prearmed = $true
+                    ToggleWaitMs = 7L
+                    ClickUtc = '2026-07-10T18:04:44.0000000Z'
+                    TerminalCompletedBeforeFault = $false
+                    Injected = $true
+                }
+                Add-TunaGuiFaultWindowEvidence `
+                    -ArtifactDir $tempRoot `
+                    -ObservedEvidenceLines $lines `
+                    -ActivationLine '[2026-07-10 18:04:40Z] event=filetransfer_route_transitioned' `
+                    -ActivationObservedUtc '2026-07-10T18:04:41.0000000Z' `
+                    -FaultResult $fault
+
+                $path = Join-Path $tempRoot 'filetransfer-tuna-gui-milestone-evidence.log'
+                if (-not (Test-Path -LiteralPath $path)) { throw 'fault telemetry was not persisted immediately' }
+                $content = [IO.File]::ReadAllText($path)
+                if ($content -notlike '*event=filetransfer_tuna_gui_fault_window*') { throw 'fault event missing' }
+                if ($content -notlike '*prearmed=1*' -or $content -notlike '*cursor_gap_count=0*' -or $content -notlike '*fault_injected=1*') { throw 'fault tuple incomplete' }
+
+                try { throw 'simulated later runtime failure' } catch { }
+                if (-not (Test-Path -LiteralPath $path)) { throw 'later failure removed fault telemetry' }
+                Write-Output 'gui-fault-window-persisted-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(result.ExitCode == 0, $"Fault-window persistence test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-fault-window-persisted-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GuiSmokeFailureClassification_ExplicitClassPrecedesHistoricalRepairEvidence()
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
