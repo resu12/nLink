@@ -4308,7 +4308,24 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        if (!TryAuthorizeRepairReplayLocked(
+        var fallbackFrontierRuntime = IsFallbackFrontierRouteRuntime(context);
+        var fallbackProofRejectionReason = "fallback_runtime_owner_or_leg_missing";
+        if (fallbackFrontierRuntime &&
+            (!IsStrictFallbackFrontierRuntime(context) ||
+             !TryValidateFallbackFrontierRepairProofLocked(
+                 context,
+                 repairRequestId,
+                 message.TransportEpoch,
+                 out fallbackProofRejectionReason)))
+        {
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_fallback_frontier_repair_proof_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(context.CurrentFallbackFrontierRepairContract?.Authority.AuthorityId.ToString() ?? "(none)")}; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={message.TransportEpoch}; repair_request_id={FormatProtocolLogValue(repairRequestId)}; decision_reason={FormatProtocolLogValue(fallbackProofRejectionReason)}");
+            return false;
+        }
+
+        if (!fallbackFrontierRuntime &&
+            !TryAuthorizeRepairReplayLocked(
                 context,
                 context.CurrentRuntimeOwner,
                 inferredFrontierProof ? RepairReplayKind.UnmatchedFrontierProof : RepairReplayKind.V6Repair,
@@ -4358,7 +4375,8 @@ public sealed partial class SessionFileTransferService
         OutboundTransferContext context,
         long transportEpoch,
         FileTransferTransportKind receivedTransportKind,
-        string reason)
+        string reason,
+        FallbackFrontierRepairContract? fallbackFrontierContractHandoff = null)
     {
         var epoch = context.V6TransportEpoch;
         if (!IsV6TransportEpochUnresolved(epoch) ||
@@ -4389,7 +4407,10 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
-        return CompleteOutboundV6TransportEpochLocked(context, reason);
+        return CompleteOutboundV6TransportEpochLocked(
+            context,
+            reason,
+            fallbackFrontierContractHandoff);
     }
 
     private bool TryRecoverOutboundV6RegularNknEpochFromLegacyV4PeerStateLocked(
@@ -4556,6 +4577,11 @@ public sealed partial class SessionFileTransferService
         }
 
         var previousRemoteFrontier = context.RemoteNextExpectedChunkIndex;
+        TrySettleOutboundFallbackFrontierProgressLocked(
+            context,
+            previousRemoteFrontier,
+            message.CommittedChunkIndex,
+            "repair_proof_progress");
         context.RemoteNextExpectedChunkIndex = Math.Clamp(message.CommittedChunkIndex, 0, context.ChunkCount);
         context.RemoteGrantedUntilExclusive = Math.Max(context.RemoteGrantedUntilExclusive, context.RemoteNextExpectedChunkIndex);
         context.ChunksTransferred = Math.Max(context.ChunksTransferred, context.RemoteNextExpectedChunkIndex);
@@ -4783,7 +4809,10 @@ public sealed partial class SessionFileTransferService
            !string.Equals(liveRouteEpoch.State, "terminal", StringComparison.OrdinalIgnoreCase) &&
            !context.IsTerminal;
 
-    private bool CompleteOutboundV6TransportEpochLocked(OutboundTransferContext context, string reason)
+    private bool CompleteOutboundV6TransportEpochLocked(
+        OutboundTransferContext context,
+        string reason,
+        FallbackFrontierRepairContract? fallbackFrontierContractHandoff = null)
     {
         var epoch = context.V6TransportEpoch;
         if (!IsV6TransportEpochUnresolved(epoch))
@@ -4805,6 +4834,19 @@ public sealed partial class SessionFileTransferService
         var discardedV4RepairChunkCount = context.PullV4SenderPumpRepairQueue.Sum(static repair => repair.ChunkIndices.Count);
         var discardedV6NormalRequestCount = context.V6NormalRequestedChunks.Count;
         var discardedV6PriorityRequestCount = context.V6PriorityRequestedChunks.Count;
+        var preserveFallbackFrontierContractForHandoff =
+            fallbackFrontierContractHandoff is not null &&
+            ReferenceEquals(
+                context.CurrentFallbackFrontierRepairContract,
+                fallbackFrontierContractHandoff) &&
+            !fallbackFrontierContractHandoff.Lifecycle.IsSettled;
+        if (!preserveFallbackFrontierContractForHandoff)
+        {
+            SettleAndClearFallbackFrontierRepairContractLocked(
+                context,
+                FallbackFrontierRepairSettlementOutcome.StaleRejected,
+                $"transport_epoch_completed_{reason}");
+        }
         TrySetV6TransportEpochStateLocked(
             epoch,
             context.TransferId,
@@ -4955,6 +4997,10 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        SettleAndClearFallbackFrontierRepairContractLocked(
+            context,
+            FallbackFrontierRepairSettlementOutcome.StaleRejected,
+            $"transport_epoch_completed_{reason}");
         TrySetV6TransportEpochStateLocked(
             epoch,
             context.TransferId,
@@ -5288,6 +5334,7 @@ public sealed partial class SessionFileTransferService
     private async Task MaybeSendInboundV6RepairProofAsync(
         InboundTransferContext context,
         FileTransferChunkBatchFrameV6 batch,
+        FallbackFrontierRepairContract? fallbackFrontierContract,
         FileTransferTransportKind receivedTransportKind,
         int appliedChunkCount,
         int committedChunkIndex,
@@ -5299,10 +5346,12 @@ public sealed partial class SessionFileTransferService
         {
             var epoch = context.V6TransportEpoch;
             var repairRequestId = batch.RepairRequestId?.Trim();
+            var fallbackFrontierRuntime = IsFallbackFrontierRouteRuntime(context);
             var batchCoversPreviousFrontier =
                 batch.StartChunkIndex <= previousCommittedChunkIndex &&
                 previousCommittedChunkIndex < batch.StartChunkIndex + Math.Max(0, batch.ChunkCount);
-            if (string.IsNullOrWhiteSpace(repairRequestId) &&
+            if (!fallbackFrontierRuntime &&
+                string.IsNullOrWhiteSpace(repairRequestId) &&
                 batchCoversPreviousFrontier &&
                 !string.IsNullOrWhiteSpace(context.V6LastFrontierRequestId))
             {
@@ -5323,7 +5372,23 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
-            if (!TryAuthorizeRepairReplayLocked(
+            var fallbackProofRejectionReason = "fallback_runtime_owner_or_leg_missing";
+            var repairProofAuthorized = fallbackFrontierRuntime
+                ? fallbackFrontierContract is not null &&
+                  IsStrictFallbackFrontierRuntime(context) &&
+                  (fallbackFrontierContract.Lifecycle.IsSettled
+                      ? TryValidateInboundFallbackFrontierProgressProofLocked(
+                          context,
+                          fallbackFrontierContract,
+                          repairRequestId,
+                          batch.TransportEpoch,
+                          out fallbackProofRejectionReason)
+                      : TryValidateFallbackFrontierRepairProofLocked(
+                          context,
+                          repairRequestId,
+                          batch.TransportEpoch,
+                          out fallbackProofRejectionReason))
+                : TryAuthorizeRepairReplayLocked(
                     context,
                     context.CurrentRuntimeOwner,
                     inferredRepairRequestId ? RepairReplayKind.UnmatchedFrontierProof : RepairReplayKind.V6Repair,
@@ -5333,8 +5398,20 @@ public sealed partial class SessionFileTransferService
                     ResolveV6TransportEpochAuthorityId(context.CurrentTransferLeg, epoch),
                     context.CurrentTransferLeg?.BridgeRecoveryGeneration,
                     null,
-                    out _) ||
-                !TryAuthorizeTransportEpochActionLocked(
+                    out _);
+            if (!repairProofAuthorized)
+            {
+                if (fallbackFrontierRuntime)
+                {
+                    LocalOperationalLog.Info(
+                        "FileTransferService",
+                        $"event=filetransfer_fallback_frontier_repair_proof_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(context.CurrentFallbackFrontierRepairContract?.Authority.AuthorityId.ToString() ?? "(none)")}; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={batch.TransportEpoch}; repair_request_id={FormatProtocolLogValue(repairRequestId)}; decision_reason={FormatProtocolLogValue(fallbackProofRejectionReason)}");
+                }
+
+                return;
+            }
+
+            if (!TryAuthorizeTransportEpochActionLocked(
                     context,
                     inferredRepairRequestId
                         ? FileTransferCoordinatorActionKind.UnmatchedFrontierProof

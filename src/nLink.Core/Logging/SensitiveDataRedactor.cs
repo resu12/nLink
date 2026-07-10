@@ -40,10 +40,13 @@ public static partial class SensitiveDataRedactor
         var redacted = ProtectStructuredEventValues(text, protectedEventValues);
         redacted = SecretKeyValueRegex().Replace(redacted, "[redacted]");
         redacted = ChatPlaintextKeyValueRegex().Replace(redacted, "[redacted]");
+        var protectedAuthorityIdValues = new List<string>();
+        redacted = ProtectStructuredAuthorityIdValues(redacted, protectedAuthorityIdValues);
         var protectedStructuredKeys = new List<string>();
         redacted = ProtectStructuredKeys(redacted, protectedStructuredKeys);
         redacted = LongSecretTokenRegex().Replace(redacted, "[redacted]");
         redacted = RestoreStructuredKeys(redacted, protectedStructuredKeys);
+        redacted = RestoreStructuredAuthorityIdValues(redacted, protectedAuthorityIdValues);
         redacted = RestoreStructuredEventValues(redacted, protectedEventValues);
         return redacted;
     }
@@ -88,6 +91,9 @@ public static partial class SensitiveDataRedactor
     [GeneratedRegex(@"\bevent=(?<value>[A-Za-z0-9._/-]+)", RegexOptions.CultureInvariant)]
     private static partial Regex EventKeyValueRegex();
 
+    [GeneratedRegex(@"\b(?<key>authority_id|predecessor_authority_id|successor_authority_id)=(?<value>fta[0-9]+-[A-Za-z0-9._/-]+)", RegexOptions.CultureInvariant)]
+    private static partial Regex AuthorityIdKeyValueRegex();
+
     [GeneratedRegex(@"(?<prefix>(?:^|[\s|,;]))(?<key>[A-Za-z_][A-Za-z0-9._/-]{1,127})(?<separator>\s*[:=])", RegexOptions.CultureInvariant)]
     private static partial Regex StructuredKeyRegex();
 
@@ -112,6 +118,34 @@ public static partial class SensitiveDataRedactor
         for (var i = 0; i < protectedEventValues.Count; i++)
         {
             restored = restored.Replace($"event=EVP{i}", $"event={protectedEventValues[i]}", StringComparison.Ordinal);
+        }
+
+        return restored;
+    }
+
+    private static string ProtectStructuredAuthorityIdValues(
+        string text,
+        List<string> protectedAuthorityIdValues)
+    {
+        return AuthorityIdKeyValueRegex().Replace(text, match =>
+        {
+            var placeholder = $"AIVP{protectedAuthorityIdValues.Count}";
+            protectedAuthorityIdValues.Add(match.Groups["value"].Value);
+            return $"{match.Groups["key"].Value}={placeholder}";
+        });
+    }
+
+    private static string RestoreStructuredAuthorityIdValues(
+        string text,
+        List<string> protectedAuthorityIdValues)
+    {
+        var restored = text;
+        for (var i = protectedAuthorityIdValues.Count - 1; i >= 0; i--)
+        {
+            restored = restored.Replace(
+                $"AIVP{i}",
+                protectedAuthorityIdValues[i],
+                StringComparison.Ordinal);
         }
 
         return restored;

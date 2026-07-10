@@ -996,6 +996,126 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void FallbackFrontierRepairAuthority_ForwardsCoordinatorIdentityAndFullTuple()
+    {
+        var predecessorAuthorityId = new FileTransferAuthorityId("fta2-fallback-frontier-predecessor");
+        var (state, repairDecision) = AuthorizeFallbackFrontierRepair(predecessorAuthorityId);
+
+        Assert.True(FileTransferCoordinator.TryIssueFallbackFrontierRepairAuthority(
+            repairDecision,
+            new FallbackFrontierRepairAuthorityRequest(
+                "fallback-frontier:12:3:frng-test",
+                "frng-test",
+                FrontierChunkIndex: 12,
+                DurableReceivedHighestChunkIndex: 18,
+                RangeCount: 2,
+                RequestedChunkCount: 3,
+                FallbackFrontierRepairSourceKind.PeerRequest,
+                ProtocolRepairRequestId: "v6-frontier:9:12:1",
+                RequestCorrelationId: "frq-test",
+                CheckpointRequestId: "(none)",
+                Priority: "frontier",
+                RecoveryMode: "frontier_repair_only",
+                DecisionReason: "fallback_frontier_request_received"),
+            out var authority,
+            out var rejectionReason));
+
+        Assert.Equal("accepted", rejectionReason);
+        Assert.NotNull(authority);
+        var issuedAuthority = authority!.Value;
+        Assert.Equal(repairDecision.AuthorityId, issuedAuthority.AuthorityId);
+        Assert.Equal(predecessorAuthorityId, issuedAuthority.PredecessorAuthorityId);
+        Assert.Equal(FileTransferRoute.PostTunaFallbackV6, issuedAuthority.Route);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV6, issuedAuthority.ProtocolVersion);
+        Assert.Equal(FileTransferTransportKind.RegularNkn, issuedAuthority.TargetTransport);
+        Assert.Equal(repairDecision.RoutePublicationToken!.Value.PublicationGeneration, issuedAuthority.RoutePublicationGeneration);
+        Assert.Equal("frng-test", issuedAuthority.RangeFingerprint);
+        Assert.Equal("frq-test", issuedAuthority.RequestCorrelationId);
+        Assert.True(FileTransferCoordinator.IsRepairReplayDecisionCurrent(state, repairDecision, out var currentReason));
+        Assert.Equal("accepted", currentReason);
+    }
+
+    [Fact]
+    public void FallbackFrontierRepairAuthority_RejectsNonFallbackAndIncompleteShapes()
+    {
+        var (_, repairDecision) = AuthorizeFallbackFrontierRepair();
+        var validRequest = new FallbackFrontierRepairAuthorityRequest(
+            "fallback-frontier:12:1:frng-test",
+            "frng-test",
+            FrontierChunkIndex: 12,
+            DurableReceivedHighestChunkIndex: 11,
+            RangeCount: 1,
+            RequestedChunkCount: 1,
+            FallbackFrontierRepairSourceKind.PeerRequest,
+            ProtocolRepairRequestId: "v6-frontier:9:12:1",
+            RequestCorrelationId: "frq-test",
+            CheckpointRequestId: "(none)",
+            Priority: "frontier",
+            RecoveryMode: "frontier_repair_only",
+            DecisionReason: "fallback_frontier_request_received");
+
+        Assert.False(FileTransferCoordinator.TryIssueFallbackFrontierRepairAuthority(
+            repairDecision with { RepairKind = RepairReplayKind.V6Repair },
+            validRequest,
+            out _,
+            out var repairKindReason));
+        Assert.Equal("fallback_frontier_repair_route_invariant_mismatch", repairKindReason);
+
+        Assert.False(FileTransferCoordinator.TryIssueFallbackFrontierRepairAuthority(
+            repairDecision with { CurrentProtocolVersion = FileTransferProtocol.ProtocolVersionV4 },
+            validRequest,
+            out _,
+            out var protocolReason));
+        Assert.Equal("repair_route_publication_authority_mismatch", protocolReason);
+
+        Assert.False(FileTransferCoordinator.TryIssueFallbackFrontierRepairAuthority(
+            repairDecision with { CurrentRuntimeGeneration = repairDecision.CurrentRuntimeGeneration + 1 },
+            validRequest,
+            out _,
+            out var runtimeGenerationReason));
+        Assert.Equal("repair_route_publication_authority_mismatch", runtimeGenerationReason);
+
+        Assert.False(FileTransferCoordinator.TryIssueFallbackFrontierRepairAuthority(
+            repairDecision with { CurrentTerminalGeneration = repairDecision.CurrentTerminalGeneration + 1 },
+            validRequest,
+            out _,
+            out var terminalGenerationReason));
+        Assert.Equal("repair_route_publication_authority_mismatch", terminalGenerationReason);
+
+        var publication = repairDecision.RoutePublicationToken!.Value;
+        Assert.False(FileTransferCoordinator.TryIssueFallbackFrontierRepairAuthority(
+            repairDecision with
+            {
+                RoutePublicationToken = publication with { TargetTransport = FileTransferTransportKind.Tuna },
+            },
+            validRequest,
+            out _,
+            out var targetReason));
+        Assert.Equal("fallback_frontier_repair_route_invariant_mismatch", targetReason);
+
+        Assert.False(FileTransferCoordinator.TryIssueFallbackFrontierRepairAuthority(
+            repairDecision with { RoutePublicationToken = null },
+            validRequest,
+            out _,
+            out var publicationReason));
+        Assert.Equal("route_publication_authority_missing", publicationReason);
+
+        Assert.False(FileTransferCoordinator.TryIssueFallbackFrontierRepairAuthority(
+            repairDecision,
+            validRequest with { RequestCorrelationId = "" },
+            out _,
+            out var correlationReason));
+        Assert.Equal("fallback_frontier_repair_identity_missing", correlationReason);
+
+        Assert.False(FileTransferCoordinator.TryIssueFallbackFrontierRepairAuthority(
+            repairDecision,
+            validRequest with { CanonicalRepairKey = "fallback-frontier:12:2:frng-test" },
+            out _,
+            out var canonicalKeyReason));
+        Assert.Equal("fallback_frontier_repair_identity_mismatch", canonicalKeyReason);
+    }
+
+    [Fact]
     public void AuthorityLifecycle_RejectsDuplicateDispatchAndSettlement()
     {
         var authorityId = new FileTransferAuthorityId("fta2-lifecycle-test");
@@ -1014,6 +1134,19 @@ public sealed class FileTransferCoordinatorTests
         Assert.True(lifecycle.IsSettled);
         Assert.Equal(FileTransferRegularV4FrontierRepairSettlementOutcome.Superseded, lifecycle.SettlementOutcome);
         Assert.Equal(successorId, lifecycle.SuccessorAuthorityId);
+    }
+
+    [Fact]
+    public void AuthorityLifecycle_TerminalBeforeDispatchRejectsLateDispatch()
+    {
+        var lifecycle = new FileTransferAuthorityLifecycle<FileTransferRegularV4FrontierRepairSettlementOutcome>(
+            new FileTransferAuthorityId("fta2-fallback-frontier-terminal"));
+
+        Assert.True(lifecycle.TrySettle(
+            FileTransferRegularV4FrontierRepairSettlementOutcome.TransferTerminal,
+            "transfer_terminal"));
+        Assert.False(lifecycle.TryMarkDispatched());
+        Assert.False(lifecycle.DispatchObserved);
     }
 
     [Fact]
@@ -4007,6 +4140,44 @@ public sealed class FileTransferCoordinatorTests
             RecoveryLivenessLease: recoveryLivenessLease,
             RecoveryDecisionGeneration: recoveryDecisionGeneration,
             PredecessorAuthorityId: predecessorAuthorityId);
+
+    private static (FileTransferCoordinatorState State, RepairReplayDecision Decision) AuthorizeFallbackFrontierRepair(
+        FileTransferAuthorityId? predecessorAuthorityId = null)
+    {
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        var state = ActiveFallbackStateWithoutCheckpoint();
+        var owner = state.CurrentRuntimeOwner!.Value;
+        var leg = state.CurrentLeg!;
+        var publication = FileTransferCoordinator.AuthorizeAction(
+            state,
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RoutePublication,
+                Source: "test",
+                Reason: "fallback_frontier_publication",
+                RuntimeOwner: owner,
+                Route: fallback.Route,
+                ProtocolVersion: fallback.ProtocolVersion,
+                LiveRouteEpoch: leg.LiveRouteEpochId,
+                LegGeneration: leg.Generation,
+                RuntimeGeneration: owner.RuntimeGeneration,
+                TerminalGeneration: state.TerminalGeneration,
+                TargetRoute: FileTransferRoute.PostTunaFallbackV6,
+                TargetProtocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                TargetTransport: FileTransferTransportKind.RegularNkn));
+        Assert.True(publication.Accepted);
+
+        var repair = FileTransferCoordinator.AuthorizeAction(
+            publication.State,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RepairReplay,
+                owner,
+                publication.State.CurrentLeg!,
+                repairReplayKind: RepairReplayKind.FrontierStallRepair,
+                predecessorAuthorityId: predecessorAuthorityId));
+        Assert.True(repair.Accepted);
+        Assert.NotNull(repair.RepairReplayDecision);
+        return (repair.State, repair.RepairReplayDecision!.Value);
+    }
 
     private static FileTransferCoordinatorState StateWithRecoveryAuthority(FileTransferCoordinatorState state)
     {

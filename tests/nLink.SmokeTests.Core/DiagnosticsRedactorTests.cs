@@ -26,6 +26,22 @@ public sealed class DiagnosticsRedactorTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public void OperationalLogRedactor_PreservesCoordinatorAuthorityCorrelationIds()
+    {
+        const string authorityId = "fta2-repair_replay-0123456789abcdef01234567";
+        const string predecessorId = "fta2-repair_replay-89abcdef0123456701234567";
+        var sample = $"authority_id={authorityId}; predecessor_authority_id={predecessorId}; secret=do-not-keep";
+
+        var redacted = SensitiveDataRedactor.Redact(sample);
+
+        Assert.Contains($"authority_id={authorityId}", redacted, StringComparison.Ordinal);
+        Assert.Contains($"predecessor_authority_id={predecessorId}", redacted, StringComparison.Ordinal);
+        Assert.Contains("[redacted]", redacted, StringComparison.Ordinal);
+        Assert.DoesNotContain("do-not-keep", redacted, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public void DiagnosticsRedactor_Redacts_Seeds_PrivateKeys_AndWalletSecrets()
     {
         var sample = string.Join(Environment.NewLine, new[]

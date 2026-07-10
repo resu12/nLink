@@ -78,6 +78,10 @@ public sealed partial class SessionFileTransferService
             }
 
             context.CancelLifetime();
+            SettleAndClearFallbackFrontierRepairContractLocked(
+                context,
+                FallbackFrontierRepairSettlementOutcome.TransferTerminal,
+                "outbound_transfer_terminal");
             ConsumeOutboundFallbackTailTerminalProofBeforeTerminalLocked(context, terminalState, "transfer_terminal");
             var terminalDecision = FileTransferCoordinator.Apply(
                 new FileTransferCoordinatorEvent(
@@ -324,6 +328,10 @@ public sealed partial class SessionFileTransferService
             }
 
             context.CancelLifetime();
+            SettleAndClearFallbackFrontierRepairContractLocked(
+                context,
+                FallbackFrontierRepairSettlementOutcome.TransferTerminal,
+                "inbound_transfer_terminal");
             ConsumeInboundFallbackTailTerminalProofBeforeTerminalLocked(context, terminalState, "transfer_terminal");
             var terminalDecision = FileTransferCoordinator.Apply(
                 new FileTransferCoordinatorEvent(

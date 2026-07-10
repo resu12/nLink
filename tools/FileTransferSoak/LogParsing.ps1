@@ -1,4 +1,5 @@
 Set-StrictMode -Version Latest
+. (Join-Path (Split-Path -Parent $PSScriptRoot) 'FileTransferAuthorityMatching.ps1')
 
 $script:FileTransferRetainedEventIndex = $null
 $script:FileTransferRetainedEventQueryCache = @{}

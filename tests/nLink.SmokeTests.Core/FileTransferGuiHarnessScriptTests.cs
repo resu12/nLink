@@ -189,11 +189,80 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task FallbackAuthorityMatcher_CurrentSchemaRequiresCompleteIdentityAndIsolatesLegacy()
+    {
+        var matcherPath = Path.Combine(FindRepoRoot(), "tools", "FileTransferAuthorityMatching.ps1")
+            .Replace("'", "''", StringComparison.Ordinal);
+        var scriptText = $$"""
+            . '{{matcherPath}}'
+
+            $current = 'event=grant; authority_schema=2; authority_id=fta-1; predecessor_authority_id=(none); transfer_id=transfer-a; session_id=session-a; direction=outbound; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; runtime_generation=7; terminal_generation=0; leg_generation=5; transport_epoch=3; bridge_recovery_generation=2; bridge_decision_generation=9; checkpoint_request_id=checkpoint-a; route_publication_generation=11; route_commit_generation=0; repair_generation=13; repair_request_key=fallback-frontier:10:2:frng-a; range_fingerprint=frng-a; frontier_chunk_index=10; durable_received_highest_chunk_index=12; range_count=1; requested_chunk_count=2; source_kind=PeerRequest; primary_protocol_repair_request_id=request-primary; primary_request_correlation_id=frq-primary; priority=frontier; recovery_mode=frontier_repair_only; target_transport=regular_nkn; authority_decision_reason=fallback_frontier_request_received'
+            $same = $current.Replace('event=grant', 'event=settled')
+            if (-not (Test-FileTransferAuthorityTupleMatch -LeftLine $current -RightLine $same)) { exit 10 }
+
+            $immutableFields = @(
+                'predecessor_authority_id',
+                'live_route_epoch',
+                'runtime_generation',
+                'terminal_generation',
+                'leg_generation',
+                'transport_epoch',
+                'bridge_recovery_generation',
+                'bridge_decision_generation',
+                'route_publication_generation',
+                'route_commit_generation',
+                'repair_generation',
+                'frontier_chunk_index',
+                'durable_received_highest_chunk_index',
+                'range_count',
+                'requested_chunk_count',
+                'source_kind',
+                'primary_protocol_repair_request_id',
+                'primary_request_correlation_id',
+                'priority',
+                'recovery_mode',
+                'target_transport',
+                'authority_decision_reason')
+            foreach ($field in $immutableFields) {
+                $mismatched = [regex]::Replace($same, ('(?i)(?:^|;\s*)' + [regex]::Escape($field) + '=)[^;]*'), ('$1' + '999'), 1)
+                if (Test-FileTransferAuthorityTupleMatch -LeftLine $current -RightLine $mismatched) { exit 11 }
+                $omitted = [regex]::Replace($same, ('(?i);\s*' + [regex]::Escape($field) + '=[^;]*'), '', 1)
+                if (Test-FileTransferAuthorityTupleMatch -LeftLine $current -RightLine $omitted) { exit 12 }
+            }
+
+            if ((ConvertTo-FileTransferAuthorityNormalizedValue 'none') -ne '(none)') { exit 13 }
+            if ((ConvertTo-FileTransferAuthorityNormalizedValue ' (none) ') -ne '(none)') { exit 14 }
+            $currentWithoutCheckpoint = $current.Replace('checkpoint_request_id=checkpoint-a', 'checkpoint_request_id=(none)')
+            $sameWithoutCheckpoint = $same.Replace('checkpoint_request_id=checkpoint-a', 'checkpoint_request_id=none')
+            if (-not (Test-FileTransferAuthorityTupleMatch -LeftLine $currentWithoutCheckpoint -RightLine $sameWithoutCheckpoint)) { exit 18 }
+            $omittedCheckpoint = $sameWithoutCheckpoint.Replace('; checkpoint_request_id=none', '')
+            if (Test-FileTransferAuthorityTupleMatch -LeftLine $currentWithoutCheckpoint -RightLine $omittedCheckpoint) { exit 19 }
+            $legacy = $same.Replace('authority_schema=2; ', '').Replace('authority_id=fta-1; ', '')
+            if (Test-FileTransferAuthorityTupleMatch -LeftLine $current -RightLine $legacy) { exit 15 }
+
+            $peerAccepted = 'event=delivery; authority_schema=2; transfer_id=transfer-a; session_id=session-a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; leg_generation=5; transport_epoch=3; bridge_recovery_generation=2; checkpoint_request_id=checkpoint-a; repair_request_id=request-a; repair_request_key=fallback-frontier:10:2:frng-a; range_fingerprint=frng-a; request_correlation_id=frq-a'
+            $peerReceived = $peerAccepted.Replace('event=delivery', 'event=received')
+            if (-not (Test-FileTransferAuthorityTupleMatch -LeftLine $peerAccepted -RightLine $peerReceived -PeerCorrelation)) { exit 16 }
+            if (Test-FileTransferAuthorityTupleMatch -LeftLine $peerAccepted -RightLine ($peerReceived.Replace('request_correlation_id=frq-a', 'request_correlation_id=frq-b')) -PeerCorrelation) { exit 17 }
+
+            Write-Output 'authority-matcher-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Authority matcher failed with exit code {result.ExitCode}.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("authority-matcher-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void RunFileTransferTunaGuiSmoke_PreactivationAcceptFailuresAreClassified()
     {
         var repoRoot = FindRepoRoot();
         var scriptPath = Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1");
         var scriptText = File.ReadAllText(scriptPath);
+        var authorityMatchingText = File.ReadAllText(Path.Combine(repoRoot, "tools", "FileTransferAuthorityMatching.ps1"));
         var routeAcceptanceText = File.ReadAllText(Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"));
 
         Assert.Contains("Get-TunaGuiFileTransferSetupFailureClassification", scriptText, StringComparison.Ordinal);
@@ -234,14 +303,26 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("fallback_frontier_request_dispatch_missing", scriptText, StringComparison.Ordinal);
         Assert.Contains("Test-TunaGuiLatestFallbackFrontierRequestDispatchMissing", scriptText, StringComparison.Ordinal);
         Assert.Contains("Test-TunaGuiFallbackFrontierRequestDispatchTupleMatch", scriptText, StringComparison.Ordinal);
-        Assert.Contains("'live_route_epoch'", scriptText, StringComparison.Ordinal);
-        Assert.Contains("'transport_epoch'", scriptText, StringComparison.Ordinal);
-        Assert.Contains("'repair_request_id'", scriptText, StringComparison.Ordinal);
-        Assert.Contains("'request_correlation_id'", scriptText, StringComparison.Ordinal);
-        Assert.Contains("'first_start_chunk_index'", scriptText, StringComparison.Ordinal);
-        Assert.Contains("'first_chunk_count'", scriptText, StringComparison.Ordinal);
-        Assert.Contains("'range_count'", scriptText, StringComparison.Ordinal);
-        Assert.Contains("'checkpoint_request_id'", scriptText, StringComparison.Ordinal);
+        Assert.Contains("FileTransferAuthorityMatching.ps1", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Test-FileTransferAuthorityTupleMatch", scriptText, StringComparison.Ordinal);
+        Assert.Contains("'authority_id'", authorityMatchingText, StringComparison.Ordinal);
+        Assert.Contains("'live_route_epoch'", authorityMatchingText, StringComparison.Ordinal);
+        Assert.Contains("'runtime_generation'", authorityMatchingText, StringComparison.Ordinal);
+        Assert.Contains("'terminal_generation'", authorityMatchingText, StringComparison.Ordinal);
+        Assert.Contains("'leg_generation'", authorityMatchingText, StringComparison.Ordinal);
+        Assert.Contains("'transport_epoch'", authorityMatchingText, StringComparison.Ordinal);
+        Assert.Contains("'bridge_recovery_generation'", authorityMatchingText, StringComparison.Ordinal);
+        Assert.Contains("'bridge_decision_generation'", authorityMatchingText, StringComparison.Ordinal);
+        Assert.Contains("'route_publication_generation'", authorityMatchingText, StringComparison.Ordinal);
+        Assert.Contains("'route_commit_generation'", authorityMatchingText, StringComparison.Ordinal);
+        Assert.Contains("'repair_generation'", authorityMatchingText, StringComparison.Ordinal);
+        Assert.Contains("'repair_request_id'", authorityMatchingText, StringComparison.Ordinal);
+        Assert.Contains("'request_correlation_id'", authorityMatchingText, StringComparison.Ordinal);
+        Assert.Contains("'checkpoint_request_id'", authorityMatchingText, StringComparison.Ordinal);
+        Assert.Contains("'range_fingerprint'", authorityMatchingText, StringComparison.Ordinal);
+        Assert.Contains("'primary_protocol_repair_request_id'", authorityMatchingText, StringComparison.Ordinal);
+        Assert.Contains("'primary_request_correlation_id'", authorityMatchingText, StringComparison.Ordinal);
+        Assert.Contains("'authority_decision_reason'", authorityMatchingText, StringComparison.Ordinal);
         Assert.Contains("filetransfer_v6_frontier_request_receive_dispatched", scriptText, StringComparison.Ordinal);
         Assert.Contains("filetransfer_v6_frontier_request_receive_dispatch_rejected", scriptText, StringComparison.Ordinal);
         Assert.Contains("filetransfer_v6_frontier_request_receive_dispatch_coalesced", scriptText, StringComparison.Ordinal);

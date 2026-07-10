@@ -422,6 +422,72 @@ internal readonly record struct RegularV4FrontierRepairAuthorityRequest(
     int PendingRepairCount,
     string DecisionReason);
 
+internal enum FallbackFrontierRepairSourceKind
+{
+    Unknown = 0,
+    ReceiverRequest = 1,
+    PeerRequest = 2,
+    SenderTimeoutRetry = 3,
+    SenderLivenessRescue = 4,
+}
+
+internal readonly record struct FallbackFrontierRepairAuthorityRequest(
+    string CanonicalRepairKey,
+    string RangeFingerprint,
+    int FrontierChunkIndex,
+    int DurableReceivedHighestChunkIndex,
+    int RangeCount,
+    int RequestedChunkCount,
+    FallbackFrontierRepairSourceKind SourceKind,
+    string ProtocolRepairRequestId,
+    string RequestCorrelationId,
+    string CheckpointRequestId,
+    string Priority,
+    string RecoveryMode,
+    string DecisionReason);
+
+internal readonly record struct FallbackFrontierRepairAuthority(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    RuntimeOwnerToken RuntimeOwner,
+    FileTransferRoute Route,
+    string RouteToken,
+    int ProtocolVersion,
+    int LiveRouteEpoch,
+    int RuntimeGeneration,
+    int TerminalGeneration,
+    int LegGeneration,
+    long TransportEpoch,
+    int BridgeRecoveryGeneration,
+    int BridgeDecisionGeneration,
+    int RoutePublicationGeneration,
+    int? RouteCommitGeneration,
+    string CheckpointRequestId,
+    string CanonicalRepairKey,
+    string RangeFingerprint,
+    int FrontierChunkIndex,
+    int DurableReceivedHighestChunkIndex,
+    int RangeCount,
+    int RequestedChunkCount,
+    FallbackFrontierRepairSourceKind SourceKind,
+    string ProtocolRepairRequestId,
+    string RequestCorrelationId,
+    string Priority,
+    string RecoveryMode,
+    int DecisionGeneration,
+    string DecisionReason,
+    FileTransferTransportKind TargetTransport,
+    FileTransferAuthorityId AuthorityId,
+    FileTransferAuthorityId? PredecessorAuthorityId)
+{
+    public bool IsDefault => AuthorityId.IsDefault ||
+                             RuntimeOwner.IsDefault ||
+                             DecisionGeneration <= 0 ||
+                             string.IsNullOrWhiteSpace(CanonicalRepairKey) ||
+                             string.IsNullOrWhiteSpace(RangeFingerprint);
+}
+
 internal readonly record struct TransportEpochDecision(
     bool Accepted,
     TransportEpochActionKind ActionKind,
@@ -784,7 +850,7 @@ internal static class FileTransferCoordinator
             return MutationRejected(state, reason, "terminal_state", terminalMutationRejected: true);
         }
 
-        return coordinatorEvent.Kind switch
+        var decision = coordinatorEvent.Kind switch
         {
             FileTransferCoordinatorEventKind.StartTransfer => StartTransfer(coordinatorEvent, state, reason),
             FileTransferCoordinatorEventKind.TunaActivated => TransitionToRoute(coordinatorEvent, state, reason, recoverEpoch: true),
@@ -810,6 +876,60 @@ internal static class FileTransferCoordinator
             FileTransferCoordinatorEventKind.Terminalized => Terminalize(state, reason),
             _ => PassThrough(state, reason),
         };
+        return ForwardFallbackRoutePublicationAuthorityAfterLegMutation(state, decision, reason);
+    }
+
+    private static FileTransferCoordinatorDecision ForwardFallbackRoutePublicationAuthorityAfterLegMutation(
+        FileTransferCoordinatorState previousState,
+        FileTransferCoordinatorDecision decision,
+        string reason)
+    {
+        if (decision.TerminalMutationRejected ||
+            decision.MutationRejectedReason is not null ||
+            decision.State.IsTerminal ||
+            decision.State.CurrentRoutePublicationToken is not null ||
+            previousState.CurrentRoutePublicationToken is not
+            {
+                IsDefault: false,
+                Route: FileTransferRoute.PostTunaFallbackV6,
+                ProtocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                TargetRoute: FileTransferRoute.PostTunaFallbackV6,
+                TargetProtocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                TargetTransport: FileTransferTransportKind.RegularNkn,
+            } previousPublication ||
+            decision.State.RouteSelection.Route != FileTransferRoute.PostTunaFallbackV6 ||
+            decision.State.RouteSelection.ProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+            decision.State.CurrentRuntimeOwner is not { } owner ||
+            decision.State.CurrentLeg is not { } leg ||
+            previousPublication.SessionId != owner.SessionId ||
+            previousPublication.TransferId != owner.TransferId ||
+            previousPublication.Direction != owner.Direction ||
+            previousPublication.LiveRouteEpoch != (decision.State.CurrentLiveRouteEpoch?.EpochId ?? 0))
+        {
+            return decision;
+        }
+
+        var publication = AuthorizeAction(
+            decision.State,
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RoutePublication,
+                Source: "coordinator_leg_handoff",
+                Reason: string.IsNullOrWhiteSpace(reason)
+                    ? "fallback_route_publication_leg_handoff"
+                    : reason,
+                RuntimeOwner: owner,
+                Route: FileTransferRoute.PostTunaFallbackV6,
+                ProtocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                LiveRouteEpoch: decision.State.CurrentLiveRouteEpoch?.EpochId ?? 0,
+                LegGeneration: leg.Generation,
+                RuntimeGeneration: owner.RuntimeGeneration,
+                TerminalGeneration: decision.State.TerminalGeneration,
+                TargetRoute: FileTransferRoute.PostTunaFallbackV6,
+                TargetProtocolVersion: FileTransferProtocol.ProtocolVersionV6,
+                TargetTransport: FileTransferTransportKind.RegularNkn));
+        return publication.Accepted && publication.RoutePublicationToken is { IsDefault: false }
+            ? decision with { State = publication.State }
+            : decision;
     }
 
     public static FileTransferCoordinatorActionDecision AuthorizeAction(
@@ -3378,6 +3498,8 @@ internal static class FileTransferCoordinator
             repairDecision.CurrentRoute != publication.Route ||
             repairDecision.CurrentProtocolVersion != publication.ProtocolVersion ||
             repairDecision.CurrentLiveRouteEpoch != publication.LiveRouteEpoch ||
+            repairDecision.CurrentRuntimeGeneration != publication.RuntimeGeneration ||
+            repairDecision.CurrentTerminalGeneration != publication.TerminalGeneration ||
             repairDecision.CurrentLegGeneration != publication.LegGeneration)
         {
             rejectionReason = "repair_route_publication_authority_mismatch";
@@ -3434,6 +3556,128 @@ internal static class FileTransferCoordinator
             AuthorityId = repairDecision.AuthorityId,
             PredecessorAuthorityId = repairDecision.PredecessorAuthorityId,
         };
+        return true;
+    }
+
+    internal static bool TryIssueFallbackFrontierRepairAuthority(
+        RepairReplayDecision repairDecision,
+        FallbackFrontierRepairAuthorityRequest request,
+        out FallbackFrontierRepairAuthority? authority,
+        out string rejectionReason)
+    {
+        authority = null;
+        rejectionReason = "accepted";
+        if (!repairDecision.Accepted ||
+            repairDecision.IsDefault ||
+            repairDecision.AuthorityId.IsDefault)
+        {
+            rejectionReason = "repair_replay_decision_missing";
+            return false;
+        }
+
+        if (repairDecision.RoutePublicationToken is not { IsDefault: false } publication)
+        {
+            rejectionReason = "route_publication_authority_missing";
+            return false;
+        }
+
+        var owner = repairDecision.RuntimeOwner;
+        if (!string.Equals(owner.SessionId, publication.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(owner.TransferId, publication.TransferId, StringComparison.Ordinal) ||
+            owner.Direction != publication.Direction ||
+            owner.RuntimeGeneration != publication.RuntimeGeneration ||
+            owner.TerminalGeneration != publication.TerminalGeneration ||
+            repairDecision.CurrentRoute != publication.Route ||
+            repairDecision.CurrentProtocolVersion != publication.ProtocolVersion ||
+            repairDecision.CurrentLiveRouteEpoch != publication.LiveRouteEpoch ||
+            repairDecision.CurrentRuntimeGeneration != publication.RuntimeGeneration ||
+            repairDecision.CurrentTerminalGeneration != publication.TerminalGeneration ||
+            repairDecision.CurrentLegGeneration != publication.LegGeneration)
+        {
+            rejectionReason = "repair_route_publication_authority_mismatch";
+            return false;
+        }
+
+        if (repairDecision.RepairKind != RepairReplayKind.FrontierStallRepair ||
+            repairDecision.CurrentRoute != FileTransferRoute.PostTunaFallbackV6 ||
+            repairDecision.CurrentProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+            repairDecision.TransportEpoch <= 0 ||
+            publication.Route != FileTransferRoute.PostTunaFallbackV6 ||
+            publication.ProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+            publication.TargetRoute != FileTransferRoute.PostTunaFallbackV6 ||
+            publication.TargetProtocolVersion != FileTransferProtocol.ProtocolVersionV6 ||
+            publication.TargetTransport != FileTransferTransportKind.RegularNkn)
+        {
+            rejectionReason = "fallback_frontier_repair_route_invariant_mismatch";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(request.CanonicalRepairKey) ||
+            string.IsNullOrWhiteSpace(request.RangeFingerprint) ||
+            request.FrontierChunkIndex < 0 ||
+            request.RangeCount <= 0 ||
+            request.RequestedChunkCount <= 0 ||
+            request.SourceKind == FallbackFrontierRepairSourceKind.Unknown ||
+            string.IsNullOrWhiteSpace(request.ProtocolRepairRequestId) ||
+            string.IsNullOrWhiteSpace(request.RequestCorrelationId))
+        {
+            rejectionReason = "fallback_frontier_repair_identity_missing";
+            return false;
+        }
+
+        var normalizedRangeFingerprint = request.RangeFingerprint.Trim();
+        var expectedCanonicalRepairKey =
+            $"fallback-frontier:{request.FrontierChunkIndex}:{request.RequestedChunkCount}:{normalizedRangeFingerprint}";
+        if (!normalizedRangeFingerprint.StartsWith("frng-", StringComparison.Ordinal) ||
+            !string.Equals(
+                request.CanonicalRepairKey.Trim(),
+                expectedCanonicalRepairKey,
+                StringComparison.Ordinal))
+        {
+            rejectionReason = "fallback_frontier_repair_identity_mismatch";
+            return false;
+        }
+
+        authority = new FallbackFrontierRepairAuthority(
+            owner.SessionId,
+            owner.TransferId,
+            owner.Direction,
+            owner,
+            publication.Route,
+            publication.RouteToken,
+            publication.ProtocolVersion,
+            publication.LiveRouteEpoch,
+            publication.RuntimeGeneration,
+            publication.TerminalGeneration,
+            publication.LegGeneration,
+            repairDecision.TransportEpoch,
+            repairDecision.BridgeRecoveryGeneration,
+            repairDecision.BridgeDecisionGeneration,
+            publication.PublicationGeneration,
+            publication.RouteCommitGeneration,
+            string.IsNullOrWhiteSpace(request.CheckpointRequestId)
+                ? "(none)"
+                : request.CheckpointRequestId.Trim(),
+            request.CanonicalRepairKey.Trim(),
+            normalizedRangeFingerprint,
+            request.FrontierChunkIndex,
+            Math.Max(-1, request.DurableReceivedHighestChunkIndex),
+            request.RangeCount,
+            request.RequestedChunkCount,
+            request.SourceKind,
+            request.ProtocolRepairRequestId.Trim(),
+            request.RequestCorrelationId.Trim(),
+            string.IsNullOrWhiteSpace(request.Priority) ? "(none)" : request.Priority.Trim(),
+            string.IsNullOrWhiteSpace(request.RecoveryMode) ? "(none)" : request.RecoveryMode.Trim(),
+            repairDecision.RepairGeneration,
+            string.IsNullOrWhiteSpace(request.DecisionReason)
+                ? repairDecision.Reason
+                : request.DecisionReason.Trim(),
+            publication.TargetTransport,
+            repairDecision.AuthorityId,
+            repairDecision.PredecessorAuthorityId is { IsDefault: false }
+                ? repairDecision.PredecessorAuthorityId
+                : null);
         return true;
     }
 

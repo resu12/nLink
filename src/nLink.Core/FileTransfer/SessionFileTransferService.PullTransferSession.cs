@@ -749,6 +749,15 @@ public sealed partial class SessionFileTransferService
         context.LastRecoveredV6TransportHandoffEpoch = Math.Max(
             context.LastRecoveredV6TransportHandoffEpoch,
             handoff.EpochId);
+        TrySettleOutboundFallbackFrontierProgressLocked(
+            context,
+            context.RemoteNextExpectedChunkIndex,
+            committedChunkIndex,
+            $"transport_handoff_completed_{reason}");
+        SettleAndClearFallbackFrontierRepairContractLocked(
+            context,
+            FallbackFrontierRepairSettlementOutcome.StaleRejected,
+            $"transport_handoff_completed_{reason}");
         var discardedRepairFrameCount = context.PullV4SenderPumpRepairQueue.Count;
         var discardedRepairChunkCount = context.PullV4SenderPumpRepairQueue.Sum(static repair => repair.ChunkIndices.Count);
         context.PullV4SenderPumpRepairQueue.Clear();
@@ -3846,6 +3855,10 @@ public sealed partial class SessionFileTransferService
 
     private void ResetOutboundPostTunaFallbackStateForFileTunaV4Locked(OutboundTransferContext context)
     {
+        SettleAndClearFallbackFrontierRepairContractLocked(
+            context,
+            FallbackFrontierRepairSettlementOutcome.StaleRejected,
+            "tuna_reactivation_replaced_fallback_owner");
         ClearOutboundRuntimeUnlockFallbackSeparationStateLocked(context);
         var supersededFallbackLeg = IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg)
             ? context.CurrentTransferLeg
@@ -3963,6 +3976,10 @@ public sealed partial class SessionFileTransferService
 
     private static void ResetInboundPostTunaFallbackStateForFileTunaV4Locked(InboundTransferContext context)
     {
+        SettleAndClearFallbackFrontierRepairContractLocked(
+            context,
+            FallbackFrontierRepairSettlementOutcome.StaleRejected,
+            "tuna_reactivation_replaced_fallback_owner");
         ClearInboundRuntimeUnlockFallbackSeparationStateLocked(context);
         var supersededFallbackLeg = IsCurrentPostTunaFallbackLeg(context.CurrentTransferLeg)
             ? context.CurrentTransferLeg
@@ -4499,6 +4516,10 @@ public sealed partial class SessionFileTransferService
         int generation,
         int frontier)
     {
+        SettleAndClearFallbackFrontierRepairContractLocked(
+            context,
+            FallbackFrontierRepairSettlementOutcome.StaleRejected,
+            "fallback_leg_owner_replaced");
         var clearedPriorityRequestCount = context.V6PriorityRequestedChunks.Count;
         var clearedNormalRequestCount = context.V6NormalRequestedChunks.Count;
         var clearedMetadataCount = context.V6RequestedChunkMetadataByChunkIndex.Count;
@@ -4565,6 +4586,10 @@ public sealed partial class SessionFileTransferService
         int generation,
         int frontier)
     {
+        SettleAndClearFallbackFrontierRepairContractLocked(
+            context,
+            FallbackFrontierRepairSettlementOutcome.StaleRejected,
+            "fallback_leg_owner_replaced");
         context.V6LastReceiverStateSentUtc = null;
         context.V6LastFrontierRequestSentUtc = null;
         context.V6LastFrontierRequestChunkIndex = -1;
@@ -4573,10 +4598,6 @@ public sealed partial class SessionFileTransferService
         context.V6PostTunaFallbackFrontierRescueStep = 0;
         context.V6PostTunaFallbackFrontierRescueRequestCount = 0;
         context.V6PostTunaFallbackFrontierRescueStartedUtc = null;
-        context.V6PostTunaFallbackFrontierRescueSettlementKey = null;
-        context.V6PostTunaFallbackFrontierRepairSettledStalledRepairKey = null;
-        context.V6PostTunaFallbackFrontierRepairSettledStalledAuthorityKey = null;
-        context.V6PostTunaFallbackFrontierRepairSettledStalledUtc = null;
         context.PullTransportRebindFrontierRepairCommittedChunks = 0;
         context.PullTransportRebindFrontierRepairWindowChunks = V4PostFallbackEmergencyFrontierRepairChunks;
         context.PullTransportRebindFrontierRepairLastCommittedChunkIndex = -1;

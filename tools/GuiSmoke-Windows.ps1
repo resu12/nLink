@@ -5,6 +5,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'FileTransferAuthorityMatching.ps1')
 
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
@@ -2768,72 +2769,10 @@ function Test-TunaGuiFallbackFrontierRequestDispatchTupleMatch {
         [AllowNull()][string]$DispatchLine
     )
 
-    foreach ($fieldName in @(
-            'transfer_id',
-            'session_id',
-            'route',
-            'protocol_version',
-            'live_route_epoch')) {
-        $acceptedValue = Get-GuiSmokeDelimitedLogField -Line $AcceptedLine -Name $fieldName
-        $dispatchValue = Get-GuiSmokeDelimitedLogField -Line $DispatchLine -Name $fieldName
-        if ([string]::IsNullOrWhiteSpace($acceptedValue) -or
-            [string]::IsNullOrWhiteSpace($dispatchValue)) {
-            return $false
-        }
-
-        if (-not [string]::Equals($acceptedValue, $dispatchValue, [System.StringComparison]::Ordinal)) {
-            return $false
-        }
-    }
-
-    $acceptedCorrelationId = Get-GuiSmokeDelimitedLogField -Line $AcceptedLine -Name 'request_correlation_id'
-    $dispatchCorrelationId = Get-GuiSmokeDelimitedLogField -Line $DispatchLine -Name 'request_correlation_id'
-    if (-not [string]::IsNullOrWhiteSpace($acceptedCorrelationId) -and
-        -not [string]::IsNullOrWhiteSpace($dispatchCorrelationId) -and
-        -not [string]::Equals($acceptedCorrelationId, '(none)', [System.StringComparison]::OrdinalIgnoreCase) -and
-        -not [string]::Equals($dispatchCorrelationId, '(none)', [System.StringComparison]::OrdinalIgnoreCase)) {
-        if (-not [string]::Equals($acceptedCorrelationId, $dispatchCorrelationId, [System.StringComparison]::Ordinal)) {
-            return $false
-        }
-
-        foreach ($fieldName in @(
-                'repair_request_id',
-                'first_start_chunk_index',
-                'first_chunk_count',
-                'range_count')) {
-            $acceptedValue = Get-GuiSmokeDelimitedLogField -Line $AcceptedLine -Name $fieldName
-            $dispatchValue = Get-GuiSmokeDelimitedLogField -Line $DispatchLine -Name $fieldName
-            if ([string]::IsNullOrWhiteSpace($acceptedValue) -or
-                [string]::IsNullOrWhiteSpace($dispatchValue)) {
-                return $false
-            }
-
-            if (-not [string]::Equals($acceptedValue, $dispatchValue, [System.StringComparison]::Ordinal)) {
-                return $false
-            }
-        }
-
-        return $true
-    }
-
-    foreach ($fieldName in @(
-            'leg_generation',
-            'bridge_recovery_generation',
-            'transport_epoch',
-            'checkpoint_request_id')) {
-        $acceptedValue = Get-GuiSmokeDelimitedLogField -Line $AcceptedLine -Name $fieldName
-        $dispatchValue = Get-GuiSmokeDelimitedLogField -Line $DispatchLine -Name $fieldName
-        if ([string]::IsNullOrWhiteSpace($acceptedValue) -or
-            [string]::IsNullOrWhiteSpace($dispatchValue)) {
-            return $false
-        }
-
-        if (-not [string]::Equals($acceptedValue, $dispatchValue, [System.StringComparison]::Ordinal)) {
-            return $false
-        }
-    }
-
-    return $true
+    return Test-FileTransferAuthorityTupleMatch `
+        -LeftLine $AcceptedLine `
+        -RightLine $DispatchLine `
+        -PeerCorrelation
 }
 
 function Test-TunaGuiLatestFallbackFrontierRequestDispatchMissing {

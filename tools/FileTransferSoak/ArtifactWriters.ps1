@@ -2540,9 +2540,16 @@ function Get-FileTransferFallbackTailReconciliationProof {
     [object[]]$frontierRepairAuthorityRejectedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_frontier_repair_authority_rejected' })
     [object[]]$frontierRepairDispatchedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_frontier_repair_dispatched' })
     [object[]]$frontierRepairStalledEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_frontier_repair_stalled' })
-    [object[]]$frontierRepairSettledStalledEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_frontier_repair_settled_stalled' })
+    [object[]]$frontierRepairContractSettledEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_frontier_repair_contract_settled' })
+    [object[]]$frontierRepairSettledStalledEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_fallback_frontier_repair_settled_stalled' -or
+        ($_.EventName -eq 'filetransfer_fallback_frontier_repair_contract_settled' -and
+            (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq 'SettledStalled')
+    })
     [object[]]$frontierRepairProgressObservedEvents = @($events | Where-Object {
         $_.EventName -eq 'filetransfer_fallback_frontier_repair_progress_observed' -or
+        ($_.EventName -eq 'filetransfer_fallback_frontier_repair_contract_settled' -and
+            (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq 'ProgressObserved') -or
         $_.EventName -eq 'filetransfer_v4_frontier_stall_missing_range_filled' -or
         $_.EventName -eq 'filetransfer_v4_frontier_repair_batch_applied' -or
         $_.EventName -eq 'filetransfer_frontier_gap_repair_filled'
@@ -2688,6 +2695,18 @@ function Get-FileTransferFallbackTailReconciliationProof {
             return $false
         }
 
+        $anchorSchema = Get-FileTransferAuthoritySchema -Line ([string]$Anchor.RawLine)
+        $candidateSchema = Get-FileTransferAuthoritySchema -Line ([string]$Candidate.RawLine)
+        if ($anchorSchema -ge 2 -or $candidateSchema -ge 2) {
+            if ($anchorSchema -lt 2 -or $candidateSchema -lt 2) {
+                return $false
+            }
+
+            return Test-FileTransferAuthorityTupleMatch `
+                -LeftLine ([string]$Anchor.RawLine) `
+                -RightLine ([string]$Candidate.RawLine)
+        }
+
         $anchorRepairKey = Get-FileTransferEventField -Event $Anchor -Name 'repair_request_key' -Default ''
         $candidateRepairKey = Get-FileTransferEventField -Event $Candidate -Name 'repair_request_key' -Default ''
         if ([string]::IsNullOrWhiteSpace($anchorRepairKey) -or
@@ -2756,72 +2775,10 @@ function Get-FileTransferFallbackTailReconciliationProof {
             [Parameter(Mandatory = $true)]$Candidate
         )
 
-        foreach ($fieldName in @(
-                'transfer_id',
-                'session_id',
-                'route',
-                'protocol_version',
-                'live_route_epoch')) {
-            $anchorValue = Get-FileTransferEventField -Event $Anchor -Name $fieldName -Default ''
-            $candidateValue = Get-FileTransferEventField -Event $Candidate -Name $fieldName -Default ''
-            if ([string]::IsNullOrWhiteSpace($anchorValue) -or
-                [string]::IsNullOrWhiteSpace($candidateValue)) {
-                return $false
-            }
-
-            if ($anchorValue -ne $candidateValue) {
-                return $false
-            }
-        }
-
-        $anchorCorrelationId = Get-FileTransferEventField -Event $Anchor -Name 'request_correlation_id' -Default ''
-        $candidateCorrelationId = Get-FileTransferEventField -Event $Candidate -Name 'request_correlation_id' -Default ''
-        if (-not [string]::IsNullOrWhiteSpace($anchorCorrelationId) -and
-            -not [string]::IsNullOrWhiteSpace($candidateCorrelationId) -and
-            $anchorCorrelationId -ne '(none)' -and
-            $candidateCorrelationId -ne '(none)') {
-            if ($anchorCorrelationId -ne $candidateCorrelationId) {
-                return $false
-            }
-
-            foreach ($fieldName in @(
-                    'repair_request_id',
-                    'first_start_chunk_index',
-                    'first_chunk_count',
-                    'range_count')) {
-                $anchorValue = Get-FileTransferEventField -Event $Anchor -Name $fieldName -Default ''
-                $candidateValue = Get-FileTransferEventField -Event $Candidate -Name $fieldName -Default ''
-                if ([string]::IsNullOrWhiteSpace($anchorValue) -or
-                    [string]::IsNullOrWhiteSpace($candidateValue)) {
-                    return $false
-                }
-
-                if ($anchorValue -ne $candidateValue) {
-                    return $false
-                }
-            }
-
-            return $true
-        }
-
-        foreach ($fieldName in @(
-                'leg_generation',
-                'bridge_recovery_generation',
-                'transport_epoch',
-                'checkpoint_request_id')) {
-            $anchorValue = Get-FileTransferEventField -Event $Anchor -Name $fieldName -Default ''
-            $candidateValue = Get-FileTransferEventField -Event $Candidate -Name $fieldName -Default ''
-            if ([string]::IsNullOrWhiteSpace($anchorValue) -or
-                [string]::IsNullOrWhiteSpace($candidateValue)) {
-                return $false
-            }
-
-            if ($anchorValue -ne $candidateValue) {
-                return $false
-            }
-        }
-
-        return $true
+        return Test-FileTransferAuthorityTupleMatch `
+            -LeftLine ([string]$Anchor.RawLine) `
+            -RightLine ([string]$Candidate.RawLine) `
+            -PeerCorrelation
     }
 
     $metadataMissing = New-Object System.Collections.Generic.List[object]
