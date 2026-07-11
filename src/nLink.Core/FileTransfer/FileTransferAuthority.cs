@@ -20,6 +20,12 @@ public readonly record struct FileTransferAuthorityId
 internal sealed class FileTransferAuthorityLifecycle<TOutcome>
     where TOutcome : struct, Enum
 {
+    private readonly object gate = new();
+    private bool dispatchObserved;
+    private TOutcome? settlementOutcome;
+    private string? settlementReason;
+    private FileTransferAuthorityId? successorAuthorityId;
+
     public FileTransferAuthorityLifecycle(FileTransferAuthorityId authorityId)
     {
         if (authorityId.IsDefault)
@@ -32,25 +38,95 @@ internal sealed class FileTransferAuthorityLifecycle<TOutcome>
 
     public FileTransferAuthorityId AuthorityId { get; }
 
-    public bool DispatchObserved { get; private set; }
+    public bool DispatchObserved
+    {
+        get
+        {
+            lock (gate)
+            {
+                return dispatchObserved;
+            }
+        }
+    }
 
-    public TOutcome? SettlementOutcome { get; private set; }
+    public TOutcome? SettlementOutcome
+    {
+        get
+        {
+            lock (gate)
+            {
+                return settlementOutcome;
+            }
+        }
+    }
 
-    public string? SettlementReason { get; private set; }
+    public string? SettlementReason
+    {
+        get
+        {
+            lock (gate)
+            {
+                return settlementReason;
+            }
+        }
+    }
 
-    public FileTransferAuthorityId? SuccessorAuthorityId { get; private set; }
+    public FileTransferAuthorityId? SuccessorAuthorityId
+    {
+        get
+        {
+            lock (gate)
+            {
+                return successorAuthorityId;
+            }
+        }
+    }
 
-    public bool IsSettled => SettlementOutcome.HasValue;
+    public bool IsSettled
+    {
+        get
+        {
+            lock (gate)
+            {
+                return settlementOutcome.HasValue;
+            }
+        }
+    }
 
     public bool TryMarkDispatched()
     {
-        if (DispatchObserved || IsSettled)
+        lock (gate)
         {
-            return false;
-        }
+            if (dispatchObserved || settlementOutcome.HasValue)
+            {
+                return false;
+            }
 
-        DispatchObserved = true;
-        return true;
+            dispatchObserved = true;
+            return true;
+        }
+    }
+
+    public bool TryMarkDispatchedAndSettle(
+        TOutcome outcome,
+        string reason,
+        FileTransferAuthorityId? successorAuthorityId = null)
+    {
+        lock (gate)
+        {
+            if (dispatchObserved || settlementOutcome.HasValue)
+            {
+                return false;
+            }
+
+            dispatchObserved = true;
+            settlementOutcome = outcome;
+            settlementReason = string.IsNullOrWhiteSpace(reason) ? "unknown" : reason.Trim();
+            this.successorAuthorityId = successorAuthorityId is { IsDefault: false }
+                ? successorAuthorityId
+                : null;
+            return true;
+        }
     }
 
     public bool TrySettle(
@@ -58,16 +134,19 @@ internal sealed class FileTransferAuthorityLifecycle<TOutcome>
         string reason,
         FileTransferAuthorityId? successorAuthorityId = null)
     {
-        if (IsSettled)
+        lock (gate)
         {
-            return false;
-        }
+            if (settlementOutcome.HasValue)
+            {
+                return false;
+            }
 
-        SettlementOutcome = outcome;
-        SettlementReason = string.IsNullOrWhiteSpace(reason) ? "unknown" : reason.Trim();
-        SuccessorAuthorityId = successorAuthorityId is { IsDefault: false }
-            ? successorAuthorityId
-            : null;
-        return true;
+            settlementOutcome = outcome;
+            settlementReason = string.IsNullOrWhiteSpace(reason) ? "unknown" : reason.Trim();
+            this.successorAuthorityId = successorAuthorityId is { IsDefault: false }
+                ? successorAuthorityId
+                : null;
+            return true;
+        }
     }
 }

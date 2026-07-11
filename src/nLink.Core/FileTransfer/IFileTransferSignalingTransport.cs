@@ -456,6 +456,216 @@ internal interface IRuntimeUnlockRouteCommitProofProvider
         string reason);
 }
 
+internal enum RuntimeUnlockRetryReleaseKind
+{
+    Unknown = 0,
+    RegularV4RepairSettlement = 1,
+    ReceiveRecoveryLeaseClosure = 2,
+    FallbackPairedTailYield = 3,
+}
+
+internal enum RuntimeUnlockRetryDispatchDecisionStatus
+{
+    Held = 0,
+    Granted = 1,
+    Rejected = 2,
+}
+
+internal enum RuntimeUnlockRetryDispatchSettlementOutcome
+{
+    DispatchObserved = 0,
+    MissingDispatch = 1,
+    AuthorityRejected = 2,
+    StaleRejected = 3,
+    TerminalRejected = 4,
+    Superseded = 5,
+    TransferTerminal = 6,
+}
+
+internal readonly record struct RuntimeUnlockRetryDispatchAuthorityRequest(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    FileTransferRoutePublicationAuthority SourcePublicationAuthority,
+    long RecoveryContractGeneration,
+    long RetiredOfferGeneration,
+    int DispatchAttemptGeneration,
+    string RetryReason,
+    string RecoveryReason,
+    int RegularV4LivenessGeneration,
+    int BridgeDecisionGeneration,
+    FileTransferAuthorityId? PredecessorAuthorityId = null)
+{
+    public bool IsDefault => string.IsNullOrWhiteSpace(SessionId) ||
+                             string.IsNullOrWhiteSpace(TransferId) ||
+                             SourcePublicationAuthority is null ||
+                             RecoveryContractGeneration <= 0 ||
+                             DispatchAttemptGeneration <= 0;
+}
+
+internal readonly record struct RuntimeUnlockRetryDispatchAuthority(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    RuntimeOwnerToken RuntimeOwner,
+    RoutePublicationToken SourcePublicationAuthority,
+    FileTransferRoute Route,
+    string RouteToken,
+    int ProtocolVersion,
+    int LiveRouteEpoch,
+    int RuntimeGeneration,
+    int TerminalGeneration,
+    int LegGeneration,
+    long TransportEpoch,
+    int BridgeRecoveryGeneration,
+    int BridgeDecisionGeneration,
+    int RoutePublicationGeneration,
+    int? RouteCommitGeneration,
+    long RecoveryContractGeneration,
+    long RetiredOfferGeneration,
+    int DispatchAttemptGeneration,
+    string RetryReason,
+    string RecoveryReason,
+    RuntimeUnlockRetryReleaseKind ReleaseKind,
+    FileTransferAuthorityId? ReleaseAuthorityId,
+    int ReleaseGeneration,
+    string ReleaseOutcome,
+    FileTransferRoute TargetRoute,
+    int TargetProtocolVersion,
+    FileTransferTransportKind TargetTransport,
+    int AuthorityGeneration,
+    FileTransferAuthorityId AuthorityId,
+    FileTransferAuthorityId? PredecessorAuthorityId)
+{
+    public bool IsDefault => AuthorityId.IsDefault ||
+                             RuntimeOwner.IsDefault ||
+                             SourcePublicationAuthority.IsDefault ||
+                             RecoveryContractGeneration <= 0 ||
+                             DispatchAttemptGeneration <= 0 ||
+                             AuthorityGeneration <= 0;
+}
+
+internal sealed class RuntimeUnlockRetryDispatchContract
+{
+    private readonly object aliasGate = new();
+    private long offerGeneration;
+    private string? offerNonce;
+    private int grantLogged;
+    private int dispatchLogged;
+    private int settlementLogged;
+
+    public RuntimeUnlockRetryDispatchContract(RuntimeUnlockRetryDispatchAuthority authority)
+    {
+        if (authority.IsDefault)
+        {
+            throw new ArgumentException("Runtime-unlock retry authority must be non-default.", nameof(authority));
+        }
+
+        Authority = authority;
+        Lifecycle = new FileTransferAuthorityLifecycle<RuntimeUnlockRetryDispatchSettlementOutcome>(
+            authority.AuthorityId);
+    }
+
+    public RuntimeUnlockRetryDispatchAuthority Authority { get; }
+
+    public FileTransferAuthorityLifecycle<RuntimeUnlockRetryDispatchSettlementOutcome> Lifecycle { get; }
+
+    public long OfferGeneration
+    {
+        get
+        {
+            lock (aliasGate)
+            {
+                return offerGeneration;
+            }
+        }
+    }
+
+    public string? OfferNonce
+    {
+        get
+        {
+            lock (aliasGate)
+            {
+                return offerNonce;
+            }
+        }
+    }
+
+    public bool TryBindOfferAlias(long generation, string nonce)
+    {
+        if (generation <= 0 || string.IsNullOrWhiteSpace(nonce) || Lifecycle.IsSettled)
+        {
+            return false;
+        }
+
+        lock (aliasGate)
+        {
+            if (offerGeneration == 0)
+            {
+                offerGeneration = generation;
+                offerNonce = nonce.Trim();
+                return true;
+            }
+
+            return offerGeneration == generation &&
+                   string.Equals(offerNonce, nonce.Trim(), StringComparison.Ordinal);
+        }
+    }
+
+    public bool MatchesOfferAlias(long generation, string? nonce = null)
+    {
+        lock (aliasGate)
+        {
+            return offerGeneration > 0 &&
+                   offerGeneration == generation &&
+                   (string.IsNullOrWhiteSpace(nonce) ||
+                    string.Equals(offerNonce, nonce.Trim(), StringComparison.Ordinal));
+        }
+    }
+
+    public bool TryMarkGrantLogged()
+        => Interlocked.CompareExchange(ref grantLogged, 1, 0) == 0;
+
+    public bool TryMarkDispatchLogged()
+        => Interlocked.CompareExchange(ref dispatchLogged, 1, 0) == 0;
+
+    public bool TryMarkSettlementLogged()
+        => Interlocked.CompareExchange(ref settlementLogged, 1, 0) == 0;
+}
+
+internal readonly record struct RuntimeUnlockRetryDispatchDecision(
+    RuntimeUnlockRetryDispatchDecisionStatus Status,
+    string Reason,
+    RuntimeUnlockRetryDispatchContract? Contract)
+{
+    public bool Granted => Status == RuntimeUnlockRetryDispatchDecisionStatus.Granted && Contract is not null;
+
+    public RuntimeUnlockRetryDispatchAuthorityRequest Request { get; init; }
+
+    public FileTransferCoordinatorState State { get; init; } = null!;
+}
+
+internal sealed class RuntimeUnlockRetryDispatchAuthorityRequestedEventArgs(
+    RuntimeUnlockRetryDispatchAuthorityRequest request) : EventArgs
+{
+    public RuntimeUnlockRetryDispatchAuthorityRequest Request { get; } = request;
+}
+
+internal interface IRuntimeUnlockRetryDispatchAuthorityBridge
+{
+    event EventHandler<RuntimeUnlockRetryDispatchAuthorityRequestedEventArgs>?
+        RuntimeUnlockRetryDispatchAuthorityRequested;
+
+    bool TryGetPendingRuntimeUnlockRetryDispatchAuthorityRequest(
+        string sessionId,
+        string transferId,
+        FileTransferDirection direction,
+        out RuntimeUnlockRetryDispatchAuthorityRequest request);
+
+    void ObserveRuntimeUnlockRetryDispatchDecision(RuntimeUnlockRetryDispatchDecision decision);
+}
+
 public interface IFileTransferSessionContextProvider
 {
     string? CurrentFileTransferSessionId { get; }

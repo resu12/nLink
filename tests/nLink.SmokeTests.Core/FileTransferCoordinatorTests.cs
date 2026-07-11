@@ -1116,6 +1116,218 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void RuntimeUnlockRetryDispatchAuthority_GrantsExactRegularV4ReleaseAndIsIdempotent()
+    {
+        var (state, request, release) = AuthorizeRegularRuntimeUnlockRetryDispatchSource();
+
+        var granted = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            state,
+            request,
+            null,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+
+        Assert.True(granted.Granted);
+        Assert.Equal(FileTransferRoute.FileTunaV4, granted.Contract!.Authority.TargetRoute);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV4, granted.Contract.Authority.TargetProtocolVersion);
+        Assert.Equal(FileTransferTransportKind.Tuna, granted.Contract.Authority.TargetTransport);
+        var duplicate = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            granted.State,
+            request,
+            granted.Contract,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+        Assert.True(duplicate.Granted);
+        Assert.Same(granted.Contract, duplicate.Contract);
+        Assert.Equal("idempotent", duplicate.Reason);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRetryDispatchAuthority_RequiresSettledPredecessorForSuccessor()
+    {
+        var (state, request, release) = AuthorizeRegularRuntimeUnlockRetryDispatchSource();
+        var first = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            state,
+            request,
+            null,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+        Assert.True(first.Granted);
+        var successorRequest = request with
+        {
+            RecoveryContractGeneration = request.RecoveryContractGeneration + 1,
+            DispatchAttemptGeneration = request.DispatchAttemptGeneration + 1,
+            PredecessorAuthorityId = first.Contract!.Authority.AuthorityId,
+        };
+
+        var held = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            first.State,
+            successorRequest,
+            first.Contract,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Held, held.Status);
+        Assert.True(first.Contract.Lifecycle.TrySettle(
+            RuntimeUnlockRetryDispatchSettlementOutcome.Superseded,
+            "test_successor"));
+        var successor = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            first.State,
+            successorRequest,
+            first.Contract,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+        Assert.True(successor.Granted);
+        Assert.Equal(first.Contract.Authority.AuthorityId, successor.Contract!.Authority.PredecessorAuthorityId);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRetryDispatchAuthority_RejectsStalePublicationAndInvalidReleaseOutcome()
+    {
+        var (state, request, release) = AuthorizeRegularRuntimeUnlockRetryDispatchSource();
+        var stale = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            state,
+            request with
+            {
+                SourcePublicationAuthority = request.SourcePublicationAuthority with
+                {
+                    RuntimeGeneration = request.SourcePublicationAuthority.RuntimeGeneration + 1,
+                },
+            },
+            null,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, stale.Status);
+        Assert.Equal("retry_dispatch_source_publication_mismatch", stale.Reason);
+
+        var invalidOutcome = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            state,
+            request,
+            null,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.AuthorityRejected.ToString());
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, invalidOutcome.Status);
+        Assert.Equal("regular_v4_repair_settlement_rejected", invalidOutcome.Reason);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRetryDispatchAuthority_RequiresExactRetiredReceiveRecoveryLease()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var started = StartRegular(regular);
+        var owner = started.State.CurrentRuntimeOwner!.Value;
+        var leg = started.State.CurrentLeg!;
+        var publicationDecision = FileTransferCoordinator.AuthorizeAction(
+            started.State,
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RoutePublication,
+                Source: "test",
+                Reason: "receive_recovery_retry_publication",
+                RuntimeOwner: owner,
+                Route: regular.Route,
+                ProtocolVersion: regular.ProtocolVersion,
+                LiveRouteEpoch: leg.LiveRouteEpochId,
+                LegGeneration: leg.Generation,
+                RuntimeGeneration: owner.RuntimeGeneration,
+                TerminalGeneration: started.State.TerminalGeneration,
+                TargetRoute: regular.Route,
+                TargetProtocolVersion: regular.ProtocolVersion,
+                TargetTransport: FileTransferTransportKind.RegularNkn));
+        var firstBegin = FileTransferCoordinator.AuthorizeAction(
+            publicationDecision.State,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RecoveryLivenessLeaseBegin,
+                owner,
+                publicationDecision.State.CurrentLeg!));
+        var firstLease = firstBegin.RecoveryLivenessLease!.Value;
+        var firstRetire = FileTransferCoordinator.AuthorizeAction(
+            firstBegin.State,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RecoveryLivenessLeaseRetire,
+                owner,
+                firstBegin.State.CurrentLeg!,
+                recoveryLivenessLease: firstLease));
+        var secondBegin = FileTransferCoordinator.AuthorizeAction(
+            firstRetire.State,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RecoveryLivenessLeaseBegin,
+                owner,
+                firstRetire.State.CurrentLeg!));
+        var secondLease = secondBegin.RecoveryLivenessLease!.Value;
+        var secondRetire = FileTransferCoordinator.AuthorizeAction(
+            secondBegin.State,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RecoveryLivenessLeaseRetire,
+                owner,
+                secondBegin.State.CurrentLeg!,
+                recoveryLivenessLease: secondLease));
+        var publication = secondRetire.State.CurrentRoutePublicationToken!.Value;
+        var request = new RuntimeUnlockRetryDispatchAuthorityRequest(
+            secondRetire.State.SessionId,
+            secondRetire.State.TransferId,
+            secondRetire.State.Direction,
+            new FileTransferRoutePublicationAuthority(
+                publication.SessionId,
+                publication.TransferId,
+                publication.Direction,
+                publication.RouteToken,
+                publication.ProtocolVersion,
+                publication.LiveRouteEpoch,
+                publication.RuntimeGeneration,
+                publication.TerminalGeneration,
+                publication.LegGeneration,
+                publication.PublicationGeneration,
+                publication.RouteCommitGeneration,
+                regular.TelemetryToken,
+                publication.TargetProtocolVersion,
+                publication.TargetTransport,
+                publication.ActionKind.ToString(),
+                publication.Reason),
+            RecoveryContractGeneration: 51,
+            RetiredOfferGeneration: 19,
+            DispatchAttemptGeneration: 1,
+            RetryReason: "runtime_unlock_offer_send_not_observed",
+            RecoveryReason: "regular_v4_receive_recovery_closed",
+            RegularV4LivenessGeneration: secondLease.LeaseGeneration,
+            BridgeDecisionGeneration: 0);
+
+        var stale = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            secondRetire.State,
+            request,
+            null,
+            RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure,
+            firstLease.AuthorityId,
+            firstLease.LeaseGeneration,
+            RecoveryLivenessLeaseState.Retired.ToString());
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, stale.Status);
+        Assert.Equal("receive_recovery_lease_stale", stale.Reason);
+
+        var granted = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            secondRetire.State,
+            request,
+            null,
+            RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure,
+            secondLease.AuthorityId,
+            secondLease.LeaseGeneration,
+            RecoveryLivenessLeaseState.Retired.ToString());
+        Assert.True(granted.Granted);
+        Assert.Equal(secondLease.AuthorityId, granted.Contract!.Authority.ReleaseAuthorityId);
+    }
+
+    [Fact]
     public void AuthorityLifecycle_RejectsDuplicateDispatchAndSettlement()
     {
         var authorityId = new FileTransferAuthorityId("fta2-lifecycle-test");
@@ -1147,6 +1359,26 @@ public sealed class FileTransferCoordinatorTests
             "transfer_terminal"));
         Assert.False(lifecycle.TryMarkDispatched());
         Assert.False(lifecycle.DispatchObserved);
+    }
+
+    [Fact]
+    public void AuthorityLifecycle_DispatchAndSettlementAreAtomic()
+    {
+        var lifecycle = new FileTransferAuthorityLifecycle<RuntimeUnlockRetryDispatchSettlementOutcome>(
+            new FileTransferAuthorityId("fta2-runtime-unlock-atomic-dispatch"));
+
+        Assert.True(lifecycle.TryMarkDispatchedAndSettle(
+            RuntimeUnlockRetryDispatchSettlementOutcome.DispatchObserved,
+            "peer_visible_offer_send_observed"));
+        Assert.True(lifecycle.DispatchObserved);
+        Assert.True(lifecycle.IsSettled);
+        Assert.Equal(RuntimeUnlockRetryDispatchSettlementOutcome.DispatchObserved, lifecycle.SettlementOutcome);
+        Assert.False(lifecycle.TrySettle(
+            RuntimeUnlockRetryDispatchSettlementOutcome.TransferTerminal,
+            "late_terminal_cleanup"));
+        Assert.False(lifecycle.TryMarkDispatchedAndSettle(
+            RuntimeUnlockRetryDispatchSettlementOutcome.DispatchObserved,
+            "duplicate_send_callback"));
     }
 
     [Fact]
@@ -1373,6 +1605,8 @@ public sealed class FileTransferCoordinatorTests
         Assert.True(retire.Accepted);
         Assert.Equal(RecoveryLivenessLeaseState.Retired, retire.RecoveryLivenessLease!.Value.State);
         Assert.Null(retire.State.CurrentRecoveryLivenessLease);
+        Assert.Equal(retire.RecoveryLivenessLease, retire.State.LastRetiredRecoveryLivenessLease);
+        Assert.Equal(lease.AuthorityId, retire.State.LastRetiredRecoveryLivenessLease?.AuthorityId);
     }
 
     [Fact]
@@ -1390,12 +1624,14 @@ public sealed class FileTransferCoordinatorTests
         Assert.Null(terminal.State.CurrentTransportEpochDecision);
         Assert.Null(terminal.State.CurrentBridgeRecoveryDecision);
         Assert.Null(terminal.State.CurrentRecoveryLivenessLease);
+        Assert.Null(terminal.State.LastRetiredRecoveryLivenessLease);
 
         var transitioned = ActivateTuna(state, tuna, committedChunk: 3);
         Assert.Null(transitioned.State.CurrentRepairReplayDecision);
         Assert.Null(transitioned.State.CurrentTransportEpochDecision);
         Assert.Null(transitioned.State.CurrentBridgeRecoveryDecision);
         Assert.Null(transitioned.State.CurrentRecoveryLivenessLease);
+        Assert.Null(transitioned.State.LastRetiredRecoveryLivenessLease);
 
         var fallbackState = FallBack(StartRegular(regular).State, fallback, committedChunk: 8, transportEpoch: 4).State;
         var requested = RequestFallbackCheckpoint(fallbackState, fallback, "checkpoint:epoch", 4);
@@ -1407,6 +1643,7 @@ public sealed class FileTransferCoordinatorTests
         Assert.Null(advancedEpoch.State.CurrentTransportEpochDecision);
         Assert.Null(advancedEpoch.State.CurrentBridgeRecoveryDecision);
         Assert.Null(advancedEpoch.State.CurrentRecoveryLivenessLease);
+        Assert.Null(advancedEpoch.State.LastRetiredRecoveryLivenessLease);
     }
 
     [Fact]
@@ -4215,6 +4452,74 @@ public sealed class FileTransferCoordinatorTests
                 leg));
 
         return liveness.State;
+    }
+
+    private static (
+        FileTransferCoordinatorState State,
+        RuntimeUnlockRetryDispatchAuthorityRequest Request,
+        RepairReplayDecision Release) AuthorizeRegularRuntimeUnlockRetryDispatchSource()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var state = StartRegular(regular).State;
+        var owner = state.CurrentRuntimeOwner!.Value;
+        var leg = state.CurrentLeg!;
+        var publicationDecision = FileTransferCoordinator.AuthorizeAction(
+            state,
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RoutePublication,
+                Source: "test",
+                Reason: "regular_v4_retry_publication",
+                RuntimeOwner: owner,
+                Route: regular.Route,
+                ProtocolVersion: regular.ProtocolVersion,
+                LiveRouteEpoch: leg.LiveRouteEpochId,
+                LegGeneration: leg.Generation,
+                RuntimeGeneration: owner.RuntimeGeneration,
+                TerminalGeneration: state.TerminalGeneration,
+                TargetRoute: FileTransferRoute.RegularNknV4Fast,
+                TargetProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
+                TargetTransport: FileTransferTransportKind.RegularNkn));
+        Assert.True(publicationDecision.Accepted);
+        var repairDecision = FileTransferCoordinator.AuthorizeAction(
+            publicationDecision.State,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RepairReplay,
+                owner,
+                publicationDecision.State.CurrentLeg!,
+                repairReplayKind: RepairReplayKind.V4Repair));
+        Assert.True(repairDecision.Accepted);
+        var release = repairDecision.RepairReplayDecision!.Value;
+        var publication = repairDecision.State.CurrentRoutePublicationToken!.Value;
+        var publicPublication = new FileTransferRoutePublicationAuthority(
+            publication.SessionId,
+            publication.TransferId,
+            publication.Direction,
+            publication.RouteToken,
+            publication.ProtocolVersion,
+            publication.LiveRouteEpoch,
+            publication.RuntimeGeneration,
+            publication.TerminalGeneration,
+            publication.LegGeneration,
+            publication.PublicationGeneration,
+            publication.RouteCommitGeneration,
+            FileTransferRouteResolver.Resolve(publication.TargetRoute).TelemetryToken,
+            publication.TargetProtocolVersion,
+            publication.TargetTransport,
+            publication.ActionKind.ToString(),
+            publication.Reason);
+        var request = new RuntimeUnlockRetryDispatchAuthorityRequest(
+            repairDecision.State.SessionId,
+            repairDecision.State.TransferId,
+            repairDecision.State.Direction,
+            publicPublication,
+            RecoveryContractGeneration: 41,
+            RetiredOfferGeneration: 17,
+            DispatchAttemptGeneration: 1,
+            RetryReason: "runtime_unlock_offer_send_not_observed",
+            RecoveryReason: "regular_v4_repair_settled",
+            RegularV4LivenessGeneration: 0,
+            BridgeDecisionGeneration: release.BridgeDecisionGeneration);
+        return (repairDecision.State, request, release);
     }
 
     private static FileTransferCoordinatorEvent CoordinatorEvent(

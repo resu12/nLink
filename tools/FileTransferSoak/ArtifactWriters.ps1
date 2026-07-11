@@ -7022,6 +7022,9 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchAuthorityGrantedCount),
         ("runtime_unlock_retry_dispatch_authority_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchAuthorityRejectedCount),
         ("runtime_unlock_retry_dispatch_observed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchObservedCount),
+        ("runtime_unlock_retry_dispatch_contract_settled_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchContractSettledCount),
+        ("runtime_unlock_retry_dispatch_duplicate_observed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchDuplicateObservedCount),
+        ("runtime_unlock_retry_dispatch_duplicate_settlement_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchDuplicateSettlementCount),
         ("runtime_unlock_retry_dispatch_missing_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchMissingCount),
         ("runtime_unlock_retry_dispatch_missing_after_authority_granted_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchMissingAfterAuthorityGrantedCount),
         ("runtime_unlock_retry_missing_authority_after_release_count={0}" -f $recoveryClassification.RuntimeUnlockRetryMissingAuthorityAfterReleaseCount),
@@ -7691,6 +7694,9 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockRetryDispatchObservedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_retry_dispatch_observed'
     })
+    $runtimeUnlockRetryDispatchContractSettledEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_contract_settled'
+    })
     $runtimeUnlockRetryDispatchHeldByActiveNegotiationEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_retry_dispatch_held_by_active_negotiation'
     })
@@ -8115,6 +8121,47 @@ function Get-FileTransferRecoveryFailureClassification {
             [Parameter(Mandatory = $true)]$Candidate
         )
 
+        $releaseSchema = Get-FileTransferAuthoritySchema -Line ([string]$Release.RawLine)
+        $candidateSchema = Get-FileTransferAuthoritySchema -Line ([string]$Candidate.RawLine)
+        if ($releaseSchema -ge 2 -or $candidateSchema -ge 2) {
+            if ($releaseSchema -lt 2 -or $candidateSchema -lt 2) {
+                return $false
+            }
+
+            return Test-FileTransferAuthorityFieldsEqual `
+                -LeftLine ([string]$Release.RawLine) `
+                -RightLine ([string]$Candidate.RawLine) `
+                -Fields @(
+                    'authority_id',
+                    'predecessor_authority_id',
+                    'session_id',
+                    'transfer_id',
+                    'direction',
+                    'route',
+                    'protocol_version',
+                    'live_route_epoch',
+                    'runtime_generation',
+                    'terminal_generation',
+                    'leg_generation',
+                    'transport_epoch',
+                    'bridge_recovery_generation',
+                    'bridge_decision_generation',
+                    'route_publication_generation',
+                    'route_commit_generation',
+                    'contract_generation',
+                    'retired_generation',
+                    'dispatch_attempt_generation',
+                    'retry_reason',
+                    'recovery_reason',
+                    'release_kind',
+                    'release_authority_id',
+                    'release_generation',
+                    'release_outcome',
+                    'target_route',
+                    'target_protocol_version',
+                    'target_transport')
+        }
+
         $releaseSession = Get-FileTransferEventField -Event $Release -Name 'session_id' -Default ''
         $candidateSession = Get-FileTransferEventField -Event $Candidate -Name 'session_id' -Default ''
         if ([string]::IsNullOrWhiteSpace($releaseSession) -or
@@ -8216,10 +8263,31 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockRetryDispatchMissingAfterAuthorityGrantedCount = $runtimeUnlockRetryDispatchMissingAfterAuthorityGrantedEvents.Count
     $runtimeUnlockRetryDispatchMissingCount = $runtimeUnlockRetryDispatchMissingAfterAuthorityGrantedCount
     $runtimeUnlockRetryDispatchReleaseCount = $runtimeUnlockRetryReleasedEvents.Count
+    $runtimeUnlockRetryDispatchDuplicateObservedCount = (@(
+        $runtimeUnlockRetryDispatchObservedEvents |
+            Where-Object { (Get-FileTransferAuthoritySchema -Line ([string]$_.RawLine)) -ge 2 } |
+            Group-Object { Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '(none)' } |
+            Where-Object { $_.Name -ne '(none)' -and $_.Count -gt 1 } |
+            ForEach-Object { $_.Count - 1 }
+    ) | Measure-Object -Sum).Sum
+    $runtimeUnlockRetryDispatchDuplicateSettlementCount = (@(
+        $runtimeUnlockRetryDispatchContractSettledEvents |
+            Where-Object { (Get-FileTransferAuthoritySchema -Line ([string]$_.RawLine)) -ge 2 } |
+            Group-Object { Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '(none)' } |
+            Where-Object { $_.Name -ne '(none)' -and $_.Count -gt 1 } |
+            ForEach-Object { $_.Count - 1 }
+    ) | Measure-Object -Sum).Sum
+    if ($null -eq $runtimeUnlockRetryDispatchDuplicateObservedCount) {
+        $runtimeUnlockRetryDispatchDuplicateObservedCount = 0
+    }
+    if ($null -eq $runtimeUnlockRetryDispatchDuplicateSettlementCount) {
+        $runtimeUnlockRetryDispatchDuplicateSettlementCount = 0
+    }
+    $runtimeUnlockRetryDispatchDuplicateObservedCount = [int]$runtimeUnlockRetryDispatchDuplicateObservedCount
+    $runtimeUnlockRetryDispatchDuplicateSettlementCount = [int]$runtimeUnlockRetryDispatchDuplicateSettlementCount
     foreach ($release in $runtimeUnlockRetryReleasedEvents) {
         $releaseSequence = [int64]$release.Sequence
         $matchingGrant = @($runtimeUnlockRetryDispatchAuthorityGrantedEvents | Where-Object {
-            [int64]$_.Sequence -gt $releaseSequence -and
             (Test-RuntimeUnlockRetryDispatchMatch -Release $release -Candidate $_)
         })
         $matchingObserved = @($runtimeUnlockRetryDispatchObservedEvents | Where-Object {
@@ -8252,6 +8320,13 @@ function Get-FileTransferRecoveryFailureClassification {
 
     foreach ($grant in @($runtimeUnlockRetryDispatchAuthorityGrantedEvents)) {
         $grantSequence = [int64]$grant.Sequence
+        $matchingRelease = @($runtimeUnlockRetryReleasedEvents | Where-Object {
+            (Test-RuntimeUnlockRetryDispatchMatch -Release $grant -Candidate $_)
+        })
+        if ($matchingRelease.Count -gt 0) {
+            continue
+        }
+
         $matchingObserved = @($runtimeUnlockRetryDispatchObservedEvents | Where-Object {
             [int64]$_.Sequence -gt $grantSequence -and
             (Test-RuntimeUnlockRetryDispatchMatch -Release $grant -Candidate $_)
@@ -8313,7 +8388,9 @@ function Get-FileTransferRecoveryFailureClassification {
     }
 
     $runtimeUnlockRetryDispatchProofVerdict = if ($runtimeUnlockRetryDispatchMissingCount -gt 0 -or
-        $runtimeUnlockRetryMissingAuthorityAfterReleaseCount -gt 0) {
+        $runtimeUnlockRetryMissingAuthorityAfterReleaseCount -gt 0 -or
+        $runtimeUnlockRetryDispatchDuplicateObservedCount -gt 0 -or
+        $runtimeUnlockRetryDispatchDuplicateSettlementCount -gt 0) {
         'fail'
     } elseif ($runtimeUnlockRetryDispatchReleaseCount -gt 0) {
         'pass'
@@ -9270,6 +9347,9 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockRetryDispatchAuthorityGrantedCount = $runtimeUnlockRetryDispatchAuthorityGrantedEvents.Count
         RuntimeUnlockRetryDispatchAuthorityRejectedCount = $runtimeUnlockRetryDispatchAuthorityRejectedEvents.Count
         RuntimeUnlockRetryDispatchObservedCount = $runtimeUnlockRetryDispatchObservedEvents.Count
+        RuntimeUnlockRetryDispatchContractSettledCount = $runtimeUnlockRetryDispatchContractSettledEvents.Count
+        RuntimeUnlockRetryDispatchDuplicateObservedCount = $runtimeUnlockRetryDispatchDuplicateObservedCount
+        RuntimeUnlockRetryDispatchDuplicateSettlementCount = $runtimeUnlockRetryDispatchDuplicateSettlementCount
         RuntimeUnlockRetryDispatchMissingCount = $runtimeUnlockRetryDispatchMissingCount
         RuntimeUnlockRetryDispatchMissingAfterAuthorityGrantedCount = $runtimeUnlockRetryDispatchMissingAfterAuthorityGrantedCount
         RuntimeUnlockRetryMissingAuthorityAfterReleaseCount = $runtimeUnlockRetryMissingAuthorityAfterReleaseCount
@@ -9867,6 +9947,9 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchAuthorityGrantedCount),
         ("runtime_unlock_retry_dispatch_authority_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchAuthorityRejectedCount),
         ("runtime_unlock_retry_dispatch_observed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchObservedCount),
+        ("runtime_unlock_retry_dispatch_contract_settled_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchContractSettledCount),
+        ("runtime_unlock_retry_dispatch_duplicate_observed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchDuplicateObservedCount),
+        ("runtime_unlock_retry_dispatch_duplicate_settlement_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchDuplicateSettlementCount),
         ("runtime_unlock_retry_dispatch_missing_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchMissingCount),
         ("runtime_unlock_retry_dispatch_missing_after_authority_granted_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchMissingAfterAuthorityGrantedCount),
         ("runtime_unlock_retry_missing_authority_after_release_count={0}" -f $recoveryClassification.RuntimeUnlockRetryMissingAuthorityAfterReleaseCount),
