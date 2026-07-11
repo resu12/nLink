@@ -2790,7 +2790,21 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 "runtime_unlock_offer_send_not_observed",
                 "tuna_activation_offer_send_timeout");
             InvokePrivateMethod(host, "MarkFileTransferTunaActivationBridgeRecoverySettled", "test_recovery_settled");
-            InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
+            var successorRecoveryRequest = recoveryRequest with
+            {
+                AuthorityReason = "regular_v4_repair_successor_after_retry_grant",
+            };
+            InvokePrivateMethod(
+                host,
+                "MarkFileTransferRegularV4RecoveryLivenessStarted",
+                successorRecoveryRequest,
+                sessionId,
+                transferId,
+                "regular_v4_repair_successor_after_retry_grant");
+            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
+                host,
+                "MarkRuntimeUnlockRecoveryContractRetryDispatched",
+                "runtime_unlock")));
             var lease = InvokePrivateMethod(
                 host,
                 "StartRuntimeUnlockTunaPathLeaseUnsafe",
@@ -2819,6 +2833,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             Assert.Contains("event=session_recovery_contract_recovery_settled;", positiveTail, StringComparison.Ordinal);
             Assert.Contains("event=runtime_unlock_retry_dispatch_evidence_ignored_after_authority_granted;", positiveTail, StringComparison.Ordinal);
             Assert.Contains("decision_reason=regular_v4_receive_recovery_evidence", positiveTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_held_by_regular_v4_receive_recovery;", positiveTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_runtime_unlock_dispatch_regular_v4_receive_recovery_bypassed;", positiveTail, StringComparison.Ordinal);
             Assert.DoesNotContain("reason=bounded_authority_observed_send_probe", tail, StringComparison.Ordinal);
             Assert.DoesNotContain("regular_v4_activation_window=0", tail, StringComparison.Ordinal);
@@ -13370,6 +13385,58 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             NknSignalingTransport.RuntimeUnlockRecoverySoftSettleDelayOverrideForTests = previousSoftSettleDelay;
             FakeNknClient.ResetNetwork();
         }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void RuntimeUnlockRetryExpectedDispatchDirection_UsesCoordinatorRequestAfterEvidenceClear()
+    {
+        var stateType = typeof(NknSignalingTransport).GetNestedType(
+            "RuntimeUnlockRecoveryRetryState",
+            BindingFlags.NonPublic);
+        Assert.NotNull(stateType);
+        var state = Activator.CreateInstance(stateType!, nonPublic: true);
+        Assert.NotNull(state);
+
+        var publication = new FileTransferRoutePublicationAuthority(
+            "session_inbound_retry_direction",
+            "transfer_inbound_retry_direction",
+            FileTransferDirection.Inbound,
+            FileTransferRouteResolver.RegularNknV4FastToken,
+            FileTransferProtocol.ProtocolVersionV4,
+            1,
+            2,
+            0,
+            3,
+            4,
+            null,
+            FileTransferRouteResolver.FileTunaV4Token,
+            FileTransferProtocol.ProtocolVersionV4,
+            FileTransferTransportKind.Tuna,
+            FileTransferCoordinatorActionKind.RoutePublication.ToString(),
+            "test_inbound_publication");
+        var request = new RuntimeUnlockRetryDispatchAuthorityRequest(
+            publication.SessionId,
+            publication.TransferId,
+            FileTransferDirection.Inbound,
+            publication,
+            RecoveryContractGeneration: 5,
+            RetiredOfferGeneration: 6,
+            DispatchAttemptGeneration: 1,
+            RetryReason: "runtime_unlock_offer_send_not_observed",
+            RecoveryReason: "regular_v4_repair_settled",
+            RegularV4LivenessGeneration: 7,
+            BridgeDecisionGeneration: 8);
+        stateType!.GetProperty("PendingDispatchAuthorityRequest")!.SetValue(state, request);
+        stateType.GetProperty("RegularV4RecoveryDirection")!.SetValue(state, null);
+
+        var method = typeof(NknSignalingTransport).GetMethod(
+            "GetRuntimeUnlockRetryExpectedDispatchDirection",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        Assert.Equal(
+            FileTransferDirection.Inbound,
+            Assert.IsType<FileTransferDirection>(method!.Invoke(null, [state])));
     }
 
     [Fact]

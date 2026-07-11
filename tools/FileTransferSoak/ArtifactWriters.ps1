@@ -7025,6 +7025,7 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_retry_dispatch_contract_settled_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchContractSettledCount),
         ("runtime_unlock_retry_dispatch_duplicate_observed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchDuplicateObservedCount),
         ("runtime_unlock_retry_dispatch_duplicate_settlement_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchDuplicateSettlementCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldCount),
         ("runtime_unlock_retry_dispatch_missing_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchMissingCount),
         ("runtime_unlock_retry_dispatch_missing_after_authority_granted_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchMissingAfterAuthorityGrantedCount),
         ("runtime_unlock_retry_missing_authority_after_release_count={0}" -f $recoveryClassification.RuntimeUnlockRetryMissingAuthorityAfterReleaseCount),
@@ -7703,6 +7704,9 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockRetryDispatchHeldByActiveNegotiationEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_retry_dispatch_held_by_active_negotiation'
     })
+    $runtimeUnlockRetryDispatchHeldEvents = @($events | Where-Object {
+        $_.EventName -like 'runtime_unlock_retry_dispatch_held_*'
+    })
     $runtimeUnlockRetryQueuedBehindActiveNegotiationEvents = @(@($runtimeUnlockRetryScheduledEvents | Where-Object {
         (Get-FileTransferEventField -Event $_ -Name 'queued_behind_active_negotiation' -Default '0') -eq '1'
     }) + $runtimeUnlockRetryDispatchHeldByActiveNegotiationEvents)
@@ -8288,6 +8292,30 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     $runtimeUnlockRetryDispatchDuplicateObservedCount = [int]$runtimeUnlockRetryDispatchDuplicateObservedCount
     $runtimeUnlockRetryDispatchDuplicateSettlementCount = [int]$runtimeUnlockRetryDispatchDuplicateSettlementCount
+    $runtimeUnlockRetryDispatchPostGrantHoldCount = 0
+    foreach ($grant in $runtimeUnlockRetryDispatchAuthorityGrantedEvents) {
+        if ((Get-FileTransferAuthoritySchema -Line ([string]$grant.RawLine)) -lt 2) {
+            continue
+        }
+
+        $grantSequence = [int64]$grant.Sequence
+        $matchingSettlement = @($runtimeUnlockRetryDispatchContractSettledEvents | Where-Object {
+            [int64]$_.Sequence -gt $grantSequence -and
+            (Test-RuntimeUnlockRetryDispatchMatch -Release $grant -Candidate $_)
+        } | Sort-Object Sequence | Select-Object -First 1)
+        $settlementSequence = if ($matchingSettlement.Count -gt 0) {
+            [int64]$matchingSettlement[0].Sequence
+        } else {
+            [int64]::MaxValue
+        }
+
+        $runtimeUnlockRetryDispatchPostGrantHoldCount += @($runtimeUnlockRetryDispatchHeldEvents | Where-Object {
+            [int64]$_.Sequence -gt $grantSequence -and
+            [int64]$_.Sequence -lt $settlementSequence -and
+            (Get-FileTransferAuthoritySchema -Line ([string]$_.RawLine)) -ge 2 -and
+            (Test-RuntimeUnlockRetryDispatchMatch -Release $grant -Candidate $_)
+        }).Count
+    }
     foreach ($release in $runtimeUnlockRetryReleasedEvents) {
         $releaseSequence = [int64]$release.Sequence
         $matchingGrant = @($runtimeUnlockRetryDispatchAuthorityGrantedEvents | Where-Object {
@@ -8393,7 +8421,8 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockRetryDispatchProofVerdict = if ($runtimeUnlockRetryDispatchMissingCount -gt 0 -or
         $runtimeUnlockRetryMissingAuthorityAfterReleaseCount -gt 0 -or
         $runtimeUnlockRetryDispatchDuplicateObservedCount -gt 0 -or
-        $runtimeUnlockRetryDispatchDuplicateSettlementCount -gt 0) {
+        $runtimeUnlockRetryDispatchDuplicateSettlementCount -gt 0 -or
+        $runtimeUnlockRetryDispatchPostGrantHoldCount -gt 0) {
         'fail'
     } elseif ($runtimeUnlockRetryDispatchReleaseCount -gt 0) {
         'pass'
@@ -8996,6 +9025,9 @@ function Get-FileTransferRecoveryFailureClassification {
     elseif ($fileTunaV4DataPathProof.Verdict -eq 'fail') {
         $class = 'file_tuna_data_path_mismatch'
     }
+    elseif ($runtimeUnlockRetryDispatchPostGrantHoldCount -gt 0) {
+        $class = 'runtime_unlock_retry_dispatch_held_after_authority_granted'
+    }
     elseif ($runtimeUnlockRetryDispatchMissingAfterAuthorityGrantedCount -gt 0) {
         $class = 'runtime_unlock_retry_dispatch_missing_after_authority_granted'
     }
@@ -9356,6 +9388,7 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockRetryDispatchContractSettledCount = $runtimeUnlockRetryDispatchContractSettledEvents.Count
         RuntimeUnlockRetryDispatchDuplicateObservedCount = $runtimeUnlockRetryDispatchDuplicateObservedCount
         RuntimeUnlockRetryDispatchDuplicateSettlementCount = $runtimeUnlockRetryDispatchDuplicateSettlementCount
+        RuntimeUnlockRetryDispatchPostGrantHoldCount = $runtimeUnlockRetryDispatchPostGrantHoldCount
         RuntimeUnlockRetryDispatchMissingCount = $runtimeUnlockRetryDispatchMissingCount
         RuntimeUnlockRetryDispatchMissingAfterAuthorityGrantedCount = $runtimeUnlockRetryDispatchMissingAfterAuthorityGrantedCount
         RuntimeUnlockRetryMissingAuthorityAfterReleaseCount = $runtimeUnlockRetryMissingAuthorityAfterReleaseCount
@@ -9880,16 +9913,24 @@ function Write-FileTransferDiagnosticsArtifacts {
 
     if ($recoveryClassification.Class -in @(
             'runtime_unlock_retry_dispatch_missing',
-            'runtime_unlock_retry_dispatch_missing_after_authority_granted') -and
+            'runtime_unlock_retry_dispatch_missing_after_authority_granted',
+            'runtime_unlock_retry_dispatch_held_after_authority_granted') -and
         $effectiveGateStatus -ne 'fail') {
         $effectiveVerdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
         $effectiveGateStatus = 'fail'
         $effectiveNextArtifact = 'filetransfer-operator-verdict.txt'
-        $dispatchFailureText = if ($recoveryClassification.Class -eq 'runtime_unlock_retry_dispatch_missing_after_authority_granted') {
-            'recovery: runtime unlock retry dispatch authority granted without observed dispatch'
-        }
-        else {
-            'recovery: runtime unlock retry release missing dispatch proof'
+        $dispatchFailureText = switch ($recoveryClassification.Class) {
+            'runtime_unlock_retry_dispatch_missing_after_authority_granted' {
+                'recovery: runtime unlock retry dispatch authority granted without observed dispatch'
+                break
+            }
+            'runtime_unlock_retry_dispatch_held_after_authority_granted' {
+                'recovery: runtime unlock retry dispatch held by evidence after authority grant'
+                break
+            }
+            default {
+                'recovery: runtime unlock retry release missing dispatch proof'
+            }
         }
         $effectiveHardFailures.Add($dispatchFailureText) | Out-Null
     }
@@ -9956,6 +9997,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_retry_dispatch_contract_settled_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchContractSettledCount),
         ("runtime_unlock_retry_dispatch_duplicate_observed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchDuplicateObservedCount),
         ("runtime_unlock_retry_dispatch_duplicate_settlement_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchDuplicateSettlementCount),
+        ("runtime_unlock_retry_dispatch_post_grant_hold_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchPostGrantHoldCount),
         ("runtime_unlock_retry_dispatch_missing_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchMissingCount),
         ("runtime_unlock_retry_dispatch_missing_after_authority_granted_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchMissingAfterAuthorityGrantedCount),
         ("runtime_unlock_retry_missing_authority_after_release_count={0}" -f $recoveryClassification.RuntimeUnlockRetryMissingAuthorityAfterReleaseCount),
