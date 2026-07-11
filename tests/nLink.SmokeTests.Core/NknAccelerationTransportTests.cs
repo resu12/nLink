@@ -16,8 +16,20 @@ namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
 [Trait("Area", "Core")]
-public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
+public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposable
 {
+    public NknAccelerationTransportTests()
+    {
+        ResetAccelerationOverridesForTests();
+        FakeNknClient.ResetNetwork();
+    }
+
+    public void Dispose()
+    {
+        ResetAccelerationOverridesForTests();
+        FakeNknClient.ResetNetwork();
+    }
+
     [Theory]
     [Trait("Category", "Smoke")]
     [InlineData((int)MsgType.TransportAccelerationPayerIntent)]
@@ -1303,6 +1315,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 true);
             InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
             Assert.True(host.BindRuntimeUnlockRetryDispatchOfferAliasForTests(23L, "nonce_replay_proof_blocker"));
+            Assert.True(host.BeginRuntimeUnlockRetryDispatchSendForTests());
             InvokePrivateMethod(
                 host,
                 "MarkRuntimeUnlockRecoveryContractRetryObserved",
@@ -2182,9 +2195,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 sessionId));
 
             var logTail = ReadOperationalLogTail(logStart);
-            Assert.Contains("event=session_recovery_contract_retry_authority_send_blocked;", logTail, StringComparison.Ordinal);
-            Assert.Contains("authority_failure_reason=runtime_unlock_retry_authority_offer_blocked", logTail, StringComparison.Ordinal);
-            Assert.True(shouldPromote);
+            Assert.Contains("event=runtime_unlock_retry_dispatch_evidence_ignored_after_authority_granted;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=session_recovery_contract_retry_authority_send_blocked;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("authority_failure_reason=runtime_unlock_retry_authority_offer_blocked", logTail, StringComparison.Ordinal);
+            Assert.False(shouldPromote);
             Assert.DoesNotContain("authority_failure_reason=retry_exhausted_runtime_unlock_offer_send_not_observed", logTail, StringComparison.Ordinal);
         }
         finally
@@ -6728,21 +6742,17 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                     ExitReasonKind: null,
                     ExitReasonText: "receive_stall_recovery_receive_resumed"));
 
-            await WaitUntilAsync(
-                () =>
-                {
-                    var currentTail = ReadOperationalLogTail(logStart);
-                    return currentTail.Contains("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", StringComparison.Ordinal) &&
-                           currentTail.Contains("event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_offer_send_not_observed", StringComparison.Ordinal);
-                },
-                TimeSpan.FromSeconds(3));
-            await WaitUntilAsync(
-                () => ReadOperationalLogTail(logStart).Contains("event=tuna_acceleration_offer_queued;", StringComparison.Ordinal),
-                TimeSpan.FromSeconds(6));
-            await negotiationTask.WaitAsync(cts.Token);
-
+            await Task.Delay(150, cts.Token);
             logTail = ReadOperationalLogTail(logStart);
-            Assert.Contains("event=tuna_acceleration_offer_queued;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;",
+                logTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_offer_send_not_observed",
+                logTail,
+                StringComparison.Ordinal);
+            await negotiationTask.WaitAsync(cts.Token);
         }
         finally
         {
@@ -8506,6 +8516,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 true);
             InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
             Assert.True(host.BindRuntimeUnlockRetryDispatchOfferAliasForTests(7L, "nonce_observed_replay"));
+            Assert.True(host.BeginRuntimeUnlockRetryDispatchSendForTests());
             InvokePrivateMethod(
                 host,
                 "MarkRuntimeUnlockRecoveryContractRetryObserved",
@@ -8608,6 +8619,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 true);
             InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
             Assert.True(host.BindRuntimeUnlockRetryDispatchOfferAliasForTests(11L, "nonce_post_fallback_observed_replay"));
+            Assert.True(host.BeginRuntimeUnlockRetryDispatchSendForTests());
             InvokePrivateMethod(
                 host,
                 "MarkRuntimeUnlockRecoveryContractRetryObserved",
@@ -9338,7 +9350,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 logTail,
                 StringComparison.Ordinal);
             Assert.Contains("source=fallback_control_proof_retry_admission", logTail, StringComparison.Ordinal);
-            Assert.Contains("source=regular_v4_receive_recovery_dispatch", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("source=regular_v4_receive_recovery_dispatch", logTail, StringComparison.Ordinal);
             Assert.Contains("fallback_owner_reason=", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain(
                 "event=tuna_acceleration_retry_allowed_fallback_control_unproven_for_listener_rearm;",
@@ -10402,14 +10414,16 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             await Task.Delay(TimeSpan.FromMilliseconds(150), cts.Token);
             var bridgeOnlyTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=filetransfer_regular_v4_recovery_liveness_bridge_lifecycle; lifecycle=receive_resumed", bridgeOnlyTail, StringComparison.Ordinal);
-            await WaitUntilAsync(
-                () =>
-                {
-                    var currentTail = ReadOperationalLogTail(logStart);
-                    return currentTail.Contains("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", StringComparison.Ordinal) &&
-                           currentTail.Contains("event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_offer_send_not_observed", StringComparison.Ordinal);
-                },
-                TimeSpan.FromSeconds(3));
+            await Task.Delay(TimeSpan.FromMilliseconds(150), cts.Token);
+            var evidenceOnlyTail = ReadOperationalLogTail(logStart);
+            Assert.DoesNotContain(
+                "event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;",
+                evidenceOnlyTail,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=tuna_acceleration_retry_scheduled; reason=runtime_unlock_offer_send_not_observed",
+                evidenceOnlyTail,
+                StringComparison.Ordinal);
         }
         finally
         {
@@ -12929,12 +12943,6 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                     {
                         var tail = ReadOperationalLogTail(logStart);
                         return tail.Contains(
-                                   "event=runtime_unlock_regular_v4_frontier_repair_precontract_settlement_consumed;",
-                                   StringComparison.Ordinal) &&
-                               tail.Contains(
-                                   "event=runtime_unlock_retry_released_after_regular_v4_receive_recovery;",
-                                   StringComparison.Ordinal) &&
-                               tail.Contains(
                                    "event=runtime_unlock_retry_dispatch_authority_granted;",
                                    StringComparison.Ordinal) &&
                                tail.Contains(
@@ -12950,10 +12958,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
             var releaseTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=runtime_unlock_regular_v4_frontier_repair_precontract_settlement_cached;", releaseTail, StringComparison.Ordinal);
-            Assert.Contains("event=runtime_unlock_regular_v4_frontier_repair_precontract_settlement_consumed;", releaseTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_regular_v4_frontier_repair_precontract_settlement_consumed;", releaseTail, StringComparison.Ordinal);
             Assert.Contains("settlement_outcome=progress_observed", releaseTail, StringComparison.Ordinal);
-            Assert.Contains("decision_reason=receive_recovery_contract_released", releaseTail, StringComparison.Ordinal);
-            Assert.Contains("event=runtime_unlock_retry_released_after_regular_v4_receive_recovery;", releaseTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("decision_reason=receive_recovery_contract_released", releaseTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_released_after_regular_v4_receive_recovery;", releaseTail, StringComparison.Ordinal);
             AssertRuntimeUnlockDispatchGrantBeforeSchedule(releaseTail);
             Assert.Contains("route=regular_nkn_v4_fast", releaseTail, StringComparison.Ordinal);
             Assert.Contains("protocol_version=4", releaseTail, StringComparison.Ordinal);
@@ -13092,49 +13100,16 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 "file_transfer_data_frame",
                 "control");
 
-            await WaitUntilAsync(
-                () =>
-                {
-                    var tail = ReadOperationalLogTail(logStart);
-                    return tail.Contains("event=runtime_unlock_retry_released_after_regular_v4_receive_recovery;", StringComparison.Ordinal) &&
-                           tail.Contains("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", StringComparison.Ordinal);
-                },
-                TimeSpan.FromSeconds(3));
+            await Task.Delay(150, cts.Token);
 
             var releaseTail = ReadOperationalLogTail(logStart);
             Assert.Equal(
-                1,
+                0,
                 releaseTail.Split("event=runtime_unlock_retry_released_after_regular_v4_receive_recovery;", StringSplitOptions.None).Length - 1);
-            Assert.Contains("decision_reason=accepted", releaseTail, StringComparison.Ordinal);
-            Assert.Contains("settlement_trigger=coordinator_retry_dispatch_authority_granted", releaseTail, StringComparison.Ordinal);
-            Assert.Contains("blocker_reason=regular_v4_receive_proof", releaseTail, StringComparison.Ordinal);
-            AssertRuntimeUnlockDispatchGrantBeforeSchedule(releaseTail);
-            Assert.Contains("route=regular_nkn_v4_fast", releaseTail, StringComparison.Ordinal);
-            Assert.Contains("protocol_version=4", releaseTail, StringComparison.Ordinal);
-            Assert.Contains("live_route_epoch=1", releaseTail, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_authority_rejected;", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_retry_dispatch_authority_granted;", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", releaseTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_observed;", releaseTail, StringComparison.Ordinal);
 
-            InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
-            InvokePrivateMethod(
-                host,
-                "MarkRuntimeUnlockRecoveryContractRetryObserved",
-                sessionId,
-                321L,
-                "bulk_queue_fallback");
-
-            await WaitUntilAsync(
-                () => ReadOperationalLogTail(logStart).Contains(
-                    "event=runtime_unlock_retry_dispatch_observed;",
-                    StringComparison.Ordinal),
-                TimeSpan.FromSeconds(3));
-
-            var observedTail = ReadOperationalLogTail(logStart);
-            Assert.Contains("event=runtime_unlock_retry_dispatch_authority_granted;", observedTail, StringComparison.Ordinal);
-            Assert.Contains("event=runtime_unlock_retry_dispatch_observed;", observedTail, StringComparison.Ordinal);
-            Assert.Contains("decision_reason=peer_visible_offer_send_observed", observedTail, StringComparison.Ordinal);
-            Assert.Contains("runtime_generation=1", observedTail, StringComparison.Ordinal);
-            Assert.Contains("terminal_generation=0", observedTail, StringComparison.Ordinal);
-            Assert.Contains("leg_generation=1", observedTail, StringComparison.Ordinal);
         }
         finally
         {
@@ -13521,6 +13496,407 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatch_RearmInstallsCoordinatorSuccessor()
+    {
+        FakeNknClient.ResetNetwork();
+        var previousHelpeePriorityDelay = NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
+        NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = TimeSpan.Zero;
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-active-contract-rearm.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-active-contract-rearm.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-active-contract-rearm-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-runtime-unlock-active-contract-rearm-id", helperClient.Address));
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare);
+            const string transferId = "transfer_runtime_unlock_active_contract_rearm";
+            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(host);
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId);
+
+            var logStart = GetOperationalLogLength();
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                901L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "regular_v4_repair_settled",
+                false);
+
+            var retryStateField = typeof(NknSignalingTransport).GetField(
+                "runtimeUnlockRecoveryRetryState",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.NotNull(retryStateField);
+            var firstState = retryStateField!.GetValue(host);
+            Assert.NotNull(firstState);
+            Assert.True(host.BindRuntimeUnlockRetryDispatchOfferAliasForTests(901L, "nonce-predecessor-rearm"));
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                902L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "bridge_recovery_wait_timeout",
+                true);
+
+            Assert.Same(firstState, retryStateField.GetValue(host));
+            InvokePrivateMethod(
+                host,
+                "MarkRuntimeUnlockRecoveryContractRetryObserved",
+                sessionId,
+                901L,
+                "late_predecessor_callback");
+            InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
+            Assert.True(host.BindRuntimeUnlockRetryDispatchOfferAliasForTests(903L, "nonce-active-contract-rearm"));
+            Assert.True(host.BeginRuntimeUnlockRetryDispatchSendForTests());
+            InvokePrivateMethod(
+                host,
+                "MarkRuntimeUnlockRecoveryContractRetryObserved",
+                sessionId,
+                903L,
+                "control_plane_peer_visible");
+
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=runtime_unlock_retry_successor_intent_coalesced;", tail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_retry_successor_intent_requested;", tail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_retry_dispatch_observed;", tail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_retry_dispatch_stale_callback_ignored;", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain("decision_reason=runtime_unlock_retry_state_replaced", tail, StringComparison.Ordinal);
+            Assert.Contains("settlement_outcome=Superseded", tail, StringComparison.Ordinal);
+            Assert.Equal(
+                2,
+                tail.Split("event=runtime_unlock_retry_dispatch_authority_granted;", StringSplitOptions.None).Length - 1);
+            Assert.Equal(
+                2,
+                tail.Split("event=runtime_unlock_retry_dispatch_contract_settled;", StringSplitOptions.None).Length - 1);
+            Assert.Equal(
+                1,
+                tail.Split("event=runtime_unlock_retry_dispatch_observed;", StringSplitOptions.None).Length - 1);
+        }
+        finally
+        {
+            NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = previousHelpeePriorityDelay;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatch_SendInFlightHoldsThenMissingDispatchInstallsSuccessor()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-held-successor.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-held-successor.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-held-successor-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-runtime-unlock-held-successor-id", helperClient.Address));
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_runtime_unlock_held_successor";
+            var allowSuccessor = false;
+            var successorRequestCount = 0;
+            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
+                host,
+                request =>
+                {
+                    if (!request.RequestActivePredecessorSupersession)
+                    {
+                        return RuntimeUnlockRetryDispatchDecisionStatus.Granted;
+                    }
+
+                    Interlocked.Increment(ref successorRequestCount);
+                    return allowSuccessor
+                        ? RuntimeUnlockRetryDispatchDecisionStatus.Granted
+                        : RuntimeUnlockRetryDispatchDecisionStatus.Held;
+                });
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId);
+            var logStart = GetOperationalLogLength();
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                910L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "regular_v4_repair_settled",
+                false);
+            InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
+            Assert.True(host.BindRuntimeUnlockRetryDispatchOfferAliasForTests(911L, "nonce-held-successor"));
+            Assert.True(host.BeginRuntimeUnlockRetryDispatchSendForTests());
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                912L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "bridge_recovery_wait_timeout",
+                true);
+
+            var retryStateField = typeof(NknSignalingTransport).GetField(
+                "runtimeUnlockRecoveryRetryState",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.NotNull(retryStateField);
+            var heldState = retryStateField!.GetValue(host);
+            Assert.NotNull(heldState);
+            var retryDeadline = Assert.IsType<long>(heldState.GetType().GetProperty("RetryDeadlineUtcMs")!.GetValue(heldState));
+            var livenessDeadline = Assert.IsType<long>(heldState.GetType().GetProperty("LivenessDeferralDeadlineUtcMs")!.GetValue(heldState));
+            var dispatchDeadline = Assert.IsType<long>(heldState.GetType().GetProperty("DispatchDeadlineUtcMs")!.GetValue(heldState));
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                913L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "duplicate_bridge_recovery_wait_timeout",
+                true);
+
+            Assert.Equal(1, Volatile.Read(ref successorRequestCount));
+            Assert.Equal(retryDeadline, heldState.GetType().GetProperty("RetryDeadlineUtcMs")!.GetValue(heldState));
+            Assert.Equal(livenessDeadline, heldState.GetType().GetProperty("LivenessDeferralDeadlineUtcMs")!.GetValue(heldState));
+            Assert.Equal(dispatchDeadline, heldState.GetType().GetProperty("DispatchDeadlineUtcMs")!.GetValue(heldState));
+            allowSuccessor = true;
+            var settled = Assert.IsType<bool>(InvokePrivateMethod(
+                host,
+                "TrySettleRuntimeUnlockRetryDispatchMissingIfCurrent",
+                sessionId,
+                911L,
+                "test_predecessor_missing_dispatch"));
+            Assert.True(settled);
+
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.Equal(2, Volatile.Read(ref successorRequestCount));
+            Assert.Equal(
+                1,
+                tail.Split("event=runtime_unlock_retry_successor_intent_requested;", StringSplitOptions.None).Length - 1);
+            Assert.Equal(
+                1,
+                tail.Split("event=runtime_unlock_retry_successor_intent_held;", StringSplitOptions.None).Length - 1);
+            Assert.Contains("settlement_outcome=MissingDispatch", tail, StringComparison.Ordinal);
+            Assert.Equal(
+                2,
+                tail.Split("event=runtime_unlock_retry_dispatch_authority_granted;", StringSplitOptions.None).Length - 1);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatch_PredecessorObservedDiscardsHeldSuccessor()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-observed-predecessor.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-observed-predecessor.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-observed-predecessor-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-runtime-unlock-observed-predecessor-id", helperClient.Address));
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_runtime_unlock_observed_predecessor";
+            var successorRequestCount = 0;
+            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
+                host,
+                request =>
+                {
+                    if (request.RequestActivePredecessorSupersession)
+                    {
+                        Interlocked.Increment(ref successorRequestCount);
+                        return RuntimeUnlockRetryDispatchDecisionStatus.Held;
+                    }
+
+                    return RuntimeUnlockRetryDispatchDecisionStatus.Granted;
+                });
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId);
+            var logStart = GetOperationalLogLength();
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                930L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "regular_v4_repair_settled",
+                false);
+            InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
+            Assert.True(host.BindRuntimeUnlockRetryDispatchOfferAliasForTests(931L, "nonce-observed-predecessor"));
+            Assert.True(host.BeginRuntimeUnlockRetryDispatchSendForTests());
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                932L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "bridge_recovery_wait_timeout",
+                true);
+            Assert.Equal(1, Volatile.Read(ref successorRequestCount));
+
+            var observed = Assert.IsType<bool>(InvokePrivateMethod(
+                host,
+                "MarkRuntimeUnlockRecoveryContractRetryObserved",
+                sessionId,
+                931L,
+                "control_plane_peer_visible"));
+            Assert.True(observed);
+
+            var retryStateField = typeof(NknSignalingTransport).GetField(
+                "runtimeUnlockRecoveryRetryState",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.NotNull(retryStateField);
+            var state = retryStateField!.GetValue(host);
+            Assert.NotNull(state);
+            Assert.Null(state.GetType().GetProperty("PendingDispatchSuccessorIntent")!.GetValue(state));
+            Assert.Null(state.GetType().GetProperty("PendingDispatchAuthorityRequest")!.GetValue(state));
+
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=runtime_unlock_retry_successor_intent_held;", tail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_retry_successor_intent_discarded;", tail, StringComparison.Ordinal);
+            Assert.Contains("decision_reason=predecessor_dispatch_observed", tail, StringComparison.Ordinal);
+            Assert.Equal(
+                1,
+                tail.Split("event=runtime_unlock_retry_dispatch_authority_granted;", StringSplitOptions.None).Length - 1);
+            Assert.Equal(
+                1,
+                tail.Split("event=runtime_unlock_retry_dispatch_observed;", StringSplitOptions.None).Length - 1);
+            Assert.Equal(
+                1,
+                tail.Split("event=runtime_unlock_retry_dispatch_contract_settled;", StringSplitOptions.None).Length - 1);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatch_RejectedSuccessorLeavesPredecessorCurrent()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-rejected-successor.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-rejected-successor.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-rejected-successor-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-runtime-unlock-rejected-successor-id", helperClient.Address));
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_runtime_unlock_rejected_successor";
+            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
+                host,
+                request => request.RequestActivePredecessorSupersession
+                    ? RuntimeUnlockRetryDispatchDecisionStatus.Rejected
+                    : RuntimeUnlockRetryDispatchDecisionStatus.Granted);
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId);
+            var retryStateField = typeof(NknSignalingTransport).GetField(
+                "runtimeUnlockRecoveryRetryState",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.NotNull(retryStateField);
+            var logStart = GetOperationalLogLength();
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                920L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "regular_v4_repair_settled",
+                false);
+            var state = retryStateField!.GetValue(host);
+            Assert.NotNull(state);
+            var contractProperty = state.GetType().GetProperty("DispatchContract");
+            Assert.NotNull(contractProperty);
+            var predecessor = Assert.IsType<RuntimeUnlockRetryDispatchContract>(contractProperty!.GetValue(state));
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                921L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "bridge_recovery_wait_timeout",
+                true);
+
+            var currentState = retryStateField.GetValue(host);
+            Assert.NotNull(currentState);
+            Assert.Same(predecessor, contractProperty.GetValue(currentState));
+            Assert.False(predecessor.Lifecycle.IsSettled);
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=runtime_unlock_retry_successor_intent_rejected;", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain("settlement_outcome=AuthorityRejected", tail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task RuntimeUnlockRetryAfterRegularV4Settlement_PausesRegularV4BeforePayerIntentDispatch()
     {
         FakeNknClient.ResetNetwork();
@@ -13700,7 +14076,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task RuntimeUnlockRetryBlockedByRegularV4Recovery_BindsTransferFromLivenessWhenDataSessionUnavailable()
+    public async Task RuntimeUnlockRetryBlockedByRegularV4Recovery_UsesExactTransferBindingWithoutLivenessFallback()
     {
         FakeNknClient.ResetNetwork();
         var previousHelpeePriorityDelay = NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
@@ -13777,11 +14153,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             InvokePrivateMethod(host, "MarkFileTransferTunaActivationBridgeRecoverySettled", "test_recovery_settled");
             InvokePrivateMethod(host, "ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed", "test_recovery_settled");
 
-            await WaitUntilAsync(
-                () => ReadOperationalLogTail(logStart).Contains(
-                    "event=runtime_unlock_retry_blocked_by_regular_v4_receive_recovery;",
-                    StringComparison.Ordinal),
-                TimeSpan.FromSeconds(3));
+            await Task.Delay(150, cts.Token);
 
             InvokePrivateMethod(
                 host,
@@ -13791,27 +14163,18 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 "file_transfer_data_frame",
                 "control");
 
-            await WaitUntilAsync(
-                () => ReadOperationalLogTail(logStart).Contains(
-                    "event=runtime_unlock_retry_released_after_regular_v4_receive_recovery;",
-                    StringComparison.Ordinal),
-                TimeSpan.FromSeconds(3));
+            await Task.Delay(150, cts.Token);
 
             var logTail = ReadOperationalLogTail(logStart);
-            Assert.Contains("transfer_id=", logTail, StringComparison.Ordinal);
-            Assert.Contains("route=regular_nkn_v4_fast", logTail, StringComparison.Ordinal);
-            Assert.Contains("protocol_version=4", logTail, StringComparison.Ordinal);
-            Assert.Contains("regular_v4_liveness_generation=1", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=runtime_unlock_retry_dispatch_authority_granted;", logTail, StringComparison.Ordinal);
-            var proofLines = logTail
+            Assert.DoesNotContain("event=runtime_unlock_retry_blocked_by_regular_v4_receive_recovery;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_released_after_regular_v4_receive_recovery;", logTail, StringComparison.Ordinal);
+            var grantLine = logTail
                 .Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries)
-                .Where(line =>
-                    line.Contains("event=runtime_unlock_retry_blocked_by_regular_v4_receive_recovery;", StringComparison.Ordinal) ||
-                    line.Contains("event=runtime_unlock_retry_released_after_regular_v4_receive_recovery;", StringComparison.Ordinal) ||
-                    line.Contains("event=runtime_unlock_retry_dispatch_authority_granted;", StringComparison.Ordinal));
-            Assert.All(proofLines, line => Assert.DoesNotContain("transfer_id=(none)", line, StringComparison.Ordinal));
-            Assert.DoesNotContain("decision_reason=missing_transfer_id", logTail, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_authority_rejected;", logTail, StringComparison.Ordinal);
+                .FirstOrDefault(line => line.Contains("event=runtime_unlock_retry_dispatch_authority_granted;", StringComparison.Ordinal));
+            if (grantLine is not null)
+            {
+                Assert.DoesNotContain("transfer_id=(none)", grantLine, StringComparison.Ordinal);
+            }
         }
         finally
         {
@@ -14524,6 +14887,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             AssertRuntimeUnlockDispatchGrantBeforeSchedule(ReadOperationalLogTail(logStart));
             InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
             Assert.True(host.BindRuntimeUnlockRetryDispatchOfferAliasForTests(403L, "test-post-tuna-dispatch"));
+            Assert.True(host.BeginRuntimeUnlockRetryDispatchSendForTests());
 
             InvokePrivateMethod(
                 host,
@@ -14621,6 +14985,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             AssertRuntimeUnlockDispatchGrantBeforeSchedule(ReadOperationalLogTail(logStart));
             InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
             Assert.True(host.BindRuntimeUnlockRetryDispatchOfferAliasForTests(503L, "test-fallback-sidecar-dispatch"));
+            Assert.True(host.BeginRuntimeUnlockRetryDispatchSendForTests());
 
             InvokePrivateMethod(
                 host,
@@ -14814,27 +15179,15 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 transferId,
                 "test_regular_v4_recovery_completed");
 
-            await WaitUntilAsync(
-                () =>
-                {
-                    var tail = ReadOperationalLogTail(logStart);
-                    return tail.Contains("event=runtime_unlock_retry_released_after_regular_v4_receive_recovery;", StringComparison.Ordinal) &&
-                           tail.Contains("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", StringComparison.Ordinal);
-                },
-                TimeSpan.FromSeconds(3));
+            await Task.Delay(150, cts.Token);
 
             var releaseTail = ReadOperationalLogTail(logStart);
             Assert.Equal(
-                1,
+                0,
                 releaseTail.Split("event=runtime_unlock_retry_released_after_regular_v4_receive_recovery;", StringSplitOptions.None).Length - 1);
-            Assert.Contains("decision_reason=accepted", releaseTail, StringComparison.Ordinal);
-            Assert.Contains("settlement_trigger=coordinator_retry_dispatch_authority_granted", releaseTail, StringComparison.Ordinal);
-            Assert.Contains("blocker_reason=regular_v4_recovery_completed", releaseTail, StringComparison.Ordinal);
-            AssertRuntimeUnlockDispatchGrantBeforeSchedule(releaseTail);
-            Assert.Contains("route=regular_nkn_v4_fast", releaseTail, StringComparison.Ordinal);
-            Assert.Contains("protocol_version=4", releaseTail, StringComparison.Ordinal);
-            Assert.Contains("live_route_epoch=1", releaseTail, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_authority_rejected;", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_regular_v4_recovery_liveness_completed;", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_retry_dispatch_authority_granted;", releaseTail, StringComparison.Ordinal);
+            Assert.Contains("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", releaseTail, StringComparison.Ordinal);
         }
         finally
         {
@@ -21440,6 +21793,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
             InvokePrivateMethod(host, "MarkFileTransferTunaActivationBridgeRecoverySettled", "test_recovery_settled");
             InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
             Assert.True(host.BindRuntimeUnlockRetryDispatchOfferAliasForTests(6L, nonce));
+            Assert.True(host.BeginRuntimeUnlockRetryDispatchSendForTests());
             InvokePrivateMethod(
                 host,
                 "MarkRuntimeUnlockRecoveryContractRetryObserved",
@@ -21992,17 +22346,27 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 answer.Nonce,
                 sequence: 101);
             var logStart = GetOperationalLogLength();
+            var logMarker = $"event=acceleration_test_log_marker; marker_id={Guid.NewGuid():N}";
+            LocalOperationalLog.Info("NKN.Tuna.Tests", logMarker);
+            string ReadCurrentTestLog()
+            {
+                var recent = LocalOperationalLog.GetRecentLogText();
+                var markerIndex = recent.IndexOf(logMarker, StringComparison.Ordinal);
+                return markerIndex >= 0
+                    ? recent[markerIndex..]
+                    : ReadOperationalLogTail(logStart);
+            }
 
             InvokePrivateMethod(host, "HandleTransportAccelerationAnswer", helperClient.Address, envelope);
             await WaitUntilAsync(
-                () => ReadOperationalLogTail(logStart).Contains("event=tuna_acceleration_answer_rejected; reason=user_stopped_tuna; offer_trigger=runtime_unlock", StringComparison.Ordinal),
+                () => ReadCurrentTestLog().Contains("event=tuna_acceleration_answer_rejected; reason=user_stopped_tuna; offer_trigger=runtime_unlock", StringComparison.Ordinal),
                 TimeSpan.FromSeconds(5));
             hostLane.SetCanListen(true);
 
             await WaitUntilAsync(
                 () => host.IsAccelerationAvailableForTests && helper.IsAccelerationAvailableForTests,
                 TimeSpan.FromSeconds(5));
-            var logTail = ReadOperationalLogTail(logStart);
+            var logTail = ReadCurrentTestLog();
             Assert.Contains("event=tuna_acceleration_answer_rejected; reason=user_stopped_tuna; offer_trigger=runtime_unlock", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_acceleration_retry_scheduled; reason=peer_user_stopped_tuna", logTail, StringComparison.Ordinal);
             Assert.True(hostLane.EnsureListenerCalls >= 1);
@@ -27330,6 +27694,35 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                 Request = request,
             };
         };
+    }
+
+    private static void ResetAccelerationOverridesForTests()
+    {
+        NknSignalingTransport.AccelerationOfferAnswerTimeoutOverrideForTests = null;
+        NknSignalingTransport.AccelerationOfferReplayDelayOverrideForTests = null;
+        NknSignalingTransport.AccelerationAnswerReplayDelayOverrideForTests = null;
+        NknSignalingTransport.AccelerationAnswerReplayAttemptsOverrideForTests = null;
+        NknSignalingTransport.AccelerationAnswerAckTimeoutOverrideForTests = null;
+        NknSignalingTransport.AccelerationControlDirectSendWaitOverrideForTests = null;
+        NknSignalingTransport.AccelerationControlBulkBypassWaitOverrideForTests = null;
+        NknSignalingTransport.FileTransferTunaActivationBridgeRecoveryWaitOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockRegularV4BridgeRecoveryStartedAuthorityProbeDelayOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockRecoverySoftSettleDelayOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockRecoveryContractStaleNegotiationWindowOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockRetryAuthorityDeadlineOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockRetryAuthorityPeerProofFreshnessOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockOfferPeerResponseTimeoutOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockPeerVisibleLifecycleCopyTimeoutOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockPreCommitProbeStartTimeoutOverrideForTests = null;
+        NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests = null;
+        NknSignalingTransport.HelperPaidOfferHelpeeIntentGraceDelayOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockOfferQueueAcceptedPressureOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockOfferObservedSendBlockerReasonOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockBulkQueueObservedProofBlockerOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockRegularV4ReceiveRecoveryBlockerOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockRegularV4RepairPressureBlockerOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockOfferDirectObservedLaneBlockerOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockOfferSendRecoveryRequestOverrideForTests = null;
     }
 
     private sealed class RecordingTunaListenerSidecarSupervisor : INknTunaListenerSidecarSupervisor

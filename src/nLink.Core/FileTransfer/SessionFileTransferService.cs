@@ -5449,7 +5449,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             return contract;
         }
 
-        contract.Lifecycle.TrySettle(
+        contract.TrySettle(
             state.IsTerminal
                 ? RuntimeUnlockRetryDispatchSettlementOutcome.TransferTerminal
                 : RuntimeUnlockRetryDispatchSettlementOutcome.StaleRejected,

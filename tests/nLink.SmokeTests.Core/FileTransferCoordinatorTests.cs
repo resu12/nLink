@@ -1175,9 +1175,9 @@ public sealed class FileTransferCoordinatorTests
             release.RepairGeneration,
             FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
         Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Held, held.Status);
-        Assert.True(first.Contract.Lifecycle.TrySettle(
-            RuntimeUnlockRetryDispatchSettlementOutcome.Superseded,
-            "test_successor"));
+        Assert.True(first.Contract.TrySettle(
+            RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch,
+            "test_missing_dispatch_successor"));
         var successor = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
             first.State,
             successorRequest,
@@ -1188,6 +1188,187 @@ public sealed class FileTransferCoordinatorTests
             FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
         Assert.True(successor.Granted);
         Assert.Equal(first.Contract.Authority.AuthorityId, successor.Contract!.Authority.PredecessorAuthorityId);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRetryDispatchAuthority_ExplicitHandoffAtomicallySupersedesPredecessor()
+    {
+        var (state, request, release) = AuthorizeRegularRuntimeUnlockRetryDispatchSource();
+        var first = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            state,
+            request,
+            null,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+        Assert.True(first.Granted);
+        var successorRequest = request with
+        {
+            RecoveryContractGeneration = request.RecoveryContractGeneration + 1,
+            DispatchAttemptGeneration = request.DispatchAttemptGeneration + 1,
+            PredecessorAuthorityId = first.Contract!.Authority.AuthorityId,
+            RequestActivePredecessorSupersession = true,
+        };
+
+        var successor = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            first.State,
+            successorRequest,
+            first.Contract,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+
+        Assert.True(successor.Granted);
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchSettlementOutcome.Superseded,
+            first.Contract.Lifecycle.SettlementOutcome);
+        Assert.Equal(successor.Contract!.Authority.AuthorityId, first.Contract.Lifecycle.SuccessorAuthorityId);
+        Assert.Equal(first.Contract.Authority.AuthorityId, successor.Contract.Authority.PredecessorAuthorityId);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRetryDispatchAuthority_DoesNotSupersedeSendInFlight()
+    {
+        var (state, request, release) = AuthorizeRegularRuntimeUnlockRetryDispatchSource();
+        var first = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            state,
+            request,
+            null,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+        Assert.True(first.Contract!.TryBindOfferAlias(61, "nonce-in-flight"));
+        Assert.True(first.Contract.TryBeginSend(out _));
+        var successorRequest = request with
+        {
+            RecoveryContractGeneration = request.RecoveryContractGeneration + 1,
+            DispatchAttemptGeneration = request.DispatchAttemptGeneration + 1,
+            PredecessorAuthorityId = first.Contract.Authority.AuthorityId,
+            RequestActivePredecessorSupersession = true,
+        };
+
+        var held = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            first.State,
+            successorRequest,
+            first.Contract,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Held, held.Status);
+        Assert.Equal("retry_dispatch_predecessor_send_in_flight", held.Reason);
+        Assert.False(first.Contract.Lifecycle.IsSettled);
+    }
+
+    [Fact]
+    public async Task RuntimeUnlockRetryDispatchAuthority_SendStartAndSupersessionHaveOneWinner()
+    {
+        for (var iteration = 0; iteration < 50; iteration++)
+        {
+            var (state, request, release) = AuthorizeRegularRuntimeUnlockRetryDispatchSource();
+            var first = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+                state,
+                request,
+                null,
+                RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+                release.AuthorityId,
+                release.RepairGeneration,
+                FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+            var predecessor = Assert.IsType<RuntimeUnlockRetryDispatchContract>(first.Contract);
+            Assert.True(predecessor.TryBindOfferAlias(1000 + iteration, $"nonce-race-{iteration}"));
+            var successorRequest = request with
+            {
+                DispatchAttemptGeneration = request.DispatchAttemptGeneration + 1,
+                PredecessorAuthorityId = predecessor.Authority.AuthorityId,
+                RequestActivePredecessorSupersession = true,
+            };
+            using var start = new ManualResetEventSlim(false);
+            var sendStarted = false;
+            RuntimeUnlockRetryDispatchDecision successor = default;
+
+            var sendTask = Task.Run(() =>
+            {
+                start.Wait();
+                sendStarted = predecessor.TryBeginSend(out _);
+            });
+            var successorTask = Task.Run(() =>
+            {
+                start.Wait();
+                successor = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+                    first.State,
+                    successorRequest,
+                    predecessor,
+                    RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+                    release.AuthorityId,
+                    release.RepairGeneration,
+                    FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+            });
+
+            start.Set();
+            await Task.WhenAll(sendTask, successorTask);
+
+            Assert.NotEqual(sendStarted, successor.Granted);
+            Assert.True(sendStarted || successor.Granted);
+        }
+    }
+
+    [Fact]
+    public void RuntimeUnlockRetryDispatchContract_AliasBoundAttemptSettlesExactlyOnce()
+    {
+        var (state, request, release) = AuthorizeRegularRuntimeUnlockRetryDispatchSource();
+        var granted = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            state,
+            request,
+            null,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+        var contract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(granted.Contract);
+
+        Assert.Equal(RuntimeUnlockRetryDispatchAttemptPhase.Granted, contract.AttemptPhase);
+        Assert.True(contract.TryBindOfferAlias(41, "nonce-attempt"));
+        Assert.Equal(RuntimeUnlockRetryDispatchAttemptPhase.AliasBound, contract.AttemptPhase);
+        Assert.True(contract.TryBeginSend(out var attempt));
+        Assert.Equal(RuntimeUnlockRetryDispatchAttemptPhase.SendInFlight, contract.AttemptPhase);
+        Assert.False(contract.TryBeginSend(out _));
+        Assert.True(contract.TryGetInFlightAttempt(out var retainedAttempt));
+        Assert.Equal(attempt, retainedAttempt);
+        Assert.True(contract.TryCompleteMissingDispatch(attempt, "peer_visible_send_missing"));
+        Assert.Equal(RuntimeUnlockRetryDispatchAttemptPhase.Settled, contract.AttemptPhase);
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch,
+            contract.Lifecycle.SettlementOutcome);
+        Assert.False(contract.TryCompleteObserved(attempt, "late_observed_send"));
+        Assert.False(contract.TryBindOfferAlias(42, "nonce-successor"));
+    }
+
+    [Fact]
+    public void RuntimeUnlockRetryDispatchContract_ObservedSendWinsLateMissingDispatchCallback()
+    {
+        var (state, request, release) = AuthorizeRegularRuntimeUnlockRetryDispatchSource();
+        var granted = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            state,
+            request,
+            null,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+        var contract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(granted.Contract);
+
+        Assert.True(contract.TryBindOfferAlias(51, "nonce-observed"));
+        Assert.True(contract.TryBeginSend(out var attempt));
+        Assert.True(contract.TryCompleteObserved(attempt, "peer_visible_send_observed"));
+        Assert.False(contract.TryCompleteMissingDispatch(attempt, "late_send_timeout"));
+        Assert.True(contract.Lifecycle.DispatchObserved);
+        Assert.Equal(
+            RuntimeUnlockRetryDispatchSettlementOutcome.DispatchObserved,
+            contract.Lifecycle.SettlementOutcome);
     }
 
     [Fact]

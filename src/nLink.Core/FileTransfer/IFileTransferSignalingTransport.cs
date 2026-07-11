@@ -482,6 +482,19 @@ internal enum RuntimeUnlockRetryDispatchSettlementOutcome
     TransferTerminal = 6,
 }
 
+internal enum RuntimeUnlockRetryDispatchAttemptPhase
+{
+    Granted = 0,
+    AliasBound = 1,
+    SendInFlight = 2,
+    Settled = 3,
+}
+
+internal readonly record struct RuntimeUnlockRetryDispatchAttempt(
+    FileTransferAuthorityId AuthorityId,
+    long OfferGeneration,
+    string OfferNonce);
+
 internal readonly record struct RuntimeUnlockRetryDispatchAuthorityRequest(
     string SessionId,
     string TransferId,
@@ -494,7 +507,8 @@ internal readonly record struct RuntimeUnlockRetryDispatchAuthorityRequest(
     string RecoveryReason,
     int RegularV4LivenessGeneration,
     int BridgeDecisionGeneration,
-    FileTransferAuthorityId? PredecessorAuthorityId = null)
+    FileTransferAuthorityId? PredecessorAuthorityId = null,
+    bool RequestActivePredecessorSupersession = false)
 {
     public bool IsDefault => string.IsNullOrWhiteSpace(SessionId) ||
                              string.IsNullOrWhiteSpace(TransferId) ||
@@ -550,6 +564,7 @@ internal sealed class RuntimeUnlockRetryDispatchContract
     private readonly object aliasGate = new();
     private long offerGeneration;
     private string? offerNonce;
+    private RuntimeUnlockRetryDispatchAttemptPhase attemptPhase = RuntimeUnlockRetryDispatchAttemptPhase.Granted;
     private int grantLogged;
     private int dispatchLogged;
     private int settlementLogged;
@@ -592,24 +607,185 @@ internal sealed class RuntimeUnlockRetryDispatchContract
         }
     }
 
+    public RuntimeUnlockRetryDispatchAttemptPhase AttemptPhase
+    {
+        get
+        {
+            lock (aliasGate)
+            {
+                return Lifecycle.IsSettled
+                    ? RuntimeUnlockRetryDispatchAttemptPhase.Settled
+                    : attemptPhase;
+            }
+        }
+    }
+
     public bool TryBindOfferAlias(long generation, string nonce)
     {
-        if (generation <= 0 || string.IsNullOrWhiteSpace(nonce) || Lifecycle.IsSettled)
+        if (generation <= 0 || string.IsNullOrWhiteSpace(nonce))
         {
             return false;
         }
 
         lock (aliasGate)
         {
+            if (Lifecycle.IsSettled)
+            {
+                return false;
+            }
+
             if (offerGeneration == 0)
             {
                 offerGeneration = generation;
                 offerNonce = nonce.Trim();
+                attemptPhase = RuntimeUnlockRetryDispatchAttemptPhase.AliasBound;
                 return true;
             }
 
             return offerGeneration == generation &&
                    string.Equals(offerNonce, nonce.Trim(), StringComparison.Ordinal);
+        }
+    }
+
+    public bool TryBeginSend(out RuntimeUnlockRetryDispatchAttempt attempt)
+    {
+        attempt = default;
+        lock (aliasGate)
+        {
+            if (Lifecycle.IsSettled ||
+                offerGeneration <= 0 ||
+                string.IsNullOrWhiteSpace(offerNonce) ||
+                attemptPhase == RuntimeUnlockRetryDispatchAttemptPhase.Settled)
+            {
+                return false;
+            }
+
+            if (attemptPhase != RuntimeUnlockRetryDispatchAttemptPhase.AliasBound)
+            {
+                return false;
+            }
+
+            attemptPhase = RuntimeUnlockRetryDispatchAttemptPhase.SendInFlight;
+            attempt = new RuntimeUnlockRetryDispatchAttempt(
+                Authority.AuthorityId,
+                offerGeneration,
+                offerNonce);
+            return true;
+        }
+    }
+
+    public bool TryGetInFlightAttempt(out RuntimeUnlockRetryDispatchAttempt attempt)
+    {
+        attempt = default;
+        lock (aliasGate)
+        {
+            if (Lifecycle.IsSettled ||
+                attemptPhase != RuntimeUnlockRetryDispatchAttemptPhase.SendInFlight ||
+                offerGeneration <= 0 ||
+                string.IsNullOrWhiteSpace(offerNonce))
+            {
+                return false;
+            }
+
+            attempt = new RuntimeUnlockRetryDispatchAttempt(
+                Authority.AuthorityId,
+                offerGeneration,
+                offerNonce);
+            return true;
+        }
+    }
+
+    public bool MatchesAttempt(RuntimeUnlockRetryDispatchAttempt attempt)
+    {
+        lock (aliasGate)
+        {
+            return attempt.AuthorityId == Authority.AuthorityId &&
+                   offerGeneration == attempt.OfferGeneration &&
+                   string.Equals(offerNonce, attempt.OfferNonce, StringComparison.Ordinal);
+        }
+    }
+
+    public bool TryCompleteObserved(
+        RuntimeUnlockRetryDispatchAttempt attempt,
+        string reason)
+        => TryCompleteAttempt(
+            attempt,
+            RuntimeUnlockRetryDispatchSettlementOutcome.DispatchObserved,
+            reason,
+            dispatched: true);
+
+    public bool TryCompleteMissingDispatch(
+        RuntimeUnlockRetryDispatchAttempt attempt,
+        string reason)
+        => TryCompleteAttempt(
+            attempt,
+            RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch,
+            reason,
+            dispatched: false);
+
+    public bool TrySettle(
+        RuntimeUnlockRetryDispatchSettlementOutcome outcome,
+        string reason,
+        FileTransferAuthorityId? successorAuthorityId = null)
+    {
+        lock (aliasGate)
+        {
+            if (!Lifecycle.TrySettle(outcome, reason, successorAuthorityId))
+            {
+                return false;
+            }
+
+            attemptPhase = RuntimeUnlockRetryDispatchAttemptPhase.Settled;
+            return true;
+        }
+    }
+
+    public bool TrySupersedeBeforeSend(
+        string reason,
+        FileTransferAuthorityId successorAuthorityId)
+    {
+        lock (aliasGate)
+        {
+            if (attemptPhase == RuntimeUnlockRetryDispatchAttemptPhase.SendInFlight ||
+                Lifecycle.IsSettled ||
+                !Lifecycle.TrySettle(
+                    RuntimeUnlockRetryDispatchSettlementOutcome.Superseded,
+                    reason,
+                    successorAuthorityId))
+            {
+                return false;
+            }
+
+            attemptPhase = RuntimeUnlockRetryDispatchAttemptPhase.Settled;
+            return true;
+        }
+    }
+
+    private bool TryCompleteAttempt(
+        RuntimeUnlockRetryDispatchAttempt attempt,
+        RuntimeUnlockRetryDispatchSettlementOutcome outcome,
+        string reason,
+        bool dispatched)
+    {
+        lock (aliasGate)
+        {
+            if (attemptPhase != RuntimeUnlockRetryDispatchAttemptPhase.SendInFlight ||
+                attempt.AuthorityId != Authority.AuthorityId ||
+                offerGeneration != attempt.OfferGeneration ||
+                !string.Equals(offerNonce, attempt.OfferNonce, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var completed = dispatched
+                ? Lifecycle.TryMarkDispatchedAndSettle(outcome, reason)
+                : Lifecycle.TrySettle(outcome, reason);
+            if (completed)
+            {
+                attemptPhase = RuntimeUnlockRetryDispatchAttemptPhase.Settled;
+            }
+
+            return completed;
         }
     }
 

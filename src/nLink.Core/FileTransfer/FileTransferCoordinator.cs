@@ -3844,6 +3844,7 @@ internal static class FileTransferCoordinator
         var predecessorAuthorityId = request.PredecessorAuthorityId is { IsDefault: false }
             ? request.PredecessorAuthorityId
             : null;
+        RuntimeUnlockRetryDispatchContract? activePredecessorToSupersede = null;
         if (currentContract is { } predecessor)
         {
             if (predecessorAuthorityId != predecessor.Authority.AuthorityId)
@@ -3855,9 +3856,21 @@ internal static class FileTransferCoordinator
 
             if (!predecessor.Lifecycle.IsSettled)
             {
-                return Decision(
-                    RuntimeUnlockRetryDispatchDecisionStatus.Held,
-                    "retry_dispatch_predecessor_active");
+                if (!request.RequestActivePredecessorSupersession)
+                {
+                    return Decision(
+                        RuntimeUnlockRetryDispatchDecisionStatus.Held,
+                        "retry_dispatch_predecessor_active");
+                }
+
+                if (predecessor.AttemptPhase == RuntimeUnlockRetryDispatchAttemptPhase.SendInFlight)
+                {
+                    return Decision(
+                        RuntimeUnlockRetryDispatchDecisionStatus.Held,
+                        "retry_dispatch_predecessor_send_in_flight");
+                }
+
+                activePredecessorToSupersede = predecessor;
             }
         }
         else if (state.CurrentRuntimeUnlockRetryDispatchAuthority is { } currentAuthority &&
@@ -3925,6 +3938,16 @@ internal static class FileTransferCoordinator
             IssueAuthorityId("runtime_unlock_retry_dispatch", state, authorityGeneration),
             predecessorAuthorityId);
         var contract = new RuntimeUnlockRetryDispatchContract(authority);
+        if (activePredecessorToSupersede is not null &&
+            !activePredecessorToSupersede.TrySupersedeBeforeSend(
+                "coordinator_successor_authorized",
+                authority.AuthorityId))
+        {
+            return Decision(
+                RuntimeUnlockRetryDispatchDecisionStatus.Held,
+                "retry_dispatch_predecessor_settlement_raced");
+        }
+
         var acceptedState = state with
         {
             CurrentRuntimeUnlockRetryDispatchAuthority = authority,
