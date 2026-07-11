@@ -219,6 +219,14 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 $afterAppend = @(Get-GuiSmokeLogLedgerLinesAfterBookmark -State $state -Bookmark $bookmark)
                 if ($afterAppend.Count -ne 1 -or $afterAppend[0] -ne 'event=c') { throw "append mismatch: $($afterAppend -join '|')" }
 
+                $partialBookmark = Get-GuiSmokeLogLedgerBookmark -State $state
+                [IO.File]::AppendAllText($active, 'event=partial', $utf8)
+                Sync-GuiSmokeLogLedger -State $state -Paths @($active)
+                if (@(Get-GuiSmokeLogLedgerLinesAfterBookmark -State $state -Bookmark $partialBookmark).Count -ne 0) { throw 'partial trailing line was consumed' }
+                [IO.File]::AppendAllText($active, $nl, $utf8)
+                Sync-GuiSmokeLogLedger -State $state -Paths @($active)
+                if ((@(Get-GuiSmokeLogLedgerLinesAfterBookmark -State $state -Bookmark $partialBookmark) -join '|') -ne 'event=partial') { throw 'completed trailing line was not consumed once' }
+
                 Move-Item -LiteralPath $active -Destination $rotated1
                 [IO.File]::WriteAllText($active, "event=d${nl}", $utf8)
                 Sync-GuiSmokeLogLedger -State $state -Paths @($rotated1, $active)
@@ -240,7 +248,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                     throw "duplicate mismatch: $($duplicates -join '|')"
                 }
 
-                $expected = @('event=a', 'event=b', 'event=c', 'event=d', 'event=e', 'event=f', 'event=duplicate', 'event=duplicate')
+                $expected = @('event=a', 'event=b', 'event=c', 'event=partial', 'event=d', 'event=e', 'event=f', 'event=duplicate', 'event=duplicate')
                 $actual = @(Get-GuiSmokeLogLedgerLines -State $state)
                 if (($actual -join '|') -ne ($expected -join '|')) { throw "ledger mismatch: $($actual -join '|')" }
 
@@ -261,6 +269,95 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("gui-log-ledger-rotation-ok", result.Stdout, StringComparison.Ordinal);
         Assert.Contains("GuiSmokeLogLedger.ps1", guiText, StringComparison.Ordinal);
         Assert.Contains("Reset-GuiSmokeLogLedgerState -State $script:GuiSmokeAppLogLedger", guiText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeLogLedger_BindsReadsToHandlesAndReconcilesIntraSyncRotations()
+    {
+        var helperPath = Path.Combine(FindRepoRoot(), "tools", "GuiSmokeLogLedger.ps1")
+            .Replace("'", "''", StringComparison.Ordinal);
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            . '{{helperPath}}'
+
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-ledger-atomic-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $utf8 = [Text.UTF8Encoding]::new($false)
+                $nl = [Environment]::NewLine
+
+                $active = Join-Path $tempRoot 'nlink.log'
+                $rotated1 = Join-Path $tempRoot 'nlink.1.log'
+                [IO.File]::WriteAllText($active, "event=old-a${nl}event=old-b${nl}", $utf8)
+                $script:GuiSmokeLogLedgerAfterSnapshotOpenedForTests = {
+                    param($snapshot)
+                    if ([IO.Path]::GetFileName([string]$snapshot.Path) -ieq 'nlink.log') {
+                        $script:GuiSmokeLogLedgerAfterSnapshotOpenedForTests = $null
+                        Move-Item -LiteralPath $active -Destination $rotated1
+                        [IO.File]::WriteAllText($active, "event=new-active${nl}", $utf8)
+                    }
+                }
+
+                $opened = Open-GuiSmokeLogLedgerFileSnapshot -Path $active
+                if ($opened.Status -ne 'Opened') { throw "atomic snapshot was not opened: $($opened.Status)" }
+                $delta = Read-GuiSmokeLogLedgerFileDelta -Snapshot $opened.Snapshot -ByteOffset 0
+                $atomicLines = @($delta.Lines)
+                if (($atomicLines -join '|') -ne 'event=old-a|event=old-b') { throw "renamed handle read mismatch: $($atomicLines -join '|')" }
+                $opened.Snapshot.Stream.Dispose()
+                Move-Item -LiteralPath $rotated1 -Destination (Join-Path $tempRoot 'disposed-handle.log')
+
+                Remove-Item -LiteralPath $active -Force
+                $appendPath = Join-Path $tempRoot 'append.log'
+                [IO.File]::WriteAllText($appendPath, "event=before-capture${nl}", $utf8)
+                $script:GuiSmokeLogLedgerAfterSnapshotOpenedForTests = {
+                    param($snapshot)
+                    $script:GuiSmokeLogLedgerAfterSnapshotOpenedForTests = $null
+                    [IO.File]::AppendAllText($appendPath, "event=after-capture${nl}", $utf8)
+                }
+                $appendOpened = Open-GuiSmokeLogLedgerFileSnapshot -Path $appendPath
+                $appendDelta = Read-GuiSmokeLogLedgerFileDelta -Snapshot $appendOpened.Snapshot -ByteOffset 0
+                if ((@($appendDelta.Lines) -join '|') -ne 'event=before-capture') { throw 'captured read included a concurrent append' }
+                $appendOpened.Snapshot.Stream.Dispose()
+                $appendState = New-GuiSmokeLogLedgerState -MaxLines 20 -MaxGenerations 10
+                Sync-GuiSmokeLogLedger -State $appendState -Paths @($appendPath)
+                if ((@(Get-GuiSmokeLogLedgerLines -State $appendState) -join '|') -ne 'event=before-capture|event=after-capture') { throw 'next sync missed concurrent append' }
+
+                $active = Join-Path $tempRoot 'nlink.log'
+                $rotated1 = Join-Path $tempRoot 'nlink.1.log'
+                $rotated2 = Join-Path $tempRoot 'nlink.2.log'
+                $state = New-GuiSmokeLogLedgerState -MaxLines 50 -MaxGenerations 20
+                [IO.File]::WriteAllText($active, "event=g1${nl}", $utf8)
+                Sync-GuiSmokeLogLedger -State $state -Paths @($active)
+                Move-Item -LiteralPath $active -Destination $rotated1
+                [IO.File]::WriteAllText($active, "event=g2${nl}", $utf8)
+                $script:GuiSmokeLogLedgerAfterSnapshotOpenedForTests = {
+                    param($snapshot)
+                    if ([IO.Path]::GetFileName([string]$snapshot.Path) -ieq 'nlink.1.log') {
+                        $script:GuiSmokeLogLedgerAfterSnapshotOpenedForTests = $null
+                        Move-Item -LiteralPath $rotated1 -Destination $rotated2
+                        Move-Item -LiteralPath $active -Destination $rotated1
+                        [IO.File]::WriteAllText($active, "event=g3${nl}", $utf8)
+                    }
+                }
+                Sync-GuiSmokeLogLedger -State $state -Paths @($rotated1, $active)
+                $lines = @(Get-GuiSmokeLogLedgerLines -State $state)
+                if (($lines -join '|') -ne 'event=g1|event=g2|event=g3') { throw "reconciled ledger mismatch: $($lines -join '|')" }
+                $diagnostics = Get-GuiSmokeLogLedgerDiagnostics -State $state
+                if ($diagnostics.TransientRescanCount -lt 1 -or $diagnostics.GapCount -ne 0) { throw 'rotation reconciliation diagnostics mismatch' }
+
+                Move-Item -LiteralPath $active -Destination (Join-Path $tempRoot 'post-sync-handle-disposed.log')
+                Write-Output 'gui-log-ledger-atomic-ok'
+            }
+            finally {
+                $script:GuiSmokeLogLedgerAfterSnapshotOpenedForTests = $null
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(result.ExitCode == 0, $"Atomic ledger test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-log-ledger-atomic-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -301,6 +398,30 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 [IO.File]::WriteAllText($gapPath, "new-generation${nl}", $utf8)
                 $gapError = try { Sync-GuiSmokeLogLedger -State $gapState -Paths @($gapPath); '' } catch { $_.Exception.Message }
                 if ($gapError -notlike 'gui_smoke_log_cursor_gap*') { throw "missing gap failure: $gapError" }
+                Move-Item -LiteralPath $gapPath -Destination (Join-Path $tempRoot 'gap-handle-disposed.log')
+
+                $generationState = New-GuiSmokeLogLedgerState -MaxLines 20 -MaxGenerations 1
+                $generationOne = Join-Path $tempRoot 'generation-one.log'
+                $generationTwo = Join-Path $tempRoot 'generation-two.log'
+                [IO.File]::WriteAllText($generationOne, "generation-one${nl}", $utf8)
+                [IO.File]::WriteAllText($generationTwo, "generation-two${nl}", $utf8)
+                Sync-GuiSmokeLogLedger -State $generationState -Paths @($generationOne)
+                $generationError = try { Sync-GuiSmokeLogLedger -State $generationState -Paths @($generationOne, $generationTwo); '' } catch { $_.Exception.Message }
+                if ($generationError -notlike 'gui_smoke_log_cursor_generation_limit*') { throw "missing generation limit failure: $generationError" }
+
+                $bookmarkState = New-GuiSmokeLogLedgerState -MaxLines 20 -MaxGenerations 10
+                Sync-GuiSmokeLogLedger -State $bookmarkState -Paths @($generationOne)
+                $bookmarkError = try { Get-GuiSmokeLogLedgerLinesAfterBookmark -State $bookmarkState -Bookmark 99; '' } catch { $_.Exception.Message }
+                if ($bookmarkError -notlike 'gui_smoke_log_cursor_invalid_bookmark*') { throw "missing invalid bookmark failure: $bookmarkError" }
+
+                $aliasState = New-GuiSmokeLogLedgerState -MaxLines 20 -MaxGenerations 10
+                $aliasOne = Join-Path $tempRoot 'alias-one.log'
+                $aliasTwo = Join-Path $tempRoot 'alias-two.log'
+                [IO.File]::WriteAllText($aliasOne, "alias-line${nl}", $utf8)
+                [IO.File]::Copy($aliasOne, $aliasTwo)
+                [IO.File]::SetCreationTimeUtc($aliasTwo, [IO.File]::GetCreationTimeUtc($aliasOne))
+                Sync-GuiSmokeLogLedger -State $aliasState -Paths @($aliasOne, $aliasTwo)
+                if ((@(Get-GuiSmokeLogLedgerLines -State $aliasState) -join '|') -ne 'alias-line') { throw 'generation aliases replayed the same line' }
 
                 Write-Output 'gui-log-ledger-failures-ok'
             }
@@ -425,7 +546,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             function Add-TunaGuiFaultWindowEvidence { {{persistBody}} }
             function Get-GuiSmokeLogLedgerDiagnostics {
                 param($State)
-                return [pscustomobject]@{ GenerationCount = 3; RotationCount = 2; GapCount = 0 }
+                return [pscustomobject]@{ GenerationCount = 3; RotationCount = 2; TransientRescanCount = 1; GapCount = 0 }
             }
             function Write-TunaGuiMilestoneEvidence {
                 param([string]$ArtifactDir, $ObservedEvidenceLines)
@@ -457,7 +578,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
                 if (-not (Test-Path -LiteralPath $path)) { throw 'fault telemetry was not persisted immediately' }
                 $content = [IO.File]::ReadAllText($path)
                 if ($content -notlike '*event=filetransfer_tuna_gui_fault_window*') { throw 'fault event missing' }
-                if ($content -notlike '*prearmed=1*' -or $content -notlike '*cursor_gap_count=0*' -or $content -notlike '*fault_injected=1*') { throw 'fault tuple incomplete' }
+                if ($content -notlike '*prearmed=1*' -or $content -notlike '*cursor_transient_rescan_count=1*' -or $content -notlike '*cursor_gap_count=0*' -or $content -notlike '*fault_injected=1*') { throw 'fault tuple incomplete' }
 
                 try { throw 'simulated later runtime failure' } catch { }
                 if (-not (Test-Path -LiteralPath $path)) { throw 'later failure removed fault telemetry' }
@@ -479,11 +600,13 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
         var explicitBody = ExtractPowerShellFunctionBody(guiText, "Get-TunaGuiExplicitFailureClassification", "Resolve-TunaGuiFailureClassification");
-        var resolveBody = ExtractPowerShellFunctionBody(guiText, "Resolve-TunaGuiFailureClassification", "Get-TunaGuiFileTransferSetupFailureClassification");
+        var resolveBody = ExtractPowerShellFunctionBody(guiText, "Resolve-TunaGuiFailureClassification", "Write-TunaGuiTopLevelFailureSummaryIfMissing");
+        var topLevelBody = ExtractPowerShellFunctionBody(guiText, "Write-TunaGuiTopLevelFailureSummaryIfMissing", "Get-TunaGuiFileTransferSetupFailureClassification");
         var scriptText = $$"""
             $ErrorActionPreference = 'Stop'
             function Get-TunaGuiExplicitFailureClassification { {{explicitBody}} }
             function Resolve-TunaGuiFailureClassification { {{resolveBody}} }
+            function Write-TunaGuiTopLevelFailureSummaryIfMissing { {{topLevelBody}} }
 
             $resolved = Resolve-TunaGuiFailureClassification `
                 -ErrorMessage 'route failed; failure_class=terminal_before_fallback_switch_off; retained_event=filetransfer_regular_v4_frontier_repair_stalled' `
@@ -501,6 +624,26 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             if ($cursor.Phase -ne 'harness_log_cursor' -or $cursor.Reason -ne 'gui_smoke_log_cursor_truncated') { throw 'cursor failure not classified as harness evidence' }
             $historical = Resolve-TunaGuiFailureClassification -ErrorMessage 'unmapped failure' -HistoricalPhase 'fallback_frontier_repair' -HistoricalReason 'fallback_frontier_repair_stalled'
             if ($historical.Phase -ne 'fallback_frontier_repair') { throw 'historical fallback changed without explicit class' }
+
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-top-level-error-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $env:NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR = $tempRoot
+                $env:NLINK_TUNA_GUI_ROUTE_MODE = 'live-regular-activation-cycle'
+                Write-TunaGuiTopLevelFailureSummaryIfMissing -ErrorMessage 'gui_smoke_log_cursor_gap: generation moved'
+                $errorPath = Join-Path $tempRoot 'filetransfer-tuna-gui-error.json'
+                if (-not (Test-Path -LiteralPath $errorPath)) { throw 'top-level cursor error artifact missing' }
+                $errorSummary = Get-Content -LiteralPath $errorPath -Raw | ConvertFrom-Json
+                if ($errorSummary.failurePhase -ne 'harness_log_cursor' -or $errorSummary.failureReason -ne 'gui_smoke_log_cursor_gap') { throw 'top-level cursor classification was not preserved' }
+                [IO.File]::WriteAllText($errorPath, '{"marker":"richer-existing-error"}')
+                Write-TunaGuiTopLevelFailureSummaryIfMissing -ErrorMessage 'gui_smoke_log_cursor_truncated: replacement forbidden'
+                if ([IO.File]::ReadAllText($errorPath) -notlike '*richer-existing-error*') { throw 'top-level writer replaced an existing error artifact' }
+            }
+            finally {
+                Remove-Item Env:NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR -ErrorAction SilentlyContinue
+                Remove-Item Env:NLINK_TUNA_GUI_ROUTE_MODE -ErrorAction SilentlyContinue
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
 
             Write-Output 'gui-failure-classification-precedence-ok'
             """;

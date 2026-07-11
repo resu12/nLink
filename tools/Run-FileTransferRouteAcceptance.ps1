@@ -2091,6 +2091,24 @@ function Assert-Phase4ScenarioRun {
     $expectedMetadata = Get-RouteAcceptanceRouteMetadata -Route $expectedFinalRoute
     $result = New-RouteAcceptanceRunResult -Name ([string]$Scenario.Name) -ArtifactDir $ArtifactDir -ExpectedRoute $expectedFinalRoute -ExpectedProtocol ([int]$expectedMetadata.Protocol)
     if ($Scenario.Kind -eq 'tuna') {
+        $errorPath = Join-Path $ArtifactDir 'filetransfer-tuna-gui-error.json'
+        if (Test-Path -LiteralPath $errorPath -PathType Leaf) {
+            try {
+                $errorSummary = Get-Content -LiteralPath $errorPath -Raw | ConvertFrom-Json
+                $failurePhase = [string](Get-JsonPropertyValue -Object $errorSummary -Name 'failurePhase' -DefaultValue '')
+                $failureReason = [string](Get-JsonPropertyValue -Object $errorSummary -Name 'failureReason' -DefaultValue '')
+                if ([string]::Equals($failurePhase, 'harness_log_cursor', [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $result.setupFailurePhase = $failurePhase
+                    $result.setupFailureReason = $failureReason
+                    Add-RouteAcceptanceFailure -Result $result -Message ("Tuna GUI harness failure: phase={0}; reason={1}" -f $failurePhase, $failureReason)
+                    return $result
+                }
+            }
+            catch {
+                # The normal artifact validation below will report malformed error evidence.
+            }
+        }
+
         $setupBootstrapFailure = Get-RouteAcceptanceTunaGuiSetupBootstrapFailure -ArtifactDir $ArtifactDir
         if ($null -ne $setupBootstrapFailure) {
             $result.setupFailurePhase = [string]$setupBootstrapFailure.Phase
@@ -5529,7 +5547,9 @@ function Test-Phase5RerunnableTransientSetupFailure {
     $reason = [string]$Result.setupFailureReason
     $combined = ("{0} {1} {2}" -f $phase, $reason, (Join-RouteAcceptanceTokenList -Values $Result.failures))
 
-    return $combined.IndexOf('activation_offer_not_observed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+    return $combined.IndexOf('harness_log_cursor', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('gui_smoke_log_cursor_', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('activation_offer_not_observed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('activation_offer_sent_waiting_answer', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('regular_v4_receive_recovery_unproven', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('preflight_bridge_bootstrap', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
@@ -5561,7 +5581,9 @@ function Test-Phase5SingleScenarioSetupRerunAllowed {
         ([string]$Result.setupFailureReason),
         (Join-RouteAcceptanceTokenList -Values $Result.failures))
 
-    return $combined.IndexOf('terminal_before_accept', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+    return $combined.IndexOf('harness_log_cursor', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('gui_smoke_log_cursor_', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combined.IndexOf('terminal_before_accept', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('preflight_bridge_bootstrap', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('nkn_bridge_bootstrap_network_unready', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combined.IndexOf('helpee_bridge_host_ready_connect_failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
@@ -5826,6 +5848,13 @@ function Get-Phase5FailureClass {
     }
 
     foreach ($line in $failureLines) {
+        if ($line.IndexOf('harness_log_cursor', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('gui_smoke_log_cursor_', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'harness_log_cursor'
+        }
+    }
+
+    foreach ($line in $failureLines) {
         if ($line.IndexOf('terminal_before_fallback_switch_off', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $line.IndexOf('fault_window_missed_before_terminal', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             return 'terminal_before_fallback_switch_off'
@@ -6044,7 +6073,8 @@ function Assert-Phase5ScenarioRun {
         [Parameter(Mandatory = $true)]$Result
     )
 
-    if ([string]::Equals([string]$Result.setupFailurePhase, 'preflight_bridge_bootstrap', [System.StringComparison]::OrdinalIgnoreCase)) {
+    if ([string]::Equals([string]$Result.setupFailurePhase, 'preflight_bridge_bootstrap', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals([string]$Result.setupFailurePhase, 'harness_log_cursor', [System.StringComparison]::OrdinalIgnoreCase)) {
         return
     }
 

@@ -2895,6 +2895,42 @@ function Resolve-TunaGuiFailureClassification {
     }
 }
 
+function Write-TunaGuiTopLevelFailureSummaryIfMissing {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$ErrorMessage)
+
+    $artifactDir = [string]$env:NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR
+    if ([string]::IsNullOrWhiteSpace($artifactDir)) {
+        return
+    }
+
+    try {
+        [void][System.IO.Directory]::CreateDirectory($artifactDir)
+        $errorPath = Join-Path $artifactDir 'filetransfer-tuna-gui-error.json'
+        if (Test-Path -LiteralPath $errorPath -PathType Leaf) {
+            return
+        }
+
+        $classification = Resolve-TunaGuiFailureClassification `
+            -ErrorMessage $ErrorMessage `
+            -HistoricalPhase 'top_level_harness' `
+            -HistoricalReason 'gui_smoke_failed'
+        $summary = [ordered]@{
+            event = 'filetransfer_tuna_gui_top_level_failure'
+            routeMode = [string]$env:NLINK_TUNA_GUI_ROUTE_MODE
+            completed = $false
+            integrityOk = $false
+            failurePhase = [string]$classification.Phase
+            failureReason = [string]$classification.Reason
+            error = $ErrorMessage
+            failedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
+        }
+        $summary | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $errorPath -Encoding UTF8
+    }
+    catch {
+        # Best-effort failure propagation must not replace the original GUI failure.
+    }
+}
+
 function Get-TunaGuiFileTransferSetupFailureClassification {
     param(
         [Parameter(Mandatory = $true)][int]$Bookmark,
@@ -5164,7 +5200,7 @@ function New-TunaGuiFaultWindowDiagnosticLine {
     )
 
     $cursor = Get-GuiSmokeLogLedgerDiagnostics -State $script:GuiSmokeAppLogLedger
-    return "[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_fault_window; activation_event_utc={1}; activation_observed_utc={2}; prearmed={3}; toggle_wait_ms={4}; cursor_generation_count={5}; cursor_rotation_count={6}; cursor_gap_count={7}; click_utc={8}; terminal_before_click={9}; fault_injected={10}" -f `
+    return "[{0}] [INFO] [GuiSmoke] event=filetransfer_tuna_gui_fault_window; activation_event_utc={1}; activation_observed_utc={2}; prearmed={3}; toggle_wait_ms={4}; cursor_generation_count={5}; cursor_rotation_count={6}; cursor_transient_rescan_count={7}; cursor_gap_count={8}; click_utc={9}; terminal_before_click={10}; fault_injected={11}" -f `
         ([datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ssZ')),
         (Get-TunaGuiLogLineUtcText -Line $ActivationLine),
         $(if ([string]::IsNullOrWhiteSpace($ActivationObservedUtc)) { '(none)' } else { $ActivationObservedUtc }),
@@ -5172,6 +5208,7 @@ function New-TunaGuiFaultWindowDiagnosticLine {
         [long]$FaultResult.ToggleWaitMs,
         [int]$cursor.GenerationCount,
         [int]$cursor.RotationCount,
+        [int]$cursor.TransientRescanCount,
         [int]$cursor.GapCount,
         [string]$FaultResult.ClickUtc,
         $(if ([bool]$FaultResult.TerminalCompletedBeforeFault) { 1 } else { 0 }),
@@ -12078,6 +12115,7 @@ try {
     $exitCode = 0
 }
 catch {
+    Write-TunaGuiTopLevelFailureSummaryIfMissing -ErrorMessage ([string]$_.Exception.Message)
     $failureArtifactsDir = New-FailureArtifactDir
     Write-Host "[GUI Smoke] FAIL: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host "[GUI Smoke] Collecting failure artifacts in $failureArtifactsDir" -ForegroundColor Yellow

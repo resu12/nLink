@@ -20,6 +20,7 @@ function New-GuiSmokeLogLedgerState {
         MaxGenerations = $MaxGenerations
         GapCount = 0
         RotationCount = 0
+        TransientRescanCount = 0
         SyncCount = 0
         ActiveGenerationKey = ''
         FailureCode = ''
@@ -34,6 +35,7 @@ function Reset-GuiSmokeLogLedgerState {
     $State.Generations.Clear()
     $State.GapCount = 0
     $State.RotationCount = 0
+    $State.TransientRescanCount = 0
     $State.SyncCount = 0
     $State.ActiveGenerationKey = ''
     $State.FailureCode = ''
@@ -103,41 +105,60 @@ function Get-GuiSmokeLogLedgerFirstCompleteNonEmptyLine {
     throw 'gui_smoke_log_cursor_identity_line_too_long: first complete non-empty line exceeded 4 MiB'
 }
 
-function Read-GuiSmokeLogLedgerFileSnapshot {
+function Open-GuiSmokeLogLedgerFileSnapshot {
     param([Parameter(Mandatory = $true)][string]$Path)
 
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        return $null
+        return [pscustomobject]@{ Status = 'Missing'; Snapshot = $null; Detail = 'path_missing' }
     }
 
     $stream = $null
     try {
-        $creationTimeUtcTicks = [System.IO.File]::GetCreationTimeUtc($Path).Ticks
         $shareMode = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
         $stream = [System.IO.FileStream]::new(
             $Path,
             [System.IO.FileMode]::Open,
             [System.IO.FileAccess]::Read,
             $shareMode)
+        $creationTimeUtcTicks = [System.IO.File]::GetCreationTimeUtc($stream.SafeFileHandle).Ticks
         $firstLine = Get-GuiSmokeLogLedgerFirstCompleteNonEmptyLine -Stream $stream
         if ([string]::IsNullOrWhiteSpace($firstLine)) {
-            return $null
+            $stream.Dispose()
+            $stream = $null
+            return [pscustomobject]@{ Status = 'Empty'; Snapshot = $null; Detail = 'identity_line_pending' }
         }
 
         $firstLineHash = Get-GuiSmokeLogLedgerHash -Value $firstLine
-        return [pscustomobject]@{
+        $snapshot = [pscustomobject]@{
             Path = [System.IO.Path]::GetFullPath($Path)
             CreationTimeUtcTicks = $creationTimeUtcTicks
             GenerationKey = ("{0}:{1}" -f $creationTimeUtcTicks, $firstLineHash)
             FirstLineHash = $firstLineHash
-            Length = [long]$stream.Length
+            CapturedLength = [long]$stream.Length
+            IsActivePath = [string]::Equals(
+                [System.IO.Path]::GetFileName($Path),
+                'nlink.log',
+                [System.StringComparison]::OrdinalIgnoreCase)
+            Stream = $stream
         }
+
+        $testHook = Get-Variable -Name GuiSmokeLogLedgerAfterSnapshotOpenedForTests -Scope Script -ErrorAction SilentlyContinue
+        if ($null -ne $testHook -and $testHook.Value -is [scriptblock]) {
+            & $testHook.Value $snapshot
+        }
+
+        $stream = $null
+        return [pscustomobject]@{ Status = 'Opened'; Snapshot = $snapshot; Detail = 'opened' }
     }
     catch {
         if ($_.Exception.Message.IndexOf('gui_smoke_log_cursor_', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             throw
         }
-        return $null
+        return [pscustomobject]@{
+            Status = 'Unavailable'
+            Snapshot = $null
+            Detail = $_.Exception.GetType().Name
+        }
     }
     finally {
         if ($stream) {
@@ -152,31 +173,19 @@ function Read-GuiSmokeLogLedgerFileDelta {
         [Parameter(Mandatory = $true)][long]$ByteOffset
     )
 
-    if (-not (Test-Path -LiteralPath $Snapshot.Path -PathType Leaf)) {
-        return $null
-    }
-
-    $stream = $null
+    $stream = [System.IO.FileStream]$Snapshot.Stream
+    $capturedLength = [long]$Snapshot.CapturedLength
     try {
-        $creationTimeUtcTicks = [System.IO.File]::GetCreationTimeUtc([string]$Snapshot.Path).Ticks
-        $shareMode = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
-        $stream = [System.IO.FileStream]::new(
-            [string]$Snapshot.Path,
-            [System.IO.FileMode]::Open,
-            [System.IO.FileAccess]::Read,
-            $shareMode)
-        $firstLine = Get-GuiSmokeLogLedgerFirstCompleteNonEmptyLine -Stream $stream
-        if ([string]::IsNullOrWhiteSpace($firstLine)) {
-            return $null
-        }
-
-        $firstLineHash = Get-GuiSmokeLogLedgerHash -Value $firstLine
-        $generationKey = "{0}:{1}" -f $creationTimeUtcTicks, $firstLineHash
-        if (-not [string]::Equals($generationKey, [string]$Snapshot.GenerationKey, [System.StringComparison]::Ordinal)) {
-            return $null
-        }
-
         $currentLength = [long]$stream.Length
+        if ($currentLength -lt $capturedLength) {
+            return [pscustomobject]@{
+                Truncated = $true
+                CurrentLength = $currentLength
+                NextByteOffset = $ByteOffset
+                CompleteLineCount = 0
+                Lines = @()
+            }
+        }
         if ($currentLength -lt $ByteOffset) {
             return [pscustomobject]@{
                 Truncated = $true
@@ -186,17 +195,17 @@ function Read-GuiSmokeLogLedgerFileDelta {
                 Lines = @()
             }
         }
-        if ($currentLength -eq $ByteOffset) {
+        if ($capturedLength -eq $ByteOffset) {
             return [pscustomobject]@{
                 Truncated = $false
-                CurrentLength = $currentLength
+                CurrentLength = $capturedLength
                 NextByteOffset = $ByteOffset
                 CompleteLineCount = 0
                 Lines = @()
             }
         }
 
-        $remaining = $currentLength - $ByteOffset
+        $remaining = $capturedLength - $ByteOffset
         if ($remaining -gt [int]::MaxValue) {
             throw ("gui_smoke_log_cursor_read_window_overflow: path={0}; unread_bytes={1}" -f $Snapshot.Path, $remaining)
         }
@@ -231,7 +240,7 @@ function Read-GuiSmokeLogLedgerFileDelta {
         if ($completeByteCount -le 0) {
             return [pscustomobject]@{
                 Truncated = $false
-                CurrentLength = $currentLength
+                CurrentLength = $capturedLength
                 NextByteOffset = $ByteOffset
                 CompleteLineCount = 0
                 Lines = @()
@@ -248,7 +257,7 @@ function Read-GuiSmokeLogLedgerFileDelta {
 
         return [pscustomobject]@{
             Truncated = $false
-            CurrentLength = $currentLength
+            CurrentLength = $capturedLength
             NextByteOffset = $ByteOffset + $completeByteCount
             CompleteLineCount = $completeLineCount
             Lines = $lines.ToArray()
@@ -260,11 +269,40 @@ function Read-GuiSmokeLogLedgerFileDelta {
         }
         return $null
     }
-    finally {
-        if ($stream) {
-            $stream.Dispose()
+}
+
+function Get-GuiSmokeLogLedgerScanPaths {
+    param([AllowEmptyCollection()][string[]]$Paths = @())
+
+    $resolved = New-Object System.Collections.Generic.List[string]
+    $rollingDirectories = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($path in @($Paths)) {
+        if ([string]::IsNullOrWhiteSpace($path)) {
+            continue
+        }
+
+        $fullPath = [System.IO.Path]::GetFullPath($path)
+        if ([regex]::IsMatch([System.IO.Path]::GetFileName($fullPath), '^nlink(?:\.\d+)?\.log$', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
+            [void]$rollingDirectories.Add([System.IO.Path]::GetDirectoryName($fullPath))
+        }
+        else {
+            $resolved.Add($fullPath) | Out-Null
         }
     }
+
+    foreach ($directory in $rollingDirectories) {
+        if (-not [System.IO.Directory]::Exists($directory)) {
+            continue
+        }
+
+        foreach ($file in @(
+                Get-ChildItem -LiteralPath $directory -File -Filter 'nlink*.log' -ErrorAction SilentlyContinue |
+                    Sort-Object LastWriteTimeUtc, Name)) {
+            $resolved.Add([string]$file.FullName) | Out-Null
+        }
+    }
+
+    return @($resolved.ToArray())
 }
 
 function Set-GuiSmokeLogLedgerFailure {
@@ -297,116 +335,217 @@ function Sync-GuiSmokeLogLedger {
     Assert-GuiSmokeLogLedgerHealthy -State $State
     $State.SyncCount++
 
-    $snapshots = New-Object System.Collections.Generic.List[object]
-    foreach ($path in @($Paths)) {
-        if ([string]::IsNullOrWhiteSpace($path)) {
-            continue
-        }
+    $maxAcquisitionAttempts = 4
+    $acquisitionRetryDelayMs = 25
+    $acceptedSnapshots = @()
+    $acceptedHandles = @()
+    $acceptedActiveGenerationKey = ''
 
-        $snapshot = Read-GuiSmokeLogLedgerFileSnapshot -Path $path
-        if ($null -eq $snapshot) {
-            continue
-        }
-
-        $snapshots.Add($snapshot) | Out-Null
-    }
-
-    $snapshotByGeneration = [ordered]@{}
-    foreach ($snapshot in $snapshots.ToArray()) {
-        $generationKey = [string]$snapshot.GenerationKey
-        $existingSnapshot = $snapshotByGeneration[$generationKey]
-        if ($null -eq $existingSnapshot -or [long]$snapshot.Length -gt [long]$existingSnapshot.Length) {
-            $snapshotByGeneration[$generationKey] = $snapshot
-        }
-    }
-
-    foreach ($snapshot in @($snapshotByGeneration.Values)) {
-
-        $generationKey = [string]$snapshot.GenerationKey
-        $generation = $State.Generations[$generationKey]
-        if ($null -eq $generation) {
-            if ($State.Generations.Count -ge $State.MaxGenerations) {
-                Set-GuiSmokeLogLedgerFailure `
-                    -State $State `
-                    -Code 'gui_smoke_log_cursor_generation_limit' `
-                    -Detail ("max_generations={0}; path={1}" -f $State.MaxGenerations, $snapshot.Path)
-                Assert-GuiSmokeLogLedgerHealthy -State $State
+    for ($attempt = 1; $attempt -le $maxAcquisitionAttempts; $attempt++) {
+        $openedSnapshots = New-Object System.Collections.Generic.List[object]
+        $snapshotByGeneration = [ordered]@{}
+        $snapshotGenerationByPath = @{}
+        $scanUnstable = $false
+        $scanFailureDetail = ''
+        try {
+            foreach ($path in @(Get-GuiSmokeLogLedgerScanPaths -Paths $Paths)) {
+                $openResult = Open-GuiSmokeLogLedgerFileSnapshot -Path $path
+                if ([string]$openResult.Status -eq 'Opened') {
+                    $snapshot = $openResult.Snapshot
+                    $openedSnapshots.Add($snapshot) | Out-Null
+                    $snapshotGenerationByPath[[string]$snapshot.Path] = [string]$snapshot.GenerationKey
+                    $generationKey = [string]$snapshot.GenerationKey
+                    $existingSnapshot = $snapshotByGeneration[$generationKey]
+                    if ($null -eq $existingSnapshot -or
+                        [long]$snapshot.CapturedLength -gt [long]$existingSnapshot.CapturedLength) {
+                        $snapshotByGeneration[$generationKey] = $snapshot
+                    }
+                }
+                elseif ([string]$openResult.Status -in @('Missing', 'Unavailable')) {
+                    $scanUnstable = $true
+                    $scanFailureDetail = "path={0}; status={1}; detail={2}" -f $path, $openResult.Status, $openResult.Detail
+                }
             }
 
-            $generation = [pscustomobject]@{
-                ConsumedByteOffset = 0L
-                ConsumedLineCount = 0L
-                LastPath = [string]$snapshot.Path
-                FirstLineHash = [string]$snapshot.FirstLineHash
+            $validationSnapshots = New-Object System.Collections.Generic.List[object]
+            try {
+                $validationGenerationByPath = @{}
+                foreach ($path in @(Get-GuiSmokeLogLedgerScanPaths -Paths $Paths)) {
+                    $validationResult = Open-GuiSmokeLogLedgerFileSnapshot -Path $path
+                    if ([string]$validationResult.Status -eq 'Opened') {
+                        $validationSnapshot = $validationResult.Snapshot
+                        $validationSnapshots.Add($validationSnapshot) | Out-Null
+                        $validationGenerationByPath[[string]$validationSnapshot.Path] = [string]$validationSnapshot.GenerationKey
+                    }
+                    elseif ([string]$validationResult.Status -in @('Missing', 'Unavailable')) {
+                        $scanUnstable = $true
+                        $scanFailureDetail = "path={0}; status={1}; detail={2}; stage=validation" -f $path, $validationResult.Status, $validationResult.Detail
+                    }
+                }
+
+                $acquiredPaths = @($snapshotGenerationByPath.Keys | Sort-Object)
+                $validatedPaths = @($validationGenerationByPath.Keys | Sort-Object)
+                if (($acquiredPaths -join '|') -ne ($validatedPaths -join '|')) {
+                    $scanUnstable = $true
+                    $scanFailureDetail = "reason=path_set_changed_during_acquisition; acquired={0}; validated={1}" -f $acquiredPaths.Count, $validatedPaths.Count
+                }
+                else {
+                    foreach ($path in $acquiredPaths) {
+                        if (-not [string]::Equals(
+                                [string]$snapshotGenerationByPath[$path],
+                                [string]$validationGenerationByPath[$path],
+                                [System.StringComparison]::Ordinal)) {
+                            $scanUnstable = $true
+                            $scanFailureDetail = "path={0}; reason=generation_map_changed_during_acquisition" -f $path
+                            break
+                        }
+                    }
+                }
             }
-            $State.Generations[$generationKey] = $generation
-        }
-        elseif (-not [string]::Equals([string]$generation.LastPath, [string]$snapshot.Path, [System.StringComparison]::OrdinalIgnoreCase)) {
-            $State.RotationCount++
-            $generation.LastPath = [string]$snapshot.Path
-        }
-
-        $delta = Read-GuiSmokeLogLedgerFileDelta -Snapshot $snapshot -ByteOffset ([long]$generation.ConsumedByteOffset)
-        if ($null -eq $delta) {
-            $State.GapCount++
-            Set-GuiSmokeLogLedgerFailure `
-                -State $State `
-                -Code 'gui_smoke_log_cursor_gap' `
-                -Detail ("path={0}; generation={1}; reason=generation_changed_during_sync" -f $snapshot.Path, $generationKey)
-            Assert-GuiSmokeLogLedgerHealthy -State $State
-        }
-        if ([bool]$delta.Truncated) {
-            $State.GapCount++
-            Set-GuiSmokeLogLedgerFailure `
-                -State $State `
-                -Code 'gui_smoke_log_cursor_truncated' `
-                -Detail ("path={0}; generation={1}; consumed_bytes={2}; current_bytes={3}; consumed_lines={4}" -f $snapshot.Path, $generationKey, $generation.ConsumedByteOffset, $delta.CurrentLength, $generation.ConsumedLineCount)
-            Assert-GuiSmokeLogLedgerHealthy -State $State
-        }
-
-        foreach ($line in @($delta.Lines)) {
-            if ($State.Lines.Count -ge $State.MaxLines) {
-                Set-GuiSmokeLogLedgerFailure `
-                    -State $State `
-                    -Code 'gui_smoke_log_cursor_overflow' `
-                    -Detail ("max_lines={0}; generations={1}; path={2}" -f $State.MaxLines, $State.Generations.Count, $snapshot.Path)
-                Assert-GuiSmokeLogLedgerHealthy -State $State
+            finally {
+                foreach ($validationSnapshot in @($validationSnapshots.ToArray())) {
+                    try { $validationSnapshot.Stream.Dispose() } catch {}
+                }
             }
 
-            $State.Lines.Add([string]$line) | Out-Null
-        }
+            $candidateSnapshots = @($snapshotByGeneration.Values)
+            $activeSnapshot = @($candidateSnapshots | Where-Object { [bool]$_.IsActivePath } | Select-Object -Last 1)
+            $candidateActiveGenerationKey = if ($activeSnapshot.Count -gt 0) {
+                [string]$activeSnapshot[0].GenerationKey
+            }
+            else {
+                ''
+            }
+            if (-not [string]::IsNullOrWhiteSpace([string]$State.ActiveGenerationKey) -and
+                -not [string]::IsNullOrWhiteSpace($candidateActiveGenerationKey) -and
+                -not [string]::Equals([string]$State.ActiveGenerationKey, $candidateActiveGenerationKey, [System.StringComparison]::Ordinal)) {
+                $previousActiveStillRetained = @($candidateSnapshots | Where-Object {
+                    [string]::Equals([string]$_.GenerationKey, [string]$State.ActiveGenerationKey, [System.StringComparison]::Ordinal)
+                }).Count -gt 0
+                if (-not $previousActiveStillRetained) {
+                    $scanUnstable = $true
+                    $scanFailureDetail = "previous_generation={0}; current_generation={1}; reason=active_predecessor_not_observed" -f $State.ActiveGenerationKey, $candidateActiveGenerationKey
+                }
+            }
 
-        $generation.ConsumedByteOffset = [long]$delta.NextByteOffset
-        $generation.ConsumedLineCount += [long]$delta.CompleteLineCount
+            if ($scanUnstable) {
+                if ($attempt -ge $maxAcquisitionAttempts) {
+                    $State.GapCount++
+                    Set-GuiSmokeLogLedgerFailure `
+                        -State $State `
+                        -Code 'gui_smoke_log_cursor_gap' `
+                        -Detail ("reason=active_generation_missing_after_reconciliation; attempts={0}; {1}" -f $maxAcquisitionAttempts, $scanFailureDetail)
+                    Assert-GuiSmokeLogLedgerHealthy -State $State
+                }
+
+                $State.TransientRescanCount++
+                Start-Sleep -Milliseconds $acquisitionRetryDelayMs
+                continue
+            }
+
+            $acceptedSnapshots = $candidateSnapshots
+            $acceptedHandles = @($openedSnapshots.ToArray())
+            $acceptedActiveGenerationKey = $candidateActiveGenerationKey
+            $openedSnapshots = $null
+            break
+        }
+        finally {
+            if ($null -ne $openedSnapshots) {
+                foreach ($snapshot in @($openedSnapshots.ToArray())) {
+                    try { $snapshot.Stream.Dispose() } catch {}
+                }
+            }
+        }
     }
 
-    $activeSnapshot = @($snapshots | Where-Object {
-        [string]::Equals(
-            [System.IO.Path]::GetFileName([string]$_.Path),
-            'nlink.log',
-            [System.StringComparison]::OrdinalIgnoreCase)
-    } | Select-Object -Last 1)
-    if ($activeSnapshot.Count -gt 0) {
-        $newActiveGenerationKey = [string]$activeSnapshot[0].GenerationKey
-        if (-not [string]::IsNullOrWhiteSpace([string]$State.ActiveGenerationKey) -and
-            -not [string]::Equals([string]$State.ActiveGenerationKey, $newActiveGenerationKey, [System.StringComparison]::Ordinal)) {
-            $previousActiveStillRetained = @($snapshots | Where-Object {
-                [string]::Equals([string]$_.GenerationKey, [string]$State.ActiveGenerationKey, [System.StringComparison]::Ordinal)
-            }).Count -gt 0
-            if (-not $previousActiveStillRetained) {
+    try {
+        $pendingDeltas = New-Object System.Collections.Generic.List[object]
+        $newGenerationCount = 0
+        $newLineCount = 0
+        foreach ($snapshot in @($acceptedSnapshots)) {
+            $generationKey = [string]$snapshot.GenerationKey
+            $generation = $State.Generations[$generationKey]
+            $consumedByteOffset = if ($null -eq $generation) { 0L } else { [long]$generation.ConsumedByteOffset }
+            $delta = Read-GuiSmokeLogLedgerFileDelta -Snapshot $snapshot -ByteOffset $consumedByteOffset
+            if ($null -eq $delta) {
                 $State.GapCount++
                 Set-GuiSmokeLogLedgerFailure `
                     -State $State `
                     -Code 'gui_smoke_log_cursor_gap' `
-                    -Detail ("previous_generation={0}; current_generation={1}; retained_generations={2}" -f $State.ActiveGenerationKey, $newActiveGenerationKey, $snapshots.Count)
+                    -Detail ("path={0}; generation={1}; reason=bound_handle_read_failed" -f $snapshot.Path, $generationKey)
                 Assert-GuiSmokeLogLedgerHealthy -State $State
             }
+            if ([bool]$delta.Truncated) {
+                $State.GapCount++
+                Set-GuiSmokeLogLedgerFailure `
+                    -State $State `
+                    -Code 'gui_smoke_log_cursor_truncated' `
+                    -Detail ("path={0}; generation={1}; consumed_bytes={2}; current_bytes={3}; consumed_lines={4}" -f $snapshot.Path, $generationKey, $consumedByteOffset, $delta.CurrentLength, $(if ($null -eq $generation) { 0 } else { $generation.ConsumedLineCount }))
+                Assert-GuiSmokeLogLedgerHealthy -State $State
+            }
+
+            if ($null -eq $generation) {
+                $newGenerationCount++
+            }
+            $newLineCount += @($delta.Lines).Count
+            $pendingDeltas.Add([pscustomobject]@{
+                Snapshot = $snapshot
+                Generation = $generation
+                GenerationKey = $generationKey
+                Delta = $delta
+            }) | Out-Null
         }
 
-        $State.ActiveGenerationKey = $newActiveGenerationKey
-    }
+        if ($State.Generations.Count + $newGenerationCount -gt $State.MaxGenerations) {
+            Set-GuiSmokeLogLedgerFailure `
+                -State $State `
+                -Code 'gui_smoke_log_cursor_generation_limit' `
+                -Detail ("max_generations={0}; current_generations={1}; pending_generations={2}" -f $State.MaxGenerations, $State.Generations.Count, $newGenerationCount)
+            Assert-GuiSmokeLogLedgerHealthy -State $State
+        }
+        if ($State.Lines.Count + $newLineCount -gt $State.MaxLines) {
+            Set-GuiSmokeLogLedgerFailure `
+                -State $State `
+                -Code 'gui_smoke_log_cursor_overflow' `
+                -Detail ("max_lines={0}; current_lines={1}; pending_lines={2}; generations={3}" -f $State.MaxLines, $State.Lines.Count, $newLineCount, $State.Generations.Count)
+            Assert-GuiSmokeLogLedgerHealthy -State $State
+        }
 
-    Assert-GuiSmokeLogLedgerHealthy -State $State
+        foreach ($pending in @($pendingDeltas.ToArray())) {
+            $snapshot = $pending.Snapshot
+            $generation = $pending.Generation
+            if ($null -eq $generation) {
+                $generation = [pscustomobject]@{
+                    ConsumedByteOffset = 0L
+                    ConsumedLineCount = 0L
+                    LastPath = [string]$snapshot.Path
+                    FirstLineHash = [string]$snapshot.FirstLineHash
+                }
+                $State.Generations[[string]$pending.GenerationKey] = $generation
+            }
+            elseif (-not [string]::Equals([string]$generation.LastPath, [string]$snapshot.Path, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $State.RotationCount++
+                $generation.LastPath = [string]$snapshot.Path
+            }
+
+            foreach ($line in @($pending.Delta.Lines)) {
+                $State.Lines.Add([string]$line) | Out-Null
+            }
+            $generation.ConsumedByteOffset = [long]$pending.Delta.NextByteOffset
+            $generation.ConsumedLineCount += [long]$pending.Delta.CompleteLineCount
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($acceptedActiveGenerationKey)) {
+            $State.ActiveGenerationKey = $acceptedActiveGenerationKey
+        }
+
+        Assert-GuiSmokeLogLedgerHealthy -State $State
+    }
+    finally {
+        foreach ($snapshot in @($acceptedHandles)) {
+            try { $snapshot.Stream.Dispose() } catch {}
+        }
+    }
 }
 
 function Get-GuiSmokeLogLedgerBookmark {
@@ -451,6 +590,7 @@ function Get-GuiSmokeLogLedgerDiagnostics {
         LineCount = [int]$State.Lines.Count
         GenerationCount = [int]$State.Generations.Count
         RotationCount = [int]$State.RotationCount
+        TransientRescanCount = [int]$State.TransientRescanCount
         GapCount = [int]$State.GapCount
         SyncCount = [int]$State.SyncCount
         FailureCode = if ([string]::IsNullOrWhiteSpace([string]$State.FailureCode)) { '(none)' } else { [string]$State.FailureCode }
