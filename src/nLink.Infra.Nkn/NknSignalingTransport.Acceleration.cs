@@ -11430,7 +11430,7 @@ public sealed partial class NknSignalingTransport
         }
     }
 
-    void IRuntimeUnlockRetryDispatchAuthorityBridge.ObserveRuntimeUnlockRetryDispatchDecision(
+    bool IRuntimeUnlockRetryDispatchAuthorityBridge.ObserveRuntimeUnlockRetryDispatchDecision(
         RuntimeUnlockRetryDispatchDecision decision)
     {
         RuntimeUnlockRecoveryRetryState? stateSnapshot = null;
@@ -11447,7 +11447,7 @@ public sealed partial class NknSignalingTransport
             if (state is null || pending is null ||
                 state.ContractState is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed)
             {
-                return;
+                return false;
             }
 
             if (decision.Request.IsDefault || decision.Request != pending.Value)
@@ -11526,7 +11526,7 @@ public sealed partial class NknSignalingTransport
             LocalOperationalLog.Info(
                 "NKN.Tuna",
                 $"event=runtime_unlock_retry_dispatch_stale_decision_ignored; session_id={SanitizeLogToken(stalePending.SessionId)}; transfer_id={SanitizeLogToken(stalePending.TransferId)}; direction={stalePending.Direction.ToString().ToLowerInvariant()}; contract_generation={stalePending.RecoveryContractGeneration}; retired_generation={stalePending.RetiredOfferGeneration}; dispatch_attempt_generation={stalePending.DispatchAttemptGeneration}; decision_status={SanitizeLogToken(decision.Status.ToString())}; decision_reason={SanitizeLogToken(staleDecisionReason)}");
-            return;
+            return false;
         }
 
         if (supersededContract is not null && grantedContract is not null &&
@@ -11551,7 +11551,7 @@ public sealed partial class NknSignalingTransport
             }
             ScheduleRuntimeUnlockRetryDispatchAuthoritySettlementCheck(stateSnapshot);
             ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed("coordinator_retry_dispatch_authority_granted");
-            return;
+            return true;
         }
 
         if (rejected && stateSnapshot is not null)
@@ -11562,7 +11562,7 @@ public sealed partial class NknSignalingTransport
                 decision.Reason,
                 decision.State?.CurrentRoutePublicationToken);
             LogRuntimeUnlockRecoveryContract("session_recovery_contract_failed", stateSnapshot.SessionId);
-            return;
+            return true;
         }
 
         if (decision.Status == RuntimeUnlockRetryDispatchDecisionStatus.Held && stateSnapshot is not null)
@@ -11571,6 +11571,8 @@ public sealed partial class NknSignalingTransport
                 "NKN.Tuna",
                 $"event=runtime_unlock_retry_dispatch_authority_held; session_id={SanitizeLogToken(stateSnapshot.SessionId)}; transfer_id={SanitizeLogToken(stateSnapshot.TransferId ?? "(none)")}; contract_generation={stateSnapshot.ContractGeneration}; retired_generation={stateSnapshot.RetiredOfferGeneration}; dispatch_attempt_generation={stateSnapshot.DispatchAttemptGeneration}; retry_reason={SanitizeLogToken(stateSnapshot.RetryReason)}; recovery_reason={SanitizeLogToken(stateSnapshot.RecoveryReason)}; decision_reason={SanitizeLogToken(decision.Reason)}");
         }
+
+        return stateSnapshot is not null;
     }
 
     private static bool RuntimeUnlockRetryDispatchAuthorityMatchesRequest(

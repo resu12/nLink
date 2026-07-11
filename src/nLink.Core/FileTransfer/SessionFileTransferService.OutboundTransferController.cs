@@ -78,6 +78,10 @@ public sealed partial class SessionFileTransferService
             }
 
             context.CancelLifetime();
+            SettleAndClearRegularV4FrontierRepairContractLocked(
+                context,
+                FileTransferRegularV4FrontierRepairSettlementOutcome.TransferTerminal,
+                "outbound_transfer_terminal");
             SettleAndClearFallbackFrontierRepairContractLocked(
                 context,
                 FallbackFrontierRepairSettlementOutcome.TransferTerminal,
@@ -328,6 +332,10 @@ public sealed partial class SessionFileTransferService
             }
 
             context.CancelLifetime();
+            SettleAndClearRegularV4FrontierRepairContractLocked(
+                context,
+                FileTransferRegularV4FrontierRepairSettlementOutcome.TransferTerminal,
+                "inbound_transfer_terminal");
             SettleAndClearFallbackFrontierRepairContractLocked(
                 context,
                 FallbackFrontierRepairSettlementOutcome.TransferTerminal,

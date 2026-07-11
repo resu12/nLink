@@ -95,6 +95,8 @@ public sealed partial class SessionFileTransferService
         IFileTransferReceiveRecoveryController? controller;
         FileTransferBridgeRecoveryPolicy bridgeRecoveryPolicy;
         var regularV4ReplayArmed = false;
+        OutboundTransferContext? regularV4RepairContext = null;
+        FileTransferRegularV4FrontierRepairAuthority? regularV4RepairAuthority = null;
         lock (gate)
         {
             request = AttachActiveRouteRuntimeForReceiveRecoveryLocked(request);
@@ -144,6 +146,24 @@ public sealed partial class SessionFileTransferService
             controller = transport as IFileTransferReceiveRecoveryController;
             bridgeRecoveryPolicy = ResolveReceiveRecoveryPolicyForRequestLocked(request);
             regularV4ReplayArmed = TryQueueOutboundRegularNknV4ReceiveRecoveryReplayLocked(request);
+            if (request.Direction == FileTransferDirection.Outbound &&
+                outboundTransfer is { } regularV4Outbound &&
+                string.Equals(regularV4Outbound.SessionId, request.SessionId, StringComparison.Ordinal) &&
+                string.Equals(regularV4Outbound.TransferId, request.TransferId, StringComparison.Ordinal))
+            {
+                regularV4RepairContext = regularV4Outbound;
+                regularV4RepairAuthority = GetCurrentRegularV4FrontierRepairAuthority(regularV4Outbound);
+            }
+        }
+
+        if (regularV4RepairContext is { } repairContext &&
+            regularV4RepairAuthority is { } repairAuthority)
+        {
+            ObserveRegularV4FrontierRepairDispatchBlocker(
+                repairContext,
+                repairAuthority,
+                repairAuthority.PendingRepairCount,
+                "regular_v4_receive_recovery_repair_armed");
         }
 
         if (controller is null)

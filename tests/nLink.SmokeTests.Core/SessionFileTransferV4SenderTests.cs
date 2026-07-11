@@ -1284,6 +1284,18 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Equal(100, GetIntProperty(replay, "FirstStartChunkIndex"));
         Assert.Equal("regular_v4_peer_silence_safety_replay", GetStringProperty(replay, "DeliveryEscalationReason"));
 
+        while (transport.RegularV4ControlFeedbackPressures.TryDequeue(out _))
+        {
+        }
+
+        var observeDispatchBlocker = typeof(SessionFileTransferService)
+            .GetMethod("ObserveRegularV4FrontierRepairDispatchBlocker", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        observeDispatchBlocker.Invoke(service, [context, predecessorAuthority, predecessorAuthority.PendingRepairCount, "test_stale_predecessor"]);
+        Assert.Empty(transport.RegularV4ControlFeedbackPressures);
+        observeDispatchBlocker.Invoke(service, [context, successorAuthority, successorAuthority.PendingRepairCount, "test_current_successor"]);
+        var forwardedPressure = Assert.Single(transport.RegularV4ControlFeedbackPressures);
+        Assert.Equal(successorAuthority.AuthorityId, forwardedPressure.RepairAuthority?.AuthorityId);
+
         var secondDequeuedRepair = repairQueue.GetType().GetMethod("Dequeue")!.Invoke(repairQueue, null)!;
         queuedChunkIndices.GetType().GetMethod("Clear")!.Invoke(queuedChunkIndices, null);
 
@@ -1307,9 +1319,15 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Contains("event=filetransfer_regular_v4_frontier_repair_settled_stalled;", log, StringComparison.Ordinal);
         Assert.Contains("reason=peer_silence_requeue_missing_dispatch_settled", log, StringComparison.Ordinal);
         Assert.Equal(1, CountOccurrences(log, "event=filetransfer_regular_v4_frontier_repair_settled_stalled;"));
-        var settlement = Assert.Single(transport.RegularV4FrontierRepairSettlements);
+        var settlements = transport.RegularV4FrontierRepairSettlements.ToArray();
+        Assert.Equal(2, settlements.Length);
+        Assert.Equal(predecessorAuthority.AuthorityId, settlements[0].AuthorityId);
+        Assert.Equal(FileTransferRegularV4FrontierRepairSettlementOutcome.Superseded, settlements[0].Outcome);
+        Assert.Equal("send_timeout_successor_authorized", settlements[0].DecisionReason);
+        var settlement = settlements[1];
         Assert.Equal(FileTransferDirection.Outbound, settlement.Direction);
         Assert.Equal(FileTransferRouteResolver.RegularNknV4FastToken, settlement.RouteToken);
+        Assert.Equal(successorAuthority.AuthorityId, settlement.AuthorityId);
         Assert.Equal(successorAuthority.DecisionGeneration, settlement.DecisionGeneration);
         Assert.Equal(successorAuthority.RepairKey, settlement.RepairKey);
         Assert.Equal(FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled, settlement.Outcome);

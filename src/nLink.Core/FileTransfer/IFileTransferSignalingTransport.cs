@@ -663,7 +663,7 @@ internal interface IRuntimeUnlockRetryDispatchAuthorityBridge
         FileTransferDirection direction,
         out RuntimeUnlockRetryDispatchAuthorityRequest request);
 
-    void ObserveRuntimeUnlockRetryDispatchDecision(RuntimeUnlockRetryDispatchDecision decision);
+    bool ObserveRuntimeUnlockRetryDispatchDecision(RuntimeUnlockRetryDispatchDecision decision);
 }
 
 public interface IFileTransferSessionContextProvider

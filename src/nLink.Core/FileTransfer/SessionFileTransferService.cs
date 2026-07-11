@@ -18024,6 +18024,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         public required FileTransferRegularV4FrontierRepairAuthority Authority { get; init; }
 
         public required FileTransferAuthorityLifecycle<FileTransferRegularV4FrontierRepairSettlementOutcome> Lifecycle { get; init; }
+
+        public DateTimeOffset? DispatchedUtc { get; set; }
     }
 
     private sealed class V4SenderRepairRequestState
