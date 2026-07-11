@@ -6967,7 +6967,8 @@ public sealed partial class NknSignalingTransport
     private void LogRuntimeUnlockRetryDispatchProof(
         string eventName,
         RuntimeUnlockRecoveryRetryState state,
-        string decisionReason)
+        string decisionReason,
+        RoutePublicationToken? coordinatorCurrentPublication = null)
     {
         var contract = state.DispatchContract;
         if (contract is not null)
@@ -6997,8 +6998,19 @@ public sealed partial class NknSignalingTransport
 
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event={SanitizeLogToken(eventName)}; session_id={SanitizeLogToken(state.SessionId)}; transfer_id={SanitizeLogToken(state.TransferId ?? "(none)")}; contract_generation={state.ContractGeneration}; retired_generation={state.RetiredOfferGeneration}; offer_generation={(state.CurrentOfferGeneration > 0 ? state.CurrentOfferGeneration : state.RetiredOfferGeneration)}; route={SanitizeLogToken(route)}; protocol_version={protocolVersion}; live_route_epoch={liveRouteEpoch}; runtime_generation={state.DispatchRuntimeGeneration}; terminal_generation={state.DispatchTerminalGeneration}; leg_generation={state.DispatchLegGeneration}; regular_v4_liveness_generation={state.RegularV4RecoveryLivenessGeneration}; bridge_decision_generation={state.RegularV4RecoveryBridgeDecisionGeneration}; queued_behind_active_negotiation={(state.QueuedBehindActiveNegotiation ? 1 : 0)}; decision_reason={SanitizeLogToken(decisionReason)}");
+            $"event={SanitizeLogToken(eventName)}; session_id={SanitizeLogToken(state.SessionId)}; transfer_id={SanitizeLogToken(state.TransferId ?? "(none)")}; contract_generation={state.ContractGeneration}; retired_generation={state.RetiredOfferGeneration}; offer_generation={(state.CurrentOfferGeneration > 0 ? state.CurrentOfferGeneration : state.RetiredOfferGeneration)}; route={SanitizeLogToken(route)}; protocol_version={protocolVersion}; live_route_epoch={liveRouteEpoch}; runtime_generation={state.DispatchRuntimeGeneration}; terminal_generation={state.DispatchTerminalGeneration}; leg_generation={state.DispatchLegGeneration}; regular_v4_liveness_generation={state.RegularV4RecoveryLivenessGeneration}; bridge_decision_generation={state.RegularV4RecoveryBridgeDecisionGeneration}; queued_behind_active_negotiation={(state.QueuedBehindActiveNegotiation ? 1 : 0)}; decision_reason={SanitizeLogToken(decisionReason)}{FormatRuntimeUnlockRetrySourcePublicationDiagnosticSuffix(state.PendingDispatchAuthorityRequest?.SourcePublicationAuthority ?? state.SourcePublicationAuthority, FileTransferCoordinator.CreateRoutePublicationAuthority(coordinatorCurrentPublication))}");
 
+    }
+
+    private static string FormatRuntimeUnlockRetrySourcePublicationDiagnosticSuffix(
+        FileTransferRoutePublicationAuthority? attempted,
+        FileTransferRoutePublicationAuthority? current)
+    {
+        static string Tuple(string prefix, FileTransferRoutePublicationAuthority? authority)
+            => $"; {prefix}_session_id={SanitizeLogToken(authority?.SessionId ?? "(none)")}; {prefix}_transfer_id={SanitizeLogToken(authority?.TransferId ?? "(none)")}; {prefix}_direction={FormatFileTransferDirection(authority?.Direction)}; {prefix}_route={SanitizeLogToken(authority?.RouteToken ?? "(none)")}; {prefix}_protocol_version={authority?.ProtocolVersion ?? 0}; {prefix}_live_route_epoch={authority?.LiveRouteEpoch ?? 0}; {prefix}_runtime_generation={authority?.RuntimeGeneration ?? 0}; {prefix}_terminal_generation={authority?.TerminalGeneration ?? 0}; {prefix}_leg_generation={authority?.LegGeneration ?? 0}; {prefix}_route_publication_generation={authority?.RoutePublicationGeneration ?? 0}; {prefix}_route_commit_generation={authority?.RouteCommitGeneration ?? 0}; {prefix}_target_route={SanitizeLogToken(authority?.TargetRouteToken ?? "(none)")}; {prefix}_target_protocol_version={authority?.TargetProtocolVersion ?? 0}; {prefix}_target_transport={FormatFileTransferTransportKindForLog(authority?.TargetTransport ?? FileTransferTransportKind.Unknown)}; {prefix}_route_publication_action_kind={SanitizeLogToken(authority?.RoutePublicationActionKind ?? "(none)")}";
+
+        return Tuple("attempted_source_publication", attempted) +
+               Tuple("current_source_publication", current);
     }
 
     private void ScheduleRuntimeUnlockRetryDispatchAuthoritySettlementCheck(
@@ -11547,7 +11559,8 @@ public sealed partial class NknSignalingTransport
             LogRuntimeUnlockRetryDispatchProof(
                 "runtime_unlock_retry_dispatch_authority_rejected",
                 stateSnapshot,
-                decision.Reason);
+                decision.Reason,
+                decision.State?.CurrentRoutePublicationToken);
             LogRuntimeUnlockRecoveryContract("session_recovery_contract_failed", stateSnapshot.SessionId);
             return;
         }

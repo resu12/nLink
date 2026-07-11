@@ -16,7 +16,7 @@ using NLink.Core.SessionSecurity;
 namespace NLink.Infra.DevLocal;
 
 // DEV ONLY: local machine named-pipe transport for testing two app instances without real networking.
-public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IFileTransferSignalingTransport, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider
+public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IFileTransferSignalingTransport, IFileTransferSessionContextProvider, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider
 {
     private const string HelpRequestFrameType = "help_request";
     private const string HelpRequestDecisionFrameType = "help_request_decision";
@@ -169,6 +169,8 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     public bool LocalSupportsRemoteControl => LocalRemoteControlSupported;
     public string LocalPeerAddress => localPeerAddress;
     public SessionSecurityState CurrentSessionSecurityState => currentSessionSecurityState;
+
+    public string? CurrentFileTransferSessionId => currentSessionSecurityState.SessionId?.Value;
     public bool RemoteSupportsRemoteControl => remoteSupportsRemoteControl;
     public bool SessionSupportsRemoteControl => LocalSupportsRemoteControl && RemoteSupportsRemoteControl;
     public bool LocalSupportsScreenShareCursorOverlay => LocalScreenShareCursorOverlaySupported;

@@ -3131,6 +3131,7 @@ public sealed partial class SessionFileTransferService
         var senderLocalAvailabilityUntilExclusive = ResolveOutboundSenderLocalAvailabilityUntilExclusiveLocked(context);
         var epoch = new V6TransportEpoch
         {
+            RoutePublicationToken = context.CurrentRoutePublicationToken,
             EpochId = epochId,
             Kind = NormalizeV6TransportHandoffKind(handoffKind),
             SourceTransport = ResolveV6EpochSourceTransport(handoffKind, targetTransport),
@@ -3209,6 +3210,7 @@ public sealed partial class SessionFileTransferService
         var epochId = Math.Max(context.LastRecoveredV6TransportEpoch + 1, Math.Max(1, context.PullTransportRebindGeneration));
         var epoch = new V6TransportEpoch
         {
+            RoutePublicationToken = context.CurrentRoutePublicationToken,
             EpochId = epochId,
             Kind = NormalizeV6TransportHandoffKind(handoffKind),
             SourceTransport = ResolveV6EpochSourceTransport(handoffKind, targetTransport),
@@ -3908,6 +3910,7 @@ public sealed partial class SessionFileTransferService
         var senderLocalAvailabilityUntilExclusive = ResolveOutboundSenderLocalAvailabilityUntilExclusiveLocked(context);
         var epoch = new V6TransportEpoch
         {
+            RoutePublicationToken = context.CurrentRoutePublicationToken,
             EpochId = message.TransportEpoch,
             Kind = kind,
             SourceTransport = ParseFileTransferTransportKind(message.SourceTransport),
@@ -4056,6 +4059,7 @@ public sealed partial class SessionFileTransferService
 
         var epoch = new V6TransportEpoch
         {
+            RoutePublicationToken = context.CurrentRoutePublicationToken,
             EpochId = message.TransportEpoch,
             Kind = kind,
             SourceTransport = ParseFileTransferTransportKind(message.SourceTransport),
@@ -4964,7 +4968,8 @@ public sealed partial class SessionFileTransferService
             TryPublishLiveRouteEpochRecoveredIfAuthorizedLocked(
                 context,
                 "transport_epoch_live_route_epoch_recovered",
-                reason);
+                reason,
+                routePublicationToken: epoch.RoutePublicationToken);
         }
         else if (epoch.Kind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
                  epoch.TargetTransport == FileTransferTransportKind.Tuna)
@@ -5080,7 +5085,8 @@ public sealed partial class SessionFileTransferService
             TryPublishLiveRouteEpochRecoveredIfAuthorizedLocked(
                 context,
                 "transport_epoch_live_route_epoch_recovered",
-                reason);
+                reason,
+                routePublicationToken: epoch.RoutePublicationToken);
         }
         else if (epoch.Kind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
                  epoch.TargetTransport == FileTransferTransportKind.Tuna)

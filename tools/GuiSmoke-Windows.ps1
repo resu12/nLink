@@ -2853,6 +2853,9 @@ function Get-TunaGuiExplicitFailureClassification {
             'terminal_fallback_prefix_missing' {
                 return [pscustomobject]@{ Phase = 'live_route_proof'; Reason = $failureClass }
             }
+            'runtime_unlock_retry_source_publication_mismatch' {
+                return [pscustomobject]@{ Phase = 'runtime_unlock_retry'; Reason = $failureClass }
+            }
         }
     }
 
@@ -3163,6 +3166,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     $runtimeUnlockRetryReleasedAfterRegularV4Recovery = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_retry_released_after_regular_v4_receive_recovery')
     $runtimeUnlockRetryRejectedAfterRegularV4Recovery = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_retry_rejected_after_regular_v4_receive_recovery')
     $runtimeUnlockRetryDispatchMissingAfterAuthorityGranted = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_retry_dispatch_missing_after_authority_granted')
+    $runtimeUnlockRetrySourcePublicationMismatch = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=runtime_unlock_retry_dispatch_authority_rejected', 'decision_reason=retry_dispatch_source_publication_mismatch')
     $runtimeUnlockFileTransferOwnerMissingBeforePathLease =
         Test-TunaGuiRuntimeUnlockFileTransferOwnerRejectionUnresolved `
             -Lines $evidenceLines `
@@ -3282,6 +3286,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $runtimeUnlockRetryReleasedAfterRegularV4Recovery -or
         $runtimeUnlockRetryRejectedAfterRegularV4Recovery -or
         $runtimeUnlockRetryDispatchMissingAfterAuthorityGranted -or
+        $runtimeUnlockRetrySourcePublicationMismatch -or
         $runtimeUnlockFileTransferOwnerMissingBeforePathLease -or
         $runtimeUnlockFileTransferOwnerStaleBeforeOfferDispatch -or
         $runtimeUnlockRetryRecoverySettlementMissingMarker -or
@@ -3337,6 +3342,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     elseif ($runtimeUnlockFileTransferOwnerStaleBeforeOfferDispatch) {
         $phase = 'runtime_unlock_owner'
         $reason = 'runtime_unlock_filetransfer_owner_stale_before_offer_dispatch'
+    }
+    elseif ($runtimeUnlockRetrySourcePublicationMismatch) {
+        $phase = 'runtime_unlock_retry'
+        $reason = 'runtime_unlock_retry_source_publication_mismatch'
     }
     elseif ($ErrorMessage.IndexOf('second_transfer_preactivation_readiness_missing', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $ErrorMessage.IndexOf('second_transfer_tuna_readiness_unstable', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
@@ -3554,6 +3563,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         ActivationOfferWaitingAnswer = [bool]$activationOfferWaitingAnswer
         RuntimeUnlockDispatchDeferredForRegularV4ReceiveRecovery = [bool]$runtimeUnlockDispatchDeferredForRegularV4ReceiveRecovery
         RuntimeUnlockRetryRegularV4RecoverySettlementMissing = [bool]$runtimeUnlockRetryRegularV4RecoverySettlementMissing
+        RuntimeUnlockRetrySourcePublicationMismatch = [bool]$runtimeUnlockRetrySourcePublicationMismatch
         BridgeBootstrapNotReady = [bool]$bridgeBootstrapNotReady
         ActivationOfferSent = [bool]$activationOfferSent
         ActivationOfferReceived = [bool]$activationOfferReceived

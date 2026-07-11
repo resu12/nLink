@@ -660,7 +660,7 @@ public sealed class FileTransferSoakRunnerTests : CoreSmokeTestsBase
         Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
         Assert.True(
             summary.Values.Any(static value => value.Contains("v4_file_only_required", StringComparison.Ordinal)),
-            "Expected the soak summary to include v4_file_only_required.");
+            $"Expected the soak summary to include v4_file_only_required. Summary: {string.Join("; ", summary.Select(static pair => $"{pair.Key}={pair.Value}"))}");
 
         var logSlice = await File.ReadAllTextAsync(Path.Combine(artifactDir, "filetransfer-retained-log-slice.log"), Encoding.UTF8);
     }

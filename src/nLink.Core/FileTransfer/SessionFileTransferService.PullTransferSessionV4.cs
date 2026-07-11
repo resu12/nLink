@@ -421,6 +421,18 @@ public sealed partial class SessionFileTransferService
     {
         IFileTransferDataSession? dataSession = null;
         RuntimeOwnerToken? senderRuntimeOwner = null;
+        RoutePublicationToken? runtimePublicationToken;
+        lock (gate)
+        {
+            if (!ReferenceEquals(outboundTransfer, context) ||
+                context.IsTerminal)
+            {
+                return;
+            }
+
+            runtimePublicationToken = context.CurrentRoutePublicationToken;
+        }
+
         var isPrimaryRegularNknBulkV6 = IsPrimaryRegularNknBulkV6Runtime(runtimeKind);
         var useV6Envelope = context.NegotiatedDataProtocolVersion >= FileTransferProtocol.ProtocolVersionV6;
         if (isPrimaryRegularNknBulkV6)
@@ -449,6 +461,20 @@ public sealed partial class SessionFileTransferService
             lock (gate)
             {
                 if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
+                {
+                    dataSession.Dispose();
+                    return;
+                }
+
+                if (runtimePublicationToken is { IsDefault: false } capturedPublication &&
+                    !TryValidateRoutePublicationForEmissionLocked(
+                        context,
+                        "v4_sender_start",
+                        "runtime_start_data_session_opened",
+                        routeCommitToken: null,
+                        requestedToken: capturedPublication,
+                        out _,
+                        out _))
                 {
                     dataSession.Dispose();
                     return;
@@ -496,11 +522,15 @@ public sealed partial class SessionFileTransferService
             {
                 if (ReferenceEquals(outboundTransfer, context) && !context.IsTerminal)
                 {
-                    TryPublishRuntimeStartedIfAuthorizedLocked(
-                        context,
-                        "sender",
-                        "v4_sender_start",
-                        "runtime_started");
+                    if (runtimePublicationToken is { IsDefault: false } publication)
+                    {
+                        TryPublishRuntimeStartedIfAuthorizedLocked(
+                            context,
+                            "sender",
+                            "v4_sender_start",
+                            "runtime_started",
+                            routePublicationToken: publication);
+                    }
                 }
             }
 
@@ -11847,7 +11877,8 @@ public sealed partial class SessionFileTransferService
                     context,
                     "receiver",
                     "v4_receiver_start",
-                    "runtime_started");
+                    "runtime_started",
+                    routePublicationToken: context.CurrentRoutePublicationToken);
             }
         }
 

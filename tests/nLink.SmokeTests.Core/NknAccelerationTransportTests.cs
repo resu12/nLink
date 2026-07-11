@@ -11518,6 +11518,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
         Assert.Contains("v4_repair_settled_stalled", source, StringComparison.Ordinal);
         Assert.Contains("runtime_unlock_regular_v4_receive_recovery_blocker_ignored", source, StringComparison.Ordinal);
         Assert.Contains("regular_v4_recovery_liveness_completed", source, StringComparison.Ordinal);
+        Assert.Contains("Tuple(\"attempted_source_publication\", attempted)", source, StringComparison.Ordinal);
+        Assert.Contains("Tuple(\"current_source_publication\", current)", source, StringComparison.Ordinal);
+        Assert.Contains("{prefix}_route_publication_generation=", source, StringComparison.Ordinal);
+        Assert.Contains("decision.State?.CurrentRoutePublicationToken", source, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -26425,7 +26429,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
         }
     }
 
-    [Fact]
+    [Fact(Skip = "Obsolete after coordinator-issued retry dispatch; a cached Infra settlement cannot fail or release the recovery contract without a coordinator decision.")]
     [Trait("Category", "Smoke")]
     public async Task RuntimeUnlockCutThroughPendingConsumesCachedRegularV4SettlementAfterBindingRecoveryContract()
     {
@@ -26574,7 +26578,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
         }
     }
 
-    [Fact]
+    [Fact(Skip = "Obsolete after coordinator-issued retry dispatch; an accepted Infra settlement remains held until Core returns a coordinator decision.")]
     [Trait("Category", "Smoke")]
     public async Task RuntimeUnlockCutThroughPendingAcceptedRegularV4SettlementFailsHeldRecoveryContract()
     {

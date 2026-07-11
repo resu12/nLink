@@ -1151,6 +1151,11 @@ public sealed partial class SessionFileTransferService : IDisposable
                 OfferedDataProtocolVersion = routeSelection.ProtocolVersion,
                 NegotiatedDataProtocolVersion = routeSelection.ProtocolVersion,
             };
+            context.RoutePublicationAuthorityForwarder =
+                (token, publicationReason) => ForwardCoordinatorIssuedRoutePublicationAuthorityLocked(
+                    context,
+                    token,
+                    publicationReason);
             ApplyFileTransferRuntimeProfileSelectionLocked(
                 context,
                 FileTransferRuntimeProfileSelection.FromRouteSelection(routeSelection));
@@ -1175,13 +1180,15 @@ public sealed partial class SessionFileTransferService : IDisposable
                     context,
                     routeInput,
                     "new_transfer",
-                    "new_transfer"))
+                    "new_transfer",
+                    out var routePublicationToken))
                 {
                     TryPublishRouteHintIfAuthorizedLocked(
                         context,
                         "new_transfer_route_hint",
                         "new_transfer",
-                        "service_initial_route_publication");
+                        "service_initial_route_publication",
+                        routePublicationToken: routePublicationToken);
                 }
             }
         }
@@ -2103,7 +2110,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                     await FailOutboundV4Async(
                         context,
                         dataSession: null,
-                        runtimeOwner: null,
+                        runtimeOwner: context.CurrentRuntimeOwner,
                         V4FileOnlyRequiredErrorCode,
                         "V4 file-transfer send is currently file-only.",
                         notifyPeer: false).ConfigureAwait(false);
@@ -2123,7 +2130,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                     await FailOutboundV4Async(
                         context,
                         dataSession: null,
-                        runtimeOwner: null,
+                        runtimeOwner: context.CurrentRuntimeOwner,
                         V4FileOnlyRequiredErrorCode,
                         "V6 file-transfer send is currently file-only.",
                         notifyPeer: false).ConfigureAwait(false);
@@ -2150,7 +2157,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                     await FailOutboundV4Async(
                         context,
                         dataSession: null,
-                        runtimeOwner: null,
+                        runtimeOwner: context.CurrentRuntimeOwner,
                         V4FileOnlyRequiredErrorCode,
                         "V6 file-transfer send is currently file-only.",
                         notifyPeer: false).ConfigureAwait(false);
@@ -2564,6 +2571,11 @@ public sealed partial class SessionFileTransferService : IDisposable
         FileTransferTransferState duplicateState = default;
         SessionFileTransferSnapshot? snapshotToRaise = null;
         var incoming = new InboundTransferContext(message, routeSelection);
+        incoming.RoutePublicationAuthorityForwarder =
+            (token, publicationReason) => ForwardCoordinatorIssuedRoutePublicationAuthorityLocked(
+                incoming,
+                token,
+                publicationReason);
         ApplyFileTransferRuntimeProfileSelectionLocked(
             incoming,
             FileTransferRuntimeProfileSelection.FromRouteSelection(routeSelection));
@@ -2618,13 +2630,15 @@ public sealed partial class SessionFileTransferService : IDisposable
                         incoming,
                         routeInput,
                         "offer_received",
-                        "offer_received"))
+                        "offer_received",
+                        out var routePublicationToken))
                     {
                         TryPublishRouteHintIfAuthorizedLocked(
                             incoming,
                             "offer_received_route_hint",
                             "offer_received",
-                            "service_initial_route_publication");
+                            "service_initial_route_publication",
+                            routePublicationToken: routePublicationToken);
                     }
                 }
             }
@@ -5185,6 +5199,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         OutboundTransferContext context,
         FileTransferCoordinatorDecision decision)
     {
+        var previousRoutePublicationToken = context.CurrentRoutePublicationToken;
         context.CurrentRuntimeUnlockRetryDispatchContract =
             ReconcileRuntimeUnlockRetryDispatchContract(
                 context.CurrentRuntimeUnlockRetryDispatchContract,
@@ -5232,12 +5247,18 @@ public sealed partial class SessionFileTransferService : IDisposable
         var legHistory = decision.State.LegHistory.ToList();
         context.TransferLegHistory.Clear();
         context.TransferLegHistory.AddRange(legHistory);
+        if (context.CurrentRoutePublicationToken is { IsDefault: false } currentToken &&
+            previousRoutePublicationToken?.PublicationGeneration != currentToken.PublicationGeneration)
+        {
+            context.RoutePublicationAuthorityForwarder?.Invoke(currentToken, decision.Reason);
+        }
     }
 
     private static void ApplyCoordinatorDecisionToContextLocked(
         InboundTransferContext context,
         FileTransferCoordinatorDecision decision)
     {
+        var previousRoutePublicationToken = context.CurrentRoutePublicationToken;
         context.CurrentRuntimeUnlockRetryDispatchContract =
             ReconcileRuntimeUnlockRetryDispatchContract(
                 context.CurrentRuntimeUnlockRetryDispatchContract,
@@ -5285,6 +5306,61 @@ public sealed partial class SessionFileTransferService : IDisposable
         var legHistory = decision.State.LegHistory.ToList();
         context.TransferLegHistory.Clear();
         context.TransferLegHistory.AddRange(legHistory);
+        if (context.CurrentRoutePublicationToken is { IsDefault: false } currentToken &&
+            previousRoutePublicationToken?.PublicationGeneration != currentToken.PublicationGeneration)
+        {
+            context.RoutePublicationAuthorityForwarder?.Invoke(currentToken, decision.Reason);
+        }
+    }
+
+    private void ForwardCoordinatorIssuedRoutePublicationAuthorityLocked(
+        OutboundTransferContext context,
+        RoutePublicationToken currentToken,
+        string reason)
+    {
+        if (context.V6TransportEpoch is { } epoch)
+        {
+            epoch.RoutePublicationToken ??= currentToken;
+        }
+        if (context.CurrentLiveRouteEpoch is { } liveRouteEpoch)
+        {
+            liveRouteEpoch.RoutePublicationToken ??= currentToken;
+        }
+
+        TryPublishRouteHintIfAuthorizedLocked(
+            context,
+            "coordinator_route_publication_successor",
+            reason,
+            "coordinator_route_publication_successor",
+            routeCommitToken: currentToken.ActionKind == FileTransferCoordinatorActionKind.RouteCommitPublication
+                ? context.RuntimeUnlockRouteCommitToken
+                : null,
+            routePublicationToken: currentToken);
+    }
+
+    private void ForwardCoordinatorIssuedRoutePublicationAuthorityLocked(
+        InboundTransferContext context,
+        RoutePublicationToken currentToken,
+        string reason)
+    {
+        if (context.V6TransportEpoch is { } epoch)
+        {
+            epoch.RoutePublicationToken ??= currentToken;
+        }
+        if (context.CurrentLiveRouteEpoch is { } liveRouteEpoch)
+        {
+            liveRouteEpoch.RoutePublicationToken ??= currentToken;
+        }
+
+        TryPublishRouteHintIfAuthorizedLocked(
+            context,
+            "coordinator_route_publication_successor",
+            reason,
+            "coordinator_route_publication_successor",
+            routeCommitToken: currentToken.ActionKind == FileTransferCoordinatorActionKind.RouteCommitPublication
+                ? context.RuntimeUnlockRouteCommitToken
+                : null,
+            routePublicationToken: currentToken);
     }
 
     private static void ApplyCoordinatorActionDecisionToContextLocked(
@@ -5784,7 +5860,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 context.CurrentLiveRouteEpoch,
                 context.CurrentTransferLeg,
                 routeCommitToken,
-                decision);
+                decision.State);
             return false;
         }
 
@@ -5834,7 +5910,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 context.CurrentLiveRouteEpoch,
                 context.CurrentTransferLeg,
                 routeCommitToken,
-                decision);
+                decision.State);
             return false;
         }
 
@@ -5890,17 +5966,211 @@ public sealed partial class SessionFileTransferService : IDisposable
         return FileTransferCoordinator.AuthorizeAction(state, request);
     }
 
+    private static bool TryValidateRoutePublicationForEmission(
+        FileTransferCoordinatorState state,
+        RouteCommitToken? routeCommitToken,
+        RoutePublicationToken? requestedToken,
+        out RoutePublicationToken? candidate,
+        out RoutePublicationToken routePublicationToken,
+        out FileTransferCoordinatorActionKind actionKind,
+        out string rejectionReason)
+    {
+        candidate = requestedToken;
+        actionKind = routeCommitToken is not null
+            ? FileTransferCoordinatorActionKind.RouteCommitPublication
+            : candidate?.ActionKind ?? FileTransferCoordinatorActionKind.RoutePublication;
+        rejectionReason = "accepted";
+        if (candidate is not { IsDefault: false } token)
+        {
+            rejectionReason = "route_publication_token_missing";
+        }
+        else if (!FileTransferCoordinator.IsRoutePublicationTokenCurrent(state, token, out rejectionReason))
+        {
+            rejectionReason = string.IsNullOrWhiteSpace(rejectionReason)
+                ? "route_publication_token_stale"
+                : rejectionReason;
+        }
+        else if (token.ActionKind is not FileTransferCoordinatorActionKind.RoutePublication and
+                 not FileTransferCoordinatorActionKind.RouteCommitPublication)
+        {
+            rejectionReason = "route_publication_action_kind_mismatch";
+        }
+        else if (routeCommitToken is { } commitToken &&
+                 !FileTransferCoordinator.IsRouteCommitTokenCurrent(state, commitToken, out rejectionReason))
+        {
+            rejectionReason = string.IsNullOrWhiteSpace(rejectionReason)
+                ? "route_commit_token_stale"
+                : rejectionReason;
+        }
+        else if (routeCommitToken is { } boundCommitToken &&
+                 (token.ActionKind != FileTransferCoordinatorActionKind.RouteCommitPublication ||
+                  token.RouteCommitGeneration != boundCommitToken.CommitGeneration))
+        {
+            rejectionReason = "route_commit_generation_mismatch";
+        }
+        else
+        {
+            routePublicationToken = token;
+            rejectionReason = "accepted";
+            return true;
+        }
+
+        routePublicationToken = default;
+        return false;
+    }
+
+    private static bool TryValidateRoutePublicationForEmissionLocked(
+        OutboundTransferContext context,
+        string source,
+        string reason,
+        RouteCommitToken? routeCommitToken,
+        RoutePublicationToken? requestedToken,
+        out RoutePublicationToken routePublicationToken,
+        out string rejectionReason)
+    {
+        var state = CreateCoordinatorStateLocked(context);
+        if (TryValidateRoutePublicationForEmission(
+                state,
+                routeCommitToken,
+                requestedToken,
+                out var candidate,
+                out routePublicationToken,
+                out var actionKind,
+                out rejectionReason))
+        {
+            return true;
+        }
+
+        LogFileTransferRoutePublicationRejected(
+            FileTransferDirection.Outbound,
+            context.TransferId,
+            context.SessionId,
+            actionKind,
+            source,
+            reason,
+            rejectionReason,
+            context.CurrentRuntimeOwner,
+            candidate?.RuntimeOwner ?? routeCommitToken?.RuntimeOwner ?? context.CurrentRuntimeOwner,
+            context.RouteSelection,
+            context.CurrentLiveRouteEpoch,
+            context.CurrentTransferLeg,
+            routeCommitToken,
+            state);
+        return false;
+    }
+
+    private static bool TryValidateRoutePublicationForEmissionLocked(
+        InboundTransferContext context,
+        string source,
+        string reason,
+        RouteCommitToken? routeCommitToken,
+        RoutePublicationToken? requestedToken,
+        out RoutePublicationToken routePublicationToken,
+        out string rejectionReason)
+    {
+        var state = CreateCoordinatorStateLocked(context);
+        if (TryValidateRoutePublicationForEmission(
+                state,
+                routeCommitToken,
+                requestedToken,
+                out var candidate,
+                out routePublicationToken,
+                out var actionKind,
+                out rejectionReason))
+        {
+            return true;
+        }
+
+        LogFileTransferRoutePublicationRejected(
+            FileTransferDirection.Inbound,
+            context.TransferId,
+            context.SessionId,
+            actionKind,
+            source,
+            reason,
+            rejectionReason,
+            context.CurrentRuntimeOwner,
+            candidate?.RuntimeOwner ?? routeCommitToken?.RuntimeOwner ?? context.CurrentRuntimeOwner,
+            context.RouteSelection,
+            context.CurrentLiveRouteEpoch,
+            context.CurrentTransferLeg,
+            routeCommitToken,
+            state);
+        return false;
+    }
+
     private bool TryPublishRouteSelectedIfAuthorizedLocked(
         OutboundTransferContext context,
         FileTransferRouteResolverInput routeInput,
         string source,
         string reason,
+        out RoutePublicationToken routePublicationToken,
         RouteCommitToken? routeCommitToken = null)
     {
         var actionKind = routeCommitToken is null
             ? FileTransferCoordinatorActionKind.RoutePublication
             : FileTransferCoordinatorActionKind.RouteCommitPublication;
-        if (!TryAuthorizeRoutePublicationLocked(context, actionKind, source, reason, routeCommitToken, out var token, out var rejectionReason))
+        if (!TryAuthorizeRoutePublicationLocked(context, actionKind, source, reason, routeCommitToken, out routePublicationToken, out var rejectionReason))
+        {
+            return false;
+        }
+
+        LogFileTransferRouteSelected(
+            FileTransferDirection.Outbound,
+            context.TransferId,
+            context.SessionId,
+            context.RouteSelection,
+            routeInput,
+            context.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            routePublicationToken,
+            rejectionReason);
+        return true;
+    }
+
+    private bool TryPublishRouteSelectedIfAuthorizedLocked(
+        InboundTransferContext context,
+        FileTransferRouteResolverInput routeInput,
+        string source,
+        string reason,
+        out RoutePublicationToken routePublicationToken,
+        RouteCommitToken? routeCommitToken = null)
+    {
+        var actionKind = routeCommitToken is null
+            ? FileTransferCoordinatorActionKind.RoutePublication
+            : FileTransferCoordinatorActionKind.RouteCommitPublication;
+        if (!TryAuthorizeRoutePublicationLocked(context, actionKind, source, reason, routeCommitToken, out routePublicationToken, out var rejectionReason))
+        {
+            return false;
+        }
+
+        LogFileTransferRouteSelected(
+            FileTransferDirection.Inbound,
+            context.TransferId,
+            context.SessionId,
+            context.RouteSelection,
+            routeInput,
+            context.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            routePublicationToken,
+            rejectionReason);
+        return true;
+    }
+
+    private bool TryPublishRouteSelectedIfAuthorizedLocked(
+        OutboundTransferContext context,
+        FileTransferRouteResolverInput routeInput,
+        string source,
+        string reason,
+        RoutePublicationToken routePublicationToken,
+        RouteCommitToken? routeCommitToken = null)
+    {
+        if (!TryValidateRoutePublicationForEmissionLocked(
+                context,
+                source,
+                reason,
+                routeCommitToken,
+                routePublicationToken,
+                out var token,
+                out var rejectionReason))
         {
             return false;
         }
@@ -5922,12 +6192,17 @@ public sealed partial class SessionFileTransferService : IDisposable
         FileTransferRouteResolverInput routeInput,
         string source,
         string reason,
+        RoutePublicationToken routePublicationToken,
         RouteCommitToken? routeCommitToken = null)
     {
-        var actionKind = routeCommitToken is null
-            ? FileTransferCoordinatorActionKind.RoutePublication
-            : FileTransferCoordinatorActionKind.RouteCommitPublication;
-        if (!TryAuthorizeRoutePublicationLocked(context, actionKind, source, reason, routeCommitToken, out var token, out var rejectionReason))
+        if (!TryValidateRoutePublicationForEmissionLocked(
+                context,
+                source,
+                reason,
+                routeCommitToken,
+                routePublicationToken,
+                out var token,
+                out var rejectionReason))
         {
             return false;
         }
@@ -5951,12 +6226,17 @@ public sealed partial class SessionFileTransferService : IDisposable
         string observerSource,
         RuntimeUnlockAdmissionDecision? runtimeUnlockAdmission = null,
         Func<RuntimeUnlockAdmissionDecision>? runtimeUnlockAdmissionFactory = null,
-        RouteCommitToken? routeCommitToken = null)
+        RouteCommitToken? routeCommitToken = null,
+        RoutePublicationToken? routePublicationToken = null)
     {
-        var actionKind = routeCommitToken is null
-            ? FileTransferCoordinatorActionKind.RoutePublication
-            : FileTransferCoordinatorActionKind.RouteCommitPublication;
-        if (!TryAuthorizeRoutePublicationLocked(context, actionKind, source, reason, routeCommitToken, out var token, out var rejectionReason))
+        if (!TryValidateRoutePublicationForEmissionLocked(
+                context,
+                source,
+                reason,
+                routeCommitToken,
+                routePublicationToken,
+                out var token,
+                out var rejectionReason))
         {
             return false;
         }
@@ -5983,12 +6263,17 @@ public sealed partial class SessionFileTransferService : IDisposable
         string observerSource,
         RuntimeUnlockAdmissionDecision? runtimeUnlockAdmission = null,
         Func<RuntimeUnlockAdmissionDecision>? runtimeUnlockAdmissionFactory = null,
-        RouteCommitToken? routeCommitToken = null)
+        RouteCommitToken? routeCommitToken = null,
+        RoutePublicationToken? routePublicationToken = null)
     {
-        var actionKind = routeCommitToken is null
-            ? FileTransferCoordinatorActionKind.RoutePublication
-            : FileTransferCoordinatorActionKind.RouteCommitPublication;
-        if (!TryAuthorizeRoutePublicationLocked(context, actionKind, source, reason, routeCommitToken, out var token, out var rejectionReason))
+        if (!TryValidateRoutePublicationForEmissionLocked(
+                context,
+                source,
+                reason,
+                routeCommitToken,
+                routePublicationToken,
+                out var token,
+                out var rejectionReason))
         {
             return false;
         }
@@ -6013,14 +6298,24 @@ public sealed partial class SessionFileTransferService : IDisposable
         FileTransferRouteSelection previousRouteSelection,
         string source,
         string reason,
+        out RoutePublicationToken routePublicationToken,
         RouteCommitToken? routeCommitToken = null)
     {
         var actionKind = routeCommitToken is null
             ? FileTransferCoordinatorActionKind.RoutePublication
             : FileTransferCoordinatorActionKind.RouteCommitPublication;
-        if (!TryAuthorizeRoutePublicationLocked(context, actionKind, source, reason, routeCommitToken, out var token, out var rejectionReason))
+        if (!TryAuthorizeRoutePublicationLocked(context, actionKind, source, reason, routeCommitToken, out routePublicationToken, out var rejectionReason))
         {
             return false;
+        }
+
+        if (context.V6TransportEpoch is { } epoch)
+        {
+            epoch.RoutePublicationToken ??= routePublicationToken;
+        }
+        if (context.CurrentLiveRouteEpoch is { } liveRouteEpoch)
+        {
+            liveRouteEpoch.RoutePublicationToken ??= routePublicationToken;
         }
 
         LogFileTransferRouteTransitioned(
@@ -6030,7 +6325,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             previousRouteSelection,
             context.RouteSelection,
             reason,
-            token,
+            routePublicationToken,
             rejectionReason);
         return true;
     }
@@ -6040,14 +6335,24 @@ public sealed partial class SessionFileTransferService : IDisposable
         FileTransferRouteSelection previousRouteSelection,
         string source,
         string reason,
+        out RoutePublicationToken routePublicationToken,
         RouteCommitToken? routeCommitToken = null)
     {
         var actionKind = routeCommitToken is null
             ? FileTransferCoordinatorActionKind.RoutePublication
             : FileTransferCoordinatorActionKind.RouteCommitPublication;
-        if (!TryAuthorizeRoutePublicationLocked(context, actionKind, source, reason, routeCommitToken, out var token, out var rejectionReason))
+        if (!TryAuthorizeRoutePublicationLocked(context, actionKind, source, reason, routeCommitToken, out routePublicationToken, out var rejectionReason))
         {
             return false;
+        }
+
+        if (context.V6TransportEpoch is { } epoch)
+        {
+            epoch.RoutePublicationToken ??= routePublicationToken;
+        }
+        if (context.CurrentLiveRouteEpoch is { } liveRouteEpoch)
+        {
+            liveRouteEpoch.RoutePublicationToken ??= routePublicationToken;
         }
 
         LogFileTransferRouteTransitioned(
@@ -6057,7 +6362,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             previousRouteSelection,
             context.RouteSelection,
             reason,
-            token,
+            routePublicationToken,
             rejectionReason);
         return true;
     }
@@ -6067,13 +6372,18 @@ public sealed partial class SessionFileTransferService : IDisposable
         FileTransferRouteSelection previousRouteSelection,
         string source,
         string reason,
-        RouteCommitToken? routeCommitToken = null)
+        RouteCommitToken? routeCommitToken = null,
+        RoutePublicationToken? routePublicationToken = null)
     {
-        var actionKind = routeCommitToken is null
-            ? FileTransferCoordinatorActionKind.RoutePublication
-            : FileTransferCoordinatorActionKind.RouteCommitPublication;
         if (context.CurrentLiveRouteEpoch is not { } liveRouteEpoch ||
-            !TryAuthorizeRoutePublicationLocked(context, actionKind, source, reason, routeCommitToken, out var token, out var rejectionReason))
+            !TryValidateRoutePublicationForEmissionLocked(
+                context,
+                source,
+                reason,
+                routeCommitToken,
+                routePublicationToken,
+                out var token,
+                out var rejectionReason))
         {
             return false;
         }
@@ -6094,13 +6404,18 @@ public sealed partial class SessionFileTransferService : IDisposable
         FileTransferRouteSelection previousRouteSelection,
         string source,
         string reason,
-        RouteCommitToken? routeCommitToken = null)
+        RouteCommitToken? routeCommitToken = null,
+        RoutePublicationToken? routePublicationToken = null)
     {
-        var actionKind = routeCommitToken is null
-            ? FileTransferCoordinatorActionKind.RoutePublication
-            : FileTransferCoordinatorActionKind.RouteCommitPublication;
         if (context.CurrentLiveRouteEpoch is not { } liveRouteEpoch ||
-            !TryAuthorizeRoutePublicationLocked(context, actionKind, source, reason, routeCommitToken, out var token, out var rejectionReason))
+            !TryValidateRoutePublicationForEmissionLocked(
+                context,
+                source,
+                reason,
+                routeCommitToken,
+                routePublicationToken,
+                out var token,
+                out var rejectionReason))
         {
             return false;
         }
@@ -6120,12 +6435,17 @@ public sealed partial class SessionFileTransferService : IDisposable
         OutboundTransferContext context,
         string source,
         string reason,
-        RouteCommitToken? routeCommitToken = null)
+        RouteCommitToken? routeCommitToken = null,
+        RoutePublicationToken? routePublicationToken = null)
     {
-        var actionKind = routeCommitToken is null
-            ? FileTransferCoordinatorActionKind.RoutePublication
-            : FileTransferCoordinatorActionKind.RouteCommitPublication;
-        if (!TryAuthorizeRoutePublicationLocked(context, actionKind, source, reason, routeCommitToken, out var token, out var rejectionReason))
+        if (!TryValidateRoutePublicationForEmissionLocked(
+                context,
+                source,
+                reason,
+                routeCommitToken,
+                routePublicationToken,
+                out var token,
+                out var rejectionReason))
         {
             return false;
         }
@@ -6145,12 +6465,17 @@ public sealed partial class SessionFileTransferService : IDisposable
         InboundTransferContext context,
         string source,
         string reason,
-        RouteCommitToken? routeCommitToken = null)
+        RouteCommitToken? routeCommitToken = null,
+        RoutePublicationToken? routePublicationToken = null)
     {
-        var actionKind = routeCommitToken is null
-            ? FileTransferCoordinatorActionKind.RoutePublication
-            : FileTransferCoordinatorActionKind.RouteCommitPublication;
-        if (!TryAuthorizeRoutePublicationLocked(context, actionKind, source, reason, routeCommitToken, out var token, out var rejectionReason))
+        if (!TryValidateRoutePublicationForEmissionLocked(
+                context,
+                source,
+                reason,
+                routeCommitToken,
+                routePublicationToken,
+                out var token,
+                out var rejectionReason))
         {
             return false;
         }
@@ -6171,12 +6496,17 @@ public sealed partial class SessionFileTransferService : IDisposable
         string runtimeRole,
         string source,
         string reason,
-        RouteCommitToken? routeCommitToken = null)
+        RouteCommitToken? routeCommitToken = null,
+        RoutePublicationToken? routePublicationToken = null)
     {
-        var actionKind = routeCommitToken is null
-            ? FileTransferCoordinatorActionKind.RoutePublication
-            : FileTransferCoordinatorActionKind.RouteCommitPublication;
-        if (!TryAuthorizeRoutePublicationLocked(context, actionKind, source, reason, routeCommitToken, out var token, out var rejectionReason))
+        if (!TryValidateRoutePublicationForEmissionLocked(
+                context,
+                source,
+                reason,
+                routeCommitToken,
+                routePublicationToken,
+                out var token,
+                out var rejectionReason))
         {
             return false;
         }
@@ -6198,12 +6528,17 @@ public sealed partial class SessionFileTransferService : IDisposable
         string runtimeRole,
         string source,
         string reason,
-        RouteCommitToken? routeCommitToken = null)
+        RouteCommitToken? routeCommitToken = null,
+        RoutePublicationToken? routePublicationToken = null)
     {
-        var actionKind = routeCommitToken is null
-            ? FileTransferCoordinatorActionKind.RoutePublication
-            : FileTransferCoordinatorActionKind.RouteCommitPublication;
-        if (!TryAuthorizeRoutePublicationLocked(context, actionKind, source, reason, routeCommitToken, out var token, out var rejectionReason))
+        if (!TryValidateRoutePublicationForEmissionLocked(
+                context,
+                source,
+                reason,
+                routeCommitToken,
+                routePublicationToken,
+                out var token,
+                out var rejectionReason))
         {
             return false;
         }
@@ -7738,14 +8073,14 @@ public sealed partial class SessionFileTransferService : IDisposable
         LiveRouteEpoch? liveRouteEpoch,
         FileTransferLeg? currentLeg,
         RouteCommitToken? routeCommitToken,
-        FileTransferCoordinatorActionDecision decision)
+        FileTransferCoordinatorState currentState)
     {
         var targetRoute = routeCommitToken?.TargetRoute ?? routeSelection.Route;
         var targetProtocolVersion = routeCommitToken?.TargetProtocolVersion ?? routeSelection.ProtocolVersion;
         var targetTransport = routeCommitToken?.TargetTransport ?? ResolveRoutePublicationTargetTransport(targetRoute);
         LocalOperationalLog.Warn(
             "FileTransferService",
-            $"event=filetransfer_route_publication_rejected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; action_kind={FormatProtocolLogValue(actionKind.ToString())}; source={FormatProtocolLogValue(source)}; reason={FormatProtocolLogValue(reason)}; rejection_reason={FormatProtocolLogValue(rejectionReason)}; current_route={FormatProtocolLogValue(FormatRuntimeUnlockCallbackRouteToken(decision.CurrentRoute))}; current_protocol_version={decision.CurrentProtocolVersion}; current_live_route_epoch={decision.CurrentLiveRouteEpoch}; current_runtime_generation={decision.CurrentRuntimeGeneration}; current_terminal_generation={decision.CurrentTerminalGeneration}; current_leg_generation={decision.CurrentLegGeneration}; attempted_route={FormatProtocolLogValue(routeCommitToken?.RouteToken ?? routeSelection.TelemetryToken)}; attempted_protocol_version={routeCommitToken?.ProtocolVersion ?? routeSelection.ProtocolVersion}; attempted_live_route_epoch={routeCommitToken?.LiveRouteEpoch ?? liveRouteEpoch?.EpochId ?? 0}; attempted_runtime_generation={routeCommitToken?.RuntimeGeneration ?? attemptedOwner?.RuntimeGeneration ?? 0}; attempted_terminal_generation={routeCommitToken?.TerminalGeneration ?? attemptedOwner?.TerminalGeneration ?? 0}; attempted_leg_generation={routeCommitToken?.LegGeneration ?? currentLeg?.Generation ?? 0}; route_commit_generation={routeCommitToken?.CommitGeneration ?? 0}; route_publication_generation={decision.State.LastRoutePublicationGeneration}; target_route={FormatProtocolLogValue(FormatRuntimeUnlockCallbackRouteToken(targetRoute))}; target_protocol_version={targetProtocolVersion}; target_transport={FormatProtocolLogValue(FormatFileTransferTransportKind(targetTransport))}; runtime_generation={attemptedOwner?.RuntimeGeneration ?? 0}; terminal_generation={attemptedOwner?.TerminalGeneration ?? 0}; leg_generation={currentLeg?.Generation ?? 0}; coordinator_decision_reason={FormatProtocolLogValue(rejectionReason)}; current_owner_runtime_generation={currentOwner?.RuntimeGeneration ?? 0}");
+            $"event=filetransfer_route_publication_rejected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; action_kind={FormatProtocolLogValue(actionKind.ToString())}; source={FormatProtocolLogValue(source)}; reason={FormatProtocolLogValue(reason)}; rejection_reason={FormatProtocolLogValue(rejectionReason)}; current_route={FormatProtocolLogValue(FormatRuntimeUnlockCallbackRouteToken(currentState.RouteSelection.Route))}; current_protocol_version={currentState.RouteSelection.ProtocolVersion}; current_live_route_epoch={currentState.CurrentLiveRouteEpoch?.EpochId ?? 0}; current_runtime_generation={currentState.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; current_terminal_generation={currentState.TerminalGeneration}; current_leg_generation={currentState.CurrentLeg?.Generation ?? 0}; attempted_route={FormatProtocolLogValue(routeCommitToken?.RouteToken ?? routeSelection.TelemetryToken)}; attempted_protocol_version={routeCommitToken?.ProtocolVersion ?? routeSelection.ProtocolVersion}; attempted_live_route_epoch={routeCommitToken?.LiveRouteEpoch ?? liveRouteEpoch?.EpochId ?? 0}; attempted_runtime_generation={routeCommitToken?.RuntimeGeneration ?? attemptedOwner?.RuntimeGeneration ?? 0}; attempted_terminal_generation={routeCommitToken?.TerminalGeneration ?? attemptedOwner?.TerminalGeneration ?? 0}; attempted_leg_generation={routeCommitToken?.LegGeneration ?? currentLeg?.Generation ?? 0}; route_commit_generation={routeCommitToken?.CommitGeneration ?? 0}; route_publication_generation={currentState.LastRoutePublicationGeneration}; target_route={FormatProtocolLogValue(FormatRuntimeUnlockCallbackRouteToken(targetRoute))}; target_protocol_version={targetProtocolVersion}; target_transport={FormatProtocolLogValue(FormatFileTransferTransportKind(targetTransport))}; runtime_generation={attemptedOwner?.RuntimeGeneration ?? 0}; terminal_generation={attemptedOwner?.TerminalGeneration ?? 0}; leg_generation={currentLeg?.Generation ?? 0}; coordinator_decision_reason={FormatProtocolLogValue(rejectionReason)}; current_owner_runtime_generation={currentOwner?.RuntimeGeneration ?? 0}");
     }
 
     private static string FormatRuntimeUnlockCallbackRouteToken(FileTransferRoute route)
@@ -10935,7 +11270,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             "fallback_tail_paired_yield_route_hint",
             "fallback_tail_paired_yield",
             "fallback_tail_paired_yield",
-            runtimeUnlockAdmissionFactory: () => RequestRuntimeUnlockAdmissionLocked(context, "route_hint", "fallback_tail_paired_yield"));
+            runtimeUnlockAdmissionFactory: () => RequestRuntimeUnlockAdmissionLocked(context, "route_hint", "fallback_tail_paired_yield"),
+            routePublicationToken: context.CurrentRoutePublicationToken);
         TryResumeOutboundRuntimeUnlockAfterFallbackSurvivalProofLocked(
             context,
             "fallback_tail_quiescent");
@@ -11014,7 +11350,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             "fallback_tail_paired_yield_route_hint",
             "fallback_tail_paired_yield",
             "fallback_tail_paired_yield",
-            runtimeUnlockAdmissionFactory: () => RequestRuntimeUnlockAdmissionLocked(context, "route_hint", "fallback_tail_paired_yield"));
+            runtimeUnlockAdmissionFactory: () => RequestRuntimeUnlockAdmissionLocked(context, "route_hint", "fallback_tail_paired_yield"),
+            routePublicationToken: context.CurrentRoutePublicationToken);
         TryResumeInboundRuntimeUnlockAfterFallbackSurvivalProofLocked(
             context,
             "fallback_tail_quiescent");
@@ -12024,7 +12361,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             "fallback_tail_quiescent_route_hint",
             "fallback_tail_quiescent",
             "fallback_tail_quiescent",
-            runtimeUnlockAdmissionFactory: () => RequestRuntimeUnlockAdmissionLocked(context, "route_hint", "fallback_tail_quiescent"));
+            runtimeUnlockAdmissionFactory: () => RequestRuntimeUnlockAdmissionLocked(context, "route_hint", "fallback_tail_quiescent"),
+            routePublicationToken: context.CurrentRoutePublicationToken);
         LogFileTransferFallbackTailQuiescentYieldGranted(
             FileTransferDirection.Outbound,
             context.TransferId,
@@ -12301,7 +12639,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             "fallback_tail_quiescent_route_hint",
             "fallback_tail_quiescent",
             "fallback_tail_quiescent",
-            runtimeUnlockAdmissionFactory: () => RequestRuntimeUnlockAdmissionLocked(context, "route_hint", "fallback_tail_quiescent"));
+            runtimeUnlockAdmissionFactory: () => RequestRuntimeUnlockAdmissionLocked(context, "route_hint", "fallback_tail_quiescent"),
+            routePublicationToken: context.CurrentRoutePublicationToken);
         RecordInboundFallbackTailLocalYieldLocked(
             context,
             currentLeg,
@@ -15303,7 +15642,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             "fallback_tail_quiescent_route_hint",
             "fallback_tail_quiescent",
             "fallback_tail_quiescent",
-            runtimeUnlockAdmissionFactory: () => RequestRuntimeUnlockAdmissionLocked(context, "route_hint", "fallback_tail_quiescent"));
+            runtimeUnlockAdmissionFactory: () => RequestRuntimeUnlockAdmissionLocked(context, "route_hint", "fallback_tail_quiescent"),
+            routePublicationToken: context.CurrentRoutePublicationToken);
         LogFileTransferFallbackTailQuiescentYieldGranted(
             FileTransferDirection.Outbound,
             context.TransferId,
@@ -15883,7 +16223,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 currentLeg?.CanSendData ?? false,
                 currentLeg?.Generation ?? 0,
                 currentLeg?.CheckpointRequestId,
-                CreateRoutePublicationAuthority(
+                FileTransferCoordinator.CreateRoutePublicationAuthority(
                     routePublicationToken,
                     coordinatorDecisionReason),
                 currentLeg?.TransportEpochId ?? 0,
@@ -15997,34 +16337,6 @@ public sealed partial class SessionFileTransferService : IDisposable
         }
 
         return $"; direction=outbound; route={route.TelemetryToken}; protocol_version={route.ProtocolVersion}; live_route_epoch={liveRouteEpoch}; runtime_generation={runtimeGeneration}; terminal_generation={terminalGeneration}; leg_generation={legGeneration}; route_publication_generation={routePublicationGeneration}; route_commit_generation={routeCommitGeneration}; target_route={targetRoute}; target_protocol_version={targetProtocolVersion}; target_transport={FormatFileTransferTransportKind(targetTransport)}; intended_target_transport={FormatFileTransferTransportKind(targetTransport)}; route_publication_action_kind={FormatProtocolLogValue(actionKind)}; coordinator_decision_reason={FormatProtocolLogValue(coordinatorReason)}";
-    }
-
-    private static FileTransferRoutePublicationAuthority? CreateRoutePublicationAuthority(
-        RoutePublicationToken? routePublicationToken,
-        string? coordinatorDecisionReason)
-    {
-        if (routePublicationToken is not { } token || token.IsDefault)
-        {
-            return null;
-        }
-
-        return new FileTransferRoutePublicationAuthority(
-            token.SessionId,
-            token.TransferId,
-            token.Direction,
-            token.RouteToken,
-            token.ProtocolVersion,
-            token.LiveRouteEpoch,
-            token.RuntimeGeneration,
-            token.TerminalGeneration,
-            token.LegGeneration,
-            token.PublicationGeneration,
-            token.RouteCommitGeneration,
-            FileTransferRouteResolver.Resolve(token.TargetRoute).TelemetryToken,
-            token.TargetProtocolVersion,
-            token.TargetTransport,
-            token.ActionKind.ToString(),
-            coordinatorDecisionReason ?? token.Reason);
     }
 
     private static FileTransferDataPathSendAuthority? CreateDataPathSendAuthority(
@@ -16885,6 +17197,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         public RoutePublicationToken? CurrentRoutePublicationToken { get; set; }
 
         public int LastRoutePublicationGeneration { get; set; }
+
+        public Action<RoutePublicationToken, string>? RoutePublicationAuthorityForwarder { get; set; }
 
         public bool RuntimeUnlockWaitingForFallbackSurvival { get; set; }
 
@@ -17845,6 +18159,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         public RoutePublicationToken? CurrentRoutePublicationToken { get; set; }
 
         public int LastRoutePublicationGeneration { get; set; }
+
+        public Action<RoutePublicationToken, string>? RoutePublicationAuthorityForwarder { get; set; }
 
         public bool RuntimeUnlockWaitingForFallbackSurvival { get; set; }
 

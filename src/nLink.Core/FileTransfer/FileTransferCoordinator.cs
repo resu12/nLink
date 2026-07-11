@@ -758,6 +758,8 @@ internal readonly record struct FileTransferLegStartRequest(
 
 internal sealed class LiveRouteEpoch
 {
+    public RoutePublicationToken? RoutePublicationToken { get; set; }
+
     public required int EpochId { get; init; }
 
     public required FileTransferRouteSelection RouteSelection { get; init; }
@@ -3938,6 +3940,11 @@ internal static class FileTransferCoordinator
     private static bool MatchesRuntimeUnlockRetrySourcePublication(
         FileTransferRoutePublicationAuthority candidate,
         RoutePublicationToken publication)
+        => MatchesRoutePublicationAuthority(candidate, publication);
+
+    internal static bool MatchesRoutePublicationAuthority(
+        FileTransferRoutePublicationAuthority candidate,
+        RoutePublicationToken publication)
         => string.Equals(candidate.SessionId, publication.SessionId, StringComparison.Ordinal) &&
            string.Equals(candidate.TransferId, publication.TransferId, StringComparison.Ordinal) &&
            candidate.Direction == publication.Direction &&
@@ -3954,7 +3961,39 @@ internal static class FileTransferCoordinator
                RuntimeUnlockRetryRouteToken(publication.TargetRoute),
                StringComparison.Ordinal) &&
            candidate.TargetProtocolVersion == publication.TargetProtocolVersion &&
-           candidate.TargetTransport == publication.TargetTransport;
+           candidate.TargetTransport == publication.TargetTransport &&
+           string.Equals(
+               candidate.RoutePublicationActionKind,
+               publication.ActionKind.ToString(),
+               StringComparison.Ordinal);
+
+    internal static FileTransferRoutePublicationAuthority? CreateRoutePublicationAuthority(
+        RoutePublicationToken? publication,
+        string? coordinatorDecisionReason = null)
+    {
+        if (publication is not { IsDefault: false } token)
+        {
+            return null;
+        }
+
+        return new FileTransferRoutePublicationAuthority(
+            token.SessionId,
+            token.TransferId,
+            token.Direction,
+            token.RouteToken,
+            token.ProtocolVersion,
+            token.LiveRouteEpoch,
+            token.RuntimeGeneration,
+            token.TerminalGeneration,
+            token.LegGeneration,
+            token.PublicationGeneration,
+            token.RouteCommitGeneration,
+            RuntimeUnlockRetryRouteToken(token.TargetRoute),
+            token.TargetProtocolVersion,
+            token.TargetTransport,
+            token.ActionKind.ToString(),
+            coordinatorDecisionReason ?? token.Reason);
+    }
 
     private static bool TryValidateRuntimeUnlockRetryRelease(
         FileTransferCoordinatorState state,

@@ -5843,6 +5843,13 @@ function Get-Phase5FailureClass {
     }
 
     foreach ($line in $failureLines) {
+        if ($line.IndexOf('runtime_unlock_retry_source_publication_mismatch', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('retry_dispatch_source_publication_mismatch', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'runtime_unlock_retry_source_publication_mismatch'
+        }
+    }
+
+    foreach ($line in $failureLines) {
         if ($line.IndexOf('runtime_unlock_retry_dispatch_missing_after_authority_granted', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             return 'runtime_unlock_retry_dispatch_missing_after_authority_granted'
         }
@@ -5865,6 +5872,18 @@ function Get-Phase5FailureClass {
             $line.IndexOf('regular_v4_frontier_repair_send_deferred_or_stalled', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $line.IndexOf('regular_v4_receive_recovery_settlement_missing', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             return 'regular_v4_frontier_repair_liveness_settlement_missing'
+        }
+    }
+
+    foreach ($line in $failureLines) {
+        if ($line.IndexOf('second transfer setup failure after reactivation', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('second transfer did not start because first transfer setup failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'setup'
+        }
+
+        if ($line.IndexOf('fallback leg authority proof verdict is fail', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('fallback leg authority proof must pass', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'fallback_authority'
         }
     }
 

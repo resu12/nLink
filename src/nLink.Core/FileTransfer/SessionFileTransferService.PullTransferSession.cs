@@ -1362,7 +1362,8 @@ public sealed partial class SessionFileTransferService
         return TryPublishLiveRouteEpochRecoveredIfAuthorizedLocked(
             context,
             "suppressed_restart_live_route_epoch_recovered",
-            reason);
+            reason,
+            routePublicationToken: epoch.RoutePublicationToken);
     }
 
     private bool TryPublishRecoveredRegularNknLiveRouteEpochAfterSuppressedRestartLocked(
@@ -1383,7 +1384,8 @@ public sealed partial class SessionFileTransferService
         return TryPublishLiveRouteEpochRecoveredIfAuthorizedLocked(
             context,
             "suppressed_restart_live_route_epoch_recovered",
-            reason);
+            reason,
+            routePublicationToken: epoch.RoutePublicationToken);
     }
 
     private static void LogOutboundV6TransportEpochWaitingForRequests(
@@ -2007,16 +2009,16 @@ public sealed partial class SessionFileTransferService
         context.StatusMessage = "Switching to regular NKN fallback.";
         StartOutboundPostTunaRecoveryWithSafetyReplayLocked(context, reason);
 
-        if (!TryPublishRouteTransitionedIfAuthorizedLocked(context, previousRouteSelection, "fallback_route_transition", reason) ||
-            !TryPublishRouteSelectedIfAuthorizedLocked(context, routeInput, "fallback_route_selected", reason) ||
-            !TryPublishRouteHintIfAuthorizedLocked(context, "fallback_route_hint", reason, "service_live_route_transition") ||
-            !TryPublishLiveRouteEpochStartedIfAuthorizedLocked(context, previousRouteSelection, "fallback_live_route_epoch_started", reason))
+        if (!TryPublishRouteTransitionedIfAuthorizedLocked(context, previousRouteSelection, "fallback_route_transition", reason, out var routePublicationToken) ||
+            !TryPublishRouteSelectedIfAuthorizedLocked(context, routeInput, "fallback_route_selected", reason, routePublicationToken) ||
+            !TryPublishRouteHintIfAuthorizedLocked(context, "fallback_route_hint", reason, "service_live_route_transition", routePublicationToken: routePublicationToken) ||
+            !TryPublishLiveRouteEpochStartedIfAuthorizedLocked(context, previousRouteSelection, "fallback_live_route_epoch_started", reason, routePublicationToken: routePublicationToken))
         {
             return false;
         }
 
         LogV6Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Outbound, routeSelection, liveRouteEpoch.EpochId);
-        if (!TryPublishRuntimeStartedIfAuthorizedLocked(context, "sender", "fallback_runtime_started", reason))
+        if (!TryPublishRuntimeStartedIfAuthorizedLocked(context, "sender", "fallback_runtime_started", reason, routePublicationToken: routePublicationToken))
         {
             return false;
         }
@@ -2074,16 +2076,16 @@ public sealed partial class SessionFileTransferService
         EnsureInboundV6DestinationModeForLivePostTunaFallbackLocked(context, reason);
         StartInboundPostTunaRecoveryLocked(context, reason);
 
-        if (!TryPublishRouteTransitionedIfAuthorizedLocked(context, previousRouteSelection, "fallback_route_transition", reason) ||
-            !TryPublishRouteSelectedIfAuthorizedLocked(context, routeInput, "fallback_route_selected", reason) ||
-            !TryPublishRouteHintIfAuthorizedLocked(context, "fallback_route_hint", reason, "service_live_route_transition") ||
-            !TryPublishLiveRouteEpochStartedIfAuthorizedLocked(context, previousRouteSelection, "fallback_live_route_epoch_started", reason))
+        if (!TryPublishRouteTransitionedIfAuthorizedLocked(context, previousRouteSelection, "fallback_route_transition", reason, out var routePublicationToken) ||
+            !TryPublishRouteSelectedIfAuthorizedLocked(context, routeInput, "fallback_route_selected", reason, routePublicationToken) ||
+            !TryPublishRouteHintIfAuthorizedLocked(context, "fallback_route_hint", reason, "service_live_route_transition", routePublicationToken: routePublicationToken) ||
+            !TryPublishLiveRouteEpochStartedIfAuthorizedLocked(context, previousRouteSelection, "fallback_live_route_epoch_started", reason, routePublicationToken: routePublicationToken))
         {
             return false;
         }
 
         LogV6Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Inbound, routeSelection, liveRouteEpoch.EpochId);
-        if (!TryPublishRuntimeStartedIfAuthorizedLocked(context, "receiver", "fallback_runtime_started", reason))
+        if (!TryPublishRuntimeStartedIfAuthorizedLocked(context, "receiver", "fallback_runtime_started", reason, routePublicationToken: routePublicationToken))
         {
             return false;
         }
@@ -2141,16 +2143,16 @@ public sealed partial class SessionFileTransferService
         EnsureInboundV6DestinationModeForLivePostTunaFallbackLocked(context, reason);
         StartInboundPostTunaRecoveryLocked(context, reason);
 
-        if (!TryPublishRouteTransitionedIfAuthorizedLocked(context, previousRouteSelection, "fallback_route_transition", reason) ||
-            !TryPublishRouteSelectedIfAuthorizedLocked(context, routeInput, "fallback_route_selected", reason) ||
-            !TryPublishRouteHintIfAuthorizedLocked(context, "fallback_route_hint", reason, "service_live_route_transition") ||
-            !TryPublishLiveRouteEpochStartedIfAuthorizedLocked(context, previousRouteSelection, "fallback_live_route_epoch_started", reason))
+        if (!TryPublishRouteTransitionedIfAuthorizedLocked(context, previousRouteSelection, "fallback_route_transition", reason, out var routePublicationToken) ||
+            !TryPublishRouteSelectedIfAuthorizedLocked(context, routeInput, "fallback_route_selected", reason, routePublicationToken) ||
+            !TryPublishRouteHintIfAuthorizedLocked(context, "fallback_route_hint", reason, "service_live_route_transition", routePublicationToken: routePublicationToken) ||
+            !TryPublishLiveRouteEpochStartedIfAuthorizedLocked(context, previousRouteSelection, "fallback_live_route_epoch_started", reason, routePublicationToken: routePublicationToken))
         {
             return false;
         }
 
         LogV6Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Inbound, routeSelection, liveRouteEpoch.EpochId);
-        if (!TryPublishRuntimeStartedIfAuthorizedLocked(context, "receiver", "fallback_runtime_started", reason))
+        if (!TryPublishRuntimeStartedIfAuthorizedLocked(context, "receiver", "fallback_runtime_started", reason, routePublicationToken: routePublicationToken))
         {
             return false;
         }
@@ -3541,16 +3543,16 @@ public sealed partial class SessionFileTransferService
         context.StatusMessage = GetOutboundResumeStatusMessage(context.State);
         context.SparseSenderPumpLastWakeReason = "live_route_tuna_activated";
 
-        if (!TryPublishRouteTransitionedIfAuthorizedLocked(context, previousRouteSelection, "runtime_unlock_route_transition", reason, routeCommitToken) ||
-            !TryPublishRouteSelectedIfAuthorizedLocked(context, routeInput, "runtime_unlock_route_selected", reason, routeCommitToken) ||
-            !TryPublishRouteHintIfAuthorizedLocked(context, "runtime_unlock_route_hint", reason, "service_live_route_transition", routeCommitToken: routeCommitToken) ||
-            !TryPublishLiveRouteEpochStartedIfAuthorizedLocked(context, previousRouteSelection, "runtime_unlock_live_route_epoch_started", reason, routeCommitToken))
+        if (!TryPublishRouteTransitionedIfAuthorizedLocked(context, previousRouteSelection, "runtime_unlock_route_transition", reason, out var routePublicationToken, routeCommitToken) ||
+            !TryPublishRouteSelectedIfAuthorizedLocked(context, routeInput, "runtime_unlock_route_selected", reason, routePublicationToken, routeCommitToken) ||
+            !TryPublishRouteHintIfAuthorizedLocked(context, "runtime_unlock_route_hint", reason, "service_live_route_transition", routeCommitToken: routeCommitToken, routePublicationToken: routePublicationToken) ||
+            !TryPublishLiveRouteEpochStartedIfAuthorizedLocked(context, previousRouteSelection, "runtime_unlock_live_route_epoch_started", reason, routeCommitToken, routePublicationToken))
         {
             return false;
         }
 
         LogV4Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Outbound, routeSelection, liveRouteEpoch.EpochId);
-        if (!TryPublishRuntimeStartedIfAuthorizedLocked(context, "sender", "runtime_unlock_runtime_started", reason, routeCommitToken))
+        if (!TryPublishRuntimeStartedIfAuthorizedLocked(context, "sender", "runtime_unlock_runtime_started", reason, routeCommitToken, routePublicationToken))
         {
             return false;
         }
@@ -3562,7 +3564,7 @@ public sealed partial class SessionFileTransferService
             runtimeSelection,
             routeSelection,
             liveRouteEpoch.EpochId);
-        if (!TryPublishLiveRouteEpochRecoveredIfAuthorizedLocked(context, "runtime_unlock_live_route_epoch_recovered", reason, routeCommitToken))
+        if (!TryPublishLiveRouteEpochRecoveredIfAuthorizedLocked(context, "runtime_unlock_live_route_epoch_recovered", reason, routeCommitToken, routePublicationToken))
         {
             return false;
         }
@@ -3619,16 +3621,16 @@ public sealed partial class SessionFileTransferService
         ResetInboundRegularNknV4StateForFileTunaV4Locked(context);
         context.StatusMessage = GetInboundResumeStatusMessage(context.State);
 
-        if (!TryPublishRouteTransitionedIfAuthorizedLocked(context, previousRouteSelection, "runtime_unlock_route_transition", reason, routeCommitToken) ||
-            !TryPublishRouteSelectedIfAuthorizedLocked(context, routeInput, "runtime_unlock_route_selected", reason, routeCommitToken) ||
-            !TryPublishRouteHintIfAuthorizedLocked(context, "runtime_unlock_route_hint", reason, "service_live_route_transition", routeCommitToken: routeCommitToken) ||
-            !TryPublishLiveRouteEpochStartedIfAuthorizedLocked(context, previousRouteSelection, "runtime_unlock_live_route_epoch_started", reason, routeCommitToken))
+        if (!TryPublishRouteTransitionedIfAuthorizedLocked(context, previousRouteSelection, "runtime_unlock_route_transition", reason, out var routePublicationToken, routeCommitToken) ||
+            !TryPublishRouteSelectedIfAuthorizedLocked(context, routeInput, "runtime_unlock_route_selected", reason, routePublicationToken, routeCommitToken) ||
+            !TryPublishRouteHintIfAuthorizedLocked(context, "runtime_unlock_route_hint", reason, "service_live_route_transition", routeCommitToken: routeCommitToken, routePublicationToken: routePublicationToken) ||
+            !TryPublishLiveRouteEpochStartedIfAuthorizedLocked(context, previousRouteSelection, "runtime_unlock_live_route_epoch_started", reason, routeCommitToken, routePublicationToken))
         {
             return false;
         }
 
         LogV4Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Inbound, routeSelection, liveRouteEpoch.EpochId);
-        if (!TryPublishRuntimeStartedIfAuthorizedLocked(context, "receiver", "runtime_unlock_runtime_started", reason, routeCommitToken))
+        if (!TryPublishRuntimeStartedIfAuthorizedLocked(context, "receiver", "runtime_unlock_runtime_started", reason, routeCommitToken, routePublicationToken))
         {
             return false;
         }
@@ -3640,7 +3642,7 @@ public sealed partial class SessionFileTransferService
             runtimeSelection,
             routeSelection,
             liveRouteEpoch.EpochId);
-        if (!TryPublishLiveRouteEpochRecoveredIfAuthorizedLocked(context, "runtime_unlock_live_route_epoch_recovered", reason, routeCommitToken))
+        if (!TryPublishLiveRouteEpochRecoveredIfAuthorizedLocked(context, "runtime_unlock_live_route_epoch_recovered", reason, routeCommitToken, routePublicationToken))
         {
             return false;
         }
@@ -3747,16 +3749,16 @@ public sealed partial class SessionFileTransferService
         context.StatusMessage = GetOutboundResumeStatusMessage(context.State);
         context.SparseSenderPumpLastWakeReason = "live_route_tuna_reactivated";
 
-        if (!TryPublishRouteTransitionedIfAuthorizedLocked(context, previousRouteSelection, "runtime_unlock_route_transition", reason, routeCommitToken) ||
-            !TryPublishRouteSelectedIfAuthorizedLocked(context, routeInput, "runtime_unlock_route_selected", reason, routeCommitToken) ||
-            !TryPublishRouteHintIfAuthorizedLocked(context, "runtime_unlock_route_hint", reason, "service_live_route_transition", routeCommitToken: routeCommitToken) ||
-            !TryPublishLiveRouteEpochStartedIfAuthorizedLocked(context, previousRouteSelection, "runtime_unlock_live_route_epoch_started", reason, routeCommitToken))
+        if (!TryPublishRouteTransitionedIfAuthorizedLocked(context, previousRouteSelection, "runtime_unlock_route_transition", reason, out var routePublicationToken, routeCommitToken) ||
+            !TryPublishRouteSelectedIfAuthorizedLocked(context, routeInput, "runtime_unlock_route_selected", reason, routePublicationToken, routeCommitToken) ||
+            !TryPublishRouteHintIfAuthorizedLocked(context, "runtime_unlock_route_hint", reason, "service_live_route_transition", routeCommitToken: routeCommitToken, routePublicationToken: routePublicationToken) ||
+            !TryPublishLiveRouteEpochStartedIfAuthorizedLocked(context, previousRouteSelection, "runtime_unlock_live_route_epoch_started", reason, routeCommitToken, routePublicationToken))
         {
             return false;
         }
 
         LogV4Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Outbound, routeSelection, liveRouteEpoch.EpochId);
-        if (!TryPublishRuntimeStartedIfAuthorizedLocked(context, "sender", "runtime_unlock_runtime_started", reason, routeCommitToken))
+        if (!TryPublishRuntimeStartedIfAuthorizedLocked(context, "sender", "runtime_unlock_runtime_started", reason, routeCommitToken, routePublicationToken))
         {
             return false;
         }
@@ -3768,7 +3770,7 @@ public sealed partial class SessionFileTransferService
             runtimeSelection,
             routeSelection,
             liveRouteEpoch.EpochId);
-        if (!TryPublishLiveRouteEpochRecoveredIfAuthorizedLocked(context, "runtime_unlock_live_route_epoch_recovered", reason, routeCommitToken))
+        if (!TryPublishLiveRouteEpochRecoveredIfAuthorizedLocked(context, "runtime_unlock_live_route_epoch_recovered", reason, routeCommitToken, routePublicationToken))
         {
             return false;
         }
@@ -3825,16 +3827,16 @@ public sealed partial class SessionFileTransferService
         ResetInboundPostTunaFallbackStateForFileTunaV4Locked(context);
         context.StatusMessage = GetInboundResumeStatusMessage(context.State);
 
-        if (!TryPublishRouteTransitionedIfAuthorizedLocked(context, previousRouteSelection, "runtime_unlock_route_transition", reason, routeCommitToken) ||
-            !TryPublishRouteSelectedIfAuthorizedLocked(context, routeInput, "runtime_unlock_route_selected", reason, routeCommitToken) ||
-            !TryPublishRouteHintIfAuthorizedLocked(context, "runtime_unlock_route_hint", reason, "service_live_route_transition", routeCommitToken: routeCommitToken) ||
-            !TryPublishLiveRouteEpochStartedIfAuthorizedLocked(context, previousRouteSelection, "runtime_unlock_live_route_epoch_started", reason, routeCommitToken))
+        if (!TryPublishRouteTransitionedIfAuthorizedLocked(context, previousRouteSelection, "runtime_unlock_route_transition", reason, out var routePublicationToken, routeCommitToken) ||
+            !TryPublishRouteSelectedIfAuthorizedLocked(context, routeInput, "runtime_unlock_route_selected", reason, routePublicationToken, routeCommitToken) ||
+            !TryPublishRouteHintIfAuthorizedLocked(context, "runtime_unlock_route_hint", reason, "service_live_route_transition", routeCommitToken: routeCommitToken, routePublicationToken: routePublicationToken) ||
+            !TryPublishLiveRouteEpochStartedIfAuthorizedLocked(context, previousRouteSelection, "runtime_unlock_live_route_epoch_started", reason, routeCommitToken, routePublicationToken))
         {
             return false;
         }
 
         LogV4Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Inbound, routeSelection, liveRouteEpoch.EpochId);
-        if (!TryPublishRuntimeStartedIfAuthorizedLocked(context, "receiver", "runtime_unlock_runtime_started", reason, routeCommitToken))
+        if (!TryPublishRuntimeStartedIfAuthorizedLocked(context, "receiver", "runtime_unlock_runtime_started", reason, routeCommitToken, routePublicationToken))
         {
             return false;
         }
@@ -3846,7 +3848,7 @@ public sealed partial class SessionFileTransferService
             runtimeSelection,
             routeSelection,
             liveRouteEpoch.EpochId);
-        if (!TryPublishLiveRouteEpochRecoveredIfAuthorizedLocked(context, "runtime_unlock_live_route_epoch_recovered", reason, routeCommitToken))
+        if (!TryPublishLiveRouteEpochRecoveredIfAuthorizedLocked(context, "runtime_unlock_live_route_epoch_recovered", reason, routeCommitToken, routePublicationToken))
         {
             return false;
         }

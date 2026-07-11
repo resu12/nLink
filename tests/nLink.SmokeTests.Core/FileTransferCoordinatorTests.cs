@@ -1211,6 +1211,23 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, stale.Status);
         Assert.Equal("retry_dispatch_source_publication_mismatch", stale.Reason);
 
+        var actionKindMismatch = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            state,
+            request with
+            {
+                SourcePublicationAuthority = request.SourcePublicationAuthority with
+                {
+                    RoutePublicationActionKind = "RouteCommitPublication",
+                },
+            },
+            null,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, actionKindMismatch.Status);
+        Assert.Equal("retry_dispatch_source_publication_mismatch", actionKindMismatch.Reason);
+
         var invalidOutcome = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
             state,
             request,

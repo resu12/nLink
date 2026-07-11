@@ -146,8 +146,9 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
         Assert.Equal(FileTransferProtocol.ProtocolVersionV4, offer.PreferredDataProtocolVersion);
         Assert.Equal(FileTransferRouteResolver.FileTunaV4Token, offer.FileTransferRoute);
 
-        var logTail = ReadOperationalLogTail(logStart);
-        Assert.DoesNotContain("event=filetransfer_initial_tuna_route_selection_denied;", logTail, StringComparison.Ordinal);
+        var currentLogTail = ReadOperationalLogTail(logStart);
+        var logTail = currentLogTail + Environment.NewLine + ReadOperationalLogText();
+        Assert.DoesNotContain("event=filetransfer_initial_tuna_route_selection_denied;", currentLogTail, StringComparison.Ordinal);
         var initialTunaGranted = FindTransferLogLine(
             logTail,
             "event=filetransfer_initial_tuna_route_selection_granted; direction=outbound;",
@@ -181,8 +182,41 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
             protocolVersion: FileTransferProtocol.ProtocolVersionV4,
             targetTransport: "tuna");
 
-        Assert.DoesNotContain("route_publication_action_kind=RouteCommitPublication", logTail, StringComparison.Ordinal);
-        Assert.DoesNotContain("file_tuna_v6", logTail, StringComparison.Ordinal);
+        var inboundRouteSelected = FindTransferLogLine(
+            logTail,
+            "event=filetransfer_route_selected; direction=inbound;",
+            transferId);
+        var inboundRuntimeStarted = FindTransferLogLine(
+            logTail,
+            "event=filetransfer_runtime_started; direction=inbound; role=receiver;",
+            transferId);
+        var outboundHint = Assert.Single(senderTransport.ObservedRouteHints.Where(notification =>
+            string.Equals(notification.TransferId, transferId, StringComparison.Ordinal) &&
+            notification.PublicationAuthority?.Direction == FileTransferDirection.Outbound));
+        var inboundHint = Assert.Single(receiverTransport.ObservedRouteHints.Where(notification =>
+            string.Equals(notification.TransferId, transferId, StringComparison.Ordinal) &&
+            notification.PublicationAuthority?.Direction == FileTransferDirection.Inbound));
+        Assert.NotNull(outboundHint.PublicationAuthority);
+        Assert.NotNull(inboundHint.PublicationAuthority);
+        Assert.Equal(outboundHint.SessionId, outboundHint.PublicationAuthority!.SessionId);
+        Assert.Equal(outboundHint.TransferId, outboundHint.PublicationAuthority.TransferId);
+        Assert.Equal(inboundHint.SessionId, inboundHint.PublicationAuthority!.SessionId);
+        Assert.Equal(inboundHint.TransferId, inboundHint.PublicationAuthority.TransferId);
+        AssertPublicationAuthorityMatches(outboundRouteSelected, outboundHint.PublicationAuthority!);
+        AssertPublicationAuthorityMatches(outboundRuntimeStarted, outboundHint.PublicationAuthority!);
+        AssertPublicationAuthorityMatches(inboundRouteSelected, inboundHint.PublicationAuthority!);
+        AssertPublicationAuthorityMatches(inboundRuntimeStarted, inboundHint.PublicationAuthority!);
+        Assert.Equal(1, outboundHint.PublicationAuthority!.RoutePublicationGeneration);
+        Assert.Equal(1, inboundHint.PublicationAuthority!.RoutePublicationGeneration);
+
+        var scopedPublicationLog = string.Join(
+            Environment.NewLine,
+            outboundRouteSelected,
+            outboundRuntimeStarted,
+            inboundRouteSelected,
+            inboundRuntimeStarted);
+        Assert.DoesNotContain("route_publication_action_kind=RouteCommitPublication", scopedPublicationLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("file_tuna_v6", scopedPublicationLog, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -811,9 +845,9 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
             .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
             .Where(line => line.Contains(eventPrefix, StringComparison.Ordinal))
             .ToArray();
-        var line = matchingLines.SingleOrDefault(line => line.Contains($"transfer_id={transferId}", StringComparison.Ordinal)) ??
-                   matchingLines.SingleOrDefault(line => line.Contains("route=file_tuna_v4; protocol_version=4", StringComparison.Ordinal)) ??
-                   matchingLines.SingleOrDefault(line => line.Contains("selected_route=file_tuna_v4; selected_protocol_version=4", StringComparison.Ordinal));
+        var line = matchingLines.LastOrDefault(line => line.Contains($"transfer_id={transferId}", StringComparison.Ordinal)) ??
+                   matchingLines.LastOrDefault(line => line.Contains("route=file_tuna_v4; protocol_version=4", StringComparison.Ordinal)) ??
+                   matchingLines.LastOrDefault(line => line.Contains("selected_route=file_tuna_v4; selected_protocol_version=4", StringComparison.Ordinal));
         Assert.False(string.IsNullOrWhiteSpace(line), $"Missing log line '{eventPrefix}' for transfer '{transferId}'." + Environment.NewLine + logText);
         return line!;
     }
@@ -835,5 +869,30 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
         Assert.Contains($"target_transport={targetTransport}", logLine, StringComparison.Ordinal);
         Assert.Contains("route_publication_action_kind=RoutePublication", logLine, StringComparison.Ordinal);
         Assert.Contains("coordinator_decision_reason=accepted", logLine, StringComparison.Ordinal);
+    }
+
+    private static void AssertPublicationAuthorityMatches(
+        string logLine,
+        FileTransferRoutePublicationAuthority authority)
+    {
+        var targetTransport = authority.TargetTransport switch
+        {
+            FileTransferTransportKind.RegularNkn => "regular_nkn",
+            FileTransferTransportKind.Tuna => "tuna",
+            _ => "unknown",
+        };
+        Assert.Contains($"direction={authority.Direction.ToString().ToLowerInvariant()}", logLine, StringComparison.Ordinal);
+        Assert.Contains($"route={authority.RouteToken}; protocol_version={authority.ProtocolVersion}", logLine, StringComparison.Ordinal);
+        Assert.Contains($"live_route_epoch={authority.LiveRouteEpoch}", logLine, StringComparison.Ordinal);
+        Assert.Contains($"route_publication_generation={authority.RoutePublicationGeneration}", logLine, StringComparison.Ordinal);
+        Assert.Contains($"runtime_generation={authority.RuntimeGeneration}", logLine, StringComparison.Ordinal);
+        Assert.Contains($"terminal_generation={authority.TerminalGeneration}", logLine, StringComparison.Ordinal);
+        Assert.Contains($"leg_generation={authority.LegGeneration}", logLine, StringComparison.Ordinal);
+        Assert.Contains($"route_commit_generation={authority.RouteCommitGeneration ?? 0}", logLine, StringComparison.Ordinal);
+        Assert.Contains($"target_route={authority.TargetRouteToken}", logLine, StringComparison.Ordinal);
+        Assert.Contains($"target_protocol_version={authority.TargetProtocolVersion}", logLine, StringComparison.Ordinal);
+        Assert.Contains($"target_transport={targetTransport}", logLine, StringComparison.Ordinal);
+        Assert.Contains($"route_publication_action_kind={authority.RoutePublicationActionKind}", logLine, StringComparison.Ordinal);
+        Assert.Contains($"coordinator_decision_reason={authority.CoordinatorDecisionReason}", logLine, StringComparison.Ordinal);
     }
 }

@@ -3051,10 +3051,23 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     public void PostTunaFallbackV6InboundCheckpointRequest_StartsNewLegAfterAcceptedCheckpoint()
     {
         using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport(
+            "session_transfer_post_tuna_fallback_inbound_checkpoint_new_epoch");
+        service.AttachTransport(transport);
         var serviceType = typeof(SessionFileTransferService);
         const string transferId = "transfer_post_tuna_fallback_inbound_checkpoint_new_epoch";
         var context = CreatePostTunaFallbackV6InboundContext(
             transferId);
+        var forwardPublication = serviceType
+            .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
+            .Single(method =>
+                method.Name == "ForwardCoordinatorIssuedRoutePublicationAuthorityLocked" &&
+                method.GetParameters()[0].ParameterType.Name == "InboundTransferContext");
+        SetPrivateProperty(
+            context,
+            "RoutePublicationAuthorityForwarder",
+            new Action<RoutePublicationToken, string>((token, reason) =>
+                forwardPublication.Invoke(service, [context, token, reason])));
         serviceType
             .GetField("inboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(service, context);
@@ -3088,6 +3101,17 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             reason: "test_first_checkpoint_accepted");
         Assert.Null(firstLeg.CheckpointRequestId);
         Assert.Equal(1, firstLeg.TransportEpochId);
+        while (transport.ObservedRouteHints.TryDequeue(out _))
+        {
+        }
+
+        var predecessorPublication = Assert.IsType<RoutePublicationToken>(
+            GetPrivatePropertyValue(context, "CurrentRoutePublicationToken"));
+        var retainedLiveRouteEpoch = Assert.IsType<LiveRouteEpoch>(
+            GetPrivatePropertyValue(context, "CurrentLiveRouteEpoch"));
+        Assert.Equal(
+            predecessorPublication.PublicationGeneration,
+            retainedLiveRouteEpoch.RoutePublicationToken?.PublicationGeneration);
 
         var secondRequest = firstRequest with
         {
@@ -3105,6 +3129,39 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Equal("v6-regular-nkn-state-refresh:2", secondLeg.CheckpointRequestId);
         Assert.False(secondLeg.CanSendData);
         Assert.Equal(FileTransferLegState.CheckpointPending, secondLeg.State);
+
+        var successorHint = Assert.Single(transport.ObservedRouteHints);
+        Assert.Equal("coordinator_route_publication_successor", successorHint.Source);
+        var successorPublication = Assert.IsType<FileTransferRoutePublicationAuthority>(
+            successorHint.PublicationAuthority);
+        var currentPublication = Assert.IsType<RoutePublicationToken>(
+            GetPrivatePropertyValue(context, "CurrentRoutePublicationToken"));
+        Assert.True(
+            FileTransferCoordinator.MatchesRoutePublicationAuthority(successorPublication, currentPublication));
+        Assert.True(successorPublication.RoutePublicationGeneration > 1);
+        Assert.Equal(secondLeg.Generation, successorPublication.LegGeneration);
+        Assert.Equal(
+            predecessorPublication.PublicationGeneration,
+            retainedLiveRouteEpoch.RoutePublicationToken?.PublicationGeneration);
+
+        var publishRecovered = serviceType
+            .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
+            .Single(method =>
+                method.Name == "TryPublishLiveRouteEpochRecoveredIfAuthorizedLocked" &&
+                method.GetParameters()[0].ParameterType.Name == "InboundTransferContext");
+        var lateCallbackLogStart = GetOperationalLogLength();
+        Assert.False((bool)publishRecovered.Invoke(
+            service,
+            [
+                context,
+                "late_predecessor_live_route_epoch_recovered",
+                "late_predecessor_callback",
+                null,
+                predecessorPublication,
+            ])!);
+        var lateCallbackLog = ReadOperationalLogTail(lateCallbackLogStart);
+        Assert.Contains("event=filetransfer_route_publication_rejected; direction=inbound;", lateCallbackLog, StringComparison.Ordinal);
+        Assert.Contains("rejection_reason=route_publication_generation_mismatch", lateCallbackLog, StringComparison.Ordinal);
 
         var scopedLog = ReadOperationalLogTail(logStart);
         var log = scopedLog + Environment.NewLine + LocalOperationalLog.GetRecentLogText();
@@ -4583,7 +4640,10 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                     .Where(line =>
                         line.Contains("event=filetransfer_live_route_epoch_started;", StringComparison.Ordinal) ||
                         line.Contains("event=filetransfer_live_route_epoch_recovered;", StringComparison.Ordinal) ||
-                        line.Contains("event=filetransfer_live_route_epoch_terminal;", StringComparison.Ordinal)));
+                        line.Contains("event=filetransfer_live_route_epoch_terminal;", StringComparison.Ordinal) ||
+                        line.Contains("event=filetransfer_route_selected;", StringComparison.Ordinal) ||
+                        line.Contains("event=filetransfer_runtime_started;", StringComparison.Ordinal) ||
+                        line.Contains("event=filetransfer_route_publication_rejected;", StringComparison.Ordinal)));
 
         void CaptureRouteProofLog()
         {
@@ -4780,6 +4840,39 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Contains("target_transport=tuna", routeProofLogText, StringComparison.Ordinal);
         Assert.Contains("target_transport=regular_nkn", routeProofLogText, StringComparison.Ordinal);
         Assert.DoesNotContain("file_tuna_v6", routeProofLogText, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_route_publication_rejected;", routeProofLogText, StringComparison.Ordinal);
+        var outboundCommitPublications = senderTransport.ObservedRouteHints
+            .Where(notification =>
+                string.Equals(notification.TransferId, transferId, StringComparison.Ordinal) &&
+                notification.PublicationAuthority is
+                {
+                    Direction: FileTransferDirection.Outbound,
+                    RouteToken: FileTransferRouteResolver.FileTunaV4Token,
+                    RoutePublicationActionKind: "RouteCommitPublication",
+                })
+            .Select(notification => notification.PublicationAuthority!)
+            .ToArray();
+        var inboundCommitPublications = receiverTransport.ObservedRouteHints
+            .Where(notification =>
+                string.Equals(notification.TransferId, transferId, StringComparison.Ordinal) &&
+                notification.PublicationAuthority is
+                {
+                    Direction: FileTransferDirection.Inbound,
+                    RouteToken: FileTransferRouteResolver.FileTunaV4Token,
+                    RoutePublicationActionKind: "RouteCommitPublication",
+                })
+            .Select(notification => notification.PublicationAuthority!)
+            .ToArray();
+        Assert.Equal(2, outboundCommitPublications.Length);
+        Assert.Equal(2, inboundCommitPublications.Length);
+        foreach (var publication in outboundCommitPublications)
+        {
+            AssertRoutePublicationForwardedToTransitionEvents(routeProofLogText, publication, "sender");
+        }
+        foreach (var publication in inboundCommitPublications)
+        {
+            AssertRoutePublicationForwardedToTransitionEvents(routeProofLogText, publication, "receiver");
+        }
         Assert.False(senderTransport.IsPostTunaFileFallbackActiveForRouteSelection);
         Assert.False(receiverTransport.IsPostTunaFileFallbackActiveForRouteSelection);
 
@@ -13381,7 +13474,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Null(GetPrivatePropertyValue(context, "V6TransportHandoff"));
         Assert.Equal(2975, GetPrivateProperty<int>(context, "RemoteNextExpectedChunkIndex"));
 
-        var log = ReadOperationalLogTail(logStart);
+        var log = ReadOperationalLogTail(logStart) + Environment.NewLine + LocalOperationalLog.GetRecentLogText();
         Assert.Contains("event=filetransfer_fallback_state_epoch_floor_reset; direction=outbound;", log, StringComparison.Ordinal);
         Assert.Contains("reason=current_fallback_receiver_state", log, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_fallback_tail_frontier_repair_cleared; direction=outbound;", log, StringComparison.Ordinal);
@@ -13463,6 +13556,8 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             RecoveryMode = "regular_nkn_state_refresh",
         };
 
+        var routePublicationGenerationBeforeYield =
+            GetPrivateProperty<int>(context, "LastRoutePublicationGeneration");
         var logStart = GetOperationalLogLength();
         serviceType
             .GetMethod("ApplyOutboundV4State", BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -13474,6 +13569,9 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Null(GetPrivatePropertyValue(context, "V6TransportHandoff"));
         Assert.True(GetPrivateProperty<bool>(context, "RuntimeUnlockWaitingForFallbackSurvival"));
         Assert.False(GetPrivateProperty<bool>(context, "RuntimeUnlockActivationWindowGranted"));
+        Assert.Equal(
+            routePublicationGenerationBeforeYield,
+            GetPrivateProperty<int>(context, "LastRoutePublicationGeneration"));
 
         var log = ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_fallback_tail_frontier_repair_cleared; direction=outbound;", log, StringComparison.Ordinal);
@@ -14544,12 +14642,13 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Equal(2, sentConfirmations.Length);
         Assert.All(sentConfirmations, sent => Assert.Equal("precommit_probe_commit_confirmed", sent.Reason));
 
-        var log = ReadOperationalLogTail(logStart);
-        Assert.Contains("event=runtime_unlock_tuna_probe_ack_received; transport=tuna; direction=outbound;", log, StringComparison.Ordinal);
-        Assert.Contains("event=runtime_unlock_precommit_probe_acked; direction=outbound;", log, StringComparison.Ordinal);
-        Assert.Contains("event=runtime_unlock_paired_commit_started; direction=outbound;", log, StringComparison.Ordinal);
-        Assert.DoesNotContain("event=runtime_unlock_precommit_probe_ack_authority_rejected; direction=outbound;", log, StringComparison.Ordinal);
-        Assert.DoesNotContain("event=filetransfer_runtime_unlock_callback_rejected; direction=outbound;", log, StringComparison.Ordinal);
+        var currentLog = ReadOperationalLogTail(logStart);
+        var proofLog = currentLog + Environment.NewLine + LocalOperationalLog.GetRecentLogText();
+        Assert.Contains("event=runtime_unlock_tuna_probe_ack_received; transport=tuna; direction=outbound;", proofLog, StringComparison.Ordinal);
+        Assert.Contains("event=runtime_unlock_precommit_probe_acked; direction=outbound;", proofLog, StringComparison.Ordinal);
+        Assert.Contains("event=runtime_unlock_paired_commit_started; direction=outbound;", proofLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=runtime_unlock_precommit_probe_ack_authority_rejected; direction=outbound;", currentLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_runtime_unlock_callback_rejected; direction=outbound;", currentLog, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -20292,8 +20391,81 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 recoveredIndex > startedIndex,
                 "Missing ordered live-route recovered proof for epoch " + expectation.Epoch + "." + Environment.NewLine + log);
 
+            if (string.Equals(expectation.HandoffKind, "normal_to_tuna_activation", StringComparison.Ordinal))
+            {
+                AssertSameRoutePublicationTuple(lines[startedIndex], lines[recoveredIndex]);
+            }
+
             cursor = recoveredIndex;
         }
+    }
+
+    private static void AssertRoutePublicationForwardedToTransitionEvents(
+        string log,
+        FileTransferRoutePublicationAuthority publication,
+        string runtimeRole)
+    {
+        Assert.True(publication.RouteCommitGeneration > 0);
+        var direction = publication.Direction.ToString().ToLowerInvariant();
+        var tuple = $"route_publication_generation={publication.RoutePublicationGeneration}";
+        var lines = log.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+        Assert.Contains(lines, line =>
+            line.Contains("event=filetransfer_route_selected;", StringComparison.Ordinal) &&
+            line.Contains($"direction={direction}", StringComparison.Ordinal) &&
+            line.Contains($"live_route_epoch={publication.LiveRouteEpoch}", StringComparison.Ordinal) &&
+            line.Contains(tuple, StringComparison.Ordinal));
+        Assert.Contains(lines, line =>
+            line.Contains("event=filetransfer_runtime_started;", StringComparison.Ordinal) &&
+            line.Contains($"direction={direction}; role={runtimeRole}", StringComparison.Ordinal) &&
+            line.Contains($"live_route_epoch={publication.LiveRouteEpoch}", StringComparison.Ordinal) &&
+            line.Contains(tuple, StringComparison.Ordinal));
+        Assert.Contains(lines, line =>
+            line.Contains("event=filetransfer_live_route_epoch_started;", StringComparison.Ordinal) &&
+            line.Contains($"direction={direction}", StringComparison.Ordinal) &&
+            line.Contains($"live_route_epoch={publication.LiveRouteEpoch}", StringComparison.Ordinal) &&
+            line.Contains(tuple, StringComparison.Ordinal));
+        Assert.Contains(lines, line =>
+            line.Contains("event=filetransfer_live_route_epoch_recovered;", StringComparison.Ordinal) &&
+            line.Contains($"direction={direction}", StringComparison.Ordinal) &&
+            line.Contains($"live_route_epoch={publication.LiveRouteEpoch}", StringComparison.Ordinal) &&
+            line.Contains(tuple, StringComparison.Ordinal));
+    }
+
+    private static void AssertSameRoutePublicationTuple(string first, string second)
+    {
+        foreach (var field in new[]
+                 {
+                     "route",
+                     "protocol_version",
+                     "live_route_epoch",
+                     "runtime_generation",
+                     "terminal_generation",
+                     "leg_generation",
+                     "route_publication_generation",
+                     "route_commit_generation",
+                     "target_route",
+                     "target_protocol_version",
+                     "target_transport",
+                     "route_publication_action_kind",
+                 })
+        {
+            Assert.Equal(GetDelimitedLogField(first, field), GetDelimitedLogField(second, field));
+        }
+    }
+
+    private static string GetDelimitedLogField(string line, string field)
+    {
+        var prefix = field + "=";
+        foreach (var segment in line.Split(';', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var trimmed = segment.Trim();
+            if (trimmed.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                return trimmed[prefix.Length..];
+            }
+        }
+
+        return string.Empty;
     }
 
     private static void AssertPublicationAuthorityFields(

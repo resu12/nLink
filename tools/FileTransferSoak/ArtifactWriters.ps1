@@ -7688,6 +7688,9 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockRetryDispatchAuthorityRejectedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_retry_dispatch_authority_rejected'
     })
+    $runtimeUnlockRetrySourcePublicationMismatchEvents = @($runtimeUnlockRetryDispatchAuthorityRejectedEvents | Where-Object {
+        (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq 'retry_dispatch_source_publication_mismatch'
+    })
     $runtimeUnlockRetryDispatchMissingAfterAuthorityGrantedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_retry_dispatch_missing_after_authority_granted'
     })
@@ -8983,6 +8986,9 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     elseif ($runtimeUnlockFileTransferOwnerStaleBeforeOfferDispatchUnresolvedEvents.Count -gt 0) {
         $class = 'runtime_unlock_filetransfer_owner_stale_before_offer_dispatch'
+    }
+    elseif ($runtimeUnlockRetrySourcePublicationMismatchEvents.Count -gt 0) {
+        $class = 'runtime_unlock_retry_source_publication_mismatch'
     }
     elseif ($publicationAuthorityFieldCoverageProof.Verdict -eq 'fail') {
         $class = 'publication_authority_missing'

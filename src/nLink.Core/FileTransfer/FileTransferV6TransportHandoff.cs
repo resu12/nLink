@@ -59,6 +59,8 @@ public interface IFileTransferV6TransportEpochObserver
 
 internal sealed class V6TransportEpoch
 {
+    public RoutePublicationToken? RoutePublicationToken { get; set; }
+
     public long EpochId { get; init; }
 
     public FileTransferTransportHandoffKind Kind { get; init; } = FileTransferTransportHandoffKind.RegularNknRecovery;

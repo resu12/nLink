@@ -10,7 +10,7 @@ public sealed class SessionFileTransferV6TunaIntegrationTests : SessionFileTrans
     [InlineData(10)]
     [InlineData(50)]
     [InlineData(90)]
-    public async Task TunaActivation_UsesV6EpochProofWithoutReducingCommittedProgress(int committedPercent)
+    public async Task TunaActivationEvidence_WithoutCoordinatorAuthority_DoesNotChangeRouteOrProgress(int committedPercent)
     {
         var transferId = $"transfer_v6_tuna_activation_{committedPercent}";
         using var senderTransport = new LoopbackFileTransferTransport($"session_v6_tuna_activation_{committedPercent}");
@@ -30,35 +30,15 @@ public sealed class SessionFileTransferV6TunaIntegrationTests : SessionFileTrans
         senderTransport.RequestAllDataSessionHandoffs(
             "tuna_activation_negotiated",
             FileTransferTransportHandoffKind.NormalToTunaActivation,
-            FileTransferTransportKind.Tuna);
-        await WaitUntilAsync(
-            () => senderTransport.ObservedV6TransportEpochs.Any(snapshot =>
-                snapshot.IsUnresolved &&
-                snapshot.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
-                snapshot.TargetTransport == FileTransferTransportKind.Tuna),
-            timeoutMs: 5000);
-        Assert.Equal("Switching to Tuna", sender.Snapshot.Outbound?.StatusMessage);
+            FileTransferTransportKind.Tuna,
+            seedRuntimeUnlockProof: false);
 
-        var probe = await ReceiveProbeAsync(receiverSession);
-        Assert.Equal(FileTransferTransportKind.Tuna, probe.TransportKind);
-        var probeFrame = Assert.IsType<FileTransferTransportProbeFrameV6>(probe.Frame);
-        await receiverTransport.SendFileTransferTransportProbeAsync(
-            new FileTransferTransportProbeV6
-            {
-                SessionId = probeFrame.SessionId,
-                TransferId = probeFrame.TransferId,
-                TransportEpoch = probeFrame.TransportEpoch,
-                ProbeId = probeFrame.ProbeId,
-                TargetTransport = probeFrame.TargetTransport,
-            },
-            CancellationToken.None);
-
-        await WaitUntilAsync(
-            () => senderTransport.ObservedV6TransportEpochs.Any(snapshot =>
-                !snapshot.IsUnresolved &&
-                snapshot.State == V6TransportEpochState.Recovered &&
-                snapshot.TransportEpoch == probeFrame.TransportEpoch),
-            timeoutMs: 5000);
+        Assert.DoesNotContain(
+            senderTransport.ObservedV6TransportEpochs,
+            snapshot => snapshot.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
+                        snapshot.TargetTransport == FileTransferTransportKind.Tuna);
+        Assert.Equal(FileTransferRouteResolver.PostTunaFallbackV6Token, sender.Snapshot.Outbound?.RouteToken);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV6, sender.Snapshot.Outbound?.ProtocolVersion);
         Assert.True(sender.Snapshot.Outbound!.ProgressBytes >= progressBeforeEpoch);
     }
 
@@ -239,7 +219,7 @@ public sealed class SessionFileTransferV6TunaIntegrationTests : SessionFileTrans
             static epoch => string.Equals(epoch.HandoffKind, "regular_nkn_recovery", StringComparison.Ordinal));
     }
 
-    [Theory]
+    [Theory(Skip = "Obsolete after coordinator-owned fallback recovery; epoch replacement now requires current proof and bridge authority, covered by SessionFileTransferV6TransportEpochTests.")]
     [InlineData(FileTransferTransportHandoffKind.RegularNknRecovery, FileTransferTransportHandoffKind.TunaToNormalFallback)]
     [InlineData(FileTransferTransportHandoffKind.TunaToNormalFallback, FileTransferTransportHandoffKind.RegularNknRecovery)]
     public async Task TunaFallback_DifferentRegularNknEpochKindsSupersedeUnresolvedEpoch(
@@ -338,7 +318,7 @@ public sealed class SessionFileTransferV6TunaIntegrationTests : SessionFileTrans
     }
 
     [Fact]
-    public async Task TunaReenableDuringActiveTransferStartsFreshEpochWithoutResettingProgress()
+    public async Task TunaReenableEvidence_WithoutCoordinatorAuthority_DoesNotSupersedeFallbackOrResetProgress()
     {
         const string transferId = "transfer_v6_tuna_reenable_fresh_epoch";
         using var senderTransport = new LoopbackFileTransferTransport("session_v6_tuna_reenable_fresh_epoch");
@@ -369,19 +349,20 @@ public sealed class SessionFileTransferV6TunaIntegrationTests : SessionFileTrans
         senderTransport.RequestAllDataSessionHandoffs(
             "tuna_reenabled",
             FileTransferTransportHandoffKind.NormalToTunaActivation,
-            FileTransferTransportKind.Tuna);
+            FileTransferTransportKind.Tuna,
+            seedRuntimeUnlockProof: false);
 
-        await WaitUntilAsync(
-            () => senderTransport.ObservedV6TransportEpochs.Any(snapshot =>
-                snapshot.IsUnresolved &&
-                snapshot.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
-                snapshot.TransportEpoch > fallbackEpoch.TransportEpoch),
-            timeoutMs: 5000);
-        Assert.Contains(
+        Assert.DoesNotContain(
             senderTransport.ObservedV6TransportEpochs,
-            snapshot => !snapshot.IsUnresolved &&
-                        snapshot.State == V6TransportEpochState.Terminal &&
-                        snapshot.TransportEpoch == fallbackEpoch.TransportEpoch);
+            snapshot => snapshot.HandoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
+                        snapshot.TransportEpoch > fallbackEpoch.TransportEpoch);
+        Assert.DoesNotContain(
+            senderTransport.ObservedV6TransportEpochs,
+            snapshot => snapshot.State == V6TransportEpochState.Terminal &&
+                        snapshot.TransportEpoch == fallbackEpoch.TransportEpoch &&
+                        string.Equals(snapshot.Reason, "superseded", StringComparison.Ordinal));
+        Assert.Equal(FileTransferRouteResolver.PostTunaFallbackV6Token, sender.Snapshot.Outbound?.RouteToken);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV6, sender.Snapshot.Outbound?.ProtocolVersion);
         Assert.True(sender.Snapshot.Outbound!.ProgressBytes >= progressBeforeEpoch);
     }
 
@@ -391,6 +372,8 @@ public sealed class SessionFileTransferV6TunaIntegrationTests : SessionFileTrans
         LoopbackFileTransferTransport receiverTransport,
         string transferId)
     {
+        senderTransport.IsPostTunaFileFallbackActiveForRouteSelection = true;
+        receiverTransport.IsPostTunaFileFallbackActiveForRouteSelection = true;
         senderTransport.SetTransportAccelerationActiveForTests(true, "test_v6_tuna_integration");
         var payload = Enumerable.Range(0, 384_000).Select(static index => (byte)(index % 251)).ToArray();
         await sender.TryStartSendAsync(

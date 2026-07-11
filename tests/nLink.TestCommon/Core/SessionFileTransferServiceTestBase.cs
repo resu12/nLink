@@ -166,7 +166,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         return builder.ToString();
     }
 
-    protected class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRegularV4FrontierRepairSettlementObserver, IFileTransferRouteCompletionObserver, ITransportAccelerationStatus, IFileTransferSessionContextProvider, IFileTransferInitialTunaReadinessProvider, IRuntimeUnlockRouteCommitProofProvider
+    protected class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities, IFileTransferRouteStatus, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IFileTransferRegularV4ControlFeedbackPressureObserver, IFileTransferRegularV4FrontierRepairSettlementObserver, IFileTransferRouteCompletionObserver, IFileTransferRouteHintObserver, ITransportAccelerationStatus, IFileTransferSessionContextProvider, IFileTransferInitialTunaReadinessProvider, IRuntimeUnlockRouteCommitProofProvider
     {
         private readonly string sessionId;
         private readonly ConcurrentDictionary<string, LoopbackDataSession> dataSessions = new(StringComparer.Ordinal);
@@ -239,6 +239,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         public ConcurrentQueue<FileTransferRegularV4ControlFeedbackPressure> RegularV4ControlFeedbackPressures { get; } = [];
         public ConcurrentQueue<FileTransferRegularV4FrontierRepairSettlement> RegularV4FrontierRepairSettlements { get; } = [];
         public ConcurrentQueue<FileTransferRouteCompletedNotification> RouteCompletionNotifications { get; } = [];
+        public ConcurrentQueue<FileTransferRouteHintNotification> ObservedRouteHints { get; } = [];
         public ConcurrentQueue<string> RuntimeUnlockProbeEvents { get; } = [];
         public ConcurrentQueue<string> RuntimeUnlockRouteCommitResults { get; } = [];
         internal RuntimeUnlockRouteCommitSnapshot? RuntimeUnlockRouteCommitSnapshot { get; set; }
@@ -342,6 +343,9 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
 
         public void ObserveFileTransferV6TransportEpoch(FileTransferV6TransportEpochSnapshot snapshot)
             => ObservedV6TransportEpochs.Enqueue(snapshot);
+
+        public void ObserveFileTransferRouteHint(FileTransferRouteHintNotification notification)
+            => ObservedRouteHints.Enqueue(notification);
 
         public void RequestFileTransferReceiveRecovery(FileTransferReceiveRecoveryRequest request)
             => ReceiveRecoveryRequests.Enqueue(request);
@@ -706,14 +710,16 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         public void RequestAllDataSessionHandoffs(
             string reason,
             FileTransferTransportHandoffKind handoffKind,
-            FileTransferTransportKind targetTransport)
+            FileTransferTransportKind targetTransport,
+            bool seedRuntimeUnlockProof = true)
         {
             NextDataFrameTransportKind = targetTransport == FileTransferTransportKind.Unknown
                 ? FileTransferTransportKind.RegularNkn
                 : targetTransport;
             foreach (var session in dataSessions.Values)
             {
-                if (handoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
+                if (seedRuntimeUnlockProof &&
+                    handoffKind == FileTransferTransportHandoffKind.NormalToTunaActivation &&
                     targetTransport == FileTransferTransportKind.Tuna)
                 {
                     SeedRuntimeUnlockRouteCommitProofForTests(session.TransferId, reason);
