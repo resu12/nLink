@@ -11853,7 +11853,7 @@ public sealed partial class NknSignalingTransport
                                 successorIntent.RetryReason,
                                 successorIntent.RecoveryReason,
                                 state.RegularV4RecoveryLivenessGeneration,
-                                state.RegularV4RecoveryBridgeDecisionGeneration,
+                                currentContract.Authority.BridgeDecisionGeneration,
                                 successorIntent.PredecessorAuthorityId,
                                 RequestActivePredecessorSupersession: true);
                         if (!state.PendingDispatchSuccessorRequestIssued)

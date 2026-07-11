@@ -13845,11 +13845,19 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 cts.Token,
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
             const string transferId = "transfer_runtime_unlock_rejected_successor";
+            RuntimeUnlockRetryDispatchAuthorityRequest? capturedSuccessorRequest = null;
             InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
                 host,
-                request => request.RequestActivePredecessorSupersession
-                    ? RuntimeUnlockRetryDispatchDecisionStatus.Rejected
-                    : RuntimeUnlockRetryDispatchDecisionStatus.Granted);
+                request =>
+                {
+                    if (request.RequestActivePredecessorSupersession)
+                    {
+                        capturedSuccessorRequest = request;
+                        return RuntimeUnlockRetryDispatchDecisionStatus.Rejected;
+                    }
+
+                    return RuntimeUnlockRetryDispatchDecisionStatus.Granted;
+                });
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             TrackAuthorizedRegularV4RouteForTests(host, transferId);
             var retryStateField = typeof(NknSignalingTransport).GetField(
@@ -13871,6 +13879,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             var contractProperty = state.GetType().GetProperty("DispatchContract");
             Assert.NotNull(contractProperty);
             var predecessor = Assert.IsType<RuntimeUnlockRetryDispatchContract>(contractProperty!.GetValue(state));
+            var forwardedPredecessor = new RuntimeUnlockRetryDispatchContract(
+                predecessor.Authority with { BridgeDecisionGeneration = 9 });
+            contractProperty.SetValue(state, forwardedPredecessor);
+            state.GetType().GetProperty("RegularV4RecoveryBridgeDecisionGeneration")!.SetValue(state, 0);
 
             InvokePrivateMethod(
                 host,
@@ -13883,8 +13895,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
             var currentState = retryStateField.GetValue(host);
             Assert.NotNull(currentState);
-            Assert.Same(predecessor, contractProperty.GetValue(currentState));
-            Assert.False(predecessor.Lifecycle.IsSettled);
+            Assert.Same(forwardedPredecessor, contractProperty.GetValue(currentState));
+            Assert.False(forwardedPredecessor.Lifecycle.IsSettled);
+            Assert.NotNull(capturedSuccessorRequest);
+            Assert.Equal(9, capturedSuccessorRequest.Value.BridgeDecisionGeneration);
             var tail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=runtime_unlock_retry_successor_intent_rejected;", tail, StringComparison.Ordinal);
             Assert.DoesNotContain("settlement_outcome=AuthorityRejected", tail, StringComparison.Ordinal);
