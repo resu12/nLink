@@ -3167,6 +3167,60 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         return $true
     }
 
+    function Test-TunaGuiRegularV4PredecessorSettlementClosedSuccessor {
+        param([string[]]$Lines)
+
+        $indexedLines = @(
+            for ($index = 0; $index -lt $Lines.Count; $index++) {
+                [pscustomobject]@{ Index = $index; Line = [string]$Lines[$index] }
+            }
+        )
+        $adoptions = @($indexedLines | Where-Object {
+            Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('runtime_unlock_regular_v4_frontier_repair_settlement_handoff_adopted')
+        })
+        $consumedEvents = @($indexedLines | Where-Object {
+            Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @(
+                'runtime_unlock_regular_v4_frontier_repair_settlement_handoff_consumed',
+                'runtime_unlock_regular_v4_frontier_repair_precontract_settlement_consumed')
+        })
+        $lifecycleEvents = @($indexedLines | Where-Object {
+            Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('filetransfer_regular_v4_recovery_liveness_bridge_lifecycle')
+        })
+
+        foreach ($consumed in $consumedEvents) {
+            $sessionId = Get-TunaGuiLogLineFieldValue -Line $consumed.Line -Name 'session_id'
+            $transferId = Get-TunaGuiLogLineFieldValue -Line $consumed.Line -Name 'transfer_id'
+            $livenessGeneration = Get-TunaGuiLogLineFieldValue -Line $consumed.Line -Name 'adopted_recovery_liveness_generation'
+            $bridgeDecisionGeneration = Get-TunaGuiLogLineFieldValue -Line $consumed.Line -Name 'adopted_bridge_decision_generation'
+            if ([string]::IsNullOrWhiteSpace($livenessGeneration) -or $livenessGeneration -eq '0') {
+                $adoption = @($adoptions | Where-Object {
+                    $_.Index -lt $consumed.Index -and
+                    (Test-TunaGuiRegularV4FrontierRepairMatch -SourceLine $consumed.Line -CandidateLine $_.Line)
+                } | Select-Object -Last 1)
+                if ($adoption.Count -gt 0) {
+                    $livenessGeneration = Get-TunaGuiLogLineFieldValue -Line $adoption[0].Line -Name 'adopted_recovery_liveness_generation'
+                    $bridgeDecisionGeneration = Get-TunaGuiLogLineFieldValue -Line $adoption[0].Line -Name 'adopted_bridge_decision_generation'
+                }
+            }
+
+            $boundary = @($lifecycleEvents | Where-Object {
+                $_.Index -lt $consumed.Index -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'session_id') -eq $sessionId -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'transfer_id') -eq $transferId -and
+                (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'lifecycle') -in @('completed', 'exhausted', 'receive_resumed') -and
+                ([string]::IsNullOrWhiteSpace($livenessGeneration) -or $livenessGeneration -eq '0' -or
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'generation') -eq $livenessGeneration) -and
+                ([string]::IsNullOrWhiteSpace($bridgeDecisionGeneration) -or $bridgeDecisionGeneration -eq '0' -or
+                    (Get-TunaGuiLogLineFieldValue -Line $_.Line -Name 'bridge_decision_generation') -eq $bridgeDecisionGeneration)
+            })
+            if ($boundary.Count -eq 0) {
+                return $true
+            }
+        }
+
+        return $false
+    }
+
     $bridgeBootstrapNotReady = Test-TunaGuiBridgeBootstrapNotReadyEvidence -Lines $evidenceLines
     $rawListenerUnavailable = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('listener_unavailable')
     $rawListenerSidecarUnavailable = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('listener_sidecar_unavailable')
@@ -3270,6 +3324,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $regularV4ReceiveRecoveryClosedNoDeferral -and
         (-not $runtimeUnlockTransactionStarted)
     $regularV4EvidenceLineText = [string[]]@($evidenceLines | ForEach-Object { [string]$_ })
+    $regularV4RecoveryPredecessorSettlementClosedSuccessor =
+        Test-TunaGuiRegularV4PredecessorSettlementClosedSuccessor -Lines $regularV4EvidenceLineText
     $regularV4FrontierRepairSettlementClosed = Test-TunaGuiRegularV4FrontierRepairSettlementClosed -Lines $regularV4EvidenceLineText
     $regularV4FrontierRepairSettledStalledUnclosed = $regularV4FrontierRepairSettledStalledEvent -and (-not $regularV4FrontierRepairSettlementClosed)
     $regularV4FrontierMissingRanges = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_v4_frontier_stall_missing_range_due')
@@ -3416,6 +3472,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     elseif ($runtimeUnlockRetryDispatchMissingAfterAuthorityGranted) {
         $phase = 'runtime_unlock_retry'
         $reason = 'runtime_unlock_retry_dispatch_missing_after_authority_granted'
+    }
+    elseif ($regularV4RecoveryPredecessorSettlementClosedSuccessor) {
+        $phase = 'regular_v4_receive_recovery'
+        $reason = 'regular_v4_recovery_predecessor_settlement_closed_successor'
     }
     elseif ($regularV4ReceiveRecoveryRejectedBeforeRuntimeUnlock) {
         $phase = 'runtime_unlock_retry'

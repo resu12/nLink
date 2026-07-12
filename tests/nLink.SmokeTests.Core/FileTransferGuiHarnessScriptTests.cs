@@ -814,6 +814,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("regularV4ReceiveRecoveryClosedNoDeferral", scriptText, StringComparison.Ordinal);
         Assert.Contains("regularV4ReceiveRecoveryRejectedBeforeRuntimeUnlock", scriptText, StringComparison.Ordinal);
         Assert.Contains("regular_v4_receive_recovery_rejected_before_runtime_unlock", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Test-TunaGuiRegularV4PredecessorSettlementClosedSuccessor", scriptText, StringComparison.Ordinal);
+        Assert.Contains("regularV4RecoveryPredecessorSettlementClosedSuccessor", scriptText, StringComparison.Ordinal);
+        Assert.Contains("regular_v4_recovery_predecessor_settlement_closed_successor", scriptText, StringComparison.Ordinal);
         Assert.Contains("regularV4FrontierRepairSettlementClosed", scriptText, StringComparison.Ordinal);
         Assert.Contains("regularV4FrontierRepairSettledStalledUnclosed", scriptText, StringComparison.Ordinal);
         Assert.Contains("runtimeUnlockRetryDispatchMissingAfterAuthorityGranted", scriptText, StringComparison.Ordinal);

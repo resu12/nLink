@@ -7108,6 +7108,7 @@ function New-FileTransferStabilityGateSummaryLines {
         ("regular_v4_frontier_repair_progress_observed_count={0}" -f $recoveryClassification.RegularV4FrontierRepairProgressObservedCount),
         ("regular_v4_frontier_repair_stalled_count={0}" -f $recoveryClassification.RegularV4FrontierRepairStalledCount),
         ("regular_v4_frontier_repair_settled_stalled_count={0}" -f $recoveryClassification.RegularV4FrontierRepairSettledStalledCount),
+        ("regular_v4_recovery_predecessor_settlement_closed_successor_count={0}" -f $recoveryClassification.RegularV4RecoveryPredecessorSettlementClosedSuccessorCount),
         ("regular_v4_frontier_repair_verdict={0}" -f $recoveryClassification.RegularV4FrontierRepairVerdict),
         ("regular_v4_repair_cache_pressure_count={0}" -f $recoveryClassification.RegularV4RepairCachePressureCount),
         ("listener_ready_unavailable_contradiction_count={0}" -f $recoveryClassification.ListenerReadyUnavailableContradictionCount),
@@ -8086,6 +8087,15 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockRegularV4FrontierRepairPrecontractSettlementConsumedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_regular_v4_frontier_repair_precontract_settlement_consumed'
     })
+    $runtimeUnlockRegularV4FrontierRepairSettlementHandoffAdoptedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_regular_v4_frontier_repair_settlement_handoff_adopted'
+    })
+    $runtimeUnlockRegularV4FrontierRepairSettlementHandoffConsumedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_regular_v4_frontier_repair_settlement_handoff_consumed'
+    })
+    $regularV4RecoveryBridgeLifecycleEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_regular_v4_recovery_liveness_bridge_lifecycle'
+    })
     $regularV4ReceiveRecoveryClosedNoDeferralEvents = @($events | Where-Object {
         $_.EventName -eq 'regular_v4_receive_recovery_contract_closed_no_deferral'
     })
@@ -8888,6 +8898,44 @@ function Get-FileTransferRecoveryFailureClassification {
         }
     )
 
+    $regularV4RecoveryPredecessorSettlementClosedSuccessorEvents = @(
+        $consumedCandidates = @(
+            $runtimeUnlockRegularV4FrontierRepairSettlementHandoffConsumedEvents +
+            $runtimeUnlockRegularV4FrontierRepairPrecontractSettlementConsumedEvents
+        )
+        foreach ($consumed in $consumedCandidates) {
+            $consumedSequence = [int64]$consumed.Sequence
+            $sessionId = Get-FileTransferEventField -Event $consumed -Name 'session_id' -Default ''
+            $transferId = Get-FileTransferEventField -Event $consumed -Name 'transfer_id' -Default ''
+            $adoptedLivenessGeneration = Get-FileTransferEventField -Event $consumed -Name 'adopted_recovery_liveness_generation' -Default '0'
+            $adoptedBridgeDecisionGeneration = Get-FileTransferEventField -Event $consumed -Name 'adopted_bridge_decision_generation' -Default '0'
+            if ($adoptedLivenessGeneration -eq '0') {
+                $adoption = @($runtimeUnlockRegularV4FrontierRepairSettlementHandoffAdoptedEvents | Where-Object {
+                    [int64]$_.Sequence -lt $consumedSequence -and
+                    (Test-RegularV4FrontierRepairMatch -Source $consumed -Candidate $_)
+                } | Select-Object -Last 1)
+                if ($adoption.Count -gt 0) {
+                    $adoptedLivenessGeneration = Get-FileTransferEventField -Event $adoption[0] -Name 'adopted_recovery_liveness_generation' -Default '0'
+                    $adoptedBridgeDecisionGeneration = Get-FileTransferEventField -Event $adoption[0] -Name 'adopted_bridge_decision_generation' -Default '0'
+                }
+            }
+
+            $terminalBoundary = @($regularV4RecoveryBridgeLifecycleEvents | Where-Object {
+                [int64]$_.Sequence -lt $consumedSequence -and
+                (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $sessionId -and
+                (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $transferId -and
+                (Get-FileTransferEventField -Event $_ -Name 'lifecycle' -Default '') -in @('completed', 'exhausted', 'receive_resumed') -and
+                ($adoptedLivenessGeneration -eq '0' -or
+                    (Get-FileTransferEventField -Event $_ -Name 'generation' -Default '0') -eq $adoptedLivenessGeneration) -and
+                ($adoptedBridgeDecisionGeneration -eq '0' -or
+                    (Get-FileTransferEventField -Event $_ -Name 'bridge_decision_generation' -Default '0') -eq $adoptedBridgeDecisionGeneration)
+            })
+            if ($terminalBoundary.Count -eq 0) {
+                $consumed
+            }
+        }
+    )
+
     $regularV4FrontierRepairUnresolvedStalledEvents = @(
         foreach ($stalled in $regularV4FrontierRepairStalledEvents) {
             $stalledSequence = [int64]$stalled.Sequence
@@ -9107,6 +9155,9 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     elseif ($runtimeUnlockRetryDispatchProofVerdict -eq 'fail') {
         $class = 'runtime_unlock_retry_dispatch_missing'
+    }
+    elseif ($regularV4RecoveryPredecessorSettlementClosedSuccessorEvents.Count -gt 0) {
+        $class = 'regular_v4_recovery_predecessor_settlement_closed_successor'
     }
     elseif ($regularV4ReceiveRecoveryRejectedBeforeRuntimeUnlock) {
         $class = 'regular_v4_receive_recovery_rejected_before_runtime_unlock'
@@ -9566,6 +9617,7 @@ function Get-FileTransferRecoveryFailureClassification {
         RegularV4FrontierRepairProgressObservedCount = $regularV4FrontierRepairProgressObservedEvents.Count
         RegularV4FrontierRepairStalledCount = $regularV4FrontierRepairStalledEvents.Count
         RegularV4FrontierRepairSettledStalledCount = $regularV4FrontierRepairSettledStalledEvents.Count
+        RegularV4RecoveryPredecessorSettlementClosedSuccessorCount = $regularV4RecoveryPredecessorSettlementClosedSuccessorEvents.Count
         RegularV4FrontierRepairVerdict = if ($regularV4FrontierRepairSendDeferred -or $regularV4FrontierRepairStalled -or $regularV4RepairLivenessAuthorityMissing) {
             'fail'
         } elseif ($regularV4FrontierRepairProgressObservedEvents.Count -gt 0 -or
@@ -10166,6 +10218,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("regular_v4_frontier_repair_progress_observed_count={0}" -f $recoveryClassification.RegularV4FrontierRepairProgressObservedCount),
         ("regular_v4_frontier_repair_stalled_count={0}" -f $recoveryClassification.RegularV4FrontierRepairStalledCount),
         ("regular_v4_frontier_repair_settled_stalled_count={0}" -f $recoveryClassification.RegularV4FrontierRepairSettledStalledCount),
+        ("regular_v4_recovery_predecessor_settlement_closed_successor_count={0}" -f $recoveryClassification.RegularV4RecoveryPredecessorSettlementClosedSuccessorCount),
         ("regular_v4_frontier_repair_verdict={0}" -f $recoveryClassification.RegularV4FrontierRepairVerdict),
         ("regular_v4_repair_cache_pressure_count={0}" -f $recoveryClassification.RegularV4RepairCachePressureCount),
         ("listener_ready_unavailable_contradiction_count={0}" -f $recoveryClassification.ListenerReadyUnavailableContradictionCount),

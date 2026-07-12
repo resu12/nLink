@@ -548,7 +548,7 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task AnalyzeRetained_RegularV4AcceptedPrecontractSettlementClosedNoDeferral_DoesNotFailAsMissingHandoff()
+    public async Task AnalyzeRetained_RegularV4PrecontractSettlementClosedBeforeRecoveryBoundary_FailsAsPredecessorClosure()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -571,8 +571,39 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
 
         Assert.Equal(0, result.Script.ExitCode);
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
-        Assert.Equal("(none)", verdict["recovery_failure_class"]);
+        Assert.Equal("regular_v4_recovery_predecessor_settlement_closed_successor", verdict["recovery_failure_class"]);
+        Assert.Equal("1", verdict["regular_v4_recovery_predecessor_settlement_closed_successor_count"]);
         Assert.Equal("1", verdict["regular_v4_frontier_repair_settled_stalled_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RegularV4PrecontractSettlementConsumedAfterRecoveryBoundary_PreservesHandoff()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_regular_v4_precontract_lifecycle_handoff";
+        const string repairKey = "441:12:441:12";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; route_publication_generation=3", secondsOffset: 0),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_settled_stalled; direction=inbound; transfer_id={transferId}; session_id=sess_a; repair_request_key={repairKey}; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; route_publication_generation=3; target_transport=regular_nkn; frontier_chunk_index=441; durable_received_highest_chunk_index=440; requested_chunk_count=12; settlement=stalled", secondsOffset: 20),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_settlement_accepted; session_id=sess_a; transfer_id={transferId}; direction=inbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=0; route_publication_generation=3; route_commit_generation=0; target_transport=regular_nkn; repair_request_key={repairKey}; frontier_chunk_index=441; durable_received_highest_chunk_index=440; requested_chunk_count=12; decision_generation=3; outcome=settled_stalled", secondsOffset: 21),
+            LogLine($"event=runtime_unlock_regular_v4_frontier_repair_settlement_held; session_id=sess_a; transfer_id={transferId}; direction=inbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=0; route_publication_generation=3; route_commit_generation=0; target_transport=regular_nkn; repair_request_key={repairKey}; settlement_decision_generation=3; settlement_outcome=settled_stalled", secondsOffset: 22),
+            LogLine($"event=runtime_unlock_regular_v4_frontier_repair_settlement_handoff_adopted; session_id=sess_a; transfer_id={transferId}; direction=inbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=0; route_publication_generation=3; route_commit_generation=0; target_transport=regular_nkn; repair_request_key={repairKey}; settlement_decision_generation=3; settlement_outcome=settled_stalled; adopted_recovery_liveness_generation=1; adopted_bridge_decision_generation=1; handoff_disposition=adopted", secondsOffset: 23),
+            LogLine($"event=filetransfer_regular_v4_recovery_liveness_bridge_lifecycle; lifecycle=completed; session_id=sess_a; transfer_id={transferId}; generation=1; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; bridge_decision_generation=1", secondsOffset: 24),
+            LogLine($"event=runtime_unlock_regular_v4_frontier_repair_settlement_handoff_consumed; session_id=sess_a; transfer_id={transferId}; direction=inbound; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; bridge_decision_generation=0; route_publication_generation=3; route_commit_generation=0; target_transport=regular_nkn; repair_request_key={repairKey}; settlement_decision_generation=3; settlement_outcome=settled_stalled; adopted_recovery_liveness_generation=1; adopted_bridge_decision_generation=1; handoff_disposition=consumed; lifecycle_boundary=bridge_lifecycle_completed", secondsOffset: 25),
+            LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_a; transfer_id={transferId}; state=Completed; route=regular_nkn_v4_fast; protocol_version=4; error_code=(none); integrity_ok=1", secondsOffset: 30),
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("(none)", verdict["recovery_failure_class"]);
     }
 
     [Fact]
