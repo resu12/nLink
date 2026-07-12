@@ -3571,7 +3571,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
                     (Test-TunaGuiRegularV4FrontierRepairMatch -SourceLine $accepted.Line -CandidateLine $_.Line)
                 })) {
                     $closure = @($indexedLines | Where-Object {
-                        Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('regular_v4_receive_recovery_contract_closed_no_deferral') -and
+                        (Test-TunaGuiLogLineHasEvent -Line $_.Line -Events @('regular_v4_receive_recovery_contract_closed_no_deferral')) -and
                         (Test-TunaGuiRegularV4FrontierRepairPrecontractClosureMatch -Accepted $accepted -Consumed $consumed -Closure $_)
                     })
                     if ($closure.Count -gt 0) {
@@ -8562,10 +8562,16 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
     $payerMode = Get-TunaGuiPayerRole
     $faultMode = Get-TunaGuiFaultMode
     $routeMode = Get-TunaGuiRouteMode
-    $runBookmark = Get-AppLogBookmark
-    $initialLogLedgerSnapshot = Get-GuiSmokeLogLedgerSnapshot `
-        -State $script:GuiSmokeAppLogLedger `
-        -Bookmark $runBookmark
+    $runBookmark = 0
+    $initialLogLedgerSnapshot = [pscustomobject]@{
+        ledgerId = [string]$script:GuiSmokeAppLogLedger.LedgerId
+        bookmark = 0
+        lineCount = 0
+        initialGenerationKey = ''
+        activeGenerationKey = ''
+        generations = @()
+        initialGenerations = @()
+    }
 
     Write-Host ("[GUI Smoke][filetransfer_tuna] artifact_dir={0}; state_root={1}; direction={2}; payer={3}; fault={4}; route_mode={5}; payload_bytes={6}; mixed_screenshare={7}" -f `
         $artifactDir,
@@ -8583,6 +8589,14 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
         $env:NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT = $receivedRoot
 
         Start-HelpeeFlow -Context $Context
+        $runBookmark = Get-AppLogBookmark
+        $initialLogLedgerSnapshot = Get-GuiSmokeLogLedgerSnapshot `
+            -State $script:GuiSmokeAppLogLedger `
+            -Bookmark $runBookmark
+        if ([string]::IsNullOrWhiteSpace([string]$initialLogLedgerSnapshot.activeGenerationKey) -or
+            @($initialLogLedgerSnapshot.generations).Count -eq 0) {
+            throw 'gui_smoke_log_cursor_initial_generation_missing: helpee startup did not establish an indexable active log generation'
+        }
         Start-HelperFlow -Context $Context
         [void](Connect-HelperAndHelpee -Context $Context)
         if ($mixedScreenShare) {
@@ -10624,7 +10638,7 @@ function Enter-HelpeeHelperIdentityAndRequestHelp {
             throw ("Helpee request flow produced no Request help button. {0}" -f (Get-HelpeeInviteReadinessDiagnostic -Window $HelpeeWindow))
         }
 
-        if (Get-IsNknTransport -and $null -ne $Context) {
+        if ((Get-IsNknTransport) -and $null -ne $Context) {
             Wait-NknBridgeBootstrapReadyForCurrentPair -Context $Context -TimeoutMs (Get-TransportAwareTimeoutMs -DefaultMs 1000 -NknMs 60000) -Reason 'before_request_help_click'
         }
 

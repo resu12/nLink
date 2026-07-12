@@ -497,6 +497,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
         var wrapperText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "Run-FileTransferTunaGuiSmoke.ps1"));
+        var scenarioBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Run-ScenarioFileTransferTunaHandoffFallback",
+            "Suspend-ProcessForRecoveryWindow");
 
         Assert.Contains("Get-GuiSmokeLogLedgerSnapshot", guiText, StringComparison.Ordinal);
         Assert.Contains("Write-FileTransferGuiLogLedgerEvidence", guiText, StringComparison.Ordinal);
@@ -512,6 +516,51 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("cursorIntegrityVerdict", guiText, StringComparison.Ordinal);
         Assert.Contains("[string]$FileName = 'filetransfer-retained-log-slice.log'", wrapperText, StringComparison.Ordinal);
         Assert.DoesNotContain("filetransfer-gui-log-ledger-slice.log", wrapperText, StringComparison.Ordinal);
+
+        var helpeeStartIndex = scenarioBody.IndexOf("Start-HelpeeFlow -Context $Context", StringComparison.Ordinal);
+        var bookmarkIndex = scenarioBody.IndexOf("$runBookmark = Get-AppLogBookmark", StringComparison.Ordinal);
+        var initialSnapshotIndex = scenarioBody.IndexOf("$initialLogLedgerSnapshot = Get-GuiSmokeLogLedgerSnapshot", StringComparison.Ordinal);
+        var helperStartIndex = scenarioBody.IndexOf("Start-HelperFlow -Context $Context", StringComparison.Ordinal);
+        Assert.True(
+            helpeeStartIndex >= 0 &&
+            bookmarkIndex > helpeeStartIndex &&
+            initialSnapshotIndex > bookmarkIndex &&
+            helperStartIndex > initialSnapshotIndex,
+            "The Tuna ledger bookmark and initial generation snapshot must be captured after the first app establishes nlink.log and before the helper contributes scenario events.");
+        Assert.Contains("gui_smoke_log_cursor_initial_generation_missing", scenarioBody, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeWindows_LogicalOperatorsAreNotParsedAsCommandParameters()
+    {
+        var guiPath = Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1")
+            .Replace("'", "''", StringComparison.Ordinal);
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            $tokens = $null
+            $errors = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile('{{guiPath}}', [ref]$tokens, [ref]$errors)
+            if (@($errors).Count -gt 0) {
+                throw "Gui smoke parse errors: $(@($errors | ForEach-Object { $_.Message }) -join '; ')"
+            }
+
+            $invalidLogicalParameters = @($ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.CommandParameterAst] -and
+                    $node.ParameterName -in @('and', 'or', 'xor')
+            }, $true))
+            if ($invalidLogicalParameters.Count -gt 0) {
+                $locations = @($invalidLogicalParameters | ForEach-Object { "line=$($_.Extent.StartLineNumber); parameter=$($_.ParameterName); text=$($_.Parent.Extent.Text)" })
+                throw "PowerShell logical operator parsed as a command parameter: $($locations -join ' | ')"
+            }
+
+            Write-Output 'gui-smoke-logical-operator-ast-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(result.ExitCode == 0, $"Gui smoke AST validation failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-smoke-logical-operator-ast-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]
