@@ -2856,6 +2856,9 @@ function Get-TunaGuiExplicitFailureClassification {
             'runtime_unlock_retry_source_publication_mismatch' {
                 return [pscustomobject]@{ Phase = 'runtime_unlock_retry'; Reason = $failureClass }
             }
+            'fallback_tail_yield_authority_invalid' {
+                return [pscustomobject]@{ Phase = 'fallback_tail_yield'; Reason = $failureClass }
+            }
         }
     }
 
@@ -3276,6 +3279,17 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
             (-not $runtimeUnlockRetryRegularV4RecoverySettled) -and
             $activationOfferNotObserved)
     $fallbackTailLocalYieldBlocked = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_tail_local_yield_blocked')
+    $fallbackTailYieldAuthorityRejected =
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_tail_yield_local_authority_rejected')) -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_tail_yield_proof_stale_ignored', 'reason=legacy_authority_missing')) -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_tail_yield_proof_stale_ignored', 'reason=authority_malformed')) -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_tail_yield_proof_stale_ignored', 'reason=authority_tuple_mismatch')) -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_tail_yield_proof_stale_ignored', 'reason=predecessor_mismatch')) -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_tail_yield_proof_stale_ignored', 'reason=late_predecessor')) -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_tail_yield_proof_stale_ignored', 'reason=peer_yield_authority_invalid')) -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_tail_yield_proof_stale_ignored', 'reason=peer_yield_authority_tuple_mismatch')) -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_tail_yield_proof_stale_ignored', 'reason=peer_yield_authority_predecessor_mismatch')) -or
+        (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_tail_yield_proof_stale_ignored', 'reason=peer_yield_generation_regressed'))
     $fallbackTailFrontierStateMissing = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_fallback_tail_local_yield_blocked', 'decision_reason=fallback_frontier_state_missing')
     $postFallbackAdmissionGranted = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_runtime_unlock_admission_granted', 'source=fallback_survival_resume', 'admission_reason=fallback_quiescent')
     $postFallbackPrecommitWaitingForProof = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_runtime_unlock_precommit_probe_waiting_for_transport_proof', 'reason=fallback_tail_quiescent')
@@ -3388,6 +3402,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $regularV4FrontierRepairStalled -or
         $fallbackFrontierRequestDispatchMissing -or
         $fallbackFrontierRepairStalled -or
+        $fallbackTailYieldAuthorityRejected -or
         $postFallbackRuntimeUnlockResumeBlocked -or
         $postTunaFallbackRouteEvidence
 
@@ -3464,6 +3479,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $ErrorMessage.IndexOf('coordinator-authorized file Tuna V4 publication after measured GUI file transfer', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         $phase = 'route_publication'
         $reason = 'file_tuna_v4_publication_missing_after_transfer'
+    }
+    elseif ($fallbackTailYieldAuthorityRejected) {
+        $phase = 'fallback_tail_yield'
+        $reason = 'fallback_tail_yield_authority_invalid'
     }
     elseif ($postFallbackRuntimeUnlockResumeBlocked) {
         $phase = 'post_fallback_runtime_unlock_resume'

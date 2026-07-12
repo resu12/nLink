@@ -735,6 +735,9 @@ public static class FileTransferDataFrameCodec
                     PairKey = yieldFields.PairKey,
                     Direction = yieldFields.Direction,
                     YieldGeneration = yieldFields.YieldGeneration,
+                    AuthoritySchema = yieldFields.AuthoritySchema,
+                    AuthorityId = yieldFields.AuthorityId,
+                    PredecessorAuthorityId = yieldFields.PredecessorAuthorityId,
                     LiveRouteEpoch = yieldFields.LiveRouteEpoch,
                     FallbackLegGeneration = yieldFields.FallbackLegGeneration,
                     BridgeRecoveryGeneration = yieldFields.BridgeRecoveryGeneration,
@@ -1381,7 +1384,24 @@ public static class FileTransferDataFrameCodec
         out FileTransferFallbackTailYieldFrameV6 normalized)
     {
         normalized = frame;
-        if (frame.TransportEpoch <= 0 ||
+        var legacyAuthority = frame.AuthoritySchema == 0 &&
+                              string.IsNullOrWhiteSpace(frame.AuthorityId) &&
+                              string.IsNullOrWhiteSpace(frame.PredecessorAuthorityId);
+        var authorityId = string.Empty;
+        var currentAuthority = frame.AuthoritySchema == FileTransferAuthoritySchema.Current &&
+                               FileTransferAuthorityIdParser.TryNormalizeFallbackTailYield(
+                                   frame.AuthorityId,
+                                   out authorityId) &&
+                               (string.IsNullOrWhiteSpace(frame.PredecessorAuthorityId) ||
+                                FileTransferAuthorityIdParser.TryNormalizeFallbackTailYield(
+                                    frame.PredecessorAuthorityId,
+                                    out _)) &&
+                               !string.Equals(
+                                   authorityId,
+                                   frame.PredecessorAuthorityId?.Trim(),
+                                   StringComparison.Ordinal);
+        if ((!legacyAuthority && !currentAuthority) ||
+            frame.TransportEpoch <= 0 ||
             frame.YieldGeneration <= 0 ||
             frame.LiveRouteEpoch <= 0 ||
             frame.FallbackLegGeneration <= 0 ||
@@ -1419,6 +1439,12 @@ public static class FileTransferDataFrameCodec
             OwnerKey = ownerKey,
             PairKey = pairKey,
             Direction = normalizedDirection,
+            AuthorityId = currentAuthority ? authorityId : string.Empty,
+            PredecessorAuthorityId = currentAuthority
+                ? string.IsNullOrWhiteSpace(frame.PredecessorAuthorityId)
+                    ? null
+                    : frame.PredecessorAuthorityId.Trim()
+                : null,
             BatchId = NormalizeTransportMetadataToken(frame.BatchId),
             RepairRequestId = NormalizeTransportMetadataToken(frame.RepairRequestId),
             Priority = NormalizeTransportMetadataToken(frame.Priority),
@@ -1495,6 +1521,15 @@ public static class FileTransferDataFrameCodec
         Stream stream,
         FileTransferFallbackTailYieldFrameV6 frame)
     {
+        if (frame.AuthoritySchema != FileTransferAuthoritySchema.Current ||
+            !FileTransferAuthorityIdParser.TryNormalizeFallbackTailYield(frame.AuthorityId, out var authorityId) ||
+            (!string.IsNullOrWhiteSpace(frame.PredecessorAuthorityId) &&
+             !FileTransferAuthorityIdParser.TryNormalizeFallbackTailYield(frame.PredecessorAuthorityId, out _)) ||
+            string.Equals(authorityId, frame.PredecessorAuthorityId?.Trim(), StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Fallback-tail yield authority payload was invalid.");
+        }
+
         WriteString(stream, frame.OwnerKey);
         WriteString(stream, frame.Direction);
         WriteInt64(stream, frame.YieldGeneration);
@@ -1505,6 +1540,9 @@ public static class FileTransferDataFrameCodec
         WriteInt32(stream, frame.HighestObservedChunkIndex);
         WriteInt64(stream, frame.SentUnixTimeMilliseconds);
         WriteString(stream, string.IsNullOrWhiteSpace(frame.PairKey) ? frame.OwnerKey : frame.PairKey);
+        WriteInt32(stream, frame.AuthoritySchema);
+        WriteString(stream, authorityId);
+        WriteOptionalString(stream, frame.PredecessorAuthorityId);
     }
 
     private static bool TryReadTransportMetadata(ref BinaryFrameReader reader, out TransportMetadata metadata)
@@ -1584,6 +1622,20 @@ public static class FileTransferDataFrameCodec
             pairKey = string.IsNullOrWhiteSpace(appendedPairKey) ? ownerKey : appendedPairKey;
         }
 
+        var authoritySchema = 0;
+        var authorityId = string.Empty;
+        string? predecessorAuthorityId = null;
+        if (!reader.IsFullyConsumed)
+        {
+            if (!reader.TryReadInt32(out authoritySchema) ||
+                !reader.TryReadString(out authorityId) ||
+                !reader.TryReadOptionalString(out predecessorAuthorityId) ||
+                authoritySchema != FileTransferAuthoritySchema.Current)
+            {
+                return false;
+            }
+        }
+
         if (!reader.IsFullyConsumed)
         {
             return false;
@@ -1599,7 +1651,10 @@ public static class FileTransferDataFrameCodec
             bridgeRecoveryGeneration,
             committedChunkIndex,
             highestObservedChunkIndex,
-            sentUnixTimeMilliseconds);
+            sentUnixTimeMilliseconds,
+            authoritySchema,
+            authorityId,
+            predecessorAuthorityId);
         return true;
     }
 
@@ -1641,7 +1696,10 @@ public static class FileTransferDataFrameCodec
         int BridgeRecoveryGeneration,
         int CommittedChunkIndex,
         int HighestObservedChunkIndex,
-        long SentUnixTimeMilliseconds);
+        long SentUnixTimeMilliseconds,
+        int AuthoritySchema,
+        string AuthorityId,
+        string? PredecessorAuthorityId);
 
     private static bool IsValidV4ChunkRange(int startChunkIndex, int chunkCount)
     {

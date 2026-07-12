@@ -17,6 +17,34 @@ public readonly record struct FileTransferAuthorityId
     public override string ToString() => IsDefault ? "(none)" : Value;
 }
 
+internal static class FileTransferAuthorityIdParser
+{
+    private static readonly string FallbackTailYieldPrefix =
+        $"fta{FileTransferAuthoritySchema.Current}-fallback_tail_yield-";
+
+    public static bool TryNormalizeFallbackTailYield(string? value, out string normalized)
+    {
+        normalized = string.IsNullOrWhiteSpace(value) ? string.Empty : value.Trim();
+        if (normalized.Length != FallbackTailYieldPrefix.Length + 24 ||
+            !normalized.StartsWith(FallbackTailYieldPrefix, StringComparison.Ordinal))
+        {
+            normalized = string.Empty;
+            return false;
+        }
+
+        foreach (var character in normalized.AsSpan(FallbackTailYieldPrefix.Length))
+        {
+            if (character is not (>= '0' and <= '9') and not (>= 'a' and <= 'f'))
+            {
+                normalized = string.Empty;
+                return false;
+            }
+        }
+
+        return true;
+    }
+}
+
 internal sealed class FileTransferAuthorityLifecycle<TOutcome>
     where TOutcome : struct, Enum
 {

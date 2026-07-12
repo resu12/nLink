@@ -170,6 +170,9 @@ public sealed class FileTransferDataFrameCodecTests
                 PairKey = " session_a|transfer_tail_yield|post_tuna_fallback_v6|6|4|2|9|checkpoint:42 ",
                 Direction = " inbound ",
                 YieldGeneration = 3,
+                AuthoritySchema = FileTransferAuthoritySchema.Current,
+                AuthorityId = "fta2-fallback_tail_yield-0123456789abcdef01234567",
+                PredecessorAuthorityId = "fta2-fallback_tail_yield-89abcdef0123456701234567",
                 LiveRouteEpoch = 4,
                 FallbackLegGeneration = 5,
                 BridgeRecoveryGeneration = 2,
@@ -194,6 +197,9 @@ public sealed class FileTransferDataFrameCodecTests
         Assert.Equal("session_a|transfer_tail_yield|post_tuna_fallback_v6|6|4|2|9|checkpoint:42", yieldFrame.PairKey);
         Assert.Equal("inbound", yieldFrame.Direction);
         Assert.Equal(3, yieldFrame.YieldGeneration);
+        Assert.Equal(FileTransferAuthoritySchema.Current, yieldFrame.AuthoritySchema);
+        Assert.Equal("fta2-fallback_tail_yield-0123456789abcdef01234567", yieldFrame.AuthorityId);
+        Assert.Equal("fta2-fallback_tail_yield-89abcdef0123456701234567", yieldFrame.PredecessorAuthorityId);
         Assert.Equal(4, yieldFrame.LiveRouteEpoch);
         Assert.Equal(5, yieldFrame.FallbackLegGeneration);
         Assert.Equal(2, yieldFrame.BridgeRecoveryGeneration);
@@ -201,6 +207,115 @@ public sealed class FileTransferDataFrameCodecTests
         Assert.Equal(2100, yieldFrame.HighestObservedChunkIndex);
         Assert.Equal(1_772_000_000_000, yieldFrame.SentUnixTimeMilliseconds);
     }
+
+    [Fact]
+    public void V6FallbackTailYieldFrame_LegacyPayloadParsesDiagnosticOnly()
+    {
+        const string authorityId = "fta2-fallback_tail_yield-0123456789abcdef01234567";
+        var payload = FileTransferDataFrameCodec.Serialize(
+            CreateFallbackTailYieldFrame(authorityId));
+        var appendedAuthorityBytes = sizeof(int) + sizeof(ushort) + Encoding.UTF8.GetByteCount(authorityId) + sizeof(byte);
+        var legacyPayload = payload[..^appendedAuthorityBytes];
+
+        var parsed = FileTransferDataFrameCodec.TryDeserialize(legacyPayload, out var frame);
+
+        var yieldFrame = Assert.IsType<FileTransferFallbackTailYieldFrameV6>(frame);
+        Assert.True(parsed);
+        Assert.Equal(0, yieldFrame.AuthoritySchema);
+        Assert.Equal(string.Empty, yieldFrame.AuthorityId);
+        Assert.Null(yieldFrame.PredecessorAuthorityId);
+        Assert.Throws<InvalidOperationException>(() => FileTransferDataFrameCodec.Serialize(yieldFrame));
+
+        var appendedSchemaZero = legacyPayload
+            .Concat(new byte[sizeof(int) + sizeof(ushort) + sizeof(byte)])
+            .ToArray();
+        Assert.False(FileTransferDataFrameCodec.TryDeserialize(appendedSchemaZero, out _));
+    }
+
+    [Fact]
+    public void V6FallbackTailYieldFrame_CurrentAuthorityWithoutPredecessorRoundTrips()
+    {
+        const string authorityId = "fta2-fallback_tail_yield-0123456789abcdef01234567";
+
+        var payload = FileTransferDataFrameCodec.Serialize(CreateFallbackTailYieldFrame(authorityId));
+        var parsed = FileTransferDataFrameCodec.TryDeserialize(payload, out var frame);
+
+        var yieldFrame = Assert.IsType<FileTransferFallbackTailYieldFrameV6>(frame);
+        Assert.True(parsed);
+        Assert.Equal(FileTransferAuthoritySchema.Current, yieldFrame.AuthoritySchema);
+        Assert.Equal(authorityId, yieldFrame.AuthorityId);
+        Assert.Null(yieldFrame.PredecessorAuthorityId);
+    }
+
+    [Theory]
+    [InlineData(0, "")]
+    [InlineData(2, "bad")]
+    [InlineData(2, "fta2-fallback_tail_yield-0123456789ABCDEF01234567")]
+    public void V6FallbackTailYieldFrame_RejectsInvalidCurrentAuthorityOnSerialize(
+        int authoritySchema,
+        string authorityId)
+    {
+        var frame = CreateFallbackTailYieldFrame(authorityId) with
+        {
+            AuthoritySchema = authoritySchema,
+        };
+
+        Assert.Throws<InvalidOperationException>(() => FileTransferDataFrameCodec.Serialize(frame));
+    }
+
+    [Fact]
+    public void V6FallbackTailYieldFrame_RejectsSelfPredecessorAndTrailingPayload()
+    {
+        const string authorityId = "fta2-fallback_tail_yield-0123456789abcdef01234567";
+        var selfPredecessor = CreateFallbackTailYieldFrame(authorityId) with
+        {
+            PredecessorAuthorityId = authorityId,
+        };
+        Assert.Throws<InvalidOperationException>(() => FileTransferDataFrameCodec.Serialize(selfPredecessor));
+
+        var payload = FileTransferDataFrameCodec.Serialize(CreateFallbackTailYieldFrame(authorityId));
+        var withTrailingByte = payload.Concat(new byte[] { 0xff }).ToArray();
+        Assert.False(FileTransferDataFrameCodec.TryDeserialize(withTrailingByte, out _));
+        Assert.False(FileTransferDataFrameCodec.TryDeserialize(payload[..^1], out _));
+    }
+
+    [Fact]
+    public void V6FallbackTailYieldFrame_RejectsMalformedCurrentAuthorityOnDeserialize()
+    {
+        const string authorityId = "fta2-fallback_tail_yield-0123456789abcdef01234567";
+        var payload = FileTransferDataFrameCodec.Serialize(CreateFallbackTailYieldFrame(authorityId));
+        var authoritySuffixLength = sizeof(int) + sizeof(ushort) + Encoding.UTF8.GetByteCount(authorityId) + sizeof(byte);
+        var authoritySchemaOffset = payload.Length - authoritySuffixLength;
+
+        var wrongSchema = payload.ToArray();
+        BinaryPrimitives.WriteInt32LittleEndian(wrongSchema.AsSpan(authoritySchemaOffset, sizeof(int)), 3);
+        Assert.False(FileTransferDataFrameCodec.TryDeserialize(wrongSchema, out _));
+
+        var malformedAuthority = payload.ToArray();
+        malformedAuthority[authoritySchemaOffset + sizeof(int) + sizeof(ushort)] = (byte)'x';
+        Assert.False(FileTransferDataFrameCodec.TryDeserialize(malformedAuthority, out _));
+    }
+
+    private static FileTransferFallbackTailYieldFrameV6 CreateFallbackTailYieldFrame(string authorityId)
+        => new()
+        {
+            SessionId = "session_a",
+            TransferId = "transfer_tail_yield",
+            TransportEpoch = 9,
+            RecoveryMode = "fallback_tail_yield",
+            OwnerKey = "session_a|transfer_tail_yield|post_tuna_fallback_v6|6|4|5|2|9|(none)",
+            PairKey = "session_a|transfer_tail_yield|post_tuna_fallback_v6|6|4|2|9|(none)",
+            Direction = "outbound",
+            YieldGeneration = 3,
+            AuthoritySchema = FileTransferAuthoritySchema.Current,
+            AuthorityId = authorityId,
+            LiveRouteEpoch = 4,
+            FallbackLegGeneration = 5,
+            BridgeRecoveryGeneration = 2,
+            CommittedChunkIndex = 1975,
+            HighestObservedChunkIndex = 2100,
+            SentUnixTimeMilliseconds = 1_772_000_000_000,
+        };
 
     [Fact]
     public void V6ChunkBatchFrame_RoundTrips_WithinBudget()

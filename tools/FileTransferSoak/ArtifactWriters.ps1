@@ -2536,6 +2536,24 @@ function Get-FileTransferFallbackTailReconciliationProof {
             Where-Object { (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq 'fallback_proof_replay_pending' }
     )
     [object[]]$staleYieldProofIgnoredEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_tail_yield_proof_stale_ignored' })
+    [string[]]$yieldAuthorityRejectionReasons = @(
+        'legacy_authority_missing',
+        'authority_malformed',
+        'authority_tuple_mismatch',
+        'predecessor_mismatch',
+        'late_predecessor',
+        'peer_yield_authority_invalid',
+        'peer_yield_authority_tuple_mismatch',
+        'peer_yield_authority_predecessor_mismatch',
+        'peer_yield_generation_regressed'
+    )
+    [object[]]$yieldAuthorityRejectedEvents = @(
+        $events | Where-Object {
+            $_.EventName -eq 'filetransfer_fallback_tail_yield_local_authority_rejected' -or
+            ($_.EventName -eq 'filetransfer_fallback_tail_yield_proof_stale_ignored' -and
+                $yieldAuthorityRejectionReasons -contains (Get-FileTransferEventField -Event $_ -Name 'reason' -Default ''))
+        }
+    )
     [object[]]$frontierRepairAuthorityGrantedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_frontier_repair_authority_granted' })
     [object[]]$frontierRepairAuthorityRejectedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_frontier_repair_authority_rejected' })
     [object[]]$frontierRepairDispatchedEvents = @($events | Where-Object { $_.EventName -eq 'filetransfer_fallback_frontier_repair_dispatched' })
@@ -2843,6 +2861,92 @@ function Get-FileTransferFallbackTailReconciliationProof {
 
     $quiescenceFindings = New-Object System.Collections.Generic.List[string]
     $quiescenceEvidence = New-Object System.Collections.Generic.List[object]
+    [object[]]$currentYieldEvents = @(
+        $quiescentYieldEvents + $yieldProofSentEvents + $yieldProofReceivedEvents + $pairedYieldGrantedEvents |
+            Where-Object { (Get-FileTransferAuthoritySchema -Line ([string]$_.RawLine)) -ge 2 }
+    )
+    [object[]]$currentPairedYieldEvents = @(
+        $pairedYieldGrantedEvents |
+            Where-Object { (Get-FileTransferAuthoritySchema -Line ([string]$_.RawLine)) -ge 2 }
+    )
+    $yieldStableFields = @(
+        'authority_id',
+        'predecessor_authority_id',
+        'transfer_id',
+        'session_id',
+        'direction',
+        'route',
+        'protocol_version',
+        'live_route_epoch',
+        'runtime_generation',
+        'terminal_generation',
+        'leg_generation',
+        'transport_epoch',
+        'bridge_recovery_generation',
+        'checkpoint_request_id',
+        'owner_key',
+        'pair_key',
+        'yield_generation'
+    )
+    $peerYieldStableFields = @(
+        'transfer_id',
+        'session_id',
+        'direction',
+        'route',
+        'protocol_version',
+        'live_route_epoch',
+        'leg_generation',
+        'transport_epoch',
+        'bridge_recovery_generation',
+        'checkpoint_request_id',
+        'owner_key',
+        'pair_key'
+    )
+    [object[]]$validCurrentPairedYieldEvents = @($currentPairedYieldEvents | Where-Object {
+        $pairedEvent = $_
+        $pairedSequence = [int64]$pairedEvent.Sequence
+        $localQuiescent = @($quiescentYieldEvents | Where-Object {
+            [int64]$_.Sequence -lt $pairedSequence -and
+            (Get-FileTransferAuthoritySchema -Line ([string]$_.RawLine)) -ge 2 -and
+            (Test-FileTransferAuthorityFieldsEqual `
+                -LeftLine ([string]$pairedEvent.RawLine) `
+                -RightLine ([string]$_.RawLine) `
+                -Fields $yieldStableFields)
+        }).Count -gt 0
+        $localSent = @($yieldProofSentEvents | Where-Object {
+            [int64]$_.Sequence -lt $pairedSequence -and
+            (Get-FileTransferAuthoritySchema -Line ([string]$_.RawLine)) -ge 2 -and
+            (Test-FileTransferAuthorityFieldsEqual `
+                -LeftLine ([string]$pairedEvent.RawLine) `
+                -RightLine ([string]$_.RawLine) `
+                -Fields $yieldStableFields)
+        }).Count -gt 0
+        $peerAuthorityId = ConvertTo-FileTransferAuthorityNormalizedValue (
+            Get-FileTransferEventField -Event $pairedEvent -Name 'peer_authority_id' -Default '')
+        $peerPredecessorAuthorityId = ConvertTo-FileTransferAuthorityNormalizedValue (
+            Get-FileTransferEventField -Event $pairedEvent -Name 'peer_predecessor_authority_id' -Default '')
+        $peerYieldGeneration = Get-FileTransferEventField -Event $pairedEvent -Name 'peer_yield_generation' -Default ''
+        $peerReceived = @($yieldProofReceivedEvents | Where-Object {
+            [int64]$_.Sequence -lt $pairedSequence -and
+            (Get-FileTransferAuthoritySchema -Line ([string]$_.RawLine)) -ge 2 -and
+            $peerAuthorityId -ne '(none)' -and
+            $peerAuthorityId -eq (ConvertTo-FileTransferAuthorityNormalizedValue (
+                Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '')) -and
+            $peerPredecessorAuthorityId -eq (ConvertTo-FileTransferAuthorityNormalizedValue (
+                Get-FileTransferEventField -Event $_ -Name 'predecessor_authority_id' -Default '')) -and
+            -not [string]::IsNullOrWhiteSpace($peerYieldGeneration) -and
+            $peerYieldGeneration -eq (Get-FileTransferEventField -Event $_ -Name 'yield_generation' -Default '') -and
+            (Test-FileTransferAuthorityFieldsEqual `
+                -LeftLine ([string]$pairedEvent.RawLine) `
+                -RightLine ([string]$_.RawLine) `
+                -Fields $peerYieldStableFields)
+        }).Count -gt 0
+        return $localQuiescent -and $localSent -and $peerReceived
+    })
+    [object[]]$yieldAuthorityChainMismatchEvents = @($currentPairedYieldEvents | Where-Object {
+        $candidate = $_
+        @($validCurrentPairedYieldEvents | Where-Object { $_.Sequence -eq $candidate.Sequence }).Count -eq 0
+    })
     $hasTailActivity = $tailReconciliationStarted -or
         $progressForcedEvents.Count -gt 0 -or
         $runtimeUnlockWaitingForFallbackEvents.Count -gt 0 -or
@@ -2862,17 +2966,34 @@ function Get-FileTransferFallbackTailReconciliationProof {
         $frontierRequestReceiveDispatchedEvents.Count -gt 0 -or
         $frontierRequestReceiveDispatchRejectedEvents.Count -gt 0 -or
         $frontierRequestReceiveDispatchCoalescedEvents.Count -gt 0 -or
+        $yieldAuthorityRejectedEvents.Count -gt 0 -or
         $staleYieldProofIgnoredEvents.Count -gt 0
-    $hasLegacyLocalPairedYield = $outboundQuiescentYieldEvents.Count -gt 0 -and
-        $inboundQuiescentYieldEvents.Count -gt 0
-    $hasPairedYield = $pairedYieldGrantedEvents.Count -gt 0 -or
-        ($hasLegacyLocalPairedYield -and $ownerGenerationMismatchEvents.Count -eq 0)
+    $hasLegacyPairedYield = $currentYieldEvents.Count -eq 0 -and
+        ($pairedYieldGrantedEvents.Count -gt 0 -or
+            ($outboundQuiescentYieldEvents.Count -gt 0 -and
+                $inboundQuiescentYieldEvents.Count -gt 0))
+    $hasPairedYield = $validCurrentPairedYieldEvents.Count -gt 0 -or
+        ($hasLegacyPairedYield -and $ownerGenerationMismatchEvents.Count -eq 0)
     $hasTailOutcome = $terminalProofConsumedEvents.Count -gt 0 -or
         $hasPairedYield
 
     if ($ownerGenerationMismatchEvents.Count -gt 0) {
         $quiescenceFindings.Add('fallback tail yield owner generation mismatch was observed') | Out-Null
         foreach ($event in @($ownerGenerationMismatchEvents | Select-Object -First 5)) {
+            $quiescenceEvidence.Add($event) | Out-Null
+        }
+    }
+
+    if ($yieldAuthorityRejectedEvents.Count -gt 0) {
+        $quiescenceFindings.Add('fallback tail yield authority was rejected before paired yield') | Out-Null
+        foreach ($event in @($yieldAuthorityRejectedEvents | Select-Object -First 5)) {
+            $quiescenceEvidence.Add($event) | Out-Null
+        }
+    }
+
+    if ($yieldAuthorityChainMismatchEvents.Count -gt 0) {
+        $quiescenceFindings.Add('schema-2 fallback tail paired yield did not match its complete local and peer authority chain') | Out-Null
+        foreach ($event in @($yieldAuthorityChainMismatchEvents | Select-Object -First 5)) {
             $quiescenceEvidence.Add($event) | Out-Null
         }
     }
@@ -3017,6 +3138,7 @@ function Get-FileTransferFallbackTailReconciliationProof {
         LocalYieldBlockedCount = $localYieldBlockedEvents.Count
         ProofReplayLocalYieldBlockedCount = $proofReplayLocalYieldBlockedEvents.Count
         StaleYieldProofIgnoredCount = $staleYieldProofIgnoredEvents.Count
+        YieldAuthorityRejectedCount = $yieldAuthorityRejectedEvents.Count + $yieldAuthorityChainMismatchEvents.Count
         PairedYieldVerdict = $(if ($terminalProofConsumedEvents.Count -gt 0 -or $hasPairedYield) { 'pass' } elseif ($hasTailActivity) { 'fail' } else { 'none' })
         FrontierRepairAuthorityGrantedCount = $frontierRepairAuthorityGrantedEvents.Count
         FrontierRepairAuthorityRejectedCount = $frontierRepairAuthorityRejectedEvents.Count
@@ -5311,6 +5433,7 @@ function New-FileTransferRouteConsistencySummaryLines {
     $lines.Add(("fallback_tail_local_yield_blocked_count={0}" -f $fallbackTailProof.LocalYieldBlockedCount)) | Out-Null
     $lines.Add(("fallback_tail_proof_replay_local_yield_blocked_count={0}" -f $fallbackTailProof.ProofReplayLocalYieldBlockedCount)) | Out-Null
     $lines.Add(("fallback_tail_stale_yield_proof_ignored_count={0}" -f $fallbackTailProof.StaleYieldProofIgnoredCount)) | Out-Null
+    $lines.Add(("fallback_tail_yield_authority_rejected_count={0}" -f $fallbackTailProof.YieldAuthorityRejectedCount)) | Out-Null
     $lines.Add(("fallback_tail_paired_yield_verdict={0}" -f $fallbackTailProof.PairedYieldVerdict)) | Out-Null
     $lines.Add(("fallback_frontier_repair_authority_granted_count={0}" -f $fallbackTailProof.FrontierRepairAuthorityGrantedCount)) | Out-Null
     $lines.Add(("fallback_frontier_repair_authority_rejected_count={0}" -f $fallbackTailProof.FrontierRepairAuthorityRejectedCount)) | Out-Null
@@ -7153,6 +7276,7 @@ function New-FileTransferStabilityGateSummaryLines {
         ("classification_fallback_tail_local_yield_blocked_count={0}" -f $recoveryClassification.FallbackTailLocalYieldBlockedCount),
         ("classification_fallback_tail_proof_replay_local_yield_blocked_count={0}" -f $recoveryClassification.FallbackTailProofReplayLocalYieldBlockedCount),
         ("classification_fallback_tail_stale_yield_proof_ignored_count={0}" -f $recoveryClassification.FallbackTailStaleYieldProofIgnoredCount),
+        ("classification_fallback_tail_yield_authority_rejected_count={0}" -f $recoveryClassification.FallbackTailYieldAuthorityRejectedCount),
         ("classification_fallback_tail_paired_yield_verdict={0}" -f $recoveryClassification.FallbackTailPairedYieldVerdict),
         ("classification_fallback_frontier_repair_authority_granted_count={0}" -f $recoveryClassification.FallbackFrontierRepairAuthorityGrantedCount),
         ("classification_fallback_frontier_repair_authority_rejected_count={0}" -f $recoveryClassification.FallbackFrontierRepairAuthorityRejectedCount),
@@ -7240,6 +7364,7 @@ function New-FileTransferStabilityGateSummaryLines {
         ("fallback_tail_local_yield_blocked_count={0}" -f $fallbackTailProof.LocalYieldBlockedCount),
         ("fallback_tail_proof_replay_local_yield_blocked_count={0}" -f $fallbackTailProof.ProofReplayLocalYieldBlockedCount),
         ("fallback_tail_stale_yield_proof_ignored_count={0}" -f $fallbackTailProof.StaleYieldProofIgnoredCount),
+        ("fallback_tail_yield_authority_rejected_count={0}" -f $fallbackTailProof.YieldAuthorityRejectedCount),
         ("fallback_tail_paired_yield_verdict={0}" -f $fallbackTailProof.PairedYieldVerdict),
         ("fallback_frontier_repair_authority_granted_count={0}" -f $fallbackTailProof.FrontierRepairAuthorityGrantedCount),
         ("fallback_frontier_repair_authority_rejected_count={0}" -f $fallbackTailProof.FrontierRepairAuthorityRejectedCount),
@@ -9190,6 +9315,10 @@ function Get-FileTransferRecoveryFailureClassification {
     elseif ($fileTunaV6Events.Count -gt 0) {
         $class = 'active_file_tuna_v6_evidence'
     }
+    elseif ($fallbackTailProof.YieldAuthorityRejectedCount -gt 0 -and
+        $hasPostTunaFallbackEvidence) {
+        $class = 'fallback_tail_yield_authority_invalid'
+    }
     elseif ($fallbackTailProof.OwnerGenerationMismatchCount -gt 0 -and
         $hasPostTunaFallbackEvidence) {
         $class = 'fallback_tail_owner_generation_mismatch'
@@ -9685,6 +9814,7 @@ function Get-FileTransferRecoveryFailureClassification {
         FallbackTailLocalYieldBlockedCount = $fallbackTailProof.LocalYieldBlockedCount
         FallbackTailProofReplayLocalYieldBlockedCount = $fallbackTailProof.ProofReplayLocalYieldBlockedCount
         FallbackTailStaleYieldProofIgnoredCount = $fallbackTailProof.StaleYieldProofIgnoredCount
+        FallbackTailYieldAuthorityRejectedCount = $fallbackTailProof.YieldAuthorityRejectedCount
         FallbackTailPairedYieldVerdict = $fallbackTailProof.PairedYieldVerdict
         FallbackFrontierRepairAuthorityGrantedCount = $fallbackTailProof.FrontierRepairAuthorityGrantedCount
         FallbackFrontierRepairAuthorityRejectedCount = $fallbackTailProof.FrontierRepairAuthorityRejectedCount
@@ -10347,6 +10477,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("fallback_tail_local_yield_blocked_count={0}" -f $fallbackTailProof.LocalYieldBlockedCount),
         ("fallback_tail_proof_replay_local_yield_blocked_count={0}" -f $fallbackTailProof.ProofReplayLocalYieldBlockedCount),
         ("fallback_tail_stale_yield_proof_ignored_count={0}" -f $fallbackTailProof.StaleYieldProofIgnoredCount),
+        ("fallback_tail_yield_authority_rejected_count={0}" -f $fallbackTailProof.YieldAuthorityRejectedCount),
         ("fallback_tail_paired_yield_verdict={0}" -f $fallbackTailProof.PairedYieldVerdict),
         ("fallback_frontier_repair_authority_granted_count={0}" -f $fallbackTailProof.FrontierRepairAuthorityGrantedCount),
         ("fallback_frontier_repair_authority_rejected_count={0}" -f $fallbackTailProof.FrontierRepairAuthorityRejectedCount),

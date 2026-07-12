@@ -297,6 +297,8 @@ public record FileTransferFallbackTailYieldFrameV6 : FileTransferDataFrame, IFil
 
     public long YieldGeneration { get; init; }
 
+    public int AuthoritySchema { get; init; }
+
     public string AuthorityId { get; init; } = string.Empty;
 
     public string? PredecessorAuthorityId { get; init; }

@@ -1822,6 +1822,8 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                     OwnerKey = $"{sessionId}|{transferId}|post_tuna_fallback_v6|6|4|5|2|7|(none)",
                     Direction = "outbound",
                     YieldGeneration = 1,
+                    AuthoritySchema = FileTransferAuthoritySchema.Current,
+                    AuthorityId = "fta2-fallback_tail_yield-0123456789abcdef01234567",
                     LiveRouteEpoch = 4,
                     FallbackLegGeneration = 5,
                     BridgeRecoveryGeneration = 2,
@@ -1849,6 +1851,8 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             var fallbackTailYield = await fallbackTailYieldReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
             Assert.Equal(FileTransferProtocol.FallbackTailYieldFrameTypeV6, fallbackTailYield.Type);
             Assert.Equal(5, fallbackTailYield.FallbackLegGeneration);
+            Assert.Equal(FileTransferAuthoritySchema.Current, fallbackTailYield.AuthoritySchema);
+            Assert.Equal("fta2-fallback_tail_yield-0123456789abcdef01234567", fallbackTailYield.AuthorityId);
             Assert.True(rawControlMessages.Count >= 3);
             Assert.True(rawBulkMessages.Count >= 3);
 
