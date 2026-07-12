@@ -1189,6 +1189,8 @@ public sealed partial class SessionFileTransferService
             {
                 retryDispatchBridge.RuntimeUnlockRetryDispatchAuthorityRequested -=
                     OnRuntimeUnlockRetryDispatchAuthorityRequested;
+                retryDispatchBridge.RuntimeUnlockRetryDispatchSettlementReported -=
+                    OnRuntimeUnlockRetryDispatchSettlementReported;
             }
         }
 

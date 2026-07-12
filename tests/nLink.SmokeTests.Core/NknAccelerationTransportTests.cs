@@ -1316,12 +1316,12 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
             Assert.True(host.BindRuntimeUnlockRetryDispatchOfferAliasForTests(23L, "nonce_replay_proof_blocker"));
             Assert.True(host.BeginRuntimeUnlockRetryDispatchSendForTests());
-            InvokePrivateMethod(
+            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
                 host,
                 "MarkRuntimeUnlockRecoveryContractRetryObserved",
                 sessionId,
                 23L,
-                "control_to_bulk_endpoint");
+                "control_to_bulk_endpoint")));
 
             var logStart = GetOperationalLogLength();
             var replayReason = InvokePrivateMethod(
@@ -8518,12 +8518,12 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
             Assert.True(host.BindRuntimeUnlockRetryDispatchOfferAliasForTests(7L, "nonce_observed_replay"));
             Assert.True(host.BeginRuntimeUnlockRetryDispatchSendForTests());
-            InvokePrivateMethod(
+            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
                 host,
                 "MarkRuntimeUnlockRecoveryContractRetryObserved",
                 sessionId,
                 7L,
-                "control_priority");
+                "control_priority")));
 
             var logStart = GetOperationalLogLength();
             var replayBypass = Assert.IsType<bool>(InvokePrivateMethod(
@@ -8621,12 +8621,12 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
             Assert.True(host.BindRuntimeUnlockRetryDispatchOfferAliasForTests(11L, "nonce_post_fallback_observed_replay"));
             Assert.True(host.BeginRuntimeUnlockRetryDispatchSendForTests());
-            InvokePrivateMethod(
+            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
                 host,
                 "MarkRuntimeUnlockRecoveryContractRetryObserved",
                 sessionId,
                 11L,
-                "control_to_bulk_endpoint");
+                "control_to_bulk_endpoint")));
 
             var logStart = GetOperationalLogLength();
             var replayBypass = Assert.IsType<bool>(InvokePrivateMethod(
@@ -13587,12 +13587,37 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 true);
 
             Assert.Same(firstState, retryStateField.GetValue(host));
-            InvokePrivateMethod(
+            var successorBeforeLate = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+                firstState!.GetType().GetProperty("DispatchContract")!.GetValue(firstState));
+            var livenessDeadlineBeforeLate = Assert.IsType<long>(
+                firstState.GetType().GetProperty("LivenessDeferralDeadlineUtcMs")!.GetValue(firstState));
+            Assert.False(Assert.IsType<bool>(InvokePrivateMethod(
                 host,
                 "MarkRuntimeUnlockRecoveryContractRetryObserved",
                 sessionId,
                 901L,
-                "late_predecessor_callback");
+                "late_predecessor_callback")));
+            Assert.Same(
+                successorBeforeLate,
+                firstState.GetType().GetProperty("DispatchContract")!.GetValue(firstState));
+            Assert.Equal(
+                livenessDeadlineBeforeLate,
+                firstState.GetType().GetProperty("LivenessDeferralDeadlineUtcMs")!.GetValue(firstState));
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                904L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "second_bridge_recovery_wait_timeout",
+                true);
+            var secondSuccessor = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+                firstState.GetType().GetProperty("DispatchContract")!.GetValue(firstState));
+            Assert.NotSame(successorBeforeLate, secondSuccessor);
+            Assert.True(
+                secondSuccessor.Authority.AuthorityGeneration >
+                successorBeforeLate.Authority.AuthorityGeneration);
             InvokePrivateMethod(host, "MarkRuntimeUnlockRecoveryContractRetryDispatched", "runtime_unlock");
             Assert.True(host.BindRuntimeUnlockRetryDispatchOfferAliasForTests(903L, "nonce-active-contract-rearm"));
             Assert.True(host.BeginRuntimeUnlockRetryDispatchSendForTests());
@@ -13611,10 +13636,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             Assert.DoesNotContain("decision_reason=runtime_unlock_retry_state_replaced", tail, StringComparison.Ordinal);
             Assert.Contains("settlement_outcome=Superseded", tail, StringComparison.Ordinal);
             Assert.Equal(
-                2,
+                3,
                 tail.Split("event=runtime_unlock_retry_dispatch_authority_granted;", StringSplitOptions.None).Length - 1);
             Assert.Equal(
-                2,
+                3,
                 tail.Split("event=runtime_unlock_retry_dispatch_contract_settled;", StringSplitOptions.None).Length - 1);
             Assert.Equal(
                 1,
@@ -13809,6 +13834,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             var state = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
             var first = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
                 state!.GetType().GetProperty("DispatchContract")!.GetValue(state));
+            Assert.True(host.BindRuntimeUnlockRetryDispatchOfferAliasForTests(
+                931L,
+                "nonce-first-missing-dispatch"));
 
             Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
                 host,
@@ -13824,6 +13852,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 state!.GetType().GetProperty("DispatchContract")!.GetValue(state));
             Assert.NotEqual(first.Authority.AuthorityId, successor.Authority.AuthorityId);
             Assert.Equal(1, successor.Authority.MissingDispatchSuccessorGeneration);
+            Assert.True(host.BindRuntimeUnlockRetryDispatchOfferAliasForTests(
+                932L,
+                "nonce-second-missing-dispatch"));
 
             Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
                 host,
@@ -13834,17 +13865,923 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 false,
                 successor.Authority.AuthorityId)));
 
+            state = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(state);
+            var stateType = state!.GetType();
+            foreach (var propertyName in new[]
+                     {
+                         "DispatchContract",
+                         "DispatchPredecessorContract",
+                         "PendingDispatchSettlementReport",
+                         "PendingDispatchSettlementDecision",
+                         "PendingDispatchSettlementConsequence",
+                         "PendingDispatchAuthorityRequest",
+                         "PendingDispatchSuccessorIntent",
+                         "SourcePublicationAuthority",
+                         "AuthorizedObservedLane",
+                         "DispatchRoute",
+                         "RegularV4FrontierRepairTrigger",
+                         "RegularV4RecoveryBlockedTransferId",
+                         "RegularV4RecoveryRouteToken",
+                         "RegularV4RecoveryBlockerReason",
+                     })
+            {
+                Assert.Null(stateType.GetProperty(propertyName)!.GetValue(state));
+            }
+            foreach (var propertyName in new[]
+                     {
+                         "PendingDispatchSuccessorRequestIssued",
+                         "PendingDispatchSuccessorRequestHeld",
+                         "PendingDispatchSuccessorHeldLogged",
+                         "DispatchAuthorityGranted",
+                         "DispatchAuthorityRejected",
+                         "DispatchObserved",
+                         "RetryQueued",
+                         "RetryDispatching",
+                         "RetryDispatched",
+                         "RetryObserved",
+                         "QueuedBehindActiveNegotiation",
+                         "RetryAuthorityPending",
+                         "RetryAuthorityGranted",
+                         "ObservedSendPending",
+                         "RequiresLocalListenerRetry",
+                         "ListenerRearmCompleted",
+                         "CutThroughPending",
+                         "CutThroughActive",
+                         "CutThroughOfferSent",
+                         "CutThroughPeerReceived",
+                         "CutThroughCompleted",
+                         "RegularV4ActivationWindowStarted",
+                         "RegularV4ActivationWindowPeerVisible",
+                         "RegularV4ActivationWindowFailed",
+                         "BlockedByRegularV4ReceiveRecovery",
+                         "BlockedByRegularV4FrontierRepair",
+                     })
+            {
+                Assert.False(Assert.IsType<bool>(stateType.GetProperty(propertyName)!.GetValue(state)));
+            }
+            foreach (var propertyName in new[]
+                     {
+                         "RetryDeadlineUtcMs",
+                         "LivenessDeferralDeadlineUtcMs",
+                         "ObservedSendDeadlineUtcMs",
+                         "DispatchDeadlineUtcMs",
+                         "CurrentOfferGeneration",
+                         "DispatchLegGeneration",
+                         "RegularV4FrontierRepairPayerDecisionId",
+                         "RegularV4FrontierRepairBlockedUtcMs",
+                         "RegularV4RecoveryTransferLegGeneration",
+                         "RegularV4RecoveryTransportEpoch",
+                         "RegularV4RecoveryBlockedUtcMs",
+                     })
+            {
+                Assert.Equal(0L, Assert.IsType<long>(stateType.GetProperty(propertyName)!.GetValue(state)));
+            }
+            Assert.Equal(0, Assert.IsType<int>(GetPrivateField(host, "pendingRuntimeUnlockAccelerationNegotiation")));
+            Assert.Equal(0, Assert.IsType<int>(GetPrivateField(host, "pendingRuntimeUnlockRegularV4FrontierRepairRecheckScheduled")));
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                940L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "independent_recovery_after_bounded_rejection",
+                false);
+            var freshState = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(freshState);
+            var fresh = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+                freshState!.GetType().GetProperty("DispatchContract")!.GetValue(freshState));
+            Assert.Equal(1, fresh.Authority.DispatchAttemptGeneration);
+            Assert.Equal(0, fresh.Authority.MissingDispatchSuccessorGeneration);
+            Assert.Null(fresh.Authority.PredecessorAuthorityId);
+
             var tail = ReadOperationalLogTail(logStart);
             Assert.Equal(
-                2,
+                3,
                 tail.Split("event=runtime_unlock_retry_dispatch_authority_granted;", StringSplitOptions.None).Length - 1);
             Assert.Equal(
                 2,
                 tail.Split("event=runtime_unlock_retry_dispatch_contract_settled;", StringSplitOptions.None).Length - 1);
             Assert.Contains("event=runtime_unlock_retry_missing_dispatch_successor_limit_rejected;", tail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_retry_dispatch_chain_closed;", tail, StringComparison.Ordinal);
+            Assert.Contains("current_authority_cleared=1", tail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_retry_dispatch_settlement_reported;", tail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_retry_dispatch_settlement_decided;", tail, StringComparison.Ordinal);
             Assert.Contains("decision_reason=retry_dispatch_missing_successor_limit_exhausted", tail, StringComparison.Ordinal);
             Assert.Contains("event=session_recovery_contract_failed;", tail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=runtime_unlock_broken_state_retry_suppressed;", tail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatch_SettlementEventCarriesExactAuthorityAndLifecycle()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-settlement-report.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-settlement-report.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-settlement-report-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-runtime-unlock-settlement-report-id", helperClient.Address));
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_runtime_unlock_settlement_report";
+            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(host);
+            var bridge = Assert.IsAssignableFrom<IRuntimeUnlockRetryDispatchAuthorityBridge>(host);
+            RuntimeUnlockRetryDispatchSettlementReport? capturedReport = null;
+            bridge.RuntimeUnlockRetryDispatchSettlementReported += (_, args) => capturedReport = args.Report;
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId);
+            var logStart = GetOperationalLogLength();
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                950L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "regular_v4_repair_settled",
+                false);
+            var state = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            var contract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+                state!.GetType().GetProperty("DispatchContract")!.GetValue(state));
+            Assert.True(host.BindRuntimeUnlockRetryDispatchOfferAliasForTests(
+                951L,
+                "nonce-exact-settlement-report"));
+            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
+                host,
+                "TrySettleRuntimeUnlockRetryDispatchMissingBeforeOfferIfCurrent",
+                sessionId,
+                "exact_missing_dispatch_reason",
+                "runtime_unlock_offer_send_not_observed",
+                false,
+                contract.Authority.AuthorityId)));
+
+            var report = Assert.IsType<RuntimeUnlockRetryDispatchSettlementReport>(capturedReport);
+            Assert.Equal(contract.Authority, report.Authority);
+            Assert.Equal(RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch, report.Outcome);
+            Assert.Equal("exact_missing_dispatch_reason", report.Reason);
+            var successorState = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            var successor = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+                successorState!.GetType().GetProperty("DispatchContract")!.GetValue(successorState));
+            Assert.NotEqual(contract.Authority.AuthorityId, successor.Authority.AuthorityId);
+            Assert.False(bridge.ObserveRuntimeUnlockRetryDispatchSettlementDecision(
+                new RuntimeUnlockRetryDispatchSettlementDecision(
+                    RuntimeUnlockRetryDispatchSettlementDecisionStatus.Idempotent,
+                    "duplicate",
+                    report)
+                {
+                    State = null!,
+                }));
+            Assert.Same(
+                successor,
+                successorState.GetType().GetProperty("DispatchContract")!.GetValue(successorState));
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=runtime_unlock_retry_dispatch_settlement_reported;", tail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_retry_dispatch_settlement_decided;", tail, StringComparison.Ordinal);
+            Assert.Contains("decision_status=Accepted", tail, StringComparison.Ordinal);
+            Assert.Contains($"authority_generation={report.Authority.AuthorityGeneration}", tail, StringComparison.Ordinal);
+            Assert.Contains("target_route=file_tuna_v4", tail, StringComparison.Ordinal);
+            Assert.Contains("target_protocol_version=4", tail, StringComparison.Ordinal);
+            Assert.Contains("target_transport=tuna", tail, StringComparison.Ordinal);
+            Assert.Contains("runtime_owner_family=test_runtime", tail, StringComparison.Ordinal);
+            Assert.Contains("runtime_owner_created_reason=test_coordinator_fixture", tail, StringComparison.Ordinal);
+            Assert.Contains("source_publication_action_kind=RoutePublication", tail, StringComparison.Ordinal);
+            Assert.Contains("source_publication_reason=test_regular_route", tail, StringComparison.Ordinal);
+            Assert.Contains("source_publication_target_route=regular_nkn_v4_fast", tail, StringComparison.Ordinal);
+            Assert.Contains("source_publication_target_protocol_version=4", tail, StringComparison.Ordinal);
+            Assert.Contains("source_publication_target_transport=regular_nkn", tail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_retry_dispatch_settlement_decision_ignored;", tail, StringComparison.Ordinal);
+            Assert.Equal(
+                2,
+                tail.Split("event=runtime_unlock_retry_dispatch_authority_granted;", StringSplitOptions.None).Length - 1);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatch_MissingSettlementSubscriberFailsClosed()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-no-settlement-subscriber.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-no-settlement-subscriber.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-no-settlement-subscriber-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-runtime-unlock-no-settlement-subscriber-id", helperClient.Address));
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_runtime_unlock_no_settlement_subscriber";
+            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
+                host,
+                installSettlementObserver: false);
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId);
+            var logStart = GetOperationalLogLength();
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                960L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "regular_v4_repair_settled",
+                false);
+            var state = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            var contract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+                state!.GetType().GetProperty("DispatchContract")!.GetValue(state));
+            Assert.True(host.BindRuntimeUnlockRetryDispatchOfferAliasForTests(
+                961L,
+                "nonce-missing-settlement-subscriber"));
+            Assert.False(Assert.IsType<bool>(InvokePrivateMethod(
+                host,
+                "TrySettleRuntimeUnlockRetryDispatchMissingBeforeOfferIfCurrent",
+                sessionId,
+                "missing_subscriber_missing_dispatch",
+                "runtime_unlock_offer_send_not_observed",
+                false,
+                contract.Authority.AuthorityId)));
+
+            state = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(state);
+            var stateType = state!.GetType();
+            Assert.Same(contract, stateType.GetProperty("DispatchContract")!.GetValue(state));
+            Assert.NotNull(stateType.GetProperty("PendingDispatchSettlementReport")!.GetValue(state));
+            Assert.Null(stateType.GetProperty("PendingDispatchSuccessorIntent")!.GetValue(state));
+            var retainedRequest = Assert.IsType<RuntimeUnlockRetryDispatchAuthorityRequest>(
+                stateType.GetProperty("PendingDispatchAuthorityRequest")!.GetValue(state));
+            Assert.Equal(1, retainedRequest.DispatchAttemptGeneration);
+            Assert.Equal(0, retainedRequest.MissingDispatchSuccessorGeneration);
+            Assert.Null(retainedRequest.PredecessorAuthorityId);
+            Assert.False(Assert.IsType<bool>(stateType.GetProperty("RetryQueued")!.GetValue(state)));
+            Assert.False(Assert.IsType<bool>(stateType.GetProperty("RetryDispatching")!.GetValue(state)));
+            Assert.False(Assert.IsType<bool>(stateType.GetProperty("RetryDispatched")!.GetValue(state)));
+            Assert.Equal(0L, Assert.IsType<long>(stateType.GetProperty("RetryDeadlineUtcMs")!.GetValue(state)));
+            Assert.Equal(0L, Assert.IsType<long>(stateType.GetProperty("LivenessDeferralDeadlineUtcMs")!.GetValue(state)));
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.Contains("subscriber_present=0", tail, StringComparison.Ordinal);
+            Assert.Contains("decision_reason=settlement_subscriber_missing", tail, StringComparison.Ordinal);
+            Assert.Equal(
+                1,
+                tail.Split("event=runtime_unlock_retry_dispatch_authority_granted;", StringSplitOptions.None).Length - 1);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatch_MalformedAcceptedSettlementStateIsDiagnosticOnly()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-malformed-settlement.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-malformed-settlement.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-malformed-settlement-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-runtime-unlock-malformed-settlement-id", helperClient.Address));
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_runtime_unlock_malformed_settlement";
+            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
+                host,
+                settlementDecisionTransform: decision =>
+                    decision.Status == RuntimeUnlockRetryDispatchSettlementDecisionStatus.Accepted &&
+                    decision.Report.Outcome == RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch
+                        ? decision with
+                        {
+                            State = decision.State! with
+                            {
+                                CurrentRuntimeUnlockRetryDispatchAuthority = null,
+                            },
+                        }
+                        : decision);
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId);
+            var logStart = GetOperationalLogLength();
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                965L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "regular_v4_repair_settled",
+                false);
+            var state = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(state);
+            var stateType = state.GetType();
+            var contract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+                stateType.GetProperty("DispatchContract")!.GetValue(state));
+            var retryDeadline = Assert.IsType<long>(
+                stateType.GetProperty("RetryDeadlineUtcMs")!.GetValue(state));
+            var livenessDeadline = Assert.IsType<long>(
+                stateType.GetProperty("LivenessDeferralDeadlineUtcMs")!.GetValue(state));
+            Assert.True(host.BindRuntimeUnlockRetryDispatchOfferAliasForTests(
+                966L,
+                "nonce-malformed-accepted-settlement"));
+
+            Assert.False(Assert.IsType<bool>(InvokePrivateMethod(
+                host,
+                "TrySettleRuntimeUnlockRetryDispatchMissingBeforeOfferIfCurrent",
+                sessionId,
+                "malformed_accepted_missing_dispatch",
+                "runtime_unlock_offer_send_not_observed",
+                false,
+                contract.Authority.AuthorityId)));
+
+            Assert.Same(contract, stateType.GetProperty("DispatchContract")!.GetValue(state));
+            Assert.Null(stateType.GetProperty("PendingDispatchSettlementReport")!.GetValue(state));
+            Assert.Null(stateType.GetProperty("PendingDispatchSettlementDecision")!.GetValue(state));
+            Assert.Null(stateType.GetProperty("PendingDispatchSettlementConsequence")!.GetValue(state));
+            Assert.Null(stateType.GetProperty("PendingDispatchSuccessorIntent")!.GetValue(state));
+            Assert.Equal(retryDeadline, stateType.GetProperty("RetryDeadlineUtcMs")!.GetValue(state));
+            Assert.Equal(livenessDeadline, stateType.GetProperty("LivenessDeferralDeadlineUtcMs")!.GetValue(state));
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=runtime_unlock_retry_dispatch_settlement_decision_ignored;", tail, StringComparison.Ordinal);
+            Assert.Contains("decision_reason=settlement_accepted_state_mismatch", tail, StringComparison.Ordinal);
+            Assert.Equal(
+                1,
+                tail.Split("event=runtime_unlock_retry_dispatch_authority_granted;", StringSplitOptions.None).Length - 1);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatch_ActiveSupersessionWithoutSettlementSubscriberDoesNotScheduleSuccessor()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-supersession-no-subscriber.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-supersession-no-subscriber.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-supersession-no-subscriber-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-runtime-unlock-supersession-no-subscriber-id", helperClient.Address));
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_runtime_unlock_supersession_no_subscriber";
+            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
+                host,
+                installSettlementObserver: false);
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId);
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                967L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "regular_v4_repair_settled",
+                false);
+            var state = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(state);
+            var stateType = state.GetType();
+            var predecessor = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+                stateType.GetProperty("DispatchContract")!.GetValue(state));
+            var logStart = GetOperationalLogLength();
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                968L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "bridge_recovery_wait_timeout",
+                true);
+
+            var successor = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+                stateType.GetProperty("DispatchContract")!.GetValue(state));
+            Assert.NotSame(predecessor, successor);
+            Assert.False(successor.Lifecycle.IsSettled);
+            Assert.NotNull(stateType.GetProperty("PendingDispatchSettlementReport")!.GetValue(state));
+            Assert.False(Assert.IsType<bool>(stateType.GetProperty("RetryQueued")!.GetValue(state)));
+            Assert.False(Assert.IsType<bool>(stateType.GetProperty("RetryDispatching")!.GetValue(state)));
+            Assert.False(Assert.IsType<bool>(stateType.GetProperty("RetryDispatched")!.GetValue(state)));
+            Assert.Equal(0L, Assert.IsType<long>(stateType.GetProperty("RetryDeadlineUtcMs")!.GetValue(state)));
+            Assert.Equal(0L, Assert.IsType<long>(stateType.GetProperty("LivenessDeferralDeadlineUtcMs")!.GetValue(state)));
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.Contains("settlement_outcome=Superseded", tail, StringComparison.Ordinal);
+            Assert.Contains("subscriber_present=0", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", tail, StringComparison.Ordinal);
+            Assert.Equal(
+                0,
+                tail.Split("event=runtime_unlock_retry_dispatch_authority_granted;", StringSplitOptions.None).Length - 1);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatch_TerminalDuringSupersededReportDrainsBeforeSuccessorSchedule()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-terminal-during-superseded.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-terminal-during-superseded.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-terminal-during-superseded-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-runtime-unlock-terminal-during-superseded-id", helperClient.Address));
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_runtime_unlock_terminal_during_superseded";
+            var terminalInjected = 0;
+            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
+                host,
+                settlementDecisionTransform: decision =>
+                {
+                    if (decision.Report.Outcome == RuntimeUnlockRetryDispatchSettlementOutcome.Superseded &&
+                        Interlocked.Exchange(ref terminalInjected, 1) == 0)
+                    {
+                        Assert.IsAssignableFrom<IFileTransferTerminalObserver>(host)
+                            .ObserveFileTransferTerminal(
+                                new FileTransferTerminalNotification(
+                                    sessionId,
+                                    transferId,
+                                    FileTransferDirection.Outbound,
+                                    FileTransferRouteResolver.RegularNknV4FastToken,
+                                    FileTransferProtocol.ProtocolVersionV4,
+                                    FileTransferTransferState.Failed,
+                                    FileTransferResultCodes.PeerDisconnected,
+                                    "Peer disconnected during predecessor disposition."));
+                    }
+
+                    return decision;
+                },
+                terminalStateSelector: report =>
+                    report.Outcome == RuntimeUnlockRetryDispatchSettlementOutcome.TransferTerminal);
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId);
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                971L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "regular_v4_repair_settled",
+                false);
+            var logStart = GetOperationalLogLength();
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                972L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "bridge_recovery_wait_timeout",
+                true);
+
+            Assert.Equal(1, Volatile.Read(ref terminalInjected));
+            var state = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(state);
+            var stateType = state!.GetType();
+            Assert.Equal("Completed", stateType.GetProperty("ContractState")!.GetValue(state)!.ToString());
+            Assert.Null(stateType.GetProperty("DispatchContract")!.GetValue(state));
+            Assert.Null(stateType.GetProperty("DispatchPredecessorContract")!.GetValue(state));
+            Assert.Null(stateType.GetProperty("PendingDispatchSettlementReport")!.GetValue(state));
+            Assert.Null(stateType.GetProperty("DeferredTerminalDispatchContract")!.GetValue(state));
+            Assert.Null(stateType.GetProperty("DeferredTerminalDispatchConsequence")!.GetValue(state));
+            Assert.Equal(0L, Assert.IsType<long>(stateType.GetProperty("RetryDeadlineUtcMs")!.GetValue(state)));
+            Assert.Equal(0L, Assert.IsType<long>(stateType.GetProperty("LivenessDeferralDeadlineUtcMs")!.GetValue(state)));
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.Contains("settlement_outcome=Superseded", tail, StringComparison.Ordinal);
+            Assert.Contains("settlement_outcome=TransferTerminal", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", tail, StringComparison.Ordinal);
+            Assert.Equal(
+                0,
+                tail.Split("event=runtime_unlock_retry_dispatch_authority_granted;", StringSplitOptions.None).Length - 1);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatch_DifferentlySettledContractRejectionIsDiagnosticOnly()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-different-settlement.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-different-settlement.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-different-settlement-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-runtime-unlock-different-settlement-id", helperClient.Address));
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_runtime_unlock_different_settlement";
+            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(host);
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId);
+            var logStart = GetOperationalLogLength();
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                969L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "regular_v4_repair_settled",
+                false);
+            var state = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(state);
+            var stateType = state.GetType();
+            var contract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+                stateType.GetProperty("DispatchContract")!.GetValue(state));
+            Assert.True(contract.TrySettle(
+                RuntimeUnlockRetryDispatchSettlementOutcome.TransferTerminal,
+                "preexisting_terminal_settlement"));
+            var retryDeadline = Assert.IsType<long>(stateType.GetProperty("RetryDeadlineUtcMs")!.GetValue(state));
+            var livenessDeadline = Assert.IsType<long>(stateType.GetProperty("LivenessDeferralDeadlineUtcMs")!.GetValue(state));
+            var decisionReason = stateType.GetProperty("DispatchDecisionReason")!.GetValue(state);
+
+            Assert.False(Assert.IsType<bool>(InvokePrivateMethod(
+                host,
+                "RejectRuntimeUnlockRetryDispatchAuthorityForCurrentContract",
+                sessionId,
+                "late_competing_authority_rejection")));
+
+            Assert.Same(contract, stateType.GetProperty("DispatchContract")!.GetValue(state));
+            Assert.Equal(
+                RuntimeUnlockRetryDispatchSettlementOutcome.TransferTerminal,
+                contract.Lifecycle.SettlementOutcome);
+            Assert.Equal(decisionReason, stateType.GetProperty("DispatchDecisionReason")!.GetValue(state));
+            Assert.Equal(retryDeadline, stateType.GetProperty("RetryDeadlineUtcMs")!.GetValue(state));
+            Assert.Equal(livenessDeadline, stateType.GetProperty("LivenessDeferralDeadlineUtcMs")!.GetValue(state));
+            Assert.Null(stateType.GetProperty("PendingDispatchSettlementReport")!.GetValue(state));
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_authority_rejected;", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=session_recovery_contract_failed;", tail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatch_TransferTerminalClearsRetryAndLivenessOnce()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-terminal-settlement.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-terminal-settlement.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-terminal-settlement-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-runtime-unlock-terminal-settlement-id", helperClient.Address));
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_runtime_unlock_terminal_settlement";
+            var coordinatorTerminal = false;
+            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
+                host,
+                terminalStateSelector: _ => coordinatorTerminal);
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId);
+            var logStart = GetOperationalLogLength();
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                970L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "regular_v4_repair_settled",
+                false);
+            var preTerminalState = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            var preSettledContract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+                preTerminalState!.GetType().GetProperty("DispatchContract")!.GetValue(preTerminalState));
+            Assert.True(preSettledContract.TrySettle(
+                RuntimeUnlockRetryDispatchSettlementOutcome.TransferTerminal,
+                "core_terminal_reconciled_before_transport_notification"));
+            coordinatorTerminal = true;
+            Assert.IsAssignableFrom<IFileTransferTerminalObserver>(host).ObserveFileTransferTerminal(
+                new FileTransferTerminalNotification(
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Outbound,
+                    FileTransferRouteResolver.RegularNknV4FastToken,
+                    FileTransferProtocol.ProtocolVersionV4,
+                    FileTransferTransferState.Completed,
+                    ErrorCode: null,
+                    Reason: "completed_before_retry_settlement"));
+
+            var state = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(state);
+            var stateType = state!.GetType();
+            Assert.Null(stateType.GetProperty("DispatchContract")!.GetValue(state));
+            Assert.Null(stateType.GetProperty("PendingDispatchSettlementReport")!.GetValue(state));
+            Assert.False(Assert.IsType<bool>(stateType.GetProperty("RetryQueued")!.GetValue(state)));
+            Assert.False(Assert.IsType<bool>(stateType.GetProperty("RetryDispatching")!.GetValue(state)));
+            Assert.False(Assert.IsType<bool>(stateType.GetProperty("RetryDispatched")!.GetValue(state)));
+            Assert.False(Assert.IsType<bool>(stateType.GetProperty("ObservedSendPending")!.GetValue(state)));
+            Assert.Equal(0L, Assert.IsType<long>(stateType.GetProperty("RetryDeadlineUtcMs")!.GetValue(state)));
+            Assert.Equal(0L, Assert.IsType<long>(stateType.GetProperty("LivenessDeferralDeadlineUtcMs")!.GetValue(state)));
+            Assert.Equal(0L, Assert.IsType<long>(stateType.GetProperty("DispatchDeadlineUtcMs")!.GetValue(state)));
+            InvokePrivateMethod(host, "ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed", "late_terminal_retry");
+
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.Contains("settlement_outcome=TransferTerminal", tail, StringComparison.Ordinal);
+            Assert.Equal(
+                1,
+                tail.Split("event=runtime_unlock_retry_dispatch_contract_settled;", StringSplitOptions.None).Length - 1);
+            Assert.Equal(
+                1,
+                tail.Split("event=runtime_unlock_retry_dispatch_settlement_reported;", StringSplitOptions.None).Length - 1);
+            Assert.Equal(
+                1,
+                tail.Split("event=runtime_unlock_retry_dispatch_settlement_decided;", StringSplitOptions.None).Length - 1);
+            Assert.Equal(
+                1,
+                tail.Split("event=runtime_unlock_retry_dispatch_authority_granted;", StringSplitOptions.None).Length - 1);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatch_TerminalAfterAcceptedMissingDispatchAppliesIdempotentClose()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-terminal-after-missing.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-terminal-after-missing.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-terminal-after-missing-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-runtime-unlock-terminal-after-missing-id", helperClient.Address));
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_runtime_unlock_terminal_after_missing";
+            var coordinatorTerminal = false;
+            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
+                host,
+                request => request.PredecessorAuthorityId is null
+                    ? RuntimeUnlockRetryDispatchDecisionStatus.Granted
+                    : RuntimeUnlockRetryDispatchDecisionStatus.Held,
+                terminalStateSelector: _ => coordinatorTerminal);
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId);
+            var logStart = GetOperationalLogLength();
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                980L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "regular_v4_repair_settled",
+                false);
+            Assert.True(host.BindRuntimeUnlockRetryDispatchOfferAliasForTests(
+                981L,
+                "nonce-terminal-after-missing"));
+            var state = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            var contract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+                state!.GetType().GetProperty("DispatchContract")!.GetValue(state));
+            Assert.True(Assert.IsType<bool>(InvokePrivateMethod(
+                host,
+                "TrySettleRuntimeUnlockRetryDispatchMissingBeforeOfferIfCurrent",
+                sessionId,
+                "missing_before_transfer_terminal",
+                "runtime_unlock_offer_send_not_observed",
+                false,
+                contract.Authority.AuthorityId)));
+
+            state = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.Same(contract, state!.GetType().GetProperty("DispatchContract")!.GetValue(state));
+            Assert.NotNull(state.GetType().GetProperty("LastAppliedDispatchSettlementReport")!.GetValue(state));
+            coordinatorTerminal = true;
+            Assert.IsAssignableFrom<IFileTransferTerminalObserver>(host).ObserveFileTransferTerminal(
+                new FileTransferTerminalNotification(
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Outbound,
+                    FileTransferRouteResolver.PostTunaFallbackV6Token,
+                    FileTransferProtocol.ProtocolVersionV6,
+                    FileTransferTransferState.Failed,
+                    FileTransferResultCodes.PeerDisconnected,
+                    "terminal_after_missing_dispatch"));
+
+            state = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(state);
+            var stateType = state!.GetType();
+            Assert.Null(stateType.GetProperty("DispatchContract")!.GetValue(state));
+            Assert.Null(stateType.GetProperty("DispatchPredecessorContract")!.GetValue(state));
+            Assert.Null(stateType.GetProperty("PendingDispatchSettlementReport")!.GetValue(state));
+            Assert.Null(stateType.GetProperty("PendingDispatchSuccessorIntent")!.GetValue(state));
+            Assert.Equal(0L, Assert.IsType<long>(stateType.GetProperty("RetryDeadlineUtcMs")!.GetValue(state)));
+            Assert.Equal(0L, Assert.IsType<long>(stateType.GetProperty("LivenessDeferralDeadlineUtcMs")!.GetValue(state)));
+            Assert.Equal(0L, Assert.IsType<long>(stateType.GetProperty("DispatchDeadlineUtcMs")!.GetValue(state)));
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.Contains("decision_status=Idempotent", tail, StringComparison.Ordinal);
+            Assert.Contains("settlement_outcome=MissingDispatch", tail, StringComparison.Ordinal);
+            Assert.Equal(
+                1,
+                tail.Split("event=runtime_unlock_retry_dispatch_authority_granted;", StringSplitOptions.None).Length - 1);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatch_TerminalWithoutSettlementSubscriberFailsClosedAndRetainsReport()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-terminal-no-subscriber.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-terminal-no-subscriber.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-terminal-no-subscriber-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-runtime-unlock-terminal-no-subscriber-id", helperClient.Address));
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_runtime_unlock_terminal_no_subscriber";
+            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
+                host,
+                installSettlementObserver: false);
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId);
+            var logStart = GetOperationalLogLength();
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                990L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "regular_v4_repair_settled",
+                false);
+            var state = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            var contract = Assert.IsType<RuntimeUnlockRetryDispatchContract>(
+                state!.GetType().GetProperty("DispatchContract")!.GetValue(state));
+            Assert.IsAssignableFrom<IFileTransferTerminalObserver>(host).ObserveFileTransferTerminal(
+                new FileTransferTerminalNotification(
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Outbound,
+                    FileTransferRouteResolver.RegularNknV4FastToken,
+                    FileTransferProtocol.ProtocolVersionV4,
+                    FileTransferTransferState.Completed,
+                    ErrorCode: null,
+                    Reason: "completed_without_settlement_subscriber"));
+
+            state = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(state);
+            var stateType = state!.GetType();
+            Assert.Same(contract, stateType.GetProperty("DispatchContract")!.GetValue(state));
+            var report = Assert.IsType<RuntimeUnlockRetryDispatchSettlementReport>(
+                stateType.GetProperty("PendingDispatchSettlementReport")!.GetValue(state));
+            Assert.Equal(RuntimeUnlockRetryDispatchSettlementOutcome.TransferTerminal, report.Outcome);
+            Assert.Null(stateType.GetProperty("LastAppliedDispatchSettlementReport")!.GetValue(state));
+            Assert.Equal(0L, Assert.IsType<long>(stateType.GetProperty("RetryDeadlineUtcMs")!.GetValue(state)));
+            Assert.Equal(0L, Assert.IsType<long>(stateType.GetProperty("LivenessDeferralDeadlineUtcMs")!.GetValue(state)));
+            Assert.Equal(0L, Assert.IsType<long>(stateType.GetProperty("DispatchDeadlineUtcMs")!.GetValue(state)));
+            var tail = ReadOperationalLogTail(logStart);
+            Assert.Contains("subscriber_present=0", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_chain_closed;", tail, StringComparison.Ordinal);
         }
         finally
         {
@@ -14036,6 +14973,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             Assert.False(forwardedPredecessor.Lifecycle.IsSettled);
             Assert.NotNull(capturedSuccessorRequest);
             Assert.Equal(9, capturedSuccessorRequest.Value.BridgeDecisionGeneration);
+            Assert.Equal(
+                forwardedPredecessor.Authority.AuthorityId,
+                capturedSuccessorRequest.Value.PredecessorAuthorityId);
             var tail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=runtime_unlock_retry_successor_intent_rejected;", tail, StringComparison.Ordinal);
             Assert.Contains("authority_schema=2", tail, StringComparison.Ordinal);
@@ -15684,6 +16624,12 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             Assert.DoesNotContain("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", rejectedTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_authority_granted;", rejectedTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=runtime_unlock_transaction_offer_generation_created;", rejectedTail, StringComparison.Ordinal);
+            var retryState = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(retryState);
+            Assert.Null(retryState!.GetType().GetProperty("DispatchContract")!.GetValue(retryState));
+            Assert.NotEqual(
+                SessionRecoveryContractState.Failed.ToString(),
+                retryState.GetType().GetProperty("ContractState")!.GetValue(retryState)!.ToString());
             Assert.False(host.IsFileTunaActiveForRouteSelection);
         }
         finally
@@ -16192,7 +17138,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task RuntimeUnlockRetryBlockedByRegularV4Recovery_MissingLivenessAuthorityRejectsAndFailsContract()
+    public async Task RuntimeUnlockRetryBlockedByRegularV4Recovery_MissingLivenessWithoutDispatchContractIsDiagnosticOnly()
     {
         FakeNknClient.ResetNetwork();
         var previousHelpeePriorityDelay = NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
@@ -16280,21 +17226,31 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 "transfer_terminal_peer_disconnected");
 
             await WaitUntilAsync(
-                () =>
-                {
-                    var tail = ReadOperationalLogTail(logStart);
-                    return tail.Contains("event=runtime_unlock_retry_rejected_after_regular_v4_receive_recovery;", StringComparison.Ordinal) &&
-                           tail.Contains("event=session_recovery_contract_failed;", StringComparison.Ordinal);
-                },
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=runtime_unlock_retry_dispatch_settlement_report_ignored;",
+                    StringComparison.Ordinal),
                 TimeSpan.FromSeconds(3));
 
             var rejectedTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("requested_outcome=AuthorityRejected", rejectedTail, StringComparison.Ordinal);
+            Assert.Contains("requested_reason=transfer_terminal_before_recovery_settlement", rejectedTail, StringComparison.Ordinal);
+            Assert.Contains("decision_reason=settlement_already_disposed_or_report_unavailable", rejectedTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=runtime_unlock_retry_regular_v4_recovery_settlement_missing;", rejectedTail, StringComparison.Ordinal);
-            Assert.Contains("decision_reason=transfer_terminal_before_recovery_settlement", rejectedTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_contract_settled;", rejectedTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_settlement_reported;", rejectedTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_settlement_decided;", rejectedTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_rejected_after_regular_v4_receive_recovery;", rejectedTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=session_recovery_contract_failed;", rejectedTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=runtime_unlock_retry_released_after_regular_v4_receive_recovery;", rejectedTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", rejectedTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_authority_granted;", rejectedTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=runtime_unlock_transaction_offer_generation_created;", rejectedTail, StringComparison.Ordinal);
+            var retryState = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(retryState);
+            Assert.Null(retryState!.GetType().GetProperty("DispatchContract")!.GetValue(retryState));
+            Assert.NotEqual(
+                SessionRecoveryContractState.Failed.ToString(),
+                retryState.GetType().GetProperty("ContractState")!.GetValue(retryState)!.ToString());
             Assert.False(host.IsFileTunaActiveForRouteSelection);
         }
         finally
@@ -16306,7 +17262,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task RuntimeUnlockRetryBlockedByRegularV4Recovery_CoreLivenessAuthorityRejectionFailsContract()
+    public async Task RuntimeUnlockRetryBlockedByRegularV4Recovery_CoreLivenessRejectionWithoutDispatchContractIsDiagnosticOnly()
     {
         FakeNknClient.ResetNetwork();
         var previousHelpeePriorityDelay = NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
@@ -16395,20 +17351,29 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 "recovery_liveness_lease_rejected");
 
             await WaitUntilAsync(
-                () =>
-                {
-                    var tail = ReadOperationalLogTail(logStart);
-                    return tail.Contains("event=runtime_unlock_retry_rejected_after_regular_v4_receive_recovery;", StringComparison.Ordinal) &&
-                           tail.Contains("event=session_recovery_contract_failed;", StringComparison.Ordinal);
-                },
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=runtime_unlock_retry_dispatch_settlement_report_ignored;",
+                    StringComparison.Ordinal),
                 TimeSpan.FromSeconds(3));
 
             var rejectedTail = ReadOperationalLogTail(logStart);
-            Assert.Contains("settlement_trigger=recovery_liveness_lease_rejected", rejectedTail, StringComparison.Ordinal);
+            Assert.Contains("requested_outcome=AuthorityRejected", rejectedTail, StringComparison.Ordinal);
+            Assert.Contains("decision_reason=settlement_already_disposed_or_report_unavailable", rejectedTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_contract_settled;", rejectedTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_settlement_reported;", rejectedTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_settlement_decided;", rejectedTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_rejected_after_regular_v4_receive_recovery;", rejectedTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=session_recovery_contract_failed;", rejectedTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=runtime_unlock_retry_released_after_regular_v4_receive_recovery;", rejectedTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", rejectedTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_authority_granted;", rejectedTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=runtime_unlock_transaction_offer_generation_created;", rejectedTail, StringComparison.Ordinal);
+            var retryState = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(retryState);
+            Assert.Null(retryState!.GetType().GetProperty("DispatchContract")!.GetValue(retryState));
+            Assert.NotEqual(
+                SessionRecoveryContractState.Failed.ToString(),
+                retryState.GetType().GetProperty("ContractState")!.GetValue(retryState)!.ToString());
             Assert.False(host.IsFileTunaActiveForRouteSelection);
         }
         finally
@@ -16420,7 +17385,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task RuntimeUnlockRetryBlockedByRegularV4Recovery_TerminalLivenessSnapshotRejectsBeforeTransferTerminal()
+    public async Task RuntimeUnlockRetryBlockedByRegularV4Recovery_TerminalLivenessWithoutDispatchContractIsDiagnosticOnly()
     {
         FakeNknClient.ResetNetwork();
         var previousHelpeePriorityDelay = NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
@@ -16527,17 +17492,20 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 "recovery_liveness_terminal_without_proof");
 
             await WaitUntilAsync(
-                () =>
-                {
-                    var tail = ReadOperationalLogTail(logStart);
-                    return tail.Contains("event=runtime_unlock_retry_rejected_after_regular_v4_receive_recovery;", StringComparison.Ordinal) &&
-                           tail.Contains("event=session_recovery_contract_failed;", StringComparison.Ordinal);
-                },
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=runtime_unlock_retry_dispatch_settlement_report_ignored;",
+                    StringComparison.Ordinal),
                 TimeSpan.FromSeconds(3));
 
             var rejectedTail = ReadOperationalLogTail(logStart);
-            Assert.Contains("settlement_trigger=recovery_liveness_terminal_without_proof", rejectedTail, StringComparison.Ordinal);
-            Assert.Contains("decision_reason=v4_recovery_terminal_no_proof", rejectedTail, StringComparison.Ordinal);
+            Assert.Contains("requested_outcome=AuthorityRejected", rejectedTail, StringComparison.Ordinal);
+            Assert.Contains("requested_reason=v4_recovery_terminal_no_proof", rejectedTail, StringComparison.Ordinal);
+            Assert.Contains("decision_reason=settlement_already_disposed_or_report_unavailable", rejectedTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_contract_settled;", rejectedTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_settlement_reported;", rejectedTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_settlement_decided;", rejectedTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_rejected_after_regular_v4_receive_recovery;", rejectedTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=session_recovery_contract_failed;", rejectedTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=runtime_unlock_retry_released_after_regular_v4_receive_recovery;", rejectedTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", rejectedTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_authority_granted;", rejectedTail, StringComparison.Ordinal);
@@ -16553,7 +17521,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task RuntimeUnlockRetryBlockedByRegularV4Recovery_TransferTerminalFailsContract()
+    public async Task RuntimeUnlockRetryBlockedByRegularV4Recovery_TransferTerminalSettlesGrantedContractAndClearsLiveness()
     {
         FakeNknClient.ResetNetwork();
         var previousHelpeePriorityDelay = NknSignalingTransport.HelperPaidOfferHelpeePriorityDelayOverrideForTests;
@@ -16582,6 +17550,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 cts.Token,
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare);
             const string transferId = "transfer_runtime_unlock_regular_v4_transfer_terminal";
+            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(host);
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             InvokePrivateMethod(
                 host,
@@ -16626,11 +17595,10 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 sessionId,
                 "runtime_unlock_offer_send_not_observed",
                 "session_liveness_timeout_pending");
-            InvokePrivateMethod(host, "MarkFileTransferTunaActivationBridgeRecoverySettled", "test_recovery_settled");
 
             await WaitUntilAsync(
                 () => ReadOperationalLogTail(logStart).Contains(
-                    "event=runtime_unlock_retry_blocked_by_regular_v4_receive_recovery;",
+                    "event=runtime_unlock_retry_dispatch_authority_granted;",
                     StringComparison.Ordinal),
                 TimeSpan.FromSeconds(3));
 
@@ -16650,18 +17618,34 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 () =>
                 {
                     var tail = ReadOperationalLogTail(logStart);
-                    return tail.Contains("event=runtime_unlock_retry_rejected_after_regular_v4_receive_recovery;", StringComparison.Ordinal) &&
-                           tail.Contains("event=session_recovery_contract_failed;", StringComparison.Ordinal);
+                    return tail.Contains("event=runtime_unlock_retry_dispatch_settlement_reported;", StringComparison.Ordinal) &&
+                           tail.Contains("event=runtime_unlock_retry_dispatch_settlement_decided;", StringComparison.Ordinal);
                 },
                 TimeSpan.FromSeconds(3));
 
             var rejectedTail = ReadOperationalLogTail(logStart);
-            Assert.Contains("settlement_trigger=transfer_terminal_peer_disconnected", rejectedTail, StringComparison.Ordinal);
-            Assert.Contains("decision_reason=transfer_terminal_before_recovery_settlement", rejectedTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_retry_dispatch_settlement_reported;", rejectedTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_retry_dispatch_settlement_decided;", rejectedTail, StringComparison.Ordinal);
+            Assert.Contains("decision_status=Accepted", rejectedTail, StringComparison.Ordinal);
+            Assert.Contains("settlement_outcome=TransferTerminal", rejectedTail, StringComparison.Ordinal);
+            Assert.Contains("settlement_reason=transfer_terminal_peer_disconnected", rejectedTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_blocked_by_regular_v4_receive_recovery;", rejectedTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_rejected_after_regular_v4_receive_recovery;", rejectedTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=session_recovery_contract_failed;", rejectedTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=runtime_unlock_retry_released_after_regular_v4_receive_recovery;", rejectedTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=tuna_acceleration_runtime_unlock_retry_after_recovery_scheduled;", rejectedTail, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_authority_granted;", rejectedTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=runtime_unlock_transaction_offer_generation_created;", rejectedTail, StringComparison.Ordinal);
+            var retryState = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
+            Assert.NotNull(retryState);
+            var retryStateType = retryState!.GetType();
+            Assert.Null(retryStateType.GetProperty("DispatchContract")!.GetValue(retryState));
+            Assert.False(Assert.IsType<bool>(retryStateType.GetProperty("RetryQueued")!.GetValue(retryState)));
+            Assert.False(Assert.IsType<bool>(retryStateType.GetProperty("RetryDispatching")!.GetValue(retryState)));
+            Assert.False(Assert.IsType<bool>(retryStateType.GetProperty("RetryDispatched")!.GetValue(retryState)));
+            Assert.False(Assert.IsType<bool>(retryStateType.GetProperty("ObservedSendPending")!.GetValue(retryState)));
+            Assert.Equal(0L, Assert.IsType<long>(retryStateType.GetProperty("RetryDeadlineUtcMs")!.GetValue(retryState)));
+            Assert.Equal(0L, Assert.IsType<long>(retryStateType.GetProperty("DispatchDeadlineUtcMs")!.GetValue(retryState)));
+            Assert.Equal(0L, Assert.IsType<long>(retryStateType.GetProperty("LivenessDeferralDeadlineUtcMs")!.GetValue(retryState)));
             Assert.False(host.IsFileTunaActiveForRouteSelection);
         }
         finally
@@ -28025,36 +29009,24 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
         NknSignalingTransport transport,
         Func<RuntimeUnlockRetryDispatchAuthorityRequest, RuntimeUnlockRetryDispatchDecisionStatus>? statusSelector = null,
         Func<RuntimeUnlockRetryDispatchAuthorityRequest, int>? bridgeDecisionGenerationSelector = null,
-        Func<RuntimeUnlockRetryDispatchDecision, RuntimeUnlockRetryDispatchDecision>? decisionTransform = null)
+        Func<RuntimeUnlockRetryDispatchDecision, RuntimeUnlockRetryDispatchDecision>? decisionTransform = null,
+        bool installSettlementObserver = true,
+        Func<RuntimeUnlockRetryDispatchSettlementDecision, RuntimeUnlockRetryDispatchSettlementDecision>?
+            settlementDecisionTransform = null,
+        Func<RuntimeUnlockRetryDispatchSettlementReport, bool>? terminalStateSelector = null)
     {
-        var authorityGeneration = 0;
-        transport.RuntimeUnlockRetryDispatchAuthorityDecisionOverrideForTests = request =>
-        {
-            var missingDispatchLimitRejected = statusSelector is null &&
-                request.MissingDispatchSuccessorGeneration >
-                    FileTransferCoordinator.RuntimeUnlockRetryMissingDispatchSuccessorLimit;
-            var selectedStatus = missingDispatchLimitRejected
-                ? RuntimeUnlockRetryDispatchDecisionStatus.Rejected
-                : statusSelector?.Invoke(request) ??
-                  RuntimeUnlockRetryDispatchDecisionStatus.Granted;
-            if (selectedStatus != RuntimeUnlockRetryDispatchDecisionStatus.Granted)
-            {
-                return new RuntimeUnlockRetryDispatchDecision(
-                    selectedStatus,
-                    missingDispatchLimitRejected
-                        ? "retry_dispatch_missing_successor_limit_exhausted"
-                        : selectedStatus == RuntimeUnlockRetryDispatchDecisionStatus.Held
-                        ? "test_coordinator_held"
-                        : "test_coordinator_rejected",
-                    null)
-                {
-                    Request = request,
-                };
-            }
+        FileTransferCoordinatorState? coordinatorState = null;
+        RuntimeUnlockRetryDispatchContract? coordinatorContract = null;
+        RuntimeUnlockRetryDispatchSettlementReport? lastSettlement = null;
+        var bridge = Assert.IsAssignableFrom<IRuntimeUnlockRetryDispatchAuthorityBridge>(transport);
 
+        FileTransferCoordinatorState CreateCoordinatorState(
+            RuntimeUnlockRetryDispatchAuthorityRequest request)
+        {
             var publication = request.SourcePublicationAuthority;
             Assert.True(FileTransferRouteResolver.TryParseTelemetryToken(publication.RouteToken, out var route));
             Assert.True(FileTransferRouteResolver.TryParseTelemetryToken(publication.TargetRouteToken, out var targetRoute));
+            var routeSelection = FileTransferRouteResolver.Resolve(route);
             var runtimeOwner = new RuntimeOwnerToken(
                 request.SessionId,
                 request.TransferId,
@@ -28066,7 +29038,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 publication.RuntimeGeneration,
                 publication.TerminalGeneration,
                 "test_runtime",
-                "test_coordinator_issued");
+                "test_coordinator_fixture");
             var sourcePublication = new RoutePublicationToken(
                 request.SessionId,
                 request.TransferId,
@@ -28086,51 +29058,6 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 publication.RoutePublicationGeneration,
                 FileTransferCoordinatorActionKind.RoutePublication,
                 publication.CoordinatorDecisionReason);
-            var generation = Interlocked.Increment(ref authorityGeneration);
-            var grantedBridgeDecisionGeneration =
-                bridgeDecisionGenerationSelector?.Invoke(request) ?? request.BridgeDecisionGeneration;
-            var releaseAuthorityId = new FileTransferAuthorityId(
-                $"test-runtime-unlock-release-{request.RecoveryContractGeneration}");
-            var fallbackRelease = route == FileTransferRoute.PostTunaFallbackV6;
-            var authority = new RuntimeUnlockRetryDispatchAuthority(
-                request.SessionId,
-                request.TransferId,
-                request.Direction,
-                runtimeOwner,
-                sourcePublication,
-                route,
-                publication.RouteToken,
-                publication.ProtocolVersion,
-                publication.LiveRouteEpoch,
-                publication.RuntimeGeneration,
-                publication.TerminalGeneration,
-                checked((int)publication.LegGeneration),
-                0,
-                0,
-                grantedBridgeDecisionGeneration,
-                publication.RoutePublicationGeneration,
-                publication.RouteCommitGeneration,
-                request.RecoveryContractGeneration,
-                request.RetiredOfferGeneration,
-                request.DispatchAttemptGeneration,
-                request.MissingDispatchSuccessorGeneration,
-                request.RetryReason,
-                request.RecoveryReason,
-                fallbackRelease
-                    ? RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield
-                    : RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
-                releaseAuthorityId,
-                Math.Max(1, request.RegularV4LivenessGeneration),
-                fallbackRelease
-                    ? "PairedYieldGranted"
-                    : FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString(),
-                FileTransferRoute.FileTunaV4,
-                FileTransferProtocol.ProtocolVersionV4,
-                FileTransferTransportKind.Tuna,
-                generation,
-                new FileTransferAuthorityId($"test-runtime-unlock-retry-{generation}"),
-                request.PredecessorAuthorityId);
-            var routeSelection = FileTransferRouteResolver.Resolve(route);
             var leg = new FileTransferLeg
             {
                 LegId = $"test-runtime-unlock-leg-{request.Direction.ToString().ToLowerInvariant()}",
@@ -28151,28 +29078,94 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                     RouteSelection = routeSelection,
                     HandoffKind = FileTransferTransportHandoffKind.None,
                     TargetTransport = publication.TargetTransport,
-                    Reason = "test_coordinator_issued",
+                    Reason = "test_coordinator_fixture",
                     State = "started",
                     RoutePublicationToken = sourcePublication,
                 }
                 : null;
-            BridgeRecoveryDecision? currentBridgeDecision = grantedBridgeDecisionGeneration > 0
+            var bridgeDecisionGeneration =
+                bridgeDecisionGenerationSelector?.Invoke(request) ?? request.BridgeDecisionGeneration;
+            BridgeRecoveryDecision? currentBridgeDecision = bridgeDecisionGeneration > 0
                 ? new BridgeRecoveryDecision(
                     true,
                     BridgeRecoveryKind.ReceiveRecoveryRequest,
-                    "test_coordinator_issued",
-                    grantedBridgeDecisionGeneration,
+                    "test_coordinator_fixture",
+                    bridgeDecisionGeneration,
                     route,
                     publication.ProtocolVersion,
                     publication.LiveRouteEpoch,
                     publication.RuntimeGeneration,
                     publication.TerminalGeneration,
                     checked((int)publication.LegGeneration),
-                    0,
-                    0,
+                    leg.TransportEpochId,
+                    leg.BridgeRecoveryGeneration,
                     runtimeOwner)
                 : null;
-            var coordinatorState = new FileTransferCoordinatorState(
+
+            var releaseAuthorityId = new FileTransferAuthorityId(
+                $"test-runtime-unlock-release-{request.RecoveryContractGeneration}");
+            const int releaseGeneration = 1;
+            RecoveryLivenessLease? retiredLease = null;
+            FallbackTailYieldDecision? fallbackTailYield = null;
+            var fallbackSurvival = RuntimeUnlockFallbackSurvivalState.Empty;
+            if (route == FileTransferRoute.RegularNknV4Fast)
+            {
+                retiredLease = new RecoveryLivenessLease(
+                    request.SessionId,
+                    request.TransferId,
+                    request.Direction,
+                    runtimeOwner,
+                    route,
+                    publication.RouteToken,
+                    publication.ProtocolVersion,
+                    publication.LiveRouteEpoch,
+                    publication.RuntimeGeneration,
+                    publication.TerminalGeneration,
+                    checked((int)publication.LegGeneration),
+                    leg.TransportEpochId,
+                    leg.BridgeRecoveryGeneration,
+                    releaseGeneration,
+                    releaseAuthorityId,
+                    RecoveryLivenessLeaseState.Retired,
+                    "test_receive_recovery_lease_retired");
+            }
+            else
+            {
+                Assert.Equal(FileTransferRoute.PostTunaFallbackV6, route);
+                fallbackSurvival = new RuntimeUnlockFallbackSurvivalState(
+                    FallbackActive: true,
+                    FallbackCurrent: true,
+                    FallbackTerminalized: false,
+                    CheckpointDeliveryRecoveryPending: false,
+                    StateRefreshSendInFlight: false,
+                    DeferredStateRefreshPending: false,
+                    ProofReplayPending: false,
+                    ControlPlanePressurePending: false,
+                    BridgeRecoveryPending: false,
+                    FallbackTailRepairPending: false,
+                    PairedFallbackYieldGranted: true);
+                fallbackTailYield = new FallbackTailYieldDecision(
+                    true,
+                    FallbackTailYieldKind.Quiescent,
+                    "test_paired_fallback_yield",
+                    releaseGeneration,
+                    "test_fallback_owner",
+                    "test_fallback_pair",
+                    string.Empty,
+                    route,
+                    publication.ProtocolVersion,
+                    publication.LiveRouteEpoch,
+                    publication.RuntimeGeneration,
+                    publication.TerminalGeneration,
+                    checked((int)publication.LegGeneration),
+                    null,
+                    fallbackSurvival)
+                {
+                    AuthorityId = releaseAuthorityId,
+                };
+            }
+
+            return new FileTransferCoordinatorState(
                 request.SessionId,
                 request.TransferId,
                 request.Direction,
@@ -28186,20 +29179,118 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 publication.TerminalGeneration,
                 runtimeOwner,
                 [leg],
+                RuntimeUnlockFallbackSurvivalState: fallbackSurvival,
+                LastFallbackTailYieldDecision: fallbackTailYield,
+                LastFallbackTailYieldGeneration: fallbackTailYield?.YieldGeneration ?? 0,
                 CurrentBridgeRecoveryDecision: currentBridgeDecision,
-                LastBridgeRecoveryDecisionGeneration: grantedBridgeDecisionGeneration,
+                LastBridgeRecoveryDecisionGeneration: bridgeDecisionGeneration,
+                LastRecoveryLivenessLeaseGeneration: retiredLease?.LeaseGeneration ?? 0,
                 CurrentRoutePublicationToken: sourcePublication,
                 LastRoutePublicationGeneration: sourcePublication.PublicationGeneration,
-                CurrentRuntimeUnlockRetryDispatchAuthority: authority,
-                LastRuntimeUnlockRetryDispatchAuthorityGeneration: generation);
-            var decision = new RuntimeUnlockRetryDispatchDecision(
-                RuntimeUnlockRetryDispatchDecisionStatus.Granted,
-                "test_coordinator_issued",
-                new RuntimeUnlockRetryDispatchContract(authority))
+                LastRetiredRecoveryLivenessLease: retiredLease);
+        }
+
+        if (installSettlementObserver)
+        {
+            bridge.RuntimeUnlockRetryDispatchSettlementReported += (_, args) =>
             {
-                Request = request,
-                State = coordinatorState,
+                Assert.NotNull(coordinatorState);
+                if (terminalStateSelector?.Invoke(args.Report) == true)
+                {
+                    coordinatorState = coordinatorState! with
+                    {
+                        IsTerminal = true,
+                        CurrentRuntimeUnlockRetryDispatchAuthority = null,
+                    };
+                }
+                var settlementDecision = FileTransferCoordinator.ObserveRuntimeUnlockRetryDispatchSettlement(
+                    coordinatorState!,
+                    coordinatorContract,
+                    lastSettlement,
+                    args.Report);
+                coordinatorState = settlementDecision.State;
+                if (settlementDecision.Status == RuntimeUnlockRetryDispatchSettlementDecisionStatus.Accepted)
+                {
+                    lastSettlement = args.Report;
+                    if (args.Report.Outcome is not RuntimeUnlockRetryDispatchSettlementOutcome.MissingDispatch)
+                    {
+                        coordinatorContract = null;
+                    }
+                }
+
+                var observedDecision = settlementDecisionTransform?.Invoke(settlementDecision) ??
+                    settlementDecision;
+                var observed = bridge.ObserveRuntimeUnlockRetryDispatchSettlementDecision(observedDecision);
+                if (settlementDecisionTransform is null)
+                {
+                    Assert.True(observed);
+                }
             };
+        }
+        transport.RuntimeUnlockRetryDispatchAuthorityDecisionOverrideForTests = request =>
+        {
+            coordinatorState ??= CreateCoordinatorState(request);
+            var selectedStatus = statusSelector?.Invoke(request) ??
+                RuntimeUnlockRetryDispatchDecisionStatus.Granted;
+            if (selectedStatus != RuntimeUnlockRetryDispatchDecisionStatus.Granted)
+            {
+                return new RuntimeUnlockRetryDispatchDecision(
+                    selectedStatus,
+                    selectedStatus == RuntimeUnlockRetryDispatchDecisionStatus.Held
+                        ? "test_coordinator_held"
+                        : "test_coordinator_rejected",
+                    null)
+                {
+                    Request = request,
+                    State = coordinatorState,
+                };
+            }
+
+            RuntimeUnlockRetryReleaseKind releaseKind;
+            FileTransferAuthorityId? releaseAuthorityId;
+            int releaseGeneration;
+            string releaseOutcome;
+            if (coordinatorState.RouteSelection.Route == FileTransferRoute.RegularNknV4Fast)
+            {
+                var lease = Assert.IsType<RecoveryLivenessLease>(
+                    coordinatorState.LastRetiredRecoveryLivenessLease);
+                releaseKind = RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure;
+                releaseAuthorityId = lease.AuthorityId;
+                releaseGeneration = lease.LeaseGeneration;
+                releaseOutcome = RecoveryLivenessLeaseState.Retired.ToString();
+            }
+            else
+            {
+                var tailYield = Assert.IsType<FallbackTailYieldDecision>(
+                    coordinatorState.LastFallbackTailYieldDecision);
+                releaseKind = RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield;
+                releaseAuthorityId = tailYield.AuthorityId;
+                releaseGeneration = tailYield.YieldGeneration;
+                releaseOutcome = "PairedYieldGranted";
+            }
+
+            var decision = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+                coordinatorState,
+                request,
+                coordinatorContract,
+                releaseKind,
+                releaseAuthorityId,
+                releaseGeneration,
+                releaseOutcome);
+            coordinatorState = decision.State;
+            if (decision.Granted)
+            {
+                coordinatorContract = decision.Contract;
+                lastSettlement = decision.State.LastRuntimeUnlockRetryDispatchSettlement ?? lastSettlement;
+            }
+            else if (string.Equals(
+                         decision.Reason,
+                         "retry_dispatch_missing_successor_limit_exhausted",
+                         StringComparison.Ordinal))
+            {
+                coordinatorContract = null;
+            }
+
             return decisionTransform?.Invoke(decision) ?? decision;
         };
     }

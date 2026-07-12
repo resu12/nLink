@@ -482,6 +482,13 @@ internal enum RuntimeUnlockRetryDispatchSettlementOutcome
     TransferTerminal = 6,
 }
 
+internal enum RuntimeUnlockRetryDispatchSettlementDecisionStatus
+{
+    Accepted = 0,
+    Idempotent = 1,
+    Rejected = 2,
+}
+
 internal enum RuntimeUnlockRetryDispatchAttemptPhase
 {
     Granted = 0,
@@ -561,6 +568,14 @@ internal readonly record struct RuntimeUnlockRetryDispatchAuthority(
                              AuthorityGeneration <= 0;
 }
 
+internal readonly record struct RuntimeUnlockRetryDispatchSettlementReport(
+    RuntimeUnlockRetryDispatchAuthority Authority,
+    RuntimeUnlockRetryDispatchSettlementOutcome Outcome,
+    string Reason)
+{
+    public bool IsDefault => Authority.IsDefault || string.IsNullOrWhiteSpace(Reason);
+}
+
 internal sealed class RuntimeUnlockRetryDispatchContract
 {
     private readonly object aliasGate = new();
@@ -571,7 +586,9 @@ internal sealed class RuntimeUnlockRetryDispatchContract
     private int dispatchLogged;
     private int settlementLogged;
 
-    public RuntimeUnlockRetryDispatchContract(RuntimeUnlockRetryDispatchAuthority authority)
+    public RuntimeUnlockRetryDispatchContract(
+        RuntimeUnlockRetryDispatchAuthority authority,
+        bool requestActivePredecessorSupersession = false)
     {
         if (authority.IsDefault)
         {
@@ -579,11 +596,14 @@ internal sealed class RuntimeUnlockRetryDispatchContract
         }
 
         Authority = authority;
+        RequestActivePredecessorSupersession = requestActivePredecessorSupersession;
         Lifecycle = new FileTransferAuthorityLifecycle<RuntimeUnlockRetryDispatchSettlementOutcome>(
             authority.AuthorityId);
     }
 
     public RuntimeUnlockRetryDispatchAuthority Authority { get; }
+
+    public bool RequestActivePredecessorSupersession { get; }
 
     public FileTransferAuthorityLifecycle<RuntimeUnlockRetryDispatchSettlementOutcome> Lifecycle { get; }
 
@@ -810,6 +830,29 @@ internal sealed class RuntimeUnlockRetryDispatchContract
 
     public bool TryMarkSettlementLogged()
         => Interlocked.CompareExchange(ref settlementLogged, 1, 0) == 0;
+
+    public bool TryCreateSettlementReport(
+        out RuntimeUnlockRetryDispatchSettlementReport report)
+    {
+        report = default;
+        lock (aliasGate)
+        {
+            if (!Lifecycle.IsSettled ||
+                Lifecycle.SettlementOutcome is not { } outcome)
+            {
+                return false;
+            }
+
+            report = new RuntimeUnlockRetryDispatchSettlementReport(
+                Authority,
+                outcome,
+                NormalizeSettlementReason(Lifecycle.SettlementReason));
+            return true;
+        }
+    }
+
+    private static string NormalizeSettlementReason(string? reason)
+        => string.IsNullOrWhiteSpace(reason) ? "unknown" : reason.Trim();
 }
 
 internal readonly record struct RuntimeUnlockRetryDispatchDecision(
@@ -824,16 +867,35 @@ internal readonly record struct RuntimeUnlockRetryDispatchDecision(
     public FileTransferCoordinatorState State { get; init; } = null!;
 }
 
+internal readonly record struct RuntimeUnlockRetryDispatchSettlementDecision(
+    RuntimeUnlockRetryDispatchSettlementDecisionStatus Status,
+    string Reason,
+    RuntimeUnlockRetryDispatchSettlementReport Report)
+{
+    public bool Accepted => Status == RuntimeUnlockRetryDispatchSettlementDecisionStatus.Accepted;
+
+    public FileTransferCoordinatorState State { get; init; } = null!;
+}
+
 internal sealed class RuntimeUnlockRetryDispatchAuthorityRequestedEventArgs(
     RuntimeUnlockRetryDispatchAuthorityRequest request) : EventArgs
 {
     public RuntimeUnlockRetryDispatchAuthorityRequest Request { get; } = request;
 }
 
+internal sealed class RuntimeUnlockRetryDispatchSettlementReportedEventArgs(
+    RuntimeUnlockRetryDispatchSettlementReport report) : EventArgs
+{
+    public RuntimeUnlockRetryDispatchSettlementReport Report { get; } = report;
+}
+
 internal interface IRuntimeUnlockRetryDispatchAuthorityBridge
 {
     event EventHandler<RuntimeUnlockRetryDispatchAuthorityRequestedEventArgs>?
         RuntimeUnlockRetryDispatchAuthorityRequested;
+
+    event EventHandler<RuntimeUnlockRetryDispatchSettlementReportedEventArgs>?
+        RuntimeUnlockRetryDispatchSettlementReported;
 
     bool TryGetPendingRuntimeUnlockRetryDispatchAuthorityRequest(
         string sessionId,
@@ -842,6 +904,9 @@ internal interface IRuntimeUnlockRetryDispatchAuthorityBridge
         out RuntimeUnlockRetryDispatchAuthorityRequest request);
 
     bool ObserveRuntimeUnlockRetryDispatchDecision(RuntimeUnlockRetryDispatchDecision decision);
+
+    bool ObserveRuntimeUnlockRetryDispatchSettlementDecision(
+        RuntimeUnlockRetryDispatchSettlementDecision decision);
 }
 
 public interface IFileTransferSessionContextProvider

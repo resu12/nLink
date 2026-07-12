@@ -540,8 +540,17 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
         var result = await RunAnalyzeFixtureAsync(lines);
 
         Assert.Equal(0, result.Script.ExitCode);
+        var missingDispatchIndex = Array.FindIndex(lines, line => line.Contains("event=filetransfer_regular_v4_frontier_repair_missing_dispatch", StringComparison.Ordinal));
+        var settledStalledIndex = Array.FindIndex(lines, line => line.Contains("event=filetransfer_regular_v4_frontier_repair_settled_stalled", StringComparison.Ordinal));
+        Assert.True(missingDispatchIndex >= 0 && settledStalledIndex > missingDispatchIndex);
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
-        Assert.Equal("regular_v4_frontier_repair_liveness_settlement_missing", verdict["recovery_failure_class"]);
+        Assert.Equal("regular_v4_frontier_repair_send_deferred_or_stalled", verdict["recovery_failure_class"]);
+        Assert.Equal("regular_v4_frontier_repair_send_deferred_or_stalled", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("filetransfer_regular_v4_frontier_repair_missing_dispatch", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal("repair_dispatch_not_observed", verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("4", verdict["first_proof_chain_failure_sequence"]);
+        Assert.Equal("4", verdict["first_proof_chain_failure_line_number"]);
+        Assert.Equal("1", verdict["regular_v4_frontier_repair_missing_dispatch_count"]);
         Assert.Equal("1", verdict["regular_v4_frontier_repair_settled_stalled_count"]);
         Assert.Equal("fail", verdict["regular_v4_frontier_repair_verdict"]);
     }

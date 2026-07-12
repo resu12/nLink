@@ -150,10 +150,24 @@ public sealed class FileTransferPhase5RerunPolicyTests : FileTransferAcceptanceP
             Assert.Equal("FAIL", summary["verdict"]);
             Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-256mb.retry_used"]);
             Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.selected_attempt"]);
-            Assert.Equal("environmental", summary["regular-v4-live-activation-off-on-off-256mb.acceptance_failure_class"]);
+            Assert.Equal("runtime_unlock_offer_observation_blocked_by_receive_recovery", summary["regular-v4-live-activation-off-on-off-256mb.acceptance_failure_class"]);
+            Assert.Equal("runtime_unlock_offer_observation_blocked_by_receive_recovery", summary["regular-v4-live-activation-off-on-off-256mb.runtime_failure_candidate"]);
             Assert.Equal("live_transport_receive_recovery_exhausted_before_runtime_unlock", summary["regular-v4-live-activation-off-on-off-256mb.environmental_classification"]);
             Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-256mb.measurement_contaminated"]);
             Assert.Contains("live_transport_receive_recovery_exhausted_before_runtime_unlock", summaryText, StringComparison.Ordinal);
+            foreach (var attemptDirName in new[]
+                     {
+                         "regular-v4-live-activation-off-on-off-256mb",
+                         "regular-v4-live-activation-off-on-off-256mb-rerun-1"
+                     })
+            {
+                var retainedText = File.ReadAllText(Path.Combine(runRoot, attemptDirName, "filetransfer-retained-log-slice.log"));
+                var retryBlockedIndex = retainedText.IndexOf("event=tuna_activation_control_send_waiting_for_regular_v4_recovery", StringComparison.Ordinal);
+                var recoveryExhaustedIndex = retainedText.IndexOf("event=nkn_bridge_receive_stall_recovery_failed", StringComparison.Ordinal);
+                Assert.True(
+                    retryBlockedIndex >= 0 && recoveryExhaustedIndex > retryBlockedIndex,
+                    $"Expected {attemptDirName} to retain the retry-observation failure before the later environmental recovery exhaustion.");
+            }
         }
         finally
         {

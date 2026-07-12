@@ -7160,6 +7160,7 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_retry_authority_observed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryAuthorityObservedCount),
         ("runtime_unlock_retry_authority_failed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryAuthorityFailedCount),
         ("runtime_unlock_retry_dispatch_proof_verdict={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchProofVerdict),
+        ("runtime_unlock_retry_dispatch_chain_closure_proof_verdict={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchChainClosureProofVerdict),
         ("runtime_unlock_retry_release_count={0}" -f $recoveryClassification.RuntimeUnlockRetryReleaseCount),
         ("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchAuthorityGrantedCount),
         ("runtime_unlock_retry_dispatch_authority_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchAuthorityRejectedCount),
@@ -7168,6 +7169,16 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_retry_dispatch_current_authority_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchCurrentAuthorityRejectedCount),
         ("runtime_unlock_retry_dispatch_observed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchObservedCount),
         ("runtime_unlock_retry_dispatch_contract_settled_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchContractSettledCount),
+        ("runtime_unlock_retry_dispatch_settlement_reported_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSettlementReportedCount),
+        ("runtime_unlock_retry_dispatch_settlement_accepted_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSettlementAcceptedCount),
+        ("runtime_unlock_retry_dispatch_settlement_idempotent_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSettlementIdempotentCount),
+        ("runtime_unlock_retry_dispatch_settlement_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSettlementRejectedCount),
+        ("runtime_unlock_retry_dispatch_settlement_decision_ignored_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSettlementDecisionIgnoredCount),
+        ("runtime_unlock_retry_dispatch_settlement_acceptance_missing_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSettlementAcceptanceMissingCount),
+        ("runtime_unlock_retry_dispatch_complete_bounded_closure_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchCompleteBoundedClosureCount),
+        ("runtime_unlock_retry_dispatch_incomplete_bounded_closure_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchIncompleteBoundedClosureCount),
+        ("runtime_unlock_retry_dispatch_fresh_independent_grant_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFreshIndependentGrantCount),
+        ("runtime_unlock_retry_dispatch_invalid_fresh_grant_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchInvalidFreshGrantCount),
         ("runtime_unlock_retry_dispatch_unsettled_authority_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchUnsettledAuthorityCount),
         ("runtime_unlock_retry_dispatch_grant_bypassed_by_retry_budget_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchGrantBypassedByRetryBudgetCount),
         ("runtime_unlock_retry_missing_dispatch_successor_limit_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRetryMissingDispatchSuccessorLimitRejectedCount),
@@ -7913,6 +7924,18 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockRetryDispatchContractSettledEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_retry_dispatch_contract_settled'
     })
+    $runtimeUnlockRetryDispatchSettlementReportedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_settlement_reported'
+    })
+    $runtimeUnlockRetryDispatchSettlementDecidedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_settlement_decided'
+    })
+    $runtimeUnlockRetryDispatchSettlementDecisionIgnoredEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_settlement_decision_ignored'
+    })
+    $runtimeUnlockRetryDispatchChainClosedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_chain_closed'
+    })
     $runtimeUnlockRetrySuccessorIntentRejectedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_retry_successor_intent_rejected'
     })
@@ -8457,6 +8480,232 @@ function Get-FileTransferRecoveryFailureClassification {
                 'target_transport')
     }
 
+    function Get-RuntimeUnlockRetryDispatchSettlementReason {
+        param([Parameter(Mandatory = $true)]$Event)
+
+        if ($Event.EventName -eq 'runtime_unlock_retry_dispatch_contract_settled') {
+            return Get-FileTransferEventField -Event $Event -Name 'decision_reason' -Default ''
+        }
+
+        return Get-FileTransferEventField -Event $Event -Name 'settlement_reason' -Default ''
+    }
+
+    function Test-RuntimeUnlockRetryDispatchPhase1AuthorityTupleMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Left,
+            [Parameter(Mandatory = $true)]$Right
+        )
+
+        if (-not (Test-RuntimeUnlockRetryDispatchMatch -Release $Left -Candidate $Right) -or
+            -not (Test-FileTransferAuthorityFieldsEqual `
+                -LeftLine ([string]$Left.RawLine) `
+                -RightLine ([string]$Right.RawLine) `
+                -Fields @(
+                    'authority_id',
+                    'authority_generation',
+                    'predecessor_authority_id',
+                    'direction',
+                    'session_id',
+                    'transfer_id',
+                    'route',
+                    'route_kind',
+                    'protocol_version',
+                    'live_route_epoch',
+                    'runtime_generation',
+                    'terminal_generation',
+                    'leg_generation',
+                    'transport_epoch',
+                    'bridge_recovery_generation',
+                    'bridge_decision_generation',
+                    'route_publication_generation',
+                    'route_commit_generation',
+                    'contract_generation',
+                    'retired_generation',
+                    'dispatch_attempt_generation',
+                    'missing_dispatch_successor_generation',
+                    'missing_dispatch_successor_limit',
+                    'retry_reason',
+                    'recovery_reason',
+                    'release_kind',
+                    'release_authority_id',
+                    'release_generation',
+                    'release_outcome',
+                    'target_route',
+                    'target_route_kind',
+                    'target_protocol_version',
+                    'target_transport',
+                    'runtime_owner_session_id',
+                    'runtime_owner_transfer_id',
+                    'runtime_owner_direction',
+                    'runtime_owner_route',
+                    'runtime_owner_route_kind',
+                    'runtime_owner_protocol_version',
+                    'runtime_owner_live_route_epoch',
+                    'runtime_owner_runtime_generation',
+                    'runtime_owner_terminal_generation',
+                    'runtime_owner_family',
+                    'runtime_owner_created_reason',
+                    'source_publication_session_id',
+                    'source_publication_transfer_id',
+                    'source_publication_direction',
+                    'source_publication_route',
+                    'source_publication_route_kind',
+                    'source_publication_protocol_version',
+                    'source_publication_live_route_epoch',
+                    'source_publication_runtime_generation',
+                    'source_publication_terminal_generation',
+                    'source_publication_leg_generation',
+                    'source_publication_route_commit_generation',
+                    'source_publication_target_route',
+                    'source_publication_target_route_kind',
+                    'source_publication_target_protocol_version',
+                    'source_publication_target_transport',
+                    'source_publication_generation',
+                    'source_publication_action_kind',
+                    'source_publication_reason',
+                    'source_publication_runtime_owner_session_id',
+                    'source_publication_runtime_owner_transfer_id',
+                    'source_publication_runtime_owner_direction',
+                    'source_publication_runtime_owner_route',
+                    'source_publication_runtime_owner_route_kind',
+                    'source_publication_runtime_owner_protocol_version',
+                    'source_publication_runtime_owner_live_route_epoch',
+                    'source_publication_runtime_owner_runtime_generation',
+                    'source_publication_runtime_owner_terminal_generation',
+                    'source_publication_runtime_owner_family',
+                    'source_publication_runtime_owner_created_reason'))) {
+            return $false
+        }
+
+        foreach ($event in @($Left, $Right)) {
+            $authorityGeneration = 0
+            $authorityGenerationText = Get-FileTransferEventField -Event $event -Name 'authority_generation' -Default '0'
+            if (-not [int]::TryParse($authorityGenerationText, [ref]$authorityGeneration) -or
+                $authorityGeneration -le 0 -or
+                (Get-FileTransferEventField -Event $event -Name 'runtime_owner_family' -Default '') -in @('', '(none)', 'none') -or
+                (Get-FileTransferEventField -Event $event -Name 'runtime_owner_created_reason' -Default '') -in @('', '(none)', 'none') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_action_kind' -Default '') -ne 'RoutePublication' -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_reason' -Default '') -in @('', '(none)', 'none') -or
+                (Get-FileTransferEventField -Event $event -Name 'runtime_owner_session_id' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'session_id' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'runtime_owner_transfer_id' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'transfer_id' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'runtime_owner_direction' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'direction' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'runtime_owner_route' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'route' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'runtime_owner_route_kind' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'route_kind' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'runtime_owner_protocol_version' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'protocol_version' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'runtime_owner_live_route_epoch' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'live_route_epoch' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'runtime_owner_runtime_generation' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'runtime_generation' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'runtime_owner_terminal_generation' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'terminal_generation' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_session_id' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'session_id' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_transfer_id' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'transfer_id' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_direction' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'direction' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_route' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'route' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_route_kind' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'route_kind' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_protocol_version' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'protocol_version' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_live_route_epoch' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'live_route_epoch' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_runtime_generation' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'runtime_generation' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_terminal_generation' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'terminal_generation' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_leg_generation' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'leg_generation' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_route_commit_generation' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'route_commit_generation' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_generation' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'route_publication_generation' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_target_route' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'route' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_target_route_kind' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'route_kind' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_target_protocol_version' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'protocol_version' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_target_transport' -Default '') -ne 'regular_nkn' -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_runtime_owner_session_id' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'runtime_owner_session_id' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_runtime_owner_transfer_id' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'runtime_owner_transfer_id' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_runtime_owner_direction' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'runtime_owner_direction' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_runtime_owner_route' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'runtime_owner_route' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_runtime_owner_route_kind' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'runtime_owner_route_kind' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_runtime_owner_protocol_version' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'runtime_owner_protocol_version' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_runtime_owner_live_route_epoch' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'runtime_owner_live_route_epoch' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_runtime_owner_runtime_generation' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'runtime_owner_runtime_generation' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_runtime_owner_terminal_generation' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'runtime_owner_terminal_generation' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_runtime_owner_family' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'runtime_owner_family' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'source_publication_runtime_owner_created_reason' -Default '') -ne
+                    (Get-FileTransferEventField -Event $event -Name 'runtime_owner_created_reason' -Default '') -or
+                (Get-FileTransferEventField -Event $event -Name 'target_route' -Default '') -ne 'file_tuna_v4' -or
+                (Get-FileTransferEventField -Event $event -Name 'target_route_kind' -Default '') -ne 'FileTunaV4' -or
+                (Get-FileTransferEventField -Event $event -Name 'target_protocol_version' -Default '') -ne '4' -or
+                (Get-FileTransferEventField -Event $event -Name 'target_transport' -Default '') -ne 'tuna') {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Test-RuntimeUnlockRetryDispatchSettlementMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Settlement,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        if (-not (Test-RuntimeUnlockRetryDispatchPhase1AuthorityTupleMatch -Left $Settlement -Right $Candidate)) {
+            return $false
+        }
+
+        $settlementOutcome = Get-FileTransferEventField -Event $Settlement -Name 'settlement_outcome' -Default ''
+        $candidateOutcome = Get-FileTransferEventField -Event $Candidate -Name 'settlement_outcome' -Default ''
+        $settlementReason = Get-RuntimeUnlockRetryDispatchSettlementReason -Event $Settlement
+        $candidateReason = Get-RuntimeUnlockRetryDispatchSettlementReason -Event $Candidate
+        return -not [string]::IsNullOrWhiteSpace($settlementOutcome) -and
+            $settlementOutcome -eq $candidateOutcome -and
+            -not [string]::IsNullOrWhiteSpace($settlementReason) -and
+            $settlementReason -eq $candidateReason
+    }
+
+    function Test-RuntimeUnlockRetryDispatchBoundedClosureMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Settlement,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        if (-not (Test-RuntimeUnlockRetryDispatchPhase1AuthorityTupleMatch -Left $Settlement -Right $Candidate) -or
+            (Get-FileTransferEventField -Event $Settlement -Name 'settlement_outcome' -Default '') -ne 'MissingDispatch' -or
+            (Get-FileTransferEventField -Event $Candidate -Name 'decision_reason' -Default '') -ne 'retry_dispatch_missing_successor_limit_exhausted') {
+            return $false
+        }
+
+        $predecessorAttempt = [int](Get-FileTransferEventField -Event $Settlement -Name 'dispatch_attempt_generation' -Default '0')
+        $predecessorMissingGeneration = [int](Get-FileTransferEventField -Event $Settlement -Name 'missing_dispatch_successor_generation' -Default '0')
+        return [int](Get-FileTransferEventField -Event $Candidate -Name 'requested_dispatch_attempt_generation' -Default '0') -eq ($predecessorAttempt + 1) -and
+            [int](Get-FileTransferEventField -Event $Candidate -Name 'requested_missing_dispatch_successor_generation' -Default '0') -eq ($predecessorMissingGeneration + 1)
+    }
+
     function Test-RuntimeUnlockPreCommitProbeTupleMatch {
         param(
             [Parameter(Mandatory = $true)]$Sent,
@@ -8552,14 +8801,90 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     $runtimeUnlockRetryDispatchDuplicateObservedCount = [int]$runtimeUnlockRetryDispatchDuplicateObservedCount
     $runtimeUnlockRetryDispatchDuplicateSettlementCount = [int]$runtimeUnlockRetryDispatchDuplicateSettlementCount
+    $runtimeUnlockRetryDispatchSettlementAcceptedEvents = @($runtimeUnlockRetryDispatchSettlementDecidedEvents | Where-Object {
+        (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -eq 'Accepted'
+    })
+    $runtimeUnlockRetryDispatchSettlementIdempotentEvents = @($runtimeUnlockRetryDispatchSettlementDecidedEvents | Where-Object {
+        (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -eq 'Idempotent'
+    })
+    $runtimeUnlockRetryDispatchSettlementRejectedEvents = @($runtimeUnlockRetryDispatchSettlementDecidedEvents | Where-Object {
+        (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -eq 'Rejected'
+    })
+    $runtimeUnlockRetryDispatchPhase1SettlementProtocolObserved =
+        $runtimeUnlockRetryDispatchSettlementReportedEvents.Count -gt 0 -or
+        $runtimeUnlockRetryDispatchSettlementDecidedEvents.Count -gt 0 -or
+        $runtimeUnlockRetryDispatchChainClosedEvents.Count -gt 0
+    $runtimeUnlockRetryDispatchSettlementAcceptanceMissingEvents = New-Object System.Collections.Generic.List[object]
+    $runtimeUnlockRetryDispatchSettlementAcceptanceMissingSettlementSequences = New-Object System.Collections.Generic.List[int64]
+    $runtimeUnlockRetryDispatchSettlementDisposedSequences = New-Object System.Collections.Generic.HashSet[int64]
+    foreach ($settlement in $runtimeUnlockRetryDispatchContractSettledEvents) {
+        if (-not $runtimeUnlockRetryDispatchPhase1SettlementProtocolObserved -or
+            (Get-FileTransferAuthoritySchema -Line ([string]$settlement.RawLine)) -lt 2) {
+            continue
+        }
+
+        $matchingReports = @($runtimeUnlockRetryDispatchSettlementReportedEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$settlement.Sequence -and
+            (Get-FileTransferEventField -Event $_ -Name 'subscriber_present' -Default '0') -eq '1' -and
+            (Test-RuntimeUnlockRetryDispatchSettlementMatch -Settlement $settlement -Candidate $_)
+        } | Sort-Object Sequence)
+        $disposed = $false
+        foreach ($report in $matchingReports) {
+            $firstDecision = @($runtimeUnlockRetryDispatchSettlementDecidedEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$report.Sequence -and
+                (Test-RuntimeUnlockRetryDispatchSettlementMatch -Settlement $report -Candidate $_)
+            } | Sort-Object Sequence | Select-Object -First 1)
+            if ($firstDecision.Count -eq 0) {
+                continue
+            }
+
+            $decisionStatus = Get-FileTransferEventField -Event $firstDecision[0] -Name 'decision_status' -Default ''
+            if ($decisionStatus -eq 'Accepted') {
+                $disposed = $true
+                break
+            }
+
+            if ($decisionStatus -eq 'Idempotent') {
+                $settlementOutcome = Get-FileTransferEventField -Event $settlement -Name 'settlement_outcome' -Default ''
+                if ($settlementOutcome -ne 'Superseded') {
+                    $disposed = $true
+                    break
+                }
+
+                $predecessorAuthorityId = Get-FileTransferEventField -Event $settlement -Name 'authority_id' -Default '(none)'
+                $successorAuthorityId = Get-FileTransferEventField -Event $settlement -Name 'successor_authority_id' -Default '(none)'
+                $matchingSuccessor = @($runtimeUnlockRetryDispatchAuthorityGrantedEvents | Where-Object {
+                    [int64]$_.Sequence -gt [int64]$settlement.Sequence -and
+                    (Get-FileTransferAuthoritySchema -Line ([string]$_.RawLine)) -ge 2 -and
+                    (Get-FileTransferEventField -Event $_ -Name 'predecessor_authority_id' -Default '(none)') -eq $predecessorAuthorityId -and
+                    ($successorAuthorityId -in @('', '(none)', 'none') -or
+                        (Get-FileTransferEventField -Event $_ -Name 'authority_id' -Default '(none)') -eq $successorAuthorityId) -and
+                    (Test-RuntimeUnlockRetryDispatchSuccessorHandoffMatch -Predecessor $settlement -Successor $_)
+                })
+                if ($matchingSuccessor.Count -eq 1) {
+                    $disposed = $true
+                    break
+                }
+            }
+        }
+        if ($disposed) {
+            [void]$runtimeUnlockRetryDispatchSettlementDisposedSequences.Add([int64]$settlement.Sequence)
+        }
+        else {
+            $runtimeUnlockRetryDispatchSettlementAcceptanceMissingSettlementSequences.Add([int64]$settlement.Sequence) | Out-Null
+            $runtimeUnlockRetryDispatchSettlementAcceptanceMissingEvents.Add(
+                $(if ($matchingReports.Count -gt 0) { $matchingReports[0] } else { $settlement })) | Out-Null
+        }
+    }
     $runtimeUnlockRetryDispatchUnsettledAuthorityEvents = @(
         $runtimeUnlockRetryDispatchAuthorityGrantedEvents | Where-Object {
             $grant = $_
-            (Get-FileTransferAuthoritySchema -Line ([string]$grant.RawLine)) -ge 2 -and
-            @($runtimeUnlockRetryDispatchContractSettledEvents | Where-Object {
+            $matchingSettlements = @($runtimeUnlockRetryDispatchContractSettledEvents | Where-Object {
                 [int64]$_.Sequence -gt [int64]$grant.Sequence -and
                 (Test-RuntimeUnlockRetryDispatchMatch -Release $grant -Candidate $_)
-            }).Count -eq 0
+            })
+            (Get-FileTransferAuthoritySchema -Line ([string]$grant.RawLine)) -ge 2 -and
+            $matchingSettlements.Count -eq 0
         }
     )
     $runtimeUnlockRetryDispatchGrantBypassedByRetryBudgetEvents = @(
@@ -8605,6 +8930,68 @@ function Get-FileTransferRecoveryFailureClassification {
             $runtimeUnlockRetryDispatchOrphanedSupersessionCount++
         }
     }
+    $runtimeUnlockRetryDispatchCompleteBoundedClosureEvents = New-Object System.Collections.Generic.List[object]
+    $runtimeUnlockRetryDispatchCompleteBoundedClosureSettlementSequences = New-Object System.Collections.Generic.HashSet[int64]
+    $runtimeUnlockRetryDispatchIncompleteBoundedClosureEvents = New-Object System.Collections.Generic.List[object]
+    foreach ($limitRejection in $runtimeUnlockRetryMissingDispatchSuccessorLimitRejectedEvents) {
+        if (-not $runtimeUnlockRetryDispatchPhase1SettlementProtocolObserved) {
+            continue
+        }
+
+        $matchingSettlements = @($runtimeUnlockRetryDispatchContractSettledEvents | Where-Object {
+            [int64]$_.Sequence -lt [int64]$limitRejection.Sequence -and
+            -not $runtimeUnlockRetryDispatchSettlementAcceptanceMissingSettlementSequences.Contains([int64]$_.Sequence) -and
+            (Test-RuntimeUnlockRetryDispatchBoundedClosureMatch -Settlement $_ -Candidate $limitRejection)
+        } | Sort-Object Sequence -Descending)
+        $completeClosure = $null
+        if ($matchingSettlements.Count -gt 0) {
+            $settlement = $matchingSettlements[0]
+            $completeClosure = @($runtimeUnlockRetryDispatchChainClosedEvents | Where-Object {
+                [int64]$_.Sequence -gt [int64]$limitRejection.Sequence -and
+                (Test-RuntimeUnlockRetryDispatchBoundedClosureMatch -Settlement $settlement -Candidate $_) -and
+                (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq 'MissingDispatch' -and
+                (Get-FileTransferEventField -Event $_ -Name 'successor_decision_status' -Default '') -eq 'Rejected' -and
+                (Get-FileTransferEventField -Event $_ -Name 'current_authority_cleared' -Default '0') -eq '1' -and
+                (Get-FileTransferEventField -Event $_ -Name 'retry_deadline_cleared' -Default '0') -eq '1' -and
+                (Get-FileTransferEventField -Event $_ -Name 'liveness_deferral_cleared' -Default '0') -eq '1'
+            } | Sort-Object Sequence | Select-Object -First 1)
+            if ($completeClosure.Count -gt 0) {
+                $runtimeUnlockRetryDispatchCompleteBoundedClosureEvents.Add($completeClosure[0]) | Out-Null
+                [void]$runtimeUnlockRetryDispatchCompleteBoundedClosureSettlementSequences.Add([int64]$settlement.Sequence)
+            }
+        }
+
+        if ($null -eq $completeClosure -or $completeClosure.Count -eq 0) {
+            $runtimeUnlockRetryDispatchIncompleteBoundedClosureEvents.Add($limitRejection) | Out-Null
+        }
+    }
+
+    $runtimeUnlockRetryDispatchFreshIndependentGrantEvents = New-Object System.Collections.Generic.List[object]
+    $runtimeUnlockRetryDispatchInvalidFreshGrantEvents = New-Object System.Collections.Generic.List[object]
+    foreach ($closure in $runtimeUnlockRetryDispatchCompleteBoundedClosureEvents) {
+        $closureSession = Get-FileTransferEventField -Event $closure -Name 'session_id' -Default ''
+        $closureTransfer = Get-FileTransferEventField -Event $closure -Name 'transfer_id' -Default ''
+        $closureDirection = Get-FileTransferEventField -Event $closure -Name 'direction' -Default ''
+        $laterGrant = @($runtimeUnlockRetryDispatchAuthorityGrantedEvents | Where-Object {
+            [int64]$_.Sequence -gt [int64]$closure.Sequence -and
+            (Get-FileTransferEventField -Event $_ -Name 'session_id' -Default '') -eq $closureSession -and
+            (Get-FileTransferEventField -Event $_ -Name 'transfer_id' -Default '') -eq $closureTransfer -and
+            (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq $closureDirection
+        } | Sort-Object Sequence | Select-Object -First 1)
+        if ($laterGrant.Count -eq 0) {
+            continue
+        }
+
+        $predecessor = Get-FileTransferEventField -Event $laterGrant[0] -Name 'predecessor_authority_id' -Default '(none)'
+        if ([int](Get-FileTransferEventField -Event $laterGrant[0] -Name 'dispatch_attempt_generation' -Default '0') -eq 1 -and
+            [int](Get-FileTransferEventField -Event $laterGrant[0] -Name 'missing_dispatch_successor_generation' -Default '-1') -eq 0 -and
+            $predecessor -in @('', '(none)', 'none', 'null')) {
+            $runtimeUnlockRetryDispatchFreshIndependentGrantEvents.Add($laterGrant[0]) | Out-Null
+        }
+        else {
+            $runtimeUnlockRetryDispatchInvalidFreshGrantEvents.Add($laterGrant[0]) | Out-Null
+        }
+    }
     $runtimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchEvents = New-Object System.Collections.Generic.List[object]
     foreach ($settlement in $runtimeUnlockRetryDispatchContractSettledEvents) {
         if ((Get-FileTransferAuthoritySchema -Line ([string]$settlement.RawLine)) -lt 2 -or
@@ -8629,6 +9016,10 @@ function Get-FileTransferRecoveryFailureClassification {
         if ($matchingSuccessor.Count -eq 1) {
             continue
         }
+        if ($runtimeUnlockRetryDispatchPhase1SettlementProtocolObserved -and
+            $runtimeUnlockRetryDispatchCompleteBoundedClosureSettlementSequences.Contains([int64]$settlement.Sequence)) {
+            continue
+        }
 
         $matchingSuccessorRejection = @($runtimeUnlockRetrySuccessorIntentRejectedEvents | Where-Object {
             [int64]$_.Sequence -gt [int64]$settlement.Sequence -and
@@ -8641,7 +9032,8 @@ function Get-FileTransferRecoveryFailureClassification {
                 [int64](Get-FileTransferEventField -Event $_ -Name 'requested_retired_generation' -Default '0') -eq $failedOfferGeneration) -and
             (Test-RuntimeUnlockRetryDispatchSuccessorHandoffMatch -Predecessor $settlement -Successor $_)
         })
-        if ($matchingSuccessorRejection.Count -gt 0) {
+        if ($matchingSuccessorRejection.Count -gt 0 -and
+            -not $runtimeUnlockRetryDispatchPhase1SettlementProtocolObserved) {
             continue
         }
 
@@ -8667,7 +9059,9 @@ function Get-FileTransferRecoveryFailureClassification {
             $terminalDirection -eq
                 (Get-FileTransferEventField -Event $settlement -Name 'direction' -Default '')
         })
-        if ($settledPredecessorReuse.Count -gt 0 -or $matchingTerminal.Count -eq 0) {
+        if (($runtimeUnlockRetryDispatchPhase1SettlementProtocolObserved -and $matchingTerminal.Count -eq 0) -or
+            (-not $runtimeUnlockRetryDispatchPhase1SettlementProtocolObserved -and
+                ($settledPredecessorReuse.Count -gt 0 -or $matchingTerminal.Count -eq 0))) {
             $runtimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchEvents.Add($settlement) | Out-Null
         }
     }
@@ -8726,12 +9120,32 @@ function Get-FileTransferRecoveryFailureClassification {
             (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq 'Superseded' -and
             (Test-RuntimeUnlockRetryDispatchMatch -Release $release -Candidate $_)
         })
+        $matchingAcceptedMissingDispatch = @($runtimeUnlockRetryDispatchContractSettledEvents | Where-Object {
+            $runtimeUnlockRetryDispatchPhase1SettlementProtocolObserved -and
+            [int64]$_.Sequence -gt $releaseSequence -and
+            (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq 'MissingDispatch' -and
+            -not $runtimeUnlockRetryDispatchSettlementAcceptanceMissingSettlementSequences.Contains([int64]$_.Sequence) -and
+            (Test-RuntimeUnlockRetryDispatchMatch -Release $release -Candidate $_)
+        })
+        $matchingDisposedTerminalSettlement = @($runtimeUnlockRetryDispatchContractSettledEvents | Where-Object {
+            $runtimeUnlockRetryDispatchPhase1SettlementProtocolObserved -and
+            [int64]$_.Sequence -gt $releaseSequence -and
+            (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -in @(
+                'AuthorityRejected',
+                'StaleRejected',
+                'TerminalRejected',
+                'TransferTerminal') -and
+            $runtimeUnlockRetryDispatchSettlementDisposedSequences.Contains([int64]$_.Sequence) -and
+            (Test-RuntimeUnlockRetryDispatchMatch -Release $release -Candidate $_)
+        })
 
         if ($matchingDispatchMissingAfterGrant.Count -gt 0 -or
             ($matchingGrant.Count -gt 0 -and $matchingObserved.Count -gt 0) -or
             $matchingRejected.Count -gt 0 -or
             $matchingFailed.Count -gt 0 -or
-            $matchingSuperseded.Count -gt 0) {
+            $matchingSuperseded.Count -gt 0 -or
+            $matchingAcceptedMissingDispatch.Count -gt 0 -or
+            $matchingDisposedTerminalSettlement.Count -gt 0) {
             continue
         }
 
@@ -8769,12 +9183,32 @@ function Get-FileTransferRecoveryFailureClassification {
             (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq 'Superseded' -and
             (Test-RuntimeUnlockRetryDispatchMatch -Release $grant -Candidate $_)
         })
+        $matchingAcceptedMissingDispatch = @($runtimeUnlockRetryDispatchContractSettledEvents | Where-Object {
+            $runtimeUnlockRetryDispatchPhase1SettlementProtocolObserved -and
+            [int64]$_.Sequence -gt $grantSequence -and
+            (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -eq 'MissingDispatch' -and
+            -not $runtimeUnlockRetryDispatchSettlementAcceptanceMissingSettlementSequences.Contains([int64]$_.Sequence) -and
+            (Test-RuntimeUnlockRetryDispatchMatch -Release $grant -Candidate $_)
+        })
+        $matchingDisposedTerminalSettlement = @($runtimeUnlockRetryDispatchContractSettledEvents | Where-Object {
+            $runtimeUnlockRetryDispatchPhase1SettlementProtocolObserved -and
+            [int64]$_.Sequence -gt $grantSequence -and
+            (Get-FileTransferEventField -Event $_ -Name 'settlement_outcome' -Default '') -in @(
+                'AuthorityRejected',
+                'StaleRejected',
+                'TerminalRejected',
+                'TransferTerminal') -and
+            $runtimeUnlockRetryDispatchSettlementDisposedSequences.Contains([int64]$_.Sequence) -and
+            (Test-RuntimeUnlockRetryDispatchMatch -Release $grant -Candidate $_)
+        })
 
         if ($matchingObserved.Count -eq 0 -and
             $matchingRejected.Count -eq 0 -and
             $matchingDispatchMissingAfterGrant.Count -eq 0 -and
             $matchingFailed.Count -eq 0 -and
-            $matchingSuperseded.Count -eq 0) {
+            $matchingSuperseded.Count -eq 0 -and
+            $matchingAcceptedMissingDispatch.Count -eq 0 -and
+            $matchingDisposedTerminalSettlement.Count -eq 0) {
             $runtimeUnlockRetryDispatchMissingCount++
         }
     }
@@ -8813,13 +9247,25 @@ function Get-FileTransferRecoveryFailureClassification {
         }
     }
 
+    $runtimeUnlockRetryDispatchChainClosureProofVerdict = if (
+        $runtimeUnlockRetryDispatchSettlementAcceptanceMissingEvents.Count -gt 0 -or
+        $runtimeUnlockRetryDispatchIncompleteBoundedClosureEvents.Count -gt 0 -or
+        $runtimeUnlockRetryDispatchInvalidFreshGrantEvents.Count -gt 0) {
+        'fail'
+    } elseif ($runtimeUnlockRetryDispatchPhase1SettlementProtocolObserved) {
+        'pass'
+    } else {
+        'none'
+    }
+
     $runtimeUnlockRetryDispatchProofVerdict = if ($runtimeUnlockRetryDispatchMissingCount -gt 0 -or
         $runtimeUnlockRetryDispatchUnsettledAuthorityEvents.Count -gt 0 -or
         $runtimeUnlockRetryMissingAuthorityAfterReleaseCount -gt 0 -or
         $runtimeUnlockRetryDispatchDuplicateObservedCount -gt 0 -or
         $runtimeUnlockRetryDispatchDuplicateSettlementCount -gt 0 -or
         $runtimeUnlockRetryDispatchOrphanedSupersessionCount -gt 0 -or
-        $runtimeUnlockRetryDispatchPostGrantHoldCount -gt 0) {
+        $runtimeUnlockRetryDispatchPostGrantHoldCount -gt 0 -or
+        $runtimeUnlockRetryDispatchChainClosureProofVerdict -eq 'fail') {
         'fail'
     } elseif ($runtimeUnlockRetryDispatchReleaseCount -gt 0) {
         'pass'
@@ -9468,6 +9914,24 @@ function Get-FileTransferRecoveryFailureClassification {
         -Candidates $proofChainFailureCandidates `
         -Class 'runtime_unlock_retry_dispatch_successor_attempt_mismatch' `
         -Events $runtimeUnlockRetryDispatchSuccessorAttemptMismatchEvents
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_retry_dispatch_settlement_unaccepted' `
+        -Events @($runtimeUnlockRetryDispatchSettlementAcceptanceMissingEvents.ToArray()) `
+        -DefaultReason 'runtime_unlock_retry_dispatch_settlement_unaccepted' `
+        -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_retry_dispatch_chain_closure_incomplete' `
+        -Events @($runtimeUnlockRetryDispatchIncompleteBoundedClosureEvents.ToArray()) `
+        -DefaultReason 'runtime_unlock_retry_dispatch_chain_closure_incomplete' `
+        -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_retry_dispatch_fresh_chain_invalid_after_closure' `
+        -Events @($runtimeUnlockRetryDispatchInvalidFreshGrantEvents.ToArray()) `
+        -DefaultReason 'runtime_unlock_retry_dispatch_fresh_chain_invalid_after_closure' `
+        -UseDefaultReason
 
     $grantBypassSequences = @($runtimeUnlockRetryDispatchGrantBypassedByRetryBudgetEvents | ForEach-Object { [int64]$_.Sequence })
     Add-FileTransferProofChainFailureCandidates `
@@ -9704,6 +10168,15 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     elseif ($runtimeUnlockRetrySourcePublicationMismatchEvents.Count -gt 0) {
         $class = 'runtime_unlock_retry_source_publication_mismatch'
+    }
+    elseif ($runtimeUnlockRetryDispatchSettlementAcceptanceMissingEvents.Count -gt 0) {
+        $class = 'runtime_unlock_retry_dispatch_settlement_unaccepted'
+    }
+    elseif ($runtimeUnlockRetryDispatchIncompleteBoundedClosureEvents.Count -gt 0) {
+        $class = 'runtime_unlock_retry_dispatch_chain_closure_incomplete'
+    }
+    elseif ($runtimeUnlockRetryDispatchInvalidFreshGrantEvents.Count -gt 0) {
+        $class = 'runtime_unlock_retry_dispatch_fresh_chain_invalid_after_closure'
     }
     elseif ($runtimeUnlockRetryDispatchGrantBypassedByRetryBudgetEvents.Count -gt 0) {
         $class = 'runtime_unlock_retry_dispatch_grant_bypassed_by_retry_budget'
@@ -10094,6 +10567,7 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockRetryAuthorityObservedCount = $sessionRecoveryContractRetryAuthorityObservedEvents.Count
         RuntimeUnlockRetryAuthorityFailedCount = $sessionRecoveryContractRetryAuthorityFailedEvents.Count
         RuntimeUnlockRetryDispatchProofVerdict = $runtimeUnlockRetryDispatchProofVerdict
+        RuntimeUnlockRetryDispatchChainClosureProofVerdict = $runtimeUnlockRetryDispatchChainClosureProofVerdict
         RuntimeUnlockRetryReleaseCount = $runtimeUnlockRetryDispatchReleaseCount
         RuntimeUnlockRetryDispatchAuthorityGrantedCount = $runtimeUnlockRetryDispatchAuthorityGrantedEvents.Count
         RuntimeUnlockRetryDispatchAuthorityRejectedCount = $runtimeUnlockRetryDispatchAuthorityRejectedEvents.Count
@@ -10102,6 +10576,16 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockRetryDispatchCurrentAuthorityRejectedCount = $runtimeUnlockRetryDispatchCurrentAuthorityRejectedEvents.Count
         RuntimeUnlockRetryDispatchObservedCount = $runtimeUnlockRetryDispatchObservedEvents.Count
         RuntimeUnlockRetryDispatchContractSettledCount = $runtimeUnlockRetryDispatchContractSettledEvents.Count
+        RuntimeUnlockRetryDispatchSettlementReportedCount = $runtimeUnlockRetryDispatchSettlementReportedEvents.Count
+        RuntimeUnlockRetryDispatchSettlementAcceptedCount = $runtimeUnlockRetryDispatchSettlementAcceptedEvents.Count
+        RuntimeUnlockRetryDispatchSettlementIdempotentCount = $runtimeUnlockRetryDispatchSettlementIdempotentEvents.Count
+        RuntimeUnlockRetryDispatchSettlementRejectedCount = $runtimeUnlockRetryDispatchSettlementRejectedEvents.Count
+        RuntimeUnlockRetryDispatchSettlementDecisionIgnoredCount = $runtimeUnlockRetryDispatchSettlementDecisionIgnoredEvents.Count
+        RuntimeUnlockRetryDispatchSettlementAcceptanceMissingCount = $runtimeUnlockRetryDispatchSettlementAcceptanceMissingEvents.Count
+        RuntimeUnlockRetryDispatchCompleteBoundedClosureCount = $runtimeUnlockRetryDispatchCompleteBoundedClosureEvents.Count
+        RuntimeUnlockRetryDispatchIncompleteBoundedClosureCount = $runtimeUnlockRetryDispatchIncompleteBoundedClosureEvents.Count
+        RuntimeUnlockRetryDispatchFreshIndependentGrantCount = $runtimeUnlockRetryDispatchFreshIndependentGrantEvents.Count
+        RuntimeUnlockRetryDispatchInvalidFreshGrantCount = $runtimeUnlockRetryDispatchInvalidFreshGrantEvents.Count
         RuntimeUnlockRetryDispatchUnsettledAuthorityCount = $runtimeUnlockRetryDispatchUnsettledAuthorityEvents.Count
         RuntimeUnlockRetryDispatchGrantBypassedByRetryBudgetCount = $runtimeUnlockRetryDispatchGrantBypassedByRetryBudgetEvents.Count
         RuntimeUnlockRetryMissingDispatchSuccessorLimitRejectedCount = $runtimeUnlockRetryMissingDispatchSuccessorLimitRejectedEvents.Count
@@ -10518,6 +11002,18 @@ function New-FileTransferInvariantLedgerObject {
         first_proof_chain_failure_sequence = [string]$recoveryClassification.FirstProofChainFailureSequence
         first_proof_chain_failure_source_path = $recoveryClassification.FirstProofChainFailureSourcePath
         first_proof_chain_failure_line_number = [string]$recoveryClassification.FirstProofChainFailureLineNumber
+        runtime_unlock_retry_dispatch_proof_verdict = $recoveryClassification.RuntimeUnlockRetryDispatchProofVerdict
+        runtime_unlock_retry_dispatch_chain_closure_proof_verdict = $recoveryClassification.RuntimeUnlockRetryDispatchChainClosureProofVerdict
+        runtime_unlock_retry_dispatch_settlement_reported_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchSettlementReportedCount
+        runtime_unlock_retry_dispatch_settlement_accepted_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchSettlementAcceptedCount
+        runtime_unlock_retry_dispatch_settlement_idempotent_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchSettlementIdempotentCount
+        runtime_unlock_retry_dispatch_settlement_rejected_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchSettlementRejectedCount
+        runtime_unlock_retry_dispatch_settlement_decision_ignored_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchSettlementDecisionIgnoredCount
+        runtime_unlock_retry_dispatch_settlement_acceptance_missing_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchSettlementAcceptanceMissingCount
+        runtime_unlock_retry_dispatch_complete_bounded_closure_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchCompleteBoundedClosureCount
+        runtime_unlock_retry_dispatch_incomplete_bounded_closure_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchIncompleteBoundedClosureCount
+        runtime_unlock_retry_dispatch_fresh_independent_grant_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFreshIndependentGrantCount
+        runtime_unlock_retry_dispatch_invalid_fresh_grant_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchInvalidFreshGrantCount
     }
 }
 
@@ -10642,6 +11138,9 @@ function Write-FileTransferDiagnosticsArtifacts {
 
     if ($recoveryClassification.Class -in @(
             'runtime_unlock_retry_dispatch_successor_attempt_mismatch',
+            'runtime_unlock_retry_dispatch_settlement_unaccepted',
+            'runtime_unlock_retry_dispatch_chain_closure_incomplete',
+            'runtime_unlock_retry_dispatch_fresh_chain_invalid_after_closure',
             'runtime_unlock_retry_dispatch_missing',
             'runtime_unlock_retry_dispatch_missing_after_authority_granted',
             'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch',
@@ -10655,6 +11154,18 @@ function Write-FileTransferDiagnosticsArtifacts {
         $dispatchFailureText = switch ($recoveryClassification.Class) {
             'runtime_unlock_retry_dispatch_successor_attempt_mismatch' {
                 'recovery: runtime unlock retry successor attempt does not match the settled predecessor'
+                break
+            }
+            'runtime_unlock_retry_dispatch_settlement_unaccepted' {
+                'recovery: runtime unlock retry settlement was not accepted by Core'
+                break
+            }
+            'runtime_unlock_retry_dispatch_chain_closure_incomplete' {
+                'recovery: bounded runtime unlock retry rejection lacks authoritative chain-closure proof'
+                break
+            }
+            'runtime_unlock_retry_dispatch_fresh_chain_invalid_after_closure' {
+                'recovery: independent runtime unlock retry after bounded closure did not restart at 1/0 without a predecessor'
                 break
             }
             'runtime_unlock_retry_dispatch_missing_after_authority_granted' {
@@ -10745,6 +11256,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_retry_authority_observed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryAuthorityObservedCount),
         ("runtime_unlock_retry_authority_failed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryAuthorityFailedCount),
         ("runtime_unlock_retry_dispatch_proof_verdict={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchProofVerdict),
+        ("runtime_unlock_retry_dispatch_chain_closure_proof_verdict={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchChainClosureProofVerdict),
         ("runtime_unlock_retry_release_count={0}" -f $recoveryClassification.RuntimeUnlockRetryReleaseCount),
         ("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchAuthorityGrantedCount),
         ("runtime_unlock_retry_dispatch_authority_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchAuthorityRejectedCount),
@@ -10753,6 +11265,16 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_retry_dispatch_current_authority_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchCurrentAuthorityRejectedCount),
         ("runtime_unlock_retry_dispatch_observed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchObservedCount),
         ("runtime_unlock_retry_dispatch_contract_settled_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchContractSettledCount),
+        ("runtime_unlock_retry_dispatch_settlement_reported_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSettlementReportedCount),
+        ("runtime_unlock_retry_dispatch_settlement_accepted_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSettlementAcceptedCount),
+        ("runtime_unlock_retry_dispatch_settlement_idempotent_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSettlementIdempotentCount),
+        ("runtime_unlock_retry_dispatch_settlement_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSettlementRejectedCount),
+        ("runtime_unlock_retry_dispatch_settlement_decision_ignored_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSettlementDecisionIgnoredCount),
+        ("runtime_unlock_retry_dispatch_settlement_acceptance_missing_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSettlementAcceptanceMissingCount),
+        ("runtime_unlock_retry_dispatch_complete_bounded_closure_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchCompleteBoundedClosureCount),
+        ("runtime_unlock_retry_dispatch_incomplete_bounded_closure_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchIncompleteBoundedClosureCount),
+        ("runtime_unlock_retry_dispatch_fresh_independent_grant_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFreshIndependentGrantCount),
+        ("runtime_unlock_retry_dispatch_invalid_fresh_grant_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchInvalidFreshGrantCount),
         ("runtime_unlock_retry_dispatch_unsettled_authority_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchUnsettledAuthorityCount),
         ("runtime_unlock_retry_dispatch_grant_bypassed_by_retry_budget_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchGrantBypassedByRetryBudgetCount),
         ("runtime_unlock_retry_missing_dispatch_successor_limit_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRetryMissingDispatchSuccessorLimitRejectedCount),
