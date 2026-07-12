@@ -2602,10 +2602,18 @@ function Copy-FileTransferLiveLogSlice {
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
         [Parameter(Mandatory = $true)][int]$Bookmark,
         [string]$FileName = 'filetransfer-retained-log-slice.log',
-        [string[]]$PrefixLines = @()
+        [string[]]$PrefixLines = @(),
+        [AllowNull()][object[]]$CapturedLines = $null,
+        [switch]$WriteOnce,
+        [switch]$PassThru
     )
 
-    $lines = @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)
+    $lines = if ($null -eq $CapturedLines) {
+        @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)
+    }
+    else {
+        @($CapturedLines | ForEach-Object { [string]$_ })
+    }
     foreach ($prefixLine in @($PrefixLines)) {
         if ([string]::IsNullOrWhiteSpace($prefixLine)) {
             continue
@@ -2617,11 +2625,217 @@ function Copy-FileTransferLiveLogSlice {
     }
 
     $path = Join-Path $ArtifactDir $FileName
-    if ($lines.Count -gt 0) {
+    if ($WriteOnce) {
+        $content = if ($lines.Count -gt 0) {
+            [string]::Join([Environment]::NewLine, @($lines))
+        }
+        else {
+            ''
+        }
+        $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($content)
+        $stream = $null
+        try {
+            $stream = [System.IO.FileStream]::new(
+                $path,
+                [System.IO.FileMode]::CreateNew,
+                [System.IO.FileAccess]::Write,
+                [System.IO.FileShare]::None)
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.Flush($true)
+        }
+        finally {
+            if ($stream) {
+                $stream.Dispose()
+            }
+        }
+    }
+    elseif ($lines.Count -gt 0) {
         [System.IO.File]::WriteAllText($path, ($lines -join [Environment]::NewLine), [System.Text.Encoding]::UTF8)
     }
     else {
         [System.IO.File]::WriteAllText($path, '', [System.Text.Encoding]::UTF8)
+    }
+
+    if ($PassThru) {
+        return [pscustomobject]@{
+            Path = [System.IO.Path]::GetFullPath($path)
+            Sha256 = Get-FileSha256Hex -Path $path
+            LineCount = [int]$lines.Count
+        }
+    }
+}
+
+function Write-FileTransferGuiLogLedgerEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)][int]$Bookmark,
+        [Parameter(Mandatory = $true)]$InitialSnapshot
+    )
+
+    $finalizationErrors = New-Object System.Collections.Generic.List[string]
+    $retainedSlice = $null
+    $analyzerInput = $null
+    $finalSnapshot = $null
+    $capturedLines = @()
+    try {
+        Sync-GuiSmokeAppLogLedger
+        $finalSnapshot = Get-GuiSmokeLogLedgerSnapshot `
+            -State $script:GuiSmokeAppLogLedger `
+            -Bookmark $Bookmark
+        $capturedLines = @(
+            Get-GuiSmokeLogLedgerLinesAfterBookmark `
+                -State $script:GuiSmokeAppLogLedger `
+                -Bookmark $Bookmark)
+    }
+    catch {
+        $finalizationErrors.Add("final_sync_failed:$($_.Exception.Message)") | Out-Null
+    }
+
+    try {
+        $retainedSlice = Copy-FileTransferLiveLogSlice `
+            -ArtifactDir $ArtifactDir `
+            -Bookmark $Bookmark `
+            -FileName 'filetransfer-gui-log-ledger-slice.log' `
+            -CapturedLines $capturedLines `
+            -WriteOnce `
+            -PassThru
+    }
+    catch {
+        $finalizationErrors.Add("ledger_slice_failed:$($_.Exception.Message)") | Out-Null
+    }
+
+    try {
+        $analyzerInput = Copy-FileTransferLiveLogSlice `
+            -ArtifactDir $ArtifactDir `
+            -Bookmark $Bookmark `
+            -CapturedLines $capturedLines `
+            -PassThru
+    }
+    catch {
+        $finalizationErrors.Add("analyzer_input_failed:$($_.Exception.Message)") | Out-Null
+    }
+
+    if ($null -eq $finalSnapshot) {
+        $finalSnapshot = Get-GuiSmokeLogLedgerSnapshot -State $script:GuiSmokeAppLogLedger -Bookmark $Bookmark
+    }
+    $diagnostics = Get-GuiSmokeLogLedgerDiagnostics -State $script:GuiSmokeAppLogLedger
+    $integrityReasons = New-Object System.Collections.Generic.List[string]
+    foreach ($errorText in @($finalizationErrors.ToArray())) {
+        $integrityReasons.Add([string]$errorText) | Out-Null
+    }
+
+    foreach ($snapshotReason in @(Get-GuiSmokeLogLedgerSnapshotIntegrityReasons `
+            -InitialSnapshot $InitialSnapshot `
+            -FinalSnapshot $finalSnapshot)) {
+        $integrityReasons.Add([string]$snapshotReason) | Out-Null
+    }
+    if ([int]$diagnostics.GapCount -ne 0) {
+        $integrityReasons.Add('cursor_gap_observed') | Out-Null
+    }
+    if ([int]$diagnostics.DuplicateIndexCount -ne 0) {
+        $integrityReasons.Add('duplicate_generation_ordinal_observed') | Out-Null
+    }
+    if ([int]$diagnostics.ConsumedIndexCount -ne [int]$finalSnapshot.lineCount) {
+        $integrityReasons.Add('ledger_line_index_count_mismatch') | Out-Null
+    }
+    if (-not [string]::Equals([string]$diagnostics.FailureCode, '(none)', [System.StringComparison]::Ordinal)) {
+        $integrityReasons.Add("ledger_failure:$($diagnostics.FailureCode)") | Out-Null
+    }
+
+    $expectedRetainedLineCount = [Math]::Max(0, [int]$finalSnapshot.lineCount - $Bookmark)
+    if ($null -eq $retainedSlice) {
+        $integrityReasons.Add('retained_slice_missing') | Out-Null
+        $retainedSliceEvidence = [ordered]@{
+            path = [System.IO.Path]::GetFullPath((Join-Path $ArtifactDir 'filetransfer-gui-log-ledger-slice.log'))
+            sha256 = '(none)'
+            lineCount = 0
+        }
+    }
+    else {
+        if ([int]$retainedSlice.LineCount -ne $expectedRetainedLineCount) {
+            $integrityReasons.Add('retained_slice_line_count_mismatch') | Out-Null
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$retainedSlice.Sha256)) {
+            $integrityReasons.Add('retained_slice_hash_missing') | Out-Null
+        }
+        $retainedSliceEvidence = [ordered]@{
+            path = [string]$retainedSlice.Path
+            sha256 = [string]$retainedSlice.Sha256
+            lineCount = [int]$retainedSlice.LineCount
+        }
+    }
+
+    if ($null -eq $analyzerInput) {
+        $integrityReasons.Add('analyzer_input_missing') | Out-Null
+        $analyzerInputEvidence = [ordered]@{
+            path = [System.IO.Path]::GetFullPath((Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log'))
+            captureSha256 = '(none)'
+            captureLineCount = 0
+            mayBeMilestoneMerged = $true
+        }
+    }
+    else {
+        $analyzerInputEvidence = [ordered]@{
+            path = [string]$analyzerInput.Path
+            captureSha256 = [string]$analyzerInput.Sha256
+            captureLineCount = [int]$analyzerInput.LineCount
+            mayBeMilestoneMerged = $true
+        }
+    }
+
+    $initialEvidence = [ordered]@{
+        bookmark = [int]$InitialSnapshot.bookmark
+        lineCount = [int]$InitialSnapshot.lineCount
+        activeGenerationKey = [string]$InitialSnapshot.activeGenerationKey
+        generations = @($InitialSnapshot.generations)
+    }
+    $finalEvidence = [ordered]@{
+        bookmark = [int]$finalSnapshot.bookmark
+        lineCount = [int]$finalSnapshot.lineCount
+        activeGenerationKey = [string]$finalSnapshot.activeGenerationKey
+        generations = @($finalSnapshot.generations)
+    }
+    $evidence = [ordered]@{
+        schemaVersion = 1
+        event = 'filetransfer_gui_log_ledger'
+        acceptanceRunId = $(if ([string]::IsNullOrWhiteSpace([string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID)) { '(none)' } else { [string]$env:NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID })
+        scenarioRunId = $(if ([string]::IsNullOrWhiteSpace([string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID)) { '(none)' } else { [string]$env:NLINK_FILETRANSFER_SCENARIO_RUN_ID })
+        ledgerId = [string]$finalSnapshot.ledgerId
+        initial = $initialEvidence
+        final = $finalEvidence
+        rotationCount = [int]$diagnostics.RotationCount
+        transientRescanCount = [int]$diagnostics.TransientRescanCount
+        gapCount = [int]$diagnostics.GapCount
+        duplicateIndexCount = [int]$diagnostics.DuplicateIndexCount
+        consumedIndexCount = [int]$diagnostics.ConsumedIndexCount
+        consumedIndexSha256 = [string]$diagnostics.ConsumedIndexSha256
+        consumedIndexRanges = @($diagnostics.ConsumedIndexRanges)
+        syncCount = [int]$diagnostics.SyncCount
+        failureCode = [string]$diagnostics.FailureCode
+        failureDetail = [string]$diagnostics.FailureDetail
+        retainedSlice = $retainedSliceEvidence
+        analyzerInput = $analyzerInputEvidence
+        cursorIntegrityVerdict = $(if ($integrityReasons.Count -eq 0) { 'pass' } else { 'fail' })
+        cursorIntegrityReasons = @($integrityReasons.ToArray())
+    }
+
+    $path = Join-Path $ArtifactDir 'filetransfer-gui-log-ledger.json'
+    $json = $evidence | ConvertTo-Json -Depth 12
+    $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($json)
+    $stream = $null
+    try {
+        $stream = [System.IO.FileStream]::new(
+            $path,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None)
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+    }
+    finally {
+        if ($stream) {
+            $stream.Dispose()
+        }
     }
 }
 
@@ -8349,6 +8563,9 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
     $faultMode = Get-TunaGuiFaultMode
     $routeMode = Get-TunaGuiRouteMode
     $runBookmark = Get-AppLogBookmark
+    $initialLogLedgerSnapshot = Get-GuiSmokeLogLedgerSnapshot `
+        -State $script:GuiSmokeAppLogLedger `
+        -Bookmark $runBookmark
 
     Write-Host ("[GUI Smoke][filetransfer_tuna] artifact_dir={0}; state_root={1}; direction={2}; payer={3}; fault={4}; route_mode={5}; payload_bytes={6}; mixed_screenshare={7}" -f `
         $artifactDir,
@@ -8437,7 +8654,10 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
             }
         }
 
-        Copy-FileTransferLiveLogSlice -ArtifactDir $artifactDir -Bookmark $runBookmark
+        Write-FileTransferGuiLogLedgerEvidence `
+            -ArtifactDir $artifactDir `
+            -Bookmark $runBookmark `
+            -InitialSnapshot $initialLogLedgerSnapshot
         if ($null -eq $previousInboundRoot) {
             Remove-Item Env:NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT -ErrorAction SilentlyContinue
         }

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using NLink.App.Views;
 using NLink.Core.Configuration;
@@ -559,6 +560,239 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch", verdict["recovery_failure_class"]);
         Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RuntimeUnlockRetrySuccessorAttemptMismatch_PrecedesLaterFallbackSymptoms()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_successor_attempt_mismatch";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_authority_rejected",
+                    transferId,
+                    suffix: "; decision_reason=retry_dispatch_successor_attempt_mismatch"),
+                $"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_runtime_unlock_dispatch_proof; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; bridge_recovery_policy=post_tuna_fallback_strict; liveness_terminal_policy=post_tuna_fallback_v6_repair; selection_reason=post_tuna_file_fallback_active; file_tuna_active=0; post_tuna_fallback_active=1; target_transport=regular_nkn; live_route_epoch=2",
+                $"event=filetransfer_fallback_tail_local_yield_blocked; direction=outbound; transfer_id={transferId}; session_id=sess_runtime_unlock_dispatch_proof; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; leg_generation=7; reason=paired_yield_missing",
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_authority_rejected",
+                    transferId,
+                    dispatchAttemptGeneration: 5,
+                    missingDispatchSuccessorGeneration: 2,
+                    suffix: "; decision_reason=retry_dispatch_successor_attempt_mismatch")),
+            ["-LiveRouteProofMode", "None"]);
+
+        Assert.Equal(0, result.Script.ExitCode);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("runtime_unlock_retry_dispatch_successor_attempt_mismatch", verdict["recovery_failure_class"]);
+        Assert.Equal("runtime_unlock_retry_dispatch_successor_attempt_mismatch", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("runtime_unlock_retry_dispatch_authority_rejected", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal("retry_dispatch_successor_attempt_mismatch", verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("2", verdict["first_proof_chain_failure_sequence"]);
+        Assert.Equal("2", verdict["first_proof_chain_failure_line_number"]);
+        Assert.Equal("nlink.log", Path.GetFileName(verdict["first_proof_chain_failure_source_path"]));
+        Assert.Equal("2", verdict["runtime_unlock_retry_dispatch_successor_attempt_mismatch_count"]);
+
+        var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
+        Assert.Equal(verdict["first_proof_chain_failure_class"], stability["first_proof_chain_failure_class"]);
+        Assert.Equal(verdict["first_proof_chain_failure_sequence"], stability["first_proof_chain_failure_sequence"]);
+        Assert.Equal(verdict["first_proof_chain_failure_source_path"], stability["first_proof_chain_failure_source_path"]);
+
+        var ledger = ReadArtifactReport(result.ArtifactDir, "phase0-invariant-ledger.txt");
+        Assert.Equal(verdict["first_proof_chain_failure_class"], ledger["first_proof_chain_failure_class"]);
+        Assert.Equal(verdict["first_proof_chain_failure_event"], ledger["first_proof_chain_failure_event"]);
+        Assert.Equal(verdict["first_proof_chain_failure_reason"], ledger["first_proof_chain_failure_reason"]);
+        Assert.Equal(verdict["first_proof_chain_failure_sequence"], ledger["first_proof_chain_failure_sequence"]);
+        Assert.Equal(verdict["first_proof_chain_failure_line_number"], ledger["first_proof_chain_failure_line_number"]);
+
+        await using var ledgerStream = File.OpenRead(Path.Combine(result.ArtifactDir, "phase0-invariant-ledger.json"));
+        using var ledgerJson = await JsonDocument.ParseAsync(ledgerStream);
+        Assert.Equal(
+            "runtime_unlock_retry_dispatch_successor_attempt_mismatch",
+            ledgerJson.RootElement.GetProperty("first_proof_chain_failure_class").GetString());
+        Assert.Equal("2", ledgerJson.RootElement.GetProperty("first_proof_chain_failure_sequence").GetString());
+        Assert.Equal("2", ledgerJson.RootElement.GetProperty("first_proof_chain_failure_line_number").GetString());
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_FirstProofChainFailure_UsesEarlierSourceMismatchBeforeLaterOwnerAndAttemptFailures()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_first_source_mismatch";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_authority_rejected",
+                    transferId,
+                    suffix: "; decision_reason=retry_dispatch_source_publication_mismatch"),
+                $"event=runtime_unlock_filetransfer_owner_missing_before_path_lease; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; trigger=runtime_unlock; rejection_reason=missing_current_filetransfer_route_publication_authority; decision_reason=coordinator_filetransfer_owner_required",
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_authority_rejected",
+                    transferId,
+                    dispatchAttemptGeneration: 4,
+                    suffix: "; decision_reason=retry_dispatch_successor_attempt_mismatch")),
+            ["-LiveRouteProofMode", "None"]);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("runtime_unlock_retry_source_publication_mismatch", verdict["recovery_failure_class"]);
+        Assert.Equal("runtime_unlock_retry_source_publication_mismatch", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("runtime_unlock_retry_dispatch_authority_rejected", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal("retry_dispatch_source_publication_mismatch", verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("2", verdict["first_proof_chain_failure_sequence"]);
+        Assert.Equal("2", verdict["first_proof_chain_failure_line_number"]);
+        Assert.Equal("nlink.log", Path.GetFileName(verdict["first_proof_chain_failure_source_path"]));
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_FirstProofChainFailure_UsesEarlierAttemptMismatchBeforeLaterOwnerAndSourceFailures()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_first_attempt_mismatch";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_authority_rejected",
+                    transferId,
+                    dispatchAttemptGeneration: 4,
+                    suffix: "; decision_reason=retry_dispatch_successor_attempt_mismatch"),
+                $"event=runtime_unlock_filetransfer_owner_missing_before_path_lease; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; trigger=runtime_unlock; rejection_reason=missing_current_filetransfer_route_publication_authority; decision_reason=coordinator_filetransfer_owner_required",
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_authority_rejected",
+                    transferId,
+                    suffix: "; decision_reason=retry_dispatch_source_publication_mismatch")),
+            ["-LiveRouteProofMode", "None"]);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("runtime_unlock_retry_dispatch_successor_attempt_mismatch", verdict["recovery_failure_class"]);
+        Assert.Equal("runtime_unlock_retry_dispatch_successor_attempt_mismatch", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("runtime_unlock_retry_dispatch_authority_rejected", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal("retry_dispatch_successor_attempt_mismatch", verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("2", verdict["first_proof_chain_failure_sequence"]);
+        Assert.Equal("2", verdict["first_proof_chain_failure_line_number"]);
+        Assert.Equal("nlink.log", Path.GetFileName(verdict["first_proof_chain_failure_source_path"]));
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_FirstProofChainFailure_UsesEarlierTerminalLifecycleViolationBeforeLaterRetryMismatch()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_terminal_lifecycle_before_retry_mismatch";
+        const string sessionId = "sess_runtime_unlock_dispatch_proof";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id={sessionId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; selection_reason=regular_nkn_default_v4", secondsOffset: 0),
+            LogLine($"event=file_transfer_outbound_terminal; role=Helpee; session_id={sessionId}; transfer_id={transferId}; state=CanceledLocal; error_code=session_end; status_message=session_end", secondsOffset: 10),
+            LogLine($"event=filetransfer_data_frame_ignored; transport=nkn; transfer_id={transferId}; session_id={sessionId}; frame_type=filetransfer.chunk_batch.v4; chunk_index=0; reason=post_terminal_late_sender_frame", secondsOffset: 20),
+            LogLine(
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_authority_rejected",
+                    transferId,
+                    dispatchAttemptGeneration: 4,
+                    suffix: "; decision_reason=retry_dispatch_successor_attempt_mismatch"),
+                secondsOffset: 30),
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "None"]);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("terminal_lifecycle", verdict["recovery_failure_class"]);
+        Assert.Equal("terminal_lifecycle", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("filetransfer_data_frame_ignored", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal("terminal_lifecycle", verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("3", verdict["first_proof_chain_failure_sequence"]);
+        Assert.Equal("3", verdict["first_proof_chain_failure_line_number"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_FirstProofChainFailure_UsesEarlierRetryMismatchBeforeLaterTerminalLifecycleViolation()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_retry_mismatch_before_terminal_lifecycle";
+        const string sessionId = "sess_runtime_unlock_dispatch_proof";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id={sessionId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; selection_reason=regular_nkn_default_v4", secondsOffset: 0),
+            LogLine(
+                RuntimeUnlockRetrySchema2Line(
+                    "runtime_unlock_retry_dispatch_authority_rejected",
+                    transferId,
+                    dispatchAttemptGeneration: 4,
+                    suffix: "; decision_reason=retry_dispatch_successor_attempt_mismatch"),
+                secondsOffset: 10),
+            LogLine($"event=file_transfer_outbound_terminal; role=Helpee; session_id={sessionId}; transfer_id={transferId}; state=CanceledLocal; error_code=session_end; status_message=session_end", secondsOffset: 20),
+            LogLine($"event=filetransfer_data_frame_ignored; transport=nkn; transfer_id={transferId}; session_id={sessionId}; frame_type=filetransfer.chunk_batch.v4; chunk_index=0; reason=post_terminal_late_sender_frame", secondsOffset: 30),
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "None"]);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("runtime_unlock_retry_dispatch_successor_attempt_mismatch", verdict["recovery_failure_class"]);
+        Assert.Equal("runtime_unlock_retry_dispatch_successor_attempt_mismatch", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("runtime_unlock_retry_dispatch_authority_rejected", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal("retry_dispatch_successor_attempt_mismatch", verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("2", verdict["first_proof_chain_failure_sequence"]);
+        Assert.Equal("2", verdict["first_proof_chain_failure_line_number"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RouteLessFallbackDiagnostic_DoesNotManufactureFallbackFirstEdge()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_route_less_fallback_diagnostic";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                $"event=filetransfer_fallback_tail_yield_local_authority_rejected; direction=outbound; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; route=(none); protocol_version=0; live_route_epoch=0; reason=authority_tuple_mismatch"),
+            ["-LiveRouteProofMode", "None"]);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.False(
+            verdict["recovery_failure_class"].StartsWith("fallback_", StringComparison.Ordinal),
+            $"Route-less diagnostic manufactured fallback classification: {verdict["recovery_failure_class"]}");
+        Assert.Equal("(none)", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("(none)", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal("(none)", verdict["first_proof_chain_failure_reason"]);
     }
 
     [Fact]

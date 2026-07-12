@@ -14,14 +14,19 @@ function New-GuiSmokeLogLedgerState {
     }
 
     return [pscustomobject]@{
+        LedgerId = [guid]::NewGuid().ToString('N')
         Lines = New-Object System.Collections.Generic.List[string]
         Generations = @{}
+        ConsumedLineIdentities = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::Ordinal)
         MaxLines = $MaxLines
         MaxGenerations = $MaxGenerations
         GapCount = 0
+        DuplicateIndexCount = 0
         RotationCount = 0
         TransientRescanCount = 0
         SyncCount = 0
+        InitialGenerationKey = ''
+        InitialGenerationSnapshots = @()
         ActiveGenerationKey = ''
         FailureCode = ''
         FailureDetail = ''
@@ -31,12 +36,17 @@ function New-GuiSmokeLogLedgerState {
 function Reset-GuiSmokeLogLedgerState {
     param([Parameter(Mandatory = $true)]$State)
 
+    $State.LedgerId = [guid]::NewGuid().ToString('N')
     $State.Lines.Clear()
     $State.Generations.Clear()
+    $State.ConsumedLineIdentities.Clear()
     $State.GapCount = 0
+    $State.DuplicateIndexCount = 0
     $State.RotationCount = 0
     $State.TransientRescanCount = 0
     $State.SyncCount = 0
+    $State.InitialGenerationKey = ''
+    $State.InitialGenerationSnapshots = @()
     $State.ActiveGenerationKey = ''
     $State.FailureCode = ''
     $State.FailureDetail = ''
@@ -511,15 +521,37 @@ function Sync-GuiSmokeLogLedger {
             Assert-GuiSmokeLogLedgerHealthy -State $State
         }
 
+        $pendingLineIdentities = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::Ordinal)
+        foreach ($pending in @($pendingDeltas.ToArray())) {
+            $generation = $pending.Generation
+            $firstLineOrdinal = if ($null -eq $generation) { 0L } else { [long]$generation.ConsumedLineCount }
+            $lines = @($pending.Delta.Lines)
+            for ($lineIndex = 0; $lineIndex -lt $lines.Count; $lineIndex++) {
+                $lineOrdinal = $firstLineOrdinal + [long]$lineIndex
+                $lineIdentity = "{0}`n{1}" -f [string]$pending.GenerationKey, $lineOrdinal
+                if ($State.ConsumedLineIdentities.Contains($lineIdentity) -or -not $pendingLineIdentities.Add($lineIdentity)) {
+                    $State.DuplicateIndexCount++
+                    Set-GuiSmokeLogLedgerFailure `
+                        -State $State `
+                        -Code 'gui_smoke_log_cursor_duplicate_index' `
+                        -Detail ("generation={0}; line_ordinal={1}" -f $pending.GenerationKey, $lineOrdinal)
+                    Assert-GuiSmokeLogLedgerHealthy -State $State
+                }
+            }
+        }
+
         foreach ($pending in @($pendingDeltas.ToArray())) {
             $snapshot = $pending.Snapshot
             $generation = $pending.Generation
             if ($null -eq $generation) {
                 $generation = [pscustomobject]@{
+                    GenerationKey = [string]$pending.GenerationKey
+                    CreationTimeUtcTicks = [long]$snapshot.CreationTimeUtcTicks
                     ConsumedByteOffset = 0L
                     ConsumedLineCount = 0L
                     LastPath = [string]$snapshot.Path
                     FirstLineHash = [string]$snapshot.FirstLineHash
+                    IsActivePath = [bool]$snapshot.IsActivePath
                 }
                 $State.Generations[[string]$pending.GenerationKey] = $generation
             }
@@ -527,9 +559,15 @@ function Sync-GuiSmokeLogLedger {
                 $State.RotationCount++
                 $generation.LastPath = [string]$snapshot.Path
             }
+            $generation.IsActivePath = [bool]$snapshot.IsActivePath
 
+            $firstLineOrdinal = [long]$generation.ConsumedLineCount
+            $lineIndex = 0L
             foreach ($line in @($pending.Delta.Lines)) {
+                $lineIdentity = "{0}`n{1}" -f [string]$pending.GenerationKey, ($firstLineOrdinal + $lineIndex)
+                [void]$State.ConsumedLineIdentities.Add($lineIdentity)
                 $State.Lines.Add([string]$line) | Out-Null
+                $lineIndex++
             }
             $generation.ConsumedByteOffset = [long]$pending.Delta.NextByteOffset
             $generation.ConsumedLineCount += [long]$pending.Delta.CompleteLineCount
@@ -537,6 +575,32 @@ function Sync-GuiSmokeLogLedger {
 
         if (-not [string]::IsNullOrWhiteSpace($acceptedActiveGenerationKey)) {
             $State.ActiveGenerationKey = $acceptedActiveGenerationKey
+        }
+
+        if ([string]::IsNullOrWhiteSpace([string]$State.InitialGenerationKey) -and $State.Generations.Count -gt 0) {
+            $initialGenerationKey = if (-not [string]::IsNullOrWhiteSpace($acceptedActiveGenerationKey)) {
+                $acceptedActiveGenerationKey
+            }
+            else {
+                [string](@($State.Generations.Values |
+                    Sort-Object CreationTimeUtcTicks, GenerationKey |
+                    Select-Object -First 1)[0].GenerationKey)
+            }
+            $State.InitialGenerationKey = $initialGenerationKey
+            $State.InitialGenerationSnapshots = @(
+                Get-GuiSmokeLogLedgerGenerationSnapshots -State $State |
+                    ForEach-Object {
+                        [pscustomobject]@{
+                            generationKey = [string]$_.generationKey
+                            creationTimeUtcTicks = [long]$_.creationTimeUtcTicks
+                            firstLineHash = [string]$_.firstLineHash
+                            lastPath = [string]$_.lastPath
+                            isActivePath = [bool]$_.isActivePath
+                            consumedByteOffset = 0L
+                            consumedLineCount = 0L
+                        }
+                    }
+            )
         }
 
         Assert-GuiSmokeLogLedgerHealthy -State $State
@@ -586,14 +650,172 @@ function Get-GuiSmokeLogLedgerLinesAfterBookmark {
 function Get-GuiSmokeLogLedgerDiagnostics {
     param([Parameter(Mandatory = $true)]$State)
 
+    $consumedIdentities = @($State.ConsumedLineIdentities | Sort-Object)
+    $consumedIndexSha256 = Get-GuiSmokeLogLedgerHash -Value ($consumedIdentities -join [char]31)
+    $consumedIndexRanges = @(
+        $State.Generations.Values |
+            Sort-Object CreationTimeUtcTicks, GenerationKey |
+            ForEach-Object {
+                $count = [long]$_.ConsumedLineCount
+                [pscustomobject]@{
+                    generationKey = [string]$_.GenerationKey
+                    firstLineOrdinal = $(if ($count -gt 0) { 0L } else { -1L })
+                    lastLineOrdinal = $(if ($count -gt 0) { $count - 1L } else { -1L })
+                    count = $count
+                }
+            })
+
     return [pscustomobject]@{
+        LedgerId = [string]$State.LedgerId
         LineCount = [int]$State.Lines.Count
+        ConsumedIndexCount = [int]$State.ConsumedLineIdentities.Count
+        ConsumedIndexSha256 = $consumedIndexSha256
+        ConsumedIndexRanges = $consumedIndexRanges
         GenerationCount = [int]$State.Generations.Count
+        InitialGenerationKey = [string]$State.InitialGenerationKey
+        ActiveGenerationKey = [string]$State.ActiveGenerationKey
         RotationCount = [int]$State.RotationCount
         TransientRescanCount = [int]$State.TransientRescanCount
         GapCount = [int]$State.GapCount
+        DuplicateIndexCount = [int]$State.DuplicateIndexCount
         SyncCount = [int]$State.SyncCount
         FailureCode = if ([string]::IsNullOrWhiteSpace([string]$State.FailureCode)) { '(none)' } else { [string]$State.FailureCode }
         FailureDetail = if ([string]::IsNullOrWhiteSpace([string]$State.FailureDetail)) { '(none)' } else { [string]$State.FailureDetail }
     }
+}
+
+function Get-GuiSmokeLogLedgerGenerationSnapshots {
+    param([Parameter(Mandatory = $true)]$State)
+
+    return @(
+        $State.Generations.Values |
+            Sort-Object CreationTimeUtcTicks, GenerationKey |
+            ForEach-Object {
+                [pscustomobject]@{
+                    generationKey = [string]$_.GenerationKey
+                    creationTimeUtcTicks = [long]$_.CreationTimeUtcTicks
+                    firstLineHash = [string]$_.FirstLineHash
+                    lastPath = [string]$_.LastPath
+                    isActivePath = [bool]$_.IsActivePath
+                    consumedByteOffset = [long]$_.ConsumedByteOffset
+                    consumedLineCount = [long]$_.ConsumedLineCount
+                }
+            }
+    )
+}
+
+function Get-GuiSmokeLogLedgerSnapshot {
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [int]$Bookmark = -1
+    )
+
+    $effectiveBookmark = if ($Bookmark -ge 0) { $Bookmark } else { [int]$State.Lines.Count }
+    return [pscustomobject]@{
+        ledgerId = [string]$State.LedgerId
+        bookmark = [int]$effectiveBookmark
+        lineCount = [int]$State.Lines.Count
+        initialGenerationKey = [string]$State.InitialGenerationKey
+        activeGenerationKey = [string]$State.ActiveGenerationKey
+        generations = @(Get-GuiSmokeLogLedgerGenerationSnapshots -State $State)
+        initialGenerations = @($State.InitialGenerationSnapshots)
+    }
+}
+
+function Test-GuiSmokeLogLedgerSnapshotMonotonicSubset {
+    param(
+        [AllowEmptyCollection()]$InitialGenerations = @(),
+        [AllowEmptyCollection()]$FinalGenerations = @()
+    )
+
+    $finalByKey = @{}
+    foreach ($generation in @($FinalGenerations)) {
+        $key = [string]$generation.generationKey
+        if (-not [string]::IsNullOrWhiteSpace($key)) {
+            $finalByKey[$key] = $generation
+        }
+    }
+
+    foreach ($initial in @($InitialGenerations)) {
+        $key = [string]$initial.generationKey
+        if ([string]::IsNullOrWhiteSpace($key) -or -not $finalByKey.ContainsKey($key)) {
+            return $false
+        }
+
+        $final = $finalByKey[$key]
+        if ([long]$final.consumedByteOffset -lt [long]$initial.consumedByteOffset -or
+            [long]$final.consumedLineCount -lt [long]$initial.consumedLineCount) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Get-GuiSmokeLogLedgerSnapshotIntegrityReasons {
+    param(
+        [Parameter(Mandatory = $true)][AllowNull()]$InitialSnapshot,
+        [Parameter(Mandatory = $true)][AllowNull()]$FinalSnapshot
+    )
+
+    $reasons = New-Object System.Collections.Generic.List[string]
+    if ($null -eq $InitialSnapshot) {
+        $reasons.Add('initial_snapshot_missing') | Out-Null
+        return @($reasons.ToArray())
+    }
+    if ($null -eq $FinalSnapshot) {
+        $reasons.Add('final_snapshot_missing') | Out-Null
+        return @($reasons.ToArray())
+    }
+
+    $initialLedgerId = [string]$InitialSnapshot.ledgerId
+    $finalLedgerId = [string]$FinalSnapshot.ledgerId
+    if ([string]::IsNullOrWhiteSpace($initialLedgerId)) {
+        $reasons.Add('initial_ledger_id_missing') | Out-Null
+    }
+    if ([string]::IsNullOrWhiteSpace($finalLedgerId)) {
+        $reasons.Add('final_ledger_id_missing') | Out-Null
+    }
+    if (-not [string]::IsNullOrWhiteSpace($initialLedgerId) -and
+        -not [string]::IsNullOrWhiteSpace($finalLedgerId) -and
+        -not [string]::Equals($initialLedgerId, $finalLedgerId, [System.StringComparison]::Ordinal)) {
+        $reasons.Add('ledger_id_changed') | Out-Null
+    }
+
+    $initialGenerationKey = [string]$InitialSnapshot.activeGenerationKey
+    $finalGenerationKey = [string]$FinalSnapshot.activeGenerationKey
+    $initialGenerations = @($InitialSnapshot.generations)
+    $finalGenerations = @($FinalSnapshot.generations)
+    if ([string]::IsNullOrWhiteSpace($initialGenerationKey)) {
+        $reasons.Add('initial_generation_missing') | Out-Null
+    }
+    if ($initialGenerations.Count -eq 0) {
+        $reasons.Add('initial_generation_snapshot_missing') | Out-Null
+    }
+    if ([string]::IsNullOrWhiteSpace($finalGenerationKey)) {
+        $reasons.Add('final_generation_missing') | Out-Null
+    }
+    if ($finalGenerations.Count -eq 0) {
+        $reasons.Add('final_generation_snapshot_missing') | Out-Null
+    }
+
+    $initialKeys = @($initialGenerations | ForEach-Object { [string]$_.generationKey })
+    $finalKeys = @($finalGenerations | ForEach-Object { [string]$_.generationKey })
+    if (-not [string]::IsNullOrWhiteSpace($initialGenerationKey) -and
+        $initialKeys -notcontains $initialGenerationKey) {
+        $reasons.Add('initial_active_generation_not_indexed') | Out-Null
+    }
+    if (-not [string]::IsNullOrWhiteSpace($finalGenerationKey) -and
+        $finalKeys -notcontains $finalGenerationKey) {
+        $reasons.Add('final_active_generation_not_indexed') | Out-Null
+    }
+    if ($initialGenerations.Count -gt 0 -and
+        $finalGenerations.Count -gt 0 -and
+        -not (Test-GuiSmokeLogLedgerSnapshotMonotonicSubset `
+            -InitialGenerations $initialGenerations `
+            -FinalGenerations $finalGenerations)) {
+        $reasons.Add('generation_snapshot_not_monotonic') | Out-Null
+    }
+
+    return @($reasons.ToArray())
 }

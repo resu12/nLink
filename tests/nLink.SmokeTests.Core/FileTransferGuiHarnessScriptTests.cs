@@ -437,6 +437,170 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
     }
 
     [Fact]
+    public async Task GuiSmokeLogLedger_ExportsStableIdentityAndDetectsGenerationOrdinalReplay()
+    {
+        var helperPath = Path.Combine(FindRepoRoot(), "tools", "GuiSmokeLogLedger.ps1")
+            .Replace("'", "''", StringComparison.Ordinal);
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            . '{{helperPath}}'
+
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-gui-ledger-identity-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $utf8 = [Text.UTF8Encoding]::new($false)
+                $nl = [Environment]::NewLine
+                $active = Join-Path $tempRoot 'nlink.log'
+                $state = New-GuiSmokeLogLedgerState -MaxLines 20 -MaxGenerations 10
+                $firstLedgerId = [string]$state.LedgerId
+                if ([string]::IsNullOrWhiteSpace($firstLedgerId)) { throw 'ledger id missing' }
+                Reset-GuiSmokeLogLedgerState -State $state
+                if ([string]::IsNullOrWhiteSpace([string]$state.LedgerId) -or $state.LedgerId -eq $firstLedgerId) { throw 'ledger id was not regenerated on reset' }
+
+                [IO.File]::WriteAllText($active, "event=identical${nl}event=identical${nl}", $utf8)
+                Sync-GuiSmokeLogLedger -State $state -Paths @($active)
+                $snapshot = Get-GuiSmokeLogLedgerSnapshot -State $state -Bookmark 0
+                if ($snapshot.ledgerId -ne $state.LedgerId) { throw 'snapshot ledger id mismatch' }
+                if ([string]::IsNullOrWhiteSpace([string]$snapshot.initialGenerationKey)) { throw 'initial generation missing' }
+                if ($snapshot.initialGenerationKey -ne $snapshot.activeGenerationKey) { throw 'initial/current generation mismatch' }
+                if (@($snapshot.generations).Count -ne 1 -or @($snapshot.initialGenerations).Count -ne 1) { throw 'generation snapshots missing' }
+                if (-not (Test-GuiSmokeLogLedgerSnapshotMonotonicSubset -InitialGenerations $snapshot.initialGenerations -FinalGenerations $snapshot.generations)) { throw 'valid generation snapshot was not monotonic' }
+                $lines = @(Get-GuiSmokeLogLedgerLines -State $state)
+                if ($lines.Count -ne 2 -or $lines[0] -ne 'event=identical' -or $lines[1] -ne 'event=identical') { throw 'legitimate identical-content lines were collapsed' }
+                $beforeReplayDiagnostics = Get-GuiSmokeLogLedgerDiagnostics -State $state
+                if ($beforeReplayDiagnostics.DuplicateIndexCount -ne 0) { throw 'identical content was treated as duplicate index' }
+                if ($beforeReplayDiagnostics.ConsumedIndexCount -ne 2) { throw 'generation/ordinal index count mismatch' }
+
+                $generation = @($state.Generations.Values)[0]
+                $generation.ConsumedByteOffset = 0L
+                $generation.ConsumedLineCount = 0L
+                $replayError = try { Sync-GuiSmokeLogLedger -State $state -Paths @($active); '' } catch { $_.Exception.Message }
+                if ($replayError -notlike 'gui_smoke_log_cursor_duplicate_index*') { throw "generation/ordinal replay was not rejected: $replayError" }
+                $diagnostics = Get-GuiSmokeLogLedgerDiagnostics -State $state
+                if ($diagnostics.DuplicateIndexCount -ne 1) { throw "duplicate index count mismatch: $($diagnostics.DuplicateIndexCount)" }
+
+                Write-Output 'gui-log-ledger-identity-ok'
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(result.ExitCode == 0, $"Ledger identity test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-log-ledger-identity-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GuiSmokeTunaScenario_WritesDurableLogLedgerEvidenceOnce()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var wrapperText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "Run-FileTransferTunaGuiSmoke.ps1"));
+
+        Assert.Contains("Get-GuiSmokeLogLedgerSnapshot", guiText, StringComparison.Ordinal);
+        Assert.Contains("Write-FileTransferGuiLogLedgerEvidence", guiText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer-gui-log-ledger.json", guiText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer-gui-log-ledger-slice.log", guiText, StringComparison.Ordinal);
+        Assert.Contains("-WriteOnce", guiText, StringComparison.Ordinal);
+        Assert.Contains("analyzerInput = $analyzerInputEvidence", guiText, StringComparison.Ordinal);
+        Assert.Contains("[System.IO.FileMode]::CreateNew", guiText, StringComparison.Ordinal);
+        Assert.Contains("NLINK_FILETRANSFER_ACCEPTANCE_RUN_ID", guiText, StringComparison.Ordinal);
+        Assert.Contains("NLINK_FILETRANSFER_SCENARIO_RUN_ID", guiText, StringComparison.Ordinal);
+        Assert.Contains("duplicateIndexCount", guiText, StringComparison.Ordinal);
+        Assert.Contains("consumedIndexSha256", guiText, StringComparison.Ordinal);
+        Assert.Contains("cursorIntegrityVerdict", guiText, StringComparison.Ordinal);
+        Assert.Contains("[string]$FileName = 'filetransfer-retained-log-slice.log'", wrapperText, StringComparison.Ordinal);
+        Assert.DoesNotContain("filetransfer-gui-log-ledger-slice.log", wrapperText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeLogLedger_MissingInitialFailsAndAnalyzerMergeCannotMutateLedgerSlice()
+    {
+        var helperPath = Path.Combine(FindRepoRoot(), "tools", "GuiSmokeLogLedger.ps1")
+            .Replace("'", "''", StringComparison.Ordinal);
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            . '{{helperPath}}'
+
+            $generation = [pscustomobject]@{
+                generationKey = 'generation-1'
+                creationTimeUtcTicks = 1L
+                firstLineHash = 'hash'
+                lastPath = 'nlink.log'
+                isActivePath = $true
+                consumedByteOffset = 8L
+                consumedLineCount = 1L
+            }
+            $final = [pscustomobject]@{
+                ledgerId = 'ledger-1'
+                activeGenerationKey = 'generation-1'
+                generations = @($generation)
+            }
+            $missingInitialReasons = @(Get-GuiSmokeLogLedgerSnapshotIntegrityReasons -InitialSnapshot $null -FinalSnapshot $final)
+            if ($missingInitialReasons -notcontains 'initial_snapshot_missing') {
+                throw "missing initial snapshot was accepted: $($missingInitialReasons -join ',')"
+            }
+            $emptyInitial = [pscustomobject]@{
+                ledgerId = 'ledger-1'
+                activeGenerationKey = ''
+                generations = @()
+            }
+            $emptyInitialReasons = @(Get-GuiSmokeLogLedgerSnapshotIntegrityReasons -InitialSnapshot $emptyInitial -FinalSnapshot $final)
+            if ($emptyInitialReasons -notcontains 'initial_generation_missing' -or
+                $emptyInitialReasons -notcontains 'initial_generation_snapshot_missing') {
+                throw "missing initial generation was accepted: $($emptyInitialReasons -join ',')"
+            }
+
+            $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('nlink-ledger-slice-' + [guid]::NewGuid().ToString('N'))
+            [void][IO.Directory]::CreateDirectory($tempRoot)
+            try {
+                $utf8 = [Text.UTF8Encoding]::new($false)
+                $ledgerSlice = Join-Path $tempRoot 'filetransfer-gui-log-ledger-slice.log'
+                $analyzerInput = Join-Path $tempRoot 'filetransfer-retained-log-slice.log'
+                [IO.File]::WriteAllText($ledgerSlice, 'event=runtime' + [Environment]::NewLine, $utf8)
+                [IO.File]::WriteAllText($analyzerInput, 'event=runtime' + [Environment]::NewLine, $utf8)
+                $sha = [Security.Cryptography.SHA256]::Create()
+                try {
+                    $beforeHash = [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($ledgerSlice)))
+                }
+                finally {
+                    $sha.Dispose()
+                }
+                $beforeCount = @(Get-Content -LiteralPath $ledgerSlice).Count
+
+                [IO.File]::AppendAllText($analyzerInput, 'event=analyzer_only_milestone' + [Environment]::NewLine, $utf8)
+
+                $sha = [Security.Cryptography.SHA256]::Create()
+                try {
+                    $afterHash = [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($ledgerSlice)))
+                }
+                finally {
+                    $sha.Dispose()
+                }
+                $afterCount = @(Get-Content -LiteralPath $ledgerSlice).Count
+                $analyzerCount = @(Get-Content -LiteralPath $analyzerInput).Count
+                if ($beforeHash -ne $afterHash -or $beforeCount -ne $afterCount) {
+                    throw 'milestone merge mutated immutable ledger slice'
+                }
+                if ($analyzerCount -le $afterCount) {
+                    throw 'analyzer input did not diverge independently from ledger slice'
+                }
+            }
+            finally {
+                if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+            }
+
+            Write-Output 'gui-log-ledger-immutable-slice-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(result.ExitCode == 0, $"Ledger immutable-slice test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-log-ledger-immutable-slice-ok", result.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GuiSmokeSwitchOffWait_IsTerminalAwareAndNeverClicksAfterTerminal()
     {
         var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));

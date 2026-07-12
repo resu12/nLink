@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using NLink.App.Views;
 using NLink.Core.Configuration;
@@ -51,8 +52,26 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("regular-v4-live-activation-off-on-off-256mb", summary["requested_scenarios"]);
             Assert.Equal("0", summary["summary_json_failed"]);
             Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.acceptance_failure_class"]);
+            Assert.Equal("1", summary["manifest_present"]);
+            Assert.Matches("^[0-9a-f]{64}$", summary["manifest_sha256"]);
+            Assert.Equal("0", summary["current_runtime_proof"]);
+            Assert.Equal("pass", summary["cursor_integrity_verdict"]);
+            Assert.Equal("complete", summary["transfer_evidence_status"]);
+            Assert.Equal("incomplete_proof", summary["runtime_correctness_verdict"]);
+            Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-256mb.manifest_present"]);
+            Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-256mb.cursor_integrity_verdict"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.current_runtime_proof"]);
             Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.fallback_receiver_state_churn_warning_count"]);
             Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.fallback_receiver_state_churn_efficiency_class"]);
+            var manifestPath = Path.Combine(runRoot, "route-acceptance-run-manifest.json");
+            Assert.True(File.Exists(manifestPath), "Expected immutable route-acceptance manifest.");
+            await using (var manifestStream = File.OpenRead(manifestPath))
+            using (var manifest = await JsonDocument.ParseAsync(manifestStream))
+            {
+                Assert.Equal(1, manifest.RootElement.GetProperty("schemaVersion").GetInt32());
+                Assert.Equal("fake", manifest.RootElement.GetProperty("executionMode").GetString());
+                Assert.Single(manifest.RootElement.GetProperty("scenarioAttempts").EnumerateArray());
+            }
             Assert.True(File.Exists(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.json")), "Expected Phase 5 JSON summary.");
             Assert.True(File.Exists(Path.Combine(runRoot, "phase5-summary-writer-diagnostics.txt")), "Expected Phase 5 summary writer diagnostics.");
             Assert.True(File.Exists(Path.Combine(runRoot, "phase5-summary-writer-diagnostics.json")), "Expected Phase 5 summary writer JSON diagnostics.");
@@ -118,6 +137,137 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
         finally
         {
             TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RunFileTransferRouteAcceptance_CurrentArtifactEquivalentIsIncompleteProofWithRetryCandidate()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "phase5-current-artifact-equivalent");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-current-artifact-equivalent");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_RETRY_DISPATCH_SUCCESSOR_ATTEMPT_MISMATCH"] = "1";
+
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ScenarioName", "regular-v4-live-activation-off-on-off-256mb",
+                    "-ArtifactRoot", artifactRoot,
+                    "-GoodputOnlyRerunLimit", "0",
+                    "-SetupOnlyRerunLimit", "0",
+                    "-EvidenceDryRun",
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.NotEqual(0, result.ExitCode);
+            var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            const string prefix = "regular-v4-live-activation-off-on-off-256mb";
+            Assert.Equal("incomplete_proof", summary[$"{prefix}.acceptance_failure_class"]);
+            Assert.Equal("incomplete_proof", summary[$"{prefix}.runtime_correctness_verdict"]);
+            Assert.Equal("incomplete", summary[$"{prefix}.transfer_evidence_status"]);
+            Assert.Equal("fail", summary[$"{prefix}.cursor_integrity_verdict"]);
+            Assert.Equal("0", summary[$"{prefix}.current_runtime_proof"]);
+            Assert.Equal("runtime_unlock_retry_dispatch_successor_attempt_mismatch", summary[$"{prefix}.runtime_failure_candidate"]);
+            Assert.Equal("runtime_unlock_retry_dispatch_authority_rejected", summary[$"{prefix}.first_proof_chain_failure_event"]);
+            Assert.Equal("retry_dispatch_successor_attempt_mismatch", summary[$"{prefix}.first_proof_chain_failure_reason"]);
+            Assert.NotEqual("fallback_authority", summary[$"{prefix}.runtime_failure_candidate"]);
+            Assert.Equal("evidence_dry_run", JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(runRoot, "route-acceptance-run-manifest.json"))).RootElement.GetProperty("executionMode").GetString());
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RunFileTransferRouteAcceptance_EvidenceDryRunValidatesSuppliedCursorWithoutClaimingLiveProof()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var testRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var sourceArtifactRoot = Path.Combine(testRoot, "source");
+        var sourceRunRoot = Path.Combine(sourceArtifactRoot, "phase5-evidence-source");
+        var dryArtifactRoot = Path.Combine(testRoot, "dry");
+        var dryRunRoot = Path.Combine(dryArtifactRoot, "phase5-evidence-dry-run");
+
+        try
+        {
+            var source = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ScenarioName", "regular-v4-live-activation-off-on-off-256mb",
+                    "-ArtifactRoot", sourceArtifactRoot,
+                    "-GoodputOnlyRerunLimit", "0",
+                    "-SetupOnlyRerunLimit", "0",
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                BuildFakeRouteAcceptanceEnvironment("phase5-evidence-source"));
+            Assert.True(source.ExitCode == 0, $"Expected source fixture run to pass.{Environment.NewLine}{source.Stdout}{Environment.NewLine}{source.Stderr}");
+
+            var dryEnvironment = BuildFakeRouteAcceptanceEnvironment("phase5-evidence-dry-run");
+            var dry = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ScenarioName", "regular-v4-live-activation-off-on-off-256mb",
+                    "-ArtifactRoot", dryArtifactRoot,
+                    "-ExePath", Path.Combine(sourceRunRoot, "evidence-fixture", "nLink.fake.exe"),
+                    "-EvidenceDryRun",
+                    "-EvidenceDryRunFixtureRoot", sourceRunRoot,
+                    "-GoodputOnlyRerunLimit", "0",
+                    "-SetupOnlyRerunLimit", "0",
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                dryEnvironment);
+
+            Assert.NotEqual(0, dry.ExitCode);
+            var summary = ReadArtifactReport(dryRunRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal("1", summary["manifest_present"]);
+            Assert.Equal("pass", summary["cursor_integrity_verdict"]);
+            Assert.Equal("0", summary["current_runtime_proof"]);
+            Assert.Equal("incomplete_proof", summary["runtime_correctness_verdict"]);
+
+            using var manifest = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(dryRunRoot, "route-acceptance-run-manifest.json")));
+            var root = manifest.RootElement;
+            Assert.Equal("evidence_dry_run", root.GetProperty("executionMode").GetString());
+            Assert.Equal("PASS", root.GetProperty("validation").GetProperty("cursorIntegrityVerdict").GetString());
+            Assert.False(root.GetProperty("validation").GetProperty("currentRuntimeProof").GetBoolean());
+            Assert.True(root.GetProperty("runtime").GetProperty("hashStable").GetBoolean());
+            Assert.True(root.GetProperty("harness").GetProperty("hashStable").GetBoolean());
+            Assert.True(root.GetProperty("bridge").GetProperty("hashStable").GetBoolean());
+
+            const string scenario = "regular-v4-live-activation-off-on-off-256mb";
+            var sourceLedger = await File.ReadAllBytesAsync(Path.Combine(sourceRunRoot, scenario, "filetransfer-gui-log-ledger.json"));
+            var importedLedger = await File.ReadAllBytesAsync(Path.Combine(dryRunRoot, scenario, "filetransfer-gui-log-ledger.json"));
+            Assert.Equal(sourceLedger, importedLedger);
+        }
+        finally
+        {
+            TryDeleteDirectory(testRoot);
         }
     }
 

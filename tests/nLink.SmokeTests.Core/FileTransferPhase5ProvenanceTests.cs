@@ -1,0 +1,632 @@
+namespace NLink.SmokeTests;
+
+[Trait("Area", "Core")]
+[Trait("OpsSuite", "AcceptancePhase5Fast")]
+[Trait("AcceptancePhase5Suite", "Provenance")]
+[Collection(FakeNknNetworkCollection.Name)]
+public sealed class FileTransferPhase5ProvenanceTests : FileTransferOpsScriptsTestBase
+{
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task EvidenceManifest_ValidLiveAndDryRunEvidenceHaveDistinctProofVerdictsAndAreWriteOnce()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunEvidenceScriptAsync(
+            FixturePrelude +
+            """
+$fixture = New-EvidenceFixture -Name 'valid' -ScenarioName 'regular-v4-live-activation-off-on-off-256mb'
+$attempt = Get-RouteAcceptanceScenarioEvidence `
+    -AcceptanceRunId $fixture.RunId `
+    -ScenarioName 'regular-v4-live-activation-off-on-off-256mb' `
+    -Attempt 1 `
+    -ScenarioRunId ($fixture.RunId + ':regular-v4-live-activation-off-on-off-256mb:1') `
+    -ArtifactDir $fixture.ArtifactDir `
+    -ArtifactFinalized $true `
+    -LogLedgerPath $fixture.LedgerPath `
+    -AnalyzerDiagnosticsPath $fixture.DiagnosticsPath `
+    -AnalyzerInputPath $fixture.AnalyzerInputPath
+
+$final = New-RouteAcceptanceEvidenceSnapshot `
+    -RepoRoot $fixture.Root `
+    -PortableExecutablePath $fixture.ExecutablePath `
+    -HarnessFiles $fixture.HarnessFiles `
+    -BridgeDir $fixture.BridgeDir `
+    -GitState $fixture.GitState
+
+$live = New-RouteAcceptanceEvidenceManifest `
+    -RunId $fixture.RunId `
+    -MatrixMode 'phase5-analyzer-gui-acceptance' `
+    -ExecutionMode live `
+    -ArtifactRoot $fixture.ArtifactDir `
+    -StartedUtc ([datetime]'2026-07-12T10:00:00Z') `
+    -FinalizedUtc ([datetime]'2026-07-12T10:05:00Z') `
+    -ScenarioNames @('regular-v4-live-activation-off-on-off-256mb') `
+    -InitialSnapshot $fixture.Initial `
+    -FinalSnapshot $final `
+    -ScenarioAttempts @($attempt)
+
+$liveValidation = Test-RouteAcceptanceEvidenceManifest -Manifest $live
+Assert-Equal $liveValidation.verdict 'PASS' 'valid live manifest verdict'
+Assert-True $liveValidation.currentRuntimeProof 'valid live manifest must prove current runtime'
+Assert-Equal $liveValidation.provenanceVerdict 'PASS' 'valid live provenance'
+Assert-Equal $liveValidation.cursorIntegrityVerdict 'PASS' 'valid live cursor'
+
+$dryRun = New-RouteAcceptanceEvidenceManifest `
+    -RunId $fixture.RunId `
+    -MatrixMode 'phase5-analyzer-gui-acceptance' `
+    -ExecutionMode evidence_dry_run `
+    -ArtifactRoot $fixture.ArtifactDir `
+    -StartedUtc ([datetime]'2026-07-12T10:00:00Z') `
+    -FinalizedUtc ([datetime]'2026-07-12T10:05:00Z') `
+    -ScenarioNames @('regular-v4-live-activation-off-on-off-256mb') `
+    -InitialSnapshot $fixture.Initial `
+    -FinalSnapshot $final `
+    -ScenarioAttempts @($attempt)
+
+$dryValidation = Test-RouteAcceptanceEvidenceManifest -Manifest $dryRun
+Assert-Equal $dryValidation.verdict 'PASS' 'valid dry-run evidence verdict'
+Assert-False $dryValidation.currentRuntimeProof 'dry run must not prove live runtime'
+Assert-Contains $dryValidation.reasons 'execution_mode_not_live' 'dry-run proof reason'
+
+$manifestPath = Join-Path $fixture.ArtifactDir 'route-acceptance-run-manifest.json'
+$write = Write-RouteAcceptanceEvidenceManifest -Path $manifestPath -Manifest $dryRun
+Assert-True (Test-Path -LiteralPath $manifestPath -PathType Leaf) 'manifest was not written'
+Assert-Equal $write.sha256 (Get-RouteAcceptanceEvidenceSha256 -Path $manifestPath) 'manifest SHA-256'
+Assert-Equal $write.validation.verdict 'PASS' 'reopened manifest verdict'
+Assert-False $write.validation.currentRuntimeProof 'reopened dry-run must remain non-live'
+
+$secondWriteFailed = $false
+try {
+    Write-RouteAcceptanceEvidenceManifest -Path $manifestPath -Manifest $dryRun | Out-Null
+}
+catch [System.IO.IOException] {
+    $secondWriteFailed = $true
+}
+Assert-True $secondWriteFailed 'FileMode.CreateNew must reject a second manifest write'
+
+$missing = Test-RouteAcceptanceEvidenceManifestFile -Path (Join-Path $fixture.ArtifactDir 'missing.json')
+Assert-Equal $missing.verdict 'FAIL' 'missing manifest verdict'
+Assert-Contains $missing.reasons 'manifest_missing' 'missing manifest reason'
+
+$malformedPath = Join-Path $fixture.ArtifactDir 'malformed.json'
+[System.IO.File]::WriteAllText($malformedPath, '{', [System.Text.UTF8Encoding]::new($false))
+$malformed = Test-RouteAcceptanceEvidenceManifestFile -Path $malformedPath
+Assert-Equal $malformed.verdict 'FAIL' 'malformed manifest verdict'
+Assert-Contains $malformed.reasons 'manifest_malformed' 'malformed manifest reason'
+""");
+
+        AssertScriptPassed(result);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task EvidenceManifest_FailsClosedForSourceRuntimeHarnessAndBridgeProvenanceChanges()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunEvidenceScriptAsync(
+            FixturePrelude +
+            """
+function New-ManifestFromFixture {
+    param(
+        [Parameter(Mandatory = $true)]$Fixture,
+        [Parameter(Mandatory = $true)]$FinalSnapshot
+    )
+
+    $attempt = Get-RouteAcceptanceScenarioEvidence `
+        -AcceptanceRunId $Fixture.RunId `
+        -ScenarioName 'scenario' `
+        -Attempt 1 `
+        -ScenarioRunId ($Fixture.RunId + ':scenario:1') `
+        -ArtifactDir $Fixture.ArtifactDir `
+        -ArtifactFinalized $true `
+        -LogLedgerPath $Fixture.LedgerPath `
+        -AnalyzerDiagnosticsPath $Fixture.DiagnosticsPath `
+        -AnalyzerInputPath $Fixture.AnalyzerInputPath
+    return New-RouteAcceptanceEvidenceManifest `
+        -RunId $Fixture.RunId `
+        -MatrixMode 'phase5-analyzer-gui-acceptance' `
+        -ExecutionMode live `
+        -ArtifactRoot $Fixture.ArtifactDir `
+        -StartedUtc ([datetime]'2026-07-12T10:00:00Z') `
+        -FinalizedUtc ([datetime]'2026-07-12T10:05:00Z') `
+        -ScenarioNames @('scenario') `
+        -InitialSnapshot $Fixture.Initial `
+        -FinalSnapshot $FinalSnapshot `
+        -ScenarioAttempts @($attempt)
+}
+
+$dirty = New-EvidenceFixture -Name 'dirty'
+$dirtyGit = [pscustomobject]@{
+    gitCommitSha = $dirty.GitState.gitCommitSha
+    dirty = $true
+    normalizedStatusSha256 = Get-RouteAcceptanceEvidenceTextSha256 -Value ' M source.cs'
+}
+$dirtyFinal = New-RouteAcceptanceEvidenceSnapshot -RepoRoot $dirty.Root -PortableExecutablePath $dirty.ExecutablePath -HarnessFiles $dirty.HarnessFiles -BridgeDir $dirty.BridgeDir -GitState $dirtyGit
+$dirtyValidation = Test-RouteAcceptanceEvidenceManifest -Manifest (New-ManifestFromFixture -Fixture $dirty -FinalSnapshot $dirtyFinal)
+Assert-Contains $dirtyValidation.reasons 'source_dirty' 'dirty source reason'
+Assert-False $dirtyValidation.currentRuntimeProof 'dirty source must not prove current runtime'
+
+$head = New-EvidenceFixture -Name 'head-change'
+$changedGit = [pscustomobject]@{
+    gitCommitSha = ('b' * 40)
+    dirty = $false
+    normalizedStatusSha256 = $head.GitState.normalizedStatusSha256
+}
+$headFinal = New-RouteAcceptanceEvidenceSnapshot -RepoRoot $head.Root -PortableExecutablePath $head.ExecutablePath -HarnessFiles $head.HarnessFiles -BridgeDir $head.BridgeDir -GitState $changedGit
+$headValidation = Test-RouteAcceptanceEvidenceManifest -Manifest (New-ManifestFromFixture -Fixture $head -FinalSnapshot $headFinal)
+Assert-Contains $headValidation.reasons 'source_head_changed' 'HEAD change reason'
+
+$runtime = New-EvidenceFixture -Name 'runtime-change'
+[System.IO.File]::AppendAllText($runtime.ExecutablePath, '-changed')
+$runtimeFinal = New-RouteAcceptanceEvidenceSnapshot -RepoRoot $runtime.Root -PortableExecutablePath $runtime.ExecutablePath -HarnessFiles $runtime.HarnessFiles -BridgeDir $runtime.BridgeDir -GitState $runtime.GitState
+$runtimeValidation = Test-RouteAcceptanceEvidenceManifest -Manifest (New-ManifestFromFixture -Fixture $runtime -FinalSnapshot $runtimeFinal)
+Assert-Contains $runtimeValidation.reasons 'runtime_sha256_changed' 'runtime hash change reason'
+
+$harness = New-EvidenceFixture -Name 'harness-change'
+[System.IO.File]::AppendAllText($harness.HarnessFiles[0], '-changed')
+$harnessFinal = New-RouteAcceptanceEvidenceSnapshot -RepoRoot $harness.Root -PortableExecutablePath $harness.ExecutablePath -HarnessFiles $harness.HarnessFiles -BridgeDir $harness.BridgeDir -GitState $harness.GitState
+$harnessValidation = Test-RouteAcceptanceEvidenceManifest -Manifest (New-ManifestFromFixture -Fixture $harness -FinalSnapshot $harnessFinal)
+Assert-Contains $harnessValidation.reasons 'harness_sha256_changed' 'harness hash change reason'
+
+$bridge = New-EvidenceFixture -Name 'bridge-change'
+[System.IO.File]::AppendAllText((Join-Path $bridge.BridgeDir 'index.js'), '-changed')
+$newBridgeHash = Get-RouteAcceptanceEvidenceSha256 -Path (Join-Path $bridge.BridgeDir 'index.js')
+Write-JsonNoBom -Path (Join-Path $bridge.BridgeDir 'bridge-manifest.json') -Value ([ordered]@{ bridgeScriptSha256 = $newBridgeHash })
+$bridgeFinal = New-RouteAcceptanceEvidenceSnapshot -RepoRoot $bridge.Root -PortableExecutablePath $bridge.ExecutablePath -HarnessFiles $bridge.HarnessFiles -BridgeDir $bridge.BridgeDir -GitState $bridge.GitState
+$bridgeValidation = Test-RouteAcceptanceEvidenceManifest -Manifest (New-ManifestFromFixture -Fixture $bridge -FinalSnapshot $bridgeFinal)
+Assert-Contains $bridgeValidation.reasons 'bridge_sha256_changed' 'bridge hash change reason'
+
+$declared = New-EvidenceFixture -Name 'bridge-declared-mismatch' -DeclaredBridgeMismatch
+$declaredFinal = New-RouteAcceptanceEvidenceSnapshot -RepoRoot $declared.Root -PortableExecutablePath $declared.ExecutablePath -HarnessFiles $declared.HarnessFiles -BridgeDir $declared.BridgeDir -GitState $declared.GitState
+$declaredValidation = Test-RouteAcceptanceEvidenceManifest -Manifest (New-ManifestFromFixture -Fixture $declared -FinalSnapshot $declaredFinal)
+Assert-Contains $declaredValidation.reasons 'bridge_manifest_sha256_mismatch' 'bridge declared hash mismatch reason'
+""");
+
+        AssertScriptPassed(result);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task EvidenceManifest_RecomputesDerivedClaimsAndRejectsIdentityOrHarnessInconsistency()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunEvidenceScriptAsync(
+            FixturePrelude +
+            """
+function Copy-EvidenceManifest {
+    param([Parameter(Mandatory = $true)]$Manifest)
+    return $Manifest | ConvertTo-Json -Depth 32 | ConvertFrom-Json
+}
+
+$fixture = New-EvidenceFixture -Name 'tampered'
+$attempt = Get-RouteAcceptanceScenarioEvidence `
+    -AcceptanceRunId $fixture.RunId `
+    -ScenarioName 'scenario' `
+    -Attempt 1 `
+    -ScenarioRunId $fixture.ScenarioRunId `
+    -ArtifactDir $fixture.ArtifactDir `
+    -ArtifactFinalized $true `
+    -LogLedgerPath $fixture.LedgerPath `
+    -AnalyzerDiagnosticsPath $fixture.DiagnosticsPath `
+    -AnalyzerInputPath $fixture.AnalyzerInputPath
+$final = New-RouteAcceptanceEvidenceSnapshot -RepoRoot $fixture.Root -PortableExecutablePath $fixture.ExecutablePath -HarnessFiles $fixture.HarnessFiles -BridgeDir $fixture.BridgeDir -GitState $fixture.GitState
+$manifest = New-RouteAcceptanceEvidenceManifest `
+    -RunId $fixture.RunId `
+    -MatrixMode 'phase5-analyzer-gui-acceptance' `
+    -ExecutionMode live `
+    -ArtifactRoot $fixture.ArtifactDir `
+    -StartedUtc ([datetime]'2026-07-12T10:00:00Z') `
+    -FinalizedUtc ([datetime]'2026-07-12T10:05:00Z') `
+    -ScenarioNames @('scenario') `
+    -InitialSnapshot $fixture.Initial `
+    -FinalSnapshot $final `
+    -ScenarioAttempts @($attempt)
+Assert-Equal (Test-RouteAcceptanceEvidenceManifest -Manifest $manifest).verdict 'PASS' 'control manifest'
+
+$head = Copy-EvidenceManifest -Manifest $manifest
+$head.source.finalGitCommitSha = ('b' * 40)
+$head.source.gitCommitSha = ('b' * 40)
+$head.source.headStable = $true
+$headResult = Test-RouteAcceptanceEvidenceManifest -Manifest $head
+Assert-Contains $headResult.reasons 'source_head_consistency_invalid' 'derived HEAD claims must be recomputed'
+
+$dirty = Copy-EvidenceManifest -Manifest $manifest
+$dirty.source.dirtyAtStart = $true
+$dirty.source.dirty = $false
+$dirtyResult = Test-RouteAcceptanceEvidenceManifest -Manifest $dirty
+Assert-Contains $dirtyResult.reasons 'source_dirty_consistency_invalid' 'derived dirty claim must be recomputed'
+Assert-Contains $dirtyResult.reasons 'source_dirty' 'primitive dirty state must fail provenance'
+
+$runtime = Copy-EvidenceManifest -Manifest $manifest
+$runtime.runtime.finalSha256 = ('b' * 64)
+$runtime.runtime.sha256 = ('b' * 64)
+$runtime.runtime.hashStable = $true
+$runtimeResult = Test-RouteAcceptanceEvidenceManifest -Manifest $runtime
+Assert-Contains $runtimeResult.reasons 'runtime_provenance_inconsistent' 'runtime stable/hash claims must be recomputed'
+Assert-Contains $runtimeResult.reasons 'runtime_sha256_changed' 'runtime pair mismatch'
+
+$harness = Copy-EvidenceManifest -Manifest $manifest
+$harness.harness.files[0].finalSha256 = ('b' * 64)
+$harness.harness.files[0].hashStable = $true
+$harnessResult = Test-RouteAcceptanceEvidenceManifest -Manifest $harness
+Assert-Contains $harnessResult.reasons 'harness_file_provenance_inconsistent' 'harness file stable claims must be recomputed'
+Assert-Contains $harnessResult.reasons 'harness_aggregate_sha256_mismatch' 'harness aggregate must be recomputed from all five files'
+
+$missingHarness = Copy-EvidenceManifest -Manifest $manifest
+$missingHarness.harness.files = @($missingHarness.harness.files | Select-Object -Skip 1)
+$missingHarnessResult = Test-RouteAcceptanceEvidenceManifest -Manifest $missingHarness
+Assert-Contains $missingHarnessResult.reasons 'harness_required_files_mismatch' 'exact five-file harness set is required'
+
+$bridge = Copy-EvidenceManifest -Manifest $manifest
+$bridge.bridge.declaredIndexSha256 = ('f' * 64)
+$bridge.bridge.declaredHashMatches = $true
+$bridgeResult = Test-RouteAcceptanceEvidenceManifest -Manifest $bridge
+Assert-Contains $bridgeResult.reasons 'bridge_declared_hash_consistency_invalid' 'bridge declared flag must be recomputed'
+Assert-Contains $bridgeResult.reasons 'bridge_manifest_sha256_mismatch' 'bridge declared hash mismatch'
+
+$invalidRun = Copy-EvidenceManifest -Manifest $manifest
+$invalidRun.runId = 'not-a-guid'
+$invalidRunResult = Test-RouteAcceptanceEvidenceManifest -Manifest $invalidRun
+Assert-Contains $invalidRunResult.reasons 'manifest_run_id_invalid' 'manifest run ID must be a GUID'
+
+$scenarioIdentity = Copy-EvidenceManifest -Manifest $manifest
+$scenarioIdentity.scenarioAttempts[0].scenarioRunId = $fixture.RunId + ':scenario:2'
+$scenarioIdentity.scenarioAttempts[0].logLedger.scenarioRunId = $fixture.RunId + ':scenario:2'
+$scenarioIdentityResult = Test-RouteAcceptanceEvidenceManifest -Manifest $scenarioIdentity
+Assert-Contains $scenarioIdentityResult.reasons 'scenario_run_id_mismatch' 'scenario run ID must use run/name/attempt tuple'
+
+$ledgerIdentity = Copy-EvidenceManifest -Manifest $manifest
+$ledgerIdentity.scenarioAttempts[0].logLedger.acceptanceRunId = [guid]::NewGuid().ToString('N')
+$ledgerIdentityResult = Test-RouteAcceptanceEvidenceManifest -Manifest $ledgerIdentity
+Assert-Contains $ledgerIdentityResult.reasons 'cursor_acceptance_run_id_mismatch' 'ledger acceptance ID must match manifest'
+
+$reopenPath = Join-Path $fixture.ArtifactDir 'tampered-manifest.json'
+$reopened = Write-RouteAcceptanceEvidenceManifest -Path $reopenPath -Manifest $runtime
+Assert-Contains $reopened.validation.reasons 'runtime_provenance_inconsistent' 'reopened validation must recompute derived claims'
+Assert-False $reopened.validation.currentRuntimeProof 'tampered manifest cannot prove runtime'
+
+[System.IO.File]::AppendAllText($fixture.ExecutablePath, '-post-finalization')
+$runtimeRace = Test-RouteAcceptanceEvidenceManifest -Manifest $manifest
+Assert-Contains $runtimeRace.reasons 'runtime_current_sha256_mismatch' 'runtime bytes are rehashed during reopen validation'
+
+[System.IO.File]::AppendAllText($fixture.HarnessFiles[0], '-post-finalization')
+$harnessRace = Test-RouteAcceptanceEvidenceManifest -Manifest $manifest
+Assert-Contains $harnessRace.reasons 'harness_current_sha256_mismatch' 'harness bytes are rehashed during reopen validation'
+
+[System.IO.File]::AppendAllText((Join-Path $fixture.BridgeDir 'index.js'), '-post-finalization')
+$bridgeRace = Test-RouteAcceptanceEvidenceManifest -Manifest $manifest
+Assert-Contains $bridgeRace.reasons 'bridge_current_sha256_mismatch' 'bridge bytes are rehashed during reopen validation'
+
+[System.IO.File]::AppendAllText($fixture.LedgerPath, "`n")
+$ledgerRace = Test-RouteAcceptanceEvidenceManifest -Manifest $manifest
+Assert-Contains $ledgerRace.reasons 'cursor_ledger_current_sha256_mismatch' 'ledger bytes are rehashed during reopen validation'
+
+[System.IO.File]::AppendAllText($fixture.DiagnosticsPath, "`n")
+$diagnosticsRace = Test-RouteAcceptanceEvidenceManifest -Manifest $manifest
+Assert-Contains $diagnosticsRace.reasons 'analyzer_diagnostics_current_sha256_mismatch' 'diagnostic bytes are rehashed during reopen validation'
+
+[System.IO.File]::AppendAllText($fixture.AnalyzerInputPath, 'event=late')
+$analyzerRace = Test-RouteAcceptanceEvidenceManifest -Manifest $manifest
+Assert-Contains $analyzerRace.reasons 'analyzer_input_current_sha256_mismatch' 'analyzer input bytes are rehashed during reopen validation'
+""");
+
+        AssertScriptPassed(result);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task CursorEvidence_RequiresMonotonicGenerationsNoGapsNoDuplicatesAndBalancedAnalyzerCounts()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunEvidenceScriptAsync(
+            FixturePrelude +
+            """
+$fixture = New-EvidenceFixture -Name 'cursor'
+$valid = Get-RouteAcceptanceCursorEvidence -LogLedger $fixture.LedgerPath -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Equal $valid.verdict 'PASS' 'valid rotated cursor verdict'
+Assert-Equal $valid.rotationCount 2 'rotation count'
+
+$ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
+$ledger.initial.activeGenerationKey = ''
+$missingInitial = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $missingInitial.reasons 'cursor_initial_generation_missing' 'missing initial generation reason'
+
+$ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
+$ledger.final.activeGenerationKey = ''
+$missingFinal = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $missingFinal.reasons 'cursor_final_generation_missing' 'missing final generation reason'
+
+$ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
+$ledger.gapCount = 1
+$gap = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $gap.reasons 'cursor_rotation_gap' 'cursor gap reason'
+
+$ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
+$ledger.duplicateIndexCount = 1
+$duplicate = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $duplicate.reasons 'cursor_duplicate_index' 'duplicate retained event index reason'
+
+$ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
+$ledger.consumedIndexSha256 = ('f' * 64)
+$arbitraryConsumedDigest = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $arbitraryConsumedDigest.reasons 'cursor_consumed_index_sha256_mismatch' 'consumed generation/ordinal digest must be recomputed'
+
+$ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
+$ledger.consumedIndexRanges = @($ledger.consumedIndexRanges[0], $ledger.consumedIndexRanges[0], $ledger.consumedIndexRanges[1])
+$duplicateGenerationRange = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $duplicateGenerationRange.reasons 'cursor_consumed_index_range_duplicate_generation' 'each final generation has one unique consumed range'
+
+$ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
+$ledger.consumedIndexRanges = @($ledger.consumedIndexRanges[0])
+$missingGenerationRange = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $missingGenerationRange.reasons 'cursor_consumed_index_range_generation_missing' 'every final generation requires a consumed range'
+
+$ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
+$ledger.consumedIndexRanges[0].count = 2
+$ledger.consumedIndexRanges[0].lastLineOrdinal = 1
+$ledger.consumedIndexRanges[1].count = 0
+$ledger.consumedIndexRanges[1].firstLineOrdinal = -1
+$ledger.consumedIndexRanges[1].lastLineOrdinal = -1
+$redistributedGenerationRanges = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $redistributedGenerationRanges.reasons 'cursor_consumed_index_range_generation_count_mismatch' 'range count must equal its generation consumed count'
+
+$ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
+$ledger.final.generations = @([pscustomobject]@{ generationKey = 'gen-2' })
+$nonMonotonic = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $nonMonotonic.reasons 'cursor_generation_not_monotonic' 'rotation generation monotonicity reason'
+
+$diagnostics = Get-Content -LiteralPath $fixture.DiagnosticsPath -Raw | ConvertFrom-Json
+$diagnostics.indexed_event_count = 1
+$unbalanced = Get-RouteAcceptanceCursorEvidence -LogLedger $fixture.LedgerPath -AnalyzerDiagnostics $diagnostics -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $unbalanced.reasons 'cursor_event_index_count_mismatch' 'event/index count mismatch reason'
+
+$diagnostics = Get-Content -LiteralPath $fixture.DiagnosticsPath -Raw | ConvertFrom-Json
+$diagnostics.log_file_count = 2
+$multipleLogs = Get-RouteAcceptanceCursorEvidence -LogLedger $fixture.LedgerPath -AnalyzerDiagnostics $diagnostics -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $multipleLogs.reasons 'cursor_log_file_count_mismatch' 'log file count mismatch reason'
+
+$ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
+$ledger.PSObject.Properties.Remove('cursorIntegrityVerdict')
+$missingProducerVerdict = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $missingProducerVerdict.reasons 'cursor_reported_integrity_verdict_missing' 'producer cursor verdict is required'
+
+$ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
+$ledger.PSObject.Properties.Remove('gapCount')
+$ledger.PSObject.Properties.Remove('duplicateIndexCount')
+$ledger.PSObject.Properties.Remove('consumedIndexCount')
+$missingCounts = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $missingCounts.reasons 'cursor_gap_count_missing' 'gap count is required'
+Assert-Contains $missingCounts.reasons 'cursor_duplicate_index_count_missing' 'duplicate count is required'
+Assert-Contains $missingCounts.reasons 'cursor_consumed_index_count_missing' 'consumed index count is required'
+
+$ledger = Get-Content -LiteralPath $fixture.LedgerPath -Raw | ConvertFrom-Json
+$ledger.final.generations[0].PSObject.Properties.Remove('consumedByteOffset')
+$missingGenerationConsumption = Get-RouteAcceptanceCursorEvidence -LogLedger $ledger -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $missingGenerationConsumption.reasons 'cursor_generation_consumed_fields_missing' 'generation consumption fields are required'
+
+$wrongRun = Get-RouteAcceptanceCursorEvidence -LogLedger $fixture.LedgerPath -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId ([guid]::NewGuid().ToString('N')) -ScenarioRunId $fixture.ScenarioRunId
+Assert-Contains $wrongRun.reasons 'cursor_acceptance_run_id_mismatch' 'acceptance run ID must correlate'
+$wrongScenario = Get-RouteAcceptanceCursorEvidence -LogLedger $fixture.LedgerPath -AnalyzerDiagnostics $fixture.DiagnosticsPath -AcceptanceRunId $fixture.RunId -ScenarioRunId ($fixture.RunId + ':scenario:2')
+Assert-Contains $wrongScenario.reasons 'cursor_scenario_run_id_mismatch' 'scenario run ID must correlate'
+""");
+
+        AssertScriptPassed(result);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task EvidenceSnapshot_HashesActualFilesAndAcceptsSha1GitHead()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunEvidenceScriptAsync(
+            FixturePrelude +
+            """
+$fixture = New-EvidenceFixture -Name 'hashes'
+$snapshot = $fixture.Initial
+Assert-Equal $snapshot.runtime.sha256 (Get-RouteAcceptanceEvidenceSha256 -Path $fixture.ExecutablePath) 'runtime file hash'
+Assert-Equal $snapshot.bridge.sha256 (Get-RouteAcceptanceEvidenceSha256 -Path (Join-Path $fixture.BridgeDir 'index.js')) 'bridge file hash'
+Assert-True $snapshot.bridge.declaredHashMatches 'bridge manifest declaration'
+Assert-Equal $snapshot.source.gitCommitSha ('a' * 40) 'SHA-1 Git head'
+Assert-True (Test-RouteAcceptanceEvidenceGitCommitValue -Value ('a' * 40)) 'SHA-1 Git head validator'
+Assert-True (Test-RouteAcceptanceEvidenceGitCommitValue -Value ('a' * 64)) 'SHA-256 Git head validator'
+Assert-False (Test-RouteAcceptanceEvidenceGitCommitValue -Value ('a' * 39)) 'invalid Git head validator'
+""");
+
+        AssertScriptPassed(result);
+    }
+
+    private static async Task<ScriptResult> RunEvidenceScriptAsync(string script)
+    {
+        var helperPath = Path.Combine(FindRepoRoot(), "tools", "FileTransferRouteAcceptanceEvidence.ps1");
+        return await RunPowerShellScriptTextAsync(script, [helperPath]);
+    }
+
+    private static void AssertScriptPassed(ScriptResult result)
+    {
+        Assert.True(
+            result.ExitCode == 0,
+            $"Expected Phase 5 evidence helper test to pass.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+    }
+
+    private const string FixturePrelude = """
+param([Parameter(Mandatory = $true)][string]$HelperPath)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+. $HelperPath
+
+$script:EvidenceTempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('nlink-phase5-provenance-' + [guid]::NewGuid().ToString('N'))
+[System.IO.Directory]::CreateDirectory($script:EvidenceTempRoot) | Out-Null
+
+function Assert-True {
+    param([bool]$Value, [string]$Message)
+    if (-not $Value) { throw $Message }
+}
+
+function Assert-False {
+    param([bool]$Value, [string]$Message)
+    if ($Value) { throw $Message }
+}
+
+function Assert-Equal {
+    param($Actual, $Expected, [string]$Message)
+    if (-not [string]::Equals([string]$Actual, [string]$Expected, [System.StringComparison]::Ordinal)) {
+        throw ("{0}: expected={1}; actual={2}" -f $Message, $Expected, $Actual)
+    }
+}
+
+function Assert-Contains {
+    param([object[]]$Values, [string]$Expected, [string]$Message)
+    if (@($Values) -notcontains $Expected) {
+        throw ("{0}: expected '{1}' in '{2}'" -f $Message, $Expected, (@($Values) -join ','))
+    }
+}
+
+function Write-JsonNoBom {
+    param([string]$Path, $Value)
+    $json = $Value | ConvertTo-Json -Depth 20
+    [System.IO.File]::WriteAllText($Path, $json, [System.Text.UTF8Encoding]::new($false))
+}
+
+function New-EvidenceFixture {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [string]$ScenarioName = 'scenario',
+        [switch]$DeclaredBridgeMismatch
+    )
+
+    $runId = [guid]::NewGuid().ToString('N')
+    $scenarioRunId = $runId + ':' + (ConvertTo-RouteAcceptanceEvidenceScenarioName -ScenarioName $ScenarioName) + ':1'
+    $root = Join-Path $script:EvidenceTempRoot $Name
+    $artifactDir = Join-Path $root 'artifacts\run'
+    $bridgeDir = Join-Path $root 'portable\bridge\win-x64'
+    [System.IO.Directory]::CreateDirectory($artifactDir) | Out-Null
+    [System.IO.Directory]::CreateDirectory($bridgeDir) | Out-Null
+
+    $executablePath = Join-Path $root 'portable\nLink.exe'
+    $harnessOne = Join-Path $root 'tools\Run-FileTransferRouteAcceptance.ps1'
+    $harnessTwo = Join-Path $root 'tools\FileTransferRouteAcceptanceEvidence.ps1'
+    $harnessThree = Join-Path $root 'tools\Run-FileTransferTunaGuiSmoke.ps1'
+    $harnessFour = Join-Path $root 'tools\GuiSmoke-Windows.ps1'
+    $harnessFive = Join-Path $root 'tools\GuiSmokeLogLedger.ps1'
+    [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($harnessOne)) | Out-Null
+    [System.IO.File]::WriteAllText($executablePath, 'runtime-bytes')
+    [System.IO.File]::WriteAllText($harnessOne, 'harness-one')
+    [System.IO.File]::WriteAllText($harnessTwo, 'harness-two')
+    [System.IO.File]::WriteAllText($harnessThree, 'harness-three')
+    [System.IO.File]::WriteAllText($harnessFour, 'harness-four')
+    [System.IO.File]::WriteAllText($harnessFive, 'harness-five')
+    [System.IO.File]::WriteAllText((Join-Path $bridgeDir 'index.js'), 'bridge-bytes')
+    $bridgeHash = Get-RouteAcceptanceEvidenceSha256 -Path (Join-Path $bridgeDir 'index.js')
+    $declaredHash = if ($DeclaredBridgeMismatch) { ('f' * 64) } else { $bridgeHash }
+    Write-JsonNoBom -Path (Join-Path $bridgeDir 'bridge-manifest.json') -Value ([ordered]@{ bridgeScriptSha256 = $declaredHash })
+
+    $slicePath = Join-Path $artifactDir 'filetransfer-retained-ledger-slice.log'
+    [System.IO.File]::WriteAllText($slicePath, "event=one`nevent=two`n", [System.Text.UTF8Encoding]::new($false))
+    $sliceHash = Get-RouteAcceptanceEvidenceSha256 -Path $slicePath
+    $ledgerPath = Join-Path $artifactDir 'filetransfer-gui-log-ledger.json'
+    $ledger = [ordered]@{
+        schemaVersion = 1
+        event = 'filetransfer_gui_log_ledger'
+        acceptanceRunId = $runId
+        scenarioRunId = $scenarioRunId
+        ledgerId = [guid]::NewGuid().ToString('N')
+        initial = [ordered]@{
+            ledgerId = ''
+            bookmark = 0
+            lineCount = 1
+            activeGenerationKey = 'gen-1'
+            generations = @([ordered]@{ generationKey = 'gen-1'; consumedByteOffset = 0; consumedLineCount = 1 })
+        }
+        final = [ordered]@{
+            ledgerId = ''
+            bookmark = 0
+            lineCount = 2
+            activeGenerationKey = 'gen-2'
+            generations = @(
+                [ordered]@{ generationKey = 'gen-1'; consumedByteOffset = 10; consumedLineCount = 1 },
+                [ordered]@{ generationKey = 'gen-2'; consumedByteOffset = 10; consumedLineCount = 1 }
+            )
+        }
+        rotationCount = 2
+        transientRescanCount = 0
+        gapCount = 0
+        duplicateIndexCount = 0
+        consumedIndexCount = 2
+        consumedIndexSha256 = Get-RouteAcceptanceEvidenceTextSha256 -Value ((@("gen-1`n0", "gen-2`n0") | Sort-Object) -join [char]31)
+        consumedIndexRanges = @(
+            [ordered]@{ generationKey = 'gen-1'; firstLineOrdinal = 0; lastLineOrdinal = 0; count = 1 },
+            [ordered]@{ generationKey = 'gen-2'; firstLineOrdinal = 0; lastLineOrdinal = 0; count = 1 }
+        )
+        syncCount = 3
+        failureCode = ''
+        failureDetail = ''
+        retainedSlice = [ordered]@{
+            path = $slicePath
+            sha256 = $sliceHash
+            lineCount = 2
+        }
+        cursorIntegrityVerdict = 'PASS'
+        cursorIntegrityReasons = @()
+    }
+    $ledger.initial.ledgerId = $ledger.ledgerId
+    $ledger.final.ledgerId = $ledger.ledgerId
+    Write-JsonNoBom -Path $ledgerPath -Value $ledger
+
+    $diagnosticsPath = Join-Path $artifactDir 'filetransfer-retained-analysis-stage-diagnostics.json'
+    Write-JsonNoBom -Path $diagnosticsPath -Value ([ordered]@{
+        event_count = 2
+        indexed_event_count = 2
+        log_file_count = 1
+    })
+
+    $gitState = [pscustomobject]@{
+        gitCommitSha = ('a' * 40)
+        dirty = $false
+        normalizedStatusSha256 = Get-RouteAcceptanceEvidenceTextSha256 -Value ''
+    }
+    $harnessFiles = @($harnessOne, $harnessTwo, $harnessThree, $harnessFour, $harnessFive)
+    $initial = New-RouteAcceptanceEvidenceSnapshot `
+        -RepoRoot $root `
+        -PortableExecutablePath $executablePath `
+        -HarnessFiles $harnessFiles `
+        -BridgeDir $bridgeDir `
+        -GitState $gitState
+
+    return [pscustomobject]@{
+        Root = $root
+        ArtifactDir = $artifactDir
+        BridgeDir = $bridgeDir
+        ExecutablePath = $executablePath
+        HarnessFiles = $harnessFiles
+        LedgerPath = $ledgerPath
+        DiagnosticsPath = $diagnosticsPath
+        AnalyzerInputPath = $slicePath
+        GitState = $gitState
+        Initial = $initial
+        RunId = $runId
+        ScenarioRunId = $scenarioRunId
+    }
+}
+""";
+}

@@ -4998,6 +4998,7 @@ function Get-FileTransferStaleRejectedActionEffectProof {
     $forbiddenEffectCount = 0
     $findings = New-Object System.Collections.Generic.List[string]
     $evidence = New-Object System.Collections.Generic.List[object]
+    $failureEvents = New-Object System.Collections.Generic.List[object]
 
     foreach ($rejection in @($rejections | Sort-Object Sequence)) {
         $family = Get-FileTransferStaleRejectedProofActionFamily -Event $rejection
@@ -5008,6 +5009,7 @@ function Get-FileTransferStaleRejectedActionEffectProof {
             $attemptedAction = Get-FileTransferEventField -Event $rejection -Name 'attempted_action' -Default '(none)'
             $findings.Add(("unknown stale rejected authority action action_kind={0} attempted_action={1}: {2}" -f $actionKind, $attemptedAction, (Format-FileTransferEvidenceLine -Event $rejection))) | Out-Null
             $evidence.Add($rejection) | Out-Null
+            $failureEvents.Add($rejection) | Out-Null
             continue
         }
 
@@ -5043,6 +5045,7 @@ function Get-FileTransferStaleRejectedActionEffectProof {
             $findings.Add(("stale rejected {0} action was followed by matching effect: rejection={1}; effect={2}" -f $displayFamily, (Format-FileTransferEvidenceLine -Event $rejection), (Format-FileTransferEvidenceLine -Event $effect))) | Out-Null
             $evidence.Add($rejection) | Out-Null
             $evidence.Add($effect) | Out-Null
+            $failureEvents.Add($effect) | Out-Null
         }
     }
 
@@ -5071,6 +5074,7 @@ function Get-FileTransferStaleRejectedActionEffectProof {
             $findings.Add(("local fallback control-plane acceptance was followed by runtime unlock admission without matching peer-visible completion: delivery={0}; admission={1}" -f (Format-FileTransferEvidenceLine -Event $localDelivery), (Format-FileTransferEvidenceLine -Event $admissionGrant))) | Out-Null
             $evidence.Add($localDelivery) | Out-Null
             $evidence.Add($admissionGrant) | Out-Null
+            $failureEvents.Add($admissionGrant) | Out-Null
         }
     }
 
@@ -5096,6 +5100,7 @@ function Get-FileTransferStaleRejectedActionEffectProof {
         FallbackPressureForbiddenEffectCount = [int]$fallbackSubfamilyCounts['fallback_pressure']
         Findings = $findings
         EvidenceEvents = @($evidence.ToArray() | Select-Object -First 20)
+        FailureEvents = @($failureEvents.ToArray() | Sort-Object Sequence, LineNumber | Select-Object -First 20)
     }
 }
 
@@ -5253,7 +5258,7 @@ function Get-FileTransferFallbackRuntimeUnlockSeparationProof {
         (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6'
     })
 
-    $probeStartedWithoutActivationWindowCount = 0
+    $probeStartedWithoutActivationWindowEvents = New-Object System.Collections.Generic.List[object]
     $inFallback = $false
     $activationWindowOpen = $false
     foreach ($event in @($events | Sort-Object Sequence)) {
@@ -5272,23 +5277,27 @@ function Get-FileTransferFallbackRuntimeUnlockSeparationProof {
             $activationWindowOpen = $true
         }
         elseif ($event.EventName -eq 'runtime_unlock_precommit_probe_started' -and $inFallback -and -not $activationWindowOpen) {
-            $probeStartedWithoutActivationWindowCount++
+            $probeStartedWithoutActivationWindowEvents.Add($event) | Out-Null
         }
     }
+    $probeStartedWithoutActivationWindowCount = $probeStartedWithoutActivationWindowEvents.Count
 
     $findings = New-Object System.Collections.Generic.List[string]
     $evidence = New-Object System.Collections.Generic.List[object]
+    $failureEvents = New-Object System.Collections.Generic.List[object]
     if ($fallbackUnavailableWithoutCoordinatorDenialEvents.Count -gt 0) {
         $findings.Add(("runtime unlock fallback-unavailable outcome without coordinator denial count={0}" -f $fallbackUnavailableWithoutCoordinatorDenialEvents.Count)) | Out-Null
         foreach ($event in @($fallbackUnavailableWithoutCoordinatorDenialEvents | Select-Object -First 5)) {
             $evidence.Add($event) | Out-Null
+            $failureEvents.Add($event) | Out-Null
         }
     }
 
     if ($probeStartedWithoutActivationWindowCount -gt 0) {
         $findings.Add(("runtime unlock precommit probe started while fallback owned recovery without activation window count={0}" -f $probeStartedWithoutActivationWindowCount)) | Out-Null
-        foreach ($event in @($preCommitProbeStartedEvents | Select-Object -First 5)) {
+        foreach ($event in @($probeStartedWithoutActivationWindowEvents.ToArray() | Select-Object -First 5)) {
             $evidence.Add($event) | Out-Null
+            $failureEvents.Add($event) | Out-Null
         }
     }
 
@@ -5298,6 +5307,9 @@ function Get-FileTransferFallbackRuntimeUnlockSeparationProof {
         $findings.Add('runtime unlock probe failed while fallback leg authority proof was missing or failed') | Out-Null
         foreach ($event in @($postTunaRouteSelected + $preCommitProbeFailedEvents + $regularNknProbeRejectedEvents | Select-Object -First 8)) {
             $evidence.Add($event) | Out-Null
+        }
+        foreach ($event in @($preCommitProbeFailedEvents + $regularNknProbeRejectedEvents | Select-Object -First 8)) {
+            $failureEvents.Add($event) | Out-Null
         }
     }
 
@@ -5333,6 +5345,7 @@ function Get-FileTransferFallbackRuntimeUnlockSeparationProof {
         FallbackUnavailableWithoutCoordinatorDenialCount = $fallbackUnavailableWithoutCoordinatorDenialEvents.Count
         Findings = $findings
         EvidenceEvents = @($evidence.ToArray())
+        FailureEvents = @($failureEvents.ToArray() | Sort-Object Sequence, LineNumber | Select-Object -First 20)
     }
 }
 
@@ -7133,6 +7146,12 @@ function New-FileTransferStabilityGateSummaryLines {
         ("gate_status={0}" -f $GateResult.GateStatus),
         ("transfer_id={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.TransferId)) { '(none)' } else { $Summary.TransferId }))),
         ("recovery_failure_class={0}" -f $recoveryClassification.Class),
+        ("first_proof_chain_failure_class={0}" -f $recoveryClassification.FirstProofChainFailureClass),
+        ("first_proof_chain_failure_event={0}" -f $recoveryClassification.FirstProofChainFailureEvent),
+        ("first_proof_chain_failure_reason={0}" -f $recoveryClassification.FirstProofChainFailureReason),
+        ("first_proof_chain_failure_sequence={0}" -f $recoveryClassification.FirstProofChainFailureSequence),
+        ("first_proof_chain_failure_source_path={0}" -f $recoveryClassification.FirstProofChainFailureSourcePath),
+        ("first_proof_chain_failure_line_number={0}" -f $recoveryClassification.FirstProofChainFailureLineNumber),
         ("runtime_unlock_offer_not_observed_count={0}" -f $recoveryClassification.RuntimeUnlockOfferNotObservedCount),
         ("runtime_unlock_retry_scheduled_count={0}" -f $recoveryClassification.RuntimeUnlockRetryScheduledCount),
         ("runtime_unlock_retry_queued_behind_active_negotiation_count={0}" -f $recoveryClassification.RuntimeUnlockRetryQueuedBehindActiveNegotiationCount),
@@ -7144,6 +7163,7 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_retry_release_count={0}" -f $recoveryClassification.RuntimeUnlockRetryReleaseCount),
         ("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchAuthorityGrantedCount),
         ("runtime_unlock_retry_dispatch_authority_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchAuthorityRejectedCount),
+        ("runtime_unlock_retry_dispatch_successor_attempt_mismatch_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSuccessorAttemptMismatchCount),
         ("runtime_unlock_retry_dispatch_decision_tuple_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchDecisionTupleRejectedCount),
         ("runtime_unlock_retry_dispatch_current_authority_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchCurrentAuthorityRejectedCount),
         ("runtime_unlock_retry_dispatch_observed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchObservedCount),
@@ -7776,6 +7796,56 @@ function Write-FileTransferV4PromotionDecision {
     $object | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'v4-promotion-decision.json') -Encoding UTF8
 }
 
+function Add-FileTransferProofChainFailureCandidates {
+    param(
+        [Parameter(Mandatory = $true)]$Candidates,
+        [Parameter(Mandatory = $true)][string]$Class,
+        [AllowEmptyCollection()][object[]]$Events = @(),
+        [string]$DefaultReason = '',
+        [switch]$UseDefaultReason
+    )
+
+    foreach ($event in @($Events | Where-Object { $null -ne $_ } | Sort-Object Sequence, LineNumber)) {
+        $sequence = [int64]$event.Sequence
+        if ($sequence -le 0) {
+            continue
+        }
+
+        $reason = if ($UseDefaultReason) { $DefaultReason } else { '' }
+        if (-not $UseDefaultReason) {
+            foreach ($fieldName in @(
+                    'decision_reason',
+                    'rejection_reason',
+                    'failure_reason',
+                    'settlement_reason',
+                    'reason',
+                    'error_code')) {
+                $candidateReason = Get-FileTransferEventField -Event $event -Name $fieldName -Default ''
+                if ([string]::IsNullOrWhiteSpace($candidateReason) -or
+                    $candidateReason -in @('(none)', 'none', 'accepted', 'pass')) {
+                    continue
+                }
+
+                $reason = $candidateReason
+                break
+            }
+        }
+
+        if ([string]::IsNullOrWhiteSpace($reason)) {
+            $reason = if ([string]::IsNullOrWhiteSpace($DefaultReason)) { $Class } else { $DefaultReason }
+        }
+
+        $Candidates.Add([pscustomobject]@{
+            Class = $Class
+            Event = [string]$event.EventName
+            Reason = $reason
+            Sequence = $sequence
+            SourcePath = [string]$event.FilePath
+            LineNumber = [int]$event.LineNumber
+        }) | Out-Null
+    }
+}
+
 function Get-FileTransferRecoveryFailureClassification {
     param(
         [Parameter(Mandatory = $true)]$Summary
@@ -7822,6 +7892,9 @@ function Get-FileTransferRecoveryFailureClassification {
     $runtimeUnlockRetryDispatchAuthorityRejectedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_retry_dispatch_authority_rejected'
     })
+    $runtimeUnlockRetryDispatchSuccessorAttemptMismatchEvents = @($runtimeUnlockRetryDispatchAuthorityRejectedEvents | Where-Object {
+        (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq 'retry_dispatch_successor_attempt_mismatch'
+    } | Sort-Object Sequence)
     $runtimeUnlockRetryDispatchDecisionTupleRejectedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_retry_dispatch_decision_tuple_rejected'
     })
@@ -8423,7 +8496,7 @@ function Get-FileTransferRecoveryFailureClassification {
         return $matchedDiscriminator
     }
 
-    $runtimeUnlockRetryRegularV4RecoverySettlementMissingCount = 0
+    $runtimeUnlockRetryRegularV4RecoverySettlementMissingCandidateEvents = New-Object System.Collections.Generic.List[object]
     $regularV4RecoverySettlementCandidates = @()
     if ($runtimeUnlockRetryBlockedByRegularV4RecoveryEvents.Count -gt 0) {
         $regularV4RecoverySettlementCandidates = @($runtimeUnlockRetryBlockedByRegularV4RecoveryEvents)
@@ -8449,9 +8522,10 @@ function Get-FileTransferRecoveryFailureClassification {
         })
         if ($matchingRelease.Count -eq 0 -and
             $matchingRegularV4Rejection.Count -eq 0) {
-            $runtimeUnlockRetryRegularV4RecoverySettlementMissingCount++
+            $runtimeUnlockRetryRegularV4RecoverySettlementMissingCandidateEvents.Add($blockedRetry) | Out-Null
         }
     }
+    $runtimeUnlockRetryRegularV4RecoverySettlementMissingCount = $runtimeUnlockRetryRegularV4RecoverySettlementMissingCandidateEvents.Count
 
     $runtimeUnlockRetryDispatchMissingAfterAuthorityGrantedCount = $runtimeUnlockRetryDispatchMissingAfterAuthorityGrantedEvents.Count
     $runtimeUnlockRetryDispatchMissingCount = $runtimeUnlockRetryDispatchMissingAfterAuthorityGrantedCount
@@ -8531,7 +8605,7 @@ function Get-FileTransferRecoveryFailureClassification {
             $runtimeUnlockRetryDispatchOrphanedSupersessionCount++
         }
     }
-    $runtimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchCount = 0
+    $runtimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchEvents = New-Object System.Collections.Generic.List[object]
     foreach ($settlement in $runtimeUnlockRetryDispatchContractSettledEvents) {
         if ((Get-FileTransferAuthoritySchema -Line ([string]$settlement.RawLine)) -lt 2 -or
             (Get-FileTransferEventField -Event $settlement -Name 'settlement_outcome' -Default '') -ne 'MissingDispatch') {
@@ -8594,10 +8668,11 @@ function Get-FileTransferRecoveryFailureClassification {
                 (Get-FileTransferEventField -Event $settlement -Name 'direction' -Default '')
         })
         if ($settledPredecessorReuse.Count -gt 0 -or $matchingTerminal.Count -eq 0) {
-            $runtimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchCount++
+            $runtimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchEvents.Add($settlement) | Out-Null
         }
     }
-    $runtimeUnlockRetryDispatchPostGrantHoldCount = 0
+    $runtimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchCount = $runtimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchEvents.Count
+    $runtimeUnlockRetryDispatchPostGrantHoldEvents = New-Object System.Collections.Generic.List[object]
     foreach ($grant in $runtimeUnlockRetryDispatchAuthorityGrantedEvents) {
         if ((Get-FileTransferAuthoritySchema -Line ([string]$grant.RawLine)) -lt 2) {
             continue
@@ -8614,13 +8689,16 @@ function Get-FileTransferRecoveryFailureClassification {
             [int64]::MaxValue
         }
 
-        $runtimeUnlockRetryDispatchPostGrantHoldCount += @($runtimeUnlockRetryDispatchHeldEvents | Where-Object {
+        foreach ($heldEvent in @($runtimeUnlockRetryDispatchHeldEvents | Where-Object {
             [int64]$_.Sequence -gt $grantSequence -and
             [int64]$_.Sequence -lt $settlementSequence -and
             (Get-FileTransferAuthoritySchema -Line ([string]$_.RawLine)) -ge 2 -and
             (Test-RuntimeUnlockRetryDispatchMatch -Release $grant -Candidate $_)
-        }).Count
+        })) {
+            $runtimeUnlockRetryDispatchPostGrantHoldEvents.Add($heldEvent) | Out-Null
+        }
     }
+    $runtimeUnlockRetryDispatchPostGrantHoldCount = $runtimeUnlockRetryDispatchPostGrantHoldEvents.Count
     foreach ($release in $runtimeUnlockRetryReleasedEvents) {
         $releaseSequence = [int64]$release.Sequence
         $matchingGrant = @($runtimeUnlockRetryDispatchAuthorityGrantedEvents | Where-Object {
@@ -9366,8 +9444,259 @@ function Get-FileTransferRecoveryFailureClassification {
         $runtimeUnlockPreCommitProbeAckedEvents.Count -gt 0 -or
         $runtimeUnlockPreCommitRouteEpochRecoveredEvents.Count -gt 0
 
+    $terminalShaOk = Get-FileTransferInvariantShaOk -TerminalEvents @($Summary.TerminalEvents) -GateVerdict ''
+    $terminalWinner = Get-FileTransferInvariantTerminalWinner -TerminalEvents @($Summary.TerminalEvents) -ShaOk $terminalShaOk
+    $lateFrameProof = Get-FileTransferInvariantLateFrameClassification -Summary $Summary -TerminalWinner $terminalWinner -ShaOk $terminalShaOk
+    $terminalLifecycleInvariant = Get-FileTransferInvariantTerminalLifecycleResult -Summary $Summary -LateFrameClassification $lateFrameProof.Classification
+    $fallbackAuthorityProof = Get-FileTransferFallbackLegAuthorityProof -TransferEvents $Summary.TransferEvents
+    $hasFallbackRouteOrOwnerEvidence = $hasPostTunaFallbackEvidence -or $fallbackAuthorityProof.StartedCount -gt 0
+
+    $proofChainFailureCandidates = New-Object System.Collections.Generic.List[object]
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_filetransfer_owner_missing_before_path_lease' `
+        -Events $runtimeUnlockFileTransferOwnerMissingBeforePathLeaseUnresolvedEvents
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_filetransfer_owner_stale_before_offer_dispatch' `
+        -Events $runtimeUnlockFileTransferOwnerStaleBeforeOfferDispatchUnresolvedEvents
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_retry_source_publication_mismatch' `
+        -Events $runtimeUnlockRetrySourcePublicationMismatchEvents
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_retry_dispatch_successor_attempt_mismatch' `
+        -Events $runtimeUnlockRetryDispatchSuccessorAttemptMismatchEvents
+
+    $grantBypassSequences = @($runtimeUnlockRetryDispatchGrantBypassedByRetryBudgetEvents | ForEach-Object { [int64]$_.Sequence })
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_retry_dispatch_grant_bypassed_by_retry_budget' `
+        -Events $runtimeUnlockRetryDispatchGrantBypassedByRetryBudgetEvents `
+        -DefaultReason 'retry_dispatch_grant_bypassed_by_retry_budget' `
+        -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_retry_dispatch_contract_unsettled' `
+        -Events @($runtimeUnlockRetryDispatchUnsettledAuthorityEvents | Where-Object { [int64]$_.Sequence -notin $grantBypassSequences }) `
+        -DefaultReason 'retry_dispatch_contract_unsettled' `
+        -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch' `
+        -Events @($runtimeUnlockRetryDispatchSuccessorMissingAfterMissingDispatchEvents.ToArray()) `
+        -DefaultReason 'retry_dispatch_successor_missing_after_missing_dispatch' `
+        -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_retry_dispatch_authority_tuple_mismatch' `
+        -Events @($runtimeUnlockRetryDispatchDecisionTupleRejectedEvents + $runtimeUnlockRetryDispatchCurrentAuthorityRejectedEvents)
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_retry_dispatch_held_after_authority_granted' `
+        -Events @($runtimeUnlockRetryDispatchPostGrantHoldEvents.ToArray()) `
+        -DefaultReason 'retry_dispatch_held_after_authority_granted' `
+        -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_retry_dispatch_missing_after_authority_granted' `
+        -Events $runtimeUnlockRetryDispatchMissingAfterAuthorityGrantedEvents
+
+    if ($runtimeUnlockRetryRegularV4RecoverySettlementMissingCount -gt 0) {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class 'runtime_unlock_retry_regular_v4_recovery_settlement_missing' `
+            -Events @($runtimeUnlockRetryRegularV4RecoverySettlementMissingCandidateEvents.ToArray()) `
+            -DefaultReason 'regular_v4_recovery_settlement_missing' `
+            -UseDefaultReason
+    }
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'regular_v4_recovery_predecessor_settlement_closed_successor' `
+        -Events $regularV4RecoveryPredecessorSettlementClosedSuccessorEvents `
+        -DefaultReason 'predecessor_settlement_closed_successor' `
+        -UseDefaultReason
+    if ($regularV4ReceiveRecoveryRejectedBeforeRuntimeUnlock) {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class 'regular_v4_receive_recovery_rejected_before_runtime_unlock' `
+            -Events $runtimeUnlockRetryRejectedAfterRegularV4RecoveryEvents
+    }
+    if (-not $regularV4ReceiveRecoveryRejectedBeforeRuntimeUnlock -and
+        ($regularV4FrontierRepairAcceptedSettlementMissingHandoffEvents.Count -gt 0 -or
+            ($regularV4FrontierRepairSettledStalledEvents.Count -gt 0 -and $regularV4FrontierRepairSettlementAcceptedEvents.Count -eq 0))) {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class 'regular_v4_frontier_repair_liveness_settlement_missing' `
+            -Events @($regularV4FrontierRepairAcceptedSettlementMissingHandoffEvents + $regularV4FrontierRepairSettledStalledEvents) `
+            -DefaultReason 'regular_v4_frontier_repair_liveness_settlement_missing' `
+            -UseDefaultReason
+    }
+    if (-not $regularV4ReceiveRecoveryRejectedBeforeRuntimeUnlock -and
+        $regularV4FrontierRepairSendDeferred) {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class 'regular_v4_frontier_repair_send_deferred_or_stalled' `
+            -Events @($regularV4FrontierRepairUnresolvedSendDeferredEvents + $regularV4FrontierRepairUnresolvedMissingDispatchEvents)
+    }
+    elseif (-not $regularV4ReceiveRecoveryRejectedBeforeRuntimeUnlock -and
+        $regularV4FrontierRepairStalled) {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class 'regular_v4_frontier_repair_stalled' `
+            -Events @($regularV4FrontierRepairUnresolvedStalledEvents + $regularV4FrontierRepairSettledStalledEvents + $regularV4FrontierRepairAcceptedSettlementMissingHandoffEvents)
+    }
+
+    if ($publicationAuthorityFieldCoverageProof.Verdict -eq 'fail') {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class 'publication_authority_missing' `
+            -Events $publicationAuthorityFieldCoverageProof.EvidenceEvents `
+            -DefaultReason 'publication_authority_missing' `
+            -UseDefaultReason
+    }
+    if ($fileTunaV4DataPathProof.Verdict -eq 'fail') {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class 'file_tuna_data_path_mismatch' `
+            -Events $fileTunaV4DataPathProof.EvidenceEvents `
+            -DefaultReason 'file_tuna_data_path_mismatch' `
+            -UseDefaultReason
+    }
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'active_file_tuna_v6_evidence' `
+        -Events $fileTunaV6Events `
+        -DefaultReason 'active_file_tuna_v6_evidence' `
+        -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'tuna_path_lease_unavailable_at_answer' `
+        -Events @($runtimeUnlockAnswerRejectedTunaPathLeaseUnavailableEvents + $runtimeUnlockTunaPathLeaseRouteCommitRejectedEvents)
+
+    $runtimeOwnerInvariant = Get-FileTransferInvariantRuntimeOwnerResult -Summary $Summary
+    if ($runtimeOwnerInvariant.Verdict -eq 'fail') {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class $runtimeOwnerInvariant.FailureClass `
+            -Events $runtimeOwnerInvariant.EvidenceEvents `
+            -DefaultReason $runtimeOwnerInvariant.FailureClass `
+            -UseDefaultReason
+    }
+    $routeLawInvariant = Get-FileTransferInvariantRouteLawResult -Summary $Summary
+    if ($routeLawInvariant.Verdict -eq 'fail') {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class $routeLawInvariant.FailureClass `
+            -Events $routeLawInvariant.EvidenceEvents `
+            -DefaultReason $routeLawInvariant.FailureClass `
+            -UseDefaultReason
+    }
+    $controlPriorityInvariant = Get-FileTransferInvariantControlPriorityResult -Summary $Summary
+    if ($controlPriorityInvariant.Verdict -eq 'fail') {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class $controlPriorityInvariant.FailureClass `
+            -Events $controlPriorityInvariant.EvidenceEvents `
+            -DefaultReason $controlPriorityInvariant.FailureClass `
+            -UseDefaultReason
+    }
+    if ($terminalLifecycleInvariant.Verdict -eq 'fail') {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class $terminalLifecycleInvariant.FailureClass `
+            -Events $terminalLifecycleInvariant.EvidenceEvents `
+            -DefaultReason $terminalLifecycleInvariant.FailureClass `
+            -UseDefaultReason
+    }
+    if ($staleRejectedActionEffectProof.Verdict -eq 'fail') {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class $staleRejectedActionEffectProof.FailureClass `
+            -Events $staleRejectedActionEffectProof.FailureEvents `
+            -DefaultReason $staleRejectedActionEffectProof.FailureClass `
+            -UseDefaultReason
+    }
+    if ($fallbackRuntimeUnlockSeparationProof.Verdict -eq 'fail' -and $hasFallbackRouteOrOwnerEvidence) {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class $fallbackRuntimeUnlockSeparationProof.FailureClass `
+            -Events $fallbackRuntimeUnlockSeparationProof.FailureEvents `
+            -DefaultReason $fallbackRuntimeUnlockSeparationProof.FailureClass `
+            -UseDefaultReason
+    }
+
+    # Fallback symptoms are proof-chain candidates only after the retained slice
+    # contains an actual fallback route or fallback-owner tuple. This prevents a
+    # route-less downstream diagnostic from manufacturing fallback authority.
+    if ($hasFallbackRouteOrOwnerEvidence) {
+        $fallbackFailureClass = if ($fallbackTailProof.YieldAuthorityRejectedCount -gt 0) {
+            'fallback_tail_yield_authority_invalid'
+        }
+        elseif ($fallbackTailProof.OwnerGenerationMismatchCount -gt 0) {
+            'fallback_tail_owner_generation_mismatch'
+        }
+        elseif ($fallbackTailProof.FrontierRequestDispatchVerdict -eq 'fail') {
+            'fallback_frontier_request_dispatch_missing'
+        }
+        elseif ($fallbackTailProof.FrontierRepairVerdict -eq 'fail') {
+            'fallback_frontier_repair_stalled'
+        }
+        elseif ($fallbackTailProof.ProofReplayLocalYieldBlockedCount -gt 0 -and $fallbackTailProof.PairedYieldVerdict -eq 'fail') {
+            'post_fallback_frontier_replay_unsettled'
+        }
+        elseif ($fallbackTailProof.LocalYieldBlockedCount -gt 0 -and $fallbackTailProof.PairedYieldVerdict -eq 'fail') {
+            'fallback_tail_local_yield_missing'
+        }
+        elseif ($fallbackTailProof.QuiescenceVerdict -eq 'fail') {
+            'fallback_tail_quiescence_missing'
+        }
+        elseif ($fallbackTailProof.Verdict -eq 'fail') {
+            'fallback_tail_reconciliation'
+        }
+        else {
+            ''
+        }
+        if (-not [string]::IsNullOrWhiteSpace($fallbackFailureClass)) {
+            $fallbackFailureEvents = @(
+                $fallbackTailProof.QuiescenceEvidenceEvents |
+                    Where-Object {
+                        $_.EventName -ne 'filetransfer_route_selected' -and
+                        $_.EventName -notlike 'filetransfer_fallback_leg_authority_started'
+                    }
+            )
+            if ($fallbackFailureEvents.Count -eq 0) {
+                $fallbackFailureEvents = @($fallbackTailProof.EvidenceEvents | Where-Object { $_.EventName -ne 'filetransfer_route_selected' })
+            }
+            Add-FileTransferProofChainFailureCandidates `
+                -Candidates $proofChainFailureCandidates `
+                -Class $fallbackFailureClass `
+                -Events $fallbackFailureEvents `
+                -DefaultReason $fallbackFailureClass `
+                -UseDefaultReason
+        }
+    }
+
+    $firstProofChainFailure = @(
+        $proofChainFailureCandidates |
+            Sort-Object Sequence, LineNumber, Class, Event |
+            Select-Object -First 1
+    )
+    if ($firstProofChainFailure.Count -eq 0) {
+        $firstProofChainFailure = $null
+    }
+    else {
+        $firstProofChainFailure = $firstProofChainFailure[0]
+    }
+
     $class = '(none)'
-    if ($runtimeUnlockFileTransferOwnerMissingBeforePathLeaseUnresolvedEvents.Count -gt 0) {
+    if ($null -ne $firstProofChainFailure) {
+        # A retained, explicit proof-chain rejection owns classification before
+        # aggregate symptoms (for example, later fallback or liveness failures).
+        $class = $firstProofChainFailure.Class
+    }
+    elseif ($runtimeUnlockFileTransferOwnerMissingBeforePathLeaseUnresolvedEvents.Count -gt 0) {
         $class = 'runtime_unlock_filetransfer_owner_missing_before_path_lease'
     }
     elseif ($runtimeUnlockFileTransferOwnerStaleBeforeOfferDispatchUnresolvedEvents.Count -gt 0) {
@@ -9487,7 +9816,8 @@ function Get-FileTransferRecoveryFailureClassification {
             'runtime_fallback_separation_violation'
         }
     }
-    elseif ($fallbackTailProof.Verdict -eq 'fail') {
+    elseif ($fallbackTailProof.Verdict -eq 'fail' -and
+        $hasPostTunaFallbackEvidence) {
         $class = 'fallback_tail_reconciliation'
     }
     elseif ($postFallbackRuntimeUnlockResumeBlocked) {
@@ -9750,6 +10080,12 @@ function Get-FileTransferRecoveryFailureClassification {
 
     [pscustomobject]@{
         Class = $class
+        FirstProofChainFailureClass = if ($null -ne $firstProofChainFailure) { $firstProofChainFailure.Class } else { '(none)' }
+        FirstProofChainFailureEvent = if ($null -ne $firstProofChainFailure) { $firstProofChainFailure.Event } else { '(none)' }
+        FirstProofChainFailureReason = if ($null -ne $firstProofChainFailure) { $firstProofChainFailure.Reason } else { '(none)' }
+        FirstProofChainFailureSequence = if ($null -ne $firstProofChainFailure) { $firstProofChainFailure.Sequence } else { -1L }
+        FirstProofChainFailureSourcePath = if ($null -ne $firstProofChainFailure) { $firstProofChainFailure.SourcePath } else { '(none)' }
+        FirstProofChainFailureLineNumber = if ($null -ne $firstProofChainFailure) { $firstProofChainFailure.LineNumber } else { 0 }
         RuntimeUnlockOfferNotObservedCount = $runtimeUnlockOfferNotObservedEvents.Count
         RuntimeUnlockRetryScheduledCount = $runtimeUnlockRetryScheduledEvents.Count
         RuntimeUnlockRetryQueuedBehindActiveNegotiationCount = $runtimeUnlockRetryQueuedBehindActiveNegotiationEvents.Count
@@ -9761,6 +10097,7 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockRetryReleaseCount = $runtimeUnlockRetryDispatchReleaseCount
         RuntimeUnlockRetryDispatchAuthorityGrantedCount = $runtimeUnlockRetryDispatchAuthorityGrantedEvents.Count
         RuntimeUnlockRetryDispatchAuthorityRejectedCount = $runtimeUnlockRetryDispatchAuthorityRejectedEvents.Count
+        RuntimeUnlockRetryDispatchSuccessorAttemptMismatchCount = $runtimeUnlockRetryDispatchSuccessorAttemptMismatchEvents.Count
         RuntimeUnlockRetryDispatchDecisionTupleRejectedCount = $runtimeUnlockRetryDispatchDecisionTupleRejectedEvents.Count
         RuntimeUnlockRetryDispatchCurrentAuthorityRejectedCount = $runtimeUnlockRetryDispatchCurrentAuthorityRejectedEvents.Count
         RuntimeUnlockRetryDispatchObservedCount = $runtimeUnlockRetryDispatchObservedEvents.Count
@@ -10175,6 +10512,12 @@ function New-FileTransferInvariantLedgerObject {
         invariant_failure_class = $combinedInvariant.FailureClass
         goodput_bytes_per_second = $goodput
         recovery_failure_class = $recoveryClassification.Class
+        first_proof_chain_failure_class = $recoveryClassification.FirstProofChainFailureClass
+        first_proof_chain_failure_event = $recoveryClassification.FirstProofChainFailureEvent
+        first_proof_chain_failure_reason = $recoveryClassification.FirstProofChainFailureReason
+        first_proof_chain_failure_sequence = [string]$recoveryClassification.FirstProofChainFailureSequence
+        first_proof_chain_failure_source_path = $recoveryClassification.FirstProofChainFailureSourcePath
+        first_proof_chain_failure_line_number = [string]$recoveryClassification.FirstProofChainFailureLineNumber
     }
 }
 
@@ -10298,6 +10641,7 @@ function Write-FileTransferDiagnosticsArtifacts {
     }
 
     if ($recoveryClassification.Class -in @(
+            'runtime_unlock_retry_dispatch_successor_attempt_mismatch',
             'runtime_unlock_retry_dispatch_missing',
             'runtime_unlock_retry_dispatch_missing_after_authority_granted',
             'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch',
@@ -10309,6 +10653,10 @@ function Write-FileTransferDiagnosticsArtifacts {
         $effectiveGateStatus = 'fail'
         $effectiveNextArtifact = 'filetransfer-operator-verdict.txt'
         $dispatchFailureText = switch ($recoveryClassification.Class) {
+            'runtime_unlock_retry_dispatch_successor_attempt_mismatch' {
+                'recovery: runtime unlock retry successor attempt does not match the settled predecessor'
+                break
+            }
             'runtime_unlock_retry_dispatch_missing_after_authority_granted' {
                 'recovery: runtime unlock retry dispatch authority granted without observed dispatch'
                 break
@@ -10383,6 +10731,12 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("control_plane_peer_visible_proof_count={0}" -f $invariantLedger.control_plane_peer_visible_proof_count),
         ("late_frame_classification={0}" -f $invariantLedger.late_frame_classification),
         ("recovery_failure_class={0}" -f $recoveryClassification.Class),
+        ("first_proof_chain_failure_class={0}" -f $recoveryClassification.FirstProofChainFailureClass),
+        ("first_proof_chain_failure_event={0}" -f $recoveryClassification.FirstProofChainFailureEvent),
+        ("first_proof_chain_failure_reason={0}" -f $recoveryClassification.FirstProofChainFailureReason),
+        ("first_proof_chain_failure_sequence={0}" -f $recoveryClassification.FirstProofChainFailureSequence),
+        ("first_proof_chain_failure_source_path={0}" -f $recoveryClassification.FirstProofChainFailureSourcePath),
+        ("first_proof_chain_failure_line_number={0}" -f $recoveryClassification.FirstProofChainFailureLineNumber),
         ("runtime_unlock_offer_not_observed_count={0}" -f $recoveryClassification.RuntimeUnlockOfferNotObservedCount),
         ("runtime_unlock_retry_scheduled_count={0}" -f $recoveryClassification.RuntimeUnlockRetryScheduledCount),
         ("runtime_unlock_retry_queued_behind_active_negotiation_count={0}" -f $recoveryClassification.RuntimeUnlockRetryQueuedBehindActiveNegotiationCount),
@@ -10394,6 +10748,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_retry_release_count={0}" -f $recoveryClassification.RuntimeUnlockRetryReleaseCount),
         ("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchAuthorityGrantedCount),
         ("runtime_unlock_retry_dispatch_authority_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchAuthorityRejectedCount),
+        ("runtime_unlock_retry_dispatch_successor_attempt_mismatch_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchSuccessorAttemptMismatchCount),
         ("runtime_unlock_retry_dispatch_decision_tuple_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchDecisionTupleRejectedCount),
         ("runtime_unlock_retry_dispatch_current_authority_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchCurrentAuthorityRejectedCount),
         ("runtime_unlock_retry_dispatch_observed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchObservedCount),

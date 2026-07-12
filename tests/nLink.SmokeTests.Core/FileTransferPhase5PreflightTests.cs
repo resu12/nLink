@@ -112,6 +112,13 @@ public sealed class FileTransferPhase5PreflightTests : FileTransferAcceptancePha
             Assert.Equal(string.Empty, summary["preflight_first_failure_subreason"]);
             Assert.Equal("0", summary["run_count"]);
             Assert.Equal("1", summary["failure_count"]);
+            Assert.Equal("1", summary["manifest_present"]);
+            Assert.Matches("^[0-9a-f]{64}$", summary["manifest_sha256"]);
+            Assert.Equal("missing", summary["cursor_integrity_verdict"]);
+            Assert.Equal("0", summary["current_runtime_proof"]);
+            Assert.Equal("not_started", summary["transfer_evidence_status"]);
+            Assert.Equal("incomplete_proof", summary["runtime_correctness_verdict"]);
+            Assert.True(File.Exists(Path.Combine(runRoot, "route-acceptance-run-manifest.json")), "Expected preflight-only immutable evidence manifest.");
             Assert.Contains("phase5-preflight-bridge-ready: nkn_bridge_bootstrap_not_ready", summaryText, StringComparison.Ordinal);
             Assert.False(Directory.Exists(Path.Combine(runRoot, "regular-nkn-v4-64mb")), "Preflight failure should not consume the Phase 5 scenario matrix.");
             Assert.False(Directory.Exists(Path.Combine(runRoot, "regular-v4-live-activation-off-on-off-256mb")), "Preflight failure should not create canonical stress artifacts.");
