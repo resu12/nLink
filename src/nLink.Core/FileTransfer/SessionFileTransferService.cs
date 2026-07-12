@@ -5019,7 +5019,12 @@ public sealed partial class SessionFileTransferService : IDisposable
             releaseAuthorityId,
             releaseGeneration,
             releaseOutcome);
-        if (decision.Granted && decision.Contract is { } contract)
+        if (decision.Granted &&
+            decision.Contract is { } contract &&
+            FileTransferCoordinator.TryValidateRuntimeUnlockRetryDispatchGrantedDecision(
+                decision,
+                request,
+                out _))
         {
             context.CurrentRuntimeUnlockRetryDispatchContract = contract;
             context.LastRuntimeUnlockRetryDispatchAuthorityGeneration =
@@ -5047,7 +5052,12 @@ public sealed partial class SessionFileTransferService : IDisposable
             releaseAuthorityId,
             releaseGeneration,
             releaseOutcome);
-        if (decision.Granted && decision.Contract is { } contract)
+        if (decision.Granted &&
+            decision.Contract is { } contract &&
+            FileTransferCoordinator.TryValidateRuntimeUnlockRetryDispatchGrantedDecision(
+                decision,
+                request,
+                out _))
         {
             context.CurrentRuntimeUnlockRetryDispatchContract = contract;
             context.LastRuntimeUnlockRetryDispatchAuthorityGeneration =

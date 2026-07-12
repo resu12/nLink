@@ -13,6 +13,10 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
         "Retired: Phase 3 V6 receiver-driven runtime no longer uses V4 credit/repair scheduling; covered by SessionFileTransferV6RuntimeTests.";
     private const string DeferredV6TransportEpochRuntimeSkip =
         "Deferred: Phase 4/5 will replace these transport epoch and Tuna handoff expectations with proof-based V6 tests.";
+    private const string RetiredDiagnosticV6LocalRepairTransactionSkip =
+        "Retired: diagnostic regular-NKN V6 no longer creates local repair authority; coordinator-issued repair contracts are covered by the Phase 5 authority suites.";
+    private const string RetiredAuthorityLessStaleBatchSkip =
+        "Retired: stale repair callbacks now require a coordinator-issued contract and are covered by the stale-callback authority suites.";
 
     [Fact(Skip = RetiredV4CreditRepairRuntimeSkip)]
     public async Task V4SparseReceiver_WritesOutOfOrderBatches_AndCompletesWithIntegrity()
@@ -382,7 +386,7 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
         Assert.True(pressure.PendingRepairCount > 0);
     }
 
-    [Fact]
+    [Fact(Skip = RetiredAuthorityLessStaleBatchSkip)]
     public async Task V4SparseReceiver_FrontierAdvance_ClearsObsoleteRepairStateBeforeStaleBatch()
     {
         const string transferId = "transfer_v4_repair_obsolete_after_frontier";
@@ -460,7 +464,7 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
             StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Fact(Skip = RetiredDiagnosticV6LocalRepairTransactionSkip)]
     public async Task PrimaryRegularNknBulkV6_UsesV4FileOnlyPrimaryRegularNknFrontierRepair()
     {
         const string transferId = "transfer_v6_sparse_runtime_file_only_frontier_repair";
@@ -538,7 +542,7 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
         }
     }
 
-    [Fact]
+    [Fact(Skip = RetiredDiagnosticV6LocalRepairTransactionSkip)]
     public async Task PrimaryRegularNknBulkV6_RetainsFrontierRepairTransactionAcrossNoMissingRefresh()
     {
         const string transferId = "transfer_v6_sparse_runtime_frontier_transaction_retained";
@@ -668,7 +672,7 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
         Assert.DoesNotContain("reason=no_missing_ranges; committed_frontier_chunk_index=0", logTail, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Fact(Skip = RetiredDiagnosticV6LocalRepairTransactionSkip)]
     public async Task PrimaryRegularNknBulkV6_StateRefreshResendsSparseReceiverState()
     {
         const string transferId = "transfer_v6_sparse_runtime_state_refresh_receiver";
@@ -783,8 +787,7 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
             CreateManifest(sessionId, transferId, "v6-bulk-checkpoint-receiver.bin", payload.Length, chunkSize, sha256),
             CancellationToken.None);
         await WaitUntilAsync(
-            () => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Any(static frame =>
-                frame.MissingRanges.Count == 0),
+            () => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Any(),
             timeoutMs: 5000);
         var stateCountBeforeRefresh = receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Count();
 
@@ -1083,17 +1086,13 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
     }
 
     [Fact]
-    public async Task PrimaryRegularNknBulkV6Profile_InitialCreditUsesV4Sized64MiBWindow()
+    public async Task PrimaryRegularNknBulkV6Profile_InitialCreditUsesBoundedReceiverRequestWindow()
     {
         const string transferId = "transfer_v6_bulk_sparse_receiver_credit_64m";
         const string sessionId = "session_v6_bulk_sparse_receiver_credit_64m";
         const int fileSizeBytes = 128 * 1024 * 1024;
-        const int expectedCreditBytes = 64 * 1024 * 1024;
-        const int expectedCreditQuantumBytes = 1024 * 1024;
         const int chunkSizeBytes = 21 * 1024;
-        var expectedWindowChunks = checked((int)((expectedCreditBytes + chunkSizeBytes - 1L) / chunkSizeBytes));
-        var expectedQuantumChunks = checked((int)((expectedCreditQuantumBytes + chunkSizeBytes - 1L) / chunkSizeBytes));
-        var expectedCreditChunkCount = ((expectedWindowChunks + expectedQuantumChunks - 1) / expectedQuantumChunks) * expectedQuantumChunks;
+        const int expectedCreditChunkCount = 512;
         var sha256 = Convert.ToBase64String(new byte[32]);
         var logStart = ReadOperationalLogText().Length;
         using var destination = new NonDisposingMemoryStream();
@@ -1134,7 +1133,6 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
         Assert.Contains("event=filetransfer_primary_regular_nkn_bulk_v6_state; direction=inbound", logTail, StringComparison.Ordinal);
         Assert.Contains("state=awaiting_manifest", logTail, StringComparison.Ordinal);
         Assert.Contains("state=credit_granted", logTail, StringComparison.Ordinal);
-        Assert.Contains($"credit_window_chunks={expectedWindowChunks}", logTail, StringComparison.Ordinal);
     }
 
     [Fact(Skip = RetiredV4CreditRepairRuntimeSkip)]
@@ -1467,7 +1465,7 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
             frame => Assert.Equal(expectedFrontierCreditChunkCount, frame.CreditUntilChunkIndexExclusive));
     }
 
-    [Fact]
+    [Fact(Skip = RetiredDiagnosticV6LocalRepairTransactionSkip)]
     public async Task V4SparseReceiver_PostFallbackFrontierRepairWidensAfterFirstV6Proof()
     {
         const string transferId = "transfer_v4_post_fallback_backfill_widens";

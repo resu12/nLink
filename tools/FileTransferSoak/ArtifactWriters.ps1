@@ -7144,6 +7144,7 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_retry_release_count={0}" -f $recoveryClassification.RuntimeUnlockRetryReleaseCount),
         ("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchAuthorityGrantedCount),
         ("runtime_unlock_retry_dispatch_authority_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchAuthorityRejectedCount),
+        ("runtime_unlock_retry_dispatch_decision_tuple_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchDecisionTupleRejectedCount),
         ("runtime_unlock_retry_dispatch_observed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchObservedCount),
         ("runtime_unlock_retry_dispatch_contract_settled_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchContractSettledCount),
         ("runtime_unlock_retry_dispatch_duplicate_observed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchDuplicateObservedCount),
@@ -7815,6 +7816,9 @@ function Get-FileTransferRecoveryFailureClassification {
     })
     $runtimeUnlockRetryDispatchAuthorityRejectedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_retry_dispatch_authority_rejected'
+    })
+    $runtimeUnlockRetryDispatchDecisionTupleRejectedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_decision_tuple_rejected'
     })
     $runtimeUnlockRetrySourcePublicationMismatchEvents = @($runtimeUnlockRetryDispatchAuthorityRejectedEvents | Where-Object {
         (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq 'retry_dispatch_source_publication_mismatch'
@@ -9266,6 +9270,9 @@ function Get-FileTransferRecoveryFailureClassification {
     elseif ($runtimeUnlockRetrySourcePublicationMismatchEvents.Count -gt 0) {
         $class = 'runtime_unlock_retry_source_publication_mismatch'
     }
+    elseif ($runtimeUnlockRetryDispatchDecisionTupleRejectedEvents.Count -gt 0) {
+        $class = 'runtime_unlock_retry_dispatch_authority_tuple_mismatch'
+    }
     elseif ($publicationAuthorityFieldCoverageProof.Verdict -eq 'fail') {
         $class = 'publication_authority_missing'
     }
@@ -9638,6 +9645,7 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockRetryReleaseCount = $runtimeUnlockRetryDispatchReleaseCount
         RuntimeUnlockRetryDispatchAuthorityGrantedCount = $runtimeUnlockRetryDispatchAuthorityGrantedEvents.Count
         RuntimeUnlockRetryDispatchAuthorityRejectedCount = $runtimeUnlockRetryDispatchAuthorityRejectedEvents.Count
+        RuntimeUnlockRetryDispatchDecisionTupleRejectedCount = $runtimeUnlockRetryDispatchDecisionTupleRejectedEvents.Count
         RuntimeUnlockRetryDispatchObservedCount = $runtimeUnlockRetryDispatchObservedEvents.Count
         RuntimeUnlockRetryDispatchContractSettledCount = $runtimeUnlockRetryDispatchContractSettledEvents.Count
         RuntimeUnlockRetryDispatchDuplicateObservedCount = $runtimeUnlockRetryDispatchDuplicateObservedCount
@@ -10250,6 +10258,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_retry_release_count={0}" -f $recoveryClassification.RuntimeUnlockRetryReleaseCount),
         ("runtime_unlock_retry_dispatch_authority_granted_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchAuthorityGrantedCount),
         ("runtime_unlock_retry_dispatch_authority_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchAuthorityRejectedCount),
+        ("runtime_unlock_retry_dispatch_decision_tuple_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchDecisionTupleRejectedCount),
         ("runtime_unlock_retry_dispatch_observed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchObservedCount),
         ("runtime_unlock_retry_dispatch_contract_settled_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchContractSettledCount),
         ("runtime_unlock_retry_dispatch_duplicate_observed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchDuplicateObservedCount),

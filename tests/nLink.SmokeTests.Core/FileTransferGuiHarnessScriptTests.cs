@@ -620,6 +620,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             if ($fallbackPrefix.Phase -ne 'live_route_proof' -or $fallbackPrefix.Reason -ne 'terminal_fallback_prefix_missing') { throw 'terminal fallback prefix class lost precedence' }
             $publicationMismatch = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_retry_source_publication_mismatch; retained_event=filetransfer_regular_v4_frontier_repair_stalled' -HistoricalPhase 'regular_v4_frontier_repair' -HistoricalReason 'regular_v4_frontier_repair_stalled'
             if ($publicationMismatch.Phase -ne 'runtime_unlock_retry' -or $publicationMismatch.Reason -ne 'runtime_unlock_retry_source_publication_mismatch') { throw 'runtime unlock source publication mismatch lost precedence' }
+            $tupleMismatch = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_retry_dispatch_authority_tuple_mismatch; retained_event=filetransfer_regular_v4_frontier_repair_stalled' -HistoricalPhase 'regular_v4_frontier_repair' -HistoricalReason 'regular_v4_frontier_repair_stalled'
+            if ($tupleMismatch.Phase -ne 'runtime_unlock_retry' -or $tupleMismatch.Reason -ne 'runtime_unlock_retry_dispatch_authority_tuple_mismatch') { throw 'runtime unlock authority tuple mismatch lost precedence' }
             $yieldAuthority = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=fallback_tail_yield_authority_invalid; retained_event=filetransfer_fallback_frontier_repair_stalled' -HistoricalPhase 'fallback_frontier_repair' -HistoricalReason 'fallback_frontier_repair_stalled'
             if ($yieldAuthority.Phase -ne 'fallback_tail_yield' -or $yieldAuthority.Reason -ne 'fallback_tail_yield_authority_invalid') { throw 'fallback-tail yield authority rejection lost precedence' }
             $cursor = Resolve-TunaGuiFailureClassification -ErrorMessage 'gui_smoke_log_cursor_truncated: path=x' -HistoricalPhase 'regular_v4_frontier_repair' -HistoricalReason 'regular_v4_frontier_repair_stalled'
@@ -807,8 +809,12 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("fallback_frontier_request_dispatch_missing", routeAcceptanceText, StringComparison.Ordinal);
         Assert.Contains("fallback_frontier_repair_stalled", routeAcceptanceText, StringComparison.Ordinal);
         Assert.Contains("runtime_unlock_retry_source_publication_mismatch", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("runtime_unlock_retry_dispatch_authority_tuple_mismatch", routeAcceptanceText, StringComparison.Ordinal);
         Assert.True(
             routeAcceptanceText.IndexOf("return 'runtime_unlock_retry_source_publication_mismatch'", StringComparison.Ordinal) <
+            routeAcceptanceText.IndexOf("return 'regular_v4_frontier_repair_liveness_settlement_missing'", StringComparison.Ordinal));
+        Assert.True(
+            routeAcceptanceText.IndexOf("return 'runtime_unlock_retry_dispatch_authority_tuple_mismatch'", StringComparison.Ordinal) <
             routeAcceptanceText.IndexOf("return 'regular_v4_frontier_repair_liveness_settlement_missing'", StringComparison.Ordinal));
         Assert.Contains("Tuna GUI setup failure:", routeAcceptanceText, StringComparison.Ordinal);
         Assert.Contains("regularV4FrontierRepairSettledStalledEvent", scriptText, StringComparison.Ordinal);
@@ -836,8 +842,12 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("filetransfer_regular_v4_frontier_repair_settlement_accepted", scriptText, StringComparison.Ordinal);
         Assert.Contains("regular_v4_frontier_repair_liveness_settlement_missing", scriptText, StringComparison.Ordinal);
         Assert.Contains("runtime_unlock_retry_source_publication_mismatch", scriptText, StringComparison.Ordinal);
+        Assert.Contains("runtime_unlock_retry_dispatch_authority_tuple_mismatch", scriptText, StringComparison.Ordinal);
         Assert.True(
             scriptText.IndexOf("elseif ($runtimeUnlockRetrySourcePublicationMismatch)", StringComparison.Ordinal) <
+            scriptText.IndexOf("elseif ($regularV4FrontierRepairSettledStalledUnclosed)", StringComparison.Ordinal));
+        Assert.True(
+            scriptText.IndexOf("elseif ($runtimeUnlockRetryDispatchAuthorityTupleMismatch)", StringComparison.Ordinal) <
             scriptText.IndexOf("elseif ($regularV4FrontierRepairSettledStalledUnclosed)", StringComparison.Ordinal));
         Assert.Contains("(-not $fallbackFrontierRepairStalled) -and ($regularV4FrontierRepairSettledStalledUnclosed", scriptText, StringComparison.Ordinal);
         Assert.Contains("post_fallback_runtime_unlock_resume", scriptText, StringComparison.Ordinal);

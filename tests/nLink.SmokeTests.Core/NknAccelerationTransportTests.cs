@@ -9541,6 +9541,139 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatch_CurrentCoordinatorBridgeGenerationSupersedesRequestObservation()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-current-bridge.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-current-bridge.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-current-bridge-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-runtime-unlock-current-bridge-id", helperClient.Address));
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_runtime_unlock_current_bridge";
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId);
+            NknSignalingTransport.RuntimeUnlockRetryAuthorityDeadlineOverrideForTests =
+                TimeSpan.FromMilliseconds(25);
+            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
+                host,
+                bridgeDecisionGenerationSelector: _ => 1);
+            var logStart = GetOperationalLogLength();
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                51L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "regular_v4_unproven_recovery_escalation",
+                false);
+
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=runtime_unlock_retry_dispatch_authority_granted;", logTail, StringComparison.Ordinal);
+            Assert.Contains("bridge_decision_generation=1", logTail, StringComparison.Ordinal);
+            Assert.Contains("request_bridge_decision_generation=0", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_retry_dispatch_decision_tuple_rejected;",
+                logTail,
+                StringComparison.Ordinal);
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=runtime_unlock_retry_dispatch_contract_settled;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(2));
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetryDispatch_CoordinatorStateTupleMismatchIsDiagnosticOnly()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.runtime-unlock-tuple-rejected.address");
+            var helperClient = new FakeNknClient("helper.runtime-unlock-tuple-rejected.address");
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-runtime-unlock-tuple-rejected-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-runtime-unlock-tuple-rejected-id", helperClient.Address));
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_runtime_unlock_tuple_rejected";
+            _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            TrackAuthorizedRegularV4RouteForTests(host, transferId);
+            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
+                host,
+                bridgeDecisionGenerationSelector: _ => 1,
+                decisionTransform: decision => decision with
+                {
+                    State = decision.State with
+                    {
+                        CurrentBridgeRecoveryDecision =
+                            decision.State.CurrentBridgeRecoveryDecision!.Value with
+                            {
+                                BridgeDecisionGeneration = 2,
+                            },
+                    },
+                });
+            var logStart = GetOperationalLogLength();
+
+            InvokePrivateMethod(
+                host,
+                "ArmRuntimeUnlockRetryAfterRecovery",
+                52L,
+                sessionId,
+                "runtime_unlock_offer_send_not_observed",
+                "regular_v4_unproven_recovery_escalation",
+                false);
+
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "event=runtime_unlock_retry_dispatch_decision_tuple_rejected;",
+                logTail,
+                StringComparison.Ordinal);
+            Assert.Contains("mismatch_field=bridge_decision_generation", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_authority_granted;", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task TransportAccelerationOffer_RuntimeUnlockLateListenerRearmDoesNotReopenMissingDispatchContract()
     {
         FakeNknClient.ResetNetwork();
@@ -27684,7 +27817,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
     private static void InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
         NknSignalingTransport transport,
-        Func<RuntimeUnlockRetryDispatchAuthorityRequest, RuntimeUnlockRetryDispatchDecisionStatus>? statusSelector = null)
+        Func<RuntimeUnlockRetryDispatchAuthorityRequest, RuntimeUnlockRetryDispatchDecisionStatus>? statusSelector = null,
+        Func<RuntimeUnlockRetryDispatchAuthorityRequest, int>? bridgeDecisionGenerationSelector = null,
+        Func<RuntimeUnlockRetryDispatchDecision, RuntimeUnlockRetryDispatchDecision>? decisionTransform = null)
     {
         var authorityGeneration = 0;
         transport.RuntimeUnlockRetryDispatchAuthorityDecisionOverrideForTests = request =>
@@ -27739,6 +27874,8 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 FileTransferCoordinatorActionKind.RoutePublication,
                 publication.CoordinatorDecisionReason);
             var generation = Interlocked.Increment(ref authorityGeneration);
+            var grantedBridgeDecisionGeneration =
+                bridgeDecisionGenerationSelector?.Invoke(request) ?? request.BridgeDecisionGeneration;
             var releaseAuthorityId = new FileTransferAuthorityId(
                 $"test-runtime-unlock-release-{request.RecoveryContractGeneration}");
             var fallbackRelease = route == FileTransferRoute.PostTunaFallbackV6;
@@ -27757,7 +27894,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 checked((int)publication.LegGeneration),
                 0,
                 0,
-                request.BridgeDecisionGeneration,
+                grantedBridgeDecisionGeneration,
                 publication.RoutePublicationGeneration,
                 publication.RouteCommitGeneration,
                 request.RecoveryContractGeneration,
@@ -27779,13 +27916,77 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 generation,
                 new FileTransferAuthorityId($"test-runtime-unlock-retry-{generation}"),
                 request.PredecessorAuthorityId);
-            return new RuntimeUnlockRetryDispatchDecision(
+            var routeSelection = FileTransferRouteResolver.Resolve(route);
+            var leg = new FileTransferLeg
+            {
+                LegId = $"test-runtime-unlock-leg-{request.Direction.ToString().ToLowerInvariant()}",
+                Generation = checked((int)publication.LegGeneration),
+                RouteSelection = routeSelection,
+                ProtocolVersion = publication.ProtocolVersion,
+                LiveRouteEpochId = publication.LiveRouteEpoch,
+                TransportEpochId = 0,
+                BridgeRecoveryGeneration = 0,
+                StartedUtc = DateTimeOffset.UtcNow,
+                State = FileTransferLegState.Active,
+                CanSendData = true,
+            };
+            var liveRouteEpoch = publication.LiveRouteEpoch > 0
+                ? new LiveRouteEpoch
+                {
+                    EpochId = publication.LiveRouteEpoch,
+                    RouteSelection = routeSelection,
+                    HandoffKind = FileTransferTransportHandoffKind.None,
+                    TargetTransport = publication.TargetTransport,
+                    Reason = "test_coordinator_issued",
+                    State = "started",
+                    RoutePublicationToken = sourcePublication,
+                }
+                : null;
+            BridgeRecoveryDecision? currentBridgeDecision = grantedBridgeDecisionGeneration > 0
+                ? new BridgeRecoveryDecision(
+                    true,
+                    BridgeRecoveryKind.ReceiveRecoveryRequest,
+                    "test_coordinator_issued",
+                    grantedBridgeDecisionGeneration,
+                    route,
+                    publication.ProtocolVersion,
+                    publication.LiveRouteEpoch,
+                    publication.RuntimeGeneration,
+                    publication.TerminalGeneration,
+                    checked((int)publication.LegGeneration),
+                    0,
+                    0,
+                    runtimeOwner)
+                : null;
+            var coordinatorState = new FileTransferCoordinatorState(
+                request.SessionId,
+                request.TransferId,
+                request.Direction,
+                false,
+                routeSelection,
+                liveRouteEpoch,
+                leg,
+                publication.LiveRouteEpoch,
+                leg.Generation,
+                publication.RuntimeGeneration,
+                publication.TerminalGeneration,
+                runtimeOwner,
+                [leg],
+                CurrentBridgeRecoveryDecision: currentBridgeDecision,
+                LastBridgeRecoveryDecisionGeneration: grantedBridgeDecisionGeneration,
+                CurrentRoutePublicationToken: sourcePublication,
+                LastRoutePublicationGeneration: sourcePublication.PublicationGeneration,
+                CurrentRuntimeUnlockRetryDispatchAuthority: authority,
+                LastRuntimeUnlockRetryDispatchAuthorityGeneration: generation);
+            var decision = new RuntimeUnlockRetryDispatchDecision(
                 RuntimeUnlockRetryDispatchDecisionStatus.Granted,
                 "test_coordinator_issued",
                 new RuntimeUnlockRetryDispatchContract(authority))
             {
                 Request = request,
+                State = coordinatorState,
             };
+            return decisionTransform?.Invoke(decision) ?? decision;
         };
     }
 

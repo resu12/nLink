@@ -11634,7 +11634,11 @@ public sealed partial class NknSignalingTransport
         RuntimeUnlockRetryDispatchAuthorityRequest? stalePendingRequest = null;
         RuntimeUnlockRetrySuccessorIntent? heldSuccessorIntent = null;
         RuntimeUnlockRetrySuccessorIntent? rejectedSuccessorIntent = null;
+        RuntimeUnlockRetryDispatchAuthorityRequest? grantedRequest = null;
+        RuntimeUnlockRetryDispatchAuthorityRequest? tupleRejectedRequest = null;
+        RuntimeUnlockRetryDispatchContract? tupleRejectedContract = null;
         string? staleDecisionReason = null;
+        string? tupleMismatchField = null;
         var newlyGranted = false;
         var rejected = false;
         lock (accelerationGate)
@@ -11656,13 +11660,14 @@ public sealed partial class NknSignalingTransport
             }
             else if (decision.Granted && decision.Contract is { } contract)
             {
-                var authority = contract.Authority;
-                if (!RuntimeUnlockRetryDispatchAuthorityMatchesRequest(
-                        authority,
+                if (!FileTransferCoordinator.TryValidateRuntimeUnlockRetryDispatchGrantedDecision(
+                        decision,
                         pending.Value,
-                        out staleDecisionReason))
+                        out var mismatchField))
                 {
-                    stalePendingRequest = pending;
+                    tupleRejectedRequest = pending;
+                    tupleRejectedContract = contract;
+                    tupleMismatchField = mismatchField;
                 }
                 else if (ReferenceEquals(state.DispatchContract, contract))
                 {
@@ -11670,6 +11675,7 @@ public sealed partial class NknSignalingTransport
                 }
                 else
                 {
+                    var authority = contract.Authority;
                     var successorIntent = pending.Value.RequestActivePredecessorSupersession
                         ? state.PendingDispatchSuccessorIntent
                         : null;
@@ -11709,6 +11715,7 @@ public sealed partial class NknSignalingTransport
                         (long)(RuntimeUnlockRetryAuthorityDeadlineOverrideForTests ??
                                RuntimeUnlockRetryAuthorityDeadline).TotalMilliseconds;
                     grantedContract = contract;
+                    grantedRequest = pending;
                     newlyGranted = true;
                     stateSnapshot = state;
                 }
@@ -11756,11 +11763,20 @@ public sealed partial class NknSignalingTransport
             }
         }
 
+        if (tupleRejectedRequest is { } rejectedRequest &&
+            tupleRejectedContract is { } rejectedContract)
+        {
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=runtime_unlock_retry_dispatch_decision_tuple_rejected; {FormatRuntimeUnlockRetryDispatchAuthorityTuple(rejectedContract.Authority)}; request_regular_v4_liveness_generation={rejectedRequest.RegularV4LivenessGeneration}; request_bridge_decision_generation={rejectedRequest.BridgeDecisionGeneration}; mismatch_field={SanitizeLogToken(tupleMismatchField ?? "unknown")}; decision_status={SanitizeLogToken(decision.Status.ToString())}; decision_reason=runtime_unlock_retry_dispatch_authority_tuple_mismatch");
+            return false;
+        }
+
         if (staleDecisionReason is not null && stalePendingRequest is { } stalePending)
         {
             LocalOperationalLog.Info(
                 "NKN.Tuna",
-                $"event=runtime_unlock_retry_dispatch_stale_decision_ignored; session_id={SanitizeLogToken(stalePending.SessionId)}; transfer_id={SanitizeLogToken(stalePending.TransferId)}; direction={stalePending.Direction.ToString().ToLowerInvariant()}; contract_generation={stalePending.RecoveryContractGeneration}; retired_generation={stalePending.RetiredOfferGeneration}; dispatch_attempt_generation={stalePending.DispatchAttemptGeneration}; decision_status={SanitizeLogToken(decision.Status.ToString())}; decision_reason={SanitizeLogToken(staleDecisionReason)}");
+                $"event=runtime_unlock_retry_dispatch_stale_decision_ignored; session_id={SanitizeLogToken(stalePending.SessionId)}; transfer_id={SanitizeLogToken(stalePending.TransferId)}; direction={stalePending.Direction.ToString().ToLowerInvariant()}; contract_generation={stalePending.RecoveryContractGeneration}; retired_generation={stalePending.RetiredOfferGeneration}; dispatch_attempt_generation={stalePending.DispatchAttemptGeneration}; request_regular_v4_liveness_generation={stalePending.RegularV4LivenessGeneration}; request_bridge_decision_generation={stalePending.BridgeDecisionGeneration}; decision_status={SanitizeLogToken(decision.Status.ToString())}; decision_reason={SanitizeLogToken(staleDecisionReason)}");
             return false;
         }
 
@@ -11805,7 +11821,7 @@ public sealed partial class NknSignalingTransport
             {
                 LocalOperationalLog.Info(
                     "NKN.Tuna",
-                    $"event=runtime_unlock_retry_dispatch_authority_granted; {FormatRuntimeUnlockRetryDispatchAuthorityTuple(grantedContract.Authority)}; offer_generation=0; offer_nonce=(none); attempt_phase={SanitizeLogToken(grantedContract.AttemptPhase.ToString())}; successor_authority_id=(none); queued_behind_active_negotiation={(stateSnapshot.QueuedBehindActiveNegotiation ? 1 : 0)}; decision_reason={SanitizeLogToken(decision.Reason)}");
+                    $"event=runtime_unlock_retry_dispatch_authority_granted; {FormatRuntimeUnlockRetryDispatchAuthorityTuple(grantedContract.Authority)}; request_regular_v4_liveness_generation={grantedRequest?.RegularV4LivenessGeneration ?? 0}; request_bridge_decision_generation={grantedRequest?.BridgeDecisionGeneration ?? 0}; offer_generation=0; offer_nonce=(none); attempt_phase={SanitizeLogToken(grantedContract.AttemptPhase.ToString())}; successor_authority_id=(none); queued_behind_active_negotiation={(stateSnapshot.QueuedBehindActiveNegotiation ? 1 : 0)}; decision_reason={SanitizeLogToken(decision.Reason)}");
             }
             ScheduleRuntimeUnlockRetryDispatchAuthoritySettlementCheck(stateSnapshot);
             ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed("coordinator_retry_dispatch_authority_granted");
@@ -11831,76 +11847,6 @@ public sealed partial class NknSignalingTransport
         }
 
         return stateSnapshot is not null;
-    }
-
-    private static bool RuntimeUnlockRetryDispatchAuthorityMatchesRequest(
-        RuntimeUnlockRetryDispatchAuthority authority,
-        RuntimeUnlockRetryDispatchAuthorityRequest request,
-        out string rejectionReason)
-    {
-        rejectionReason = "accepted";
-        var publication = request.SourcePublicationAuthority;
-        if (authority.IsDefault ||
-            !string.Equals(authority.SessionId, request.SessionId, StringComparison.Ordinal) ||
-            !string.Equals(authority.TransferId, request.TransferId, StringComparison.Ordinal) ||
-            authority.Direction != request.Direction ||
-            authority.RecoveryContractGeneration != request.RecoveryContractGeneration ||
-            authority.RetiredOfferGeneration != request.RetiredOfferGeneration ||
-            authority.DispatchAttemptGeneration != request.DispatchAttemptGeneration ||
-            authority.PredecessorAuthorityId != request.PredecessorAuthorityId ||
-            authority.BridgeDecisionGeneration != request.BridgeDecisionGeneration ||
-            !string.Equals(authority.RetryReason, request.RetryReason?.Trim(), StringComparison.Ordinal) ||
-            !string.Equals(authority.RecoveryReason, request.RecoveryReason?.Trim(), StringComparison.Ordinal))
-        {
-            rejectionReason = "authority_request_tuple_mismatch";
-            return false;
-        }
-
-        if (!string.Equals(authority.RouteToken, publication.RouteToken, StringComparison.Ordinal) ||
-            authority.ProtocolVersion != publication.ProtocolVersion ||
-            authority.LiveRouteEpoch != publication.LiveRouteEpoch ||
-            authority.RuntimeGeneration != publication.RuntimeGeneration ||
-            authority.TerminalGeneration != publication.TerminalGeneration ||
-            authority.LegGeneration != publication.LegGeneration ||
-            authority.RoutePublicationGeneration != publication.RoutePublicationGeneration ||
-            authority.RouteCommitGeneration != publication.RouteCommitGeneration ||
-            authority.SourcePublicationAuthority.RuntimeOwner != authority.RuntimeOwner ||
-            !string.Equals(authority.SourcePublicationAuthority.SessionId, publication.SessionId, StringComparison.Ordinal) ||
-            !string.Equals(authority.SourcePublicationAuthority.TransferId, publication.TransferId, StringComparison.Ordinal) ||
-            authority.SourcePublicationAuthority.Direction != publication.Direction ||
-            !string.Equals(authority.SourcePublicationAuthority.RouteToken, publication.RouteToken, StringComparison.Ordinal) ||
-            authority.SourcePublicationAuthority.ProtocolVersion != publication.ProtocolVersion ||
-            authority.SourcePublicationAuthority.LiveRouteEpoch != publication.LiveRouteEpoch ||
-            authority.SourcePublicationAuthority.RuntimeGeneration != publication.RuntimeGeneration ||
-            authority.SourcePublicationAuthority.TerminalGeneration != publication.TerminalGeneration ||
-            authority.SourcePublicationAuthority.LegGeneration != publication.LegGeneration ||
-            authority.SourcePublicationAuthority.PublicationGeneration != publication.RoutePublicationGeneration ||
-            authority.SourcePublicationAuthority.RouteCommitGeneration != publication.RouteCommitGeneration ||
-            !string.Equals(
-                authority.SourcePublicationAuthority.RouteToken,
-                authority.RuntimeOwner.RouteToken,
-                StringComparison.Ordinal) ||
-            authority.SourcePublicationAuthority.TargetProtocolVersion != publication.TargetProtocolVersion ||
-            authority.SourcePublicationAuthority.TargetTransport != publication.TargetTransport ||
-            !string.Equals(
-                authority.SourcePublicationAuthority.TargetRoute switch
-                {
-                    FileTransferRoute.RegularNknV4Fast => FileTransferRouteResolver.RegularNknV4FastToken,
-                    FileTransferRoute.PostTunaFallbackV6 => FileTransferRouteResolver.PostTunaFallbackV6Token,
-                    FileTransferRoute.FileTunaV4 => FileTransferRouteResolver.FileTunaV4Token,
-                    _ => "invalid",
-                },
-                publication.TargetRouteToken,
-                StringComparison.Ordinal) ||
-            authority.TargetRoute != FileTransferRoute.FileTunaV4 ||
-            authority.TargetProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
-            authority.TargetTransport != FileTransferTransportKind.Tuna)
-        {
-            rejectionReason = "authority_publication_tuple_mismatch";
-            return false;
-        }
-
-        return true;
     }
 
     private void RequestRuntimeUnlockRetryDispatchAuthority(

@@ -1147,6 +1147,106 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void RuntimeUnlockRetryDispatchAuthority_HeldRequestAcceptsCurrentCoordinatorBridgeGeneration()
+    {
+        var (state, request, release) = AuthorizeRegularRuntimeUnlockRetryDispatchSource();
+        Assert.Equal(0, request.BridgeDecisionGeneration);
+        var bridge = FileTransferCoordinator.AuthorizeAction(
+            state,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.BridgeRecovery,
+                state.CurrentRuntimeOwner!.Value,
+                state.CurrentLeg!,
+                bridgeRecoveryKind: BridgeRecoveryKind.ReceiveRecoveryRequest));
+        Assert.True(bridge.Accepted);
+        Assert.Equal(1, bridge.State.CurrentBridgeRecoveryDecision!.Value.BridgeDecisionGeneration);
+
+        var granted = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            bridge.State,
+            request,
+            null,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch.ToString());
+
+        Assert.True(granted.Granted);
+        Assert.Equal(request, granted.Request);
+        Assert.Equal(1, granted.Contract!.Authority.BridgeDecisionGeneration);
+        Assert.True(FileTransferCoordinator.TryValidateRuntimeUnlockRetryDispatchGrantedDecision(
+            granted,
+            request,
+            out var mismatchField), mismatchField);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRetryDispatchAuthority_IdempotentRecheckPreservesOriginalReleaseTuple()
+    {
+        var (state, request, release) = AuthorizeRegularRuntimeUnlockRetryDispatchSource();
+        var granted = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            state,
+            request,
+            null,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch.ToString());
+        Assert.True(granted.Granted);
+        var originalAuthority = granted.Contract!.Authority;
+        var successorRelease = FileTransferCoordinator.AuthorizeAction(
+            granted.State,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RepairReplay,
+                granted.State.CurrentRuntimeOwner!.Value,
+                granted.State.CurrentLeg!,
+                repairReplayKind: RepairReplayKind.V4Repair));
+        Assert.True(successorRelease.Accepted);
+        var laterRelease = successorRelease.RepairReplayDecision!.Value;
+
+        var duplicate = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            successorRelease.State,
+            request,
+            granted.Contract,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            laterRelease.AuthorityId,
+            laterRelease.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch.ToString());
+
+        Assert.True(duplicate.Granted);
+        Assert.Same(granted.Contract, duplicate.Contract);
+        Assert.Equal(originalAuthority.ReleaseAuthorityId, duplicate.Contract!.Authority.ReleaseAuthorityId);
+        Assert.Equal(originalAuthority.ReleaseGeneration, duplicate.Contract.Authority.ReleaseGeneration);
+        Assert.Equal(originalAuthority.ReleaseOutcome, duplicate.Contract.Authority.ReleaseOutcome);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRetryDispatchAuthority_SameGenerationStableRequestCollisionRejects()
+    {
+        var (state, request, release) = AuthorizeRegularRuntimeUnlockRetryDispatchSource();
+        var granted = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            state,
+            request,
+            null,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+        Assert.True(granted.Granted);
+
+        var collision = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            granted.State,
+            request with { RetryReason = "different_retry_reason" },
+            granted.Contract,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, collision.Status);
+        Assert.Equal("retry_dispatch_attempt_identity_mismatch", collision.Reason);
+    }
+
+    [Fact]
     public void RuntimeUnlockRetryDispatchAuthority_RequiresSettledPredecessorForSuccessor()
     {
         var (state, request, release) = AuthorizeRegularRuntimeUnlockRetryDispatchSource();

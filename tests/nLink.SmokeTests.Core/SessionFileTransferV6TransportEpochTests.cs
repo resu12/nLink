@@ -2570,10 +2570,10 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         Assert.Contains("predecessor_authority_id=fta2-", logTail, StringComparison.Ordinal);
         Assert.Equal(2, CountOccurrences(logTail, "event=filetransfer_fallback_frontier_repair_authority_granted;"));
         Assert.Equal(1, CountOccurrences(logTail, "settlement_outcome=SettledStalled"));
-        Assert.Contains("event=filetransfer_post_tuna_fallback_control_plane_pressure_cleared_after_frontier_settlement", logTail, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_post_tuna_fallback_control_plane_pressure_cleared_after_frontier_settlement", logTail, StringComparison.Ordinal);
         Assert.NotNull(GetPrivatePropertyValue(context, "PostTunaFallbackControlPlanePressureTuple"));
-        Assert.False(GetPrivateProperty<bool>(context, "RuntimeUnlockWaitingForFallbackSurvival"));
-        Assert.True(GetPrivateProperty<bool>(context, "RuntimeUnlockActivationWindowGranted"));
+        Assert.True(GetPrivateProperty<bool>(context, "RuntimeUnlockWaitingForFallbackSurvival"));
+        Assert.False(GetPrivateProperty<bool>(context, "RuntimeUnlockActivationWindowGranted"));
 
         var currentContract = GetPrivatePropertyValue(
             context,

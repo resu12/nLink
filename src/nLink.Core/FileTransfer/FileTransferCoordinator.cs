@@ -3834,6 +3834,16 @@ internal static class FileTransferCoordinator
             existing.Authority.RetiredOfferGeneration == request.RetiredOfferGeneration &&
             existing.Authority.DispatchAttemptGeneration == request.DispatchAttemptGeneration)
         {
+            if (!RuntimeUnlockRetryDispatchAuthorityMatchesStableRequest(
+                    existing.Authority,
+                    request,
+                    out _))
+            {
+                return Decision(
+                    RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
+                    "retry_dispatch_attempt_identity_mismatch");
+            }
+
             return existing.Lifecycle.IsSettled
                 ? Decision(
                     RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
@@ -3958,6 +3968,196 @@ internal static class FileTransferCoordinator
             "accepted",
             contract,
             acceptedState);
+    }
+
+    internal static bool TryValidateRuntimeUnlockRetryDispatchGrantedDecision(
+        RuntimeUnlockRetryDispatchDecision decision,
+        RuntimeUnlockRetryDispatchAuthorityRequest expectedRequest,
+        out string mismatchField)
+    {
+        mismatchField = "none";
+        if (!decision.Granted || decision.Contract is not { } contract)
+        {
+            return RuntimeUnlockRetryDispatchMismatch("decision_status", out mismatchField);
+        }
+
+        if (decision.Request.IsDefault || decision.Request != expectedRequest)
+        {
+            return RuntimeUnlockRetryDispatchMismatch("decision_request", out mismatchField);
+        }
+
+        var state = decision.State;
+        if (state is null)
+        {
+            return RuntimeUnlockRetryDispatchMismatch("coordinator_state", out mismatchField);
+        }
+
+        var authority = contract.Authority;
+        if (!RuntimeUnlockRetryDispatchAuthorityMatchesStableRequest(
+                authority,
+                expectedRequest,
+                out mismatchField))
+        {
+            return false;
+        }
+
+        if (state.CurrentRuntimeOwner is not { } owner || authority.RuntimeOwner != owner)
+        {
+            return RuntimeUnlockRetryDispatchMismatch("runtime_owner", out mismatchField);
+        }
+
+        if (state.CurrentLeg is not { } leg ||
+            authority.LegGeneration != leg.Generation ||
+            authority.TransportEpoch != leg.TransportEpochId ||
+            authority.BridgeRecoveryGeneration != leg.BridgeRecoveryGeneration)
+        {
+            return RuntimeUnlockRetryDispatchMismatch("transfer_leg", out mismatchField);
+        }
+
+        if (state.CurrentRoutePublicationToken is not { } publication ||
+            authority.SourcePublicationAuthority != publication ||
+            authority.RoutePublicationGeneration != publication.PublicationGeneration ||
+            authority.RouteCommitGeneration != publication.RouteCommitGeneration ||
+            publication.RuntimeOwner != owner ||
+            !string.Equals(publication.SessionId, state.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(publication.TransferId, state.TransferId, StringComparison.Ordinal) ||
+            publication.Direction != state.Direction ||
+            publication.Route != state.RouteSelection.Route ||
+            !string.Equals(publication.RouteToken, state.RouteSelection.TelemetryToken, StringComparison.Ordinal) ||
+            publication.ProtocolVersion != state.RouteSelection.ProtocolVersion ||
+            publication.LiveRouteEpoch != (state.CurrentLiveRouteEpoch?.EpochId ?? 0) ||
+            publication.RuntimeGeneration != owner.RuntimeGeneration ||
+            publication.TerminalGeneration != state.TerminalGeneration ||
+            publication.LegGeneration != leg.Generation ||
+            publication.TargetRoute != state.RouteSelection.Route ||
+            publication.TargetProtocolVersion != state.RouteSelection.ProtocolVersion ||
+            publication.TargetTransport != FileTransferTransportKind.RegularNkn ||
+            publication.ActionKind != FileTransferCoordinatorActionKind.RoutePublication)
+        {
+            return RuntimeUnlockRetryDispatchMismatch("route_publication", out mismatchField);
+        }
+
+        var expectedBridgeDecisionGeneration =
+            state.CurrentBridgeRecoveryDecision?.BridgeDecisionGeneration ??
+            expectedRequest.BridgeDecisionGeneration;
+        if (authority.BridgeDecisionGeneration != expectedBridgeDecisionGeneration)
+        {
+            return RuntimeUnlockRetryDispatchMismatch("bridge_decision_generation", out mismatchField);
+        }
+
+        if (!string.Equals(authority.SessionId, state.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(authority.TransferId, state.TransferId, StringComparison.Ordinal) ||
+            authority.Direction != state.Direction ||
+            authority.Route != state.RouteSelection.Route ||
+            !string.Equals(authority.RouteToken, state.RouteSelection.TelemetryToken, StringComparison.Ordinal) ||
+            authority.ProtocolVersion != state.RouteSelection.ProtocolVersion ||
+            authority.LiveRouteEpoch != (state.CurrentLiveRouteEpoch?.EpochId ?? 0) ||
+            authority.RuntimeGeneration != owner.RuntimeGeneration ||
+            authority.TerminalGeneration != state.TerminalGeneration)
+        {
+            return RuntimeUnlockRetryDispatchMismatch("coordinator_runtime_tuple", out mismatchField);
+        }
+
+        if (state.CurrentRuntimeUnlockRetryDispatchAuthority is not { } currentAuthority ||
+            currentAuthority != authority)
+        {
+            return RuntimeUnlockRetryDispatchMismatch("coordinator_current_authority", out mismatchField);
+        }
+
+        if (authority.TargetRoute != FileTransferRoute.FileTunaV4 ||
+            authority.TargetProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+            authority.TargetTransport != FileTransferTransportKind.Tuna)
+        {
+            return RuntimeUnlockRetryDispatchMismatch("target_route", out mismatchField);
+        }
+
+        if (authority.ReleaseKind == RuntimeUnlockRetryReleaseKind.Unknown ||
+            authority.ReleaseAuthorityId is not { IsDefault: false } ||
+            authority.ReleaseGeneration <= 0 ||
+            string.IsNullOrWhiteSpace(authority.ReleaseOutcome))
+        {
+            return RuntimeUnlockRetryDispatchMismatch("release_identity", out mismatchField);
+        }
+
+        if ((state.RouteSelection.Route == FileTransferRoute.RegularNknV4Fast &&
+             authority.ReleaseKind is not (
+                 RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement or
+                 RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure)) ||
+            (state.RouteSelection.Route == FileTransferRoute.PostTunaFallbackV6 &&
+             authority.ReleaseKind != RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield))
+        {
+            return RuntimeUnlockRetryDispatchMismatch("release_kind", out mismatchField);
+        }
+
+        if (authority.ReleaseKind == RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement &&
+            authority.ReleaseOutcome is not (
+                nameof(FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved) or
+                nameof(FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch) or
+                nameof(FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled)))
+        {
+            return RuntimeUnlockRetryDispatchMismatch("release_outcome", out mismatchField);
+        }
+
+        if (authority.ReleaseKind == RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure &&
+            !string.Equals(
+                authority.ReleaseOutcome,
+                nameof(RecoveryLivenessLeaseState.Retired),
+                StringComparison.Ordinal))
+        {
+            return RuntimeUnlockRetryDispatchMismatch("release_outcome", out mismatchField);
+        }
+
+        return true;
+    }
+
+    private static bool RuntimeUnlockRetryDispatchAuthorityMatchesStableRequest(
+        RuntimeUnlockRetryDispatchAuthority authority,
+        RuntimeUnlockRetryDispatchAuthorityRequest request,
+        out string mismatchField)
+    {
+        mismatchField = "none";
+        if (authority.IsDefault)
+        {
+            return RuntimeUnlockRetryDispatchMismatch("authority", out mismatchField);
+        }
+
+        if (!string.Equals(authority.SessionId, request.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(authority.TransferId, request.TransferId, StringComparison.Ordinal) ||
+            authority.Direction != request.Direction)
+        {
+            return RuntimeUnlockRetryDispatchMismatch("request_identity", out mismatchField);
+        }
+
+        if (!MatchesRuntimeUnlockRetrySourcePublication(
+                request.SourcePublicationAuthority,
+                authority.SourcePublicationAuthority))
+        {
+            return RuntimeUnlockRetryDispatchMismatch("request_source_publication", out mismatchField);
+        }
+
+        if (authority.RecoveryContractGeneration != request.RecoveryContractGeneration ||
+            authority.RetiredOfferGeneration != request.RetiredOfferGeneration ||
+            authority.DispatchAttemptGeneration != request.DispatchAttemptGeneration ||
+            authority.PredecessorAuthorityId != request.PredecessorAuthorityId)
+        {
+            return RuntimeUnlockRetryDispatchMismatch("request_attempt", out mismatchField);
+        }
+
+        if (!string.Equals(authority.RetryReason, NormalizeReason(request.RetryReason), StringComparison.Ordinal) ||
+            !string.Equals(authority.RecoveryReason, NormalizeReason(request.RecoveryReason), StringComparison.Ordinal))
+        {
+            return RuntimeUnlockRetryDispatchMismatch("request_reason", out mismatchField);
+        }
+
+        return true;
+    }
+
+    private static bool RuntimeUnlockRetryDispatchMismatch(
+        string field,
+        out string mismatchField)
+    {
+        mismatchField = field;
+        return false;
     }
 
     private static bool MatchesRuntimeUnlockRetrySourcePublication(

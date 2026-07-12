@@ -2271,14 +2271,21 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 FallbackTailYieldKind: FallbackTailYieldKind.Quiescent));
         Assert.True(yieldAuthority.Accepted);
         Assert.NotNull(yieldAuthority.FallbackTailYieldDecision);
-        SetPrivateProperty(context, "LastFallbackTailYieldDecision", yieldAuthority.FallbackTailYieldDecision);
+        var yieldDecision = yieldAuthority.FallbackTailYieldDecision.Value;
+        SetPrivateProperty(context, "LastFallbackTailYieldDecision", yieldDecision);
         SetPrivateProperty(
             context,
             "LastFallbackTailYieldGeneration",
-            yieldAuthority.FallbackTailYieldDecision.Value.YieldGeneration);
+            yieldDecision.YieldGeneration);
         SetPrivateProperty(context, "PairedFallbackTailYieldGranted", true);
+        SetPrivateProperty(context, "LocalFallbackTailYieldGranted", true);
+        SetPrivateProperty(context, "LocalFallbackTailYieldPeerVisible", true);
+        SetPrivateProperty(context, "LocalFallbackTailYieldAuthorityId", yieldDecision.AuthorityId.ToString());
         SetPrivateProperty(context, "LocalFallbackTailYieldOwnerKey", ownerKey);
         SetPrivateProperty(context, "LocalFallbackTailYieldPairKey", pairKey);
+        SetPrivateProperty(context, "PeerFallbackTailYieldGranted", true);
+        SetPrivateProperty(context, "PeerFallbackTailYieldAuthorityId", CreatePeerFallbackTailYieldAuthorityId(transferId));
+        SetPrivateProperty(context, "PeerFallbackTailYieldGeneration", 1L);
         SetPrivateProperty(context, "PeerFallbackTailYieldOwnerKey", ownerKey);
         SetPrivateProperty(context, "PeerFallbackTailYieldPairKey", pairKey);
         TrySetPrivateProperty(context, "PullPostTunaRecoveryActive", false);
