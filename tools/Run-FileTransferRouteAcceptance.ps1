@@ -5879,6 +5879,12 @@ function Get-Phase5FailureClass {
     }
 
     foreach ($line in $failureLines) {
+        if ($line.IndexOf('runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch'
+        }
+    }
+
+    foreach ($line in $failureLines) {
         if ($line.IndexOf('runtime_unlock_retry_dispatch_authority_tuple_mismatch', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $line.IndexOf('runtime_unlock_retry_dispatch_decision_tuple_rejected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             return 'runtime_unlock_retry_dispatch_authority_tuple_mismatch'
