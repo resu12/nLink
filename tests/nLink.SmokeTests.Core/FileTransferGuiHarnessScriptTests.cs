@@ -624,6 +624,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             if ($tupleMismatch.Phase -ne 'runtime_unlock_retry' -or $tupleMismatch.Reason -ne 'runtime_unlock_retry_dispatch_authority_tuple_mismatch') { throw 'runtime unlock authority tuple mismatch lost precedence' }
             $missingSuccessor = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch; retained_event=filetransfer_regular_v4_frontier_repair_stalled' -HistoricalPhase 'regular_v4_frontier_repair' -HistoricalReason 'regular_v4_frontier_repair_stalled'
             if ($missingSuccessor.Phase -ne 'runtime_unlock_retry' -or $missingSuccessor.Reason -ne 'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch') { throw 'runtime unlock missing successor lost precedence' }
+            $budgetBypass = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_retry_dispatch_grant_bypassed_by_retry_budget; retained_event=filetransfer_regular_v4_frontier_repair_stalled' -HistoricalPhase 'regular_v4_frontier_repair' -HistoricalReason 'regular_v4_frontier_repair_stalled'
+            if ($budgetBypass.Phase -ne 'runtime_unlock_retry' -or $budgetBypass.Reason -ne 'runtime_unlock_retry_dispatch_grant_bypassed_by_retry_budget') { throw 'runtime unlock budget bypass lost precedence' }
+            $unsettled = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_retry_dispatch_contract_unsettled; retained_event=filetransfer_regular_v4_frontier_repair_stalled' -HistoricalPhase 'regular_v4_frontier_repair' -HistoricalReason 'regular_v4_frontier_repair_stalled'
+            if ($unsettled.Phase -ne 'runtime_unlock_retry' -or $unsettled.Reason -ne 'runtime_unlock_retry_dispatch_contract_unsettled') { throw 'runtime unlock unsettled contract lost precedence' }
             $yieldAuthority = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=fallback_tail_yield_authority_invalid; retained_event=filetransfer_fallback_frontier_repair_stalled' -HistoricalPhase 'fallback_frontier_repair' -HistoricalReason 'fallback_frontier_repair_stalled'
             if ($yieldAuthority.Phase -ne 'fallback_tail_yield' -or $yieldAuthority.Reason -ne 'fallback_tail_yield_authority_invalid') { throw 'fallback-tail yield authority rejection lost precedence' }
             $cursor = Resolve-TunaGuiFailureClassification -ErrorMessage 'gui_smoke_log_cursor_truncated: path=x' -HistoricalPhase 'regular_v4_frontier_repair' -HistoricalReason 'regular_v4_frontier_repair_stalled'
@@ -813,6 +817,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("runtime_unlock_retry_source_publication_mismatch", routeAcceptanceText, StringComparison.Ordinal);
         Assert.Contains("runtime_unlock_retry_dispatch_authority_tuple_mismatch", routeAcceptanceText, StringComparison.Ordinal);
         Assert.Contains("runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("runtime_unlock_retry_dispatch_grant_bypassed_by_retry_budget", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("runtime_unlock_retry_dispatch_contract_unsettled", routeAcceptanceText, StringComparison.Ordinal);
         Assert.True(
             routeAcceptanceText.IndexOf("return 'runtime_unlock_retry_source_publication_mismatch'", StringComparison.Ordinal) <
             routeAcceptanceText.IndexOf("return 'regular_v4_frontier_repair_liveness_settlement_missing'", StringComparison.Ordinal));
@@ -836,6 +842,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("runtimeUnlockRetryDispatchMissingAfterAuthorityGranted", scriptText, StringComparison.Ordinal);
         Assert.Contains("runtime_unlock_retry_dispatch_missing_after_authority_granted", scriptText, StringComparison.Ordinal);
         Assert.Contains("Test-TunaGuiRuntimeUnlockMissingDispatchSuccessorUnresolved", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Get-TunaGuiRuntimeUnlockUnsettledGrantReason", scriptText, StringComparison.Ordinal);
+        Assert.Contains("runtime_unlock_retry_dispatch_grant_bypassed_by_retry_budget", scriptText, StringComparison.Ordinal);
+        Assert.Contains("runtime_unlock_retry_dispatch_contract_unsettled", scriptText, StringComparison.Ordinal);
         Assert.Contains("requested_predecessor_authority_id", scriptText, StringComparison.Ordinal);
         Assert.Contains("requested_dispatch_attempt_generation", scriptText, StringComparison.Ordinal);
         Assert.Contains("$terminalDirection", scriptText, StringComparison.Ordinal);

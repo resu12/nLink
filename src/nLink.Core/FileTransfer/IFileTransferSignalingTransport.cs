@@ -508,7 +508,8 @@ internal readonly record struct RuntimeUnlockRetryDispatchAuthorityRequest(
     int RegularV4LivenessGeneration,
     int BridgeDecisionGeneration,
     FileTransferAuthorityId? PredecessorAuthorityId = null,
-    bool RequestActivePredecessorSupersession = false)
+    bool RequestActivePredecessorSupersession = false,
+    int MissingDispatchSuccessorGeneration = 0)
 {
     public bool IsDefault => string.IsNullOrWhiteSpace(SessionId) ||
                              string.IsNullOrWhiteSpace(TransferId) ||
@@ -538,6 +539,7 @@ internal readonly record struct RuntimeUnlockRetryDispatchAuthority(
     long RecoveryContractGeneration,
     long RetiredOfferGeneration,
     int DispatchAttemptGeneration,
+    int MissingDispatchSuccessorGeneration,
     string RetryReason,
     string RecoveryReason,
     RuntimeUnlockRetryReleaseKind ReleaseKind,

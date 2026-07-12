@@ -826,6 +826,8 @@ internal sealed class FileTransferLeg
 
 internal static class FileTransferCoordinator
 {
+    internal const int RuntimeUnlockRetryMissingDispatchSuccessorLimit = 1;
+
     private static readonly TimeSpan InitialTunaReadinessEvidenceMaxAge = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan SessionReactivationInitialTunaReadinessEvidenceMaxAge = TimeSpan.FromMinutes(30);
 
@@ -3778,6 +3780,13 @@ internal static class FileTransferCoordinator
             return Decision(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, "retry_dispatch_request_missing");
         }
 
+        if (request.MissingDispatchSuccessorGeneration < 0)
+        {
+            return Decision(
+                RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
+                "retry_dispatch_missing_successor_generation_invalid");
+        }
+
         if (!string.Equals(request.SessionId, state.SessionId, StringComparison.Ordinal) ||
             !string.Equals(request.TransferId, state.TransferId, StringComparison.Ordinal) ||
             request.Direction != state.Direction)
@@ -3890,6 +3899,14 @@ internal static class FileTransferCoordinator
                 }
 
                 activePredecessorToSupersede = predecessor;
+
+                if (request.MissingDispatchSuccessorGeneration !=
+                    predecessor.Authority.MissingDispatchSuccessorGeneration)
+                {
+                    return Decision(
+                        RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
+                        "retry_dispatch_active_successor_generation_mismatch");
+                }
             }
             else
             {
@@ -3909,6 +3926,22 @@ internal static class FileTransferCoordinator
                     return Decision(
                         RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
                         "retry_dispatch_successor_attempt_mismatch");
+                }
+
+                if (request.MissingDispatchSuccessorGeneration !=
+                    predecessor.Authority.MissingDispatchSuccessorGeneration + 1)
+                {
+                    return Decision(
+                        RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
+                        "retry_dispatch_missing_successor_generation_mismatch");
+                }
+
+                if (request.MissingDispatchSuccessorGeneration >
+                    RuntimeUnlockRetryMissingDispatchSuccessorLimit)
+                {
+                    return Decision(
+                        RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
+                        "retry_dispatch_missing_successor_limit_exhausted");
                 }
 
                 if (predecessor.OfferGeneration > 0 &&
@@ -3937,6 +3970,12 @@ internal static class FileTransferCoordinator
             return Decision(
                 RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
                 "retry_dispatch_predecessor_missing");
+        }
+        else if (request.MissingDispatchSuccessorGeneration != 0)
+        {
+            return Decision(
+                RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
+                "retry_dispatch_initial_missing_successor_generation_mismatch");
         }
 
         var releaseValid = currentContract is not null
@@ -3991,6 +4030,7 @@ internal static class FileTransferCoordinator
             request.RecoveryContractGeneration,
             request.RetiredOfferGeneration,
             request.DispatchAttemptGeneration,
+            request.MissingDispatchSuccessorGeneration,
             NormalizeReason(request.RetryReason),
             NormalizeReason(request.RecoveryReason),
             authorizedReleaseKind,
@@ -4225,6 +4265,8 @@ internal static class FileTransferCoordinator
         if (authority.RecoveryContractGeneration != request.RecoveryContractGeneration ||
             authority.RetiredOfferGeneration != request.RetiredOfferGeneration ||
             authority.DispatchAttemptGeneration != request.DispatchAttemptGeneration ||
+            authority.MissingDispatchSuccessorGeneration !=
+                request.MissingDispatchSuccessorGeneration ||
             authority.PredecessorAuthorityId != request.PredecessorAuthorityId)
         {
             return RuntimeUnlockRetryDispatchMismatch("request_attempt", out mismatchField);

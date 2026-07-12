@@ -5879,6 +5879,16 @@ function Get-Phase5FailureClass {
     }
 
     foreach ($line in $failureLines) {
+        if ($line.IndexOf('runtime_unlock_retry_dispatch_grant_bypassed_by_retry_budget', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'runtime_unlock_retry_dispatch_grant_bypassed_by_retry_budget'
+        }
+
+        if ($line.IndexOf('runtime_unlock_retry_dispatch_contract_unsettled', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'runtime_unlock_retry_dispatch_contract_unsettled'
+        }
+    }
+
+    foreach ($line in $failureLines) {
         if ($line.IndexOf('runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             return 'runtime_unlock_retry_dispatch_successor_missing_after_missing_dispatch'
         }
