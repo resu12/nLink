@@ -12736,7 +12736,23 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 RouteToken = FileTransferRouteResolver.RegularNknV4FastToken,
                 ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
                 LiveRouteEpoch = 1,
+                TransferLegGeneration = 1,
                 AuthorityReason = "regular_v4_startup_local_only_no_ack",
+                BridgeRecoveryAuthority = new FileTransferBridgeRecoveryAuthority(
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Outbound,
+                    FileTransferRouteResolver.RegularNknV4FastToken,
+                    FileTransferProtocol.ProtocolVersionV4,
+                    LiveRouteEpoch: 1,
+                    RuntimeGeneration: 1,
+                    TerminalGeneration: 0,
+                    TransferLegGeneration: 1,
+                    TransportEpoch: 0,
+                    BridgeRecoveryGeneration: 0,
+                    BridgeDecisionGeneration: 1,
+                    RecoveryKind: "ReceiveRecoveryRequest",
+                    Reason: "session_liveness_timeout_pending"),
             };
             InvokePrivateMethod(
                 host,
@@ -14958,7 +14974,23 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 RouteToken = FileTransferRouteResolver.RegularNknV4FastToken,
                 ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
                 LiveRouteEpoch = 1,
+                TransferLegGeneration = 1,
                 AuthorityReason = "regular_v4_startup_local_only_no_ack",
+                BridgeRecoveryAuthority = new FileTransferBridgeRecoveryAuthority(
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Outbound,
+                    FileTransferRouteResolver.RegularNknV4FastToken,
+                    FileTransferProtocol.ProtocolVersionV4,
+                    LiveRouteEpoch: 1,
+                    RuntimeGeneration: 1,
+                    TerminalGeneration: 0,
+                    TransferLegGeneration: 1,
+                    TransportEpoch: 0,
+                    BridgeRecoveryGeneration: 0,
+                    BridgeDecisionGeneration: 1,
+                    RecoveryKind: "ReceiveRecoveryRequest",
+                    Reason: "session_liveness_timeout_pending"),
             };
             InvokePrivateMethod(
                 host,
@@ -27773,6 +27805,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
         RuntimeUnlockRetryDispatchContract? coordinatorContract = null;
         RuntimeUnlockRetryDispatchSettlementReport? lastSettlement = null;
         RuntimeUnlockRegularV4RecoverySettlementReport? lastRegularV4Handoff = null;
+        RuntimeUnlockRegularV4RecoveryLifecycleReport? lastRegularV4Lifecycle = null;
         var bridge = Assert.IsAssignableFrom<IRuntimeUnlockRetryDispatchAuthorityBridge>(transport);
 
         FileTransferCoordinatorState CreateCoordinatorState(
@@ -27947,6 +27980,80 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
         if (installSettlementObserver)
         {
+            bridge.RuntimeUnlockRegularV4RecoveryLifecycleReported += (_, args) =>
+            {
+                var authority = args.Report.Authority;
+                if (coordinatorState is null)
+                {
+                    var retryState = typeof(NknSignalingTransport).GetField(
+                        "runtimeUnlockRecoveryRetryState",
+                        BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(transport);
+                    var publication = retryState?.GetType()
+                        .GetProperty("SourcePublicationAuthority")?
+                        .GetValue(retryState) as FileTransferRoutePublicationAuthority ??
+                        new FileTransferRoutePublicationAuthority(
+                        authority.SessionId,
+                        authority.TransferId,
+                        authority.Direction,
+                        authority.RouteToken,
+                        authority.ProtocolVersion,
+                        authority.LiveRouteEpoch,
+                        authority.RuntimeGeneration,
+                        authority.TerminalGeneration,
+                        authority.TransferLegGeneration,
+                        RoutePublicationGeneration: 1,
+                        RouteCommitGeneration: null,
+                        FileTransferRouteResolver.FileTunaV4Token,
+                        FileTransferProtocol.ProtocolVersionV4,
+                        FileTransferTransportKind.Tuna,
+                        FileTransferCoordinatorActionKind.RoutePublication.ToString(),
+                        "test_lifecycle_bootstrap");
+                    coordinatorState = CreateCoordinatorState(
+                        new RuntimeUnlockRetryDispatchAuthorityRequest(
+                            authority.SessionId,
+                            authority.TransferId,
+                            authority.Direction,
+                            publication,
+                            RecoveryContractGeneration: 1,
+                            RetiredOfferGeneration: 0,
+                            DispatchAttemptGeneration: 1,
+                            RetryReason: "runtime_unlock_offer_send_not_observed",
+                            RecoveryReason: "regular_v4_recovery_lifecycle",
+                            args.Report.RegularV4LivenessGeneration,
+                            authority.BridgeDecisionGeneration));
+                }
+
+                if (lastRegularV4Lifecycle is null &&
+                    coordinatorState.CurrentRecoveryLivenessLease is null &&
+                    coordinatorState.LastRetiredRecoveryLivenessLease is { } lease)
+                {
+                    coordinatorState = coordinatorState with
+                    {
+                        CurrentRecoveryLivenessLease = lease with
+                        {
+                            State = RecoveryLivenessLeaseState.Active,
+                        },
+                        LastRetiredRecoveryLivenessLease = null,
+                    };
+                }
+
+                var lifecycleDecision =
+                    FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoveryLifecycle(
+                        coordinatorState,
+                        lastRegularV4Lifecycle,
+                        args.Report);
+                coordinatorState = lifecycleDecision.State;
+                if (lifecycleDecision.Status ==
+                    RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Accepted)
+                {
+                    lastRegularV4Lifecycle = args.Report;
+                }
+
+                Assert.True(
+                    bridge.ObserveRuntimeUnlockRegularV4RecoveryLifecycleDecision(lifecycleDecision),
+                    lifecycleDecision.Reason);
+            };
+
             bridge.RuntimeUnlockRetryDispatchSettlementReported += (_, args) =>
             {
                 Assert.NotNull(coordinatorState);

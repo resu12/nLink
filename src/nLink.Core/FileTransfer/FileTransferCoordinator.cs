@@ -597,7 +597,8 @@ internal sealed record FileTransferCoordinatorState(
     RuntimeUnlockRetryDispatchSettlementReport? LastRuntimeUnlockRetryDispatchSettlement = null,
     RuntimeUnlockRegularV4RecoverySettlementReport? LastRuntimeUnlockRegularV4RecoverySettlement = null,
     FileTransferRegularV4FrontierRepairSettlement? LastCoordinatorIssuedRegularV4RecoverySettlement = null,
-    bool RuntimeUnlockRegularV4RecoverySettlementAvailable = false)
+    bool RuntimeUnlockRegularV4RecoverySettlementAvailable = false,
+    RuntimeUnlockRegularV4RecoveryLifecycleReport? LastRuntimeUnlockRegularV4RecoveryLifecycle = null)
 {
     public FileTransferRouteRuntimeDescriptor RouteRuntime => RouteSelection.RuntimeDescriptor;
 }
@@ -4432,6 +4433,121 @@ internal static class FileTransferCoordinator
             acceptedState);
     }
 
+    internal static RuntimeUnlockRegularV4RecoveryLifecycleDecision ObserveRuntimeUnlockRegularV4RecoveryLifecycle(
+        FileTransferCoordinatorState state,
+        RuntimeUnlockRegularV4RecoveryLifecycleReport? lastLifecycle,
+        RuntimeUnlockRegularV4RecoveryLifecycleReport report)
+    {
+        RuntimeUnlockRegularV4RecoveryLifecycleDecision Decision(
+            RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus status,
+            string reason,
+            FileTransferCoordinatorState? nextState = null)
+            => new(status, reason, report)
+            {
+                State = nextState ?? state,
+            };
+
+        if (report.IsDefault)
+        {
+            return Decision(
+                RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Rejected,
+                "regular_v4_recovery_lifecycle_report_missing");
+        }
+
+        var authority = report.Authority;
+        if (!string.Equals(authority.SessionId, state.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(authority.TransferId, state.TransferId, StringComparison.Ordinal) ||
+            authority.Direction != state.Direction)
+        {
+            return Decision(
+                RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Rejected,
+                "regular_v4_recovery_lifecycle_identity_mismatch");
+        }
+
+        var retained = state.LastRuntimeUnlockRegularV4RecoveryLifecycle ?? lastLifecycle;
+        if (retained is { } prior)
+        {
+            return prior == report
+                ? Decision(
+                    RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Idempotent,
+                    "regular_v4_recovery_lifecycle_duplicate")
+                : Decision(
+                    RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Rejected,
+                    "regular_v4_recovery_lifecycle_final_disposition_conflict");
+        }
+
+        if (state.IsTerminal)
+        {
+            return Decision(
+                RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Rejected,
+                "terminal_state");
+        }
+
+        if (!string.Equals(report.Reason, NormalizeReason(report.Reason), StringComparison.Ordinal))
+        {
+            return Decision(
+                RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Rejected,
+                "regular_v4_recovery_lifecycle_reason_not_normalized");
+        }
+
+        if (state.RouteSelection.Route != FileTransferRoute.RegularNknV4Fast ||
+            state.RouteSelection.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4 ||
+            state.CurrentRuntimeOwner is not { } owner ||
+            state.CurrentLeg is not { } leg ||
+            state.CurrentBridgeRecoveryDecision is not { Accepted: true } bridgeDecision ||
+            !string.Equals(authority.RouteToken, state.RouteSelection.TelemetryToken, StringComparison.Ordinal) ||
+            authority.ProtocolVersion != state.RouteSelection.ProtocolVersion ||
+            authority.LiveRouteEpoch != (state.CurrentLiveRouteEpoch?.EpochId ?? 0) ||
+            authority.RuntimeGeneration != owner.RuntimeGeneration ||
+            authority.TerminalGeneration != state.TerminalGeneration ||
+            authority.TransferLegGeneration != leg.Generation ||
+            authority.TransportEpoch != leg.TransportEpochId ||
+            authority.BridgeRecoveryGeneration != leg.BridgeRecoveryGeneration ||
+            authority.BridgeDecisionGeneration != bridgeDecision.BridgeDecisionGeneration)
+        {
+            return Decision(
+                RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Rejected,
+                "regular_v4_recovery_lifecycle_authority_stale");
+        }
+
+        RecoveryLivenessLease? retiredLease = null;
+        if (state.CurrentRecoveryLivenessLease is { } lease)
+        {
+            if (!RuntimeUnlockRegularV4RecoveryLeaseMatchesCurrentRuntime(state, lease))
+            {
+                return Decision(
+                    RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Rejected,
+                    "regular_v4_recovery_lifecycle_lease_stale");
+            }
+
+            retiredLease = lease with
+            {
+                State = RecoveryLivenessLeaseState.Retired,
+                Reason = NormalizeReason(report.Reason),
+            };
+        }
+        else if (state.LastRecoveryLivenessLeaseGeneration > 0)
+        {
+            return Decision(
+                RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Rejected,
+                "regular_v4_recovery_lifecycle_lease_missing");
+        }
+
+        var acceptedState = state with
+        {
+            CurrentRecoveryLivenessLease = null,
+            LastRetiredRecoveryLivenessLease = retiredLease ?? state.LastRetiredRecoveryLivenessLease,
+            LastRecoveryLivenessLeaseGeneration = retiredLease is { } retired
+                ? Math.Max(state.LastRecoveryLivenessLeaseGeneration, retired.LeaseGeneration)
+                : state.LastRecoveryLivenessLeaseGeneration,
+            LastRuntimeUnlockRegularV4RecoveryLifecycle = report,
+        };
+        return Decision(
+            RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Accepted,
+            "regular_v4_recovery_lifecycle_accepted",
+            acceptedState);
+    }
+
     private static bool TryValidateRuntimeUnlockRegularV4RecoverySettlementTuple(
         FileTransferCoordinatorState state,
         RuntimeUnlockRegularV4RecoverySettlementReport report,
@@ -4457,10 +4573,13 @@ internal static class FileTransferCoordinator
             return true;
         }
 
-        var lease = state.CurrentRecoveryLivenessLease ?? state.LastRetiredRecoveryLivenessLease;
-        if (lease is not { } recoveryLease ||
-            recoveryLease.LeaseGeneration != livenessGeneration ||
-            !RuntimeUnlockRegularV4RecoveryLeaseMatchesCurrentRuntime(state, recoveryLease))
+        var lifecycle = state.LastRuntimeUnlockRegularV4RecoveryLifecycle;
+        if (lifecycle is not { } acceptedLifecycle ||
+            acceptedLifecycle.RegularV4LivenessGeneration != livenessGeneration ||
+            acceptedLifecycle.Authority.BridgeDecisionGeneration != bridgeDecisionGeneration ||
+            state.CurrentRecoveryLivenessLease is not null ||
+            (state.LastRetiredRecoveryLivenessLease is { } recoveryLease &&
+             !RuntimeUnlockRegularV4RecoveryLeaseMatchesCurrentRuntime(state, recoveryLease)))
         {
             rejectionReason = "regular_v4_recovery_settlement_liveness_generation_stale";
             return false;
@@ -6342,6 +6461,10 @@ internal static class FileTransferCoordinator
                         kind == FileTransferCoordinatorActionKind.RecoveryLivenessLeaseBegin
                             ? null
                             : next.LastRuntimeUnlockRegularV4RecoverySettlement,
+                    LastRuntimeUnlockRegularV4RecoveryLifecycle =
+                        kind == FileTransferCoordinatorActionKind.RecoveryLivenessLeaseBegin
+                            ? null
+                            : next.LastRuntimeUnlockRegularV4RecoveryLifecycle,
                     RuntimeUnlockRegularV4RecoverySettlementAvailable =
                         kind == FileTransferCoordinatorActionKind.RecoveryLivenessLeaseBegin
                             ? false

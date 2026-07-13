@@ -46,6 +46,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private static readonly TimeSpan ScreenShareBridgeLogInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan BridgeTrafficLogInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan ReceiveStallRecoveryCooldown = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan ReceiveStallRecoveryAttemptBudget = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan ReceiveStallActiveFileTransferExtendedRecoveryCooldown = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan ReceiveStallActiveFileTransferUnprovenRecoveryCooldown = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan ActiveFileTransferRecoveryTombstoneTtl = TimeSpan.FromSeconds(90);
@@ -79,6 +80,28 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         MaxDelay: TimeSpan.FromSeconds(16),
         JitterRatio: 0d);
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> IdentityUsageLeases = new(StringComparer.OrdinalIgnoreCase);
+
+    internal static async Task RunBoundedReceiveStallRecoveryConnectAsync(
+        Func<CancellationToken, Task> connectAsync,
+        TimeSpan attemptBudget)
+    {
+        ArgumentNullException.ThrowIfNull(connectAsync);
+        if (attemptBudget <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(attemptBudget));
+        }
+
+        using var recoveryBudget = new CancellationTokenSource(attemptBudget);
+        try
+        {
+            await connectAsync(recoveryBudget.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (recoveryBudget.IsCancellationRequested)
+        {
+            throw new TimeoutException(
+                $"Receive-stall recovery exceeded its {attemptBudget.TotalMilliseconds:0} ms budget.");
+        }
+    }
 
     private readonly object gate = new();
     private readonly NknIdentity identity;
@@ -4975,7 +4998,10 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 Interlocked.Exchange(ref receiveStallRecoveryConnectActive, 1);
                 try
                 {
-                    await ConnectAsync(CancellationToken.None).ConfigureAwait(false);
+                    await RunBoundedReceiveStallRecoveryConnectAsync(
+                            ConnectAsync,
+                            ReceiveStallRecoveryAttemptBudget)
+                        .ConfigureAwait(false);
                 }
                 finally
                 {

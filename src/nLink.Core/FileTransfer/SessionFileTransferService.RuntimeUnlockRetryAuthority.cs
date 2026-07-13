@@ -136,6 +136,110 @@ public sealed partial class SessionFileTransferService
         bridge.ObserveRuntimeUnlockRegularV4RecoverySettlementDecision(resolvedDecision);
     }
 
+    private void OnRuntimeUnlockRegularV4RecoveryLifecycleReported(
+        object? sender,
+        RuntimeUnlockRegularV4RecoveryLifecycleReportedEventArgs args)
+    {
+        if (sender is not IRuntimeUnlockRetryDispatchAuthorityBridge bridge)
+        {
+            return;
+        }
+
+        RuntimeUnlockRegularV4RecoveryLifecycleDecision? decision = null;
+        lock (gate)
+        {
+            var report = args.Report;
+            var bridgeIsCurrentTransport =
+                transport is IRuntimeUnlockRetryDispatchAuthorityBridge currentBridge &&
+                ReferenceEquals(currentBridge, bridge);
+            if (!report.IsDefault &&
+                bridgeIsCurrentTransport &&
+                report.Authority.Direction == FileTransferDirection.Outbound &&
+                outboundTransfer is { } outbound &&
+                string.Equals(report.Authority.SessionId, outbound.SessionId, StringComparison.Ordinal) &&
+                string.Equals(report.Authority.TransferId, outbound.TransferId, StringComparison.Ordinal))
+            {
+                decision = ObserveRuntimeUnlockRegularV4RecoveryLifecycleLocked(outbound, report);
+            }
+            else if (!report.IsDefault &&
+                     bridgeIsCurrentTransport &&
+                     report.Authority.Direction == FileTransferDirection.Inbound &&
+                     inboundTransfer is { } inbound &&
+                     string.Equals(report.Authority.SessionId, inbound.SessionId, StringComparison.Ordinal) &&
+                     string.Equals(report.Authority.TransferId, inbound.TransferId, StringComparison.Ordinal))
+            {
+                decision = ObserveRuntimeUnlockRegularV4RecoveryLifecycleLocked(inbound, report);
+            }
+            else if (outboundTransfer is { } rejectionOutbound)
+            {
+                decision = new RuntimeUnlockRegularV4RecoveryLifecycleDecision(
+                    RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Rejected,
+                    "regular_v4_recovery_lifecycle_transfer_missing",
+                    report)
+                {
+                    State = CreateCoordinatorStateLocked(rejectionOutbound),
+                };
+            }
+            else if (inboundTransfer is { } rejectionInbound)
+            {
+                decision = new RuntimeUnlockRegularV4RecoveryLifecycleDecision(
+                    RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Rejected,
+                    "regular_v4_recovery_lifecycle_transfer_missing",
+                    report)
+                {
+                    State = CreateCoordinatorStateLocked(rejectionInbound),
+                };
+            }
+        }
+
+        if (decision is { } resolvedDecision)
+        {
+            bridge.ObserveRuntimeUnlockRegularV4RecoveryLifecycleDecision(resolvedDecision);
+        }
+    }
+
+    private static RuntimeUnlockRegularV4RecoveryLifecycleDecision
+        ObserveRuntimeUnlockRegularV4RecoveryLifecycleLocked(
+            OutboundTransferContext context,
+            RuntimeUnlockRegularV4RecoveryLifecycleReport report)
+    {
+        var decision = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoveryLifecycle(
+            CreateCoordinatorStateLocked(context),
+            context.LastRuntimeUnlockRegularV4RecoveryLifecycle,
+            report);
+        if (decision.State is not null)
+        {
+            context.CurrentRecoveryLivenessLease = decision.State.CurrentRecoveryLivenessLease;
+            context.LastRetiredRecoveryLivenessLease = decision.State.LastRetiredRecoveryLivenessLease;
+            context.LastRecoveryLivenessLeaseGeneration = decision.State.LastRecoveryLivenessLeaseGeneration;
+            context.LastRuntimeUnlockRegularV4RecoveryLifecycle =
+                decision.State.LastRuntimeUnlockRegularV4RecoveryLifecycle;
+        }
+
+        return decision;
+    }
+
+    private static RuntimeUnlockRegularV4RecoveryLifecycleDecision
+        ObserveRuntimeUnlockRegularV4RecoveryLifecycleLocked(
+            InboundTransferContext context,
+            RuntimeUnlockRegularV4RecoveryLifecycleReport report)
+    {
+        var decision = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoveryLifecycle(
+            CreateCoordinatorStateLocked(context),
+            context.LastRuntimeUnlockRegularV4RecoveryLifecycle,
+            report);
+        if (decision.State is not null)
+        {
+            context.CurrentRecoveryLivenessLease = decision.State.CurrentRecoveryLivenessLease;
+            context.LastRetiredRecoveryLivenessLease = decision.State.LastRetiredRecoveryLivenessLease;
+            context.LastRecoveryLivenessLeaseGeneration = decision.State.LastRecoveryLivenessLeaseGeneration;
+            context.LastRuntimeUnlockRegularV4RecoveryLifecycle =
+                decision.State.LastRuntimeUnlockRegularV4RecoveryLifecycle;
+        }
+
+        return decision;
+    }
+
     private static RuntimeUnlockRegularV4RecoverySettlementDecision
         ObserveRuntimeUnlockRegularV4RecoverySettlementLocked(
             OutboundTransferContext context,

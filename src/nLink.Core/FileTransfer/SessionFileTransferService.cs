@@ -686,6 +686,8 @@ public sealed partial class SessionFileTransferService : IDisposable
                 OnRuntimeUnlockRetryDispatchSettlementReported;
             retryDispatchBridge.RuntimeUnlockRegularV4RecoverySettlementReported +=
                 OnRuntimeUnlockRegularV4RecoverySettlementReported;
+            retryDispatchBridge.RuntimeUnlockRegularV4RecoveryLifecycleReported +=
+                OnRuntimeUnlockRegularV4RecoveryLifecycleReported;
         }
 
         if (transport is ISignalingTransport lifecycleTransport)
@@ -5200,7 +5202,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.LastRuntimeUnlockRetryDispatchSettlement,
             context.LastRuntimeUnlockRegularV4RecoverySettlement,
             context.LastCoordinatorIssuedRegularV4RecoverySettlement,
-            context.RuntimeUnlockRegularV4RecoverySettlementAvailable);
+            context.RuntimeUnlockRegularV4RecoverySettlementAvailable,
+            context.LastRuntimeUnlockRegularV4RecoveryLifecycle);
 
     private static void ApplyCoordinatorDecisionToContextLocked(
         OutboundTransferContext context,
@@ -5263,6 +5266,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             decision.State.LastCoordinatorIssuedRegularV4RecoverySettlement;
         context.RuntimeUnlockRegularV4RecoverySettlementAvailable =
             decision.State.RuntimeUnlockRegularV4RecoverySettlementAvailable;
+        context.LastRuntimeUnlockRegularV4RecoveryLifecycle =
+            decision.State.LastRuntimeUnlockRegularV4RecoveryLifecycle;
         var legHistory = decision.State.LegHistory.ToList();
         context.TransferLegHistory.Clear();
         context.TransferLegHistory.AddRange(legHistory);
@@ -5334,6 +5339,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             decision.State.LastCoordinatorIssuedRegularV4RecoverySettlement;
         context.RuntimeUnlockRegularV4RecoverySettlementAvailable =
             decision.State.RuntimeUnlockRegularV4RecoverySettlementAvailable;
+        context.LastRuntimeUnlockRegularV4RecoveryLifecycle =
+            decision.State.LastRuntimeUnlockRegularV4RecoveryLifecycle;
         var legHistory = decision.State.LegHistory.ToList();
         context.TransferLegHistory.Clear();
         context.TransferLegHistory.AddRange(legHistory);
@@ -5439,6 +5446,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             decision.State.LastCoordinatorIssuedRegularV4RecoverySettlement;
         context.RuntimeUnlockRegularV4RecoverySettlementAvailable =
             decision.State.RuntimeUnlockRegularV4RecoverySettlementAvailable;
+        context.LastRuntimeUnlockRegularV4RecoveryLifecycle =
+            decision.State.LastRuntimeUnlockRegularV4RecoveryLifecycle;
     }
 
     private static void ApplyCoordinatorActionDecisionToContextLocked(
@@ -5486,6 +5495,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             decision.State.LastCoordinatorIssuedRegularV4RecoverySettlement;
         context.RuntimeUnlockRegularV4RecoverySettlementAvailable =
             decision.State.RuntimeUnlockRegularV4RecoverySettlementAvailable;
+        context.LastRuntimeUnlockRegularV4RecoveryLifecycle =
+            decision.State.LastRuntimeUnlockRegularV4RecoveryLifecycle;
     }
 
     private static RuntimeUnlockRetryDispatchContract? ReconcileRuntimeUnlockRetryDispatchContract(
@@ -5577,7 +5588,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.LastRuntimeUnlockRetryDispatchSettlement,
             context.LastRuntimeUnlockRegularV4RecoverySettlement,
             context.LastCoordinatorIssuedRegularV4RecoverySettlement,
-            context.RuntimeUnlockRegularV4RecoverySettlementAvailable);
+            context.RuntimeUnlockRegularV4RecoverySettlementAvailable,
+            context.LastRuntimeUnlockRegularV4RecoveryLifecycle);
 
     private static bool TryCaptureRuntimeOwnerLocked(
         OutboundTransferContext context,
@@ -17731,6 +17743,8 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public RuntimeUnlockRegularV4RecoverySettlementReport? LastRuntimeUnlockRegularV4RecoverySettlement { get; set; }
 
+        public RuntimeUnlockRegularV4RecoveryLifecycleReport? LastRuntimeUnlockRegularV4RecoveryLifecycle { get; set; }
+
         public FileTransferRegularV4FrontierRepairSettlement? LastCoordinatorIssuedRegularV4RecoverySettlement { get; set; }
 
         public bool RuntimeUnlockRegularV4RecoverySettlementAvailable { get; set; }
@@ -18704,6 +18718,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         public RuntimeUnlockRetryDispatchSettlementReport? LastRuntimeUnlockRetryDispatchSettlement { get; set; }
 
         public RuntimeUnlockRegularV4RecoverySettlementReport? LastRuntimeUnlockRegularV4RecoverySettlement { get; set; }
+
+        public RuntimeUnlockRegularV4RecoveryLifecycleReport? LastRuntimeUnlockRegularV4RecoveryLifecycle { get; set; }
 
         public FileTransferRegularV4FrontierRepairSettlement? LastCoordinatorIssuedRegularV4RecoverySettlement { get; set; }
 

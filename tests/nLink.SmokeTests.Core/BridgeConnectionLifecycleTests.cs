@@ -7300,6 +7300,26 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
     }
 
     [Fact]
+    [Trait("Category", "Contract")]
+    public async Task Bridge_ReceiveStallSoftRecoveryBudget_CancelsConnectAndNormalizesTimeout()
+    {
+        var connectTokenWasCancelable = false;
+
+        var exception = await Assert.ThrowsAsync<TimeoutException>(() =>
+            RealNknClientAdapter.RunBoundedReceiveStallRecoveryConnectAsync(
+                async cancellationToken =>
+                {
+                    connectTokenWasCancelable = cancellationToken.CanBeCanceled;
+                    await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                },
+                TimeSpan.FromMilliseconds(25)));
+
+        Assert.True(connectTokenWasCancelable);
+        Assert.Contains("Receive-stall recovery exceeded", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("25 ms budget", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Bridge_ReceiveStallRecoveryFailureWithoutActiveFileTransferDoesNotEmitExhausted()
     {
         var options = NknTransportOptions.Load();
