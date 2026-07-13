@@ -205,8 +205,10 @@ $resourceArtifacts = @()
 
 Push-Location $repoRoot
 try {
-    Invoke-Step -Name "Smoke tests (Category=Smoke)" -Action {
-        & powershell -ExecutionPolicy Bypass -File ".\tools\Test-Lanes.ps1" -Lane Smoke -Configuration Release
+    Invoke-Step -Name "Deterministic contract, analyzer, fake-acceptance, and smoke lanes" -Action {
+        & powershell -ExecutionPolicy Bypass -File ".\tools\Test-Lanes.ps1" `
+            -Lane CoreContract,FileTransferContract,FileTransferAnalyzer,FileTransferAcceptanceFake,Smoke `
+            -Configuration Release
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
 

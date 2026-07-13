@@ -8,7 +8,7 @@ Run from the repo root:
 
 ```powershell
 dotnet build .\nLink.sln -c Release -m:1 -nr:false -p:UseSharedCompilation=false
-powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane Smoke -Configuration Release
+powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane CoreContract,FileTransferContract,FileTransferAnalyzer,FileTransferAcceptanceFake,Smoke -Configuration Release
 powershell -ExecutionPolicy Bypass -File .\tools\BetaReadiness-Check.ps1
 dotnet build-server shutdown
 ```
@@ -21,7 +21,7 @@ powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane GuiSmoke -
 
 Expected outcome:
 - build passes
-- smoke tests pass
+- deterministic contract, analyzer, fake-acceptance, and compatibility smoke lanes pass
 - GUI smoke passes when run
 - BetaReadiness reports `PASS`
 - reliability and packaging gates pass

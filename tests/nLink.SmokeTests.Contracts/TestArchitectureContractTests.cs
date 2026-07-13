@@ -71,6 +71,19 @@ public sealed class TestArchitectureContractTests
         "ScreenShare",
         "RemoteControl",
         "Contracts",
+        "CoreContract",
+        "FileTransferContract",
+        "FileTransferCoordinatorContract",
+        "FileTransferInfraContract",
+        "FileTransferNknTransportContract",
+        "FileTransferCoreRuntimeContract",
+        "FileTransferAnalyzer",
+        "FileTransferAnalyzerAuthority",
+        "FileTransferAnalyzerRouteLaw",
+        "FileTransferAnalyzerFallback",
+        "FileTransferAnalyzerRuntimeUnlock",
+        "FileTransferAnalyzerV4Transport",
+        "FileTransferAcceptanceFake",
         "Smoke",
         "NonGui",
         "GuiSmoke",
@@ -313,6 +326,48 @@ public sealed class TestArchitectureContractTests
         var expected = RequiredTestLanes.OrderBy(lane => lane, StringComparer.Ordinal).ToArray();
         Assert.Equal(expected, ExtractLaneScriptLanes(scriptText));
         Assert.Equal(expected, ExtractLaneDocLanes(docsText));
+    }
+
+    [Fact]
+    public void FileTransferLanes_OwnEveryAnalyzerAndAcceptanceSuite_AndSmokeExcludesCore()
+    {
+        var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var scriptText = File.ReadAllText(Path.Combine(repoRoot, "tools", "Test-Lanes.ps1"));
+        var opsText = File.ReadAllText(Path.Combine(repoRoot, "tools", "FileTransfer-Ops.ps1"));
+
+        foreach (var analyzerSuite in new[]
+                 {
+                     "RetainedAuthorityProof",
+                     "RetainedRouteLaw",
+                     "RetainedFallback",
+                     "RetainedRuntimeUnlock",
+                     "RetainedV4Transport"
+                 })
+        {
+            Assert.Contains($"OpsSuite={analyzerSuite}", scriptText, StringComparison.Ordinal);
+            Assert.Contains($"OpsSuite={analyzerSuite}", opsText, StringComparison.Ordinal);
+        }
+
+        foreach (var acceptanceSuite in new[]
+                 {
+                     "ScriptSurface",
+                     "GuiHarness",
+                     "AcceptancePhase4",
+                     "AcceptancePhase5Fast",
+                     "AcceptancePhase5Full",
+                     "NknSoakAndBaseline"
+                 })
+        {
+            Assert.Contains($"OpsSuite={acceptanceSuite}", scriptText, StringComparison.Ordinal);
+            Assert.Contains($"OpsSuite={acceptanceSuite}", opsText, StringComparison.Ordinal);
+        }
+
+        var smokeCase = Regex.Match(
+            scriptText,
+            "\\\"Smoke\\\"\\s*\\{(?<body>.*?)^\\s*\\}",
+            RegexOptions.Multiline | RegexOptions.Singleline);
+        Assert.True(smokeCase.Success, "Expected the Smoke lane case.");
+        Assert.DoesNotContain("nLink.SmokeTests.Core", smokeCase.Groups["body"].Value, StringComparison.Ordinal);
     }
 
     [Fact]

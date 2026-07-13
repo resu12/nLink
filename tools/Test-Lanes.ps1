@@ -17,6 +17,19 @@ $validLanes = @(
     "ScreenShare",
     "RemoteControl",
     "Contracts",
+    "CoreContract",
+    "FileTransferContract",
+    "FileTransferCoordinatorContract",
+    "FileTransferInfraContract",
+    "FileTransferNknTransportContract",
+    "FileTransferCoreRuntimeContract",
+    "FileTransferAnalyzer",
+    "FileTransferAnalyzerAuthority",
+    "FileTransferAnalyzerRouteLaw",
+    "FileTransferAnalyzerFallback",
+    "FileTransferAnalyzerRuntimeUnlock",
+    "FileTransferAnalyzerV4Transport",
+    "FileTransferAcceptanceFake",
     "Smoke",
     "NonGui",
     "GuiSmoke",
@@ -58,6 +71,7 @@ function Invoke-DotnetTest {
     param(
         [Parameter(Mandatory = $true)][string]$Target,
         [string]$Filter = "",
+        [string]$ResultSuffix = "",
         [switch]$EnableGuiSmoke
     )
 
@@ -70,7 +84,14 @@ function Invoke-DotnetTest {
     }
     foreach ($loggerValue in $Logger) {
         if (-not [string]::IsNullOrWhiteSpace($loggerValue)) {
-            $argsList += @("--logger", $loggerValue)
+            $effectiveLoggerValue = $loggerValue
+            if (-not [string]::IsNullOrWhiteSpace($ResultSuffix)) {
+                $effectiveLoggerValue = [regex]::Replace(
+                    $loggerValue,
+                    "LogFilePrefix=([^;]+)",
+                    { param($match) "LogFilePrefix=$($match.Groups[1].Value)-$ResultSuffix" })
+            }
+            $argsList += @("--logger", $effectiveLoggerValue)
         }
     }
 
@@ -164,8 +185,101 @@ function Invoke-TestLane {
         "Contracts" {
             Invoke-DotnetTest -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Contracts")
         }
+        "CoreContract" {
+            Invoke-DotnetTest `
+                -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
+                -Filter "Category=Smoke&FullyQualifiedName!~NknAccelerationTransportTests&FullyQualifiedName!~NknFileTransferTransportTests&FullyQualifiedName!~SessionFileTransferRuntimeTests&OpsSuite!=ScriptSurface&OpsSuite!=GuiHarness&OpsSuite!=RetainedAuthorityProof&OpsSuite!=RetainedRouteLaw&OpsSuite!=RetainedFallback&OpsSuite!=RetainedRuntimeUnlock&OpsSuite!=RetainedV4Transport&OpsSuite!=AcceptancePhase4&OpsSuite!=AcceptancePhase5Fast&OpsSuite!=AcceptancePhase5Full&OpsSuite!=NknSoakAndBaseline&FullyQualifiedName!~FileTransferSoakRunnerTests"
+        }
+        "FileTransferContract" {
+            foreach ($contractLane in @(
+                "FileTransferCoordinatorContract",
+                "FileTransferInfraContract",
+                "FileTransferNknTransportContract",
+                "FileTransferCoreRuntimeContract"
+            )) {
+                Invoke-TestLane -RepoRoot $RepoRoot -Name $contractLane
+            }
+        }
+        "FileTransferCoordinatorContract" {
+            Invoke-DotnetTest `
+                -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
+                -Filter "FullyQualifiedName~FileTransferCoordinatorTests" `
+                -ResultSuffix "coordinator"
+        }
+        "FileTransferInfraContract" {
+            Invoke-DotnetTest `
+                -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
+                -Filter "FullyQualifiedName~NknAccelerationTransportTests" `
+                -ResultSuffix "infra"
+        }
+        "FileTransferNknTransportContract" {
+            Invoke-DotnetTest `
+                -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
+                -Filter "FullyQualifiedName~NknFileTransferTransportTests" `
+                -ResultSuffix "nkn-transport"
+        }
+        "FileTransferCoreRuntimeContract" {
+            Invoke-DotnetTest `
+                -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
+                -Filter "FullyQualifiedName~SessionFileTransferRuntimeUnlockRetryAuthorityTests|FullyQualifiedName~SessionFileTransferRuntimeTests" `
+                -ResultSuffix "core-runtime"
+        }
+        "FileTransferAnalyzer" {
+            foreach ($analyzerLane in @(
+                "FileTransferAnalyzerAuthority",
+                "FileTransferAnalyzerRouteLaw",
+                "FileTransferAnalyzerFallback",
+                "FileTransferAnalyzerRuntimeUnlock",
+                "FileTransferAnalyzerV4Transport"
+            )) {
+                Invoke-TestLane -RepoRoot $RepoRoot -Name $analyzerLane
+            }
+        }
+        "FileTransferAnalyzerAuthority" {
+            Invoke-DotnetTest `
+                -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
+                -Filter "OpsSuite=RetainedAuthorityProof" `
+                -ResultSuffix "authority"
+        }
+        "FileTransferAnalyzerRouteLaw" {
+            Invoke-DotnetTest `
+                -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
+                -Filter "OpsSuite=RetainedRouteLaw" `
+                -ResultSuffix "route-law"
+        }
+        "FileTransferAnalyzerFallback" {
+            Invoke-DotnetTest `
+                -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
+                -Filter "OpsSuite=RetainedFallback" `
+                -ResultSuffix "fallback"
+        }
+        "FileTransferAnalyzerRuntimeUnlock" {
+            Invoke-DotnetTest `
+                -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
+                -Filter "OpsSuite=RetainedRuntimeUnlock" `
+                -ResultSuffix "runtime-unlock"
+        }
+        "FileTransferAnalyzerV4Transport" {
+            Invoke-DotnetTest `
+                -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
+                -Filter "OpsSuite=RetainedV4Transport" `
+                -ResultSuffix "v4-transport"
+        }
+        "FileTransferAcceptanceFake" {
+            Invoke-DotnetTest `
+                -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
+                -Filter "OpsSuite=ScriptSurface|OpsSuite=GuiHarness|OpsSuite=AcceptancePhase4|OpsSuite=AcceptancePhase5Fast|OpsSuite=AcceptancePhase5Full|OpsSuite=NknSoakAndBaseline|FullyQualifiedName~FileTransferSoakRunnerTests"
+        }
         "Smoke" {
-            Invoke-DomainProjectsWithFilter -RepoRoot $RepoRoot -Filter "Category=Smoke"
+            Invoke-DomainProjectsWithFilter `
+                -RepoRoot $RepoRoot `
+                -Filter "Category=Smoke" `
+                -ProjectNames @(
+                    "nLink.SmokeTests.Gui",
+                    "nLink.SmokeTests.ScreenShare",
+                    "nLink.SmokeTests.RemoteControl",
+                    "nLink.SmokeTests.Contracts"
+                )
         }
         "NonGui" {
             foreach ($domainLane in @("Core", "ScreenShare", "RemoteControl", "Contracts")) {

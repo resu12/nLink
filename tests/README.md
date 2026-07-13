@@ -18,6 +18,15 @@ Use project-level runs when diagnosing a focused change:
 
 On Windows, prefer the lock-safe command shape in `docs\build-test-lock-avoidance.md`: build once, run repeated opt-in cells with `--no-build --no-restore`, and run `dotnet build-server shutdown` after long batches.
 
+Use `tools\Test-Lanes.ps1` as the scheduling authority for deterministic release subsets. Core file-transfer tests are split into runtime contracts, five independently runnable analyzer shards, and fake acceptance/wrapper contracts:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane CoreContract,FileTransferContract,FileTransferAcceptanceFake -Configuration Release
+powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane FileTransferAnalyzer -Configuration Release
+```
+
+The compatibility `Smoke` lane no longer runs the Core project. Historical Core `Category=Smoke` traits remain metadata; do not use a raw category filter as a substitute for the named lanes.
+
 The latest Phase 4 release baseline was:
 
 - Contracts: 35 passed

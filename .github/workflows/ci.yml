@@ -107,7 +107,23 @@ jobs:
             Write-Host "Bridge bundle is self-contained; node_modules is not staged."
           }
 
-      - name: Smoke tests
+      - name: Core contract tests
+        shell: powershell
+        run: .\tools\Test-Lanes.ps1 -Lane CoreContract -Configuration Release -NoBuild -Logger "trx;LogFilePrefix=core-contract-results"
+
+      - name: File-transfer runtime contract tests
+        shell: powershell
+        run: .\tools\Test-Lanes.ps1 -Lane FileTransferContract -Configuration Release -NoBuild -Logger "trx;LogFilePrefix=filetransfer-contract-results"
+
+      - name: File-transfer analyzer contract tests
+        shell: powershell
+        run: .\tools\Test-Lanes.ps1 -Lane FileTransferAnalyzer -Configuration Release -NoBuild -Logger "trx;LogFilePrefix=filetransfer-analyzer-results"
+
+      - name: File-transfer fake acceptance tests
+        shell: powershell
+        run: .\tools\Test-Lanes.ps1 -Lane FileTransferAcceptanceFake -Configuration Release -NoBuild -Logger "trx;LogFilePrefix=filetransfer-acceptance-results"
+
+      - name: Non-Core smoke compatibility tests
         shell: powershell
         run: .\tools\Test-Lanes.ps1 -Lane Smoke -Configuration Release -NoBuild -Logger "trx;LogFilePrefix=smoke-results"
 
@@ -149,12 +165,17 @@ jobs:
         shell: powershell
         run: .\build\verify-release-assets.ps1 -Version $env:NLINK_VERSION -Runtime win-x64
 
-      - name: Upload smoke test results
+      - name: Upload deterministic test results
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: smoke-test-results
-          path: '**/smoke-results*.trx'
+          name: deterministic-test-results
+          path: |
+            **/core-contract-results*.trx
+            **/filetransfer-contract-results*.trx
+            **/filetransfer-analyzer-results*.trx
+            **/filetransfer-acceptance-results*.trx
+            **/smoke-results*.trx
           if-no-files-found: ignore
 
       - name: Upload benchmark artifacts
