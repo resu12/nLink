@@ -3423,8 +3423,7 @@ public sealed partial class SessionFileTransferService
         int requestedChunkCount,
         string decisionReason,
         FileTransferAuthorityId? successorAuthorityId = null,
-        bool notifyObserver = true,
-        bool reevaluatePendingRetry = true)
+        bool notifyObserver = true)
     {
         if (contract is null)
         {
@@ -3454,7 +3453,7 @@ public sealed partial class SessionFileTransferService
             observer = transport as IFileTransferRegularV4FrontierRepairSettlementObserver;
         }
 
-        observer?.ObserveRegularV4FrontierRepairSettlement(new FileTransferRegularV4FrontierRepairSettlement(
+        var settlement = new FileTransferRegularV4FrontierRepairSettlement(
             authority.SessionId,
             authority.TransferId,
             authority.Direction,
@@ -3482,17 +3481,47 @@ public sealed partial class SessionFileTransferService
             SuccessorAuthorityId = successorAuthorityId is { IsDefault: false }
                 ? successorAuthorityId
                 : null,
-        });
+        };
 
-        if (reevaluatePendingRetry &&
-            outcome is FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved or
-            FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch or
-            FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled)
+        lock (gate)
         {
-            TryReevaluatePendingRuntimeUnlockRetryDispatchAuthority(authority, outcome, decisionReason);
+            RecordCoordinatorIssuedRegularV4RecoverySettlementLocked(settlement);
         }
 
+        observer?.ObserveRegularV4FrontierRepairSettlement(settlement);
+
         return true;
+    }
+
+    private void RecordCoordinatorIssuedRegularV4RecoverySettlementLocked(
+        FileTransferRegularV4FrontierRepairSettlement settlement)
+    {
+        if (settlement.Direction == FileTransferDirection.Outbound &&
+            outboundTransfer is { } outbound &&
+            string.Equals(outbound.SessionId, settlement.SessionId, StringComparison.Ordinal) &&
+            string.Equals(outbound.TransferId, settlement.TransferId, StringComparison.Ordinal) &&
+            outbound.CurrentRepairReplayDecision is { } outboundRepair &&
+            outboundRepair.AuthorityId == settlement.AuthorityId &&
+            outboundRepair.RepairGeneration == settlement.DecisionGeneration)
+        {
+            outbound.LastCoordinatorIssuedRegularV4RecoverySettlement = settlement;
+            outbound.LastRuntimeUnlockRegularV4RecoverySettlement = null;
+            outbound.RuntimeUnlockRegularV4RecoverySettlementAvailable = false;
+            return;
+        }
+
+        if (settlement.Direction == FileTransferDirection.Inbound &&
+            inboundTransfer is { } inbound &&
+            string.Equals(inbound.SessionId, settlement.SessionId, StringComparison.Ordinal) &&
+            string.Equals(inbound.TransferId, settlement.TransferId, StringComparison.Ordinal) &&
+            inbound.CurrentRepairReplayDecision is { } inboundRepair &&
+            inboundRepair.AuthorityId == settlement.AuthorityId &&
+            inboundRepair.RepairGeneration == settlement.DecisionGeneration)
+        {
+            inbound.LastCoordinatorIssuedRegularV4RecoverySettlement = settlement;
+            inbound.LastRuntimeUnlockRegularV4RecoverySettlement = null;
+            inbound.RuntimeUnlockRegularV4RecoverySettlementAvailable = false;
+        }
     }
 
     private void SettleAndClearRegularV4FrontierRepairContractLocked(
@@ -3532,70 +3561,6 @@ public sealed partial class SessionFileTransferService
         context.CurrentRegularV4FrontierRepairContract = null;
         context.V4RegularFrontierRepairSettledStalledContract = null;
         context.V4RegularFrontierRepairSettledStalledAuthorityId = null;
-    }
-
-    private RuntimeUnlockRetryDispatchDecisionStatus? TryReevaluatePendingRuntimeUnlockRetryDispatchAuthority(
-        FileTransferRegularV4FrontierRepairAuthority authority,
-        FileTransferRegularV4FrontierRepairSettlementOutcome outcome,
-        string trigger,
-        RuntimeUnlockRetryDispatchAuthorityRequest? expectedRequest = null)
-    {
-        IRuntimeUnlockRetryDispatchAuthorityBridge? bridge;
-        lock (gate)
-        {
-            bridge = transport as IRuntimeUnlockRetryDispatchAuthorityBridge;
-        }
-
-        if (bridge is null)
-        {
-            return null;
-        }
-
-        RuntimeUnlockRetryDispatchAuthorityRequest request;
-        if (expectedRequest is { } capturedRequest)
-        {
-            request = capturedRequest;
-        }
-        else if (!bridge.TryGetPendingRuntimeUnlockRetryDispatchAuthorityRequest(
-                     authority.SessionId,
-                     authority.TransferId,
-                     authority.Direction,
-                     out request))
-        {
-            return null;
-        }
-
-        RuntimeUnlockRetryDispatchDecision decision;
-        lock (gate)
-        {
-            if (authority.Direction == FileTransferDirection.Outbound &&
-                outboundTransfer is { } outbound &&
-                !outbound.IsTerminal &&
-                string.Equals(outbound.SessionId, authority.SessionId, StringComparison.Ordinal) &&
-                string.Equals(outbound.TransferId, authority.TransferId, StringComparison.Ordinal))
-            {
-                decision = AuthorizeRuntimeUnlockRetryDispatchLocked(outbound, request);
-            }
-            else if (authority.Direction == FileTransferDirection.Inbound &&
-                     inboundTransfer is { } inbound &&
-                     !inbound.IsTerminal &&
-                     string.Equals(inbound.SessionId, authority.SessionId, StringComparison.Ordinal) &&
-                     string.Equals(inbound.TransferId, authority.TransferId, StringComparison.Ordinal))
-            {
-                decision = AuthorizeRuntimeUnlockRetryDispatchLocked(inbound, request);
-            }
-            else
-            {
-                return null;
-            }
-        }
-
-        LocalOperationalLog.Info(
-            "FileTransferService",
-            $"event=runtime_unlock_retry_dispatch_pending_request_rechecked; session_id={FormatProtocolLogValue(authority.SessionId)}; transfer_id={FormatProtocolLogValue(authority.TransferId)}; direction={authority.Direction.ToString().ToLowerInvariant()}; release_authority_id={FormatProtocolLogValue(authority.AuthorityId.ToString())}; release_generation={authority.DecisionGeneration}; release_outcome={FormatProtocolLogValue(outcome.ToString())}; request_regular_v4_liveness_generation={request.RegularV4LivenessGeneration}; request_bridge_decision_generation={request.BridgeDecisionGeneration}; granted_authority_id={FormatProtocolLogValue(decision.Contract?.Authority.AuthorityId.ToString() ?? "(none)")}; granted_bridge_decision_generation={decision.Contract?.Authority.BridgeDecisionGeneration ?? 0}; decision_status={FormatProtocolLogValue(decision.Status.ToString())}; decision_reason={FormatProtocolLogValue(decision.Reason)}; trigger={FormatProtocolLogValue(trigger)}");
-        return bridge.ObserveRuntimeUnlockRetryDispatchDecision(decision)
-            ? decision.Status
-            : null;
     }
 
     private RuntimeUnlockRetryDispatchAuthorityRequest? GetPendingRuntimeUnlockRetryDispatchAuthorityRequest(
@@ -4867,16 +4832,8 @@ public sealed partial class SessionFileTransferService
                             pendingReleaseContract,
                             FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch,
                             repairSend.RequestedChunkCount,
-                            "regular_v4_frontier_repair_missing_dispatch",
-                            reevaluatePendingRetry: false);
-                        var arbitrationStatus = TryReevaluatePendingRuntimeUnlockRetryDispatchAuthority(
-                            pendingReleaseContract.Authority,
-                            FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch,
-                            "regular_v4_frontier_repair_missing_dispatch",
-                            pendingRetryRequest);
-                        pendingRuntimeUnlockRetryDispatch =
-                            arbitrationStatus is RuntimeUnlockRetryDispatchDecisionStatus.Granted or
-                                RuntimeUnlockRetryDispatchDecisionStatus.Held;
+                            "regular_v4_frontier_repair_missing_dispatch");
+                        pendingRuntimeUnlockRetryDispatch = requeueSettlementObserved;
                     }
 
                     var deferredEventName = IsFileTunaV4PostTunaRecoveryActiveLocked(context)

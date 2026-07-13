@@ -1130,6 +1130,7 @@ public sealed class FileTransferCoordinatorTests
             FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
 
         Assert.True(granted.Granted);
+        Assert.False(granted.State.RuntimeUnlockRegularV4RecoverySettlementAvailable);
         Assert.Equal(FileTransferRoute.FileTunaV4, granted.Contract!.Authority.TargetRoute);
         Assert.Equal(FileTransferProtocol.ProtocolVersionV4, granted.Contract.Authority.TargetProtocolVersion);
         Assert.Equal(FileTransferTransportKind.Tuna, granted.Contract.Authority.TargetTransport);
@@ -1160,6 +1161,354 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void RuntimeUnlockRetryDispatchAuthority_RequiresAcceptedRegularV4RecoverySettlementConsumption()
+    {
+        var (correlatedState, request, release) = AuthorizeRegularRuntimeUnlockRetryDispatchSource();
+        var report = Assert.IsType<RuntimeUnlockRegularV4RecoverySettlementReport>(
+            correlatedState.LastRuntimeUnlockRegularV4RecoverySettlement);
+        var rawSettlementState = correlatedState with
+        {
+            LastRuntimeUnlockRegularV4RecoverySettlement = null,
+            RuntimeUnlockRegularV4RecoverySettlementAvailable = false,
+        };
+
+        var held = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            rawSettlementState,
+            request,
+            null,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Held, held.Status);
+        Assert.Equal("regular_v4_recovery_settlement_consumption_pending", held.Reason);
+
+        var accepted = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoverySettlement(
+            rawSettlementState,
+            null,
+            report);
+        Assert.Equal(
+            RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Accepted,
+            accepted.Status);
+        Assert.Equal(report, accepted.State.LastRuntimeUnlockRegularV4RecoverySettlement);
+
+        var granted = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            accepted.State,
+            request,
+            null,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+        Assert.True(granted.Granted);
+        Assert.Equal(0, request.RegularV4LivenessGeneration);
+        Assert.False(granted.State.RuntimeUnlockRegularV4RecoverySettlementAvailable);
+        Assert.Equal(report.RegularV4LivenessGeneration, request.RegularV4LivenessGeneration);
+        Assert.Equal(report.BridgeDecisionGeneration, request.BridgeDecisionGeneration);
+
+        var duplicate = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoverySettlement(
+            granted.State,
+            report,
+            report);
+        Assert.Equal(
+            RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Idempotent,
+            duplicate.Status);
+        Assert.Equal(report, duplicate.State.LastRuntimeUnlockRegularV4RecoverySettlement);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRetryDispatchAuthority_RejectsStaleOrNonConsumedRegularV4RecoverySettlement()
+    {
+        var (correlatedState, request, release) = AuthorizeRegularRuntimeUnlockRetryDispatchSource();
+        var report = Assert.IsType<RuntimeUnlockRegularV4RecoverySettlementReport>(
+            correlatedState.LastRuntimeUnlockRegularV4RecoverySettlement);
+        var rawSettlementState = correlatedState with
+        {
+            LastRuntimeUnlockRegularV4RecoverySettlement = null,
+            RuntimeUnlockRegularV4RecoverySettlementAvailable = false,
+        };
+
+        var staleTuple = report with
+        {
+            RegularV4LivenessGeneration = report.RegularV4LivenessGeneration + 1,
+        };
+        var staleAccepted = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoverySettlement(
+            rawSettlementState,
+            null,
+            staleTuple);
+        Assert.Equal(
+            RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Rejected,
+            staleAccepted.Status);
+        Assert.Equal(
+            "regular_v4_recovery_settlement_generation_tuple_incomplete",
+            staleAccepted.Reason);
+        var stale = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            staleAccepted.State,
+            request,
+            null,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Held, stale.Status);
+        Assert.Equal("regular_v4_recovery_settlement_consumption_pending", stale.Reason);
+
+        var rejectedReport = report with
+        {
+            Disposition = RuntimeUnlockRegularV4RecoverySettlementDisposition.Rejected,
+            Reason = "regular_v4_recovery_settlement_rejected",
+        };
+        var rejectedAccepted = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoverySettlement(
+            rawSettlementState,
+            null,
+            rejectedReport);
+        Assert.Equal(
+            RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Rejected,
+            rejectedAccepted.Status);
+        Assert.Equal(
+            "regular_v4_recovery_settlement_disposition_diagnostic_only",
+            rejectedAccepted.Reason);
+        var rejected = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            rejectedAccepted.State,
+            request,
+            null,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Held, rejected.Status);
+        Assert.Equal("regular_v4_recovery_settlement_consumption_pending", rejected.Reason);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRegularV4RecoverySettlement_LateTerminalAndMismatchedReportsAreDiagnosticOnly()
+    {
+        var (correlatedState, _, _) = AuthorizeRegularRuntimeUnlockRetryDispatchSource();
+        var report = Assert.IsType<RuntimeUnlockRegularV4RecoverySettlementReport>(
+            correlatedState.LastRuntimeUnlockRegularV4RecoverySettlement);
+        var rawSettlementState = correlatedState with
+        {
+            LastRuntimeUnlockRegularV4RecoverySettlement = null,
+            RuntimeUnlockRegularV4RecoverySettlementAvailable = false,
+        };
+
+        var mismatched = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoverySettlement(
+            rawSettlementState,
+            null,
+            report with
+            {
+                Settlement = report.Settlement with
+                {
+                    AuthorityId = new FileTransferAuthorityId("fta2-stale-regular-v4-repair"),
+                },
+            });
+        Assert.Equal(
+            RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Rejected,
+            mismatched.Status);
+        Assert.Null(mismatched.State.LastRuntimeUnlockRegularV4RecoverySettlement);
+
+        var terminal = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoverySettlement(
+            rawSettlementState with { IsTerminal = true },
+            null,
+            report);
+        Assert.Equal(
+            RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Rejected,
+            terminal.Status);
+        Assert.Equal("terminal_state", terminal.Reason);
+        Assert.Null(terminal.State.LastRuntimeUnlockRegularV4RecoverySettlement);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRegularV4RecoverySettlement_NewRecoveryLeaseInvalidatesPriorConsumption()
+    {
+        var (state, _, _) = AuthorizeRegularRuntimeUnlockRetryDispatchSource();
+        Assert.NotNull(state.LastRuntimeUnlockRegularV4RecoverySettlement);
+        var owner = state.CurrentRuntimeOwner!.Value;
+        var leg = state.CurrentLeg!;
+
+        var nextRecovery = FileTransferCoordinator.AuthorizeAction(
+            state,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RecoveryLivenessLeaseBegin,
+                owner,
+                leg));
+
+        Assert.True(nextRecovery.Accepted);
+        Assert.Null(nextRecovery.State.LastRuntimeUnlockRegularV4RecoverySettlement);
+        Assert.False(nextRecovery.State.RuntimeUnlockRegularV4RecoverySettlementAvailable);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRegularV4RecoverySettlement_RequiresExactIssuedSettlementAndFinalDisposition()
+    {
+        var (correlatedState, _, _) = AuthorizeRegularRuntimeUnlockRetryDispatchSource();
+        var report = Assert.IsType<RuntimeUnlockRegularV4RecoverySettlementReport>(
+            correlatedState.LastRuntimeUnlockRegularV4RecoverySettlement);
+        var rawState = correlatedState with
+        {
+            LastRuntimeUnlockRegularV4RecoverySettlement = null,
+            RuntimeUnlockRegularV4RecoverySettlementAvailable = false,
+        };
+        var reconstructed = report with
+        {
+            Settlement = report.Settlement with { },
+        };
+
+        var missing = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoverySettlement(
+            rawState,
+            null,
+            default);
+        Assert.Equal(RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Rejected, missing.Status);
+        Assert.Equal("regular_v4_recovery_settlement_report_missing", missing.Reason);
+        Assert.Same(rawState, missing.State);
+
+        var reconstructedDecision = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoverySettlement(
+            rawState,
+            null,
+            reconstructed);
+
+        Assert.Equal(
+            RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Rejected,
+            reconstructedDecision.Status);
+        Assert.Equal(
+            "regular_v4_recovery_settlement_not_coordinator_issued",
+            reconstructedDecision.Reason);
+
+        var accepted = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoverySettlement(
+            rawState,
+            null,
+            report);
+        Assert.Equal(RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Accepted, accepted.Status);
+
+        var conflicting = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoverySettlement(
+            accepted.State,
+            report,
+            report with { Reason = "different_final_reason" });
+        Assert.Equal(
+            RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Rejected,
+            conflicting.Status);
+        Assert.Equal(
+            "regular_v4_recovery_settlement_final_disposition_conflict",
+            conflicting.Reason);
+        Assert.Equal(report, conflicting.State.LastRuntimeUnlockRegularV4RecoverySettlement);
+        Assert.True(conflicting.State.RuntimeUnlockRegularV4RecoverySettlementAvailable);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRegularV4RecoverySettlement_ValidatesCoordinatorRecoveryTuple()
+    {
+        var (correlatedState, _, _) = AuthorizeRegularRuntimeUnlockRetryDispatchSource();
+        var report = Assert.IsType<RuntimeUnlockRegularV4RecoverySettlementReport>(
+            correlatedState.LastRuntimeUnlockRegularV4RecoverySettlement);
+        var rawState = correlatedState with
+        {
+            LastRuntimeUnlockRegularV4RecoverySettlement = null,
+            RuntimeUnlockRegularV4RecoverySettlementAvailable = false,
+        };
+        var owner = rawState.CurrentRuntimeOwner!.Value;
+        var leg = rawState.CurrentLeg!;
+        var bridge = FileTransferCoordinator.AuthorizeAction(
+            rawState,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.BridgeRecovery,
+                owner,
+                leg,
+                bridgeRecoveryKind: BridgeRecoveryKind.ReceiveRecoveryRequest));
+        Assert.True(bridge.Accepted);
+        var recovery = FileTransferCoordinator.AuthorizeAction(
+            bridge.State,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RecoveryLivenessLeaseBegin,
+                owner,
+                leg));
+        Assert.True(recovery.Accepted);
+        var lease = recovery.State.CurrentRecoveryLivenessLease!.Value;
+        var activeReport = report with
+        {
+            RegularV4LivenessGeneration = lease.LeaseGeneration,
+            BridgeDecisionGeneration = bridge.BridgeRecoveryDecision!.Value.BridgeDecisionGeneration,
+        };
+
+        var zeroWhileActive = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoverySettlement(
+            recovery.State,
+            null,
+            report);
+        Assert.Equal(RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Rejected, zeroWhileActive.Status);
+        Assert.Equal(
+            "regular_v4_recovery_settlement_zero_tuple_recovery_active",
+            zeroWhileActive.Reason);
+
+        var stale = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoverySettlement(
+            recovery.State,
+            null,
+            activeReport with { RegularV4LivenessGeneration = lease.LeaseGeneration + 1 });
+        Assert.Equal(RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Rejected, stale.Status);
+        Assert.Equal("regular_v4_recovery_settlement_liveness_generation_stale", stale.Reason);
+
+        var accepted = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoverySettlement(
+            recovery.State,
+            null,
+            activeReport);
+        Assert.Equal(RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Accepted, accepted.Status);
+        Assert.True(accepted.State.RuntimeUnlockRegularV4RecoverySettlementAvailable);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRetryDispatchAuthority_ConsumedHandoffIsOneShotAndSuccessorTupleIsStable()
+    {
+        var (state, request, release) = AuthorizeRegularRuntimeUnlockRetryDispatchSource();
+        var granted = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            state,
+            request,
+            null,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+        Assert.True(granted.Granted);
+
+        var mismatchedSuccessor = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            granted.State,
+            request with
+            {
+                DispatchAttemptGeneration = 2,
+                PredecessorAuthorityId = granted.Contract!.Authority.AuthorityId,
+                RequestActivePredecessorSupersession = true,
+                BridgeDecisionGeneration = request.BridgeDecisionGeneration + 1,
+            },
+            granted.Contract,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, mismatchedSuccessor.Status);
+        Assert.Equal("retry_dispatch_recovery_handoff_tuple_mismatch", mismatchedSuccessor.Reason);
+
+        Assert.True(granted.Contract!.TrySettle(
+            RuntimeUnlockRetryDispatchSettlementOutcome.AuthorityRejected,
+            "authority_rejected"));
+        Assert.True(granted.Contract.TryCreateSettlementReport(out var settlementReport));
+        var retired = FileTransferCoordinator.ObserveRuntimeUnlockRetryDispatchSettlement(
+            granted.State,
+            granted.Contract,
+            null,
+            settlementReport);
+        Assert.Equal(RuntimeUnlockRetryDispatchSettlementDecisionStatus.Accepted, retired.Status);
+        Assert.Null(retired.State.CurrentRuntimeUnlockRetryDispatchAuthority);
+
+        var reused = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            retired.State,
+            request with { RecoveryContractGeneration = request.RecoveryContractGeneration + 1 },
+            null,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            release.AuthorityId,
+            release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, reused.Status);
+        Assert.Equal("regular_v4_recovery_settlement_consumption_already_used", reused.Reason);
+    }
+
+    [Fact]
     public void RuntimeUnlockRetryDispatchAuthority_HeldRequestAcceptsCurrentCoordinatorBridgeGeneration()
     {
         var (state, request, release) = AuthorizeRegularRuntimeUnlockRetryDispatchSource();
@@ -1181,7 +1530,7 @@ public sealed class FileTransferCoordinatorTests
             RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
             release.AuthorityId,
             release.RepairGeneration,
-            FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch.ToString());
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
 
         Assert.True(granted.Granted);
         Assert.Equal(request, granted.Request);
@@ -1213,7 +1562,7 @@ public sealed class FileTransferCoordinatorTests
             RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
             release.AuthorityId,
             release.RepairGeneration,
-            FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch.ToString());
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
         Assert.True(granted.Granted);
         var originalAuthority = granted.Contract!.Authority;
         var successorRelease = FileTransferCoordinator.AuthorizeAction(
@@ -1233,7 +1582,7 @@ public sealed class FileTransferCoordinatorTests
             RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
             laterRelease.AuthorityId,
             laterRelease.RepairGeneration,
-            FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch.ToString());
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
 
         Assert.True(duplicate.Granted);
         Assert.Same(granted.Contract, duplicate.Contract);
@@ -1441,13 +1790,55 @@ public sealed class FileTransferCoordinatorTests
         Assert.Null(exhausted.State.CurrentRuntimeUnlockRetryDispatchAuthority);
         Assert.Equal(successorSettlementReport, exhausted.State.LastRuntimeUnlockRetryDispatchSettlement);
 
-        var fresh = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+        var staleIndependentRequest = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
             exhausted.State,
-            request,
+            request with { RecoveryContractGeneration = request.RecoveryContractGeneration + 1 },
             null,
             RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
             release.AuthorityId,
             release.RepairGeneration,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, staleIndependentRequest.Status);
+        Assert.Equal(
+            "regular_v4_recovery_settlement_consumption_already_used",
+            staleIndependentRequest.Reason);
+
+        var nextRepair = FileTransferCoordinator.AuthorizeAction(
+            exhausted.State,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RepairReplay,
+                exhausted.State.CurrentRuntimeOwner!.Value,
+                exhausted.State.CurrentLeg!,
+                repairReplayKind: RepairReplayKind.V4Repair));
+        Assert.True(nextRepair.Accepted);
+        var nextRelease = nextRepair.RepairReplayDecision!.Value;
+        var freshRequest = request with
+        {
+            RecoveryContractGeneration = request.RecoveryContractGeneration + 1,
+        };
+        var freshReport = CreateRegularV4RecoverySettlementReport(
+            nextRepair.State,
+            freshRequest,
+            nextRelease,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved);
+        var handoff = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoverySettlement(
+            nextRepair.State with
+            {
+                LastRuntimeUnlockRegularV4RecoverySettlement = null,
+                LastCoordinatorIssuedRegularV4RecoverySettlement = freshReport.Settlement,
+                RuntimeUnlockRegularV4RecoverySettlementAvailable = false,
+            },
+            null,
+            freshReport);
+        Assert.Equal(RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Accepted, handoff.Status);
+
+        var fresh = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            handoff.State,
+            freshRequest,
+            null,
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            nextRelease.AuthorityId,
+            nextRelease.RepairGeneration,
             FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved.ToString());
         Assert.True(fresh.Granted);
         Assert.Equal(1, fresh.Contract!.Authority.DispatchAttemptGeneration);
@@ -5492,7 +5883,65 @@ public sealed class FileTransferCoordinatorTests
             RecoveryReason: "regular_v4_repair_settled",
             RegularV4LivenessGeneration: 0,
             BridgeDecisionGeneration: release.BridgeDecisionGeneration);
-        return (repairDecision.State, request, release);
+        var handoff = CreateRegularV4RecoverySettlementReport(
+            repairDecision.State,
+            request,
+            release,
+            FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved);
+        return (
+            repairDecision.State with
+            {
+                LastRuntimeUnlockRegularV4RecoverySettlement = handoff,
+                LastCoordinatorIssuedRegularV4RecoverySettlement = handoff.Settlement,
+                RuntimeUnlockRegularV4RecoverySettlementAvailable = true,
+            },
+            request,
+            release);
+    }
+
+    private static RuntimeUnlockRegularV4RecoverySettlementReport
+        CreateRegularV4RecoverySettlementReport(
+            FileTransferCoordinatorState state,
+            RuntimeUnlockRetryDispatchAuthorityRequest request,
+            RepairReplayDecision release,
+            FileTransferRegularV4FrontierRepairSettlementOutcome outcome,
+            RuntimeUnlockRegularV4RecoverySettlementDisposition disposition =
+                RuntimeUnlockRegularV4RecoverySettlementDisposition.Consumed,
+            string reason = "regular_v4_recovery_settlement_consumed")
+    {
+        var leg = Assert.IsType<FileTransferLeg>(state.CurrentLeg);
+        var settlement = new FileTransferRegularV4FrontierRepairSettlement(
+            state.SessionId,
+            state.TransferId,
+            state.Direction,
+            state.RouteSelection.TelemetryToken,
+            state.RouteSelection.ProtocolVersion,
+            state.CurrentLiveRouteEpoch?.EpochId ?? 0,
+            state.CurrentRuntimeOwner?.RuntimeGeneration ?? 0,
+            state.TerminalGeneration,
+            leg.Generation,
+            leg.TransportEpochId,
+            leg.BridgeRecoveryGeneration,
+            release.BridgeDecisionGeneration,
+            release.RoutePublicationToken?.PublicationGeneration ?? 0,
+            release.RoutePublicationToken?.RouteCommitGeneration,
+            "regular-v4-frontier:0:test",
+            FrontierChunkIndex: 0,
+            DurableReceivedHighestChunkIndex: -1,
+            RequestedChunkCount: 1,
+            release.RepairGeneration,
+            "regular_v4_repair_settled",
+            outcome,
+            FileTransferTransportKind.RegularNkn)
+        {
+            AuthorityId = release.AuthorityId,
+        };
+        return new RuntimeUnlockRegularV4RecoverySettlementReport(
+            settlement,
+            request.RegularV4LivenessGeneration,
+            request.BridgeDecisionGeneration,
+            disposition,
+            reason);
     }
 
     private static FileTransferCoordinatorEvent CoordinatorEvent(

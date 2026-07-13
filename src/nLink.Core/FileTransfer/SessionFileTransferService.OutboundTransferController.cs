@@ -1191,6 +1191,8 @@ public sealed partial class SessionFileTransferService
                     OnRuntimeUnlockRetryDispatchAuthorityRequested;
                 retryDispatchBridge.RuntimeUnlockRetryDispatchSettlementReported -=
                     OnRuntimeUnlockRetryDispatchSettlementReported;
+                retryDispatchBridge.RuntimeUnlockRegularV4RecoverySettlementReported -=
+                    OnRuntimeUnlockRegularV4RecoverySettlementReported;
             }
         }
 

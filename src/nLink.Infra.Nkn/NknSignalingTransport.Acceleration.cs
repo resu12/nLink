@@ -155,6 +155,8 @@ public sealed partial class NknSignalingTransport
         runtimeUnlockRetryDispatchAuthorityRequested;
     private event EventHandler<RuntimeUnlockRetryDispatchSettlementReportedEventArgs>?
         runtimeUnlockRetryDispatchSettlementReported;
+    private event EventHandler<RuntimeUnlockRegularV4RecoverySettlementReportedEventArgs>?
+        runtimeUnlockRegularV4RecoverySettlementReported;
 
     internal Func<RuntimeUnlockRetryDispatchAuthorityRequest, RuntimeUnlockRetryDispatchDecision>?
         RuntimeUnlockRetryDispatchAuthorityDecisionOverrideForTests { get; set; }
@@ -661,6 +663,22 @@ public sealed partial class NknSignalingTransport
         public int AdoptedBridgeDecisionGeneration { get; set; }
 
         public string? LifecycleBoundary { get; set; }
+
+        public RuntimeUnlockRegularV4RecoverySettlementReport? PendingReport { get; set; }
+
+        public RuntimeUnlockRegularV4RecoverySettlementDecision? PendingDecision { get; set; }
+
+        public RuntimeUnlockRegularV4RecoverySettlementReport? LastAppliedReport { get; set; }
+
+        public RuntimeUnlockRegularV4RecoverySettlementReport? LastConsequencedReport { get; set; }
+
+        public RuntimeUnlockRecoveryRetryState? PendingReportState { get; set; }
+
+        public RuntimeUnlockRetryDispatchContract? PendingReportDispatchContract { get; set; }
+
+        public RuntimeUnlockRetryDispatchAuthorityRequest? PendingReportAuthorityRequest { get; set; }
+
+        public Action? PendingAcceptedConsequence { get; set; }
     }
 
     private enum RegularV4FrontierRepairSettlementHandoffDisposition
@@ -1564,6 +1582,14 @@ public sealed partial class NknSignalingTransport
                     snapshot.TransferId,
                     rejectionReason,
                     handoff: pendingSettlement);
+                _ = PublishRuntimeUnlockRegularV4RecoverySettlementReport(
+                    pendingSettlement,
+                    new RuntimeUnlockRegularV4RecoverySettlementReport(
+                        settlement,
+                        snapshot.Generation,
+                        snapshot.BridgeDecisionGeneration,
+                        RuntimeUnlockRegularV4RecoverySettlementDisposition.Rejected,
+                        SanitizeLogToken(rejectionReason)));
             }
 
             return false;
@@ -2394,7 +2420,6 @@ public sealed partial class NknSignalingTransport
                     SessionId = sessionId ?? "none",
                     TransferId = transferId,
                 });
-            NotifyTransportAccelerationStateChanged("regular_v4_frontier_repair_settlement");
         }
     }
 
@@ -2547,7 +2572,11 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
-        if (TryConsumePendingRuntimeUnlockAccelerationNegotiation(out var pendingReason))
+        // Legacy pending negotiation is not retry-release authority. It may keep
+        // its historical behavior only when no retry contract exists; otherwise
+        // the accepted handoff decision below owns the single authorized wake.
+        if (stateSnapshot is null &&
+            TryConsumePendingRuntimeUnlockAccelerationNegotiation(out var pendingReason))
         {
             LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
                 "runtime_unlock_regular_v4_frontier_repair_settlement_released",
@@ -2563,15 +2592,93 @@ public sealed partial class NknSignalingTransport
 
         if (stateSnapshot is not null)
         {
-            LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
-                "runtime_unlock_regular_v4_frontier_repair_settlement_released",
+            CachePendingRuntimeUnlockRegularV4FrontierRepairSettlement(
                 settlement,
                 normalizedSessionId,
                 normalizedTransferId,
-                "retry_contract_released",
+                "immediate_retry_handoff");
+            PendingRuntimeUnlockRegularV4FrontierRepairSettlement? immediateHandoff;
+            lock (accelerationGate)
+            {
+                immediateHandoff = pendingRuntimeUnlockRegularV4FrontierRepairSettlement;
+                if (immediateHandoff is not null &&
+                    Equals(immediateHandoff.Settlement, settlement) &&
+                    immediateHandoff.Disposition == RegularV4FrontierRepairSettlementHandoffDisposition.Pending)
+                {
+                    immediateHandoff.Disposition = RegularV4FrontierRepairSettlementHandoffDisposition.Consumed;
+                    immediateHandoff.AdoptedRecoveryLivenessGeneration = 0;
+                    immediateHandoff.AdoptedBridgeDecisionGeneration = 0;
+                    immediateHandoff.LifecycleBoundary = "no_active_recovery_boundary";
+                }
+            }
+
+            if (immediateHandoff is null ||
+                !Equals(immediateHandoff.Settlement, settlement) ||
+                immediateHandoff.Disposition != RegularV4FrontierRepairSettlementHandoffDisposition.Consumed ||
+                !PublishRuntimeUnlockRegularV4RecoverySettlementReport(
+                    immediateHandoff,
+                    new RuntimeUnlockRegularV4RecoverySettlementReport(
+                        settlement,
+                        0,
+                        0,
+                        RuntimeUnlockRegularV4RecoverySettlementDisposition.Consumed,
+                        "no_active_recovery_boundary"),
+                    stateSnapshot,
+                    () =>
+                    {
+                        lock (accelerationGate)
+                        {
+                            if (!ReferenceEquals(runtimeUnlockRecoveryRetryState, stateSnapshot) ||
+                                immediateHandoff.LastAppliedReport is not
+                                {
+                                    Disposition:
+                                        RuntimeUnlockRegularV4RecoverySettlementDisposition.Consumed,
+                                } applied ||
+                                applied.Settlement != settlement ||
+                                stateSnapshot.ContractState is SessionRecoveryContractState.Completed or
+                                    SessionRecoveryContractState.Failed)
+                            {
+                                return;
+                            }
+                        }
+
+                        ClearPendingRuntimeUnlockAccelerationNegotiation();
+                        LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
+                            "runtime_unlock_regular_v4_frontier_repair_settlement_released",
+                            settlement,
+                            normalizedSessionId,
+                            normalizedTransferId,
+                            "retry_contract_released",
+                            retryReason: stateSnapshot.RetryReason,
+                            stateSnapshot: stateSnapshot,
+                            handoff: immediateHandoff);
+                        RequestRuntimeUnlockRetryDispatchAuthority(
+                            stateSnapshot.SessionId,
+                            "regular_v4_recovery_consumption_accepted");
+                        ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed(settlementTrigger);
+                    }))
+            {
+                LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
+                    "runtime_unlock_regular_v4_frontier_repair_settlement_held",
+                    settlement,
+                    normalizedSessionId,
+                    normalizedTransferId,
+                    "coordinator_consumption_decision_not_accepted",
+                    retryReason: stateSnapshot.RetryReason,
+                    stateSnapshot: stateSnapshot,
+                    handoff: immediateHandoff);
+                return;
+            }
+
+            LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
+                "runtime_unlock_regular_v4_frontier_repair_settlement_held",
+                settlement,
+                normalizedSessionId,
+                normalizedTransferId,
+                "awaiting_coordinator_consumption_decision",
                 retryReason: stateSnapshot.RetryReason,
-                stateSnapshot: stateSnapshot);
-            ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed(settlementTrigger);
+                stateSnapshot: stateSnapshot,
+                handoff: immediateHandoff);
             return;
         }
 
@@ -2841,6 +2948,163 @@ public sealed partial class NknSignalingTransport
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event={SanitizeLogToken(eventName)}; session_id={SanitizeLogToken(sessionId)}; transfer_id={SanitizeLogToken(transferId)}; direction={settlement.Direction.ToString().ToLowerInvariant()}; route={SanitizeLogToken(settlement.RouteToken)}; protocol_version={settlement.ProtocolVersion}; live_route_epoch={settlement.LiveRouteEpoch}; runtime_generation={settlement.RuntimeGeneration}; terminal_generation={settlement.TerminalGeneration}; leg_generation={settlement.LegGeneration}; transport_epoch={settlement.TransportEpoch}; bridge_recovery_generation={settlement.BridgeRecoveryGeneration}; bridge_decision_generation={settlement.BridgeDecisionGeneration}; route_publication_generation={settlement.RoutePublicationGeneration}; route_commit_generation={settlement.RouteCommitGeneration ?? 0}; target_transport={FormatFileTransferTransportKindForLog(settlement.TargetTransport)}; repair_request_key={SanitizeLogToken(settlement.RepairKey)}; frontier_chunk_index={settlement.FrontierChunkIndex}; durable_received_highest_chunk_index={settlement.DurableReceivedHighestChunkIndex}; requested_chunk_count={Math.Max(0, settlement.RequestedChunkCount)}; settlement_decision_generation={settlement.DecisionGeneration}; settlement_outcome={FormatRegularV4FrontierRepairSettlementOutcomeForAccelerationLog(settlement.Outcome)}; adopted_recovery_liveness_generation={handoff?.AdoptedRecoveryLivenessGeneration ?? 0}; adopted_bridge_decision_generation={handoff?.AdoptedBridgeDecisionGeneration ?? 0}; handoff_disposition={SanitizeLogToken(handoff?.Disposition.ToString() ?? "(none)")}; lifecycle_boundary={SanitizeLogToken(handoff?.LifecycleBoundary ?? "(none)")}; retry_reason={SanitizeLogToken(retryReason ?? stateSnapshot?.RetryReason ?? "(none)")}; recovery_reason={SanitizeLogToken(stateSnapshot?.RecoveryReason ?? "(none)")}; contract_generation={stateSnapshot?.ContractGeneration ?? 0}; offer_generation={(stateSnapshot is null ? 0 : stateSnapshot.CurrentOfferGeneration > 0 ? stateSnapshot.CurrentOfferGeneration : stateSnapshot.RetiredOfferGeneration)}; blocker_reason={SanitizeLogToken(blockerReason ?? stateSnapshot?.RegularV4FrontierRepairBlockerReason ?? "(none)")}; blocker_remaining_ms={Math.Max(0, blockerRemainingMs)}; decision_reason={SanitizeLogToken(decisionReason)}");
+    }
+
+    private static string FormatRuntimeUnlockRegularV4RecoverySettlementReport(
+        RuntimeUnlockRegularV4RecoverySettlementReport report)
+    {
+        var settlement = report.Settlement;
+        return $"authority_schema={FileTransferAuthoritySchema.Current}; authority_id={SanitizeLogToken(settlement.AuthorityId.ToString())}; successor_authority_id={SanitizeLogToken(settlement.SuccessorAuthorityId?.ToString() ?? "(none)")}; session_id={SanitizeLogToken(settlement.SessionId)}; transfer_id={SanitizeLogToken(settlement.TransferId)}; direction={settlement.Direction.ToString().ToLowerInvariant()}; route={SanitizeLogToken(settlement.RouteToken)}; protocol_version={settlement.ProtocolVersion}; live_route_epoch={settlement.LiveRouteEpoch}; runtime_generation={settlement.RuntimeGeneration}; terminal_generation={settlement.TerminalGeneration}; leg_generation={settlement.LegGeneration}; transport_epoch={settlement.TransportEpoch}; bridge_recovery_generation={settlement.BridgeRecoveryGeneration}; settlement_bridge_decision_generation={settlement.BridgeDecisionGeneration}; route_publication_generation={settlement.RoutePublicationGeneration}; route_commit_generation={settlement.RouteCommitGeneration ?? 0}; target_transport={FormatFileTransferTransportKindForLog(settlement.TargetTransport)}; repair_request_key={SanitizeLogToken(settlement.RepairKey)}; frontier_chunk_index={settlement.FrontierChunkIndex}; durable_received_highest_chunk_index={settlement.DurableReceivedHighestChunkIndex}; requested_chunk_count={Math.Max(0, settlement.RequestedChunkCount)}; settlement_decision_generation={settlement.DecisionGeneration}; settlement_outcome={FormatRegularV4FrontierRepairSettlementOutcomeForAccelerationLog(settlement.Outcome)}; regular_v4_liveness_generation={report.RegularV4LivenessGeneration}; bridge_decision_generation={report.BridgeDecisionGeneration}; disposition={SanitizeLogToken(report.Disposition.ToString())}; settlement_reason={SanitizeLogToken(report.Reason)}";
+    }
+
+    private static void LogRuntimeUnlockRegularV4RecoverySettlementDecision(
+        string eventName,
+        RuntimeUnlockRegularV4RecoverySettlementDecision decision,
+        string decisionReason)
+    {
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event={SanitizeLogToken(eventName)}; {FormatRuntimeUnlockRegularV4RecoverySettlementReport(decision.Report)}; decision_status={SanitizeLogToken(decision.Status.ToString())}; decision_reason={SanitizeLogToken(decisionReason)}");
+    }
+
+    private static void FailClosedRuntimeUnlockRegularV4RecoverySettlementUnsafe(
+        RuntimeUnlockRecoveryRetryState? currentState,
+        PendingRuntimeUnlockRegularV4FrontierRepairSettlement handoff,
+        string reason)
+    {
+        var expectedState = handoff.PendingReportState;
+        var expectedDispatchContract = handoff.PendingReportDispatchContract;
+        var expectedAuthorityRequest = handoff.PendingReportAuthorityRequest;
+        handoff.PendingReport = null;
+        handoff.PendingDecision = null;
+        handoff.PendingReportState = null;
+        handoff.PendingReportDispatchContract = null;
+        handoff.PendingReportAuthorityRequest = null;
+        handoff.PendingAcceptedConsequence = null;
+        handoff.LifecycleBoundary = SanitizeLogToken(reason);
+        if (expectedState is null ||
+            !ReferenceEquals(currentState, expectedState) ||
+            !ReferenceEquals(expectedState.DispatchContract, expectedDispatchContract) ||
+            expectedState.PendingDispatchAuthorityRequest != expectedAuthorityRequest)
+        {
+            return;
+        }
+
+        expectedState.PendingDispatchAuthorityRequest = null;
+        expectedState.RetryQueued = false;
+        expectedState.RetryDispatching = false;
+        expectedState.RetryDispatched = false;
+        expectedState.RetryAuthorityPending = false;
+        expectedState.RetryAuthorityGranted = false;
+        expectedState.ObservedSendPending = false;
+        expectedState.ObservedSendDeadlineUtcMs = 0;
+        expectedState.DispatchDeadlineUtcMs = 0;
+        expectedState.RetryDeadlineUtcMs = 0;
+        expectedState.LivenessDeferralDeadlineUtcMs = 0;
+        expectedState.DispatchDecisionReason = reason;
+        expectedState.AuthorityFailureReason = reason;
+    }
+
+    private bool PublishRuntimeUnlockRegularV4RecoverySettlementReport(
+        PendingRuntimeUnlockRegularV4FrontierRepairSettlement handoff,
+        RuntimeUnlockRegularV4RecoverySettlementReport report,
+        RuntimeUnlockRecoveryRetryState? expectedState = null,
+        Action? acceptedConsequence = null)
+    {
+        EventHandler<RuntimeUnlockRegularV4RecoverySettlementReportedEventArgs>? subscriber;
+        lock (accelerationGate)
+        {
+            if (!ReferenceEquals(pendingRuntimeUnlockRegularV4FrontierRepairSettlement, handoff))
+            {
+                return false;
+            }
+
+            if (handoff.LastAppliedReport == report)
+            {
+                return true;
+            }
+
+            if (handoff.PendingReport is { } pending && pending != report)
+            {
+                return false;
+            }
+
+            handoff.PendingReport = report;
+            handoff.PendingDecision = null;
+            handoff.PendingReportState = expectedState;
+            handoff.PendingReportDispatchContract = expectedState?.DispatchContract;
+            handoff.PendingReportAuthorityRequest = expectedState?.PendingDispatchAuthorityRequest;
+            handoff.PendingAcceptedConsequence = acceptedConsequence;
+            subscriber = runtimeUnlockRegularV4RecoverySettlementReported;
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_regular_v4_recovery_settlement_reported; {FormatRuntimeUnlockRegularV4RecoverySettlementReport(report)}; subscriber_present={(subscriber is null ? 0 : 1)}; decision_reason={(subscriber is null ? "settlement_subscriber_missing" : "reported_to_core")}");
+        if (subscriber is null)
+        {
+            lock (accelerationGate)
+            {
+                if (ReferenceEquals(pendingRuntimeUnlockRegularV4FrontierRepairSettlement, handoff) &&
+                    handoff.PendingReport == report)
+                {
+                    FailClosedRuntimeUnlockRegularV4RecoverySettlementUnsafe(
+                        runtimeUnlockRecoveryRetryState,
+                        handoff,
+                        "runtime_unlock_regular_v4_recovery_settlement_subscriber_missing");
+                }
+            }
+            return false;
+        }
+
+        // The repair settlement can be delivered by Core while its outer transfer
+        // lock is still held. Always break that call stack before reporting back to
+        // Core, then require the decision observer to apply the consequence.
+        _ = Task.Run(
+            () =>
+            {
+                try
+                {
+                    subscriber.Invoke(
+                        this,
+                        new RuntimeUnlockRegularV4RecoverySettlementReportedEventArgs(report));
+                }
+                catch (Exception ex)
+                {
+                    lock (accelerationGate)
+                    {
+                        if (ReferenceEquals(pendingRuntimeUnlockRegularV4FrontierRepairSettlement, handoff) &&
+                            handoff.PendingReport == report)
+                        {
+                            FailClosedRuntimeUnlockRegularV4RecoverySettlementUnsafe(
+                                runtimeUnlockRecoveryRetryState,
+                                handoff,
+                                "runtime_unlock_regular_v4_recovery_settlement_handler_failed");
+                        }
+                    }
+                    LocalOperationalLog.Warn(
+                        "NKN.Tuna",
+                        $"event=runtime_unlock_regular_v4_recovery_settlement_handler_failed; {FormatRuntimeUnlockRegularV4RecoverySettlementReport(report)}; error={SanitizeLogToken(ex.GetType().Name)}; decision_reason=settlement_handler_failed");
+                    return;
+                }
+
+                lock (accelerationGate)
+                {
+                    if (ReferenceEquals(pendingRuntimeUnlockRegularV4FrontierRepairSettlement, handoff) &&
+                        handoff.PendingReport == report)
+                    {
+                        var decision = handoff.PendingDecision;
+                        FailClosedRuntimeUnlockRegularV4RecoverySettlementUnsafe(
+                            runtimeUnlockRecoveryRetryState,
+                            handoff,
+                            decision is null
+                                ? "runtime_unlock_regular_v4_recovery_settlement_decision_missing"
+                                : "runtime_unlock_regular_v4_recovery_settlement_decision_rejected");
+                    }
+                }
+            },
+            CancellationToken.None);
+        return true;
     }
 
     public void ObservePostTunaFallbackControlPlanePressure(FileTransferPostTunaFallbackControlPlanePressure pressure)
@@ -11835,6 +12099,13 @@ public sealed partial class NknSignalingTransport
         remove => runtimeUnlockRetryDispatchSettlementReported -= value;
     }
 
+    event EventHandler<RuntimeUnlockRegularV4RecoverySettlementReportedEventArgs>?
+        IRuntimeUnlockRetryDispatchAuthorityBridge.RuntimeUnlockRegularV4RecoverySettlementReported
+    {
+        add => runtimeUnlockRegularV4RecoverySettlementReported += value;
+        remove => runtimeUnlockRegularV4RecoverySettlementReported -= value;
+    }
+
     bool IRuntimeUnlockRetryDispatchAuthorityBridge.TryGetPendingRuntimeUnlockRetryDispatchAuthorityRequest(
         string sessionId,
         string transferId,
@@ -11844,13 +12115,27 @@ public sealed partial class NknSignalingTransport
         request = default;
         lock (accelerationGate)
         {
-            var pending = runtimeUnlockRecoveryRetryState?.PendingDispatchAuthorityRequest;
+            var state = runtimeUnlockRecoveryRetryState;
+            var pending = state?.PendingDispatchAuthorityRequest;
             if (pending is not { } candidate ||
                 !string.Equals(candidate.SessionId, sessionId?.Trim(), StringComparison.Ordinal) ||
                 !string.Equals(candidate.TransferId, transferId?.Trim(), StringComparison.Ordinal) ||
                 candidate.Direction != direction)
             {
                 return false;
+            }
+
+            if (state!.BlockedByRegularV4ReceiveRecovery)
+            {
+                var consumedReport = pendingRuntimeUnlockRegularV4FrontierRepairSettlement?.LastAppliedReport;
+                if (candidate.RegularV4LivenessGeneration != state.RegularV4RecoveryLivenessGeneration ||
+                    candidate.BridgeDecisionGeneration != state.RegularV4RecoveryBridgeDecisionGeneration ||
+                    consumedReport is not { Disposition: RuntimeUnlockRegularV4RecoverySettlementDisposition.Consumed } ||
+                    consumedReport.Value.RegularV4LivenessGeneration != state.RegularV4RecoveryLivenessGeneration ||
+                    consumedReport.Value.BridgeDecisionGeneration != state.RegularV4RecoveryBridgeDecisionGeneration)
+                {
+                    return false;
+                }
             }
 
             request = candidate;
@@ -12572,6 +12857,163 @@ public sealed partial class NknSignalingTransport
         return accepted;
     }
 
+    private static bool TryValidateRuntimeUnlockRegularV4RecoverySettlementDecision(
+        RuntimeUnlockRegularV4RecoverySettlementDecision decision,
+        out string? rejectionReason)
+    {
+        rejectionReason = null;
+        if (decision.State is not { } state)
+        {
+            rejectionReason = "regular_v4_recovery_settlement_decision_state_missing";
+            return false;
+        }
+
+        var report = decision.Report;
+        var settlement = report.Settlement;
+        if (!string.Equals(state.SessionId, settlement.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(state.TransferId, settlement.TransferId, StringComparison.Ordinal) ||
+            state.Direction != settlement.Direction)
+        {
+            rejectionReason = "regular_v4_recovery_settlement_decision_state_identity_mismatch";
+            return false;
+        }
+
+        if (state.LastRuntimeUnlockRegularV4RecoverySettlement != report)
+        {
+            rejectionReason = "regular_v4_recovery_settlement_decision_state_report_mismatch";
+            return false;
+        }
+
+        if (report.Disposition == RuntimeUnlockRegularV4RecoverySettlementDisposition.Consumed &&
+            state.IsTerminal)
+        {
+            rejectionReason = "regular_v4_recovery_settlement_decision_state_terminal";
+            return false;
+        }
+
+        return true;
+    }
+
+    bool IRuntimeUnlockRetryDispatchAuthorityBridge.ObserveRuntimeUnlockRegularV4RecoverySettlementDecision(
+        RuntimeUnlockRegularV4RecoverySettlementDecision decision)
+    {
+        var accepted = false;
+        string? staleReason = null;
+        Action? acceptedConsequence = null;
+        lock (accelerationGate)
+        {
+            var handoff = pendingRuntimeUnlockRegularV4FrontierRepairSettlement;
+            if (decision.Report.IsDefault)
+            {
+                staleReason = "regular_v4_recovery_settlement_decision_report_missing";
+            }
+            else if (handoff is null)
+            {
+                staleReason = "regular_v4_recovery_settlement_handoff_missing";
+            }
+            else if (handoff.PendingReport is { } pendingReport)
+            {
+                if (pendingReport != decision.Report)
+                {
+                    staleReason = "regular_v4_recovery_settlement_decision_report_mismatch";
+                }
+                else
+                {
+                    var statusAccepted = decision.Status is
+                        RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Accepted or
+                        RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Idempotent;
+                    if (statusAccepted &&
+                        !TryValidateRuntimeUnlockRegularV4RecoverySettlementDecision(
+                            decision,
+                            out staleReason))
+                    {
+                        accepted = false;
+                    }
+                    else if (statusAccepted &&
+                             pendingReport.Disposition ==
+                                 RuntimeUnlockRegularV4RecoverySettlementDisposition.Consumed &&
+                             (handoff.PendingReportState is not { } expectedState ||
+                              !ReferenceEquals(runtimeUnlockRecoveryRetryState, expectedState) ||
+                              !ReferenceEquals(
+                                  expectedState.DispatchContract,
+                                  handoff.PendingReportDispatchContract) ||
+                              expectedState.PendingDispatchAuthorityRequest !=
+                                  handoff.PendingReportAuthorityRequest ||
+                              expectedState.ContractState is SessionRecoveryContractState.Completed or
+                                  SessionRecoveryContractState.Failed))
+                    {
+                        staleReason = "regular_v4_recovery_settlement_decision_retry_state_stale";
+                    }
+                    else
+                    {
+                        handoff.PendingDecision = decision;
+                        accepted = statusAccepted;
+                        if (accepted)
+                        {
+                            handoff.LastAppliedReport = pendingReport;
+                            if (pendingReport.Disposition ==
+                                    RuntimeUnlockRegularV4RecoverySettlementDisposition.Consumed &&
+                                handoff.LastConsequencedReport != pendingReport)
+                            {
+                                handoff.LastConsequencedReport = pendingReport;
+                                acceptedConsequence = handoff.PendingAcceptedConsequence;
+                            }
+
+                            handoff.PendingReport = null;
+                            handoff.PendingDecision = null;
+                            handoff.PendingReportState = null;
+                            handoff.PendingReportDispatchContract = null;
+                            handoff.PendingReportAuthorityRequest = null;
+                            handoff.PendingAcceptedConsequence = null;
+                        }
+                    }
+                }
+            }
+            else if (handoff.LastAppliedReport == decision.Report &&
+                     decision.Status is RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Accepted or
+                         RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Idempotent &&
+                     TryValidateRuntimeUnlockRegularV4RecoverySettlementDecision(
+                         decision,
+                         out staleReason))
+            {
+                accepted = true;
+            }
+            else
+            {
+                staleReason = "regular_v4_recovery_settlement_report_not_pending";
+            }
+        }
+
+        if (staleReason is not null)
+        {
+            LogRuntimeUnlockRegularV4RecoverySettlementDecision(
+                "runtime_unlock_regular_v4_recovery_settlement_decision_ignored",
+                decision,
+                staleReason);
+            return false;
+        }
+
+        LogRuntimeUnlockRegularV4RecoverySettlementDecision(
+            "runtime_unlock_regular_v4_recovery_settlement_decided",
+            decision,
+            decision.Reason);
+        if (acceptedConsequence is not null)
+        {
+            try
+            {
+                acceptedConsequence();
+            }
+            catch (Exception ex)
+            {
+                LocalOperationalLog.Warn(
+                    "NKN.Tuna",
+                    $"event=runtime_unlock_regular_v4_recovery_settlement_consequence_failed; {FormatRuntimeUnlockRegularV4RecoverySettlementReport(decision.Report)}; error={SanitizeLogToken(ex.GetType().Name)}; decision_reason=accepted_consequence_failed");
+                return false;
+            }
+        }
+        return accepted;
+    }
+
     private void RequestRuntimeUnlockRetryDispatchAuthority(
         string sessionId,
         string trigger,
@@ -12590,6 +13032,27 @@ public sealed partial class NknSignalingTransport
                 state.ContractState is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed)
             {
                 return;
+            }
+
+            if (state.BlockedByRegularV4ReceiveRecovery)
+            {
+                var handoff = pendingRuntimeUnlockRegularV4FrontierRepairSettlement;
+                var consumedReport = handoff?.LastAppliedReport;
+                if (handoff is not null &&
+                    (consumedReport is not { Disposition: RuntimeUnlockRegularV4RecoverySettlementDisposition.Consumed } ||
+                     consumedReport.Value.RegularV4LivenessGeneration != state.RegularV4RecoveryLivenessGeneration ||
+                     consumedReport.Value.BridgeDecisionGeneration != state.RegularV4RecoveryBridgeDecisionGeneration))
+                {
+                    state.PendingDispatchAuthorityRequest = null;
+                    state.PendingDispatchSuccessorRequestIssued = false;
+                    state.PendingDispatchSuccessorRequestHeld = false;
+                    state.PendingDispatchSuccessorHeldLogged = false;
+                    state.RetryAuthorityPending = false;
+                    state.RetryAuthorityGranted = false;
+                    state.DispatchDecisionReason = "regular_v4_recovery_handoff_pending";
+                    state.AuthorityFailureReason = "regular_v4_recovery_handoff_pending";
+                    return;
+                }
             }
 
             if (state.SourcePublicationAuthority is not { } publication ||
@@ -12637,8 +13100,8 @@ public sealed partial class NknSignalingTransport
                                 successorIntent.DispatchAttemptGeneration,
                                 successorIntent.RetryReason,
                                 successorIntent.RecoveryReason,
-                                state.RegularV4RecoveryLivenessGeneration,
-                                currentContract.Authority.BridgeDecisionGeneration,
+                                currentContract.RegularV4LivenessGeneration,
+                                currentContract.RequestBridgeDecisionGeneration,
                                 successorIntent.PredecessorAuthorityId,
                                 successorIntent.RequestActivePredecessorSupersession,
                                 successorIntent.MissingDispatchSuccessorGeneration);
@@ -17430,11 +17893,22 @@ public sealed partial class NknSignalingTransport
             out sourcePublicationAuthority,
             out _);
         var transferId = sourcePublicationAuthority?.TransferId;
-        if (string.IsNullOrWhiteSpace(transferId) &&
-            TryGetActiveRegularV4RecoveryLivenessSnapshot(normalizedSessionId, out var retryLivenessSnapshot))
+        var hasActiveRegularV4Recovery =
+            ShouldDeferRuntimeUnlockRetryForActiveRegularV4ReceiveRecovery(
+                normalizedSessionId,
+                out var activeRegularV4RecoveryReason,
+                out var activeRegularV4RecoverySnapshot);
+        if (string.IsNullOrWhiteSpace(transferId) && hasActiveRegularV4Recovery)
         {
-            transferId = retryLivenessSnapshot.TransferId;
+            transferId = activeRegularV4RecoverySnapshot.TransferId;
         }
+        var activeRegularV4RoutePublicationGeneration = 0;
+        int? activeRegularV4RouteCommitGeneration = null;
+        var hasActiveRegularV4RoutePublication = hasActiveRegularV4Recovery &&
+            TryGetRegularV4RecoveryRoutePublicationTuple(
+                activeRegularV4RecoverySnapshot,
+                out activeRegularV4RoutePublicationGeneration,
+                out activeRegularV4RouteCommitGeneration);
 
         RuntimeUnlockRecoveryRetryState? preservedCutThroughState = null;
         RuntimeUnlockRecoveryRetryState? preservedDispatchState = null;
@@ -17505,7 +17979,7 @@ public sealed partial class NknSignalingTransport
             else
             {
                 var contractGeneration = ++runtimeUnlockRecoveryContractNextGeneration;
-                runtimeUnlockRecoveryRetryState = new RuntimeUnlockRecoveryRetryState
+                var newState = new RuntimeUnlockRecoveryRetryState
                 {
                     ContractGeneration = contractGeneration,
                     RetiredOfferGeneration = retiredOfferGeneration,
@@ -17514,8 +17988,12 @@ public sealed partial class NknSignalingTransport
                     RetryReason = SanitizeLogToken(retryReason),
                     RecoveryReason = SanitizeLogToken(recoveryReason),
                     CreatedUtcMs = nowMs,
-                    RetryDeadlineUtcMs = now.Add(RuntimeUnlockRecoveryContractRetryDeadline).ToUnixTimeMilliseconds(),
-                    LivenessDeferralDeadlineUtcMs = now.Add(RuntimeUnlockRecoveryContractLivenessDeferral).ToUnixTimeMilliseconds(),
+                    RetryDeadlineUtcMs = hasActiveRegularV4Recovery
+                        ? 0
+                        : now.Add(RuntimeUnlockRecoveryContractRetryDeadline).ToUnixTimeMilliseconds(),
+                    LivenessDeferralDeadlineUtcMs = hasActiveRegularV4Recovery
+                        ? 0
+                        : now.Add(RuntimeUnlockRecoveryContractLivenessDeferral).ToUnixTimeMilliseconds(),
                     RequiresLocalListenerRetry = requiresLocalListenerRetry,
                     CutThroughPending = cutThroughPending,
                     CutThroughAttempt = previousCutThroughAttempt,
@@ -17523,6 +18001,21 @@ public sealed partial class NknSignalingTransport
                     MissingDispatchSuccessorGeneration = 0,
                     SourcePublicationAuthority = sourcePublicationAuthority,
                 };
+                if (hasActiveRegularV4Recovery)
+                {
+                    MarkRuntimeUnlockRetryBlockedByRegularV4ReceiveRecoveryUnsafe(
+                        newState,
+                        activeRegularV4RecoverySnapshot,
+                        activeRegularV4RecoveryReason,
+                        hasActiveRegularV4RoutePublication
+                            ? activeRegularV4RoutePublicationGeneration
+                            : 0,
+                        hasActiveRegularV4RoutePublication
+                            ? activeRegularV4RouteCommitGeneration
+                            : null);
+                }
+
+                runtimeUnlockRecoveryRetryState = newState;
             }
         }
 
@@ -17709,6 +18202,36 @@ public sealed partial class NknSignalingTransport
         state.RegularV4RecoveryRouteCommitGeneration = routeCommitGeneration;
         state.RegularV4RecoveryBlockerReason = SanitizeLogToken(blockerReason);
         state.RegularV4RecoveryBlockedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var activePredecessor = state.DispatchContract is { Lifecycle.IsSettled: false };
+        if (state.PendingDispatchAuthorityRequest is { } pendingRequest &&
+            (pendingRequest.RegularV4LivenessGeneration != livenessSnapshot.Generation ||
+             pendingRequest.BridgeDecisionGeneration != livenessSnapshot.BridgeDecisionGeneration))
+        {
+            state.PendingDispatchAuthorityRequest = null;
+            state.PendingDispatchSuccessorRequestIssued = false;
+            state.PendingDispatchSuccessorRequestHeld = false;
+            state.PendingDispatchSuccessorHeldLogged = false;
+            state.RetryAuthorityPending = false;
+            if (!activePredecessor)
+            {
+                state.RetryAuthorityGranted = false;
+                state.DispatchAuthorityGranted = false;
+            }
+            state.DispatchDecisionReason = "regular_v4_recovery_handoff_pending";
+            state.AuthorityFailureReason = "regular_v4_recovery_handoff_pending";
+        }
+
+        if (!activePredecessor)
+        {
+            state.RetryQueued = false;
+            state.RetryDispatching = false;
+            state.RetryDispatched = false;
+            state.ObservedSendPending = false;
+            state.ObservedSendDeadlineUtcMs = 0;
+            state.DispatchDeadlineUtcMs = 0;
+            state.RetryDeadlineUtcMs = 0;
+            state.LivenessDeferralDeadlineUtcMs = 0;
+        }
     }
 
     private static void ClearRuntimeUnlockRetryBlockedByRegularV4ReceiveRecoveryUnsafe(
@@ -17790,6 +18313,14 @@ public sealed partial class NknSignalingTransport
                     retryReason: stateSnapshot?.RetryReason,
                     stateSnapshot: stateSnapshot,
                     handoff: pendingSettlement);
+                _ = PublishRuntimeUnlockRegularV4RecoverySettlementReport(
+                    pendingSettlement,
+                    new RuntimeUnlockRegularV4RecoverySettlementReport(
+                        settlement,
+                        livenessSnapshot.Generation,
+                        livenessSnapshot.BridgeDecisionGeneration,
+                        RuntimeUnlockRegularV4RecoverySettlementDisposition.Rejected,
+                        SanitizeLogToken(rejectionReason)));
             }
 
             return false;
@@ -17807,35 +18338,102 @@ public sealed partial class NknSignalingTransport
             pendingSettlement.LifecycleBoundary = SanitizeLogToken(settlementTrigger);
         }
 
-        var resolutionObserved = ResolveRuntimeUnlockRetryBlockedByRegularV4Recovery(
-            livenessSnapshot,
-            settlementTrigger,
+        var settlementReport = new RuntimeUnlockRegularV4RecoverySettlementReport(
             settlement,
-            out var receiveRecoveryReleased,
-            allowPreRecoveryFrontierSettlement: true);
-        var handoffDecisionReason = receiveRecoveryReleased
-            ? "receive_recovery_contract_released"
-            : resolutionObserved
-                ? "receive_recovery_contract_rejected"
-                : "coordinator_decision_pending";
+            livenessSnapshot.Generation,
+            livenessSnapshot.BridgeDecisionGeneration,
+            RuntimeUnlockRegularV4RecoverySettlementDisposition.Consumed,
+            SanitizeLogToken(settlementTrigger));
+        if (stateSnapshot is not null)
+        {
+            var reportQueued = PublishRuntimeUnlockRegularV4RecoverySettlementReport(
+                pendingSettlement,
+                settlementReport,
+                stateSnapshot,
+                () =>
+                {
+                    lock (accelerationGate)
+                    {
+                        if (!ReferenceEquals(runtimeUnlockRecoveryRetryState, stateSnapshot) ||
+                            pendingSettlement.LastAppliedReport != settlementReport ||
+                            stateSnapshot.ContractState is SessionRecoveryContractState.Completed or
+                                SessionRecoveryContractState.Failed)
+                        {
+                            return;
+                        }
+                    }
+
+                    var receiveRecoveryReleased = false;
+                    var resolutionObserved = ResolveRuntimeUnlockRetryBlockedByRegularV4Recovery(
+                        livenessSnapshot,
+                        settlementTrigger,
+                        settlement,
+                        out receiveRecoveryReleased,
+                        allowPreRecoveryFrontierSettlement: true);
+                    var handoffDecisionReason = receiveRecoveryReleased
+                        ? "receive_recovery_contract_released"
+                        : resolutionObserved
+                            ? "receive_recovery_contract_rejected"
+                            : "coordinator_decision_pending";
+
+                    LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
+                        "runtime_unlock_regular_v4_frontier_repair_settlement_handoff_consumed",
+                        settlement,
+                        livenessSnapshot.SessionId,
+                        livenessSnapshot.TransferId,
+                        handoffDecisionReason,
+                        retryReason: stateSnapshot.RetryReason,
+                        stateSnapshot: stateSnapshot,
+                        handoff: pendingSettlement);
+                    LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
+                        "runtime_unlock_regular_v4_frontier_repair_precontract_settlement_consumed",
+                        settlement,
+                        livenessSnapshot.SessionId,
+                        livenessSnapshot.TransferId,
+                        handoffDecisionReason,
+                        retryReason: stateSnapshot.RetryReason,
+                        stateSnapshot: stateSnapshot,
+                        handoff: pendingSettlement);
+                });
+            if (reportQueued)
+            {
+                LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
+                    "runtime_unlock_regular_v4_frontier_repair_settlement_held",
+                    settlement,
+                    livenessSnapshot.SessionId,
+                    livenessSnapshot.TransferId,
+                    "awaiting_coordinator_consumption_decision",
+                    retryReason: stateSnapshot.RetryReason,
+                    stateSnapshot: stateSnapshot,
+                    handoff: pendingSettlement);
+                return true;
+            }
+
+            LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
+                "runtime_unlock_regular_v4_frontier_repair_settlement_handoff_consumed",
+                settlement,
+                livenessSnapshot.SessionId,
+                livenessSnapshot.TransferId,
+                "coordinator_consumption_decision_not_accepted",
+                retryReason: stateSnapshot?.RetryReason,
+                stateSnapshot: stateSnapshot,
+                handoff: pendingSettlement);
+            return true;
+        }
 
         LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
             "runtime_unlock_regular_v4_frontier_repair_settlement_handoff_consumed",
             settlement,
             livenessSnapshot.SessionId,
             livenessSnapshot.TransferId,
-            handoffDecisionReason,
-            retryReason: stateSnapshot?.RetryReason,
-            stateSnapshot: stateSnapshot,
+            "no_retry_contract",
             handoff: pendingSettlement);
         LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
             "runtime_unlock_regular_v4_frontier_repair_precontract_settlement_consumed",
             settlement,
             livenessSnapshot.SessionId,
             livenessSnapshot.TransferId,
-            handoffDecisionReason,
-            retryReason: stateSnapshot?.RetryReason,
-            stateSnapshot: stateSnapshot,
+            "no_retry_contract",
             handoff: pendingSettlement);
         return true;
     }
@@ -17883,6 +18481,14 @@ public sealed partial class NknSignalingTransport
             snapshot?.TransferId ?? handoff.Settlement.TransferId,
             decisionReason,
             handoff: handoff);
+        _ = PublishRuntimeUnlockRegularV4RecoverySettlementReport(
+            handoff,
+            new RuntimeUnlockRegularV4RecoverySettlementReport(
+                handoff.Settlement,
+                snapshot?.Generation ?? handoff.AdoptedRecoveryLivenessGeneration,
+                snapshot?.BridgeDecisionGeneration ?? handoff.AdoptedBridgeDecisionGeneration,
+                RuntimeUnlockRegularV4RecoverySettlementDisposition.Discarded,
+                SanitizeLogToken(decisionReason)));
     }
 
     private bool TryGetRegularV4RecoveryRoutePublicationTuple(

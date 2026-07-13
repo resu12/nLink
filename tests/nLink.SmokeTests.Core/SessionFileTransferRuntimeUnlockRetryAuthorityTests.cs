@@ -19,11 +19,13 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
 
         Assert.Equal(1, bridge.AuthorityRequestSubscriberCount);
         Assert.Equal(1, bridge.SettlementReportSubscriberCount);
+        Assert.Equal(1, bridge.RegularV4SettlementReportSubscriberCount);
 
         service.DetachTransport();
 
         Assert.Equal(0, bridge.AuthorityRequestSubscriberCount);
         Assert.Equal(0, bridge.SettlementReportSubscriberCount);
+        Assert.Equal(0, bridge.RegularV4SettlementReportSubscriberCount);
     }
 
     [Fact]
@@ -65,6 +67,50 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         Assert.Equal("retry_dispatch_settlement_duplicate", duplicate.Reason);
         Assert.Same(contract, GetCurrentContract(fixture.Context));
         Assert.Equal(report, GetLastSettlement(fixture.Context));
+    }
+
+    [Fact]
+    public async Task RegularV4RecoverySettlementReport_IsProcessedUnderCoreGate_AndAuthorizesExactRequest()
+    {
+        using var fixture = await CreateFixtureAsync(
+            "session_retry_regular_v4_handoff",
+            "transfer_retry_regular_v4_handoff");
+        var report = SeedRegularV4RecoverySettlement(fixture.Context);
+        var coreGate = GetCoreGate(fixture.Service);
+
+        Task delivery;
+        Monitor.Enter(coreGate);
+        try
+        {
+            delivery = Task.Run(() => fixture.Bridge.RaiseRegularV4SettlementReport(report));
+            Assert.False(
+                delivery.Wait(TimeSpan.FromMilliseconds(100)),
+                "Regular-V4 recovery settlement escaped the Core transfer lock.");
+        }
+        finally
+        {
+            Monitor.Exit(coreGate);
+        }
+
+        await delivery.WaitAsync(TimeSpan.FromSeconds(3));
+        var accepted = fixture.Bridge.DequeueRegularV4SettlementDecision();
+        Assert.Equal(
+            RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Accepted,
+            accepted.Status);
+        Assert.Equal(report, GetLastRegularV4Settlement(fixture.Context));
+
+        fixture.Bridge.RaiseRegularV4SettlementReport(report);
+        var duplicate = fixture.Bridge.DequeueRegularV4SettlementDecision();
+        Assert.Equal(
+            RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Idempotent,
+            duplicate.Status);
+
+        var contract = Grant(fixture, fixture.InitialRequest);
+        Assert.Equal(
+            RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
+            contract.Authority.ReleaseKind);
+        Assert.Equal(report.Settlement.AuthorityId, contract.Authority.ReleaseAuthorityId);
+        Assert.Equal(report.Settlement.DecisionGeneration, contract.Authority.ReleaseGeneration);
     }
 
     [Fact]
@@ -317,6 +363,79 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         SetProperty(context, "LastRetiredRecoveryLivenessLease", lease);
     }
 
+    private static RuntimeUnlockRegularV4RecoverySettlementReport
+        SeedRegularV4RecoverySettlement(object context)
+    {
+        var sessionId = GetRequiredProperty<string>(context, "SessionId");
+        var transferId = GetRequiredProperty<string>(context, "TransferId");
+        var route = GetRequiredProperty<FileTransferRouteSelection>(context, "RouteSelection");
+        var epoch = GetOptionalProperty<LiveRouteEpoch>(context, "CurrentLiveRouteEpoch");
+        var leg = GetRequiredProperty<FileTransferLeg>(context, "CurrentTransferLeg");
+        var owner = GetRequiredProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner");
+        var terminalGeneration = GetRequiredProperty<int>(context, "TerminalGeneration");
+        var publication = GetRequiredProperty<RoutePublicationToken>(
+            context,
+            "CurrentRoutePublicationToken");
+        const int repairGeneration = 7;
+        var authorityId = new FileTransferAuthorityId(
+            $"fta2-test-regular-v4-handoff-{transferId}");
+        var repairDecision = new RepairReplayDecision(
+            Accepted: true,
+            RepairReplayKind.V4Repair,
+            "test_regular_v4_handoff",
+            repairGeneration,
+            route.Route,
+            route.ProtocolVersion,
+            epoch?.EpochId ?? 0,
+            owner.RuntimeGeneration,
+            terminalGeneration,
+            leg.Generation,
+            leg.TransportEpochId,
+            leg.BridgeRecoveryGeneration,
+            owner,
+            authorityId,
+            PredecessorAuthorityId: null,
+            BridgeDecisionGeneration: 0,
+            publication);
+        SetProperty(context, "CurrentRepairReplayDecision", repairDecision);
+        SetProperty(context, "LastRepairReplayGeneration", repairGeneration);
+
+        var settlement = new FileTransferRegularV4FrontierRepairSettlement(
+            sessionId,
+            transferId,
+            FileTransferDirection.Outbound,
+            route.TelemetryToken,
+            route.ProtocolVersion,
+            epoch?.EpochId ?? 0,
+            owner.RuntimeGeneration,
+            terminalGeneration,
+            leg.Generation,
+            leg.TransportEpochId,
+            leg.BridgeRecoveryGeneration,
+            BridgeDecisionGeneration: 0,
+            publication.PublicationGeneration,
+            publication.RouteCommitGeneration,
+            "regular-v4-frontier:0:test",
+            FrontierChunkIndex: 0,
+            DurableReceivedHighestChunkIndex: -1,
+            RequestedChunkCount: 1,
+            repairGeneration,
+            "test_regular_v4_handoff_consumed",
+            FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch,
+            FileTransferTransportKind.RegularNkn)
+        {
+            AuthorityId = authorityId,
+        };
+        SetProperty(context, "LastCoordinatorIssuedRegularV4RecoverySettlement", settlement);
+        SetProperty(context, "RuntimeUnlockRegularV4RecoverySettlementAvailable", false);
+        return new RuntimeUnlockRegularV4RecoverySettlementReport(
+            settlement,
+            RegularV4LivenessGeneration: 0,
+            BridgeDecisionGeneration: 0,
+            RuntimeUnlockRegularV4RecoverySettlementDisposition.Consumed,
+            "test_regular_v4_handoff_consumed");
+    }
+
     private static object GetOutboundContext(SessionFileTransferService service)
     {
         var field = typeof(SessionFileTransferService).GetField(
@@ -378,6 +497,17 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         return value is RuntimeUnlockRetryDispatchSettlementReport report ? report : null;
     }
 
+    private static RuntimeUnlockRegularV4RecoverySettlementReport? GetLastRegularV4Settlement(
+        object context)
+    {
+        var value = context.GetType()
+            .GetProperty(
+                "LastRuntimeUnlockRegularV4RecoverySettlement",
+                BindingFlags.Instance | BindingFlags.Public)!
+            .GetValue(context);
+        return value is RuntimeUnlockRegularV4RecoverySettlementReport report ? report : null;
+    }
+
     private sealed class RetryFixture(
         SessionFileTransferService service,
         RetryAuthorityLoopbackTransport bridge,
@@ -410,8 +540,10 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
     {
         private readonly ConcurrentQueue<RuntimeUnlockRetryDispatchDecision> authorityDecisions = [];
         private readonly ConcurrentQueue<RuntimeUnlockRetryDispatchSettlementDecision> settlementDecisions = [];
+        private readonly ConcurrentQueue<RuntimeUnlockRegularV4RecoverySettlementDecision> regularV4SettlementDecisions = [];
         private EventHandler<RuntimeUnlockRetryDispatchAuthorityRequestedEventArgs>? authorityRequested;
         private EventHandler<RuntimeUnlockRetryDispatchSettlementReportedEventArgs>? settlementReported;
+        private EventHandler<RuntimeUnlockRegularV4RecoverySettlementReportedEventArgs>? regularV4SettlementReported;
         private RuntimeUnlockRetryDispatchAuthorityRequest? pendingRequest;
         private int settlementDecisionObservationCount;
 
@@ -429,11 +561,21 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             remove => settlementReported -= value;
         }
 
+        public event EventHandler<RuntimeUnlockRegularV4RecoverySettlementReportedEventArgs>?
+            RuntimeUnlockRegularV4RecoverySettlementReported
+        {
+            add => regularV4SettlementReported += value;
+            remove => regularV4SettlementReported -= value;
+        }
+
         public int AuthorityRequestSubscriberCount =>
             authorityRequested?.GetInvocationList().Length ?? 0;
 
         public int SettlementReportSubscriberCount =>
             settlementReported?.GetInvocationList().Length ?? 0;
+
+        public int RegularV4SettlementReportSubscriberCount =>
+            regularV4SettlementReported?.GetInvocationList().Length ?? 0;
 
         public RuntimeUnlockRetryDispatchContract? InfraCurrentContract { get; private set; }
 
@@ -461,6 +603,12 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
                 new RuntimeUnlockRetryDispatchSettlementReportedEventArgs(report));
         }
 
+        public void RaiseRegularV4SettlementReport(
+            RuntimeUnlockRegularV4RecoverySettlementReport report)
+            => regularV4SettlementReported?.Invoke(
+                this,
+                new RuntimeUnlockRegularV4RecoverySettlementReportedEventArgs(report));
+
         public RuntimeUnlockRetryDispatchDecision DequeueAuthorityDecision()
         {
             Assert.True(authorityDecisions.TryDequeue(out var decision));
@@ -470,6 +618,12 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         public RuntimeUnlockRetryDispatchSettlementDecision DequeueSettlementDecision()
         {
             Assert.True(settlementDecisions.TryDequeue(out var decision));
+            return decision;
+        }
+
+        public RuntimeUnlockRegularV4RecoverySettlementDecision DequeueRegularV4SettlementDecision()
+        {
+            Assert.True(regularV4SettlementDecisions.TryDequeue(out var decision));
             return decision;
         }
 
@@ -533,6 +687,13 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
 
             settlementDecisions.Enqueue(decision);
             SettlementDecisionObserved.Set();
+            return true;
+        }
+
+        public bool ObserveRuntimeUnlockRegularV4RecoverySettlementDecision(
+            RuntimeUnlockRegularV4RecoverySettlementDecision decision)
+        {
+            regularV4SettlementDecisions.Enqueue(decision);
             return true;
         }
     }

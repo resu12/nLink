@@ -594,7 +594,10 @@ internal sealed record FileTransferCoordinatorState(
     RuntimeUnlockRetryDispatchAuthority? CurrentRuntimeUnlockRetryDispatchAuthority = null,
     int LastRuntimeUnlockRetryDispatchAuthorityGeneration = 0,
     RecoveryLivenessLease? LastRetiredRecoveryLivenessLease = null,
-    RuntimeUnlockRetryDispatchSettlementReport? LastRuntimeUnlockRetryDispatchSettlement = null)
+    RuntimeUnlockRetryDispatchSettlementReport? LastRuntimeUnlockRetryDispatchSettlement = null,
+    RuntimeUnlockRegularV4RecoverySettlementReport? LastRuntimeUnlockRegularV4RecoverySettlement = null,
+    FileTransferRegularV4FrontierRepairSettlement? LastCoordinatorIssuedRegularV4RecoverySettlement = null,
+    bool RuntimeUnlockRegularV4RecoverySettlementAvailable = false)
 {
     public FileTransferRouteRuntimeDescriptor RouteRuntime => RouteSelection.RuntimeDescriptor;
 }
@@ -2778,6 +2781,9 @@ internal static class FileTransferCoordinator
             CurrentRecoveryLivenessLease = null,
             CurrentRuntimeUnlockRetryDispatchAuthority = null,
             LastRetiredRecoveryLivenessLease = null,
+            LastRuntimeUnlockRegularV4RecoverySettlement = null,
+            LastCoordinatorIssuedRegularV4RecoverySettlement = null,
+            RuntimeUnlockRegularV4RecoverySettlementAvailable = false,
         };
 
     private static FileTransferCoordinatorState InvalidateRoutePublicationAuthority(FileTransferCoordinatorState state)
@@ -3886,6 +3892,8 @@ internal static class FileTransferCoordinator
                     existing.Authority,
                     request,
                     out _) ||
+                existing.RegularV4LivenessGeneration != request.RegularV4LivenessGeneration ||
+                existing.RequestBridgeDecisionGeneration != request.BridgeDecisionGeneration ||
                 existing.RequestActivePredecessorSupersession !=
                     request.RequestActivePredecessorSupersession)
             {
@@ -3921,6 +3929,14 @@ internal static class FileTransferCoordinator
             authorizedReleaseAuthorityId = predecessor.Authority.ReleaseAuthorityId;
             authorizedReleaseGeneration = predecessor.Authority.ReleaseGeneration;
             authorizedReleaseOutcome = predecessor.Authority.ReleaseOutcome;
+
+            if (request.RegularV4LivenessGeneration != predecessor.RegularV4LivenessGeneration ||
+                request.BridgeDecisionGeneration != predecessor.RequestBridgeDecisionGeneration)
+            {
+                return Decision(
+                    RuntimeUnlockRetryDispatchDecisionStatus.Rejected,
+                    "retry_dispatch_recovery_handoff_tuple_mismatch");
+            }
 
             if (!predecessor.Lifecycle.IsSettled)
             {
@@ -4036,6 +4052,8 @@ internal static class FileTransferCoordinator
 
         var releaseValid = currentContract is not null
             ? TryValidateInheritedRuntimeUnlockRetryRelease(
+                state,
+                currentContract,
                 authorizedReleaseKind,
                 authorizedReleaseAuthorityId,
                 authorizedReleaseGeneration,
@@ -4043,6 +4061,7 @@ internal static class FileTransferCoordinator
                 out var releaseRejectionReason)
             : TryValidateRuntimeUnlockRetryRelease(
                 state,
+                request,
                 authorizedReleaseKind,
                 authorizedReleaseAuthorityId,
                 authorizedReleaseGeneration,
@@ -4052,6 +4071,7 @@ internal static class FileTransferCoordinator
         {
             var held = releaseRejectionReason is
                 "regular_v4_repair_settlement_pending" or
+                "regular_v4_recovery_settlement_consumption_pending" or
                 "receive_recovery_lease_pending" or
                 "fallback_paired_tail_yield_pending" or
                 "fallback_owner_work_pending";
@@ -4101,7 +4121,9 @@ internal static class FileTransferCoordinator
             predecessorAuthorityId);
         var contract = new RuntimeUnlockRetryDispatchContract(
             authority,
-            request.RequestActivePredecessorSupersession);
+            request.RequestActivePredecessorSupersession,
+            request.RegularV4LivenessGeneration,
+            request.BridgeDecisionGeneration);
         RuntimeUnlockRetryDispatchSettlementReport? supersededPredecessorSettlement = null;
         if (activePredecessorToSupersede is not null &&
             !activePredecessorToSupersede.TrySupersedeBeforeSend(
@@ -4131,6 +4153,11 @@ internal static class FileTransferCoordinator
             LastRuntimeUnlockRetryDispatchAuthorityGeneration = authorityGeneration,
             LastRuntimeUnlockRetryDispatchSettlement =
                 supersededPredecessorSettlement ?? state.LastRuntimeUnlockRetryDispatchSettlement,
+            RuntimeUnlockRegularV4RecoverySettlementAvailable =
+                currentContract is null &&
+                authorizedReleaseKind == RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement
+                    ? false
+                    : state.RuntimeUnlockRegularV4RecoverySettlementAvailable,
         };
         return Decision(
             RuntimeUnlockRetryDispatchDecisionStatus.Granted,
@@ -4280,6 +4307,199 @@ internal static class FileTransferCoordinator
             acceptedState);
     }
 
+    internal static RuntimeUnlockRegularV4RecoverySettlementDecision ObserveRuntimeUnlockRegularV4RecoverySettlement(
+        FileTransferCoordinatorState state,
+        RuntimeUnlockRegularV4RecoverySettlementReport? lastSettlement,
+        RuntimeUnlockRegularV4RecoverySettlementReport report)
+    {
+        RuntimeUnlockRegularV4RecoverySettlementDecision Decision(
+            RuntimeUnlockRegularV4RecoverySettlementDecisionStatus status,
+            string reason,
+            FileTransferCoordinatorState? nextState = null)
+            => new(status, reason, report)
+            {
+                State = nextState ?? state,
+            };
+
+        if (report.IsDefault)
+        {
+            return Decision(
+                RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Rejected,
+                "regular_v4_recovery_settlement_report_missing");
+        }
+
+        var settlement = report.Settlement;
+        if (!string.Equals(settlement.SessionId, state.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(settlement.TransferId, state.TransferId, StringComparison.Ordinal) ||
+            settlement.Direction != state.Direction)
+        {
+            return Decision(
+                RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Rejected,
+                "regular_v4_recovery_settlement_identity_mismatch");
+        }
+
+        if (state.IsTerminal)
+        {
+            return Decision(
+                RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Rejected,
+                "terminal_state");
+        }
+
+        if (state.RouteSelection.Route != FileTransferRoute.RegularNknV4Fast ||
+            state.RouteSelection.ProtocolVersion != FileTransferProtocol.ProtocolVersionV4)
+        {
+            return Decision(
+                RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Rejected,
+                "regular_v4_recovery_settlement_route_mismatch");
+        }
+
+        if (state.CurrentRepairReplayDecision is not { } repairDecision ||
+            !IsRepairReplayDecisionCurrent(state, repairDecision, out _) ||
+            !RuntimeUnlockRegularV4RecoverySettlementMatchesCurrentRepair(
+                state,
+                repairDecision,
+                settlement))
+        {
+            return Decision(
+                RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Rejected,
+                "regular_v4_recovery_settlement_authority_stale");
+        }
+
+        if (state.LastCoordinatorIssuedRegularV4RecoverySettlement is not { } issuedSettlement ||
+            !ReferenceEquals(issuedSettlement, settlement) ||
+            issuedSettlement != settlement)
+        {
+            return Decision(
+                RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Rejected,
+                "regular_v4_recovery_settlement_not_coordinator_issued");
+        }
+
+        var normalizedReason = NormalizeReason(report.Reason);
+        if (!string.Equals(report.Reason, normalizedReason, StringComparison.Ordinal))
+        {
+            return Decision(
+                RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Rejected,
+                "regular_v4_recovery_settlement_reason_not_normalized");
+        }
+
+        if (!TryValidateRuntimeUnlockRegularV4RecoverySettlementTuple(
+                state,
+                report,
+                out var tupleRejectionReason))
+        {
+            return Decision(
+                RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Rejected,
+                tupleRejectionReason);
+        }
+
+        if (report.Disposition != RuntimeUnlockRegularV4RecoverySettlementDisposition.Consumed)
+        {
+            return Decision(
+                RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Rejected,
+                "regular_v4_recovery_settlement_disposition_diagnostic_only");
+        }
+
+        if (settlement.Outcome is not (
+                FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved or
+                FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch or
+                FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled))
+        {
+            return Decision(
+                RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Rejected,
+                "regular_v4_recovery_settlement_outcome_rejected");
+        }
+
+        var retainedSettlement = state.LastRuntimeUnlockRegularV4RecoverySettlement ?? lastSettlement;
+        if (retainedSettlement is { } priorSettlement)
+        {
+            return priorSettlement == report
+                ? Decision(
+                    RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Idempotent,
+                    "regular_v4_recovery_settlement_duplicate")
+                : Decision(
+                    RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Rejected,
+                    "regular_v4_recovery_settlement_final_disposition_conflict");
+        }
+
+        var acceptedState = state with
+        {
+            LastRuntimeUnlockRegularV4RecoverySettlement = report,
+            RuntimeUnlockRegularV4RecoverySettlementAvailable = true,
+        };
+        return Decision(
+            RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Accepted,
+            "regular_v4_recovery_settlement_accepted",
+            acceptedState);
+    }
+
+    private static bool TryValidateRuntimeUnlockRegularV4RecoverySettlementTuple(
+        FileTransferCoordinatorState state,
+        RuntimeUnlockRegularV4RecoverySettlementReport report,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        var livenessGeneration = report.RegularV4LivenessGeneration;
+        var bridgeDecisionGeneration = report.BridgeDecisionGeneration;
+        if ((livenessGeneration == 0) != (bridgeDecisionGeneration == 0))
+        {
+            rejectionReason = "regular_v4_recovery_settlement_generation_tuple_incomplete";
+            return false;
+        }
+
+        if (livenessGeneration == 0)
+        {
+            if (state.CurrentRecoveryLivenessLease is not null)
+            {
+                rejectionReason = "regular_v4_recovery_settlement_zero_tuple_recovery_active";
+                return false;
+            }
+
+            return true;
+        }
+
+        var lease = state.CurrentRecoveryLivenessLease ?? state.LastRetiredRecoveryLivenessLease;
+        if (lease is not { } recoveryLease ||
+            recoveryLease.LeaseGeneration != livenessGeneration ||
+            !RuntimeUnlockRegularV4RecoveryLeaseMatchesCurrentRuntime(state, recoveryLease))
+        {
+            rejectionReason = "regular_v4_recovery_settlement_liveness_generation_stale";
+            return false;
+        }
+
+        if (state.CurrentBridgeRecoveryDecision is { } bridgeDecision &&
+            bridgeDecision.BridgeDecisionGeneration != bridgeDecisionGeneration)
+        {
+            rejectionReason = "regular_v4_recovery_settlement_bridge_generation_stale";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool RuntimeUnlockRegularV4RecoveryLeaseMatchesCurrentRuntime(
+        FileTransferCoordinatorState state,
+        RecoveryLivenessLease lease)
+    {
+        var leg = state.CurrentLeg;
+        return !lease.IsDefault &&
+               !state.IsTerminal &&
+               string.Equals(lease.SessionId, state.SessionId, StringComparison.Ordinal) &&
+               string.Equals(lease.TransferId, state.TransferId, StringComparison.Ordinal) &&
+               lease.Direction == state.Direction &&
+               lease.RuntimeOwner == state.CurrentRuntimeOwner &&
+               lease.Route == state.RouteSelection.Route &&
+               string.Equals(lease.RouteToken, state.RouteSelection.TelemetryToken, StringComparison.Ordinal) &&
+               lease.ProtocolVersion == state.RouteSelection.ProtocolVersion &&
+               lease.LiveRouteEpoch == (state.CurrentLiveRouteEpoch?.EpochId ?? 0) &&
+               lease.RuntimeGeneration == (state.CurrentRuntimeOwner?.RuntimeGeneration ?? 0) &&
+               lease.TerminalGeneration == state.TerminalGeneration &&
+               leg is not null &&
+               lease.LegGeneration == leg.Generation &&
+               lease.TransportEpoch == leg.TransportEpochId &&
+               lease.BridgeRecoveryGeneration == leg.BridgeRecoveryGeneration &&
+               lease.State is RecoveryLivenessLeaseState.Active or RecoveryLivenessLeaseState.Retired;
+    }
+
     internal static bool TryValidateRuntimeUnlockRetryDispatchGrantedDecision(
         RuntimeUnlockRetryDispatchDecision decision,
         RuntimeUnlockRetryDispatchAuthorityRequest expectedRequest,
@@ -4301,6 +4521,14 @@ internal static class FileTransferCoordinator
         {
             return RuntimeUnlockRetryDispatchMismatch(
                 "contract_request_active_predecessor_supersession",
+                out mismatchField);
+        }
+
+        if (contract.RegularV4LivenessGeneration != expectedRequest.RegularV4LivenessGeneration ||
+            contract.RequestBridgeDecisionGeneration != expectedRequest.BridgeDecisionGeneration)
+        {
+            return RuntimeUnlockRetryDispatchMismatch(
+                "contract_recovery_handoff_tuple",
                 out mismatchField);
         }
 
@@ -4571,6 +4799,7 @@ internal static class FileTransferCoordinator
 
     private static bool TryValidateRuntimeUnlockRetryRelease(
         FileTransferCoordinatorState state,
+        RuntimeUnlockRetryDispatchAuthorityRequest request,
         RuntimeUnlockRetryReleaseKind releaseKind,
         FileTransferAuthorityId? releaseAuthorityId,
         int releaseGeneration,
@@ -4607,6 +4836,45 @@ internal static class FileTransferCoordinator
                         StringComparison.Ordinal)
                         ? "regular_v4_repair_settlement_pending"
                         : "regular_v4_repair_settlement_rejected";
+                    return false;
+                }
+
+                if (state.LastRuntimeUnlockRegularV4RecoverySettlement is not { } handoff)
+                {
+                    rejectionReason = "regular_v4_recovery_settlement_consumption_pending";
+                    return false;
+                }
+
+                if (!state.RuntimeUnlockRegularV4RecoverySettlementAvailable)
+                {
+                    rejectionReason = "regular_v4_recovery_settlement_consumption_already_used";
+                    return false;
+                }
+
+                if (handoff.Disposition !=
+                    RuntimeUnlockRegularV4RecoverySettlementDisposition.Consumed)
+                {
+                    rejectionReason = "regular_v4_recovery_settlement_consumption_rejected";
+                    return false;
+                }
+
+                if (state.LastCoordinatorIssuedRegularV4RecoverySettlement is not { } issuedSettlement ||
+                    !ReferenceEquals(issuedSettlement, handoff.Settlement) ||
+                    issuedSettlement != handoff.Settlement ||
+                    !RuntimeUnlockRegularV4RecoverySettlementMatchesCurrentRepair(
+                        state,
+                        repairDecision,
+                        handoff.Settlement) ||
+                    handoff.Settlement.AuthorityId != releaseAuthorityId ||
+                    handoff.Settlement.DecisionGeneration != releaseGeneration ||
+                    !string.Equals(
+                        handoff.Settlement.Outcome.ToString(),
+                        releaseOutcome,
+                        StringComparison.Ordinal) ||
+                    handoff.RegularV4LivenessGeneration != request.RegularV4LivenessGeneration ||
+                    handoff.BridgeDecisionGeneration != request.BridgeDecisionGeneration)
+                {
+                    rejectionReason = "regular_v4_recovery_settlement_consumption_stale";
                     return false;
                 }
 
@@ -4670,7 +4938,39 @@ internal static class FileTransferCoordinator
         return true;
     }
 
+    private static bool RuntimeUnlockRegularV4RecoverySettlementMatchesCurrentRepair(
+        FileTransferCoordinatorState state,
+        RepairReplayDecision repairDecision,
+        FileTransferRegularV4FrontierRepairSettlement settlement)
+    {
+        var publication = repairDecision.RoutePublicationToken;
+        return settlement is not null &&
+               !settlement.AuthorityId.IsDefault &&
+               settlement.AuthorityId == repairDecision.AuthorityId &&
+               settlement.DecisionGeneration == repairDecision.RepairGeneration &&
+               string.Equals(settlement.SessionId, state.SessionId, StringComparison.Ordinal) &&
+               string.Equals(settlement.TransferId, state.TransferId, StringComparison.Ordinal) &&
+               settlement.Direction == state.Direction &&
+               string.Equals(
+                   settlement.RouteToken,
+                   state.RouteSelection.TelemetryToken,
+                   StringComparison.Ordinal) &&
+               settlement.ProtocolVersion == FileTransferProtocol.ProtocolVersionV4 &&
+               settlement.LiveRouteEpoch == (state.CurrentLiveRouteEpoch?.EpochId ?? 0) &&
+               settlement.RuntimeGeneration == (state.CurrentRuntimeOwner?.RuntimeGeneration ?? 0) &&
+               settlement.TerminalGeneration == state.TerminalGeneration &&
+               settlement.LegGeneration == state.CurrentLeg?.Generation &&
+               settlement.TransportEpoch == state.CurrentLeg?.TransportEpochId &&
+               settlement.BridgeRecoveryGeneration == state.CurrentLeg?.BridgeRecoveryGeneration &&
+               settlement.BridgeDecisionGeneration == repairDecision.BridgeDecisionGeneration &&
+               settlement.RoutePublicationGeneration == publication?.PublicationGeneration &&
+               settlement.RouteCommitGeneration == publication?.RouteCommitGeneration &&
+               settlement.TargetTransport == FileTransferTransportKind.RegularNkn;
+    }
+
     private static bool TryValidateInheritedRuntimeUnlockRetryRelease(
+        FileTransferCoordinatorState state,
+        RuntimeUnlockRetryDispatchContract currentContract,
         RuntimeUnlockRetryReleaseKind releaseKind,
         FileTransferAuthorityId? releaseAuthorityId,
         int releaseGeneration,
@@ -4682,6 +4982,34 @@ internal static class FileTransferCoordinator
         {
             rejectionReason = "retry_dispatch_predecessor_release_invalid";
             return false;
+        }
+
+        if (releaseKind == RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement)
+        {
+            if (state.LastRuntimeUnlockRegularV4RecoverySettlement is not
+                {
+                    Disposition: RuntimeUnlockRegularV4RecoverySettlementDisposition.Consumed,
+                } handoff ||
+                state.LastCoordinatorIssuedRegularV4RecoverySettlement is not { } issuedSettlement ||
+                !ReferenceEquals(issuedSettlement, handoff.Settlement) ||
+                issuedSettlement != handoff.Settlement ||
+                handoff.Settlement.AuthorityId != releaseAuthorityId ||
+                handoff.Settlement.DecisionGeneration != releaseGeneration ||
+                !string.Equals(
+                    handoff.Settlement.Outcome.ToString(),
+                    releaseOutcome,
+                    StringComparison.Ordinal) ||
+                currentContract.Authority.ReleaseKind != releaseKind ||
+                currentContract.Authority.ReleaseAuthorityId != releaseAuthorityId ||
+                currentContract.Authority.ReleaseGeneration != releaseGeneration ||
+                !string.Equals(
+                    currentContract.Authority.ReleaseOutcome,
+                    releaseOutcome,
+                    StringComparison.Ordinal))
+            {
+                rejectionReason = "retry_dispatch_predecessor_recovery_handoff_stale";
+                return false;
+            }
         }
 
         var outcomeValid = releaseKind switch
@@ -5968,6 +6296,9 @@ internal static class FileTransferCoordinator
             {
                 CurrentRepairReplayDecision = repair,
                 LastRepairReplayGeneration = repair.RepairGeneration,
+                LastRuntimeUnlockRegularV4RecoverySettlement = null,
+                LastCoordinatorIssuedRegularV4RecoverySettlement = null,
+                RuntimeUnlockRegularV4RecoverySettlementAvailable = false,
             };
         }
 
@@ -6007,6 +6338,14 @@ internal static class FileTransferCoordinator
                     LastRecoveryLivenessLeaseGeneration = Math.Max(
                         next.LastRecoveryLivenessLeaseGeneration,
                         livenessLease.LeaseGeneration),
+                    LastRuntimeUnlockRegularV4RecoverySettlement =
+                        kind == FileTransferCoordinatorActionKind.RecoveryLivenessLeaseBegin
+                            ? null
+                            : next.LastRuntimeUnlockRegularV4RecoverySettlement,
+                    RuntimeUnlockRegularV4RecoverySettlementAvailable =
+                        kind == FileTransferCoordinatorActionKind.RecoveryLivenessLeaseBegin
+                            ? false
+                            : next.RuntimeUnlockRegularV4RecoverySettlementAvailable,
                 };
         }
 

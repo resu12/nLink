@@ -7194,6 +7194,11 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_retry_held_by_regular_v4_recovery_count={0}" -f $recoveryClassification.RuntimeUnlockRetryHeldByRegularV4RecoveryCount),
         ("runtime_unlock_retry_rejected_after_regular_v4_recovery_count={0}" -f $recoveryClassification.RuntimeUnlockRetryRejectedAfterRegularV4RecoveryCount),
         ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_count={0}" -f $recoveryClassification.RuntimeUnlockRetryRegularV4RecoverySettlementMissingCount),
+        ("runtime_unlock_regular_v4_recovery_settlement_reported_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoverySettlementReportedCount),
+        ("runtime_unlock_regular_v4_recovery_settlement_accepted_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoverySettlementAcceptedCount),
+        ("runtime_unlock_regular_v4_recovery_settlement_idempotent_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoverySettlementIdempotentCount),
+        ("runtime_unlock_regular_v4_recovery_settlement_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoverySettlementRejectedCount),
+        ("runtime_unlock_retry_regular_v4_settlement_handoff_bypassed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryRegularV4SettlementHandoffBypassedCount),
         ("runtime_unlock_broken_state_fresh_retry_consumed_count={0}" -f $recoveryClassification.RuntimeUnlockBrokenStateFreshRetryConsumedCount),
         ("runtime_unlock_broken_state_retry_suppressed_count={0}" -f $recoveryClassification.RuntimeUnlockBrokenStateRetrySuppressedCount),
         ("runtime_unlock_broken_state_transaction_failed_count={0}" -f $recoveryClassification.RuntimeUnlockBrokenStateTransactionFailedCount),
@@ -7896,6 +7901,29 @@ function Get-FileTransferRecoveryFailureClassification {
     })
     $runtimeUnlockRetryRegularV4RecoverySettlementMissingEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_retry_regular_v4_recovery_settlement_missing'
+    })
+    $runtimeUnlockRegularV4RecoverySettlementReportedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_regular_v4_recovery_settlement_reported'
+    })
+    $runtimeUnlockRegularV4RecoverySettlementDecidedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_regular_v4_recovery_settlement_decided'
+    })
+    $runtimeUnlockRegularV4RecoverySettlementAcceptedEvents = @($runtimeUnlockRegularV4RecoverySettlementDecidedEvents | Where-Object {
+        (Get-FileTransferEventField -Event $_ -Name 'disposition' -Default '') -eq 'Consumed' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -eq 'Accepted'
+    })
+    $runtimeUnlockRegularV4RecoverySettlementIdempotentEvents = @($runtimeUnlockRegularV4RecoverySettlementDecidedEvents | Where-Object {
+        (Get-FileTransferEventField -Event $_ -Name 'disposition' -Default '') -eq 'Consumed' -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -eq 'Idempotent'
+    })
+    $runtimeUnlockRegularV4RecoverySettlementRejectedEvents = @($runtimeUnlockRegularV4RecoverySettlementDecidedEvents | Where-Object {
+        (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -eq 'Rejected'
+    })
+    $runtimeUnlockRegularV4RecoverySettlementProtocolObserved =
+        $runtimeUnlockRegularV4RecoverySettlementReportedEvents.Count -gt 0 -or
+        $runtimeUnlockRegularV4RecoverySettlementDecidedEvents.Count -gt 0
+    $runtimeUnlockRetryDispatchPendingRequestRecheckedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_pending_request_rechecked'
     })
     $runtimeUnlockRetryDispatchAuthorityGrantedEvents = @($events | Where-Object {
         $_.EventName -eq 'runtime_unlock_retry_dispatch_authority_granted'
@@ -8745,14 +8773,235 @@ function Get-FileTransferRecoveryFailureClassification {
         return $matchedDiscriminator
     }
 
+    function Test-RuntimeUnlockRegularV4RecoverySettlementMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Blocked,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        if ((Get-FileTransferAuthoritySchema -Line ([string]$Candidate.RawLine)) -lt 2) {
+            return $false
+        }
+
+        foreach ($requiredCandidateField in @(
+                'authority_id',
+                'session_id',
+                'transfer_id',
+                'direction',
+                'route',
+                'protocol_version',
+                'live_route_epoch',
+                'runtime_generation',
+                'terminal_generation',
+                'leg_generation',
+                'transport_epoch',
+                'bridge_recovery_generation',
+                'settlement_bridge_decision_generation',
+                'route_publication_generation',
+                'route_commit_generation',
+                'target_transport',
+                'repair_request_key',
+                'frontier_chunk_index',
+                'durable_received_highest_chunk_index',
+                'requested_chunk_count',
+                'settlement_decision_generation',
+                'settlement_outcome',
+                'regular_v4_liveness_generation',
+                'bridge_decision_generation',
+                'disposition',
+                'settlement_reason',
+                'decision_status')) {
+            $requiredValue = Get-FileTransferEventField -Event $Candidate -Name $requiredCandidateField -Default ''
+            if ([string]::IsNullOrWhiteSpace($requiredValue) -or $requiredValue -in @('(none)', 'none')) {
+                return $false
+            }
+        }
+
+        foreach ($identityField in @(
+                'session_id',
+                'transfer_id',
+                'route',
+                'protocol_version',
+                'live_route_epoch',
+                'regular_v4_liveness_generation',
+                'bridge_decision_generation')) {
+            $blockedValue = Get-FileTransferEventField -Event $Blocked -Name $identityField -Default ''
+            $candidateValue = Get-FileTransferEventField -Event $Candidate -Name $identityField -Default ''
+            if ([string]::IsNullOrWhiteSpace($blockedValue) -or
+                $blockedValue -in @('(none)', 'none') -or
+                [string]::IsNullOrWhiteSpace($candidateValue) -or
+                $candidateValue -in @('(none)', 'none') -or
+                -not [string]::Equals($blockedValue, $candidateValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        if ((Get-FileTransferEventField -Event $Candidate -Name 'disposition' -Default '') -ne 'Consumed' -or
+            (Get-FileTransferEventField -Event $Candidate -Name 'decision_status' -Default '') -notin @('Accepted', 'Idempotent')) {
+            return $false
+        }
+
+        return $true
+    }
+
+    function Test-RuntimeUnlockRegularV4RecoveryGrantMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Blocked,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        foreach ($requiredBlockedField in @(
+                'session_id',
+                'transfer_id',
+                'route',
+                'protocol_version',
+                'live_route_epoch',
+                'regular_v4_liveness_generation',
+                'bridge_decision_generation')) {
+            $blockedValue = Get-FileTransferEventField -Event $Blocked -Name $requiredBlockedField -Default ''
+            if ([string]::IsNullOrWhiteSpace($blockedValue) -or $blockedValue -in @('(none)', 'none')) {
+                return $false
+            }
+        }
+
+        foreach ($requiredCandidateField in @(
+                'session_id',
+                'transfer_id',
+                'direction',
+                'request_regular_v4_liveness_generation',
+                'request_bridge_decision_generation',
+                'decision_reason')) {
+            $candidateValue = Get-FileTransferEventField -Event $Candidate -Name $requiredCandidateField -Default ''
+            if ([string]::IsNullOrWhiteSpace($candidateValue) -or $candidateValue -in @('(none)', 'none')) {
+                return $false
+            }
+        }
+
+        foreach ($identityField in @('session_id', 'transfer_id')) {
+            $blockedValue = Get-FileTransferEventField -Event $Blocked -Name $identityField -Default ''
+            $candidateValue = Get-FileTransferEventField -Event $Candidate -Name $identityField -Default ''
+            if (-not [string]::Equals($blockedValue, $candidateValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        foreach ($generationPair in @(
+                @('regular_v4_liveness_generation', 'request_regular_v4_liveness_generation'),
+                @('bridge_decision_generation', 'request_bridge_decision_generation'))) {
+            $blockedValue = Get-FileTransferEventField -Event $Blocked -Name $generationPair[0] -Default ''
+            $requestValue = Get-FileTransferEventField -Event $Candidate -Name $generationPair[1] -Default ''
+            if ($requestValue -ne '0' -and $requestValue -ne $blockedValue) {
+                return $false
+            }
+        }
+
+        if ($Candidate.EventName -eq 'runtime_unlock_retry_dispatch_pending_request_rechecked') {
+            foreach ($requiredRecheckField in @(
+                    'release_authority_id',
+                    'release_generation',
+                    'release_outcome',
+                    'granted_authority_id',
+                    'granted_bridge_decision_generation',
+                    'decision_status',
+                    'trigger')) {
+                $requiredValue = Get-FileTransferEventField -Event $Candidate -Name $requiredRecheckField -Default ''
+                if ([string]::IsNullOrWhiteSpace($requiredValue) -or $requiredValue -in @('(none)', 'none')) {
+                    return $false
+                }
+            }
+
+            if ((Get-FileTransferEventField -Event $Candidate -Name 'decision_status' -Default '') -notin @('Granted', 'Accepted')) {
+                return $false
+            }
+
+            return $true
+        }
+
+        if ($Candidate.EventName -ne 'runtime_unlock_retry_dispatch_authority_granted' -or
+            (Get-FileTransferAuthoritySchema -Line ([string]$Candidate.RawLine)) -lt 2) {
+            return $false
+        }
+
+        foreach ($requiredGrantField in @(
+                'authority_id',
+                'route',
+                'protocol_version',
+                'live_route_epoch',
+                'contract_generation',
+                'retired_generation',
+                'release_kind',
+                'release_authority_id',
+                'release_generation',
+                'release_outcome')) {
+            $requiredValue = Get-FileTransferEventField -Event $Candidate -Name $requiredGrantField -Default ''
+            if ([string]::IsNullOrWhiteSpace($requiredValue) -or $requiredValue -in @('(none)', 'none')) {
+                return $false
+            }
+        }
+
+        foreach ($tupleField in @('route', 'protocol_version', 'live_route_epoch')) {
+            if (-not [string]::Equals(
+                    (Get-FileTransferEventField -Event $Blocked -Name $tupleField -Default ''),
+                    (Get-FileTransferEventField -Event $Candidate -Name $tupleField -Default ''),
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        foreach ($optionalRetryField in @('contract_generation', 'retired_generation')) {
+            $blockedValue = Get-FileTransferEventField -Event $Blocked -Name $optionalRetryField -Default ''
+            $candidateValue = Get-FileTransferEventField -Event $Candidate -Name $optionalRetryField -Default ''
+            if (-not [string]::IsNullOrWhiteSpace($blockedValue) -and $blockedValue -ne $candidateValue) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
     $runtimeUnlockRetryRegularV4RecoverySettlementMissingCandidateEvents = New-Object System.Collections.Generic.List[object]
-    $regularV4RecoverySettlementCandidates = @()
-    if ($runtimeUnlockRetryBlockedByRegularV4RecoveryEvents.Count -gt 0) {
-        $regularV4RecoverySettlementCandidates = @($runtimeUnlockRetryBlockedByRegularV4RecoveryEvents)
+    $runtimeUnlockRetryRegularV4SettlementHandoffBypassedCandidateEvents = New-Object System.Collections.Generic.List[object]
+    $regularV4RecoverySettlementCandidateList = New-Object System.Collections.Generic.List[object]
+    $blockedRecoveryTupleKeys = @{}
+    $blockedRecoveryChainKeys = @{}
+
+    function Get-RuntimeUnlockRegularV4RecoveryTupleKey {
+        param([Parameter(Mandatory = $true)]$Event)
+
+        return (@(
+                'session_id',
+                'transfer_id',
+                'route',
+                'protocol_version',
+                'live_route_epoch',
+                'regular_v4_liveness_generation',
+                'bridge_decision_generation') |
+                ForEach-Object { Get-FileTransferEventField -Event $Event -Name $_ -Default '(missing)' }) -join '|'
     }
-    else {
-        $regularV4RecoverySettlementCandidates = @($runtimeUnlockRetryHeldByRegularV4RecoveryEvents)
+
+    foreach ($blockedRetry in @($runtimeUnlockRetryBlockedByRegularV4RecoveryEvents | Sort-Object Sequence)) {
+        $tupleKey = Get-RuntimeUnlockRegularV4RecoveryTupleKey -Event $blockedRetry
+        $blockedRecoveryTupleKeys[$tupleKey] = $true
+        $retryKey = (@('contract_generation', 'retired_generation', 'offer_generation') |
+                ForEach-Object { Get-FileTransferEventField -Event $blockedRetry -Name $_ -Default '(missing)' }) -join '|'
+        $chainKey = $tupleKey + '|' + $retryKey
+        if (-not $blockedRecoveryChainKeys.ContainsKey($chainKey)) {
+            $blockedRecoveryChainKeys[$chainKey] = $true
+            $regularV4RecoverySettlementCandidateList.Add($blockedRetry) | Out-Null
+        }
     }
+
+    $heldRecoveryTupleKeys = @{}
+    foreach ($heldRetry in @($runtimeUnlockRetryHeldByRegularV4RecoveryEvents | Sort-Object Sequence)) {
+        $tupleKey = Get-RuntimeUnlockRegularV4RecoveryTupleKey -Event $heldRetry
+        if (-not $blockedRecoveryTupleKeys.ContainsKey($tupleKey) -and
+            -not $heldRecoveryTupleKeys.ContainsKey($tupleKey)) {
+            $heldRecoveryTupleKeys[$tupleKey] = $true
+            $regularV4RecoverySettlementCandidateList.Add($heldRetry) | Out-Null
+        }
+    }
+
+    $regularV4RecoverySettlementCandidates = @($regularV4RecoverySettlementCandidateList.ToArray() | Sort-Object Sequence)
 
     if ($regularV4RecoverySettlementCandidates.Count -eq 0 -and
         $runtimeUnlockRetryRegularV4RecoverySettlementMissingEvents.Count -gt 0) {
@@ -8765,16 +9014,51 @@ function Get-FileTransferRecoveryFailureClassification {
             [int64]$_.Sequence -gt $blockedSequence -and
             (Test-RuntimeUnlockRetryDispatchMatch -Release $blockedRetry -Candidate $_)
         })
+        $matchingResolutionRelease = @(
+            if (-not $runtimeUnlockRegularV4RecoverySettlementProtocolObserved) {
+                $matchingRelease
+            }
+        )
         $matchingRegularV4Rejection = @($runtimeUnlockRetryRejectedAfterRegularV4RecoveryEvents | Where-Object {
             [int64]$_.Sequence -gt $blockedSequence -and
             (Test-RuntimeUnlockRetryDispatchMatch -Release $blockedRetry -Candidate $_)
         })
-        if ($matchingRelease.Count -eq 0 -and
-            $matchingRegularV4Rejection.Count -eq 0) {
+        $matchingAcceptedHandoffDecisions = @(
+            @($runtimeUnlockRegularV4RecoverySettlementAcceptedEvents + $runtimeUnlockRegularV4RecoverySettlementIdempotentEvents) |
+                Where-Object {
+                    [int64]$_.Sequence -gt $blockedSequence -and
+                    (Test-RuntimeUnlockRegularV4RecoverySettlementMatch -Blocked $blockedRetry -Candidate $_)
+                } |
+                Sort-Object Sequence
+        )
+        $matchingGrantCandidates = @(
+            @($runtimeUnlockRetryDispatchPendingRequestRecheckedEvents + $runtimeUnlockRetryDispatchAuthorityGrantedEvents) |
+                Where-Object {
+                    [int64]$_.Sequence -gt $blockedSequence -and
+                    (Test-RuntimeUnlockRegularV4RecoveryGrantMatch -Blocked $blockedRetry -Candidate $_)
+                } |
+                Sort-Object Sequence
+        )
+        $firstResolutionSequence = [int64]::MaxValue
+        foreach ($resolution in @($matchingResolutionRelease + $matchingRegularV4Rejection + $matchingAcceptedHandoffDecisions)) {
+            if ([int64]$resolution.Sequence -lt $firstResolutionSequence) {
+                $firstResolutionSequence = [int64]$resolution.Sequence
+            }
+        }
+
+        $firstGrantCandidate = @($matchingGrantCandidates | Select-Object -First 1)
+        if ($firstGrantCandidate.Count -gt 0 -and
+            [int64]$firstGrantCandidate[0].Sequence -lt $firstResolutionSequence) {
+            $runtimeUnlockRetryRegularV4SettlementHandoffBypassedCandidateEvents.Add($firstGrantCandidate[0]) | Out-Null
+        }
+        elseif ($matchingResolutionRelease.Count -eq 0 -and
+            $matchingRegularV4Rejection.Count -eq 0 -and
+            $matchingAcceptedHandoffDecisions.Count -eq 0) {
             $runtimeUnlockRetryRegularV4RecoverySettlementMissingCandidateEvents.Add($blockedRetry) | Out-Null
         }
     }
     $runtimeUnlockRetryRegularV4RecoverySettlementMissingCount = $runtimeUnlockRetryRegularV4RecoverySettlementMissingCandidateEvents.Count
+    $runtimeUnlockRetryRegularV4SettlementHandoffBypassedCount = $runtimeUnlockRetryRegularV4SettlementHandoffBypassedCandidateEvents.Count
 
     $runtimeUnlockRetryDispatchMissingAfterAuthorityGrantedCount = $runtimeUnlockRetryDispatchMissingAfterAuthorityGrantedEvents.Count
     $runtimeUnlockRetryDispatchMissingCount = $runtimeUnlockRetryDispatchMissingAfterAuthorityGrantedCount
@@ -9933,7 +10217,11 @@ function Get-FileTransferRecoveryFailureClassification {
         -DefaultReason 'runtime_unlock_retry_dispatch_fresh_chain_invalid_after_closure' `
         -UseDefaultReason
 
-    $grantBypassSequences = @($runtimeUnlockRetryDispatchGrantBypassedByRetryBudgetEvents | ForEach-Object { [int64]$_.Sequence })
+    $grantBypassSequences = @(
+        @($runtimeUnlockRetryDispatchGrantBypassedByRetryBudgetEvents) +
+        @($runtimeUnlockRetryRegularV4SettlementHandoffBypassedCandidateEvents.ToArray()) |
+            ForEach-Object { [int64]$_.Sequence }
+    )
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
         -Class 'runtime_unlock_retry_dispatch_grant_bypassed_by_retry_budget' `
@@ -9966,6 +10254,15 @@ function Get-FileTransferRecoveryFailureClassification {
         -Candidates $proofChainFailureCandidates `
         -Class 'runtime_unlock_retry_dispatch_missing_after_authority_granted' `
         -Events $runtimeUnlockRetryDispatchMissingAfterAuthorityGrantedEvents
+
+    if ($runtimeUnlockRetryRegularV4SettlementHandoffBypassedCount -gt 0) {
+        Add-FileTransferProofChainFailureCandidates `
+            -Candidates $proofChainFailureCandidates `
+            -Class 'runtime_unlock_retry_regular_v4_settlement_handoff_bypassed' `
+            -Events @($runtimeUnlockRetryRegularV4SettlementHandoffBypassedCandidateEvents.ToArray()) `
+            -DefaultReason 'regular_v4_recovery_settlement_handoff_bypassed' `
+            -UseDefaultReason
+    }
 
     if ($runtimeUnlockRetryRegularV4RecoverySettlementMissingCount -gt 0) {
         Add-FileTransferProofChainFailureCandidates `
@@ -10202,6 +10499,9 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     elseif ($runtimeUnlockRetryDispatchMissingAfterAuthorityGrantedCount -gt 0) {
         $class = 'runtime_unlock_retry_dispatch_missing_after_authority_granted'
+    }
+    elseif ($runtimeUnlockRetryRegularV4SettlementHandoffBypassedCount -gt 0) {
+        $class = 'runtime_unlock_retry_regular_v4_settlement_handoff_bypassed'
     }
     elseif ($runtimeUnlockRetryDispatchProofVerdict -eq 'fail') {
         $class = 'runtime_unlock_retry_dispatch_missing'
@@ -10601,6 +10901,11 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockRetryHeldByRegularV4RecoveryCount = $runtimeUnlockRetryHeldByRegularV4RecoveryEvents.Count
         RuntimeUnlockRetryRejectedAfterRegularV4RecoveryCount = $runtimeUnlockRetryRejectedAfterRegularV4RecoveryEvents.Count
         RuntimeUnlockRetryRegularV4RecoverySettlementMissingCount = $runtimeUnlockRetryRegularV4RecoverySettlementMissingCount
+        RuntimeUnlockRegularV4RecoverySettlementReportedCount = $runtimeUnlockRegularV4RecoverySettlementReportedEvents.Count
+        RuntimeUnlockRegularV4RecoverySettlementAcceptedCount = $runtimeUnlockRegularV4RecoverySettlementAcceptedEvents.Count
+        RuntimeUnlockRegularV4RecoverySettlementIdempotentCount = $runtimeUnlockRegularV4RecoverySettlementIdempotentEvents.Count
+        RuntimeUnlockRegularV4RecoverySettlementRejectedCount = $runtimeUnlockRegularV4RecoverySettlementRejectedEvents.Count
+        RuntimeUnlockRetryRegularV4SettlementHandoffBypassedCount = $runtimeUnlockRetryRegularV4SettlementHandoffBypassedCount
         RuntimeUnlockBrokenStateFreshRetryConsumedCount = $runtimeUnlockBrokenStateFreshRetryConsumedEvents.Count
         RuntimeUnlockBrokenStateRetrySuppressedCount = $runtimeUnlockBrokenStateRetrySuppressedEvents.Count
         RuntimeUnlockBrokenStateTransactionFailedCount = $runtimeUnlockBrokenStateTransactionFailedEvents.Count
@@ -11290,6 +11595,11 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_retry_held_by_regular_v4_recovery_count={0}" -f $recoveryClassification.RuntimeUnlockRetryHeldByRegularV4RecoveryCount),
         ("runtime_unlock_retry_rejected_after_regular_v4_recovery_count={0}" -f $recoveryClassification.RuntimeUnlockRetryRejectedAfterRegularV4RecoveryCount),
         ("runtime_unlock_retry_regular_v4_recovery_settlement_missing_count={0}" -f $recoveryClassification.RuntimeUnlockRetryRegularV4RecoverySettlementMissingCount),
+        ("runtime_unlock_regular_v4_recovery_settlement_reported_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoverySettlementReportedCount),
+        ("runtime_unlock_regular_v4_recovery_settlement_accepted_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoverySettlementAcceptedCount),
+        ("runtime_unlock_regular_v4_recovery_settlement_idempotent_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoverySettlementIdempotentCount),
+        ("runtime_unlock_regular_v4_recovery_settlement_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoverySettlementRejectedCount),
+        ("runtime_unlock_retry_regular_v4_settlement_handoff_bypassed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryRegularV4SettlementHandoffBypassedCount),
         ("runtime_unlock_broken_state_fresh_retry_consumed_count={0}" -f $recoveryClassification.RuntimeUnlockBrokenStateFreshRetryConsumedCount),
         ("runtime_unlock_broken_state_retry_suppressed_count={0}" -f $recoveryClassification.RuntimeUnlockBrokenStateRetrySuppressedCount),
         ("runtime_unlock_broken_state_transaction_failed_count={0}" -f $recoveryClassification.RuntimeUnlockBrokenStateTransactionFailedCount),

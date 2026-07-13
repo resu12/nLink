@@ -684,6 +684,8 @@ public sealed partial class SessionFileTransferService : IDisposable
                 OnRuntimeUnlockRetryDispatchAuthorityRequested;
             retryDispatchBridge.RuntimeUnlockRetryDispatchSettlementReported +=
                 OnRuntimeUnlockRetryDispatchSettlementReported;
+            retryDispatchBridge.RuntimeUnlockRegularV4RecoverySettlementReported +=
+                OnRuntimeUnlockRegularV4RecoverySettlementReported;
         }
 
         if (transport is ISignalingTransport lifecycleTransport)
@@ -5062,13 +5064,15 @@ public sealed partial class SessionFileTransferService : IDisposable
         out string releaseOutcome)
     {
         if (context.RouteSelection.Route == FileTransferRoute.RegularNknV4Fast &&
-            context.CurrentRegularV4FrontierRepairContract is { } repairContract &&
-            repairContract.Lifecycle.SettlementOutcome is { } outcome)
+            context.LastRuntimeUnlockRegularV4RecoverySettlement is
+            {
+                Disposition: RuntimeUnlockRegularV4RecoverySettlementDisposition.Consumed,
+            } handoff)
         {
             releaseKind = RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement;
-            releaseAuthorityId = repairContract.Authority.AuthorityId;
-            releaseGeneration = repairContract.Authority.DecisionGeneration;
-            releaseOutcome = outcome.ToString();
+            releaseAuthorityId = handoff.Settlement.AuthorityId;
+            releaseGeneration = handoff.Settlement.DecisionGeneration;
+            releaseOutcome = handoff.Settlement.Outcome.ToString();
             return;
         }
 
@@ -5109,13 +5113,15 @@ public sealed partial class SessionFileTransferService : IDisposable
         out string releaseOutcome)
     {
         if (context.RouteSelection.Route == FileTransferRoute.RegularNknV4Fast &&
-            context.CurrentRegularV4FrontierRepairContract is { } repairContract &&
-            repairContract.Lifecycle.SettlementOutcome is { } outcome)
+            context.LastRuntimeUnlockRegularV4RecoverySettlement is
+            {
+                Disposition: RuntimeUnlockRegularV4RecoverySettlementDisposition.Consumed,
+            } handoff)
         {
             releaseKind = RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement;
-            releaseAuthorityId = repairContract.Authority.AuthorityId;
-            releaseGeneration = repairContract.Authority.DecisionGeneration;
-            releaseOutcome = outcome.ToString();
+            releaseAuthorityId = handoff.Settlement.AuthorityId;
+            releaseGeneration = handoff.Settlement.DecisionGeneration;
+            releaseOutcome = handoff.Settlement.Outcome.ToString();
             return;
         }
 
@@ -5191,7 +5197,10 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.CurrentRuntimeUnlockRetryDispatchContract?.Authority,
             context.LastRuntimeUnlockRetryDispatchAuthorityGeneration,
             context.LastRetiredRecoveryLivenessLease,
-            context.LastRuntimeUnlockRetryDispatchSettlement);
+            context.LastRuntimeUnlockRetryDispatchSettlement,
+            context.LastRuntimeUnlockRegularV4RecoverySettlement,
+            context.LastCoordinatorIssuedRegularV4RecoverySettlement,
+            context.RuntimeUnlockRegularV4RecoverySettlementAvailable);
 
     private static void ApplyCoordinatorDecisionToContextLocked(
         OutboundTransferContext context,
@@ -5248,6 +5257,12 @@ public sealed partial class SessionFileTransferService : IDisposable
             decision.State.LastRuntimeUnlockPendingPreCommitProbeGeneration;
         context.LastRuntimeUnlockRetryDispatchAuthorityGeneration =
             decision.State.LastRuntimeUnlockRetryDispatchAuthorityGeneration;
+        context.LastRuntimeUnlockRegularV4RecoverySettlement =
+            decision.State.LastRuntimeUnlockRegularV4RecoverySettlement;
+        context.LastCoordinatorIssuedRegularV4RecoverySettlement =
+            decision.State.LastCoordinatorIssuedRegularV4RecoverySettlement;
+        context.RuntimeUnlockRegularV4RecoverySettlementAvailable =
+            decision.State.RuntimeUnlockRegularV4RecoverySettlementAvailable;
         var legHistory = decision.State.LegHistory.ToList();
         context.TransferLegHistory.Clear();
         context.TransferLegHistory.AddRange(legHistory);
@@ -5313,6 +5328,12 @@ public sealed partial class SessionFileTransferService : IDisposable
             decision.State.LastRuntimeUnlockPendingPreCommitProbeGeneration;
         context.LastRuntimeUnlockRetryDispatchAuthorityGeneration =
             decision.State.LastRuntimeUnlockRetryDispatchAuthorityGeneration;
+        context.LastRuntimeUnlockRegularV4RecoverySettlement =
+            decision.State.LastRuntimeUnlockRegularV4RecoverySettlement;
+        context.LastCoordinatorIssuedRegularV4RecoverySettlement =
+            decision.State.LastCoordinatorIssuedRegularV4RecoverySettlement;
+        context.RuntimeUnlockRegularV4RecoverySettlementAvailable =
+            decision.State.RuntimeUnlockRegularV4RecoverySettlementAvailable;
         var legHistory = decision.State.LegHistory.ToList();
         context.TransferLegHistory.Clear();
         context.TransferLegHistory.AddRange(legHistory);
@@ -5412,6 +5433,12 @@ public sealed partial class SessionFileTransferService : IDisposable
             decision.State.LastRuntimeUnlockPendingPreCommitProbeGeneration;
         context.LastRuntimeUnlockRetryDispatchAuthorityGeneration =
             decision.State.LastRuntimeUnlockRetryDispatchAuthorityGeneration;
+        context.LastRuntimeUnlockRegularV4RecoverySettlement =
+            decision.State.LastRuntimeUnlockRegularV4RecoverySettlement;
+        context.LastCoordinatorIssuedRegularV4RecoverySettlement =
+            decision.State.LastCoordinatorIssuedRegularV4RecoverySettlement;
+        context.RuntimeUnlockRegularV4RecoverySettlementAvailable =
+            decision.State.RuntimeUnlockRegularV4RecoverySettlementAvailable;
     }
 
     private static void ApplyCoordinatorActionDecisionToContextLocked(
@@ -5453,6 +5480,12 @@ public sealed partial class SessionFileTransferService : IDisposable
             decision.State.LastRuntimeUnlockPendingPreCommitProbeGeneration;
         context.LastRuntimeUnlockRetryDispatchAuthorityGeneration =
             decision.State.LastRuntimeUnlockRetryDispatchAuthorityGeneration;
+        context.LastRuntimeUnlockRegularV4RecoverySettlement =
+            decision.State.LastRuntimeUnlockRegularV4RecoverySettlement;
+        context.LastCoordinatorIssuedRegularV4RecoverySettlement =
+            decision.State.LastCoordinatorIssuedRegularV4RecoverySettlement;
+        context.RuntimeUnlockRegularV4RecoverySettlementAvailable =
+            decision.State.RuntimeUnlockRegularV4RecoverySettlementAvailable;
     }
 
     private static RuntimeUnlockRetryDispatchContract? ReconcileRuntimeUnlockRetryDispatchContract(
@@ -5541,7 +5574,10 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.CurrentRuntimeUnlockRetryDispatchContract?.Authority,
             context.LastRuntimeUnlockRetryDispatchAuthorityGeneration,
             context.LastRetiredRecoveryLivenessLease,
-            context.LastRuntimeUnlockRetryDispatchSettlement);
+            context.LastRuntimeUnlockRetryDispatchSettlement,
+            context.LastRuntimeUnlockRegularV4RecoverySettlement,
+            context.LastCoordinatorIssuedRegularV4RecoverySettlement,
+            context.RuntimeUnlockRegularV4RecoverySettlementAvailable);
 
     private static bool TryCaptureRuntimeOwnerLocked(
         OutboundTransferContext context,
@@ -17693,6 +17729,12 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public RuntimeUnlockRetryDispatchSettlementReport? LastRuntimeUnlockRetryDispatchSettlement { get; set; }
 
+        public RuntimeUnlockRegularV4RecoverySettlementReport? LastRuntimeUnlockRegularV4RecoverySettlement { get; set; }
+
+        public FileTransferRegularV4FrontierRepairSettlement? LastCoordinatorIssuedRegularV4RecoverySettlement { get; set; }
+
+        public bool RuntimeUnlockRegularV4RecoverySettlementAvailable { get; set; }
+
         public FileTransferRuntimeProfile RuntimeProfile { get; set; }
 
         public FileTransferBridgeRecoveryPolicy BridgeRecoveryPolicy { get; set; } =
@@ -18660,6 +18702,12 @@ public sealed partial class SessionFileTransferService : IDisposable
         public int LastRuntimeUnlockRetryDispatchAuthorityGeneration { get; set; }
 
         public RuntimeUnlockRetryDispatchSettlementReport? LastRuntimeUnlockRetryDispatchSettlement { get; set; }
+
+        public RuntimeUnlockRegularV4RecoverySettlementReport? LastRuntimeUnlockRegularV4RecoverySettlement { get; set; }
+
+        public FileTransferRegularV4FrontierRepairSettlement? LastCoordinatorIssuedRegularV4RecoverySettlement { get; set; }
+
+        public bool RuntimeUnlockRegularV4RecoverySettlementAvailable { get; set; }
 
         public FileTransferRuntimeProfile RuntimeProfile { get; set; }
 

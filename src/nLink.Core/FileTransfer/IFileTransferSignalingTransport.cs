@@ -489,6 +489,20 @@ internal enum RuntimeUnlockRetryDispatchSettlementDecisionStatus
     Rejected = 2,
 }
 
+internal enum RuntimeUnlockRegularV4RecoverySettlementDisposition
+{
+    Consumed = 0,
+    Rejected = 1,
+    Discarded = 2,
+}
+
+internal enum RuntimeUnlockRegularV4RecoverySettlementDecisionStatus
+{
+    Accepted = 0,
+    Idempotent = 1,
+    Rejected = 2,
+}
+
 internal enum RuntimeUnlockRetryDispatchAttemptPhase
 {
     Granted = 0,
@@ -576,6 +590,20 @@ internal readonly record struct RuntimeUnlockRetryDispatchSettlementReport(
     public bool IsDefault => Authority.IsDefault || string.IsNullOrWhiteSpace(Reason);
 }
 
+internal readonly record struct RuntimeUnlockRegularV4RecoverySettlementReport(
+    FileTransferRegularV4FrontierRepairSettlement Settlement,
+    int RegularV4LivenessGeneration,
+    int BridgeDecisionGeneration,
+    RuntimeUnlockRegularV4RecoverySettlementDisposition Disposition,
+    string Reason)
+{
+    public bool IsDefault => Settlement is null ||
+                             Settlement.AuthorityId.IsDefault ||
+                             RegularV4LivenessGeneration < 0 ||
+                             BridgeDecisionGeneration < 0 ||
+                             string.IsNullOrWhiteSpace(Reason);
+}
+
 internal sealed class RuntimeUnlockRetryDispatchContract
 {
     private readonly object aliasGate = new();
@@ -588,7 +616,9 @@ internal sealed class RuntimeUnlockRetryDispatchContract
 
     public RuntimeUnlockRetryDispatchContract(
         RuntimeUnlockRetryDispatchAuthority authority,
-        bool requestActivePredecessorSupersession = false)
+        bool requestActivePredecessorSupersession = false,
+        int regularV4LivenessGeneration = 0,
+        int requestBridgeDecisionGeneration = 0)
     {
         if (authority.IsDefault)
         {
@@ -597,6 +627,8 @@ internal sealed class RuntimeUnlockRetryDispatchContract
 
         Authority = authority;
         RequestActivePredecessorSupersession = requestActivePredecessorSupersession;
+        RegularV4LivenessGeneration = regularV4LivenessGeneration;
+        RequestBridgeDecisionGeneration = requestBridgeDecisionGeneration;
         Lifecycle = new FileTransferAuthorityLifecycle<RuntimeUnlockRetryDispatchSettlementOutcome>(
             authority.AuthorityId);
     }
@@ -604,6 +636,10 @@ internal sealed class RuntimeUnlockRetryDispatchContract
     public RuntimeUnlockRetryDispatchAuthority Authority { get; }
 
     public bool RequestActivePredecessorSupersession { get; }
+
+    public int RegularV4LivenessGeneration { get; }
+
+    public int RequestBridgeDecisionGeneration { get; }
 
     public FileTransferAuthorityLifecycle<RuntimeUnlockRetryDispatchSettlementOutcome> Lifecycle { get; }
 
@@ -877,6 +913,16 @@ internal readonly record struct RuntimeUnlockRetryDispatchSettlementDecision(
     public FileTransferCoordinatorState State { get; init; } = null!;
 }
 
+internal readonly record struct RuntimeUnlockRegularV4RecoverySettlementDecision(
+    RuntimeUnlockRegularV4RecoverySettlementDecisionStatus Status,
+    string Reason,
+    RuntimeUnlockRegularV4RecoverySettlementReport Report)
+{
+    public bool Accepted => Status == RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Accepted;
+
+    public FileTransferCoordinatorState State { get; init; } = null!;
+}
+
 internal sealed class RuntimeUnlockRetryDispatchAuthorityRequestedEventArgs(
     RuntimeUnlockRetryDispatchAuthorityRequest request) : EventArgs
 {
@@ -889,6 +935,12 @@ internal sealed class RuntimeUnlockRetryDispatchSettlementReportedEventArgs(
     public RuntimeUnlockRetryDispatchSettlementReport Report { get; } = report;
 }
 
+internal sealed class RuntimeUnlockRegularV4RecoverySettlementReportedEventArgs(
+    RuntimeUnlockRegularV4RecoverySettlementReport report) : EventArgs
+{
+    public RuntimeUnlockRegularV4RecoverySettlementReport Report { get; } = report;
+}
+
 internal interface IRuntimeUnlockRetryDispatchAuthorityBridge
 {
     event EventHandler<RuntimeUnlockRetryDispatchAuthorityRequestedEventArgs>?
@@ -896,6 +948,9 @@ internal interface IRuntimeUnlockRetryDispatchAuthorityBridge
 
     event EventHandler<RuntimeUnlockRetryDispatchSettlementReportedEventArgs>?
         RuntimeUnlockRetryDispatchSettlementReported;
+
+    event EventHandler<RuntimeUnlockRegularV4RecoverySettlementReportedEventArgs>?
+        RuntimeUnlockRegularV4RecoverySettlementReported;
 
     bool TryGetPendingRuntimeUnlockRetryDispatchAuthorityRequest(
         string sessionId,
@@ -907,6 +962,9 @@ internal interface IRuntimeUnlockRetryDispatchAuthorityBridge
 
     bool ObserveRuntimeUnlockRetryDispatchSettlementDecision(
         RuntimeUnlockRetryDispatchSettlementDecision decision);
+
+    bool ObserveRuntimeUnlockRegularV4RecoverySettlementDecision(
+        RuntimeUnlockRegularV4RecoverySettlementDecision decision);
 }
 
 public interface IFileTransferSessionContextProvider
