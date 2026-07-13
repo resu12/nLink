@@ -97,7 +97,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
 
     protected static int GetOperationalLogLength()
     {
-        return ReadOperationalLogText().Length;
+        return CoreSmokeTestsBase.GetOperationalLogLength();
     }
 
     protected static bool GetOutboundRepairOnlyMode(SessionFileTransferService service)
@@ -113,20 +113,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
 
     protected static string ReadOperationalLogTail(int startIndex)
     {
-        var logText = ReadOperationalLogText();
-        if (startIndex <= 0)
-        {
-            return logText;
-        }
-
-        if (startIndex >= logText.Length)
-        {
-            // The operational log can rotate between the initial length snapshot and the final read.
-            // When that happens, returning the full current contents is more reliable than returning nothing.
-            return logText;
-        }
-
-        return logText[startIndex..];
+        return CoreSmokeTestsBase.ReadOperationalLogTail(startIndex);
     }
 
     protected static string GetLoopbackFrameChunkIndex(FileTransferDataFrame frame) => frame switch
@@ -631,6 +618,22 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             peer?.SetAllDataSessionsAvailability(isAvailable: true, reason, requiresResumeRequest: true);
         }
 
+        public bool TryFailActiveDataSessionReceiveForTests(string transferId, Exception exception)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(transferId);
+            ArgumentNullException.ThrowIfNull(exception);
+            return dataSessions.TryGetValue(transferId.Trim(), out var session) &&
+                   session.TryFailActiveReceive(exception);
+        }
+
+        public (bool Active, long Ordinal) GetDataSessionReceiveStateForTests(string transferId)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(transferId);
+            return dataSessions.TryGetValue(transferId.Trim(), out var session)
+                ? (session.HasActiveReceive, session.ReceiveOrdinal)
+                : (false, 0L);
+        }
+
         public void ReceiveDeliveredSessionOpen(FileTransferSessionOpenV2 payload)
         {
             FileTransferSessionOpenReceived?.Invoke(this, new FileTransferSessionOpenReceivedEventArgs(payload, "loopback-peer"));
@@ -831,8 +834,11 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             private readonly Channel<FileTransferReceivedDataFrame> frames = Channel.CreateUnbounded<FileTransferReceivedDataFrame>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false, AllowSynchronousContinuations = false, });
             private int disposed;
             private int activeReader;
+            private long receiveOrdinal;
             private int available = 1;
             private string availabilityReason = "available";
+            private readonly object receiveFailureGate = new();
+            private TaskCompletionSource<Exception>? activeReceiveFailure;
             public LoopbackDataSession(LoopbackFileTransferTransport owner, string sessionId, string transferId)
             {
                 this.owner = owner;
@@ -843,6 +849,8 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             public string SessionId { get; }
             public string TransferId { get; }
             public bool IsAvailable => Volatile.Read(ref available) != 0;
+            public bool HasActiveReceive => Volatile.Read(ref activeReader) != 0;
+            public long ReceiveOrdinal => Volatile.Read(ref receiveOrdinal);
             public ConcurrentQueue<FileTransferDataPathSendAuthority> SentDataPathSendAuthorities { get; } = [];
 
             public event EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? AvailabilityChanged;
@@ -851,18 +859,61 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
 
             public async ValueTask<FileTransferReceivedDataFrame> ReceiveWithMetadataAsync(CancellationToken ct)
             {
+                Interlocked.Increment(ref receiveOrdinal);
                 if (Interlocked.CompareExchange(ref activeReader, 1, 0) != 0)
                 {
                     LocalOperationalLog.Warn("FileTransferService", $"event=filetransfer_receive_loop_overlap_detected; transfer_id={TransferId}; session_id={SessionId}; reason=loopback_session_multiple_readers");
                 }
 
+                var receiveFailure = new TaskCompletionSource<Exception>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                lock (receiveFailureGate)
+                {
+                    activeReceiveFailure = receiveFailure;
+                }
+
                 try
                 {
-                    return await frames.Reader.ReadAsync(ct).ConfigureAwait(false);
+                    using var readCancellation = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    var readTask = frames.Reader.ReadAsync(readCancellation.Token).AsTask();
+                    var completed = await Task.WhenAny(receiveFailure.Task, readTask).ConfigureAwait(false);
+                    if (completed == receiveFailure.Task)
+                    {
+                        var injected = await receiveFailure.Task.ConfigureAwait(false);
+                        readCancellation.Cancel();
+                        try
+                        {
+                            await readTask.ConfigureAwait(false);
+                        }
+                        catch (OperationCanceledException) when (readCancellation.IsCancellationRequested)
+                        {
+                        }
+
+                        throw injected;
+                    }
+
+                    return await readTask.ConfigureAwait(false);
                 }
                 finally
                 {
+                    lock (receiveFailureGate)
+                    {
+                        if (ReferenceEquals(activeReceiveFailure, receiveFailure))
+                        {
+                            activeReceiveFailure = null;
+                        }
+                    }
+
                     Volatile.Write(ref activeReader, 0);
+                }
+            }
+
+            public bool TryFailActiveReceive(Exception exception)
+            {
+                ArgumentNullException.ThrowIfNull(exception);
+                lock (receiveFailureGate)
+                {
+                    return activeReceiveFailure?.TrySetResult(exception) == true;
                 }
             }
 

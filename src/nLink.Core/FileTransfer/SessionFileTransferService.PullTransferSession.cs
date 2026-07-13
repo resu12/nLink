@@ -4848,6 +4848,10 @@ public sealed partial class SessionFileTransferService
         }
 
         context.DataSession = session;
+        context.DataSessionGeneration = Math.Max(1, context.DataSessionGeneration + 1);
+        context.PendingOutboundSparsePumpInstall = null;
+        context.InstalledOutboundSparsePump = null;
+        context.PendingOutboundSparseFrontierDispatchProofs.Clear();
         SubscribeDataSessionEvents(session);
         TryReplayOutboundRuntimeUnlockPendingPreCommitProbeLocked(context, "data_session_attached");
         RetryOutboundFallbackTailLocalYieldProofIfPendingLocked(context, "data_session_attached");

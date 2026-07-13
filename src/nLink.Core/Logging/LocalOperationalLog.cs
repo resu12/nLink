@@ -61,6 +61,22 @@ public static class LocalOperationalLog
         }
     }
 
+    internal static bool TryReadRetainedSlice(string startToken, string endToken, out string slice)
+    {
+        lock (Gate)
+        {
+            return Logger.TryReadRetainedSlice(startToken, endToken, out slice);
+        }
+    }
+
+    internal static bool TryReadRetainedTail(string startToken, out string tail)
+    {
+        lock (Gate)
+        {
+            return Logger.TryReadRetainedTail(startToken, out tail);
+        }
+    }
+
     private static string GetDefaultLogPath()
     {
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);

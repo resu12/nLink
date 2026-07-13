@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using NLink.App;
 using NLink.Core.FileTransfer;
+using NLink.Core.Logging;
 using NLink.Infra.DevLocal;
 using Xunit.Sdk;
 
@@ -12,6 +13,418 @@ namespace NLink.SmokeTests;
 [Collection(FakeNknNetworkCollection.Name)]
 public sealed class FileTransferSoakRunnerTests : CoreSmokeTestsBase
 {
+    [Fact]
+    public void FileTransferSoakRunner_RetainedLogSliceStitchesRotatedGenerationsBetweenMarkers()
+    {
+        var directory = Path.Combine(
+            Path.GetTempPath(),
+            "nlink-filetransfer-soak-log-slice",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var activePath = Path.Combine(directory, "nlink.log");
+        var rotatedPath = Path.Combine(directory, "nlink.1.log");
+        const string marker = "soak-00000001-00000001-00000001";
+
+        try
+        {
+            File.WriteAllLines(
+                rotatedPath,
+                [
+                    "before-marker",
+                    $"event=filetransfer_local_soak_slice_started; slice_marker={marker}",
+                    "event=filetransfer_route_selected; route=regular_nkn_v4_fast; protocol_version=4",
+                    "event=filetransfer_v4_sender_started",
+                ],
+                Encoding.UTF8);
+            File.WriteAllLines(
+                activePath,
+                [
+                    "event=transfer_terminal; route=regular_nkn_v4_fast; protocol_version=4; error_code=(none)",
+                    $"event=filetransfer_local_soak_slice_ended; slice_marker={marker}",
+                    "after-marker",
+                ],
+                Encoding.UTF8);
+
+            var slice = FileTransferSoakRunner.ReadLogSliceForTests(
+                activePath,
+                length: (2 * 1024 * 1024) - 32,
+                marker);
+
+            Assert.Contains("event=filetransfer_route_selected", slice, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_v4_sender_started", slice, StringComparison.Ordinal);
+            Assert.Contains("event=transfer_terminal", slice, StringComparison.Ordinal);
+            Assert.DoesNotContain("before-marker", slice, StringComparison.Ordinal);
+            Assert.DoesNotContain("after-marker", slice, StringComparison.Ordinal);
+            Assert.DoesNotContain("slice_marker=", slice, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteDirectory(directory);
+        }
+    }
+
+    [Fact]
+    public void FileTransferSoakRunner_RetainedLogSliceRejectsMissingIntermediateGeneration()
+    {
+        var directory = Path.Combine(
+            Path.GetTempPath(),
+            "nlink-filetransfer-soak-log-slice-gap",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var activePath = Path.Combine(directory, "nlink.log");
+        const string marker = "soak-00000001-00000001-00000003";
+        var startToken = $"event=filetransfer_local_soak_slice_started; slice_marker={marker}";
+        var endToken = $"event=filetransfer_local_soak_slice_ended; slice_marker={marker}";
+
+        try
+        {
+            File.WriteAllLines(
+                Path.Combine(directory, "nlink.3.log"),
+                [startToken, "event=filetransfer_route_selected"],
+                Encoding.UTF8);
+            File.WriteAllLines(
+                Path.Combine(directory, "nlink.1.log"),
+                ["event=filetransfer_v4_sender_started"],
+                Encoding.UTF8);
+            File.WriteAllLines(activePath, ["event=transfer_terminal", endToken], Encoding.UTF8);
+
+            var logger = new RollingFileLogger(activePath, retainedFileCount: 5);
+            var found = logger.TryReadRetainedSlice(startToken, endToken, out var slice);
+
+            Assert.False(found);
+            Assert.Empty(slice);
+        }
+        finally
+        {
+            TryDeleteDirectory(directory);
+        }
+    }
+
+    [Fact]
+    public void RollingFileLogger_RetainedTailStitchesEveryGenerationAfterExactCursor()
+    {
+        var directory = Path.Combine(
+            Path.GetTempPath(),
+            "nlink-retained-log-tail",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var activePath = Path.Combine(directory, "nlink.log");
+        const string cursorToken =
+            "event=smoke_test_operational_log_cursor; cursor_id=p1234r0123456789abcdefn7;";
+
+        try
+        {
+            File.WriteAllLines(
+                Path.Combine(directory, "nlink.2.log"),
+                ["before-cursor", cursorToken, "generation-two"],
+                Encoding.UTF8);
+            File.WriteAllLines(
+                Path.Combine(directory, "nlink.1.log"),
+                ["generation-one"],
+                Encoding.UTF8);
+            File.WriteAllLines(activePath, ["active-generation"], Encoding.UTF8);
+
+            var logger = new RollingFileLogger(activePath, retainedFileCount: 3);
+            var found = logger.TryReadRetainedTail(cursorToken, out var tail);
+
+            Assert.True(found);
+            Assert.DoesNotContain("before-cursor", tail, StringComparison.Ordinal);
+            Assert.DoesNotContain(cursorToken, tail, StringComparison.Ordinal);
+            Assert.Contains("generation-two", tail, StringComparison.Ordinal);
+            Assert.Contains("generation-one", tail, StringComparison.Ordinal);
+            Assert.Contains("active-generation", tail, StringComparison.Ordinal);
+            Assert.Equal(cursorToken, SensitiveDataRedactor.Redact(cursorToken));
+        }
+        finally
+        {
+            TryDeleteDirectory(directory);
+        }
+    }
+
+    [Fact]
+    public void RollingFileLogger_RetainedTailAfterCurrentEndIsValidAndEmpty()
+    {
+        var directory = Path.Combine(
+            Path.GetTempPath(),
+            "nlink-retained-log-tail-empty",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var activePath = Path.Combine(directory, "nlink.log");
+        const string cursorToken =
+            "event=smoke_test_operational_log_cursor; cursor_id=p1234r0123456789abcdefn8;";
+
+        try
+        {
+            File.WriteAllLines(activePath, [cursorToken], Encoding.UTF8);
+
+            var logger = new RollingFileLogger(activePath, retainedFileCount: 3);
+            var found = logger.TryReadRetainedTail(cursorToken, out var tail);
+
+            Assert.True(found);
+            Assert.Empty(tail);
+        }
+        finally
+        {
+            TryDeleteDirectory(directory);
+        }
+    }
+
+    [Fact]
+    public void RollingFileLogger_RetainedTailFailsClosedWhenCursorIsNotRetained()
+    {
+        var directory = Path.Combine(
+            Path.GetTempPath(),
+            "nlink-retained-log-tail-missing",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var activePath = Path.Combine(directory, "nlink.log");
+
+        try
+        {
+            File.WriteAllLines(activePath, ["active-generation"], Encoding.UTF8);
+
+            var logger = new RollingFileLogger(activePath, retainedFileCount: 3);
+            var found = logger.TryReadRetainedTail(
+                "event=smoke_test_operational_log_cursor; cursor_id=missing;",
+                out var tail);
+
+            Assert.False(found);
+            Assert.Empty(tail);
+        }
+        finally
+        {
+            TryDeleteDirectory(directory);
+        }
+    }
+
+    [Fact]
+    public void RollingFileLogger_RetainedTailRejectsMissingIntermediateGeneration()
+    {
+        var directory = Path.Combine(
+            Path.GetTempPath(),
+            "nlink-retained-log-tail-gap",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var activePath = Path.Combine(directory, "nlink.log");
+        const string cursorToken =
+            "event=smoke_test_operational_log_cursor; cursor_id=p1234r0123456789abcdefn9;";
+
+        try
+        {
+            File.WriteAllLines(
+                Path.Combine(directory, "nlink.3.log"),
+                [cursorToken, "generation-three"],
+                Encoding.UTF8);
+            File.WriteAllLines(
+                Path.Combine(directory, "nlink.1.log"),
+                ["generation-one"],
+                Encoding.UTF8);
+            File.WriteAllLines(activePath, ["active-generation"], Encoding.UTF8);
+
+            var logger = new RollingFileLogger(activePath, retainedFileCount: 5);
+            var found = logger.TryReadRetainedTail(cursorToken, out var tail);
+
+            Assert.False(found);
+            Assert.Empty(tail);
+        }
+        finally
+        {
+            TryDeleteDirectory(directory);
+        }
+    }
+
+    [Fact]
+    public async Task RollingFileLogger_RetainedTailBlocksRotationUntilAtomicSnapshotCompletes()
+    {
+        var directory = Path.Combine(
+            Path.GetTempPath(),
+            "nlink-retained-log-tail-atomic",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var activePath = Path.Combine(directory, "nlink.log");
+        const string cursorToken =
+            "event=smoke_test_operational_log_cursor; cursor_id=p1234r0123456789abcdefn10;";
+        using var releaseSnapshot = new ManualResetEventSlim(initialState: false);
+
+        try
+        {
+            File.WriteAllLines(
+                Path.Combine(directory, "nlink.1.log"),
+                [cursorToken, "rotated-generation"],
+                Encoding.UTF8);
+            File.WriteAllLines(activePath, ["active-generation"], Encoding.UTF8);
+
+            var logger = new RollingFileLogger(activePath, maxFileBytes: 1, retainedFileCount: 3);
+            var snapshotBarrierReached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var writerAttempted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var barrierCount = 0;
+            logger.RetainedSliceReadBarrierForTests = _ =>
+            {
+                if (Interlocked.CompareExchange(ref barrierCount, 1, 0) != 0)
+                {
+                    return;
+                }
+
+                snapshotBarrierReached.TrySetResult();
+                Assert.True(releaseSnapshot.Wait(TimeSpan.FromSeconds(5)));
+            };
+
+            var readTask = Task.Run(() =>
+            {
+                var found = logger.TryReadRetainedTail(cursorToken, out var tail);
+                return (Found: found, Tail: tail);
+            });
+            await snapshotBarrierReached.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var writerTask = Task.Run(() =>
+            {
+                writerAttempted.TrySetResult();
+                logger.WriteLine("rotation-after-snapshot");
+            });
+            await writerAttempted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await Task.Delay(50);
+            Assert.False(writerTask.IsCompleted);
+
+            releaseSnapshot.Set();
+            var result = await readTask.WaitAsync(TimeSpan.FromSeconds(5));
+            await writerTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.True(result.Found);
+            Assert.Contains("rotated-generation", result.Tail, StringComparison.Ordinal);
+            Assert.Contains("active-generation", result.Tail, StringComparison.Ordinal);
+            Assert.DoesNotContain("rotation-after-snapshot", result.Tail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            releaseSnapshot.Set();
+            TryDeleteDirectory(directory);
+        }
+    }
+
+    [Fact]
+    public async Task FileTransferSoakRunner_RetainedLogSliceBlocksRotationUntilAtomicSnapshotCompletes()
+    {
+        var directory = Path.Combine(
+            Path.GetTempPath(),
+            "nlink-filetransfer-soak-log-slice-atomic",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var activePath = Path.Combine(directory, "nlink.log");
+        var rotatedPath = Path.Combine(directory, "nlink.1.log");
+        const string marker = "soak-00000001-00000001-00000002";
+        var startToken = $"event=filetransfer_local_soak_slice_started; slice_marker={marker}";
+        var endToken = $"event=filetransfer_local_soak_slice_ended; slice_marker={marker}";
+        using var releaseSnapshot = new ManualResetEventSlim(initialState: false);
+
+        try
+        {
+            File.WriteAllLines(
+                rotatedPath,
+                [
+                    startToken,
+                    "event=filetransfer_route_selected; route=regular_nkn_v4_fast; protocol_version=4",
+                ],
+                Encoding.UTF8);
+            File.WriteAllLines(
+                activePath,
+                [
+                    "event=transfer_terminal; route=regular_nkn_v4_fast; protocol_version=4; error_code=(none)",
+                    endToken,
+                ],
+                Encoding.UTF8);
+
+            var logger = new RollingFileLogger(activePath, maxFileBytes: 1, retainedFileCount: 3);
+            var snapshotBarrierReached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var writerAttempted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var barrierCount = 0;
+            logger.RetainedSliceReadBarrierForTests = _ =>
+            {
+                if (Interlocked.CompareExchange(ref barrierCount, 1, 0) != 0)
+                {
+                    return;
+                }
+
+                snapshotBarrierReached.TrySetResult();
+                Assert.True(releaseSnapshot.Wait(TimeSpan.FromSeconds(5)));
+            };
+
+            var readTask = Task.Run(() =>
+            {
+                var found = logger.TryReadRetainedSlice(startToken, endToken, out var slice);
+                return (Found: found, Slice: slice);
+            });
+            await snapshotBarrierReached.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var writerTask = Task.Run(() =>
+            {
+                writerAttempted.TrySetResult();
+                logger.WriteLine("rotation-after-snapshot");
+            });
+            await writerAttempted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await Task.Delay(50);
+            Assert.False(writerTask.IsCompleted);
+
+            releaseSnapshot.Set();
+            var result = await readTask.WaitAsync(TimeSpan.FromSeconds(5));
+            await writerTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.True(result.Found);
+            Assert.Contains("event=filetransfer_route_selected", result.Slice, StringComparison.Ordinal);
+            Assert.Contains("event=transfer_terminal", result.Slice, StringComparison.Ordinal);
+        }
+        finally
+        {
+            releaseSnapshot.Set();
+            TryDeleteDirectory(directory);
+        }
+    }
+
+    [Theory]
+    [InlineData("started")]
+    [InlineData("ended")]
+    public async Task FileTransferSoakRunner_MissingRetainedLogMarkerFailsClosed(string suppressedLifecycle)
+    {
+        var artifactDir = Path.Combine(
+            Path.GetTempPath(),
+            "nlink-filetransfer-soak-log-marker-missing",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(artifactDir);
+        var previousOverride = FileTransferSoakRunner.LogSliceMarkerWriteOverrideForTests;
+        FileTransferSoakRunner.LogSliceMarkerWriteOverrideForTests =
+            (lifecycle, _) => !string.Equals(lifecycle, suppressedLifecycle, StringComparison.Ordinal);
+
+        try
+        {
+            using var output = new StringWriter();
+            using var error = new StringWriter();
+            var exitCode = await FileTransferSoakRunner.RunAsync(
+                [
+                    "--filetransfer-soak",
+                    "local-fast",
+                    "--payload-sizes",
+                    "64KiB",
+                    "--cycles",
+                    "1",
+                    "--artifact-dir",
+                    artifactDir,
+                    "--cycle-timeout-seconds",
+                    "45",
+                ],
+                output,
+                error,
+                CancellationToken.None);
+
+            var summary = ReadArtifactReport(artifactDir, "filetransfer-local-soak-summary.txt");
+            Assert.Equal(1, exitCode);
+            Assert.Equal("1", summary["cycles_completed"]);
+            Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", summary["verdict"]);
+            Assert.Contains("retained_log_marker_pair_missing", summary["failure_reason"], StringComparison.Ordinal);
+        }
+        finally
+        {
+            FileTransferSoakRunner.LogSliceMarkerWriteOverrideForTests = previousOverride;
+            TryDeleteDirectory(artifactDir);
+        }
+    }
+
     [Fact]
     public void Program_Parses_FileTransferSoak_Argument()
     {

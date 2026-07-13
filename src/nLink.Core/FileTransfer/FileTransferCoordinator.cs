@@ -6994,6 +6994,7 @@ internal static class FileTransferCoordinator
             FileTransferRoute.RegularNknV4Fast => FileTransferProtocol.ProtocolVersionV4,
             FileTransferRoute.FileTunaV4 => FileTransferProtocol.ProtocolVersionV4,
             FileTransferRoute.PostTunaFallbackV6 => FileTransferProtocol.ProtocolVersionV6,
+            FileTransferRoute.DiagnosticRegularNknV6 => FileTransferProtocol.ProtocolVersionV6,
             _ => 0,
         };
         if (protocolVersion != expectedProtocol)

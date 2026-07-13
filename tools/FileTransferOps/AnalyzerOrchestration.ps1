@@ -316,6 +316,572 @@ function Get-FileTransferCompactRouteMetadata {
     }
 }
 
+function Test-FileTransferCompactOutboundWorkerScopeMatch {
+    param(
+        [Parameter(Mandatory = $true)]$Anchor,
+        [Parameter(Mandatory = $true)]$Candidate
+    )
+
+    foreach ($fieldName in @('session_id', 'transfer_id')) {
+        $anchorValue = Get-FileTransferEventField -Event $Anchor -Name $fieldName -Default ''
+        $candidateValue = Get-FileTransferEventField -Event $Candidate -Name $fieldName -Default ''
+        if ([string]::IsNullOrWhiteSpace($anchorValue) -or
+            $anchorValue -in @('(none)', 'none') -or
+            [string]::IsNullOrWhiteSpace($candidateValue) -or
+            $candidateValue -in @('(none)', 'none') -or
+            -not [string]::Equals($anchorValue, $candidateValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Test-FileTransferCompactOutboundWorkerPublicationTupleMatch {
+    param(
+        [Parameter(Mandatory = $true)]$Publication,
+        [Parameter(Mandatory = $true)]$Candidate
+    )
+
+    if (-not (Test-FileTransferCompactOutboundWorkerPublicationTupleComplete -Event $Publication) -or
+        -not (Test-FileTransferCompactOutboundWorkerPublicationTupleComplete -Event $Candidate) -or
+        -not (Test-FileTransferCompactOutboundWorkerScopeMatch -Anchor $Publication -Candidate $Candidate)) {
+        return $false
+    }
+
+    foreach ($fieldName in @(
+            'route',
+            'protocol_version',
+            'live_route_epoch',
+            'runtime_generation',
+            'terminal_generation',
+            'leg_generation',
+            'route_publication_generation',
+            'route_commit_generation',
+            'target_route',
+            'target_protocol_version',
+            'target_transport')) {
+        $publicationValue = Get-FileTransferEventField -Event $Publication -Name $fieldName -Default ''
+        $candidateValue = Get-FileTransferEventField -Event $Candidate -Name $fieldName -Default ''
+        if (-not [string]::Equals($publicationValue, $candidateValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Test-FileTransferCompactOutboundWorkerPublicationTupleComplete {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    foreach ($fieldName in @('session_id', 'transfer_id')) {
+        $value = Get-FileTransferEventField -Event $Event -Name $fieldName -Default ''
+        if ([string]::IsNullOrWhiteSpace($value) -or $value -in @('(none)', 'none')) {
+            return $false
+        }
+    }
+
+    if (-not [string]::Equals(
+            (Get-FileTransferEventField -Event $Event -Name 'direction' -Default ''),
+            'outbound',
+            [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+
+    foreach ($fieldName in @(
+            'route',
+            'protocol_version',
+            'live_route_epoch',
+            'runtime_generation',
+            'terminal_generation',
+            'leg_generation',
+            'route_publication_generation',
+            'route_commit_generation',
+            'target_route',
+            'target_protocol_version',
+            'target_transport')) {
+        $value = Get-FileTransferEventField -Event $Event -Name $fieldName -Default ''
+        if ([string]::IsNullOrWhiteSpace($value) -or $value -in @('(none)', 'none')) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Test-FileTransferCompactOutboundWorkerFrontierTupleMatch {
+    param(
+        [Parameter(Mandatory = $true)]$Publication,
+        [Parameter(Mandatory = $true)]$Candidate
+    )
+
+    if (-not (Test-FileTransferCompactOutboundWorkerPublicationTupleComplete -Event $Publication) -or
+        -not (Test-FileTransferCompactOutboundWorkerScopeMatch -Anchor $Publication -Candidate $Candidate)) {
+        return $false
+    }
+
+    foreach ($fieldName in @('route', 'protocol_version', 'live_route_epoch', 'leg_generation')) {
+        $publicationValue = Get-FileTransferEventField -Event $Publication -Name $fieldName -Default ''
+        $candidateValue = Get-FileTransferEventField -Event $Candidate -Name $fieldName -Default ''
+        if ([string]::IsNullOrWhiteSpace($candidateValue) -or
+            $candidateValue -in @('(none)', 'none') -or
+            -not [string]::Equals($publicationValue, $candidateValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Get-FileTransferCompactOutboundWorkerFrontierCorrelationKey {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    $repairRequestId = Get-FileTransferEventField -Event $Event -Name 'repair_request_id' -Default ''
+    $requestCorrelationId = Get-FileTransferEventField -Event $Event -Name 'request_correlation_id' -Default ''
+    if ([string]::IsNullOrWhiteSpace($repairRequestId) -or
+        $repairRequestId -in @('(none)', 'none') -or
+        [string]::IsNullOrWhiteSpace($requestCorrelationId) -or
+        $requestCorrelationId -in @('(none)', 'none')) {
+        return ''
+    }
+
+    return ('{0}|{1}' -f $repairRequestId, $requestCorrelationId).ToLowerInvariant()
+}
+
+function Get-FileTransferCompactOutboundWorkerInstallDescriptorFieldNames {
+    @(
+        'descriptor_terminal_generation',
+        'descriptor_leg_generation',
+        'installation_reason',
+        'runtime_owner_session_id',
+        'runtime_owner_transfer_id',
+        'runtime_owner_direction',
+        'runtime_owner_route',
+        'runtime_owner_route_token',
+        'runtime_owner_protocol_version',
+        'runtime_owner_live_route_epoch',
+        'runtime_owner_runtime_generation',
+        'runtime_owner_terminal_generation',
+        'runtime_owner_runtime_family',
+        'runtime_owner_created_reason',
+        'route_publication_session_id',
+        'route_publication_transfer_id',
+        'route_publication_direction',
+        'route_publication_route',
+        'route_publication_route_token',
+        'route_publication_protocol_version',
+        'route_publication_live_route_epoch',
+        'route_publication_runtime_generation',
+        'route_publication_terminal_generation',
+        'route_publication_leg_generation',
+        'route_publication_route_commit_generation',
+        'route_publication_target_route',
+        'route_publication_target_protocol_version',
+        'route_publication_target_transport',
+        'route_publication_token_generation',
+        'route_publication_action_kind',
+        'route_publication_reason',
+        'route_publication_owner_session_id',
+        'route_publication_owner_transfer_id',
+        'route_publication_owner_direction',
+        'route_publication_owner_route',
+        'route_publication_owner_route_token',
+        'route_publication_owner_protocol_version',
+        'route_publication_owner_live_route_epoch',
+        'route_publication_owner_runtime_generation',
+        'route_publication_owner_terminal_generation',
+        'route_publication_owner_runtime_family',
+        'route_publication_owner_created_reason'
+    )
+}
+
+function Test-FileTransferCompactOutboundWorkerInstallDescriptorComplete {
+    param([Parameter(Mandatory = $true)]$Event)
+
+    if (-not (Test-FileTransferCompactOutboundWorkerPublicationTupleComplete -Event $Event)) {
+        return $false
+    }
+
+    $installGenerationText = Get-FileTransferEventField -Event $Event -Name 'install_generation' -Default ''
+    $predecessorGenerationText = Get-FileTransferEventField -Event $Event -Name 'predecessor_install_generation' -Default ''
+    $dataSessionGenerationText = Get-FileTransferEventField -Event $Event -Name 'data_session_generation' -Default ''
+    $runtimeFamily = Get-FileTransferEventField -Event $Event -Name 'runtime_family' -Default ''
+    if ($installGenerationText -notmatch '^\d+$' -or
+        $predecessorGenerationText -notmatch '^\d+$' -or
+        $dataSessionGenerationText -notmatch '^\d+$' -or
+        [string]::IsNullOrWhiteSpace($runtimeFamily) -or
+        $runtimeFamily -in @('(none)', 'none')) {
+        return $false
+    }
+
+    foreach ($fieldName in Get-FileTransferCompactOutboundWorkerInstallDescriptorFieldNames) {
+        $value = Get-FileTransferEventField -Event $Event -Name $fieldName -Default ''
+        if ([string]::IsNullOrWhiteSpace($value) -or $value -in @('(none)', 'none')) {
+            return $false
+        }
+    }
+
+    foreach ($fieldName in @(
+            'descriptor_terminal_generation',
+            'descriptor_leg_generation',
+            'runtime_owner_protocol_version',
+            'runtime_owner_live_route_epoch',
+            'runtime_owner_runtime_generation',
+            'runtime_owner_terminal_generation',
+            'route_publication_protocol_version',
+            'route_publication_live_route_epoch',
+            'route_publication_runtime_generation',
+            'route_publication_terminal_generation',
+            'route_publication_leg_generation',
+            'route_publication_route_commit_generation',
+            'route_publication_target_protocol_version',
+            'route_publication_token_generation',
+            'route_publication_owner_protocol_version',
+            'route_publication_owner_live_route_epoch',
+            'route_publication_owner_runtime_generation',
+            'route_publication_owner_terminal_generation')) {
+        if ((Get-FileTransferEventField -Event $Event -Name $fieldName -Default '') -notmatch '^\d+$') {
+            return $false
+        }
+    }
+
+    foreach ($fieldName in @('runtime_owner_direction', 'route_publication_direction', 'route_publication_owner_direction')) {
+        if ((Get-FileTransferEventField -Event $Event -Name $fieldName -Default '') -ne 'outbound') {
+            return $false
+        }
+    }
+
+    $installGeneration = [int64]$installGenerationText
+    $predecessorGeneration = [int64]$predecessorGenerationText
+    $dataSessionGeneration = [int64]$dataSessionGenerationText
+    return $installGeneration -gt 0 -and
+        $predecessorGeneration -ge 0 -and
+        $predecessorGeneration -lt $installGeneration -and
+        $dataSessionGeneration -gt 0
+}
+
+function Test-FileTransferCompactOutboundWorkerInstallDescriptorMatch {
+    param(
+        [Parameter(Mandatory = $true)]$Anchor,
+        [Parameter(Mandatory = $true)]$Candidate
+    )
+
+    if (-not (Test-FileTransferCompactOutboundWorkerInstallDescriptorComplete -Event $Anchor) -or
+        -not (Test-FileTransferCompactOutboundWorkerInstallDescriptorComplete -Event $Candidate) -or
+        -not (Test-FileTransferCompactOutboundWorkerPublicationTupleMatch -Publication $Anchor -Candidate $Candidate)) {
+        return $false
+    }
+
+    foreach ($fieldName in @(
+            'install_generation',
+            'predecessor_install_generation',
+            'data_session_generation',
+            'runtime_family') + @(Get-FileTransferCompactOutboundWorkerInstallDescriptorFieldNames)) {
+        $anchorValue = Get-FileTransferEventField -Event $Anchor -Name $fieldName -Default ''
+        $candidateValue = Get-FileTransferEventField -Event $Candidate -Name $fieldName -Default ''
+        if (-not [string]::Equals($anchorValue, $candidateValue, [System.StringComparison]::Ordinal)) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Test-FileTransferCompactOutboundWorkerDispatchTupleMatch {
+    param(
+        [Parameter(Mandatory = $true)]$Install,
+        [Parameter(Mandatory = $true)]$Candidate
+    )
+
+    return Test-FileTransferCompactOutboundWorkerInstallDescriptorMatch -Anchor $Install -Candidate $Candidate
+}
+
+function Test-FileTransferCompactOutboundWorkerProgressMatch {
+    param(
+        [Parameter(Mandatory = $true)]$Install,
+        [Parameter(Mandatory = $true)]$Progress,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Dispatches
+    )
+
+    if ($Progress.EventName -ne 'filetransfer_fallback_frontier_repair_progress_observed' -or
+        (Get-FileTransferEventField -Event $Progress -Name 'direction' -Default '') -ne 'inbound' -or
+        -not (Test-FileTransferCompactOutboundWorkerScopeMatch -Anchor $Install -Candidate $Progress)) {
+        return $false
+    }
+
+    $repairRequestKey = Get-FileTransferEventField -Event $Progress -Name 'repair_request_key' -Default ''
+    $frontierBeforeText = Get-FileTransferEventField -Event $Progress -Name 'committed_frontier_before' -Default ''
+    $frontierAfterText = Get-FileTransferEventField -Event $Progress -Name 'committed_frontier_after' -Default ''
+    $requestedChunkCountText = Get-FileTransferEventField -Event $Progress -Name 'requested_chunk_count' -Default ''
+    if ([string]::IsNullOrWhiteSpace($repairRequestKey) -or
+        $repairRequestKey -in @('(none)', 'none') -or
+        $frontierBeforeText -notmatch '^\d+$' -or
+        $frontierAfterText -notmatch '^\d+$' -or
+        $requestedChunkCountText -notmatch '^\d+$' -or
+        [int64]$frontierAfterText -le [int64]$frontierBeforeText -or
+        [int64]$requestedChunkCountText -le 0) {
+        return $false
+    }
+
+    return @($Dispatches | Where-Object {
+        [int64]$_.Sequence -lt [int64]$Progress.Sequence -and
+        (Test-FileTransferCompactOutboundWorkerInstallDescriptorMatch -Anchor $Install -Candidate $_) -and
+        [string]::Equals(
+            (Get-FileTransferEventField -Event $_ -Name 'repair_request_id' -Default ''),
+            $repairRequestKey,
+            [System.StringComparison]::Ordinal)
+    } | Select-Object -First 1).Count -gt 0
+}
+
+function Get-FileTransferCompactOutboundReceiveWorkerHandoffProof {
+    param([Parameter(Mandatory = $true)]$Index)
+
+    [object[]]$publicationEvents = @(
+        Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_transitioned'
+        Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_selected'
+        Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_live_route_epoch_started'
+        Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_live_route_epoch_recovered'
+        Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_started'
+    )
+    [object[]]$frontierEvents = @(
+        Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_control_plane_delivery_result'
+        Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_control_plane_delivery_observed'
+        Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_frontier_request_transport_queued'
+        Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_frontier_request_transport_rejected'
+    )
+    [object[]]$terminalEvents = @(
+        Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_outbound_terminal'
+        Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'transfer_terminal'
+    )
+    [object[]]$installEvents = @(
+        Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_outbound_sparse_worker_handoff_installed'
+    )
+    [object[]]$requiredEvents = @(
+        Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_outbound_sparse_worker_handoff_required'
+    )
+    [object[]]$supervisorStoppedEvents = @(
+        Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_outbound_sparse_receive_supervisor_stopped'
+    )
+    [object[]]$dispatchEvents = @(
+        Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_v6_frontier_request_receive_dispatched'
+    )
+    [object[]]$progressEvents = @(
+        Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_frontier_repair_progress_observed'
+    )
+    $candidates = New-Object System.Collections.Generic.List[object]
+    $staleFailures = @(
+        Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_owner_stale_update_rejected' |
+            Where-Object {
+                (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+                (Get-FileTransferEventField -Event $_ -Name 'source' -Default '') -eq 'v4_sender_failed' -and
+                (Get-FileTransferEventField -Event $_ -Name 'attempted_action' -Default '') -eq 'read_failed' -and
+                (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'runtime_generation_mismatch' -and
+                (Get-FileTransferEventField -Event $_ -Name 'current_route' -Default '') -eq 'post_tuna_fallback_v6' -and
+                (Get-FileTransferEventField -Event $_ -Name 'current_protocol_version' -Default '') -eq '6'
+            } |
+            Sort-Object Sequence
+    )
+    foreach ($staleFailure in $staleFailures) {
+        $staleSequence = [int64]$staleFailure.Sequence
+        $currentRuntimeGeneration = Get-FileTransferEventField -Event $staleFailure -Name 'current_runtime_generation' -Default ''
+        $currentTerminalGeneration = Get-FileTransferEventField -Event $staleFailure -Name 'current_terminal_generation' -Default ''
+        $currentLiveRouteEpoch = Get-FileTransferEventField -Event $staleFailure -Name 'current_live_route_epoch' -Default ''
+        if ([string]::IsNullOrWhiteSpace($currentRuntimeGeneration) -or
+            [string]::IsNullOrWhiteSpace($currentTerminalGeneration) -or
+            [string]::IsNullOrWhiteSpace($currentLiveRouteEpoch)) {
+            continue
+        }
+
+        $matchingPublications = @(
+            $publicationEvents |
+                Where-Object {
+                    [int64]$_.Sequence -lt $staleSequence -and
+                    (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -eq '6' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'runtime_generation' -Default '') -eq $currentRuntimeGeneration -and
+                    (Get-FileTransferEventField -Event $_ -Name 'terminal_generation' -Default '') -eq $currentTerminalGeneration -and
+                    (Get-FileTransferEventField -Event $_ -Name 'live_route_epoch' -Default '') -eq $currentLiveRouteEpoch -and
+                    (Get-FileTransferEventField -Event $_ -Name 'route_publication_action_kind' -Default '') -eq 'RoutePublication' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'coordinator_decision_reason' -Default '') -eq 'accepted' -and
+                    (Test-FileTransferCompactOutboundWorkerScopeMatch -Anchor $staleFailure -Candidate $_) -and
+                    (Test-FileTransferCompactOutboundWorkerPublicationTupleComplete -Event $_)
+                } |
+                Sort-Object Sequence -Descending |
+                Select-Object -First 1
+        )
+        if ($matchingPublications.Count -eq 0) {
+            continue
+        }
+
+        $publication = $matchingPublications[0]
+        $supersedingPublication = @(
+            $publicationEvents |
+                Where-Object {
+                    [int64]$_.Sequence -gt $staleSequence -and
+                    (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'route_publication_action_kind' -Default '') -eq 'RoutePublication' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'coordinator_decision_reason' -Default '') -eq 'accepted' -and
+                    (Test-FileTransferCompactOutboundWorkerScopeMatch -Anchor $staleFailure -Candidate $_) -and
+                    (Test-FileTransferCompactOutboundWorkerPublicationTupleComplete -Event $_) -and
+                    -not (Test-FileTransferCompactOutboundWorkerPublicationTupleMatch -Publication $publication -Candidate $_)
+                } |
+                Sort-Object Sequence |
+                Select-Object -First 1
+        )
+        if ($supersedingPublication.Count -gt 0) {
+            continue
+        }
+
+        $frontierEvidenceObserved = $false
+        $terminalResolutionObserved = $false
+        $publicationSuperseded = $false
+        $currentInstall = $null
+        $currentConsumerProven = $false
+        $descriptorDispatchEvents = New-Object System.Collections.Generic.List[object]
+        $matchedFrontierCorrelationKeys = [System.Collections.Generic.HashSet[string]]::new(
+            [System.StringComparer]::OrdinalIgnoreCase)
+        $scanEvents = @(
+            @($publicationEvents) +
+            @($installEvents) +
+            @($supervisorStoppedEvents) +
+            @($dispatchEvents) +
+            @($progressEvents) +
+            @($terminalEvents) +
+            @($frontierEvents) |
+                Sort-Object Sequence
+        )
+        foreach ($event in $scanEvents) {
+            $eventSequence = [int64]$event.Sequence
+            if ($eventSequence -le [int64]$publication.Sequence -or
+                -not (Test-FileTransferCompactOutboundWorkerScopeMatch -Anchor $staleFailure -Candidate $event)) {
+                continue
+            }
+
+            if ($eventSequence -gt $staleSequence -and
+                $event.EventName -in @(
+                    'filetransfer_route_transitioned',
+                    'filetransfer_route_selected',
+                    'filetransfer_live_route_epoch_started',
+                    'filetransfer_live_route_epoch_recovered',
+                    'filetransfer_runtime_started') -and
+                (Get-FileTransferEventField -Event $event -Name 'direction' -Default '') -eq 'outbound' -and
+                (Get-FileTransferEventField -Event $event -Name 'route_publication_action_kind' -Default '') -eq 'RoutePublication' -and
+                (Get-FileTransferEventField -Event $event -Name 'coordinator_decision_reason' -Default '') -eq 'accepted' -and
+                (Test-FileTransferCompactOutboundWorkerPublicationTupleComplete -Event $event) -and
+                -not (Test-FileTransferCompactOutboundWorkerPublicationTupleMatch -Publication $publication -Candidate $event)) {
+                $publicationSuperseded = $true
+                break
+            }
+
+            if ($eventSequence -gt $staleSequence -and
+                $event.EventName -in @('file_transfer_outbound_terminal', 'transfer_terminal') -and
+                ($event.EventName -ne 'transfer_terminal' -or
+                    (Get-FileTransferEventField -Event $event -Name 'direction' -Default '') -eq 'outbound')) {
+                $terminalResolutionObserved = $true
+                break
+            }
+
+            if ($event.EventName -eq 'filetransfer_outbound_sparse_worker_handoff_installed' -and
+                (Test-FileTransferCompactOutboundWorkerInstallDescriptorComplete -Event $event) -and
+                (Test-FileTransferCompactOutboundWorkerPublicationTupleMatch -Publication $publication -Candidate $event)) {
+                $matchingRequired = @($requiredEvents | Where-Object {
+                    [int64]$_.Sequence -lt $eventSequence -and
+                    (Test-FileTransferCompactOutboundWorkerInstallDescriptorMatch -Anchor $_ -Candidate $event)
+                } | Sort-Object Sequence -Descending | Select-Object -First 1)
+                if ($matchingRequired.Count -gt 0) {
+                    if ($null -eq $currentInstall -or
+                        -not (Test-FileTransferCompactOutboundWorkerInstallDescriptorMatch -Anchor $currentInstall -Candidate $event)) {
+                        $currentConsumerProven = $false
+                    }
+                    $currentInstall = $event
+                }
+                continue
+            }
+
+            if ($event.EventName -eq 'filetransfer_outbound_sparse_receive_supervisor_stopped' -and
+                $null -ne $currentInstall -and
+                (Test-FileTransferCompactOutboundWorkerInstallDescriptorMatch -Anchor $currentInstall -Candidate $event)) {
+                $stopTerminal = Get-FileTransferEventField -Event $event -Name 'terminal' -Default ''
+                if ($eventSequence -gt $staleSequence -and $stopTerminal -eq '1') {
+                    $terminalResolutionObserved = $true
+                    break
+                }
+                if ($stopTerminal -eq '0') {
+                    $currentInstall = $null
+                    $currentConsumerProven = $false
+                }
+                continue
+            }
+
+            if ($eventSequence -gt $staleSequence -and
+                $event.EventName -eq 'filetransfer_v6_frontier_request_receive_dispatched' -and
+                (Test-FileTransferCompactOutboundWorkerInstallDescriptorComplete -Event $event) -and
+                (Test-FileTransferCompactOutboundWorkerPublicationTupleMatch -Publication $publication -Candidate $event)) {
+                $descriptorDispatchEvents.Add($event) | Out-Null
+                if ($null -ne $currentInstall -and
+                    (Test-FileTransferCompactOutboundWorkerDispatchTupleMatch -Install $currentInstall -Candidate $event)) {
+                    $currentConsumerProven = $true
+                }
+                continue
+            }
+
+            if ($eventSequence -gt $staleSequence -and
+                $null -ne $currentInstall -and
+                (Test-FileTransferCompactOutboundWorkerProgressMatch `
+                    -Install $currentInstall `
+                    -Progress $event `
+                    -Dispatches $descriptorDispatchEvents.ToArray())) {
+                $currentConsumerProven = $true
+                continue
+            }
+
+            if ($eventSequence -le $staleSequence) {
+                continue
+            }
+
+            if ($event.EventName -in @(
+                    'filetransfer_v6_frontier_request_transport_queued',
+                    'filetransfer_v6_frontier_request_transport_rejected') -and
+                (Get-FileTransferEventField -Event $event -Name 'frame_type' -Default '') -eq 'filetransfer.frontier_request.v6') {
+                $correlationKey = Get-FileTransferCompactOutboundWorkerFrontierCorrelationKey -Event $event
+                if (-not [string]::IsNullOrWhiteSpace($correlationKey) -and
+                    $matchedFrontierCorrelationKeys.Contains($correlationKey)) {
+                    $frontierEvidenceObserved = $true
+                }
+                continue
+            }
+
+            if ($event.EventName -in @(
+                    'filetransfer_control_plane_delivery_result',
+                    'filetransfer_control_plane_delivery_observed') -and
+                (Get-FileTransferEventField -Event $event -Name 'frame_type' -Default '') -eq 'filetransfer.frontier_request.v6' -and
+                (Test-FileTransferCompactOutboundWorkerFrontierTupleMatch -Publication $publication -Candidate $event) -and
+                (Get-FileTransferEventField -Event $event -Name 'peer_visible_any' -Default '0') -eq '1' -and
+                (Get-FileTransferEventField -Event $event -Name 'accepted_any' -Default '0') -eq '1') {
+                $correlationKey = Get-FileTransferCompactOutboundWorkerFrontierCorrelationKey -Event $event
+                if (-not [string]::IsNullOrWhiteSpace($correlationKey)) {
+                    $matchedFrontierCorrelationKeys.Add($correlationKey) | Out-Null
+                    $frontierEvidenceObserved = $true
+                }
+            }
+        }
+
+        if (-not $publicationSuperseded -and
+            -not $terminalResolutionObserved -and
+            $frontierEvidenceObserved -and
+            -not $currentConsumerProven) {
+            $candidates.Add($staleFailure) | Out-Null
+        }
+    }
+
+    $firstCandidate = @($candidates.ToArray() | Sort-Object Sequence, LineNumber | Select-Object -First 1)
+    return [pscustomobject]@{
+        Count = $candidates.Count
+        FirstCandidate = if ($firstCandidate.Count -gt 0) { $firstCandidate[0] } else { $null }
+    }
+}
+
 function Write-FileTransferCompactRetainedAnalysisArtifacts {
     param(
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
@@ -446,6 +1012,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     $retiredStaleSendCount = Get-FileTransferCompactIndexEventCount -Index $Index -Name 'filetransfer_control_plane_send_retired_stale_generation'
     $nonCurrentSendCount = 0
     $runtimeOwnerStaleRejectedCount = Get-FileTransferCompactIndexEventCount -Index $Index -Name 'filetransfer_runtime_owner_stale_update_rejected'
+    $outboundReceiveWorkerHandoffProof = Get-FileTransferCompactOutboundReceiveWorkerHandoffProof -Index $Index
     $warningKinds = New-Object System.Collections.Generic.List[string]
     $fallbackFrontierRepairRawCount =
         (Get-FileTransferCompactIndexEventCount -Index $Index -Name 'filetransfer_v6_frontier_request_sent') +
@@ -492,6 +1059,44 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $gateStatus = 'warn'
     }
 
+    if ($outboundReceiveWorkerHandoffProof.Count -gt 0) {
+        $verdict = 'INCONCLUSIVE'
+        $gateStatus = 'fail'
+        $acceptanceFailureClass = 'incomplete_proof'
+    }
+
+    $recoveryFailureClass = if ($outboundReceiveWorkerHandoffProof.Count -gt 0) {
+        'post_tuna_fallback_outbound_receive_worker_handoff_missing'
+    }
+    elseif ($verdict -eq 'PASS') {
+        'none'
+    }
+    else {
+        $acceptanceFailureClass
+    }
+    $firstProofChainFailure = $outboundReceiveWorkerHandoffProof.FirstCandidate
+    $firstProofChainFailureClass = if ($null -ne $firstProofChainFailure) {
+        'post_tuna_fallback_outbound_receive_worker_handoff_missing'
+    }
+    else {
+        '(none)'
+    }
+    $firstProofChainFailureEvent = if ($null -ne $firstProofChainFailure) {
+        [string]$firstProofChainFailure.EventName
+    }
+    else {
+        '(none)'
+    }
+    $firstProofChainFailureReason = if ($null -ne $firstProofChainFailure) {
+        Get-FileTransferEventField -Event $firstProofChainFailure -Name 'reason' -Default 'runtime_generation_mismatch'
+    }
+    else {
+        '(none)'
+    }
+    $firstProofChainFailureSequence = if ($null -ne $firstProofChainFailure) { [int64]$firstProofChainFailure.Sequence } else { -1L }
+    $firstProofChainFailureSourcePath = if ($null -ne $firstProofChainFailure) { [string]$firstProofChainFailure.FilePath } else { '(none)' }
+    $firstProofChainFailureLineNumber = if ($null -ne $firstProofChainFailure) { [int]$firstProofChainFailure.LineNumber } else { 0 }
+
     $runtimeUnlockProbeCommitVerdict = if ($probeAckCount -gt 0 -and $pairedCommitCount -gt 0) { 'pass' } else { 'none' }
     $fallbackTailQuiescenceVerdict = if ($fallbackPairedYield -or $fallbackTerminalProofCount -gt 0) { 'pass' } elseif ($fallbackYieldCount -gt 0) { 'fail' } elseif ($guiCompleted) { 'pass' } else { 'pending' }
     $fallbackTailPairedYieldVerdict = if ($fallbackPairedYield -or $fallbackTerminalProofCount -gt 0) { 'pass' } elseif ($fallbackYieldCount -gt 0) { 'fail' } else { 'none' }
@@ -528,7 +1133,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("hard_failure_count={0}" -f $hardFailureCount),
         ("warning_count={0}" -f $warningKinds.Count),
         ("warning_kinds={0}" -f ($(if ($warningKinds.Count -gt 0) { $warningKinds -join ',' } else { '(none)' }))),
-        ("recovery_failure_class={0}" -f ($(if ($verdict -eq 'PASS') { 'none' } else { $acceptanceFailureClass }))),
+        ("recovery_failure_class={0}" -f $recoveryFailureClass),
+        ("first_proof_chain_failure_class={0}" -f $firstProofChainFailureClass),
+        ("first_proof_chain_failure_event={0}" -f $firstProofChainFailureEvent),
+        ("first_proof_chain_failure_reason={0}" -f $firstProofChainFailureReason),
+        ("first_proof_chain_failure_sequence={0}" -f $firstProofChainFailureSequence),
+        ("first_proof_chain_failure_source_path={0}" -f $firstProofChainFailureSourcePath),
+        ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
+        ("post_tuna_fallback_outbound_receive_worker_handoff_missing_count={0}" -f $outboundReceiveWorkerHandoffProof.Count),
         ("runtime_unlock_precommit_probe_acked_count={0}" -f $probeAckCount),
         ("runtime_unlock_paired_commit_confirmed_count={0}" -f $pairedCommitCount),
         ("runtime_unlock_probe_commit_verdict={0}" -f $runtimeUnlockProbeCommitVerdict),
@@ -564,6 +1176,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("route_sequence={0}" -f $selectedRouteText),
         ("live_route_epoch_route_changes={0}" -f $liveRouteText),
         ("live_route_epoch_proof_verdict={0}" -f $liveRouteProofVerdict),
+        ("recovery_failure_class={0}" -f $recoveryFailureClass),
+        ("first_proof_chain_failure_class={0}" -f $firstProofChainFailureClass),
+        ("first_proof_chain_failure_event={0}" -f $firstProofChainFailureEvent),
+        ("first_proof_chain_failure_reason={0}" -f $firstProofChainFailureReason),
+        ("first_proof_chain_failure_sequence={0}" -f $firstProofChainFailureSequence),
+        ("first_proof_chain_failure_source_path={0}" -f $firstProofChainFailureSourcePath),
+        ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
+        ("post_tuna_fallback_outbound_receive_worker_handoff_missing_count={0}" -f $outboundReceiveWorkerHandoffProof.Count),
         'fallback_leg_authority_proof_verdict=pass',
         'clean_fallback_leg_proof_verdict=pass',
         ("fallback_tail_quiescence_verdict={0}" -f $fallbackTailQuiescenceVerdict),
@@ -592,6 +1212,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("retained_analysis_mode=compact"),
         ("event_count={0}" -f $totalIndexedEventCount),
         ("hard_failure_count={0}" -f $hardFailureCount),
+        ("recovery_failure_class={0}" -f $recoveryFailureClass),
+        ("first_proof_chain_failure_class={0}" -f $firstProofChainFailureClass),
+        ("first_proof_chain_failure_event={0}" -f $firstProofChainFailureEvent),
+        ("first_proof_chain_failure_reason={0}" -f $firstProofChainFailureReason),
+        ("first_proof_chain_failure_sequence={0}" -f $firstProofChainFailureSequence),
+        ("first_proof_chain_failure_source_path={0}" -f $firstProofChainFailureSourcePath),
+        ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
+        ("post_tuna_fallback_outbound_receive_worker_handoff_missing_count={0}" -f $outboundReceiveWorkerHandoffProof.Count),
         ("liveness_timeout_count={0}" -f $livenessTimeoutCount),
         ("liveness_timeout_before_terminal_count={0}" -f $preTerminalLivenessTimeoutCount),
         ("liveness_timeout_after_terminal_count={0}" -f $postTerminalLivenessTimeoutCount)
@@ -607,6 +1235,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("live_epoch_route_changes={0}" -f $liveRouteText),
         ("sha_ok={0}" -f ($(if ($guiIntegrityOk) { '1' } else { '0' }))),
         ("goodput_bytes_per_second={0}" -f $goodput),
+        ("recovery_failure_class={0}" -f $recoveryFailureClass),
+        ("first_proof_chain_failure_class={0}" -f $firstProofChainFailureClass),
+        ("first_proof_chain_failure_event={0}" -f $firstProofChainFailureEvent),
+        ("first_proof_chain_failure_reason={0}" -f $firstProofChainFailureReason),
+        ("first_proof_chain_failure_sequence={0}" -f $firstProofChainFailureSequence),
+        ("first_proof_chain_failure_source_path={0}" -f $firstProofChainFailureSourcePath),
+        ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
         'late_frame_classification=none'
     )
     Set-Content -LiteralPath (Join-Path $ArtifactDir 'phase0-invariant-ledger.txt') -Value $invariantLines -Encoding UTF8
@@ -616,6 +1251,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         retained_analysis_mode = 'compact'
         verdict = $verdict
         gate_status = $gateStatus
+        acceptance_failure_class = $acceptanceFailureClass
         event_count = $totalIndexedEventCount
         selected_route_changes = $selectedRouteText
         live_route_epoch_route_changes = $liveRouteText
@@ -626,6 +1262,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         liveness_timeout_count = $livenessTimeoutCount
         liveness_timeout_before_terminal_count = $preTerminalLivenessTimeoutCount
         liveness_timeout_after_terminal_count = $postTerminalLivenessTimeoutCount
+        recovery_failure_class = $recoveryFailureClass
+        first_proof_chain_failure_class = $firstProofChainFailureClass
+        first_proof_chain_failure_event = $firstProofChainFailureEvent
+        first_proof_chain_failure_reason = $firstProofChainFailureReason
+        first_proof_chain_failure_sequence = $firstProofChainFailureSequence
+        first_proof_chain_failure_source_path = $firstProofChainFailureSourcePath
+        first_proof_chain_failure_line_number = $firstProofChainFailureLineNumber
+        post_tuna_fallback_outbound_receive_worker_handoff_missing_count = $outboundReceiveWorkerHandoffProof.Count
     }
     $compactDto | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-retained-compact-summary.json') -Encoding UTF8
 

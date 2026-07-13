@@ -91,6 +91,15 @@ public sealed partial class SessionFileTransferService
     }
 
     private bool TryRequestFileTransferReceiveRecovery(FileTransferReceiveRecoveryRequest request)
+        => TryRequestFileTransferReceiveRecoveryIfCurrent(
+            request,
+            requiredSparsePumpInstall: null,
+            requiredDataSession: null);
+
+    private bool TryRequestFileTransferReceiveRecoveryIfCurrent(
+        FileTransferReceiveRecoveryRequest request,
+        OutboundSparsePumpInstall? requiredSparsePumpInstall,
+        IFileTransferDataSession? requiredDataSession)
     {
         IFileTransferReceiveRecoveryController? controller;
         FileTransferBridgeRecoveryPolicy bridgeRecoveryPolicy;
@@ -99,6 +108,34 @@ public sealed partial class SessionFileTransferService
         FileTransferRegularV4FrontierRepairAuthority? regularV4RepairAuthority = null;
         lock (gate)
         {
+            if (requiredSparsePumpInstall is not null)
+            {
+                var sparseInstallRejectionReason = "transfer_identity_mismatch";
+                var sparseInstallCurrent =
+                    request.Direction == FileTransferDirection.Outbound &&
+                    outboundTransfer is { } requiredOutbound &&
+                    string.Equals(requiredOutbound.TransferId, request.TransferId, StringComparison.Ordinal) &&
+                    string.Equals(requiredOutbound.SessionId, request.SessionId, StringComparison.Ordinal) &&
+                    IsOutboundSparsePumpInstallCurrentLocked(
+                        requiredOutbound,
+                        requiredSparsePumpInstall,
+                        requiredDataSession,
+                        out sparseInstallRejectionReason);
+                if (!sparseInstallCurrent)
+                {
+                    if (outboundTransfer is { } rejectedOutbound)
+                    {
+                        LogOutboundSparsePumpInstallRejected(
+                            rejectedOutbound,
+                            requiredSparsePumpInstall,
+                            "receive_recovery_request",
+                            sparseInstallRejectionReason);
+                    }
+
+                    return false;
+                }
+            }
+
             request = AttachActiveRouteRuntimeForReceiveRecoveryLocked(request);
             if (TrySuppressReceiveRecoveryForSupersededRegularV4RuntimeLocked(request))
             {
@@ -1707,11 +1744,26 @@ public sealed partial class SessionFileTransferService
            context.LastRecoveredV6TransportTargetTransport != FileTransferTransportKind.Tuna &&
            context.LastRecoveredV6TransportEpochKind != FileTransferTransportHandoffKind.TunaToNormalFallback;
 
-    private void TouchOutboundV6PeerLiveness(OutboundTransferContext context, string reason)
+    private void TouchOutboundV6PeerLiveness(
+        OutboundTransferContext context,
+        string reason,
+        OutboundSparsePumpInstall? receiveInstall = null,
+        RuntimeOwnerToken? receiveRuntimeOwner = null,
+        IFileTransferDataSession? receiveDataSession = null,
+        long receiveDataSessionGeneration = 0)
     {
         lock (gate)
         {
-            if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
+            if (!ReferenceEquals(outboundTransfer, context) ||
+                context.IsTerminal ||
+                (receiveDataSession is not null &&
+                 !IsOutboundSparseReceiveResultCurrentLocked(
+                     context,
+                     receiveInstall,
+                     receiveRuntimeOwner,
+                     receiveDataSession,
+                     receiveDataSessionGeneration,
+                     out _)))
             {
                 return;
             }

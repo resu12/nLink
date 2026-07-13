@@ -7199,6 +7199,7 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_regular_v4_recovery_settlement_idempotent_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoverySettlementIdempotentCount),
         ("runtime_unlock_regular_v4_recovery_settlement_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoverySettlementRejectedCount),
         ("runtime_unlock_retry_regular_v4_settlement_handoff_bypassed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryRegularV4SettlementHandoffBypassedCount),
+        ("post_tuna_fallback_outbound_receive_worker_handoff_missing_count={0}" -f $recoveryClassification.PostTunaFallbackOutboundReceiveWorkerHandoffMissingCount),
         ("runtime_unlock_broken_state_fresh_retry_consumed_count={0}" -f $recoveryClassification.RuntimeUnlockBrokenStateFreshRetryConsumedCount),
         ("runtime_unlock_broken_state_retry_suppressed_count={0}" -f $recoveryClassification.RuntimeUnlockBrokenStateRetrySuppressedCount),
         ("runtime_unlock_broken_state_transaction_failed_count={0}" -f $recoveryClassification.RuntimeUnlockBrokenStateTransactionFailedCount),
@@ -10042,6 +10043,535 @@ function Get-FileTransferRecoveryFailureClassification {
         $routeChanges[0] -eq 'regular_nkn_v4_fast' -and
         -not $hasPostTunaFallbackEvidence
 
+    function Test-PostTunaFallbackOutboundWorkerScopeMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Anchor,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        foreach ($fieldName in @('session_id', 'transfer_id')) {
+            $anchorValue = Get-FileTransferEventField -Event $Anchor -Name $fieldName -Default ''
+            $candidateValue = Get-FileTransferEventField -Event $Candidate -Name $fieldName -Default ''
+            if ([string]::IsNullOrWhiteSpace($anchorValue) -or
+                $anchorValue -in @('(none)', 'none') -or
+                [string]::IsNullOrWhiteSpace($candidateValue) -or
+                $candidateValue -in @('(none)', 'none') -or
+                -not [string]::Equals($anchorValue, $candidateValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Test-PostTunaFallbackOutboundWorkerPublicationTupleMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Publication,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        if (-not (Test-PostTunaFallbackOutboundWorkerPublicationTupleComplete -Event $Publication) -or
+            -not (Test-PostTunaFallbackOutboundWorkerPublicationTupleComplete -Event $Candidate) -or
+            -not (Test-PostTunaFallbackOutboundWorkerScopeMatch -Anchor $Publication -Candidate $Candidate)) {
+            return $false
+        }
+
+        foreach ($fieldName in @(
+                'route',
+                'protocol_version',
+                'live_route_epoch',
+                'runtime_generation',
+                'terminal_generation',
+                'leg_generation',
+                'route_publication_generation',
+                'route_commit_generation',
+                'target_route',
+                'target_protocol_version',
+                'target_transport')) {
+            $publicationValue = Get-FileTransferEventField -Event $Publication -Name $fieldName -Default ''
+            $candidateValue = Get-FileTransferEventField -Event $Candidate -Name $fieldName -Default ''
+            if (-not [string]::Equals($publicationValue, $candidateValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Test-PostTunaFallbackOutboundWorkerPublicationTupleComplete {
+        param([Parameter(Mandatory = $true)]$Event)
+
+        foreach ($fieldName in @('session_id', 'transfer_id')) {
+            $value = Get-FileTransferEventField -Event $Event -Name $fieldName -Default ''
+            if ([string]::IsNullOrWhiteSpace($value) -or $value -in @('(none)', 'none')) {
+                return $false
+            }
+        }
+
+        if (-not [string]::Equals(
+                (Get-FileTransferEventField -Event $Event -Name 'direction' -Default ''),
+                'outbound',
+                [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+
+        foreach ($fieldName in @(
+                'route',
+                'protocol_version',
+                'live_route_epoch',
+                'runtime_generation',
+                'terminal_generation',
+                'leg_generation',
+                'route_publication_generation',
+                'route_commit_generation',
+                'target_route',
+                'target_protocol_version',
+                'target_transport')) {
+            $value = Get-FileTransferEventField -Event $Event -Name $fieldName -Default ''
+            if ([string]::IsNullOrWhiteSpace($value) -or $value -in @('(none)', 'none')) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Test-PostTunaFallbackOutboundWorkerFrontierTupleMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Publication,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        if (-not (Test-PostTunaFallbackOutboundWorkerPublicationTupleComplete -Event $Publication) -or
+            -not (Test-PostTunaFallbackOutboundWorkerScopeMatch -Anchor $Publication -Candidate $Candidate)) {
+            return $false
+        }
+
+        foreach ($fieldName in @('route', 'protocol_version', 'live_route_epoch', 'leg_generation')) {
+            $publicationValue = Get-FileTransferEventField -Event $Publication -Name $fieldName -Default ''
+            $candidateValue = Get-FileTransferEventField -Event $Candidate -Name $fieldName -Default ''
+            if ([string]::IsNullOrWhiteSpace($candidateValue) -or
+                $candidateValue -in @('(none)', 'none') -or
+                -not [string]::Equals($publicationValue, $candidateValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Get-PostTunaFallbackOutboundWorkerFrontierCorrelationKey {
+        param([Parameter(Mandatory = $true)]$Event)
+
+        $repairRequestId = Get-FileTransferEventField -Event $Event -Name 'repair_request_id' -Default ''
+        $requestCorrelationId = Get-FileTransferEventField -Event $Event -Name 'request_correlation_id' -Default ''
+        if ([string]::IsNullOrWhiteSpace($repairRequestId) -or
+            $repairRequestId -in @('(none)', 'none') -or
+            [string]::IsNullOrWhiteSpace($requestCorrelationId) -or
+            $requestCorrelationId -in @('(none)', 'none')) {
+            return ''
+        }
+
+        return ('{0}|{1}' -f $repairRequestId, $requestCorrelationId).ToLowerInvariant()
+    }
+
+    function Get-PostTunaFallbackOutboundWorkerInstallDescriptorFieldNames {
+        @(
+            'descriptor_terminal_generation',
+            'descriptor_leg_generation',
+            'installation_reason',
+            'runtime_owner_session_id',
+            'runtime_owner_transfer_id',
+            'runtime_owner_direction',
+            'runtime_owner_route',
+            'runtime_owner_route_token',
+            'runtime_owner_protocol_version',
+            'runtime_owner_live_route_epoch',
+            'runtime_owner_runtime_generation',
+            'runtime_owner_terminal_generation',
+            'runtime_owner_runtime_family',
+            'runtime_owner_created_reason',
+            'route_publication_session_id',
+            'route_publication_transfer_id',
+            'route_publication_direction',
+            'route_publication_route',
+            'route_publication_route_token',
+            'route_publication_protocol_version',
+            'route_publication_live_route_epoch',
+            'route_publication_runtime_generation',
+            'route_publication_terminal_generation',
+            'route_publication_leg_generation',
+            'route_publication_route_commit_generation',
+            'route_publication_target_route',
+            'route_publication_target_protocol_version',
+            'route_publication_target_transport',
+            'route_publication_token_generation',
+            'route_publication_action_kind',
+            'route_publication_reason',
+            'route_publication_owner_session_id',
+            'route_publication_owner_transfer_id',
+            'route_publication_owner_direction',
+            'route_publication_owner_route',
+            'route_publication_owner_route_token',
+            'route_publication_owner_protocol_version',
+            'route_publication_owner_live_route_epoch',
+            'route_publication_owner_runtime_generation',
+            'route_publication_owner_terminal_generation',
+            'route_publication_owner_runtime_family',
+            'route_publication_owner_created_reason'
+        )
+    }
+
+    function Test-PostTunaFallbackOutboundWorkerInstallDescriptorComplete {
+        param([Parameter(Mandatory = $true)]$Event)
+
+        if (-not (Test-PostTunaFallbackOutboundWorkerPublicationTupleComplete -Event $Event)) {
+            return $false
+        }
+
+        $installGenerationText = Get-FileTransferEventField -Event $Event -Name 'install_generation' -Default ''
+        $predecessorGenerationText = Get-FileTransferEventField -Event $Event -Name 'predecessor_install_generation' -Default ''
+        $dataSessionGenerationText = Get-FileTransferEventField -Event $Event -Name 'data_session_generation' -Default ''
+        $runtimeFamily = Get-FileTransferEventField -Event $Event -Name 'runtime_family' -Default ''
+        if ($installGenerationText -notmatch '^\d+$' -or
+            $predecessorGenerationText -notmatch '^\d+$' -or
+            $dataSessionGenerationText -notmatch '^\d+$' -or
+            [string]::IsNullOrWhiteSpace($runtimeFamily) -or
+            $runtimeFamily -in @('(none)', 'none')) {
+            return $false
+        }
+
+        foreach ($fieldName in Get-PostTunaFallbackOutboundWorkerInstallDescriptorFieldNames) {
+            $value = Get-FileTransferEventField -Event $Event -Name $fieldName -Default ''
+            if ([string]::IsNullOrWhiteSpace($value) -or $value -in @('(none)', 'none')) {
+                return $false
+            }
+        }
+
+        foreach ($fieldName in @(
+                'descriptor_terminal_generation',
+                'descriptor_leg_generation',
+                'runtime_owner_protocol_version',
+                'runtime_owner_live_route_epoch',
+                'runtime_owner_runtime_generation',
+                'runtime_owner_terminal_generation',
+                'route_publication_protocol_version',
+                'route_publication_live_route_epoch',
+                'route_publication_runtime_generation',
+                'route_publication_terminal_generation',
+                'route_publication_leg_generation',
+                'route_publication_route_commit_generation',
+                'route_publication_target_protocol_version',
+                'route_publication_token_generation',
+                'route_publication_owner_protocol_version',
+                'route_publication_owner_live_route_epoch',
+                'route_publication_owner_runtime_generation',
+                'route_publication_owner_terminal_generation')) {
+            if ((Get-FileTransferEventField -Event $Event -Name $fieldName -Default '') -notmatch '^\d+$') {
+                return $false
+            }
+        }
+
+        foreach ($fieldName in @('runtime_owner_direction', 'route_publication_direction', 'route_publication_owner_direction')) {
+            if ((Get-FileTransferEventField -Event $Event -Name $fieldName -Default '') -ne 'outbound') {
+                return $false
+            }
+        }
+
+        $installGeneration = [int64]$installGenerationText
+        $predecessorGeneration = [int64]$predecessorGenerationText
+        $dataSessionGeneration = [int64]$dataSessionGenerationText
+        return $installGeneration -gt 0 -and
+            $predecessorGeneration -ge 0 -and
+            $predecessorGeneration -lt $installGeneration -and
+            $dataSessionGeneration -gt 0
+    }
+
+    function Test-PostTunaFallbackOutboundWorkerInstallDescriptorMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Anchor,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        if (-not (Test-PostTunaFallbackOutboundWorkerInstallDescriptorComplete -Event $Anchor) -or
+            -not (Test-PostTunaFallbackOutboundWorkerInstallDescriptorComplete -Event $Candidate) -or
+            -not (Test-PostTunaFallbackOutboundWorkerPublicationTupleMatch -Publication $Anchor -Candidate $Candidate)) {
+            return $false
+        }
+
+        foreach ($fieldName in @(
+                'install_generation',
+                'predecessor_install_generation',
+                'data_session_generation',
+                'runtime_family') + @(Get-PostTunaFallbackOutboundWorkerInstallDescriptorFieldNames)) {
+            $anchorValue = Get-FileTransferEventField -Event $Anchor -Name $fieldName -Default ''
+            $candidateValue = Get-FileTransferEventField -Event $Candidate -Name $fieldName -Default ''
+            if (-not [string]::Equals($anchorValue, $candidateValue, [System.StringComparison]::Ordinal)) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Test-PostTunaFallbackOutboundWorkerDispatchTupleMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Install,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        return Test-PostTunaFallbackOutboundWorkerInstallDescriptorMatch -Anchor $Install -Candidate $Candidate
+    }
+
+    function Test-PostTunaFallbackOutboundWorkerProgressMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Install,
+            [Parameter(Mandatory = $true)]$Progress,
+            [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Dispatches
+        )
+
+        if ($Progress.EventName -ne 'filetransfer_fallback_frontier_repair_progress_observed' -or
+            (Get-FileTransferEventField -Event $Progress -Name 'direction' -Default '') -ne 'inbound' -or
+            -not (Test-PostTunaFallbackOutboundWorkerScopeMatch -Anchor $Install -Candidate $Progress)) {
+            return $false
+        }
+
+        $repairRequestKey = Get-FileTransferEventField -Event $Progress -Name 'repair_request_key' -Default ''
+        $frontierBeforeText = Get-FileTransferEventField -Event $Progress -Name 'committed_frontier_before' -Default ''
+        $frontierAfterText = Get-FileTransferEventField -Event $Progress -Name 'committed_frontier_after' -Default ''
+        $requestedChunkCountText = Get-FileTransferEventField -Event $Progress -Name 'requested_chunk_count' -Default ''
+        if ([string]::IsNullOrWhiteSpace($repairRequestKey) -or
+            $repairRequestKey -in @('(none)', 'none') -or
+            $frontierBeforeText -notmatch '^\d+$' -or
+            $frontierAfterText -notmatch '^\d+$' -or
+            $requestedChunkCountText -notmatch '^\d+$' -or
+            [int64]$frontierAfterText -le [int64]$frontierBeforeText -or
+            [int64]$requestedChunkCountText -le 0) {
+            return $false
+        }
+
+        return @($Dispatches | Where-Object {
+            [int64]$_.Sequence -lt [int64]$Progress.Sequence -and
+            (Test-PostTunaFallbackOutboundWorkerInstallDescriptorMatch -Anchor $Install -Candidate $_) -and
+            [string]::Equals(
+                (Get-FileTransferEventField -Event $_ -Name 'repair_request_id' -Default ''),
+                $repairRequestKey,
+                [System.StringComparison]::Ordinal)
+        } | Select-Object -First 1).Count -gt 0
+    }
+
+    # A stale V4 sender failure is normally harmless after route supersession. It
+    # becomes a proof-chain failure only when the accepted post-Tuna publication
+    # is left without a consuming outbound worker: a later peer-visible frontier
+    # request reaches the transport, but no exact handoff installation followed
+    # by Core dispatch (or terminal resolution) remains current. A matching
+    # nonterminal supervisor stop invalidates that proof until a fresh complete
+    # required/install/dispatch interval is retained.
+    $postTunaFallbackOutboundReceiveWorkerHandoffMissingCandidateEvents =
+        New-Object System.Collections.Generic.List[object]
+    $postTunaFallbackOutboundReceiveWorkerStaleFailureEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_runtime_owner_stale_update_rejected' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+        (Get-FileTransferEventField -Event $_ -Name 'source' -Default '') -eq 'v4_sender_failed' -and
+        (Get-FileTransferEventField -Event $_ -Name 'attempted_action' -Default '') -eq 'read_failed' -and
+        (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'runtime_generation_mismatch' -and
+        (Get-FileTransferEventField -Event $_ -Name 'current_route' -Default '') -eq 'post_tuna_fallback_v6' -and
+        (Get-FileTransferEventField -Event $_ -Name 'current_protocol_version' -Default '') -eq '6'
+    } | Sort-Object Sequence)
+    $postTunaFallbackOutboundWorkerRequiredEvents = @($events | Where-Object {
+        $_.EventName -eq 'filetransfer_outbound_sparse_worker_handoff_required'
+    } | Sort-Object Sequence)
+    foreach ($staleFailure in $postTunaFallbackOutboundReceiveWorkerStaleFailureEvents) {
+        $staleSequence = [int64]$staleFailure.Sequence
+        $currentRuntimeGeneration = Get-FileTransferEventField -Event $staleFailure -Name 'current_runtime_generation' -Default ''
+        $currentTerminalGeneration = Get-FileTransferEventField -Event $staleFailure -Name 'current_terminal_generation' -Default ''
+        $currentLiveRouteEpoch = Get-FileTransferEventField -Event $staleFailure -Name 'current_live_route_epoch' -Default ''
+        if ([string]::IsNullOrWhiteSpace($currentRuntimeGeneration) -or
+            [string]::IsNullOrWhiteSpace($currentTerminalGeneration) -or
+            [string]::IsNullOrWhiteSpace($currentLiveRouteEpoch)) {
+            continue
+        }
+
+        $matchingPublications = @($events | Where-Object {
+            [int64]$_.Sequence -lt $staleSequence -and
+            $_.EventName -in @(
+                'filetransfer_route_transitioned',
+                'filetransfer_route_selected',
+                'filetransfer_live_route_epoch_started',
+                'filetransfer_live_route_epoch_recovered',
+                'filetransfer_runtime_started') -and
+            (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+            (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
+            (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -eq '6' -and
+            (Get-FileTransferEventField -Event $_ -Name 'runtime_generation' -Default '') -eq $currentRuntimeGeneration -and
+            (Get-FileTransferEventField -Event $_ -Name 'terminal_generation' -Default '') -eq $currentTerminalGeneration -and
+            (Get-FileTransferEventField -Event $_ -Name 'live_route_epoch' -Default '') -eq $currentLiveRouteEpoch -and
+            (Get-FileTransferEventField -Event $_ -Name 'route_publication_action_kind' -Default '') -eq 'RoutePublication' -and
+            (Get-FileTransferEventField -Event $_ -Name 'coordinator_decision_reason' -Default '') -eq 'accepted' -and
+            (Test-PostTunaFallbackOutboundWorkerScopeMatch -Anchor $staleFailure -Candidate $_) -and
+            (Test-PostTunaFallbackOutboundWorkerPublicationTupleComplete -Event $_)
+        } | Sort-Object Sequence -Descending | Select-Object -First 1)
+        if ($matchingPublications.Count -eq 0) {
+            continue
+        }
+
+        $publication = $matchingPublications[0]
+        $supersedingPublication = @($events | Where-Object {
+            [int64]$_.Sequence -gt $staleSequence -and
+            $_.EventName -in @(
+                'filetransfer_route_transitioned',
+                'filetransfer_route_selected',
+                'filetransfer_live_route_epoch_started',
+                'filetransfer_live_route_epoch_recovered',
+                'filetransfer_runtime_started') -and
+            (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+            (Get-FileTransferEventField -Event $_ -Name 'route_publication_action_kind' -Default '') -eq 'RoutePublication' -and
+            (Get-FileTransferEventField -Event $_ -Name 'coordinator_decision_reason' -Default '') -eq 'accepted' -and
+            (Test-PostTunaFallbackOutboundWorkerScopeMatch -Anchor $staleFailure -Candidate $_) -and
+            (Test-PostTunaFallbackOutboundWorkerPublicationTupleComplete -Event $_) -and
+            -not (Test-PostTunaFallbackOutboundWorkerPublicationTupleMatch -Publication $publication -Candidate $_)
+        } | Sort-Object Sequence | Select-Object -First 1)
+        if ($supersedingPublication.Count -gt 0) {
+            # Route/publication replacement invalidates the old worker stage.
+            # Later frontier traffic belongs to the successor tuple and cannot
+            # prove a missing handoff for this stale predecessor.
+            continue
+        }
+
+        $frontierEvidenceObserved = $false
+        $terminalResolutionObserved = $false
+        $publicationSuperseded = $false
+        $currentInstall = $null
+        $currentConsumerProven = $false
+        $descriptorDispatchEvents = New-Object System.Collections.Generic.List[object]
+        $matchedFrontierCorrelationKeys = [System.Collections.Generic.HashSet[string]]::new(
+            [System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($event in @($events | Sort-Object Sequence)) {
+            $eventSequence = [int64]$event.Sequence
+            if ($eventSequence -le [int64]$publication.Sequence -or
+                -not (Test-PostTunaFallbackOutboundWorkerScopeMatch -Anchor $staleFailure -Candidate $event)) {
+                continue
+            }
+
+            if ($eventSequence -gt $staleSequence -and
+                $event.EventName -in @(
+                    'filetransfer_route_transitioned',
+                    'filetransfer_route_selected',
+                    'filetransfer_live_route_epoch_started',
+                    'filetransfer_live_route_epoch_recovered',
+                    'filetransfer_runtime_started') -and
+                (Get-FileTransferEventField -Event $event -Name 'direction' -Default '') -eq 'outbound' -and
+                (Get-FileTransferEventField -Event $event -Name 'route_publication_action_kind' -Default '') -eq 'RoutePublication' -and
+                (Get-FileTransferEventField -Event $event -Name 'coordinator_decision_reason' -Default '') -eq 'accepted' -and
+                (Test-PostTunaFallbackOutboundWorkerPublicationTupleComplete -Event $event) -and
+                -not (Test-PostTunaFallbackOutboundWorkerPublicationTupleMatch -Publication $publication -Candidate $event)) {
+                $publicationSuperseded = $true
+                break
+            }
+
+            if ($eventSequence -gt $staleSequence -and
+                $event.EventName -in @('file_transfer_outbound_terminal', 'transfer_terminal') -and
+                ($event.EventName -ne 'transfer_terminal' -or
+                    (Get-FileTransferEventField -Event $event -Name 'direction' -Default '') -eq 'outbound')) {
+                $terminalResolutionObserved = $true
+                break
+            }
+
+            if ($event.EventName -eq 'filetransfer_outbound_sparse_worker_handoff_installed' -and
+                (Test-PostTunaFallbackOutboundWorkerInstallDescriptorComplete -Event $event) -and
+                (Test-PostTunaFallbackOutboundWorkerPublicationTupleMatch -Publication $publication -Candidate $event)) {
+                $matchingRequired = @($postTunaFallbackOutboundWorkerRequiredEvents | Where-Object {
+                    [int64]$_.Sequence -lt $eventSequence -and
+                    (Test-PostTunaFallbackOutboundWorkerInstallDescriptorMatch -Anchor $_ -Candidate $event)
+                } | Sort-Object Sequence -Descending | Select-Object -First 1)
+                if ($matchingRequired.Count -gt 0) {
+                    if ($null -eq $currentInstall -or
+                        -not (Test-PostTunaFallbackOutboundWorkerInstallDescriptorMatch -Anchor $currentInstall -Candidate $event)) {
+                        $currentConsumerProven = $false
+                    }
+                    $currentInstall = $event
+                }
+                continue
+            }
+
+            if ($event.EventName -eq 'filetransfer_outbound_sparse_receive_supervisor_stopped' -and
+                $null -ne $currentInstall -and
+                (Test-PostTunaFallbackOutboundWorkerInstallDescriptorMatch -Anchor $currentInstall -Candidate $event)) {
+                $stopTerminal = Get-FileTransferEventField -Event $event -Name 'terminal' -Default ''
+                if ($eventSequence -gt $staleSequence -and $stopTerminal -eq '1') {
+                    $terminalResolutionObserved = $true
+                    break
+                }
+                if ($stopTerminal -eq '0') {
+                    $currentInstall = $null
+                    $currentConsumerProven = $false
+                }
+                continue
+            }
+
+            if ($eventSequence -gt $staleSequence -and
+                $event.EventName -eq 'filetransfer_v6_frontier_request_receive_dispatched' -and
+                (Test-PostTunaFallbackOutboundWorkerInstallDescriptorComplete -Event $event) -and
+                (Test-PostTunaFallbackOutboundWorkerPublicationTupleMatch -Publication $publication -Candidate $event)) {
+                $descriptorDispatchEvents.Add($event) | Out-Null
+                if ($null -ne $currentInstall -and
+                    (Test-PostTunaFallbackOutboundWorkerDispatchTupleMatch -Install $currentInstall -Candidate $event)) {
+                    $currentConsumerProven = $true
+                }
+                continue
+            }
+
+            if ($eventSequence -gt $staleSequence -and
+                $null -ne $currentInstall -and
+                (Test-PostTunaFallbackOutboundWorkerProgressMatch `
+                    -Install $currentInstall `
+                    -Progress $event `
+                    -Dispatches $descriptorDispatchEvents.ToArray())) {
+                $currentConsumerProven = $true
+                continue
+            }
+
+            if ($eventSequence -le $staleSequence) {
+                continue
+            }
+
+            if ($event.EventName -in @(
+                    'filetransfer_v6_frontier_request_transport_queued',
+                    'filetransfer_v6_frontier_request_transport_rejected') -and
+                (Get-FileTransferEventField -Event $event -Name 'frame_type' -Default '') -eq 'filetransfer.frontier_request.v6') {
+                $correlationKey = Get-PostTunaFallbackOutboundWorkerFrontierCorrelationKey -Event $event
+                if (-not [string]::IsNullOrWhiteSpace($correlationKey) -and
+                    $matchedFrontierCorrelationKeys.Contains($correlationKey)) {
+                    $frontierEvidenceObserved = $true
+                }
+                continue
+            }
+
+            if ($event.EventName -in @(
+                    'filetransfer_control_plane_delivery_result',
+                    'filetransfer_control_plane_delivery_observed') -and
+                (Get-FileTransferEventField -Event $event -Name 'frame_type' -Default '') -eq 'filetransfer.frontier_request.v6' -and
+                (Test-PostTunaFallbackOutboundWorkerFrontierTupleMatch -Publication $publication -Candidate $event) -and
+                (Get-FileTransferEventField -Event $event -Name 'peer_visible_any' -Default '0') -eq '1' -and
+                (Get-FileTransferEventField -Event $event -Name 'accepted_any' -Default '0') -eq '1') {
+                $correlationKey = Get-PostTunaFallbackOutboundWorkerFrontierCorrelationKey -Event $event
+                if (-not [string]::IsNullOrWhiteSpace($correlationKey)) {
+                    $matchedFrontierCorrelationKeys.Add($correlationKey) | Out-Null
+                    $frontierEvidenceObserved = $true
+                }
+            }
+        }
+
+        if (-not $publicationSuperseded -and
+            -not $terminalResolutionObserved -and
+            $frontierEvidenceObserved -and
+            -not $currentConsumerProven) {
+            $postTunaFallbackOutboundReceiveWorkerHandoffMissingCandidateEvents.Add($staleFailure) | Out-Null
+        }
+    }
+    $postTunaFallbackOutboundReceiveWorkerHandoffMissingCount =
+        $postTunaFallbackOutboundReceiveWorkerHandoffMissingCandidateEvents.Count
+
     function Test-RegularV4FrontierRepairMatch {
         param(
             [Parameter(Mandatory = $true)]$Source,
@@ -10517,6 +11047,10 @@ function Get-FileTransferRecoveryFailureClassification {
         -Events @($runtimeUnlockRetryDispatchInvalidFreshGrantEvents.ToArray()) `
         -DefaultReason 'runtime_unlock_retry_dispatch_fresh_chain_invalid_after_closure' `
         -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'post_tuna_fallback_outbound_receive_worker_handoff_missing' `
+        -Events @($postTunaFallbackOutboundReceiveWorkerHandoffMissingCandidateEvents.ToArray())
 
     $grantBypassSequences = @(
         @($runtimeUnlockRetryDispatchGrantBypassedByRetryBudgetEvents) +
@@ -11202,6 +11736,7 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockRegularV4RecoverySettlementIdempotentCount = $runtimeUnlockRegularV4RecoverySettlementIdempotentEvents.Count
         RuntimeUnlockRegularV4RecoverySettlementRejectedCount = $runtimeUnlockRegularV4RecoverySettlementRejectedEvents.Count
         RuntimeUnlockRetryRegularV4SettlementHandoffBypassedCount = $runtimeUnlockRetryRegularV4SettlementHandoffBypassedCount
+        PostTunaFallbackOutboundReceiveWorkerHandoffMissingCount = $postTunaFallbackOutboundReceiveWorkerHandoffMissingCount
         RuntimeUnlockBrokenStateFreshRetryConsumedCount = $runtimeUnlockBrokenStateFreshRetryConsumedEvents.Count
         RuntimeUnlockBrokenStateRetrySuppressedCount = $runtimeUnlockBrokenStateRetrySuppressedEvents.Count
         RuntimeUnlockBrokenStateTransactionFailedCount = $runtimeUnlockBrokenStateTransactionFailedEvents.Count
@@ -11896,6 +12431,7 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_regular_v4_recovery_settlement_idempotent_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoverySettlementIdempotentCount),
         ("runtime_unlock_regular_v4_recovery_settlement_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoverySettlementRejectedCount),
         ("runtime_unlock_retry_regular_v4_settlement_handoff_bypassed_count={0}" -f $recoveryClassification.RuntimeUnlockRetryRegularV4SettlementHandoffBypassedCount),
+        ("post_tuna_fallback_outbound_receive_worker_handoff_missing_count={0}" -f $recoveryClassification.PostTunaFallbackOutboundReceiveWorkerHandoffMissingCount),
         ("runtime_unlock_broken_state_fresh_retry_consumed_count={0}" -f $recoveryClassification.RuntimeUnlockBrokenStateFreshRetryConsumedCount),
         ("runtime_unlock_broken_state_retry_suppressed_count={0}" -f $recoveryClassification.RuntimeUnlockBrokenStateRetrySuppressedCount),
         ("runtime_unlock_broken_state_transaction_failed_count={0}" -f $recoveryClassification.RuntimeUnlockBrokenStateTransactionFailedCount),

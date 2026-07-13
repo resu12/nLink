@@ -427,6 +427,14 @@ public sealed partial class SessionFileTransferService : IDisposable
     internal static TimeSpan? V6RegularNknInferredFrontierRepairStallOverrideForTests { get; set; }
     internal static TimeSpan? V6RegularNknInferredFrontierRepairCooldownOverrideForTests { get; set; }
     internal static TimeSpan? OfferSendTimeoutOverrideForTests { get; set; }
+    internal static Func<string, string, Task>? OutboundSparseReceiveCompletionBarrierForTests { get; set; }
+    internal static Func<string, string, Task>? OutboundSparseSendCompletionBarrierForTests { get; set; }
+    internal static Func<string, string, Task>? OutboundSparseReceiveDispatchBarrierForTests { get; set; }
+    internal static Func<string, string, Task>? OutboundSparseFrontierApplyBarrierForTests { get; set; }
+    internal static Func<string, string, Task>? OutboundSparseTerminalCompletionBarrierForTests { get; set; }
+    internal static Func<string, string, Task>? OutboundSparseFailureAuthorizationBarrierForTests { get; set; }
+    internal static Func<string, string, Task>? OutboundSparsePostInstallBarrierForTests { get; set; }
+    internal static Func<string, string, Task>? OutboundSparseStateApplyBarrierForTests { get; set; }
     public SessionFileTransferService(Func<string>? transferIdFactory = null)
     {
         this.transferIdFactory = transferIdFactory ?? (() => Guid.NewGuid().ToString("N"));
@@ -3870,7 +3878,11 @@ public sealed partial class SessionFileTransferService : IDisposable
 
     private async Task<bool> TryHandleOutboundLifecycleErrorDataFrameAsync(
         OutboundTransferContext context,
-        FileTransferErrorFrameV4 error)
+        FileTransferErrorFrameV4 error,
+        OutboundSparsePumpInstall? receiveInstall = null,
+        RuntimeOwnerToken? receiveRuntimeOwner = null,
+        IFileTransferDataSession? receiveDataSession = null,
+        long receiveDataSessionGeneration = 0)
     {
         var errorCode = NormalizeErrorCode(error.ErrorCode);
         if (!IsPeerDisconnectedErrorCode(errorCode))
@@ -3878,20 +3890,43 @@ public sealed partial class SessionFileTransferService : IDisposable
             return false;
         }
 
-        TouchOutboundV6PeerLiveness(context, "error_data_frame");
+        if (receiveInstall is not null)
+        {
+            lock (gate)
+            {
+                if (!IsOutboundSparseReceiveResultCurrentLocked(
+                        context,
+                        receiveInstall,
+                        receiveRuntimeOwner,
+                        receiveDataSession,
+                        receiveDataSessionGeneration,
+                        out _))
+                {
+                    return false;
+                }
+            }
+        }
+
+        TouchOutboundV6PeerLiveness(
+            context,
+            "error_data_frame",
+            receiveInstall,
+            receiveRuntimeOwner,
+            receiveDataSession,
+            receiveDataSessionGeneration);
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_lifecycle_priority_received; kind=error; transfer_id={context.TransferId}; session_id={context.SessionId}; direction=outbound; error_code={errorCode ?? InvalidStateErrorCode}; reason={FormatProtocolLogValue(NormalizeReason(error.Message) ?? "(none)")}; path=redundant_data_frame");
-        await TransitionOutboundToTerminalAsync(
+        return await TransitionOutboundToTerminalAsync(
                 context,
                 FileTransferTransferState.Failed,
                 errorCode: errorCode,
                 statusMessage: NormalizeReason(error.Message) ?? "Peer disconnected.",
                 notifyPeer: false,
                 cancelReason: null,
-                ct: CancellationToken.None)
+                ct: CancellationToken.None,
+                requiredSparsePumpInstall: receiveInstall)
             .ConfigureAwait(false);
-        return true;
     }
 
     private async Task<bool> TryHandleInboundLifecycleErrorDataFrameAsync(
@@ -3978,7 +4013,11 @@ public sealed partial class SessionFileTransferService : IDisposable
 
     private async Task<bool> TryHandleOutboundLifecycleCompleteDataFrameAsync(
         OutboundTransferContext context,
-        FileTransferCompleteFrameV4 complete)
+        FileTransferCompleteFrameV4 complete,
+        OutboundSparsePumpInstall? receiveInstall = null,
+        RuntimeOwnerToken? receiveRuntimeOwner = null,
+        IFileTransferDataSession? receiveDataSession = null,
+        long receiveDataSessionGeneration = 0)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(complete);
@@ -3988,6 +4027,14 @@ public sealed partial class SessionFileTransferService : IDisposable
         {
             completionEligible = ReferenceEquals(outboundTransfer, context) &&
                 !context.IsTerminal &&
+                (receiveInstall is null ||
+                 IsOutboundSparseReceiveResultCurrentLocked(
+                     context,
+                     receiveInstall,
+                     receiveRuntimeOwner,
+                     receiveDataSession,
+                     receiveDataSessionGeneration,
+                     out _)) &&
                 string.Equals(context.TransferId, complete.TransferId, StringComparison.Ordinal) &&
                 string.Equals(context.SessionId, complete.SessionId, StringComparison.Ordinal) &&
                 (
@@ -4002,13 +4049,6 @@ public sealed partial class SessionFileTransferService : IDisposable
                 return false;
             }
 
-            context.BytesTransferred = context.FileSizeBytes;
-            context.ChunksTransferred = context.ChunkCount;
-            context.BytesAcceptedForTransport = context.FileSizeBytes;
-            context.ChunksAcceptedForTransport = context.ChunkCount;
-            context.BytesAcknowledgedByReceiver = context.FileSizeBytes;
-            context.State = FileTransferTransferState.AwaitingCompletion;
-            context.StatusMessage = "Waiting for receiver verification.";
         }
 
         LogTransferInfo(
@@ -4017,20 +4057,26 @@ public sealed partial class SessionFileTransferService : IDisposable
             complete.TransferId,
             sessionId: complete.SessionId,
             fileSizeBytes: complete.FileSizeBytes);
-        TouchOutboundV6PeerLiveness(context, "complete_data_frame");
+        TouchOutboundV6PeerLiveness(
+            context,
+            "complete_data_frame",
+            receiveInstall,
+            receiveRuntimeOwner,
+            receiveDataSession,
+            receiveDataSessionGeneration);
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_lifecycle_priority_received; kind=complete; transfer_id={complete.TransferId}; session_id={complete.SessionId}; direction=outbound; file_size_bytes={complete.FileSizeBytes}; path=redundant_data_frame; protocol_version={(complete is FileTransferCompleteFrameV6 ? FileTransferProtocol.ProtocolVersionV6 : FileTransferProtocol.ProtocolVersionV4)}");
-        await TransitionOutboundToTerminalAsync(
+        return await TransitionOutboundToTerminalAsync(
                 context,
                 FileTransferTransferState.Completed,
                 errorCode: null,
                 statusMessage: "Transfer complete.",
                 notifyPeer: false,
                 cancelReason: null,
-                ct: CancellationToken.None)
+                ct: CancellationToken.None,
+                requiredSparsePumpInstall: receiveInstall)
             .ConfigureAwait(false);
-        return true;
     }
 
     private Task HandleIncomingPauseControlAsync(FileTransferPauseControlV6 message)
@@ -10545,11 +10591,26 @@ public sealed partial class SessionFileTransferService : IDisposable
         }
     }
 
-    private void ApplyOutboundFallbackTailYieldProof(OutboundTransferContext context, FileTransferFallbackTailYieldFrameV6 frame)
+    private void ApplyOutboundFallbackTailYieldProof(
+        OutboundTransferContext context,
+        FileTransferFallbackTailYieldFrameV6 frame,
+        OutboundSparsePumpInstall? receiveInstall = null,
+        RuntimeOwnerToken? receiveRuntimeOwner = null,
+        IFileTransferDataSession? receiveDataSession = null,
+        long receiveDataSessionGeneration = 0)
     {
         lock (gate)
         {
-            if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
+            if (!ReferenceEquals(outboundTransfer, context) ||
+                context.IsTerminal ||
+                (receiveDataSession is not null &&
+                 !IsOutboundSparseReceiveResultCurrentLocked(
+                     context,
+                     receiveInstall,
+                     receiveRuntimeOwner,
+                     receiveDataSession,
+                     receiveDataSessionGeneration,
+                     out _)))
             {
                 return;
             }
@@ -17645,6 +17706,35 @@ public sealed partial class SessionFileTransferService : IDisposable
         string ProbeId,
         DateTimeOffset CreatedUtc);
 
+    private sealed record OutboundSparsePumpInstall(
+        long InstallGeneration,
+        long PredecessorInstallGeneration,
+        RuntimeOwnerToken RuntimeOwner,
+        RoutePublicationToken RoutePublication,
+        int TerminalGeneration,
+        int LegGeneration,
+        long DataSessionGeneration,
+        string Reason);
+
+    private sealed record OutboundSparsePumpRuntime(
+        OutboundSparsePumpInstall Install,
+        Stream Stream,
+        IFileTransferDataSession DataSession,
+        CancellationTokenSource Cancellation,
+        Task PumpTask);
+
+    private sealed record OutboundSparseFrontierDispatchProof(
+        string CorrelationKey,
+        OutboundSparsePumpInstall Install,
+        FileTransferFrontierRequestFrameV6 Request,
+        long TransportEpoch,
+        string? RepairRequestId,
+        string? RequestCorrelationId,
+        int FirstStartChunkIndex,
+        int FirstChunkCount,
+        int RangeCount,
+        FileTransferTransportKind ReceivedTransportKind);
+
     private sealed class OutboundTransferContext
     {
         private TaskCompletionSource<bool> controlSignal = CreateSignal();
@@ -17783,6 +17873,29 @@ public sealed partial class SessionFileTransferService : IDisposable
         public DateTimeOffset? LastSendAheadClampLogUtc { get; set; }
 
         public IFileTransferDataSession? DataSession { get; set; }
+
+        public long DataSessionGeneration { get; set; }
+
+        public long LastOutboundSparsePumpInstallGeneration { get; set; }
+
+        public OutboundSparsePumpInstall? PendingOutboundSparsePumpInstall { get; set; }
+
+        public OutboundSparsePumpInstall? InstalledOutboundSparsePump { get; set; }
+
+        public Dictionary<string, OutboundSparseFrontierDispatchProof>
+            PendingOutboundSparseFrontierDispatchProofs { get; } = new(StringComparer.Ordinal);
+
+        public long LastOutboundSparseReceiveSupervisorGeneration { get; set; }
+
+        public long ActiveOutboundSparseReceiveSupervisorGeneration { get; set; }
+
+        public bool OutboundSparseSessionOpenDispatched { get; set; }
+
+        public int OutboundSparseSessionOpenProtocolVersion { get; set; }
+
+        public string? OutboundSparseSessionOpenRoute { get; set; }
+
+        public bool OutboundSparseManifestDispatched { get; set; }
 
         public bool PullSessionActive { get; set; }
 

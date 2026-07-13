@@ -1258,14 +1258,84 @@ public sealed partial class SessionFileTransferService
             TerminalGeneration: pending.TerminalGeneration,
             RuntimeUnlockPendingPreCommitProbeRequest: pending);
 
-    private async Task<bool> TryHandleRuntimeUnlockPreCommitProbeDataFrameAsync(
+    private Task<bool> TryHandleRuntimeUnlockPreCommitProbeDataFrameAsync(
         string sessionId,
         string transferId,
         FileTransferDirection direction,
         FileTransferDataFrame frame,
         FileTransferTransportKind receivedTransportKind,
         IFileTransferDataSession? dataSession)
+        => TryHandleRuntimeUnlockPreCommitProbeDataFrameCoreAsync(
+            sessionId,
+            transferId,
+            direction,
+            frame,
+            receivedTransportKind,
+            dataSession,
+            outboundSparseReceiveAuthority: null);
+
+    private Task<bool> TryHandleOutboundSparseRuntimeUnlockPreCommitProbeDataFrameAsync(
+        string sessionId,
+        string transferId,
+        FileTransferDataFrame frame,
+        FileTransferTransportKind receivedTransportKind,
+        IFileTransferDataSession dataSession,
+        OutboundTransferContext context,
+        OutboundSparsePumpInstall install,
+        RuntimeOwnerToken runtimeOwner,
+        long dataSessionGeneration,
+        long receiveSupervisorGeneration)
+        => TryHandleRuntimeUnlockPreCommitProbeDataFrameCoreAsync(
+            sessionId,
+            transferId,
+            FileTransferDirection.Outbound,
+            frame,
+            receivedTransportKind,
+            dataSession,
+            new OutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthority(
+                context,
+                install,
+                runtimeOwner,
+                dataSession,
+                dataSessionGeneration,
+                receiveSupervisorGeneration));
+
+    private async Task<bool> TryHandleRuntimeUnlockPreCommitProbeDataFrameCoreAsync(
+        string sessionId,
+        string transferId,
+        FileTransferDirection direction,
+        FileTransferDataFrame frame,
+        FileTransferTransportKind receivedTransportKind,
+        IFileTransferDataSession? dataSession,
+        OutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthority? outboundSparseReceiveAuthority)
     {
+        if (outboundSparseReceiveAuthority is { } requiredReceiveAuthority)
+        {
+            bool receiveAuthorityCurrent;
+            string receiveAuthorityRejection;
+            lock (gate)
+            {
+                receiveAuthorityCurrent = IsOutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthorityCurrentLocked(
+                    requiredReceiveAuthority,
+                    out receiveAuthorityRejection);
+            }
+
+            if (!receiveAuthorityCurrent)
+            {
+                LogOutboundSparseRuntimeUnlockPreCommitProbeReceiveRejected(
+                    requiredReceiveAuthority,
+                    direction,
+                    transferId,
+                    sessionId,
+                    frame,
+                    receivedTransportKind,
+                    "precommit_probe_receive",
+                    receiveAuthorityRejection);
+                return frame is FileTransferRuntimeUnlockPreCommitProbeFrame or
+                    FileTransferRuntimeUnlockPreCommitProbeAckFrame;
+            }
+        }
+
         switch (frame)
         {
             case FileTransferRuntimeUnlockPreCommitProbeFrame probe:
@@ -1275,7 +1345,8 @@ public sealed partial class SessionFileTransferService
                         direction,
                         probe,
                         receivedTransportKind,
-                        dataSession)
+                        dataSession,
+                        outboundSparseReceiveAuthority)
                     .ConfigureAwait(false);
                 return true;
             case FileTransferRuntimeUnlockPreCommitProbeAckFrame ack:
@@ -1285,7 +1356,8 @@ public sealed partial class SessionFileTransferService
                         direction,
                         ack,
                         receivedTransportKind,
-                        dataSession)
+                        dataSession,
+                        outboundSparseReceiveAuthority)
                     .ConfigureAwait(false);
                 return true;
             default:
@@ -1299,7 +1371,8 @@ public sealed partial class SessionFileTransferService
         FileTransferDirection direction,
         FileTransferRuntimeUnlockPreCommitProbeFrame probe,
         FileTransferTransportKind receivedTransportKind,
-        IFileTransferDataSession? dataSession)
+        IFileTransferDataSession? dataSession,
+        OutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthority? outboundSparseReceiveAuthority)
     {
         if (!TryValidateRuntimeUnlockPreCommitProbeFrame(
                 sessionId,
@@ -1333,12 +1406,43 @@ public sealed partial class SessionFileTransferService
         var accepted = true;
         var ackReason = RuntimeUnlockPreCommitProbeReceivedReason;
         RuntimeUnlockAdmissionToken? currentAdmissionToken = null;
-        var admissionStatus = EnsureRuntimeUnlockPreCommitProbeAdmissionLocked(
-            direction,
-            sessionId,
-            transferId,
-            out var admissionRejectionReason,
-            out currentAdmissionToken);
+        RuntimeUnlockPreCommitProbeAdmissionStatus admissionStatus;
+        string admissionRejectionReason;
+        bool receiveAuthorityRejectedBeforeAck = false;
+        lock (gate)
+        {
+            if (outboundSparseReceiveAuthority is { } requiredReceiveAuthority &&
+                !IsOutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthorityCurrentLocked(
+                    requiredReceiveAuthority,
+                    out admissionRejectionReason))
+            {
+                admissionStatus = RuntimeUnlockPreCommitProbeAdmissionStatus.Rejected;
+                receiveAuthorityRejectedBeforeAck = true;
+            }
+            else
+            {
+                admissionStatus = EnsureRuntimeUnlockPreCommitProbeAdmissionLocked(
+                    direction,
+                    sessionId,
+                    transferId,
+                    out admissionRejectionReason,
+                    out currentAdmissionToken);
+            }
+        }
+
+        if (receiveAuthorityRejectedBeforeAck && outboundSparseReceiveAuthority is { } rejectedReceiveAuthority)
+        {
+            LogOutboundSparseRuntimeUnlockPreCommitProbeReceiveRejected(
+                rejectedReceiveAuthority,
+                direction,
+                transferId,
+                sessionId,
+                probe,
+                receivedTransportKind,
+                "precommit_probe_before_ack",
+                admissionRejectionReason);
+            return;
+        }
         if (admissionStatus == RuntimeUnlockPreCommitProbeAdmissionStatus.Rejected)
         {
             accepted = false;
@@ -1356,7 +1460,7 @@ public sealed partial class SessionFileTransferService
                     direction,
                     sessionId,
                     transferId,
-                    runtimeOwner: null,
+                    runtimeOwner: outboundSparseReceiveAuthority?.RuntimeOwner,
                     actionKind: FileTransferCoordinatorActionKind.RuntimeUnlockProbeAck,
                     source: "runtime_unlock_precommit_probe_received",
                     attemptedAction: "probe_received",
@@ -1410,6 +1514,23 @@ public sealed partial class SessionFileTransferService
             lock (gate)
             {
                 var attemptedAdmissionToken = currentAdmissionToken;
+                if (outboundSparseReceiveAuthority is { } requiredReceiveAuthority &&
+                    !IsOutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthorityCurrentLocked(
+                        requiredReceiveAuthority,
+                        out var receiveAuthorityRejection))
+                {
+                    LogOutboundSparseRuntimeUnlockPreCommitProbeReceiveRejected(
+                        requiredReceiveAuthority,
+                        direction,
+                        transferId,
+                        sessionId,
+                        probe,
+                        receivedTransportKind,
+                        "precommit_probe_ack_authorization",
+                        receiveAuthorityRejection);
+                    return;
+                }
+
                 if (!TryGetCurrentRuntimeUnlockAdmissionTokenForDirectionLocked(
                         direction,
                         sessionId,
@@ -1432,7 +1553,7 @@ public sealed partial class SessionFileTransferService
                         direction,
                         sessionId,
                         transferId,
-                        runtimeOwner: null,
+                        runtimeOwner: outboundSparseReceiveAuthority?.RuntimeOwner,
                         actionKind: FileTransferCoordinatorActionKind.RuntimeUnlockProbeAck,
                         source: "runtime_unlock_precommit_probe_received",
                         attemptedAction: "probe_received",
@@ -1464,9 +1585,43 @@ public sealed partial class SessionFileTransferService
             }
         }
 
+        if (outboundSparseReceiveAuthority is { } sendReceiveAuthority &&
+            !IsOutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthorityCurrent(
+                sendReceiveAuthority,
+                out var sendReceiveAuthorityRejection))
+        {
+            LogOutboundSparseRuntimeUnlockPreCommitProbeReceiveRejected(
+                sendReceiveAuthority,
+                direction,
+                transferId,
+                sessionId,
+                probe,
+                receivedTransportKind,
+                "precommit_probe_before_ack_send",
+                sendReceiveAuthorityRejection);
+            return;
+        }
+
         if (dataSession is IFileTransferRuntimeUnlockPreCommitProbeAckAuthorizer ackAuthorizer)
         {
             ackAuthorizer.AuthorizeRuntimeUnlockPreCommitProbeAck(probe, receivedTransportKind);
+        }
+
+        if (outboundSparseReceiveAuthority is { } authorizedReceiveAuthority &&
+            !IsOutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthorityCurrent(
+                authorizedReceiveAuthority,
+                out var authorizedReceiveAuthorityRejection))
+        {
+            LogOutboundSparseRuntimeUnlockPreCommitProbeReceiveRejected(
+                authorizedReceiveAuthority,
+                direction,
+                transferId,
+                sessionId,
+                probe,
+                receivedTransportKind,
+                "precommit_probe_after_ack_authorizer",
+                authorizedReceiveAuthorityRejection);
+            return;
         }
 
         try
@@ -1476,6 +1631,23 @@ public sealed partial class SessionFileTransferService
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=runtime_unlock_precommit_probe_ack_sent; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={ack.TransactionGeneration}; offer_generation={ack.OfferGeneration}; tuna_path_lease_generation={ack.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(ack.ProbeId ?? "(none)")}; received_transport={FormatFileTransferTransportKind(receivedTransportKind)}");
+            if (outboundSparseReceiveAuthority is { } completedSendReceiveAuthority &&
+                !IsOutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthorityCurrent(
+                    completedSendReceiveAuthority,
+                    out var completedSendReceiveAuthorityRejection))
+            {
+                LogOutboundSparseRuntimeUnlockPreCommitProbeReceiveRejected(
+                    completedSendReceiveAuthority,
+                    direction,
+                    transferId,
+                    sessionId,
+                    probe,
+                    receivedTransportKind,
+                    "precommit_probe_after_ack_send",
+                    completedSendReceiveAuthorityRejection);
+                return;
+            }
+
             if (!accepted)
             {
                 LocalOperationalLog.Warn(
@@ -1486,7 +1658,40 @@ public sealed partial class SessionFileTransferService
 
             if (transport is IRuntimeUnlockRouteCommitProofProvider proofProvider)
             {
-                TrackRuntimeUnlockPeerPreCommitProbeLocked(direction, sessionId, transferId, ack);
+                if (outboundSparseReceiveAuthority is { } requiredReceiveAuthority)
+                {
+                    bool receiveAuthorityCurrent;
+                    string receiveAuthorityRejection;
+                    lock (gate)
+                    {
+                        receiveAuthorityCurrent = IsOutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthorityCurrentLocked(
+                            requiredReceiveAuthority,
+                            out receiveAuthorityRejection);
+                        if (receiveAuthorityCurrent)
+                        {
+                            TrackRuntimeUnlockPeerPreCommitProbeLocked(direction, sessionId, transferId, ack);
+                        }
+                    }
+
+                    if (!receiveAuthorityCurrent)
+                    {
+                        LogOutboundSparseRuntimeUnlockPreCommitProbeReceiveRejected(
+                            requiredReceiveAuthority,
+                            direction,
+                            transferId,
+                            sessionId,
+                            probe,
+                            receivedTransportKind,
+                            "precommit_probe_after_ack",
+                            receiveAuthorityRejection);
+                        return;
+                    }
+                }
+                else
+                {
+                    TrackRuntimeUnlockPeerPreCommitProbeLocked(direction, sessionId, transferId, ack);
+                }
+
                 if (ShouldRecordReceivedRuntimeUnlockPreCommitProbeAsTransactionProbe(
                         proofProvider,
                         sessionId,
@@ -2022,7 +2227,8 @@ public sealed partial class SessionFileTransferService
         FileTransferDirection direction,
         FileTransferRuntimeUnlockPreCommitProbeAckFrame ack,
         FileTransferTransportKind receivedTransportKind,
-        IFileTransferDataSession? dataSession)
+        IFileTransferDataSession? dataSession,
+        OutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthority? outboundSparseReceiveAuthority)
     {
         LogRuntimeUnlockPreCommitProbeAckReceiveDispatched(
             direction,
@@ -2082,34 +2288,45 @@ public sealed partial class SessionFileTransferService
         string ackAuthorizationRejectionReason;
         lock (gate)
         {
-            _ = TryGetCurrentRuntimeUnlockAdmissionTokenForDirectionLocked(
-                direction,
-                sessionId,
-                transferId,
-                out currentAdmissionToken);
-
-            authorized = TryAuthorizeRuntimeUnlockCallbackActionForDirectionLocked(
+            if (outboundSparseReceiveAuthority is { } requiredReceiveAuthority &&
+                !IsOutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthorityCurrentLocked(
+                    requiredReceiveAuthority,
+                    out ackAuthorizationRejectionReason))
+            {
+                authorized = false;
+                currentAdmissionToken = null;
+            }
+            else
+            {
+                _ = TryGetCurrentRuntimeUnlockAdmissionTokenForDirectionLocked(
                     direction,
                     sessionId,
                     transferId,
-                    runtimeOwner: null,
-                    actionKind: FileTransferCoordinatorActionKind.RuntimeUnlockProbeAck,
-                    source: "runtime_unlock_precommit_probe_ack",
-                    attemptedAction: ack.Accepted ? "probe_ack" : "probe_rejected",
-                    admissionToken: currentAdmissionToken,
-                    routeCommitToken: null,
-                    transactionGeneration: ack.TransactionGeneration,
-                    offerGeneration: ack.OfferGeneration,
-                    tunaPathLeaseGeneration: ack.TunaPathLeaseGeneration,
-                    tunaPathLeaseListenerRunId: null,
-                    probeId: ack.ProbeId,
-                    probeAcked: ack.Accepted,
-                    samePathTunaProbeAckId: ack.Accepted ? ack.ProbeId : null,
-                    routeCommitGeneration: null,
-                    targetRoute: FileTransferRoute.FileTunaV4,
-                    targetProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
-                    targetTransport: FileTransferTransportKind.Tuna,
-                    out ackAuthorizationRejectionReason);
+                    out currentAdmissionToken);
+
+                authorized = TryAuthorizeRuntimeUnlockCallbackActionForDirectionLocked(
+                        direction,
+                        sessionId,
+                        transferId,
+                        runtimeOwner: outboundSparseReceiveAuthority?.RuntimeOwner,
+                        actionKind: FileTransferCoordinatorActionKind.RuntimeUnlockProbeAck,
+                        source: "runtime_unlock_precommit_probe_ack",
+                        attemptedAction: ack.Accepted ? "probe_ack" : "probe_rejected",
+                        admissionToken: currentAdmissionToken,
+                        routeCommitToken: null,
+                        transactionGeneration: ack.TransactionGeneration,
+                        offerGeneration: ack.OfferGeneration,
+                        tunaPathLeaseGeneration: ack.TunaPathLeaseGeneration,
+                        tunaPathLeaseListenerRunId: null,
+                        probeId: ack.ProbeId,
+                        probeAcked: ack.Accepted,
+                        samePathTunaProbeAckId: ack.Accepted ? ack.ProbeId : null,
+                        routeCommitGeneration: null,
+                        targetRoute: FileTransferRoute.FileTunaV4,
+                        targetProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
+                        targetTransport: FileTransferTransportKind.Tuna,
+                        out ackAuthorizationRejectionReason);
+            }
         }
 
         if (!authorized)
@@ -2132,6 +2349,23 @@ public sealed partial class SessionFileTransferService
                 currentAdmissionToken,
                 latestAdmissionToken,
                 ackAuthorizationRejectionReason);
+            return;
+        }
+
+        if (outboundSparseReceiveAuthority is { } authorizedAckReceiveAuthority &&
+            !IsOutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthorityCurrent(
+                authorizedAckReceiveAuthority,
+                out var authorizedAckReceiveAuthorityRejection))
+        {
+            LogOutboundSparseRuntimeUnlockPreCommitProbeReceiveRejected(
+                authorizedAckReceiveAuthority,
+                direction,
+                transferId,
+                sessionId,
+                ack,
+                receivedTransportKind,
+                "precommit_probe_ack_after_authorization",
+                authorizedAckReceiveAuthorityRejection);
             return;
         }
 
@@ -2217,9 +2451,43 @@ public sealed partial class SessionFileTransferService
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=runtime_unlock_paired_commit_started; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={ack.TransactionGeneration}; offer_generation={ack.OfferGeneration}; tuna_path_lease_generation={ack.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(ack.ProbeId ?? "(none)")}; reason={FormatProtocolLogValue(RuntimeUnlockPreCommitProbeCommitConfirmedReason)}");
+            if (outboundSparseReceiveAuthority is { } confirmationReceiveAuthority &&
+                !IsOutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthorityCurrent(
+                    confirmationReceiveAuthority,
+                    out var confirmationReceiveAuthorityRejection))
+            {
+                LogOutboundSparseRuntimeUnlockPreCommitProbeReceiveRejected(
+                    confirmationReceiveAuthority,
+                    direction,
+                    transferId,
+                    sessionId,
+                    ack,
+                    receivedTransportKind,
+                    "precommit_probe_before_confirmation_send",
+                    confirmationReceiveAuthorityRejection);
+                return;
+            }
+
             if (dataSession is IFileTransferRuntimeUnlockPreCommitProbeAckAuthorizer confirmationAuthorizer)
             {
                 confirmationAuthorizer.AuthorizeRuntimeUnlockPreCommitProbeAck(ack, receivedTransportKind);
+            }
+
+            if (outboundSparseReceiveAuthority is { } authorizedConfirmationReceiveAuthority &&
+                !IsOutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthorityCurrent(
+                    authorizedConfirmationReceiveAuthority,
+                    out var authorizedConfirmationReceiveAuthorityRejection))
+            {
+                LogOutboundSparseRuntimeUnlockPreCommitProbeReceiveRejected(
+                    authorizedConfirmationReceiveAuthority,
+                    direction,
+                    transferId,
+                    sessionId,
+                    ack,
+                    receivedTransportKind,
+                    "precommit_probe_after_confirmation_authorizer",
+                    authorizedConfirmationReceiveAuthorityRejection);
+                return;
             }
 
             var confirmationSent = await SendRuntimeUnlockPreCommitProbeCommitConfirmationAsync(
@@ -2230,15 +2498,52 @@ public sealed partial class SessionFileTransferService
                     dataSession,
                     RuntimeUnlockPreCommitProbeCommitConfirmedReason)
                 .ConfigureAwait(false);
-            if (!confirmationSent)
+            if (outboundSparseReceiveAuthority is { } requiredReceiveAuthority)
             {
+                bool receiveAuthorityCurrent;
+                string receiveAuthorityRejection;
                 lock (gate)
                 {
-                    if (!TryAuthorizeRuntimeUnlockCallbackActionForDirectionLocked(
+                    receiveAuthorityCurrent = IsOutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthorityCurrentLocked(
+                        requiredReceiveAuthority,
+                        out receiveAuthorityRejection);
+                }
+
+                if (!receiveAuthorityCurrent)
+                {
+                    LogOutboundSparseRuntimeUnlockPreCommitProbeReceiveRejected(
+                        requiredReceiveAuthority,
+                        direction,
+                        transferId,
+                        sessionId,
+                        ack,
+                        receivedTransportKind,
+                        "precommit_probe_confirmation_after_send",
+                        receiveAuthorityRejection);
+                    return;
+                }
+            }
+
+            if (!confirmationSent)
+            {
+                var confirmationFailureAuthorized = false;
+                string? confirmationFailureReceiveRejection = null;
+                lock (gate)
+                {
+                    if (outboundSparseReceiveAuthority is { } confirmationFailureReceiveAuthority &&
+                        !IsOutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthorityCurrentLocked(
+                            confirmationFailureReceiveAuthority,
+                            out confirmationFailureReceiveRejection))
+                    {
+                        confirmationFailureAuthorized = false;
+                    }
+                    else
+                    {
+                        confirmationFailureAuthorized = TryAuthorizeRuntimeUnlockCallbackActionForDirectionLocked(
                             direction,
                             sessionId,
                             transferId,
-                            runtimeOwner: null,
+                            runtimeOwner: outboundSparseReceiveAuthority?.RuntimeOwner,
                             actionKind: FileTransferCoordinatorActionKind.RuntimeUnlockTransactionCallback,
                             source: "runtime_unlock_paired_commit_confirmation",
                             attemptedAction: "paired_commit_confirmation_send_failed",
@@ -2255,10 +2560,28 @@ public sealed partial class SessionFileTransferService
                             targetRoute: FileTransferRoute.FileTunaV4,
                             targetProtocolVersion: FileTransferProtocol.ProtocolVersionV4,
                             targetTransport: FileTransferTransportKind.Tuna,
-                            out _))
-                    {
-                        return;
+                            out _);
                     }
+                }
+
+                if (confirmationFailureReceiveRejection is not null &&
+                    outboundSparseReceiveAuthority is { } rejectedConfirmationFailureReceiveAuthority)
+                {
+                    LogOutboundSparseRuntimeUnlockPreCommitProbeReceiveRejected(
+                        rejectedConfirmationFailureReceiveAuthority,
+                        direction,
+                        transferId,
+                        sessionId,
+                        ack,
+                        receivedTransportKind,
+                        "precommit_probe_confirmation_failure",
+                        confirmationFailureReceiveRejection);
+                    return;
+                }
+
+                if (!confirmationFailureAuthorized)
+                {
+                    return;
                 }
 
                 proofProvider.NotifyRuntimeUnlockPathProbeResult(
@@ -2277,14 +2600,46 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
-            var initiatorCommitted = TryCommitRuntimeUnlockRouteAfterPreCommitProbeAck(
-                direction,
-                sessionId,
-                transferId,
-                ack.TransactionGeneration,
-                ack.OfferGeneration,
-                RuntimeUnlockPreCommitProbeCommitConfirmedReason,
-                out var initiatorRouteCommitToken);
+            var initiatorCommitted = false;
+            RouteCommitToken initiatorRouteCommitToken = default;
+            string? initiatorCommitReceiveRejection = null;
+            lock (gate)
+            {
+                if (outboundSparseReceiveAuthority is { } initiatorCommitReceiveAuthority &&
+                    !IsOutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthorityCurrentLocked(
+                        initiatorCommitReceiveAuthority,
+                        out initiatorCommitReceiveRejection))
+                {
+                    initiatorCommitted = false;
+                }
+                else
+                {
+                    initiatorCommitted = TryCommitRuntimeUnlockRouteAfterPreCommitProbeAck(
+                        direction,
+                        sessionId,
+                        transferId,
+                        ack.TransactionGeneration,
+                        ack.OfferGeneration,
+                        RuntimeUnlockPreCommitProbeCommitConfirmedReason,
+                        out initiatorRouteCommitToken);
+                }
+            }
+
+            if (initiatorCommitReceiveRejection is not null &&
+                outboundSparseReceiveAuthority is { } rejectedInitiatorCommitReceiveAuthority)
+            {
+                LogOutboundSparseRuntimeUnlockPreCommitProbeReceiveRejected(
+                    rejectedInitiatorCommitReceiveAuthority,
+                    direction,
+                    transferId,
+                    sessionId,
+                    ack,
+                    receivedTransportKind,
+                    "precommit_probe_confirmation_commit",
+                    initiatorCommitReceiveRejection);
+                return;
+            }
+
             if (initiatorCommitted)
             {
                 NotifyRuntimeUnlockPairedRouteCommitConfirmed(
@@ -2409,6 +2764,76 @@ public sealed partial class SessionFileTransferService
                 $"event=runtime_unlock_paired_commit_confirmed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; transaction_generation={ack.TransactionGeneration}; offer_generation={ack.OfferGeneration}; tuna_path_lease_generation={ack.TunaPathLeaseGeneration}; probe_id={FormatProtocolLogValue(ack.ProbeId ?? "(none)")}; reason={FormatProtocolLogValue(RuntimeUnlockPreCommitProbeCommitConfirmedReplyReason)}");
         }
     }
+
+    private void LogOutboundSparseRuntimeUnlockPreCommitProbeReceiveRejected(
+        OutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthority receiveAuthority,
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        FileTransferDataFrame frame,
+        FileTransferTransportKind receivedTransportKind,
+        string phase,
+        string rejectionReason)
+    {
+        LogOutboundSparsePumpInstallRejected(
+            receiveAuthority.Context,
+            receiveAuthority.Install,
+            phase,
+            rejectionReason);
+        if (frame is FileTransferRuntimeUnlockPreCommitProbeFrameBase probe)
+        {
+            LogRuntimeUnlockPreCommitProbeIgnored(
+                direction,
+                transferId,
+                sessionId,
+                probe,
+                receivedTransportKind,
+                $"stale_outbound_sparse_receive_{NormalizeReason(rejectionReason)}");
+        }
+    }
+
+    private bool IsOutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthorityCurrentLocked(
+        OutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthority receiveAuthority,
+        out string rejectionReason)
+    {
+        if (!IsOutboundSparseReceiveSessionCurrentLocked(
+                receiveAuthority.Context,
+                receiveAuthority.DataSession,
+                receiveAuthority.DataSessionGeneration,
+                receiveAuthority.ReceiveSupervisorGeneration,
+                out rejectionReason))
+        {
+            return false;
+        }
+
+        return IsOutboundSparseReceiveResultCurrentLocked(
+            receiveAuthority.Context,
+            receiveAuthority.Install,
+            receiveAuthority.RuntimeOwner,
+            receiveAuthority.DataSession,
+            receiveAuthority.DataSessionGeneration,
+            out rejectionReason);
+    }
+
+    private bool IsOutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthorityCurrent(
+        OutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthority receiveAuthority,
+        out string rejectionReason)
+    {
+        lock (gate)
+        {
+            return IsOutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthorityCurrentLocked(
+                receiveAuthority,
+                out rejectionReason);
+        }
+    }
+
+    private sealed record OutboundSparseRuntimeUnlockPreCommitProbeReceiveAuthority(
+        OutboundTransferContext Context,
+        OutboundSparsePumpInstall Install,
+        RuntimeOwnerToken RuntimeOwner,
+        IFileTransferDataSession DataSession,
+        long DataSessionGeneration,
+        long ReceiveSupervisorGeneration);
 
     private async Task<bool> SendRuntimeUnlockPreCommitProbeCommitConfirmationAsync(
         FileTransferDirection direction,

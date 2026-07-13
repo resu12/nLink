@@ -36,6 +36,11 @@ namespace NLink.SmokeTests;
 
 public abstract class CoreSmokeTestsBase
 {
+    private static readonly ConcurrentDictionary<int, string> OperationalLogCursorTokens = new();
+    private static readonly string OperationalLogProcessNonce =
+        Convert.ToHexString(RandomNumberGenerator.GetBytes(8)).ToLowerInvariant();
+    private static int nextOperationalLogCursorId;
+
 internal static IDisposable EnableUnsafeDeveloperModeForTests()
     => ReleaseOverridePolicy.OverrideUnsafeDeveloperModeForTests(true);
 
@@ -1026,30 +1031,64 @@ internal static async Task<string> ApproveNknSessionAsync(
         NknSignalingTransport host,
         NknSignalingTransport helper,
         CancellationToken ct,
-        InviteCapabilities capabilities = InviteCapabilities.Chat)
+        InviteCapabilities capabilities = InviteCapabilities.Chat,
+        bool suppressAutomaticAccelerationNegotiation = false)
     {
-        var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var previousHostNegotiationScheduled = 0;
+        var previousHelperNegotiationScheduled = 0;
+        EventHandler<TransportSessionSecurityStateChangedEventArgs>? hostSuppressionHandler = null;
+        EventHandler<TransportSessionSecurityStateChangedEventArgs>? helperSuppressionHandler = null;
+        if (suppressAutomaticAccelerationNegotiation)
+        {
+            previousHostNegotiationScheduled = Convert.ToInt32(
+                GetPrivateField(host, "accelerationNegotiationScheduled"),
+                System.Globalization.CultureInfo.InvariantCulture);
+            previousHelperNegotiationScheduled = Convert.ToInt32(
+                GetPrivateField(helper, "accelerationNegotiationScheduled"),
+                System.Globalization.CultureInfo.InvariantCulture);
+            hostSuppressionHandler = (_, _) => SetPrivateField(host, "accelerationNegotiationScheduled", 1);
+            helperSuppressionHandler = (_, _) => SetPrivateField(helper, "accelerationNegotiationScheduled", 1);
+            host.SessionSecurityStateChanged += hostSuppressionHandler;
+            helper.SessionSecurityStateChanged += helperSuppressionHandler;
+            SetPrivateField(host, "accelerationNegotiationScheduled", 1);
+            SetPrivateField(helper, "accelerationNegotiationScheduled", 1);
+        }
 
-        host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
-        host.Approved += (_, _) => hostApproved.TrySetResult();
-        helper.Approved += (_, _) => helperApproved.TrySetResult();
+        try
+        {
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        await host.HostByAddressAsync(ct);
-        var invite = CreateValidatedInviteForTarget(
-            new PeerAddress(host.LocalPeerAddress),
-            out var rawToken,
-            capabilities,
-            boundHelperAddress: new PeerAddress(helper.LocalPeerAddress));
-        await helper.JoinByInviteAsync(rawToken, invite, ct);
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+            host.Approved += (_, _) => hostApproved.TrySetResult();
+            helper.Approved += (_, _) => helperApproved.TrySetResult();
 
-        var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(3), ct);
-        await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), ct);
-        await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), ct);
-        await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), ct);
+            await host.HostByAddressAsync(ct);
+            var invite = CreateValidatedInviteForTarget(
+                new PeerAddress(host.LocalPeerAddress),
+                out var rawToken,
+                capabilities,
+                boundHelperAddress: new PeerAddress(helper.LocalPeerAddress));
+            await helper.JoinByInviteAsync(rawToken, invite, ct);
 
-        return host.CurrentSessionSecurityState.SessionId!.Value.Value;
+            var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(3), ct);
+            await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), ct);
+            await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), ct);
+            await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), ct);
+
+            return host.CurrentSessionSecurityState.SessionId!.Value.Value;
+        }
+        finally
+        {
+            if (suppressAutomaticAccelerationNegotiation)
+            {
+                host.SessionSecurityStateChanged -= hostSuppressionHandler;
+                helper.SessionSecurityStateChanged -= helperSuppressionHandler;
+                SetPrivateField(host, "accelerationNegotiationScheduled", previousHostNegotiationScheduled);
+                SetPrivateField(helper, "accelerationNegotiationScheduled", previousHelperNegotiationScheduled);
+            }
+        }
     }
 
 internal static List<string> FindOperationalLogLines(Func<string, bool> predicate)
@@ -1065,11 +1104,48 @@ internal static List<string> FindOperationalLogLines(Func<string, bool> predicat
 
 internal static int GetOperationalLogLength()
     {
-        return ReadOperationalLogText().Length;
+        var cursorId = Interlocked.Increment(ref nextOperationalLogCursorId);
+        if (cursorId <= 0)
+        {
+            throw new InvalidOperationException("The operational-log cursor generation was exhausted.");
+        }
+
+        var cursorToken =
+            $"event=smoke_test_operational_log_cursor; cursor_id=p{Environment.ProcessId}r{OperationalLogProcessNonce}n{cursorId};";
+        OperationalLogCursorTokens[cursorId] = cursorToken;
+        LocalOperationalLog.Info("SmokeTest", cursorToken);
+        return -cursorId;
     }
 
     internal static string ReadOperationalLogTail(int startIndex)
     {
+        if (startIndex < 0)
+        {
+            var cursorId = -startIndex;
+            if (!OperationalLogCursorTokens.TryGetValue(cursorId, out var cursorToken))
+            {
+                throw new InvalidOperationException($"Unknown operational-log cursor '{cursorId}'.");
+            }
+
+            if (!LocalOperationalLog.TryReadRetainedTail(cursorToken, out var retainedTail))
+            {
+                var recentLogText = LocalOperationalLog.GetRecentLogText();
+                var recentCursorIndex = recentLogText.LastIndexOf(cursorToken, StringComparison.Ordinal);
+                if (recentCursorIndex >= 0)
+                {
+                    var cursorLineEnd = recentLogText.IndexOf('\n', recentCursorIndex);
+                    return cursorLineEnd < 0
+                        ? string.Empty
+                        : recentLogText[(cursorLineEnd + 1)..];
+                }
+
+                throw new InvalidOperationException(
+                    $"Operational-log cursor '{cursorId}' is missing from the retained log generations and recent in-memory log.");
+            }
+
+            return retainedTail;
+        }
+
         var logText = ReadOperationalLogText();
         if (startIndex <= 0)
         {

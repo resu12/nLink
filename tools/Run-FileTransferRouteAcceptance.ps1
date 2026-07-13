@@ -5969,6 +5969,8 @@ function Clear-Phase5StaleSetupFailureAfterRuntimeEvidence {
         $combinedSetup.IndexOf('helpee_bridge_host_ready_connect_failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combinedSetup.IndexOf('helper_bridge_host_ready_connect_failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
     $isRuntimeFailureLabel =
+        $combinedSetup.IndexOf('post_tuna_fallback_outbound_receive_worker_handoff_missing', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $combinedSetup.IndexOf('outbound_sparse_worker_handoff', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combinedSetup.IndexOf('fallback_frontier_request_dispatch_missing', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combinedSetup.IndexOf('fallback_frontier_repair', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
         $combinedSetup.IndexOf('runtime_unlock_retry', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
@@ -6474,6 +6476,12 @@ function Get-Phase5FailureClass {
             $line.IndexOf('file_tuna_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $line.IndexOf('diagnostic_regular_nkn_v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
             return 'route_runtime'
+        }
+    }
+
+    foreach ($line in $failureLines) {
+        if ($line.IndexOf('post_tuna_fallback_outbound_receive_worker_handoff_missing', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return 'post_tuna_fallback_outbound_receive_worker_handoff_missing'
         }
     }
 

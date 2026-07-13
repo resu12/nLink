@@ -2614,4 +2614,592 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
         Assert.NotEqual("fallback_frontier_repair_stalled", verdict["recovery_failure_class"]);
         Assert.Equal("pass", verdict["classification_fallback_frontier_repair_verdict"]);
     }
+
+    [Fact]
+    [Trait("RetainedFallbackSuite", "OutboundReceiveWorkerHandoff")]
+    public async Task AnalyzeRetained_StaleV4WorkerFollowedByUnconsumedFallbackFrontier_ClassifiesMissingHandoff()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_receive_worker_handoff_missing";
+        const string currentTuple =
+            "direction=outbound; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=5; route_commit_generation=0; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_runtime_started; role=sender; transfer_id={transferId}; {currentTuple}; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted", secondsOffset: 0),
+            LogLine($"event=filetransfer_runtime_owner_stale_update_rejected; direction=outbound; transfer_id={transferId}; session_id=sess_a; source=v4_sender_failed; attempted_action=read_failed; reason=runtime_generation_mismatch; runtime_generation=1; current_runtime_generation=3; terminal_generation=0; current_terminal_generation=0; route=regular_nkn_v4_fast; current_route=post_tuna_fallback_v6; protocol_version=4; current_protocol_version=6; live_route_epoch=0; current_live_route_epoch=2; runtime_family=regular_v4; current_runtime_family=post_tuna_fallback_v6", secondsOffset: 1),
+            LogLine($"event=filetransfer_control_plane_delivery_result; direction=inbound; kind=frontier_request; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; leg_generation=3; bridge_recovery_generation=1; transport_epoch=1; frame_type=filetransfer.frontier_request.v6; repair_request_id=v6-frontier:2709:33; request_correlation_id=frq-missing; first_start_chunk_index=2709; first_chunk_count=32; range_count=1; control_queue=1; control_copy=1; bulk_copy=1; peer_visible_any=1; accepted_any=1; local_only_rejected=0", secondsOffset: 2),
+            LogLine($"event=filetransfer_v6_frontier_request_transport_queued; transport=nkn; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.frontier_request.v6; lane=control; actual_transport=regular_nkn; priority=1; queue_capacity_bypassed=1; queued_frames=144; queued_bytes=147456; transport_epoch=1; repair_request_id=v6-frontier:2709:33; request_correlation_id=frq-missing; range_count=1; first_start_chunk_index=2709; requested_chunk_count=32; decision_reason=queued_for_core", secondsOffset: 3),
+            LogLine($"event=filetransfer_v6_frontier_request_transport_rejected; transport=nkn; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.frontier_request.v6; lane=control; actual_transport=regular_nkn; priority=1; queue_capacity_bypassed=1; queued_frames=144; queued_bytes=147456; transport_epoch=1; repair_request_id=v6-frontier:2709:33; request_correlation_id=frq-missing; decision_reason=priority_control_queue_capacity_exceeded", secondsOffset: 4),
+            LogLine($"event=filetransfer_data_frame_ignored; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.frontier_request.v6; route=post_tuna_fallback_v6; protocol_version=6; reason=route_hint_missing", secondsOffset: 5)
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("post_tuna_fallback_outbound_receive_worker_handoff_missing", verdict["recovery_failure_class"]);
+        Assert.Equal("post_tuna_fallback_outbound_receive_worker_handoff_missing", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("filetransfer_runtime_owner_stale_update_rejected", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal("runtime_generation_mismatch", verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("1", verdict["post_tuna_fallback_outbound_receive_worker_handoff_missing_count"]);
+        Assert.NotEqual("fallback_frontier_request_dispatch_missing", verdict["recovery_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("RetainedFallbackSuite", "OutboundReceiveWorkerHandoff")]
+    public async Task AnalyzeRetained_ExactWorkerInstallAndFallbackDispatch_ClearsMissingHandoffCandidate()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_receive_worker_handoff_resolved";
+        const string repairKey = "v6-frontier:2709:1";
+        const string currentTuple =
+            "direction=outbound; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=5; route_commit_generation=0; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn";
+        var installDescriptor = OutboundSparseInstallDescriptor(transferId);
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_runtime_started; role=sender; transfer_id={transferId}; {currentTuple}; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted", secondsOffset: 0),
+            LogLine($"event=filetransfer_runtime_owner_stale_update_rejected; direction=outbound; transfer_id={transferId}; session_id=sess_a; source=v4_sender_failed; attempted_action=read_failed; reason=runtime_generation_mismatch; runtime_generation=1; current_runtime_generation=3; terminal_generation=0; current_terminal_generation=0; route=regular_nkn_v4_fast; current_route=post_tuna_fallback_v6; protocol_version=4; current_protocol_version=6; live_route_epoch=0; current_live_route_epoch=2; runtime_family=regular_v4; current_runtime_family=post_tuna_fallback_v6", secondsOffset: 1),
+            LogLine($"event=filetransfer_control_plane_delivery_result; direction=inbound; kind=frontier_request; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; leg_generation=3; bridge_recovery_generation=1; transport_epoch=1; frame_type=filetransfer.frontier_request.v6; repair_request_id={repairKey}; request_correlation_id=frq-resolved; first_start_chunk_index=2709; first_chunk_count=1; range_count=1; control_queue=1; control_copy=1; bulk_copy=1; peer_visible_any=1; accepted_any=1; local_only_rejected=0", secondsOffset: 2),
+            LogLine($"event=filetransfer_outbound_sparse_worker_handoff_required; transfer_id={transferId}; {currentTuple}; {installDescriptor}; decision_reason=stale_worker_superseded", secondsOffset: 3),
+            LogLine($"event=filetransfer_outbound_sparse_worker_handoff_installed; transfer_id={transferId}; {currentTuple}; {installDescriptor}; decision_reason=stale_worker_superseded", secondsOffset: 4),
+            LogLine($"event=filetransfer_v6_frontier_request_receive_dispatched; transfer_id={transferId}; {currentTuple}; {installDescriptor}; transport_epoch=1; bridge_recovery_generation=1; repair_request_id={repairKey}; request_correlation_id=frq-resolved; first_start_chunk_index=2709; first_chunk_count=1; range_count=1; received_transport=regular_nkn; decision_reason=queued_for_sender_repair", secondsOffset: 5),
+            LogLine($"event=filetransfer_fallback_frontier_repair_authority_granted; direction=outbound; transfer_id={transferId}; session_id=sess_a; repair_request_key={repairKey}; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; frontier_chunk_index=2709; requested_chunk_count=1; decision_generation=7", secondsOffset: 6),
+            LogLine($"event=filetransfer_fallback_frontier_repair_dispatched; direction=outbound; transfer_id={transferId}; session_id=sess_a; repair_request_key={repairKey}; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; leg_generation=3; transport_epoch=1; bridge_recovery_generation=1; frontier_chunk_index=2709; requested_chunk_count=1; decision_generation=7", secondsOffset: 7),
+            LogLine($"event=filetransfer_fallback_frontier_repair_progress_observed; direction=inbound; transfer_id={transferId}; session_id=sess_a; repair_request_key={repairKey}; reason=frontier_advanced; committed_frontier_before=2709; committed_frontier_after=2710; requested_chunk_count=1", secondsOffset: 8)
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.NotEqual("post_tuna_fallback_outbound_receive_worker_handoff_missing", verdict["recovery_failure_class"]);
+        Assert.Equal("0", verdict["post_tuna_fallback_outbound_receive_worker_handoff_missing_count"]);
+    }
+
+    [Fact]
+    [Trait("RetainedFallbackSuite", "OutboundReceiveWorkerHandoff")]
+    public async Task AnalyzeRetained_StaleWorkerFollowedByOutboundTerminal_ClearsMissingHandoffCandidate()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_receive_worker_terminal";
+        const string currentTuple =
+            "direction=outbound; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=5; route_commit_generation=0; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_runtime_started; role=sender; transfer_id={transferId}; {currentTuple}; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted", secondsOffset: 0),
+            LogLine($"event=filetransfer_runtime_owner_stale_update_rejected; direction=outbound; transfer_id={transferId}; session_id=sess_a; source=v4_sender_failed; attempted_action=read_failed; reason=runtime_generation_mismatch; runtime_generation=1; current_runtime_generation=3; terminal_generation=0; current_terminal_generation=0; route=regular_nkn_v4_fast; current_route=post_tuna_fallback_v6; protocol_version=4; current_protocol_version=6; live_route_epoch=0; current_live_route_epoch=2; runtime_family=regular_v4; current_runtime_family=post_tuna_fallback_v6", secondsOffset: 1),
+            LogLine($"event=filetransfer_control_plane_delivery_result; direction=inbound; kind=frontier_request; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; leg_generation=3; bridge_recovery_generation=1; transport_epoch=1; frame_type=filetransfer.frontier_request.v6; repair_request_id=v6-frontier:2709:1; request_correlation_id=frq-terminal; first_start_chunk_index=2709; first_chunk_count=1; range_count=1; peer_visible_any=1; accepted_any=1", secondsOffset: 2),
+            LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_a; transfer_id={transferId}; state=Failed; error_code=peer_disconnected", secondsOffset: 3)
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.NotEqual("post_tuna_fallback_outbound_receive_worker_handoff_missing", verdict["recovery_failure_class"]);
+        Assert.Equal("0", verdict["post_tuna_fallback_outbound_receive_worker_handoff_missing_count"]);
+    }
+
+    [Fact]
+    [Trait("RetainedFallbackSuite", "OutboundReceiveWorkerHandoff")]
+    public async Task AnalyzeRetained_SupersedingPublicationInvalidatesOldWorkerCandidateInFullAndCompactModes()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_receive_worker_superseded";
+        const string firstTuple =
+            "direction=outbound; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=5; route_commit_generation=0; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn";
+        const string successorTuple =
+            "direction=outbound; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; runtime_generation=5; terminal_generation=0; leg_generation=5; route_publication_generation=8; route_commit_generation=0; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_runtime_started; role=sender; transfer_id={transferId}; {firstTuple}; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted", secondsOffset: 0),
+            LogLine($"event=filetransfer_runtime_owner_stale_update_rejected; direction=outbound; transfer_id={transferId}; session_id=sess_a; source=v4_sender_failed; attempted_action=read_failed; reason=runtime_generation_mismatch; runtime_generation=1; current_runtime_generation=3; terminal_generation=0; current_terminal_generation=0; route=regular_nkn_v4_fast; current_route=post_tuna_fallback_v6; protocol_version=4; current_protocol_version=6; live_route_epoch=0; current_live_route_epoch=2; runtime_family=regular_v4; current_runtime_family=post_tuna_fallback_v6", secondsOffset: 1),
+            LogLine($"event=filetransfer_runtime_started; role=sender; transfer_id={transferId}; {successorTuple}; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted", secondsOffset: 2),
+            LogLine($"event=filetransfer_outbound_sparse_worker_handoff_installed; transfer_id={transferId}; {successorTuple}; data_session_generation=2; predecessor_install_generation=2; install_generation=3; installation_reason=publication_superseded", secondsOffset: 3),
+            LogLine($"event=filetransfer_v6_frontier_request_receive_dispatched; transfer_id={transferId}; {successorTuple}; transport_epoch=2; bridge_recovery_generation=2; repair_request_id=v6-frontier:2710:1; request_correlation_id=frq-successor; first_start_chunk_index=2710; first_chunk_count=1; range_count=1; decision_reason=queued_for_sender_repair", secondsOffset: 4),
+            LogLine($"event=filetransfer_control_plane_delivery_result; direction=inbound; kind=frontier_request; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; leg_generation=5; bridge_recovery_generation=2; transport_epoch=2; frame_type=filetransfer.frontier_request.v6; repair_request_id=v6-frontier:2710:1; request_correlation_id=frq-successor; first_start_chunk_index=2710; first_chunk_count=1; range_count=1; peer_visible_any=1; accepted_any=1", secondsOffset: 5)
+        };
+
+        var full = await RunAnalyzeFixtureAsync(lines);
+        Assert.Equal(0, full.Script.ExitCode);
+        var fullVerdict = ReadArtifactReport(full.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.NotEqual("post_tuna_fallback_outbound_receive_worker_handoff_missing", fullVerdict["recovery_failure_class"]);
+        Assert.Equal("0", fullVerdict["post_tuna_fallback_outbound_receive_worker_handoff_missing_count"]);
+
+        var compact = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: new Dictionary<string, string>
+            {
+                ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+            });
+        Assert.Equal(0, compact.Script.ExitCode);
+        var compactVerdict = ReadArtifactReport(compact.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.NotEqual("post_tuna_fallback_outbound_receive_worker_handoff_missing", compactVerdict["recovery_failure_class"]);
+        Assert.Equal("(none)", compactVerdict["first_proof_chain_failure_class"]);
+        Assert.Equal("0", compactVerdict["post_tuna_fallback_outbound_receive_worker_handoff_missing_count"]);
+    }
+
+    [Fact]
+    [Trait("RetainedFallbackSuite", "OutboundReceiveWorkerHandoff")]
+    public async Task AnalyzeRetained_RecoveredEarlierWorkerPressureDoesNotHideLaterMissingHandoff()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_receive_worker_later_missing";
+        const string firstTuple =
+            "direction=outbound; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=5; route_commit_generation=0; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn";
+        const string secondTuple =
+            "direction=outbound; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; runtime_generation=5; terminal_generation=0; leg_generation=5; route_publication_generation=8; route_commit_generation=0; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn";
+        var firstInstallDescriptor = OutboundSparseInstallDescriptor(transferId);
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_runtime_started; role=sender; transfer_id={transferId}; {firstTuple}; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted", secondsOffset: 0),
+            LogLine($"event=filetransfer_runtime_owner_stale_update_rejected; direction=outbound; transfer_id={transferId}; session_id=sess_a; source=v4_sender_failed; attempted_action=read_failed; reason=runtime_generation_mismatch; runtime_generation=1; current_runtime_generation=3; terminal_generation=0; current_terminal_generation=0; route=regular_nkn_v4_fast; current_route=post_tuna_fallback_v6; protocol_version=4; current_protocol_version=6; live_route_epoch=0; current_live_route_epoch=2; runtime_family=regular_v4; current_runtime_family=post_tuna_fallback_v6", secondsOffset: 1),
+            LogLine($"event=filetransfer_control_plane_delivery_result; direction=inbound; kind=frontier_request; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; leg_generation=3; bridge_recovery_generation=1; transport_epoch=1; frame_type=filetransfer.frontier_request.v6; repair_request_id=v6-frontier:2709:1; request_correlation_id=frq-first; first_start_chunk_index=2709; first_chunk_count=1; range_count=1; peer_visible_any=1; accepted_any=1", secondsOffset: 2),
+            LogLine($"event=filetransfer_outbound_sparse_worker_handoff_required; transfer_id={transferId}; {firstTuple}; {firstInstallDescriptor}; decision_reason=stale_worker_superseded", secondsOffset: 3),
+            LogLine($"event=filetransfer_outbound_sparse_worker_handoff_installed; transfer_id={transferId}; {firstTuple}; {firstInstallDescriptor}; decision_reason=stale_worker_superseded", secondsOffset: 4),
+            LogLine($"event=filetransfer_v6_frontier_request_receive_dispatched; transfer_id={transferId}; {firstTuple}; {firstInstallDescriptor}; transport_epoch=1; bridge_recovery_generation=1; repair_request_id=v6-frontier:2709:1; request_correlation_id=frq-first; first_start_chunk_index=2709; first_chunk_count=1; range_count=1; decision_reason=queued_for_sender_repair", secondsOffset: 5),
+            LogLine($"event=filetransfer_fallback_frontier_repair_progress_observed; direction=inbound; transfer_id={transferId}; session_id=sess_a; repair_request_key=v6-frontier:2709:1; reason=frontier_advanced; committed_frontier_before=2709; committed_frontier_after=2710; requested_chunk_count=1", secondsOffset: 6),
+            LogLine($"event=filetransfer_runtime_started; role=sender; transfer_id={transferId}; {secondTuple}; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted", secondsOffset: 7),
+            LogLine($"event=filetransfer_runtime_owner_stale_update_rejected; direction=outbound; transfer_id={transferId}; session_id=sess_a; source=v4_sender_failed; attempted_action=read_failed; reason=runtime_generation_mismatch; runtime_generation=3; current_runtime_generation=5; terminal_generation=0; current_terminal_generation=0; route=post_tuna_fallback_v6; current_route=post_tuna_fallback_v6; protocol_version=6; current_protocol_version=6; live_route_epoch=2; current_live_route_epoch=4; runtime_family=post_tuna_fallback_v6; current_runtime_family=post_tuna_fallback_v6", secondsOffset: 8),
+            LogLine($"event=filetransfer_control_plane_delivery_result; direction=inbound; kind=frontier_request; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; leg_generation=5; bridge_recovery_generation=2; transport_epoch=2; frame_type=filetransfer.frontier_request.v6; repair_request_id=v6-frontier:2710:2; request_correlation_id=frq-second; first_start_chunk_index=2710; first_chunk_count=1; range_count=1; peer_visible_any=1; accepted_any=1", secondsOffset: 9),
+            LogLine($"event=filetransfer_v6_frontier_request_transport_rejected; transport=nkn; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.frontier_request.v6; priority=1; queue_capacity_bypassed=1; queued_frames=144; queued_bytes=147456; transport_epoch=2; repair_request_id=v6-frontier:2710:2; request_correlation_id=frq-second; decision_reason=priority_control_queue_capacity_exceeded", secondsOffset: 10)
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("post_tuna_fallback_outbound_receive_worker_handoff_missing", verdict["recovery_failure_class"]);
+        Assert.Equal("post_tuna_fallback_outbound_receive_worker_handoff_missing", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("filetransfer_runtime_owner_stale_update_rejected", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal("9", verdict["first_proof_chain_failure_line_number"]);
+        Assert.Equal("1", verdict["post_tuna_fallback_outbound_receive_worker_handoff_missing_count"]);
+    }
+
+    [Fact]
+    [Trait("RetainedFallbackSuite", "OutboundReceiveWorkerHandoff")]
+    public async Task AnalyzeRetained_CompactModePreservesMissingWorkerHandoffFirstEdge()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_compact_fallback_receive_worker_missing";
+        const string currentTuple =
+            "direction=outbound; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=5; route_commit_generation=0; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_runtime_started; role=sender; transfer_id={transferId}; {currentTuple}; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted", secondsOffset: 0),
+            LogLine($"event=filetransfer_runtime_owner_stale_update_rejected; direction=outbound; transfer_id={transferId}; session_id=sess_a; source=v4_sender_failed; attempted_action=read_failed; reason=runtime_generation_mismatch; runtime_generation=1; current_runtime_generation=3; terminal_generation=0; current_terminal_generation=0; route=regular_nkn_v4_fast; current_route=post_tuna_fallback_v6; protocol_version=4; current_protocol_version=6; live_route_epoch=0; current_live_route_epoch=2; runtime_family=regular_v4; current_runtime_family=post_tuna_fallback_v6", secondsOffset: 1),
+            LogLine($"event=filetransfer_control_plane_delivery_result; direction=inbound; kind=frontier_request; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; leg_generation=3; bridge_recovery_generation=1; transport_epoch=1; frame_type=filetransfer.frontier_request.v6; repair_request_id=v6-frontier:2709:1; request_correlation_id=frq-compact-missing; first_start_chunk_index=2709; first_chunk_count=1; range_count=1; peer_visible_any=1; accepted_any=1", secondsOffset: 2),
+            LogLine($"event=filetransfer_v6_frontier_request_transport_rejected; transport=nkn; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.frontier_request.v6; priority=1; queue_capacity_bypassed=1; queued_frames=144; queued_bytes=147456; transport_epoch=1; repair_request_id=v6-frontier:2709:1; request_correlation_id=frq-compact-missing; decision_reason=priority_control_queue_capacity_exceeded", secondsOffset: 3)
+        };
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: new Dictionary<string, string>
+            {
+                ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+            });
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("INCONCLUSIVE", verdict["verdict"]);
+        Assert.Equal("incomplete_proof", verdict["acceptance_failure_class"]);
+        Assert.Equal("post_tuna_fallback_outbound_receive_worker_handoff_missing", verdict["recovery_failure_class"]);
+        Assert.Equal("post_tuna_fallback_outbound_receive_worker_handoff_missing", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("filetransfer_runtime_owner_stale_update_rejected", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal("runtime_generation_mismatch", verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("2", verdict["first_proof_chain_failure_line_number"]);
+        Assert.Equal("1", verdict["post_tuna_fallback_outbound_receive_worker_handoff_missing_count"]);
+
+        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+        Assert.Equal("post_tuna_fallback_outbound_receive_worker_handoff_missing", route["first_proof_chain_failure_class"]);
+        Assert.Equal("filetransfer_runtime_owner_stale_update_rejected", route["first_proof_chain_failure_event"]);
+        var compactJson = await File.ReadAllTextAsync(Path.Combine(result.ArtifactDir, "filetransfer-retained-compact-summary.json"));
+        using var compactDocument = System.Text.Json.JsonDocument.Parse(compactJson);
+        Assert.Equal("incomplete_proof", compactDocument.RootElement.GetProperty("acceptance_failure_class").GetString());
+        Assert.Equal(2L, compactDocument.RootElement.GetProperty("first_proof_chain_failure_sequence").GetInt64());
+    }
+
+    [Fact]
+    [Trait("RetainedFallbackSuite", "OutboundReceiveWorkerHandoff")]
+    public async Task AnalyzeRetained_CompactModeExactInstallAndDispatchClearsMissingHandoff()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_compact_fallback_receive_worker_resolved";
+        const string currentTuple =
+            "direction=outbound; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=5; route_commit_generation=0; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn";
+        var installDescriptor = OutboundSparseInstallDescriptor(transferId);
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_runtime_started; role=sender; transfer_id={transferId}; {currentTuple}; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted", secondsOffset: 0),
+            LogLine($"event=filetransfer_runtime_owner_stale_update_rejected; direction=outbound; transfer_id={transferId}; session_id=sess_a; source=v4_sender_failed; attempted_action=read_failed; reason=runtime_generation_mismatch; runtime_generation=1; current_runtime_generation=3; terminal_generation=0; current_terminal_generation=0; route=regular_nkn_v4_fast; current_route=post_tuna_fallback_v6; protocol_version=4; current_protocol_version=6; live_route_epoch=0; current_live_route_epoch=2; runtime_family=regular_v4; current_runtime_family=post_tuna_fallback_v6", secondsOffset: 1),
+            LogLine($"event=filetransfer_control_plane_delivery_result; direction=inbound; kind=frontier_request; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; leg_generation=3; bridge_recovery_generation=1; transport_epoch=1; frame_type=filetransfer.frontier_request.v6; repair_request_id=v6-frontier:2709:1; request_correlation_id=frq-compact-resolved; first_start_chunk_index=2709; first_chunk_count=1; range_count=1; peer_visible_any=1; accepted_any=1", secondsOffset: 2),
+            LogLine($"event=filetransfer_outbound_sparse_worker_handoff_required; transfer_id={transferId}; {currentTuple}; {installDescriptor}; decision_reason=stale_worker_superseded", secondsOffset: 3),
+            LogLine($"event=filetransfer_outbound_sparse_worker_handoff_installed; transfer_id={transferId}; {currentTuple}; {installDescriptor}; decision_reason=stale_worker_superseded", secondsOffset: 4),
+            LogLine($"event=filetransfer_v6_frontier_request_receive_dispatched; transfer_id={transferId}; {currentTuple}; {installDescriptor}; transport_epoch=1; bridge_recovery_generation=1; repair_request_id=v6-frontier:2709:1; request_correlation_id=frq-compact-resolved; first_start_chunk_index=2709; first_chunk_count=1; range_count=1; decision_reason=queued_for_sender_repair", secondsOffset: 5)
+        };
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: new Dictionary<string, string>
+            {
+                ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+            });
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.NotEqual("post_tuna_fallback_outbound_receive_worker_handoff_missing", verdict["recovery_failure_class"]);
+        Assert.Equal("(none)", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("0", verdict["post_tuna_fallback_outbound_receive_worker_handoff_missing_count"]);
+    }
+
+    [Fact]
+    [Trait("RetainedFallbackSuite", "OutboundReceiveWorkerHandoff")]
+    public async Task AnalyzeRetained_NonterminalSupervisorStopInvalidatesConsumerUntilFreshInstallAndDispatch()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_receive_supervisor_stopped";
+        const string tuple =
+            "direction=outbound; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=5; route_commit_generation=0; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn";
+        var descriptor2 = OutboundSparseInstallDescriptor(transferId);
+        var stoppedLines = new[]
+        {
+            LogLine($"event=filetransfer_runtime_started; role=sender; transfer_id={transferId}; {tuple}; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted", secondsOffset: 0),
+            LogLine($"event=filetransfer_runtime_owner_stale_update_rejected; direction=outbound; transfer_id={transferId}; session_id=sess_a; source=v4_sender_failed; attempted_action=read_failed; reason=runtime_generation_mismatch; runtime_generation=1; current_runtime_generation=3; terminal_generation=0; current_terminal_generation=0; route=regular_nkn_v4_fast; current_route=post_tuna_fallback_v6; protocol_version=4; current_protocol_version=6; live_route_epoch=0; current_live_route_epoch=2", secondsOffset: 1),
+            LogLine($"event=filetransfer_control_plane_delivery_result; direction=inbound; kind=frontier_request; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; leg_generation=3; frame_type=filetransfer.frontier_request.v6; repair_request_id=v6-frontier:1; request_correlation_id=frq-stopped; peer_visible_any=1; accepted_any=1", secondsOffset: 2),
+            LogLine($"event=filetransfer_outbound_sparse_worker_handoff_required; transfer_id={transferId}; {tuple}; {descriptor2}; decision_reason=stale_worker_superseded", secondsOffset: 3),
+            LogLine($"event=filetransfer_outbound_sparse_worker_handoff_installed; transfer_id={transferId}; {tuple}; {descriptor2}; decision_reason=stale_worker_superseded", secondsOffset: 4),
+            LogLine($"event=filetransfer_v6_frontier_request_receive_dispatched; transfer_id={transferId}; {tuple}; {descriptor2}; repair_request_id=v6-frontier:1; request_correlation_id=frq-first; decision_reason=queued_for_sender_repair", secondsOffset: 5),
+            LogLine($"event=filetransfer_outbound_sparse_receive_supervisor_stopped; transfer_id={transferId}; {tuple}; {descriptor2}; receive_supervisor_generation=1; terminal=0; decision_reason=read_failed", secondsOffset: 6),
+            LogLine($"event=filetransfer_v6_frontier_request_transport_queued; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.frontier_request.v6; decision_reason=queued_for_core", secondsOffset: 7)
+        };
+
+        foreach (var compact in new[] { false, true })
+        {
+            var result = compact
+                ? await RunAnalyzeFixtureAsync(
+                    stoppedLines,
+                    environment: new Dictionary<string, string>
+                    {
+                        ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                    })
+                : await RunAnalyzeFixtureAsync(stoppedLines);
+            Assert.Equal(0, result.Script.ExitCode);
+            var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+            Assert.Equal("post_tuna_fallback_outbound_receive_worker_handoff_missing", verdict["recovery_failure_class"]);
+            Assert.Equal("1", verdict["post_tuna_fallback_outbound_receive_worker_handoff_missing_count"]);
+        }
+
+        var descriptor3 = OutboundSparseInstallDescriptor(
+            transferId,
+            installGeneration: 3,
+            predecessorInstallGeneration: 2,
+            installationReason: "repair_after_supervisor_restart");
+        var recoveredLines = stoppedLines.Concat(new[]
+        {
+            LogLine($"event=filetransfer_outbound_sparse_worker_handoff_required; transfer_id={transferId}; {tuple}; {descriptor3}; decision_reason=repair_after_supervisor_restart", secondsOffset: 8),
+            LogLine($"event=filetransfer_outbound_sparse_worker_handoff_installed; transfer_id={transferId}; {tuple}; {descriptor3}; decision_reason=repair_after_supervisor_restart", secondsOffset: 9),
+            LogLine($"event=filetransfer_v6_frontier_request_receive_dispatched; transfer_id={transferId}; {tuple}; {descriptor3}; repair_request_id=v6-frontier:2; request_correlation_id=frq-second; decision_reason=queued_for_sender_repair", secondsOffset: 10)
+        }).ToArray();
+
+        var recovered = await RunAnalyzeFixtureAsync(recoveredLines);
+        Assert.Equal(0, recovered.Script.ExitCode);
+        var recoveredVerdict = ReadArtifactReport(recovered.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.NotEqual("post_tuna_fallback_outbound_receive_worker_handoff_missing", recoveredVerdict["recovery_failure_class"]);
+        Assert.Equal("0", recoveredVerdict["post_tuna_fallback_outbound_receive_worker_handoff_missing_count"]);
+    }
+
+    [Fact]
+    [Trait("RetainedFallbackSuite", "OutboundReceiveWorkerHandoff")]
+    public async Task AnalyzeRetained_MismatchedOrPartialInstallDescriptorCannotResolveMissingHandoff()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_receive_descriptor_mismatch";
+        const string tuple =
+            "direction=outbound; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=5; route_commit_generation=0; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn";
+        var descriptor = OutboundSparseInstallDescriptor(transferId);
+        var prefix = new[]
+        {
+            LogLine($"event=filetransfer_runtime_started; role=sender; transfer_id={transferId}; {tuple}; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted", secondsOffset: 0),
+            LogLine($"event=filetransfer_runtime_owner_stale_update_rejected; direction=outbound; transfer_id={transferId}; session_id=sess_a; source=v4_sender_failed; attempted_action=read_failed; reason=runtime_generation_mismatch; runtime_generation=1; current_runtime_generation=3; terminal_generation=0; current_terminal_generation=0; route=regular_nkn_v4_fast; current_route=post_tuna_fallback_v6; protocol_version=4; current_protocol_version=6; live_route_epoch=0; current_live_route_epoch=2", secondsOffset: 1),
+            LogLine($"event=filetransfer_control_plane_delivery_observed; direction=inbound; kind=frontier_request; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; leg_generation=3; frame_type=filetransfer.frontier_request.v6; repair_request_id=v6-frontier:1; request_correlation_id=frq-mismatch; peer_visible_any=1; accepted_any=1", secondsOffset: 2),
+            LogLine($"event=filetransfer_outbound_sparse_worker_handoff_required; transfer_id={transferId}; {tuple}; {descriptor}", secondsOffset: 3)
+        };
+        var installed = LogLine($"event=filetransfer_outbound_sparse_worker_handoff_installed; transfer_id={transferId}; {tuple}; {descriptor}", secondsOffset: 4);
+        var dispatch = LogLine($"event=filetransfer_v6_frontier_request_receive_dispatched; transfer_id={transferId}; {tuple}; {descriptor}; repair_request_id=v6-frontier:1; request_correlation_id=frq-mismatch; decision_reason=queued_for_sender_repair", secondsOffset: 5);
+        var cases = new[]
+        {
+            prefix.Concat(new[]
+            {
+                installed.Replace("data_session_generation=2", "data_session_generation=3", StringComparison.Ordinal),
+                dispatch
+            }).ToArray(),
+            prefix.Concat(new[]
+            {
+                installed.Replace("predecessor_install_generation=1; ", string.Empty, StringComparison.Ordinal),
+                dispatch
+            }).ToArray(),
+            prefix.Concat(new[]
+            {
+                installed,
+                dispatch.Replace("install_generation=2", "install_generation=9", StringComparison.Ordinal)
+            }).ToArray(),
+            prefix.Concat(new[]
+            {
+                installed.Replace("installation_reason=stale_worker_superseded; ", string.Empty, StringComparison.Ordinal),
+                dispatch
+            }).ToArray(),
+            prefix.Concat(new[]
+            {
+                installed,
+                dispatch.Replace("installation_reason=stale_worker_superseded", "installation_reason=wrong_install_reason", StringComparison.Ordinal)
+            }).ToArray(),
+            prefix.Concat(new[]
+            {
+                installed,
+                dispatch.Replace("route_publication_owner_runtime_generation=3", "route_publication_owner_runtime_generation=9", StringComparison.Ordinal)
+            }).ToArray(),
+            prefix.Concat(new[]
+            {
+                installed,
+                dispatch.Replace("descriptor_terminal_generation=0", "descriptor_terminal_generation=9", StringComparison.Ordinal)
+            }).ToArray()
+        };
+
+        foreach (var lines in cases)
+        {
+            var result = await RunAnalyzeFixtureAsync(lines);
+            Assert.Equal(0, result.Script.ExitCode);
+            var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+            Assert.Equal("post_tuna_fallback_outbound_receive_worker_handoff_missing", verdict["recovery_failure_class"]);
+            Assert.Equal("1", verdict["post_tuna_fallback_outbound_receive_worker_handoff_missing_count"]);
+        }
+
+        var compactResult = await RunAnalyzeFixtureAsync(
+            cases[5],
+            environment: new Dictionary<string, string>
+            {
+                ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+            });
+        Assert.Equal(0, compactResult.Script.ExitCode);
+        var compactVerdict = ReadArtifactReport(compactResult.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("post_tuna_fallback_outbound_receive_worker_handoff_missing", compactVerdict["recovery_failure_class"]);
+        Assert.Equal("1", compactVerdict["post_tuna_fallback_outbound_receive_worker_handoff_missing_count"]);
+    }
+
+    [Fact]
+    [Trait("RetainedFallbackSuite", "OutboundReceiveWorkerHandoff")]
+    public async Task AnalyzeRetained_PreInstallDispatchRequiresPostInstallConsumptionProof()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_receive_preinstall_dispatch";
+        const string repairRequestId = "v6-frontier:pending:1";
+        const string tuple =
+            "direction=outbound; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=5; route_commit_generation=0; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn";
+        var descriptor = OutboundSparseInstallDescriptor(transferId);
+        var publication = LogLine($"event=filetransfer_runtime_started; role=sender; transfer_id={transferId}; {tuple}; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted", secondsOffset: 0);
+        var stale = LogLine($"event=filetransfer_runtime_owner_stale_update_rejected; direction=outbound; transfer_id={transferId}; session_id=sess_a; source=v4_sender_failed; attempted_action=read_failed; reason=runtime_generation_mismatch; runtime_generation=1; current_runtime_generation=3; terminal_generation=0; current_terminal_generation=0; route=regular_nkn_v4_fast; current_route=post_tuna_fallback_v6; protocol_version=4; current_protocol_version=6; live_route_epoch=0; current_live_route_epoch=2", secondsOffset: 1);
+        var delivery = LogLine($"event=filetransfer_control_plane_delivery_result; direction=inbound; kind=frontier_request; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; leg_generation=3; frame_type=filetransfer.frontier_request.v6; repair_request_id={repairRequestId}; request_correlation_id=frq-pending; peer_visible_any=1; accepted_any=1", secondsOffset: 2);
+        var required = LogLine($"event=filetransfer_outbound_sparse_worker_handoff_required; transfer_id={transferId}; {tuple}; {descriptor}; decision_reason=stale_worker_superseded", secondsOffset: 3);
+        var preInstallDispatch = LogLine($"event=filetransfer_v6_frontier_request_receive_dispatched; transfer_id={transferId}; {tuple}; {descriptor}; repair_request_id={repairRequestId}; request_correlation_id=frq-pending; decision_reason=queued_for_sender_repair", secondsOffset: 4);
+        var installed = LogLine($"event=filetransfer_outbound_sparse_worker_handoff_installed; transfer_id={transferId}; {tuple}; {descriptor}; decision_reason=stale_worker_superseded", secondsOffset: 5);
+        var progress = LogLine($"event=filetransfer_fallback_frontier_repair_progress_observed; direction=inbound; transfer_id={transferId}; session_id=sess_a; repair_request_key={repairRequestId}; reason=frontier_advanced; committed_frontier_before=2709; committed_frontier_after=2710; requested_chunk_count=1", secondsOffset: 6);
+
+        async Task AssertHandoffVerdictAsync(string[] lines, bool expectedMissing, bool compact)
+        {
+            var result = compact
+                ? await RunAnalyzeFixtureAsync(
+                    lines,
+                    environment: new Dictionary<string, string>
+                    {
+                        ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                    })
+                : await RunAnalyzeFixtureAsync(lines);
+            Assert.Equal(0, result.Script.ExitCode);
+            var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+            Assert.Equal(
+                expectedMissing ? "1" : "0",
+                verdict["post_tuna_fallback_outbound_receive_worker_handoff_missing_count"]);
+            if (expectedMissing)
+            {
+                Assert.Equal("post_tuna_fallback_outbound_receive_worker_handoff_missing", verdict["recovery_failure_class"]);
+            }
+            else
+            {
+                Assert.NotEqual("post_tuna_fallback_outbound_receive_worker_handoff_missing", verdict["recovery_failure_class"]);
+            }
+        }
+
+        var preInstallDispatchOnly = new[]
+        {
+            publication, stale, delivery, required, preInstallDispatch, installed
+        };
+        var postInstallProgress = preInstallDispatchOnly.Append(progress).ToArray();
+        foreach (var compact in new[] { false, true })
+        {
+            await AssertHandoffVerdictAsync(preInstallDispatchOnly, expectedMissing: true, compact);
+            await AssertHandoffVerdictAsync(postInstallProgress, expectedMissing: false, compact);
+        }
+
+        var progressBeforeInstall = new[]
+        {
+            publication,
+            stale,
+            delivery,
+            required,
+            preInstallDispatch,
+            progress,
+            installed
+        };
+        await AssertHandoffVerdictAsync(progressBeforeInstall, expectedMissing: true, compact: false);
+        await AssertHandoffVerdictAsync(
+            postInstallProgress[..^1].Append(
+                progress.Replace($"repair_request_key={repairRequestId}", "repair_request_key=v6-frontier:unrelated:1", StringComparison.Ordinal)).ToArray(),
+            expectedMissing: true,
+            compact: false);
+        await AssertHandoffVerdictAsync(
+            postInstallProgress[..^1].Append(
+                progress.Replace("committed_frontier_after=2710", "committed_frontier_after=2709", StringComparison.Ordinal)).ToArray(),
+            expectedMissing: true,
+            compact: false);
+    }
+
+    [Fact]
+    [Trait("RetainedFallbackSuite", "OutboundReceiveWorkerHandoff")]
+    public async Task AnalyzeRetained_PartialPublicationCannotManufactureWorkerHandoffAuthority()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_receive_partial_publication";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_runtime_started; role=sender; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=5; route_commit_generation=0; target_route=post_tuna_fallback_v6; target_protocol_version=6; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted; fixture_skip_publication_authority_fields=1", secondsOffset: 0),
+            LogLine($"event=filetransfer_runtime_owner_stale_update_rejected; direction=outbound; transfer_id={transferId}; session_id=sess_a; source=v4_sender_failed; attempted_action=read_failed; reason=runtime_generation_mismatch; runtime_generation=1; current_runtime_generation=3; terminal_generation=0; current_terminal_generation=0; route=regular_nkn_v4_fast; current_route=post_tuna_fallback_v6; protocol_version=4; current_protocol_version=6; live_route_epoch=0; current_live_route_epoch=2", secondsOffset: 1),
+            LogLine($"event=filetransfer_control_plane_delivery_result; direction=inbound; kind=frontier_request; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; leg_generation=3; frame_type=filetransfer.frontier_request.v6; repair_request_id=v6-frontier:1; request_correlation_id=frq-partial-publication; peer_visible_any=1; accepted_any=1", secondsOffset: 2)
+        };
+
+        foreach (var compact in new[] { false, true })
+        {
+            var result = compact
+                ? await RunAnalyzeFixtureAsync(
+                    lines,
+                    environment: new Dictionary<string, string>
+                    {
+                        ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                    })
+                : await RunAnalyzeFixtureAsync(lines);
+            Assert.Equal(0, result.Script.ExitCode);
+            var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+            Assert.NotEqual("post_tuna_fallback_outbound_receive_worker_handoff_missing", verdict["recovery_failure_class"]);
+            Assert.Equal("0", verdict["post_tuna_fallback_outbound_receive_worker_handoff_missing_count"]);
+        }
+    }
+
+    [Fact]
+    [Trait("RetainedFallbackSuite", "OutboundReceiveWorkerHandoff")]
+    public async Task AnalyzeRetained_WrongFrontierTupleAndUncorrelatedQueueCannotManufactureMissingHandoff()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        static string Publication(string transferId, string sessionId) =>
+            $"event=filetransfer_runtime_started; role=sender; direction=outbound; transfer_id={transferId}; session_id={sessionId}; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=5; route_commit_generation=0; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted";
+        static string StaleFailure(string transferId, string sessionId) =>
+            $"event=filetransfer_runtime_owner_stale_update_rejected; direction=outbound; transfer_id={transferId}; session_id={sessionId}; source=v4_sender_failed; attempted_action=read_failed; reason=runtime_generation_mismatch; runtime_generation=1; current_runtime_generation=3; terminal_generation=0; current_terminal_generation=0; route=regular_nkn_v4_fast; current_route=post_tuna_fallback_v6; protocol_version=4; current_protocol_version=6; live_route_epoch=0; current_live_route_epoch=2";
+        static string Delivery(string transferId, string sessionId, int liveRouteEpoch, int legGeneration) =>
+            $"event=filetransfer_control_plane_delivery_result; direction=inbound; kind=frontier_request; transfer_id={transferId}; session_id={sessionId}; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch={liveRouteEpoch}; leg_generation={legGeneration}; frame_type=filetransfer.frontier_request.v6; repair_request_id=v6-frontier:2709:1; request_correlation_id=frq-{transferId}; peer_visible_any=1; accepted_any=1";
+
+        const string epochTransfer = "transfer_worker_handoff_wrong_epoch";
+        const string legTransfer = "transfer_worker_handoff_wrong_leg";
+        const string queueTransfer = "transfer_worker_handoff_uncorrelated_queue";
+        var lines = new[]
+        {
+            LogLine(Publication(epochTransfer, "sess_epoch"), secondsOffset: 0),
+            LogLine(StaleFailure(epochTransfer, "sess_epoch"), secondsOffset: 1),
+            LogLine(Delivery(epochTransfer, "sess_epoch", liveRouteEpoch: 9, legGeneration: 3), secondsOffset: 2),
+            LogLine(Publication(legTransfer, "sess_leg"), secondsOffset: 3),
+            LogLine(StaleFailure(legTransfer, "sess_leg"), secondsOffset: 4),
+            LogLine(Delivery(legTransfer, "sess_leg", liveRouteEpoch: 2, legGeneration: 9), secondsOffset: 5),
+            LogLine(Publication(queueTransfer, "sess_queue"), secondsOffset: 6),
+            LogLine(StaleFailure(queueTransfer, "sess_queue"), secondsOffset: 7),
+            LogLine($"event=filetransfer_v6_frontier_request_transport_rejected; transfer_id={queueTransfer}; session_id=sess_queue; frame_type=filetransfer.frontier_request.v6; repair_request_id=v6-frontier:2709:99; request_correlation_id=frq-unbound-queue; decision_reason=priority_control_queue_capacity_exceeded", secondsOffset: 8),
+        };
+
+        foreach (var compact in new[] { false, true })
+        {
+            var result = compact
+                ? await RunAnalyzeFixtureAsync(
+                    lines,
+                    environment: new Dictionary<string, string>
+                    {
+                        ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                    })
+                : await RunAnalyzeFixtureAsync(lines);
+            Assert.Equal(0, result.Script.ExitCode);
+            var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+            Assert.NotEqual(
+                "post_tuna_fallback_outbound_receive_worker_handoff_missing",
+                verdict["recovery_failure_class"]);
+            Assert.Equal(
+                "0",
+                verdict["post_tuna_fallback_outbound_receive_worker_handoff_missing_count"]);
+        }
+    }
+
+    private static string OutboundSparseInstallDescriptor(
+        string transferId,
+        int installGeneration = 2,
+        int predecessorInstallGeneration = 1,
+        long dataSessionGeneration = 2,
+        int liveRouteEpoch = 2,
+        int runtimeGeneration = 3,
+        int terminalGeneration = 0,
+        int legGeneration = 3,
+        int routePublicationGeneration = 5,
+        string installationReason = "stale_worker_superseded")
+        => $"install_generation={installGeneration}; predecessor_install_generation={predecessorInstallGeneration}; data_session_generation={dataSessionGeneration}; runtime_family=post_tuna_fallback_v6; descriptor_terminal_generation={terminalGeneration}; descriptor_leg_generation={legGeneration}; installation_reason={installationReason}; runtime_owner_session_id=sess_a; runtime_owner_transfer_id={transferId}; runtime_owner_direction=outbound; runtime_owner_route=post_tuna_fallback_v6; runtime_owner_route_token=post_tuna_fallback_v6; runtime_owner_protocol_version=6; runtime_owner_live_route_epoch={liveRouteEpoch}; runtime_owner_runtime_generation={runtimeGeneration}; runtime_owner_terminal_generation={terminalGeneration}; runtime_owner_runtime_family=post_tuna_fallback_v6; runtime_owner_created_reason=post_tuna_file_fallback_active; route_publication_session_id=sess_a; route_publication_transfer_id={transferId}; route_publication_direction=outbound; route_publication_route=post_tuna_fallback_v6; route_publication_route_token=post_tuna_fallback_v6; route_publication_protocol_version=6; route_publication_live_route_epoch={liveRouteEpoch}; route_publication_runtime_generation={runtimeGeneration}; route_publication_terminal_generation={terminalGeneration}; route_publication_leg_generation={legGeneration}; route_publication_route_commit_generation=0; route_publication_target_route=post_tuna_fallback_v6; route_publication_target_protocol_version=6; route_publication_target_transport=regular_nkn; route_publication_token_generation={routePublicationGeneration}; route_publication_action_kind=RoutePublication; route_publication_reason=accepted; route_publication_owner_session_id=sess_a; route_publication_owner_transfer_id={transferId}; route_publication_owner_direction=outbound; route_publication_owner_route=post_tuna_fallback_v6; route_publication_owner_route_token=post_tuna_fallback_v6; route_publication_owner_protocol_version=6; route_publication_owner_live_route_epoch={liveRouteEpoch}; route_publication_owner_runtime_generation={runtimeGeneration}; route_publication_owner_terminal_generation={terminalGeneration}; route_publication_owner_runtime_family=post_tuna_fallback_v6; route_publication_owner_created_reason=post_tuna_file_fallback_active";
 }

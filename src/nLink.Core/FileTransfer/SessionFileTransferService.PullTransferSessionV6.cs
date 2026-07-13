@@ -1727,19 +1727,24 @@ public sealed partial class SessionFileTransferService
         string decisionReason,
         int firstStartChunkIndex,
         int firstChunkCount,
-        int rangeCount)
+        int rangeCount,
+        OutboundSparsePumpInstall? receiveInstall = null)
     {
         var eventName = outcome switch
         {
             "attempted" => "filetransfer_v6_frontier_request_receive_dispatch_attempted",
             "dispatched" => "filetransfer_v6_frontier_request_receive_dispatched",
+            "staged" => "filetransfer_v6_frontier_request_receive_dispatch_staged",
             "coalesced" => "filetransfer_v6_frontier_request_receive_dispatch_coalesced",
             _ => "filetransfer_v6_frontier_request_receive_dispatch_rejected",
         };
         var leg = context.CurrentTransferLeg;
+        var authorityTuple = receiveInstall is null
+            ? $"direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? leg?.LiveRouteEpochId ?? 0}; leg_generation={leg?.Generation ?? 0}"
+            : FormatOutboundSparsePumpInstallTuple(receiveInstall);
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event={eventName}; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? leg?.LiveRouteEpochId ?? 0}; leg_generation={leg?.Generation ?? 0}; transport_epoch={request.TransportEpoch}; current_transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(leg?.CheckpointRequestId ?? "(none)")}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId ?? "(none)")}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId ?? "(none)")}; first_start_chunk_index={firstStartChunkIndex}; first_chunk_count={firstChunkCount}; range_count={rangeCount}; received_transport={FormatFileTransferTransportKind(receivedTransportKind)}; decision_reason={FormatProtocolLogValue(decisionReason)}");
+            $"event={eventName}; {authorityTuple}; transport_epoch={request.TransportEpoch}; current_transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(leg?.CheckpointRequestId ?? "(none)")}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId ?? "(none)")}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId ?? "(none)")}; first_start_chunk_index={firstStartChunkIndex}; first_chunk_count={firstChunkCount}; range_count={rangeCount}; received_transport={FormatFileTransferTransportKind(receivedTransportKind)}; decision_reason={FormatProtocolLogValue(decisionReason)}");
     }
 
     private static void PreemptOutboundV6NormalPipelineForFrontierRequestLocked(

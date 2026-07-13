@@ -34,14 +34,15 @@ public sealed partial class SessionFileTransferService
         context.BytesAcknowledgedByReceiver = Math.Max(context.BytesAcknowledgedByReceiver, acknowledgedBytes);
     }
 
-    private async Task TransitionOutboundToTerminalAsync(
+    private async Task<bool> TransitionOutboundToTerminalAsync(
         OutboundTransferContext context,
         FileTransferTransferState terminalState,
         string? errorCode,
         string statusMessage,
         bool notifyPeer,
         string? cancelReason,
-        CancellationToken ct)
+        CancellationToken ct,
+        OutboundSparsePumpInstall? requiredSparsePumpInstall = null)
     {
         SessionFileTransferSnapshot? snapshot = null;
         bool shouldNotifyPeer;
@@ -59,7 +60,7 @@ public sealed partial class SessionFileTransferService
         {
             if (!ReferenceEquals(outboundTransfer, context))
             {
-                return;
+                return false;
             }
 
             if (context.IsTerminal)
@@ -74,7 +75,22 @@ public sealed partial class SessionFileTransferService
                     NormalizeErrorCode(errorCode),
                     "transition_outbound_terminal",
                     "already_terminal");
-                return;
+                return false;
+            }
+
+            if (requiredSparsePumpInstall is not null &&
+                !IsOutboundSparsePumpInstallCurrentLocked(
+                    context,
+                    requiredSparsePumpInstall,
+                    context.DataSession,
+                    out var sparseInstallRejectionReason))
+            {
+                LogOutboundSparsePumpInstallRejected(
+                    context,
+                    requiredSparsePumpInstall,
+                    "terminal_transition",
+                    sparseInstallRejectionReason);
+                return false;
             }
 
             context.CancelLifetime();
@@ -283,6 +299,7 @@ public sealed partial class SessionFileTransferService
             context.ErrorCode,
             context.StatusMessage);
         NotifyRouteCompletedIfNeeded(routeCompletionObserver, context.RouteSelection, terminalState, sessionId, transferId);
+        return true;
     }
 
     private async Task TransitionInboundToTerminalAsync(

@@ -31,6 +31,8 @@ internal static class FileTransferSoakRunner
     private const string DefaultMode = LocalFastMode;
     private const int DefaultSeed = 1_313_625_684;
     private const int DefaultCycleTimeoutSeconds = 120;
+    private static int logSliceMarkerSequence;
+    internal static Func<string, string, bool>? LogSliceMarkerWriteOverrideForTests { get; set; }
     private static readonly TimeSpan MixedScreenShareWarmup = TimeSpan.FromSeconds(3);
     private static readonly long[] DefaultPayloadSizes = [1L * 1024 * 1024, 16L * 1024 * 1024, 64L * 1024 * 1024];
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -123,7 +125,7 @@ internal static class FileTransferSoakRunner
         FileTransferSoakAggregate Aggregate,
         FileTransferSoakCycleResult[] Cycles);
 
-    private readonly record struct LogSliceSnapshot(string Path, long Length);
+    private readonly record struct LogSliceSnapshot(string Marker);
 
     public static async Task<int> RunAsync(string[] args, TextWriter output, TextWriter error, CancellationToken ct)
     {
@@ -144,7 +146,8 @@ internal static class FileTransferSoakRunner
         Directory.CreateDirectory(artifactDir);
 
         var runId = $"filetransfer_soak_run_{startedUtc:yyyyMMddHHmmss}_{Environment.ProcessId}";
-        var initialLogSnapshot = CaptureLogSnapshot();
+        var logSliceMarker = CreateLogSliceMarker();
+        var initialLogSnapshot = CaptureLogSnapshot(logSliceMarker);
         var cycleResults = new List<FileTransferSoakCycleResult>(options.Cycles);
         var runFailure = string.Empty;
 
@@ -157,6 +160,7 @@ internal static class FileTransferSoakRunner
         await output.WriteLineAsync($"  Impairment profile: {options.ImpairmentProfile}").ConfigureAwait(false);
         await output.WriteLineAsync($"  Payload efficiency profile: {options.PayloadEfficiencyProfile}").ConfigureAwait(false);
         await output.WriteLineAsync($"  Artifact dir: {artifactDir}").ConfigureAwait(false);
+        WriteLogSliceMarker("started", logSliceMarker);
         LocalOperationalLog.Info(
             "FileTransferSoak",
             $"event=filetransfer_local_soak_started; run_id={runId}; mode={options.Mode}; cycles={options.Cycles}; payload_sizes={string.Join(",", options.PayloadSizes)}; direction={options.Direction}; seed={options.Seed}; impairment_profile={options.ImpairmentProfile}; payload_efficiency_profile={options.PayloadEfficiencyProfile}; artifact_dir={artifactDir}");
@@ -206,7 +210,14 @@ internal static class FileTransferSoakRunner
             RestorePayloadEfficiencyProfileEnvironment(payloadEfficiencyRestore);
         }
 
-        var logSlice = ReadLogSlice(initialLogSnapshot);
+        WriteLogSliceMarker("ended", logSliceMarker);
+        var logSliceComplete = TryReadLogSlice(initialLogSnapshot, out var logSlice);
+        if (!logSliceComplete)
+        {
+            runFailure = string.IsNullOrWhiteSpace(runFailure)
+                ? "retained_log_marker_pair_missing"
+                : $"{runFailure}; retained_log_marker_pair_missing";
+        }
         var logSlicePath = Path.Combine(artifactDir, "filetransfer-retained-log-slice.log");
         await File.WriteAllTextAsync(logSlicePath, logSlice, Encoding.UTF8, CancellationToken.None).ConfigureAwait(false);
 
@@ -1128,33 +1139,57 @@ internal static class FileTransferSoakRunner
             startedUtc.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture));
     }
 
-    private static LogSliceSnapshot CaptureLogSnapshot()
+    private static string CreateLogSliceMarker()
     {
-        var path = LocalOperationalLog.LogFilePath;
-        if (!File.Exists(path))
-        {
-            return new LogSliceSnapshot(path, 0);
-        }
-
-        return new LogSliceSnapshot(path, new FileInfo(path).Length);
+        var sequence = unchecked((uint)Interlocked.Increment(ref logSliceMarkerSequence));
+        var tick = unchecked((uint)Environment.TickCount64);
+        return $"soak-{Environment.ProcessId:x8}-{sequence:x8}-{tick:x8}";
     }
 
-    private static string ReadLogSlice(LogSliceSnapshot snapshot)
+    private static void WriteLogSliceMarker(string lifecycle, string marker)
     {
-        if (!File.Exists(snapshot.Path))
+        if (LogSliceMarkerWriteOverrideForTests?.Invoke(lifecycle, marker) == false)
         {
-            return string.Empty;
+            return;
         }
 
-        using var stream = new FileStream(snapshot.Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-        if (snapshot.Length > 0 && snapshot.Length < stream.Length)
-        {
-            stream.Seek(snapshot.Length, SeekOrigin.Begin);
-        }
-
-        using var reader = new StreamReader(stream, Encoding.UTF8);
-        return reader.ReadToEnd();
+        LocalOperationalLog.Info(
+            "FileTransferSoak",
+            $"event=filetransfer_local_soak_slice_{lifecycle}; slice_marker={marker}");
     }
+
+    private static LogSliceSnapshot CaptureLogSnapshot(string marker)
+        => new(marker);
+
+    private static bool TryReadLogSlice(LogSliceSnapshot snapshot, out string slice)
+        => TryReadMarkedLogSlice(snapshot, out slice);
+
+    internal static string ReadLogSliceForTests(string path, long length, string marker)
+    {
+        _ = length;
+        var logger = new RollingFileLogger(path);
+        if (logger.TryReadRetainedSlice(
+                BuildLogSliceStartToken(marker),
+                BuildLogSliceEndToken(marker),
+                out var slice))
+        {
+            return slice;
+        }
+
+        return string.Empty;
+    }
+
+    private static bool TryReadMarkedLogSlice(LogSliceSnapshot snapshot, out string slice)
+        => LocalOperationalLog.TryReadRetainedSlice(
+            BuildLogSliceStartToken(snapshot.Marker),
+            BuildLogSliceEndToken(snapshot.Marker),
+            out slice);
+
+    private static string BuildLogSliceStartToken(string marker)
+        => $"event=filetransfer_local_soak_slice_started; slice_marker={marker}";
+
+    private static string BuildLogSliceEndToken(string marker)
+        => $"event=filetransfer_local_soak_slice_ended; slice_marker={marker}";
 
     private static LogMetrics ExtractLogMetrics(string logText)
     {

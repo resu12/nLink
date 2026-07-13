@@ -841,6 +841,8 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
             if ($budgetBypass.Phase -ne 'runtime_unlock_retry' -or $budgetBypass.Reason -ne 'runtime_unlock_retry_dispatch_grant_bypassed_by_retry_budget') { throw 'runtime unlock budget bypass lost precedence' }
             $unsettled = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=runtime_unlock_retry_dispatch_contract_unsettled; retained_event=filetransfer_regular_v4_frontier_repair_stalled' -HistoricalPhase 'regular_v4_frontier_repair' -HistoricalReason 'regular_v4_frontier_repair_stalled'
             if ($unsettled.Phase -ne 'runtime_unlock_retry' -or $unsettled.Reason -ne 'runtime_unlock_retry_dispatch_contract_unsettled') { throw 'runtime unlock unsettled contract lost precedence' }
+            $workerHandoff = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=post_tuna_fallback_outbound_receive_worker_handoff_missing; retained_event=filetransfer_fallback_frontier_repair_stalled' -HistoricalPhase 'fallback_frontier_repair' -HistoricalReason 'fallback_frontier_repair_stalled'
+            if ($workerHandoff.Phase -ne 'outbound_sparse_worker_handoff' -or $workerHandoff.Reason -ne 'post_tuna_fallback_outbound_receive_worker_handoff_missing') { throw 'outbound sparse worker handoff lost precedence' }
             $yieldAuthority = Resolve-TunaGuiFailureClassification -ErrorMessage 'failure_class=fallback_tail_yield_authority_invalid; retained_event=filetransfer_fallback_frontier_repair_stalled' -HistoricalPhase 'fallback_frontier_repair' -HistoricalReason 'fallback_frontier_repair_stalled'
             if ($yieldAuthority.Phase -ne 'fallback_tail_yield' -or $yieldAuthority.Reason -ne 'fallback_tail_yield_authority_invalid') { throw 'fallback-tail yield authority rejection lost precedence' }
             $cursor = Resolve-TunaGuiFailureClassification -ErrorMessage 'gui_smoke_log_cursor_truncated: path=x' -HistoricalPhase 'regular_v4_frontier_repair' -HistoricalReason 'regular_v4_frontier_repair_stalled'
@@ -876,6 +878,108 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.True(result.ExitCode == 0, $"Failure classification test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
         Assert.Contains("gui-failure-classification-precedence-ok", result.Stdout, StringComparison.Ordinal);
         Assert.Contains("Resolve-TunaGuiFailureClassification", guiText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GuiSmokeFailureClassification_CorrelatesUnresolvedOutboundWorkerHandoff()
+    {
+        var guiText = File.ReadAllText(Path.Combine(FindRepoRoot(), "tools", "GuiSmoke-Windows.ps1"));
+        var containsAllBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Test-TunaGuiLogLineContainsAll",
+            "Test-TunaGuiFallbackFrontierRequestDispatchTupleMatch");
+        var handoffBody = ExtractPowerShellFunctionBody(
+            guiText,
+            "Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing",
+            "Test-TunaGuiBridgeBootstrapNotReadyEvidence");
+        var scriptText = $$"""
+            $ErrorActionPreference = 'Stop'
+            function Test-TunaGuiLogLineContainsAll { {{containsAllBody}} }
+            function Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing { {{handoffBody}} }
+
+            $publication = 'event=filetransfer_runtime_started; direction=outbound; transfer_id=transfer-a; session_id=session-a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=5; route_commit_generation=0; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted'
+            $stale = 'event=filetransfer_runtime_owner_stale_update_rejected; direction=outbound; transfer_id=transfer-a; session_id=session-a; source=v4_sender_failed; attempted_action=read_failed; reason=runtime_generation_mismatch; runtime_generation=1; current_runtime_generation=3; terminal_generation=0; current_terminal_generation=0; route=regular_nkn_v4_fast; current_route=post_tuna_fallback_v6; protocol_version=4; current_protocol_version=6; live_route_epoch=0; current_live_route_epoch=2'
+            $delivery = 'event=filetransfer_control_plane_delivery_result; direction=inbound; transfer_id=transfer-a; session_id=session-a; kind=frontier_request; frame_type=filetransfer.frontier_request.v6; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; leg_generation=3; repair_request_id=v6-frontier:2709:1; request_correlation_id=frq-gui-handoff; peer_visible_any=1; accepted_any=1'
+            if (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($stale, $delivery)) { throw 'missing accepted publication was treated as worker authority' }
+            if (-not (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($publication, $stale, $delivery))) { throw 'current artifact correlation was not recognized' }
+
+            $partialPublication = $publication.Replace('; route_publication_generation=5', '')
+            if (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($partialPublication, $stale, $delivery)) { throw 'partial publication manufactured worker authority' }
+            $staleWithoutCurrentRuntime = $stale.Replace('current_runtime_generation=3; ', '')
+            if (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($publication, $staleWithoutCurrentRuntime, $delivery)) { throw 'attempted stale runtime generation substituted for missing current authority' }
+            $wrongEpochDelivery = $delivery.Replace('live_route_epoch=2', 'live_route_epoch=9')
+            if (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($publication, $stale, $wrongEpochDelivery)) { throw 'wrong live-route epoch manufactured frontier evidence' }
+            $wrongLegDelivery = $delivery.Replace('leg_generation=3', 'leg_generation=9')
+            if (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($publication, $stale, $wrongLegDelivery)) { throw 'wrong leg generation manufactured frontier evidence' }
+            $uncorrelatedQueue = 'event=filetransfer_v6_frontier_request_transport_rejected; transfer_id=transfer-a; session_id=session-a; frame_type=filetransfer.frontier_request.v6; repair_request_id=v6-frontier:2709:99; request_correlation_id=frq-unbound-queue; decision_reason=priority_control_queue_capacity_exceeded'
+            if (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($publication, $stale, $uncorrelatedQueue)) { throw 'uncorrelated transport queue evidence manufactured a worker-handoff candidate' }
+
+            $requiredInstall = 'event=filetransfer_outbound_sparse_worker_handoff_required; direction=outbound; transfer_id=transfer-a; session_id=session-a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; route_publication_generation=5; route_commit_generation=0; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; install_generation=2; predecessor_install_generation=1; data_session_generation=2; runtime_family=post_tuna_fallback_v6; descriptor_terminal_generation=0; descriptor_leg_generation=3; installation_reason=stale_worker_superseded; runtime_owner_session_id=session-a; runtime_owner_transfer_id=transfer-a; runtime_owner_direction=outbound; runtime_owner_route=post_tuna_fallback_v6; runtime_owner_route_token=post_tuna_fallback_v6; runtime_owner_protocol_version=6; runtime_owner_live_route_epoch=2; runtime_owner_runtime_generation=3; runtime_owner_terminal_generation=0; runtime_owner_runtime_family=post_tuna_fallback_v6; runtime_owner_created_reason=post_tuna_file_fallback_active; route_publication_session_id=session-a; route_publication_transfer_id=transfer-a; route_publication_direction=outbound; route_publication_route=post_tuna_fallback_v6; route_publication_route_token=post_tuna_fallback_v6; route_publication_protocol_version=6; route_publication_live_route_epoch=2; route_publication_runtime_generation=3; route_publication_terminal_generation=0; route_publication_leg_generation=3; route_publication_route_commit_generation=0; route_publication_target_route=post_tuna_fallback_v6; route_publication_target_protocol_version=6; route_publication_target_transport=regular_nkn; route_publication_token_generation=5; route_publication_action_kind=RoutePublication; route_publication_reason=accepted; route_publication_owner_session_id=session-a; route_publication_owner_transfer_id=transfer-a; route_publication_owner_direction=outbound; route_publication_owner_route=post_tuna_fallback_v6; route_publication_owner_route_token=post_tuna_fallback_v6; route_publication_owner_protocol_version=6; route_publication_owner_live_route_epoch=2; route_publication_owner_runtime_generation=3; route_publication_owner_terminal_generation=0; route_publication_owner_runtime_family=post_tuna_fallback_v6; route_publication_owner_created_reason=post_tuna_file_fallback_active'
+            $install = $requiredInstall.Replace('event=filetransfer_outbound_sparse_worker_handoff_required', 'event=filetransfer_outbound_sparse_worker_handoff_installed')
+            $dispatch = $install.Replace('event=filetransfer_outbound_sparse_worker_handoff_installed', 'event=filetransfer_v6_frontier_request_receive_dispatched') + '; repair_request_id=v6-frontier:2709:1; request_correlation_id=frq-gui-handoff'
+            if (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($publication, $stale, $delivery, $requiredInstall, $install, $dispatch)) { throw 'valid required/install/dispatch interval did not resolve the candidate' }
+
+            $progress = 'event=filetransfer_fallback_frontier_repair_progress_observed; direction=inbound; transfer_id=transfer-a; session_id=session-a; repair_request_key=v6-frontier:2709:1; reason=frontier_advanced; committed_frontier_before=2709; committed_frontier_after=2710; requested_chunk_count=1'
+            if (-not (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($publication, $stale, $delivery, $requiredInstall, $dispatch, $install))) { throw 'pre-install dispatch alone incorrectly proved a current consumer' }
+            if (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($publication, $stale, $delivery, $requiredInstall, $dispatch, $install, $progress)) { throw 'post-install correlated progress did not prove pending-dispatch consumption' }
+            if (-not (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($publication, $stale, $delivery, $requiredInstall, $dispatch, $progress, $install))) { throw 'progress before install incorrectly proved post-install consumption' }
+            $wrongProgress = $progress.Replace('repair_request_key=v6-frontier:2709:1', 'repair_request_key=v6-frontier:unrelated:1')
+            if (-not (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($publication, $stale, $delivery, $requiredInstall, $dispatch, $install, $wrongProgress))) { throw 'unrelated progress incorrectly proved pending-dispatch consumption' }
+            $nonAdvancingProgress = $progress.Replace('committed_frontier_after=2710', 'committed_frontier_after=2709')
+            if (-not (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($publication, $stale, $delivery, $requiredInstall, $dispatch, $install, $nonAdvancingProgress))) { throw 'non-advancing progress incorrectly proved pending-dispatch consumption' }
+
+            if (-not (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($publication, $stale, $delivery, $install, $dispatch))) { throw 'install without its required descriptor incorrectly resolved the candidate' }
+
+            $wrongInstall = $install.Replace('runtime_generation=3', 'runtime_generation=4')
+            if (-not (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($publication, $stale, $delivery, $requiredInstall, $wrongInstall, $dispatch))) { throw 'mismatched publication tuple incorrectly resolved the candidate' }
+            $wrongDataSessionInstall = $install.Replace('data_session_generation=2', 'data_session_generation=3')
+            if (-not (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($publication, $stale, $delivery, $requiredInstall, $wrongDataSessionInstall, $dispatch))) { throw 'mismatched data-session descriptor incorrectly resolved the candidate' }
+            $partialInstall = $install.Replace('; predecessor_install_generation=1', '')
+            if (-not (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($publication, $stale, $delivery, $requiredInstall, $partialInstall, $dispatch))) { throw 'partial install descriptor incorrectly resolved the candidate' }
+            $wrongDispatch = $dispatch.Replace('install_generation=2', 'install_generation=9')
+            if (-not (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($publication, $stale, $delivery, $requiredInstall, $install, $wrongDispatch))) { throw 'mismatched dispatch descriptor incorrectly resolved the candidate' }
+            $missingInstallationReason = $install.Replace('; installation_reason=stale_worker_superseded', '')
+            if (-not (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($publication, $stale, $delivery, $requiredInstall, $missingInstallationReason, $dispatch))) { throw 'install without installation reason incorrectly resolved the candidate' }
+            $wrongInstallationReason = $dispatch.Replace('installation_reason=stale_worker_superseded', 'installation_reason=wrong_install_reason')
+            if (-not (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($publication, $stale, $delivery, $requiredInstall, $install, $wrongInstallationReason))) { throw 'mismatched installation reason incorrectly resolved the candidate' }
+            $wrongPublicationOwner = $dispatch.Replace('route_publication_owner_runtime_generation=3', 'route_publication_owner_runtime_generation=9')
+            if (-not (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($publication, $stale, $delivery, $requiredInstall, $install, $wrongPublicationOwner))) { throw 'mismatched publication owner incorrectly resolved the candidate' }
+            $wrongDescriptorTerminal = $dispatch.Replace('descriptor_terminal_generation=0', 'descriptor_terminal_generation=9')
+            if (-not (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($publication, $stale, $delivery, $requiredInstall, $install, $wrongDescriptorTerminal))) { throw 'mismatched descriptor terminal generation incorrectly resolved the candidate' }
+
+            $supervisorStopped = $install.Replace('event=filetransfer_outbound_sparse_worker_handoff_installed', 'event=filetransfer_outbound_sparse_receive_supervisor_stopped') + '; receive_supervisor_generation=1; terminal=0; decision_reason=read_failed'
+            $laterDelivery = $delivery.Replace('kind=frontier_request', 'kind=fallback_checkpoint_request')
+            if (-not (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($publication, $stale, $delivery, $requiredInstall, $install, $dispatch, $supervisorStopped, $laterDelivery))) { throw 'nonterminal supervisor stop did not invalidate current-consumer proof' }
+
+            $requiredInstall3 = $requiredInstall.Replace('install_generation=2', 'install_generation=3').Replace('predecessor_install_generation=1', 'predecessor_install_generation=2')
+            $install3 = $requiredInstall3.Replace('event=filetransfer_outbound_sparse_worker_handoff_required', 'event=filetransfer_outbound_sparse_worker_handoff_installed')
+            $dispatch3 = $install3.Replace('event=filetransfer_outbound_sparse_worker_handoff_installed', 'event=filetransfer_v6_frontier_request_receive_dispatched')
+            if (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($publication, $stale, $delivery, $requiredInstall, $install, $dispatch, $supervisorStopped, $laterDelivery, $requiredInstall3, $install3, $dispatch3)) { throw 'fresh complete install and dispatch did not restore current-consumer proof' }
+
+            $terminal = 'event=file_transfer_outbound_terminal; direction=outbound; transfer_id=transfer-a; session_id=session-a; state=Failed'
+            if (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($publication, $stale, $delivery, $terminal)) { throw 'terminal closure left a worker-handoff candidate' }
+
+            $unrelatedDelivery = $delivery.Replace('transfer_id=transfer-a', 'transfer_id=transfer-b')
+            if (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($publication, $stale, $unrelatedDelivery)) { throw 'unrelated frontier delivery was correlated' }
+            $unboundDelivery = $delivery.Replace('; session_id=session-a', '')
+            if (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($publication, $stale, $unboundDelivery)) { throw 'frontier delivery without complete identity was correlated' }
+
+            $successorPublication = $publication.Replace('live_route_epoch=2', 'live_route_epoch=4').Replace('runtime_generation=3', 'runtime_generation=5').Replace('leg_generation=3', 'leg_generation=5').Replace('route_publication_generation=5', 'route_publication_generation=8')
+            $successorInstall = $install.Replace('live_route_epoch=2', 'live_route_epoch=4').Replace('runtime_generation=3', 'runtime_generation=5').Replace('leg_generation=3', 'leg_generation=5').Replace('route_publication_generation=5', 'route_publication_generation=8').Replace('install_generation=2', 'install_generation=3')
+            $successorDispatch = $dispatch.Replace('live_route_epoch=2', 'live_route_epoch=4').Replace('runtime_generation=3', 'runtime_generation=5').Replace('leg_generation=3', 'leg_generation=5').Replace('route_publication_generation=5', 'route_publication_generation=8')
+            if (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($publication, $stale, $successorPublication, $successorInstall, $successorDispatch, $delivery)) { throw 'superseded publication retained a stale worker-handoff candidate' }
+
+            $required = 'event=filetransfer_outbound_sparse_worker_handoff_required; direction=outbound; transfer_id=transfer-c; session_id=session-c; route=post_tuna_fallback_v6; runtime_generation=7; install_generation=4'
+            $requiredDelivery = $delivery.Replace('transfer_id=transfer-a', 'transfer_id=transfer-c').Replace('session_id=session-a', 'session_id=session-c')
+            if (Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines @($required, $requiredDelivery)) { throw 'legitimate staged handoff was misclassified without a stale worker failure' }
+
+            Write-Output 'gui-worker-handoff-correlation-ok'
+            """;
+
+        var result = await RunPowerShellScriptTextAsync(scriptText, Array.Empty<string>());
+
+        Assert.True(result.ExitCode == 0, $"Worker-handoff classification test failed.{Environment.NewLine}{result.Stdout}{Environment.NewLine}{result.Stderr}");
+        Assert.Contains("gui-worker-handoff-correlation-ok", result.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -991,6 +1095,9 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("FallbackFrontierRepairStalled", scriptText, StringComparison.Ordinal);
         Assert.Contains("fallback_frontier_repair_stalled", scriptText, StringComparison.Ordinal);
         Assert.Contains("fallback_frontier_request_dispatch_missing", scriptText, StringComparison.Ordinal);
+        Assert.Contains("post_tuna_fallback_outbound_receive_worker_handoff_missing", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing", scriptText, StringComparison.Ordinal);
+        Assert.Contains("filetransfer_outbound_sparse_worker_handoff_installed", scriptText, StringComparison.Ordinal);
         Assert.Contains("Test-TunaGuiLatestFallbackFrontierRequestDispatchMissing", scriptText, StringComparison.Ordinal);
         Assert.Contains("Test-TunaGuiFallbackFrontierRequestDispatchTupleMatch", scriptText, StringComparison.Ordinal);
         Assert.Contains("FileTransferAuthorityMatching.ps1", scriptText, StringComparison.Ordinal);
@@ -1026,6 +1133,7 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("Clear-Phase5StaleSetupFailureAfterRuntimeEvidence -Result $result", routeAcceptanceText, StringComparison.Ordinal);
         Assert.Contains("Tuna GUI runtime failure: phase={0}; reason={1}", routeAcceptanceText, StringComparison.Ordinal);
         Assert.Contains("fallback_frontier_request_dispatch_missing", routeAcceptanceText, StringComparison.Ordinal);
+        Assert.Contains("post_tuna_fallback_outbound_receive_worker_handoff_missing", routeAcceptanceText, StringComparison.Ordinal);
         Assert.Contains("fallback_frontier_repair_stalled", routeAcceptanceText, StringComparison.Ordinal);
         Assert.Contains("runtime_unlock_retry_source_publication_mismatch", routeAcceptanceText, StringComparison.Ordinal);
         Assert.Contains("runtime_unlock_retry_dispatch_authority_tuple_mismatch", routeAcceptanceText, StringComparison.Ordinal);
@@ -1097,6 +1205,10 @@ public sealed class FileTransferGuiHarnessScriptTests : FileTransferOpsScriptsTe
         Assert.Contains("$runtimeUnlockRetryRecoverySettlementMissingMarker -or", scriptText, StringComparison.Ordinal);
         Assert.Contains("$runtimeUnlockRetryRegularV4RecoverySettlementMissing -or", scriptText, StringComparison.Ordinal);
         Assert.Contains("(-not $hasScenarioRuntimeEvidence) -and", scriptText, StringComparison.Ordinal);
+        Assert.True(
+            scriptText.IndexOf("elseif ($postTunaFallbackOutboundReceiveWorkerHandoffMissing)", StringComparison.Ordinal) <
+            scriptText.IndexOf("elseif ($fallbackFrontierRequestDispatchMissing)", StringComparison.Ordinal),
+            "A missing outbound worker handoff must classify before downstream missing frontier dispatch.");
         Assert.True(
             scriptText.IndexOf("elseif ($fallbackFrontierRequestDispatchMissing)", StringComparison.Ordinal) <
             scriptText.IndexOf("elseif ($fallbackFrontierRepairStalled)", StringComparison.Ordinal),

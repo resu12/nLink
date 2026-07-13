@@ -4189,6 +4189,56 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    [Trait("FileTransferRuntimeSuite", "SparseWorkerHandoff")]
+    public void AuthorizeAction_RoutePublication_DiagnosticRegularNknV6RequiresV6RegularNknTarget()
+    {
+        var diagnostic = FileTransferRouteResolver.Resolve(FileTransferRoute.DiagnosticRegularNknV6);
+        var started = StartRegular(diagnostic);
+        var owner = started.State.CurrentRuntimeOwner!.Value;
+        var leg = started.State.CurrentLeg!;
+
+        FileTransferCoordinatorActionRequest Request(int targetProtocol, FileTransferTransportKind targetTransport)
+            => new(
+                FileTransferCoordinatorActionKind.RoutePublication,
+                Source: "test",
+                Reason: "diagnostic_regular_nkn_v6_route_publication",
+                RuntimeOwner: owner,
+                Route: diagnostic.Route,
+                ProtocolVersion: diagnostic.ProtocolVersion,
+                LiveRouteEpoch: leg.LiveRouteEpochId,
+                LegGeneration: leg.Generation,
+                RuntimeGeneration: owner.RuntimeGeneration,
+                TerminalGeneration: started.State.TerminalGeneration,
+                TargetRoute: FileTransferRoute.DiagnosticRegularNknV6,
+                TargetProtocolVersion: targetProtocol,
+                TargetTransport: targetTransport);
+
+        var accepted = FileTransferCoordinator.AuthorizeAction(
+            started.State,
+            Request(FileTransferProtocol.ProtocolVersionV6, FileTransferTransportKind.RegularNkn));
+        var v4Target = FileTransferCoordinator.AuthorizeAction(
+            started.State,
+            Request(FileTransferProtocol.ProtocolVersionV4, FileTransferTransportKind.RegularNkn));
+        var tunaTarget = FileTransferCoordinator.AuthorizeAction(
+            started.State,
+            Request(FileTransferProtocol.ProtocolVersionV6, FileTransferTransportKind.Tuna));
+
+        Assert.True(accepted.Accepted);
+        Assert.NotNull(accepted.RoutePublicationToken);
+        Assert.Equal(FileTransferRoute.DiagnosticRegularNknV6, accepted.RoutePublicationToken!.Value.TargetRoute);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV6, accepted.RoutePublicationToken.Value.TargetProtocolVersion);
+        Assert.Equal(FileTransferTransportKind.RegularNkn, accepted.RoutePublicationToken.Value.TargetTransport);
+        Assert.True(FileTransferCoordinator.IsRoutePublicationTokenCurrent(
+            accepted.State,
+            accepted.RoutePublicationToken.Value,
+            out _));
+        Assert.False(v4Target.Accepted);
+        Assert.Equal("target_route_protocol_mismatch", v4Target.RejectionReason);
+        Assert.False(tunaTarget.Accepted);
+        Assert.Equal("route_publication_target_mismatch", tunaTarget.RejectionReason);
+    }
+
+    [Fact]
     public void AuthorizeAction_RoutePublication_RejectsTerminalState()
     {
         var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);

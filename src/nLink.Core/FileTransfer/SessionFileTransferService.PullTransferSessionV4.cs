@@ -11,6 +11,16 @@ namespace NLink.Core.FileTransfer;
 
 public sealed partial class SessionFileTransferService
 {
+    private const int OutboundSparsePendingFrontierDispatchProofLimit = 256;
+
+    internal static Func<string, string, Task>? OutboundSparseTailReconciliationQueueBarrierForTests { get; set; }
+    internal static Func<string, string, Task>? OutboundSparseFailureDeferralBarrierForTests { get; set; }
+    internal static Func<string, string, Task>? OutboundSparseStateRefreshPreSendBarrierForTests { get; set; }
+    internal static Func<string, string, string, Task>? OutboundSparseBootstrapBarrierForTests { get; set; }
+    internal static Func<string, string, string, Task>? OutboundSparseRepairContinuationBarrierForTests { get; set; }
+    internal static Func<string, string, Task>? OutboundSparseSourceReopenBarrierForTests { get; set; }
+    internal static Func<string, string, bool>? OutboundSparseSenderPumpNormalCompletionForTests { get; set; }
+
     private static bool ShouldUseV6SparseCreditEnvelope(OutboundTransferContext context)
         => context.NegotiatedDataProtocolVersion >= FileTransferProtocol.ProtocolVersionV6 &&
            context.RouteRuntime.UsesV6FeedbackEnvelope;
@@ -69,7 +79,7 @@ public sealed partial class SessionFileTransferService
         {
             return ReferenceEquals(outboundTransfer, context) &&
                    !context.IsTerminal &&
-                   IsCurrentPostTunaFallbackV6RouteOwner(context);
+                   SupportsOutboundSparsePumpInstall(context);
         }
     }
 
@@ -212,7 +222,11 @@ public sealed partial class SessionFileTransferService
     private bool TryPromoteOutboundFileTunaV4FallbackFromPeerV6Proof(
         OutboundTransferContext context,
         FileTransferDataFrame frame,
-        out SessionFileTransferSnapshot? snapshot)
+        out SessionFileTransferSnapshot? snapshot,
+        OutboundSparsePumpInstall? receiveInstall = null,
+        RuntimeOwnerToken? receiveRuntimeOwner = null,
+        IFileTransferDataSession? receiveDataSession = null,
+        long receiveDataSessionGeneration = 0)
     {
         snapshot = null;
         var currentLiveFallbackFrame = IsCurrentPostTunaFallbackV6LiveRouteFrame(context.CurrentLiveRouteEpoch, frame);
@@ -226,6 +240,14 @@ public sealed partial class SessionFileTransferService
         {
             if (!ReferenceEquals(outboundTransfer, context) ||
                 context.IsTerminal ||
+                (receiveDataSession is not null &&
+                 !IsOutboundSparseReceiveResultCurrentLocked(
+                     context,
+                     receiveInstall,
+                     receiveRuntimeOwner,
+                     receiveDataSession,
+                     receiveDataSessionGeneration,
+                     out _)) ||
                 !context.RouteRuntime.UsesFileTunaV4Runtime ||
                 context.NegotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV4)
             {
@@ -387,9 +409,11 @@ public sealed partial class SessionFileTransferService
         V6RegularNknSparseRuntimeV4TransportSendTimeoutOverrideForTests ??
         TimeSpan.FromMilliseconds(V6RegularNknSparseRuntimeV4TransportSendTimeoutMs);
 
-    private FileTransferManifestFrameV4 CreateOutboundV4ManifestFrame(OutboundTransferContext context)
+    private FileTransferManifestFrameV4 CreateOutboundV4ManifestFrame(
+        OutboundTransferContext context,
+        bool? useV6EnvelopeOverride = null)
     {
-        if (ShouldUseV6SparseCreditEnvelope(context))
+        if (useV6EnvelopeOverride ?? ShouldUseV6SparseCreditEnvelope(context))
         {
             return new FileTransferManifestFrameV6
             {
@@ -415,12 +439,961 @@ public sealed partial class SessionFileTransferService
         };
     }
 
+    private static bool SupportsOutboundSparsePumpInstall(OutboundTransferContext context)
+        => (context.RouteSelection.Route is FileTransferRoute.RegularNknV4Fast or
+                FileTransferRoute.FileTunaV4 or
+                FileTransferRoute.PostTunaFallbackV6 or
+                FileTransferRoute.DiagnosticRegularNknV6) &&
+           (context.RouteSelection.ProtocolVersion is FileTransferProtocol.ProtocolVersionV4 or
+                FileTransferProtocol.ProtocolVersionV6);
+
+    private bool IsOutboundSparsePumpInstallCurrentLocked(
+        OutboundTransferContext context,
+        OutboundSparsePumpInstall install,
+        IFileTransferDataSession? expectedDataSession,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (!ReferenceEquals(outboundTransfer, context))
+        {
+            rejectionReason = "transfer_context_replaced";
+            return false;
+        }
+
+        if (context.IsTerminal)
+        {
+            rejectionReason = "transfer_terminal";
+            return false;
+        }
+
+        if (!SupportsOutboundSparsePumpInstall(context))
+        {
+            rejectionReason = "sparse_runtime_not_current";
+            return false;
+        }
+
+        if (context.InstalledOutboundSparsePump != install &&
+            context.PendingOutboundSparsePumpInstall != install)
+        {
+            rejectionReason = "install_generation_mismatch";
+            return false;
+        }
+
+        if (context.DataSession is null)
+        {
+            rejectionReason = "data_session_missing";
+            return false;
+        }
+
+        if (expectedDataSession is not null && !ReferenceEquals(context.DataSession, expectedDataSession))
+        {
+            rejectionReason = "data_session_replaced";
+            return false;
+        }
+
+        if (context.DataSessionGeneration != install.DataSessionGeneration)
+        {
+            rejectionReason = "data_session_generation_mismatch";
+            return false;
+        }
+
+        if (context.CurrentRuntimeOwner is not { } owner || owner.IsDefault)
+        {
+            rejectionReason = "runtime_owner_missing";
+            return false;
+        }
+
+        if (owner != install.RuntimeOwner)
+        {
+            rejectionReason = "runtime_owner_replaced";
+            return false;
+        }
+
+        if (context.CurrentRoutePublicationToken is not { } publication || publication.IsDefault)
+        {
+            rejectionReason = "route_publication_missing";
+            return false;
+        }
+
+        if (publication != install.RoutePublication)
+        {
+            rejectionReason = "route_publication_replaced";
+            return false;
+        }
+
+        if (context.CurrentTransferLeg is not { } leg ||
+            context.TerminalGeneration != install.TerminalGeneration ||
+            leg.Generation != install.LegGeneration ||
+            publication.RuntimeOwner != owner ||
+            publication.SessionId != context.SessionId ||
+            publication.TransferId != context.TransferId ||
+            publication.Direction != FileTransferDirection.Outbound ||
+            publication.Route != context.RouteSelection.Route ||
+            publication.RouteToken != context.RouteSelection.TelemetryToken ||
+            publication.ProtocolVersion != context.NegotiatedDataProtocolVersion ||
+            publication.LiveRouteEpoch != (context.CurrentLiveRouteEpoch?.EpochId ?? 0) ||
+            publication.RuntimeGeneration != owner.RuntimeGeneration ||
+            publication.TerminalGeneration != context.TerminalGeneration ||
+            publication.LegGeneration != leg.Generation)
+        {
+            rejectionReason = "coordinator_tuple_mismatch";
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool IsOutboundSparseReceiveResultCurrentLocked(
+        OutboundTransferContext context,
+        OutboundSparsePumpInstall? receiveInstall,
+        RuntimeOwnerToken? receiveRuntimeOwner,
+        IFileTransferDataSession? receiveDataSession,
+        long receiveDataSessionGeneration,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (!ReferenceEquals(outboundTransfer, context))
+        {
+            rejectionReason = "transfer_context_replaced";
+            return false;
+        }
+
+        if (context.IsTerminal)
+        {
+            rejectionReason = "transfer_terminal";
+            return false;
+        }
+
+        if (receiveDataSession is null || !ReferenceEquals(context.DataSession, receiveDataSession))
+        {
+            rejectionReason = "data_session_replaced";
+            return false;
+        }
+
+        if (context.DataSessionGeneration != receiveDataSessionGeneration)
+        {
+            rejectionReason = "data_session_generation_mismatch";
+            return false;
+        }
+
+        if (receiveRuntimeOwner is null ||
+            receiveRuntimeOwner.Value.IsDefault ||
+            context.CurrentRuntimeOwner != receiveRuntimeOwner)
+        {
+            rejectionReason = "runtime_owner_replaced";
+            return false;
+        }
+
+        if (receiveInstall is null)
+        {
+            rejectionReason = "receive_install_missing";
+            return false;
+        }
+
+        if (context.InstalledOutboundSparsePump != receiveInstall ||
+            !IsOutboundSparsePumpInstallCurrentLocked(
+                context,
+                receiveInstall,
+                receiveDataSession,
+                out rejectionReason))
+        {
+            if (string.Equals(rejectionReason, "accepted", StringComparison.Ordinal))
+            {
+                rejectionReason = "receive_install_replaced";
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool IsOutboundSparsePumpContinuationCurrentLocked(
+        OutboundTransferContext context,
+        OutboundSparsePumpInstall? pumpInstall,
+        IFileTransferDataSession dataSession)
+        => pumpInstall is null
+            ? ReferenceEquals(outboundTransfer, context) && !context.IsTerminal
+            : IsOutboundSparsePumpInstallCurrentLocked(
+                context,
+                pumpInstall,
+                dataSession,
+                out _);
+
+    private bool IsOutboundSparseReceiveSessionCurrentLocked(
+        OutboundTransferContext context,
+        IFileTransferDataSession? receiveDataSession,
+        long receiveDataSessionGeneration,
+        long receiveSupervisorGeneration,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (!ReferenceEquals(outboundTransfer, context))
+        {
+            rejectionReason = "transfer_context_replaced";
+            return false;
+        }
+
+        if (context.IsTerminal)
+        {
+            rejectionReason = "transfer_terminal";
+            return false;
+        }
+
+        if (context.ActiveOutboundSparseReceiveSupervisorGeneration != receiveSupervisorGeneration)
+        {
+            rejectionReason = "receive_supervisor_replaced";
+            return false;
+        }
+
+        if (receiveDataSession is null || !ReferenceEquals(context.DataSession, receiveDataSession))
+        {
+            rejectionReason = "data_session_replaced";
+            return false;
+        }
+
+        if (context.DataSessionGeneration != receiveDataSessionGeneration)
+        {
+            rejectionReason = "data_session_generation_mismatch";
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool TryResolveOutboundSparseReceiveDispatchInstallLocked(
+        OutboundTransferContext context,
+        IFileTransferDataSession? receiveDataSession,
+        long receiveDataSessionGeneration,
+        long receiveSupervisorGeneration,
+        out OutboundSparsePumpInstall? receiveInstall,
+        out RuntimeOwnerToken? receiveRuntimeOwner,
+        out string rejectionReason)
+    {
+        receiveInstall = null;
+        receiveRuntimeOwner = null;
+        if (!IsOutboundSparseReceiveSessionCurrentLocked(
+                context,
+                receiveDataSession,
+                receiveDataSessionGeneration,
+                receiveSupervisorGeneration,
+                out rejectionReason))
+        {
+            return false;
+        }
+
+        var installed = context.InstalledOutboundSparsePump;
+        if (installed is not null &&
+            IsOutboundSparsePumpInstallCurrentLocked(
+                context,
+                installed,
+                receiveDataSession,
+                out rejectionReason))
+        {
+            receiveInstall = installed;
+        }
+        else if (context.PendingOutboundSparsePumpInstall is { } pending &&
+                 IsOutboundSparsePumpInstallCurrentLocked(
+                     context,
+                     pending,
+                     receiveDataSession,
+                     out rejectionReason))
+        {
+            receiveInstall = pending;
+        }
+        else
+        {
+            rejectionReason = string.Equals(rejectionReason, "accepted", StringComparison.Ordinal)
+                ? "receive_install_missing"
+                : rejectionReason;
+            return false;
+        }
+
+        receiveRuntimeOwner = receiveInstall.RuntimeOwner;
+        return true;
+    }
+
+    private static bool CanRebindOutboundSparseReceiveFrameAcrossInstall(
+        FileTransferDataFrame frame)
+        => frame is FileTransferFrontierRequestFrameV6;
+
+    private static string FormatOutboundSparsePumpInstallTuple(OutboundSparsePumpInstall install)
+    {
+        var owner = install.RuntimeOwner;
+        var publication = install.RoutePublication;
+        var publicationOwner = publication.RuntimeOwner;
+        return $"install_generation={install.InstallGeneration}; predecessor_install_generation={install.PredecessorInstallGeneration}; session_id={FormatProtocolLogValue(owner.SessionId)}; transfer_id={FormatProtocolLogValue(owner.TransferId)}; direction=outbound; route={FormatProtocolLogValue(publication.RouteToken)}; protocol_version={publication.ProtocolVersion}; live_route_epoch={publication.LiveRouteEpoch}; runtime_generation={publication.RuntimeGeneration}; terminal_generation={publication.TerminalGeneration}; leg_generation={publication.LegGeneration}; route_publication_generation={publication.PublicationGeneration}; route_commit_generation={publication.RouteCommitGeneration ?? 0}; target_route={FormatProtocolLogValue(FileTransferRouteResolver.Resolve(publication.TargetRoute).TelemetryToken)}; target_protocol_version={publication.TargetProtocolVersion}; target_transport={FormatFileTransferTransportKind(publication.TargetTransport)}; data_session_generation={install.DataSessionGeneration}; runtime_family={FormatProtocolLogValue(owner.RuntimeFamily)}; descriptor_terminal_generation={install.TerminalGeneration}; descriptor_leg_generation={install.LegGeneration}; installation_reason={FormatProtocolLogValue(install.Reason)}; runtime_owner_session_id={FormatProtocolLogValue(owner.SessionId)}; runtime_owner_transfer_id={FormatProtocolLogValue(owner.TransferId)}; runtime_owner_direction={FormatFileTransferDirection(owner.Direction)}; runtime_owner_route={FormatProtocolLogValue(FileTransferRouteResolver.Resolve(owner.Route).TelemetryToken)}; runtime_owner_route_token={FormatProtocolLogValue(owner.RouteToken)}; runtime_owner_protocol_version={owner.ProtocolVersion}; runtime_owner_live_route_epoch={owner.LiveRouteEpoch}; runtime_owner_runtime_generation={owner.RuntimeGeneration}; runtime_owner_terminal_generation={owner.TerminalGeneration}; runtime_owner_runtime_family={FormatProtocolLogValue(owner.RuntimeFamily)}; runtime_owner_created_reason={FormatProtocolLogValue(owner.CreatedReason)}; route_publication_session_id={FormatProtocolLogValue(publication.SessionId)}; route_publication_transfer_id={FormatProtocolLogValue(publication.TransferId)}; route_publication_direction={FormatFileTransferDirection(publication.Direction)}; route_publication_route={FormatProtocolLogValue(FileTransferRouteResolver.Resolve(publication.Route).TelemetryToken)}; route_publication_route_token={FormatProtocolLogValue(publication.RouteToken)}; route_publication_protocol_version={publication.ProtocolVersion}; route_publication_live_route_epoch={publication.LiveRouteEpoch}; route_publication_runtime_generation={publication.RuntimeGeneration}; route_publication_terminal_generation={publication.TerminalGeneration}; route_publication_leg_generation={publication.LegGeneration}; route_publication_route_commit_generation={publication.RouteCommitGeneration ?? 0}; route_publication_target_route={FormatProtocolLogValue(FileTransferRouteResolver.Resolve(publication.TargetRoute).TelemetryToken)}; route_publication_target_protocol_version={publication.TargetProtocolVersion}; route_publication_target_transport={FormatFileTransferTransportKind(publication.TargetTransport)}; route_publication_token_generation={publication.PublicationGeneration}; route_publication_action_kind={FormatProtocolLogValue(publication.ActionKind.ToString())}; route_publication_reason={FormatProtocolLogValue(publication.Reason)}; route_publication_owner_session_id={FormatProtocolLogValue(publicationOwner.SessionId)}; route_publication_owner_transfer_id={FormatProtocolLogValue(publicationOwner.TransferId)}; route_publication_owner_direction={FormatFileTransferDirection(publicationOwner.Direction)}; route_publication_owner_route={FormatProtocolLogValue(FileTransferRouteResolver.Resolve(publicationOwner.Route).TelemetryToken)}; route_publication_owner_route_token={FormatProtocolLogValue(publicationOwner.RouteToken)}; route_publication_owner_protocol_version={publicationOwner.ProtocolVersion}; route_publication_owner_live_route_epoch={publicationOwner.LiveRouteEpoch}; route_publication_owner_runtime_generation={publicationOwner.RuntimeGeneration}; route_publication_owner_terminal_generation={publicationOwner.TerminalGeneration}; route_publication_owner_runtime_family={FormatProtocolLogValue(publicationOwner.RuntimeFamily)}; route_publication_owner_created_reason={FormatProtocolLogValue(publicationOwner.CreatedReason)}";
+    }
+
+    private bool TryStageOutboundSparsePumpInstallLocked(
+        OutboundTransferContext context,
+        OutboundSparsePumpInstall? predecessor,
+        string reason,
+        out OutboundSparsePumpInstall? pendingInstall,
+        out string rejectionReason)
+    {
+        pendingInstall = null;
+        rejectionReason = "accepted";
+        if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
+        {
+            rejectionReason = context.IsTerminal ? "transfer_terminal" : "transfer_context_replaced";
+            return false;
+        }
+
+        if (!SupportsOutboundSparsePumpInstall(context) ||
+            context.DataSession is null ||
+            context.DataSessionGeneration <= 0 ||
+            context.CurrentRuntimeOwner is not { IsDefault: false } owner ||
+            context.CurrentRoutePublicationToken is not { IsDefault: false } publication ||
+            context.CurrentTransferLeg is not { } leg)
+        {
+            rejectionReason = !SupportsOutboundSparsePumpInstall(context)
+                ? "sparse_runtime_not_current"
+                : context.DataSession is null || context.DataSessionGeneration <= 0
+                    ? "data_session_missing"
+                    : context.CurrentRuntimeOwner is not { IsDefault: false }
+                        ? "runtime_owner_missing"
+                        : context.CurrentRoutePublicationToken is not { IsDefault: false }
+                            ? "route_publication_missing"
+                            : "transfer_leg_missing";
+            return false;
+        }
+
+        if (predecessor is null)
+        {
+            if (context.InstalledOutboundSparsePump is not null)
+            {
+                rejectionReason = "predecessor_install_missing";
+                return false;
+            }
+        }
+        else if (context.InstalledOutboundSparsePump != predecessor)
+        {
+            rejectionReason = "predecessor_install_mismatch";
+            return false;
+        }
+
+        if (context.PendingOutboundSparsePumpInstall is { } existingPending)
+        {
+            if (existingPending.RuntimeOwner == owner &&
+                existingPending.RoutePublication == publication &&
+                existingPending.TerminalGeneration == context.TerminalGeneration &&
+                existingPending.LegGeneration == leg.Generation &&
+                existingPending.DataSessionGeneration == context.DataSessionGeneration &&
+                existingPending.PredecessorInstallGeneration == (predecessor?.InstallGeneration ?? 0))
+            {
+                pendingInstall = existingPending;
+                rejectionReason = "idempotent";
+                return true;
+            }
+
+            rejectionReason = "pending_install_exists";
+            return false;
+        }
+
+        var installGeneration = Math.Max(1, context.LastOutboundSparsePumpInstallGeneration + 1);
+        pendingInstall = new OutboundSparsePumpInstall(
+            installGeneration,
+            predecessor?.InstallGeneration ?? 0,
+            owner,
+            publication,
+            context.TerminalGeneration,
+            leg.Generation,
+            context.DataSessionGeneration,
+            NormalizeReason(reason) ?? "unspecified");
+        context.LastOutboundSparsePumpInstallGeneration = installGeneration;
+        context.PendingOutboundSparsePumpInstall = pendingInstall;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_outbound_sparse_worker_handoff_required; {FormatOutboundSparsePumpInstallTuple(pendingInstall)}; retired_runtime_generation={predecessor?.RuntimeOwner.RuntimeGeneration ?? 0}; retired_route={FormatProtocolLogValue(predecessor?.RuntimeOwner.RouteToken ?? "(none)")}; decision_reason={FormatProtocolLogValue(pendingInstall.Reason)}");
+        return true;
+    }
+
+    private bool TryCommitOutboundSparsePumpInstallLocked(
+        OutboundTransferContext context,
+        OutboundSparsePumpInstall pendingInstall,
+        IFileTransferDataSession dataSession,
+        out OutboundSparsePumpInstall? installed,
+        out string rejectionReason)
+    {
+        installed = null;
+        rejectionReason = "accepted";
+        if (context.InstalledOutboundSparsePump == pendingInstall)
+        {
+            if (!IsOutboundSparsePumpInstallCurrentLocked(
+                    context,
+                    pendingInstall,
+                    dataSession,
+                    out rejectionReason))
+            {
+                DiscardOutboundSparseFrontierDispatchProofsLocked(
+                    context,
+                    pendingInstall,
+                    rejectionReason);
+                LogOutboundSparsePumpInstallRejected(context, pendingInstall, "commit", rejectionReason);
+                return false;
+            }
+
+            installed = pendingInstall;
+            rejectionReason = "idempotent";
+            return true;
+        }
+
+        if (context.PendingOutboundSparsePumpInstall != pendingInstall)
+        {
+            rejectionReason = "pending_install_mismatch";
+            DiscardOutboundSparseFrontierDispatchProofsLocked(
+                context,
+                pendingInstall,
+                rejectionReason);
+            LogOutboundSparsePumpInstallRejected(context, pendingInstall, "commit", rejectionReason);
+            return false;
+        }
+
+        if (pendingInstall.PredecessorInstallGeneration == 0
+                ? context.InstalledOutboundSparsePump is not null
+                : context.InstalledOutboundSparsePump?.InstallGeneration !=
+                  pendingInstall.PredecessorInstallGeneration)
+        {
+            rejectionReason = "predecessor_install_mismatch";
+            context.PendingOutboundSparsePumpInstall = null;
+            DiscardOutboundSparseFrontierDispatchProofsLocked(
+                context,
+                pendingInstall,
+                rejectionReason);
+            LogOutboundSparsePumpInstallRejected(context, pendingInstall, "commit", rejectionReason);
+            return false;
+        }
+
+        if (!IsOutboundSparsePumpInstallCurrentLocked(
+                context,
+                pendingInstall,
+                dataSession,
+                out rejectionReason))
+        {
+            context.PendingOutboundSparsePumpInstall = null;
+            DiscardOutboundSparseFrontierDispatchProofsLocked(
+                context,
+                pendingInstall,
+                rejectionReason);
+            LogOutboundSparsePumpInstallRejected(context, pendingInstall, "commit", rejectionReason);
+            return false;
+        }
+
+        context.PendingOutboundSparsePumpInstall = null;
+        context.InstalledOutboundSparsePump = pendingInstall;
+        installed = pendingInstall;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_outbound_sparse_worker_handoff_installed; {FormatOutboundSparsePumpInstallTuple(pendingInstall)}; decision_reason={FormatProtocolLogValue(pendingInstall.Reason)}");
+        FlushOutboundSparseFrontierDispatchProofsLocked(context, pendingInstall);
+        return true;
+    }
+
+    private static void StageOutboundSparseFrontierDispatchProofLocked(
+        OutboundTransferContext context,
+        OutboundSparsePumpInstall install,
+        FileTransferFrontierRequestFrameV6 request,
+        FileTransferTransportKind receivedTransportKind,
+        int firstStartChunkIndex,
+        int firstChunkCount,
+        int rangeCount)
+    {
+        var correlationKey =
+            $"{install.InstallGeneration}:{request.TransportEpoch}:{request.Priority}:{request.RecoveryMode}:{string.Join(',', request.MissingRanges.Select(static range => $"{range.StartChunkIndex}:{range.ChunkCount}"))}";
+        if (!context.PendingOutboundSparseFrontierDispatchProofs.ContainsKey(correlationKey) &&
+            context.PendingOutboundSparseFrontierDispatchProofs.Count >=
+            OutboundSparsePendingFrontierDispatchProofLimit)
+        {
+            var retiredKey = context.PendingOutboundSparseFrontierDispatchProofs.Keys.First();
+            context.PendingOutboundSparseFrontierDispatchProofs.Remove(retiredKey);
+            LocalOperationalLog.Warn(
+                "FileTransferService",
+                $"event=filetransfer_v6_frontier_request_receive_dispatch_rejected; {FormatOutboundSparsePumpInstallTuple(install)}; transport_epoch={request.TransportEpoch}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId ?? "(none)")}; request_correlation_id={FormatProtocolLogValue(request.RequestCorrelationId ?? "(none)")}; first_start_chunk_index={firstStartChunkIndex}; first_chunk_count={firstChunkCount}; range_count={rangeCount}; decision_reason=pending_install_dispatch_proof_capacity_replaced; retired_correlation_key={FormatProtocolLogValue(retiredKey)}");
+        }
+
+        context.PendingOutboundSparseFrontierDispatchProofs[correlationKey] =
+            new OutboundSparseFrontierDispatchProof(
+                correlationKey,
+                install,
+                request with
+                {
+                    MissingRanges = request.MissingRanges
+                        .Select(static range => range with { })
+                        .ToArray(),
+                },
+                request.TransportEpoch,
+                request.RepairRequestId,
+                request.RequestCorrelationId,
+                firstStartChunkIndex,
+                firstChunkCount,
+                rangeCount,
+                receivedTransportKind);
+    }
+
+    private void FlushOutboundSparseFrontierDispatchProofsLocked(
+        OutboundTransferContext context,
+        OutboundSparsePumpInstall installed)
+    {
+        if (context.PendingOutboundSparseFrontierDispatchProofs.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var pair in context.PendingOutboundSparseFrontierDispatchProofs.ToArray())
+        {
+            var proof = pair.Value;
+            context.PendingOutboundSparseFrontierDispatchProofs.Remove(pair.Key);
+            if (proof.Install != installed)
+            {
+                LogOutboundSparsePumpInstallRejected(
+                    context,
+                    proof.Install,
+                    "frontier_dispatch_proof",
+                    "install_no_longer_current");
+                continue;
+            }
+
+            ApplyOutboundV6RepairRequestCore(
+                context,
+                proof.Request,
+                proof.ReceivedTransportKind,
+                installed,
+                installed.RuntimeOwner,
+                context.DataSession,
+                context.DataSessionGeneration,
+                context.ActiveOutboundSparseReceiveSupervisorGeneration);
+        }
+    }
+
+    private static void DiscardOutboundSparseFrontierDispatchProofsLocked(
+        OutboundTransferContext context,
+        OutboundSparsePumpInstall invalidatedInstall,
+        string reason)
+    {
+        foreach (var pair in context.PendingOutboundSparseFrontierDispatchProofs
+                     .Where(pair => pair.Value.Install == invalidatedInstall)
+                     .ToArray())
+        {
+            context.PendingOutboundSparseFrontierDispatchProofs.Remove(pair.Key);
+            var proof = pair.Value;
+            LogOutboundV6FrontierRequestReceiveDispatch(
+                context,
+                proof.Request,
+                proof.ReceivedTransportKind,
+                "rejected",
+                reason,
+                proof.FirstStartChunkIndex,
+                proof.FirstChunkCount,
+                proof.RangeCount,
+                invalidatedInstall);
+        }
+    }
+
+    private static void LogOutboundSparsePumpInstallRejected(
+        OutboundTransferContext context,
+        OutboundSparsePumpInstall? install,
+        string stage,
+        string reason)
+    {
+        var tuple = install is null
+            ? $"install_generation=0; predecessor_install_generation=0; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; direction=outbound; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? 0}; runtime_generation={context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; terminal_generation={context.TerminalGeneration}; leg_generation={context.CurrentTransferLeg?.Generation ?? 0}; route_publication_generation={context.CurrentRoutePublicationToken?.PublicationGeneration ?? 0}; route_commit_generation={context.CurrentRoutePublicationToken?.RouteCommitGeneration ?? 0}; target_route={FormatProtocolLogValue(context.CurrentRoutePublicationToken is { } publication ? FileTransferRouteResolver.Resolve(publication.TargetRoute).TelemetryToken : "(none)")}; target_protocol_version={context.CurrentRoutePublicationToken?.TargetProtocolVersion ?? 0}; target_transport={FormatFileTransferTransportKind(context.CurrentRoutePublicationToken?.TargetTransport ?? FileTransferTransportKind.Unknown)}; data_session_generation={context.DataSessionGeneration}"
+            : FormatOutboundSparsePumpInstallTuple(install);
+        LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_outbound_sparse_worker_handoff_rejected; {tuple}; stage={FormatProtocolLogValue(stage)}; decision_reason={FormatProtocolLogValue(reason)}; current_route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; current_protocol_version={context.NegotiatedDataProtocolVersion}; current_live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? 0}; current_runtime_generation={context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; current_terminal_generation={context.TerminalGeneration}; current_leg_generation={context.CurrentTransferLeg?.Generation ?? 0}; current_route_publication_generation={context.CurrentRoutePublicationToken?.PublicationGeneration ?? 0}; current_route_commit_generation={context.CurrentRoutePublicationToken?.RouteCommitGeneration ?? 0}; current_data_session_generation={context.DataSessionGeneration}");
+    }
+
+    private bool TryUpdateOutboundSparseBootstrapStateIfCurrent(
+        OutboundTransferContext context,
+        OutboundSparsePumpInstall requiredInstall,
+        IFileTransferDataSession requiredDataSession,
+        FileTransferTransferState state,
+        string statusMessage,
+        bool markManifestDispatched,
+        string stage,
+        out string rejectionReason)
+    {
+        SessionFileTransferSnapshot? snapshot;
+        lock (gate)
+        {
+            if (context.PendingOutboundSparsePumpInstall != requiredInstall)
+            {
+                rejectionReason = "pending_install_mismatch";
+                LogOutboundSparsePumpInstallRejected(
+                    context,
+                    requiredInstall,
+                    stage,
+                    rejectionReason);
+                return false;
+            }
+
+            if (!IsOutboundSparsePumpInstallCurrentLocked(
+                    context,
+                    requiredInstall,
+                    requiredDataSession,
+                    out rejectionReason))
+            {
+                LogOutboundSparsePumpInstallRejected(
+                    context,
+                    requiredInstall,
+                    stage,
+                    rejectionReason);
+                return false;
+            }
+
+            context.State = state;
+            context.BytesTransferred = 0;
+            context.ChunksTransferred = 0;
+            context.BytesAcknowledgedByReceiver = Math.Max(context.BytesAcknowledgedByReceiver, 0);
+            context.StatusMessage = context.UserPaused
+                ? "Transfer paused."
+                : context.PeerPaused
+                    ? "Peer paused transfer."
+                    : statusMessage;
+            if (markManifestDispatched)
+            {
+                context.OutboundSparseManifestDispatched = true;
+            }
+            snapshot = CreateSnapshotLocked();
+        }
+
+        RaiseTransferChanged(snapshot);
+        MaybeLogProgressMilestone(context, FileTransferDirection.Outbound);
+        rejectionReason = "accepted";
+        return true;
+    }
+
+    private static bool HasOutboundSparsePumpWorkLocked(OutboundTransferContext context)
+        => context.PullV4SenderPumpRepairQueue.Count > 0 ||
+           (!context.V4TerminalReady &&
+            Math.Min(context.RemoteGrantedUntilExclusive, context.ChunkCount) > context.ChunksAcceptedForTransport);
+
+    private async Task<OutboundSparsePumpRuntime?> TryInstallOutboundSparsePumpAsync(
+        OutboundTransferContext context,
+        OutboundSparsePumpInstall? predecessor,
+        Stream? reusableStream,
+        bool reopenSource,
+        string reason,
+        CancellationToken installCancellationToken)
+    {
+        OutboundSparsePumpInstall? pending;
+        IFileTransferDataSession? dataSession;
+        int chunksAcceptedForTransport;
+        lock (gate)
+        {
+            if (!TryStageOutboundSparsePumpInstallLocked(
+                    context,
+                    predecessor,
+                    reason,
+                    out pending,
+                    out var stageRejection) ||
+                pending is null)
+            {
+                LogOutboundSparsePumpInstallRejected(context, predecessor, "stage", stageRejection);
+                return null;
+            }
+
+            dataSession = context.DataSession;
+            chunksAcceptedForTransport = context.ChunksAcceptedForTransport;
+        }
+
+        Stream? pumpStream = reusableStream;
+        var openedReplacementStream = false;
+        try
+        {
+            if (pumpStream is null || reopenSource)
+            {
+                if (reopenSource &&
+                    OutboundSparseSourceReopenBarrierForTests is { } sourceReopenBarrier)
+                {
+                    await sourceReopenBarrier(context.TransferId, context.SessionId).ConfigureAwait(false);
+                }
+
+                pumpStream = await context.OpenReadStreamAsync(installCancellationToken).ConfigureAwait(false);
+                openedReplacementStream = true;
+                ValidateReadableStream(pumpStream);
+                if (reopenSource && !pumpStream.CanSeek && chunksAcceptedForTransport > 0)
+                {
+                    throw new InvalidOperationException("A non-seekable source cannot be rebound after sparse sender progress.");
+                }
+            }
+        }
+        catch (OperationCanceledException) when (installCancellationToken.IsCancellationRequested)
+        {
+            if (openedReplacementStream && pumpStream is not null)
+            {
+                await DisposeOutboundSparsePumpStreamDiagnosticOnlyAsync(pumpStream).ConfigureAwait(false);
+            }
+
+            lock (gate)
+            {
+                if (context.PendingOutboundSparsePumpInstall == pending)
+                {
+                    context.PendingOutboundSparsePumpInstall = null;
+                }
+
+                LogOutboundSparsePumpInstallRejected(context, pending, "source_open", "install_invalidated");
+            }
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            if (openedReplacementStream && pumpStream is not null)
+            {
+                await DisposeOutboundSparsePumpStreamDiagnosticOnlyAsync(pumpStream).ConfigureAwait(false);
+            }
+
+            var sourceFailureCurrent = false;
+            lock (gate)
+            {
+                sourceFailureCurrent = context.PendingOutboundSparsePumpInstall == pending &&
+                    dataSession is not null &&
+                    IsOutboundSparsePumpInstallCurrentLocked(
+                        context,
+                        pending,
+                        dataSession,
+                        out _);
+                if (!sourceFailureCurrent &&
+                    context.PendingOutboundSparsePumpInstall == pending)
+                {
+                    context.PendingOutboundSparsePumpInstall = null;
+                }
+
+                LogOutboundSparsePumpInstallRejected(
+                    context,
+                    pending,
+                    "source_open",
+                    sourceFailureCurrent ? "source_stream_open_failed" : "install_invalidated");
+            }
+
+            if (!sourceFailureCurrent)
+            {
+                return null;
+            }
+
+            var errorCode = ClassifyOutboundFailureErrorCode(ex, StreamReadFailedErrorCode);
+            await FailOutboundV4Async(
+                    context,
+                    dataSession,
+                    pending.RuntimeOwner,
+                    errorCode,
+                    ClassifyOutboundFailureStatusMessage(ex, errorCode),
+                    notifyPeer: true,
+                    requiredSparsePumpInstall: pending)
+                .ConfigureAwait(false);
+            return null;
+        }
+
+        OutboundSparsePumpInstall? installed;
+        lock (gate)
+        {
+            if (dataSession is null ||
+                !TryCommitOutboundSparsePumpInstallLocked(
+                    context,
+                    pending,
+                    dataSession,
+                    out installed,
+                    out _))
+            {
+                installed = null;
+            }
+        }
+
+        if (installed is null || dataSession is null)
+        {
+            if (openedReplacementStream && pumpStream is not null)
+            {
+                await DisposeOutboundSparsePumpStreamDiagnosticOnlyAsync(pumpStream).ConfigureAwait(false);
+            }
+
+            return null;
+        }
+
+        var pumpCancellation = new CancellationTokenSource();
+        var pumpTask = RunOutboundV4SenderPumpAsync(
+            context,
+            pumpStream!,
+            dataSession,
+            pumpCancellation.Token,
+            installed);
+        return new OutboundSparsePumpRuntime(
+            installed,
+            pumpStream!,
+            dataSession,
+            pumpCancellation,
+            pumpTask);
+    }
+
+    private static async Task DisposeOutboundSparsePumpStreamDiagnosticOnlyAsync(Stream stream)
+    {
+        try
+        {
+            await stream.DisposeAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            // Cleanup from an invalidated descriptor is diagnostic-only.
+        }
+    }
+
+    private static async Task DisposeRetiredOutboundSparsePumpAsync(
+        Task pumpTask,
+        Stream pumpStream,
+        CancellationTokenSource pumpCancellation)
+    {
+        try
+        {
+            await pumpTask.ConfigureAwait(false);
+        }
+        catch
+        {
+            // A retired descriptor is diagnostic-only. Its exact failure is handled by the
+            // supervisor that observed the authority handoff; never let it mutate new state.
+        }
+        finally
+        {
+            await DisposeOutboundSparsePumpStreamDiagnosticOnlyAsync(pumpStream).ConfigureAwait(false);
+            try
+            {
+                pumpCancellation.Dispose();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        }
+    }
+
+    private async Task DisposeRetiredOutboundSparsePumpInstallAsync(
+        OutboundTransferContext context,
+        long receiveSupervisorGeneration,
+        Task<OutboundSparsePumpRuntime?> installTask,
+        CancellationTokenSource? installCancellation)
+    {
+        try
+        {
+            OutboundSparsePumpRuntime? runtime;
+            try
+            {
+                runtime = await installTask.ConfigureAwait(false);
+            }
+            catch
+            {
+                return;
+            }
+
+            if (runtime is null)
+            {
+                return;
+            }
+
+            lock (gate)
+            {
+                if (context.InstalledOutboundSparsePump == runtime.Install &&
+                    (context.ActiveOutboundSparseReceiveSupervisorGeneration != receiveSupervisorGeneration ||
+                     !IsOutboundSparsePumpInstallCurrentLocked(
+                         context,
+                         runtime.Install,
+                         runtime.DataSession,
+                         out _)))
+                {
+                    context.InstalledOutboundSparsePump = null;
+                }
+            }
+
+            try
+            {
+                runtime.Cancellation.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+
+            await DisposeRetiredOutboundSparsePumpAsync(
+                    runtime.PumpTask,
+                    runtime.Stream,
+                    runtime.Cancellation)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            try
+            {
+                installCancellation?.Dispose();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        }
+    }
+
+    private async Task ObserveRetiredOutboundSparseReceiveAsync(
+        OutboundTransferContext context,
+        Task<FileTransferReceivedDataFrame> receiveTask,
+        OutboundSparsePumpInstall? receiveInstall,
+        long dataSessionGeneration,
+        CancellationTokenSource? receiveCancellation,
+        string rejectionReason = "data_session_replaced")
+    {
+        try
+        {
+            var received = await receiveTask.ConfigureAwait(false);
+            LogOutboundSparsePumpInstallRejected(
+                context,
+                receiveInstall,
+                "receive_result",
+                rejectionReason);
+            LogPullDataFrameIgnored(
+                context.TransferId,
+                context.SessionId,
+                received.Frame,
+                $"stale_outbound_sparse_receive_data_session_generation_{dataSessionGeneration}");
+        }
+        catch
+        {
+            LogOutboundSparsePumpInstallRejected(
+                context,
+                receiveInstall,
+                "receive_failure",
+                rejectionReason);
+        }
+        finally
+        {
+            try
+            {
+                receiveCancellation?.Dispose();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        }
+    }
+
     private async Task RunOutboundSparseCreditSenderAsync(
         OutboundTransferContext context,
         FileTransferSparseCreditRuntimeKind runtimeKind)
     {
         IFileTransferDataSession? dataSession = null;
         RuntimeOwnerToken? senderRuntimeOwner = null;
+        Stream? senderPumpStream = null;
+        CancellationTokenSource? senderPumpCancellation = null;
+        Task? senderPumpTask = null;
+        Task<OutboundSparsePumpRuntime?>? pendingPumpInstallTask = null;
+        CancellationTokenSource? pendingPumpInstallCancellation = null;
+        OutboundSparsePumpInstall? pendingPumpInstallDescriptor = null;
+        OutboundSparsePumpInstall? startupPumpInstall = null;
+        OutboundSparsePumpInstall? senderPumpInstall = null;
+        Task<FileTransferReceivedDataFrame>? pendingReceiveTask = null;
+        CancellationTokenSource? pendingReceiveCancellation = null;
+        OutboundSparsePumpInstall? pendingReceiveInstall = null;
+        RuntimeOwnerToken? pendingReceiveRuntimeOwner = null;
+        IFileTransferDataSession? pendingReceiveDataSession = null;
+        long pendingReceiveDataSessionGeneration = 0;
+        long receiveSupervisorGeneration = 0;
+        var receiveSupervisorStopReason = "completed";
+        var restartSupervisorAfterCleanup = false;
+        OutboundSparsePumpInstall? resumableInstalledPump = null;
         RoutePublicationToken? runtimePublicationToken;
         lock (gate)
         {
@@ -430,10 +1403,39 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
+            if (context.ActiveOutboundSparseReceiveSupervisorGeneration > 0)
+            {
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=filetransfer_outbound_sparse_receive_supervisor_duplicate_ignored; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; active_receive_supervisor_generation={context.ActiveOutboundSparseReceiveSupervisorGeneration}; decision_reason=already_active");
+                return;
+            }
+
             runtimePublicationToken = context.CurrentRoutePublicationToken;
+            receiveSupervisorGeneration = Math.Max(
+                1,
+                context.LastOutboundSparseReceiveSupervisorGeneration + 1);
+            context.LastOutboundSparseReceiveSupervisorGeneration = receiveSupervisorGeneration;
+            context.ActiveOutboundSparseReceiveSupervisorGeneration = receiveSupervisorGeneration;
+            if (context.DataSession is { } existingDataSession && context.DataSessionGeneration > 0)
+            {
+                dataSession = existingDataSession;
+                senderRuntimeOwner = context.CurrentRuntimeOwner;
+                resumableInstalledPump = context.InstalledOutboundSparsePump;
+            }
         }
 
         var isPrimaryRegularNknBulkV6 = IsPrimaryRegularNknBulkV6Runtime(runtimeKind);
+        bool IsCurrentPrimaryRegularNknBulkV6()
+        {
+            lock (gate)
+            {
+                return ReferenceEquals(outboundTransfer, context) &&
+                    !context.IsTerminal &&
+                    IsPrimaryRegularNknBulkV6ContextLocked(context);
+            }
+        }
+
         var useV6Envelope = context.NegotiatedDataProtocolVersion >= FileTransferProtocol.ProtocolVersionV6;
         if (isPrimaryRegularNknBulkV6)
         {
@@ -443,146 +1445,752 @@ public sealed partial class SessionFileTransferService
         try
         {
             var currentTransport = GetTransportOrThrow();
+            IFileTransferDataSession? retiredDataSession = null;
+            var dataSessionReplaced = false;
+            while (dataSession is null)
+            {
+                RoutePublicationToken? openingPublication = null;
+                RuntimeOwnerToken? openingOwner = null;
+                lock (gate)
+                {
+                    if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
+                    {
+                        return;
+                    }
+
+                    if (context.CurrentRoutePublicationToken is { IsDefault: false } currentPublication &&
+                        context.CurrentRuntimeOwner is { IsDefault: false } currentOwner &&
+                        currentPublication.RuntimeOwner == currentOwner &&
+                        TryValidateRoutePublicationForEmissionLocked(
+                            context,
+                            "v4_sender_start",
+                            "runtime_start_data_session_opening",
+                            routeCommitToken: null,
+                            requestedToken: currentPublication,
+                            out _,
+                            out _))
+                    {
+                        openingPublication = currentPublication;
+                        openingOwner = currentOwner;
+                    }
+                }
+
+                if (openingPublication is null || openingOwner is null)
+                {
+                    await Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token).ConfigureAwait(false);
+                    continue;
+                }
+
+                IFileTransferDataSession openedDataSession;
+                try
+                {
+                    openedDataSession = await currentTransport
+                        .OpenFileTransferDataSessionAsync(
+                            context.SessionId,
+                            context.TransferId,
+                            context.LifetimeCts.Token)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (context.LifetimeCts.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    var openingAuthorityCurrent = false;
+                    lock (gate)
+                    {
+                        openingAuthorityCurrent = ReferenceEquals(outboundTransfer, context) &&
+                            !context.IsTerminal &&
+                            context.CurrentRoutePublicationToken == openingPublication &&
+                            context.CurrentRuntimeOwner == openingOwner;
+                    }
+
+                    if (openingAuthorityCurrent)
+                    {
+                        throw;
+                    }
+
+                    LogOutboundSparsePumpInstallRejected(
+                        context,
+                        null,
+                        "data_session_open",
+                        $"opening_authority_invalidated_{NormalizeReason(ex.GetType().Name) ?? "failure"}");
+                    await Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token).ConfigureAwait(false);
+                    continue;
+                }
+                var openedSessionAttached = false;
+                lock (gate)
+                {
+                    var publicationCurrent = ReferenceEquals(outboundTransfer, context) &&
+                        !context.IsTerminal &&
+                        context.CurrentRoutePublicationToken == openingPublication &&
+                        context.CurrentRuntimeOwner == openingOwner &&
+                        TryValidateRoutePublicationForEmissionLocked(
+                            context,
+                            "v4_sender_start",
+                            "runtime_start_data_session_opened",
+                            routeCommitToken: null,
+                            requestedToken: openingPublication,
+                            out _,
+                            out _);
+                    if (publicationCurrent)
+                    {
+                        if (!ReferenceEquals(context.DataSession, openedDataSession))
+                        {
+                            dataSessionReplaced = true;
+                            retiredDataSession = context.DataSession;
+                            context.DataSession = openedDataSession;
+                            context.DataSessionGeneration = Math.Max(1, context.DataSessionGeneration + 1);
+                            context.PendingOutboundSparsePumpInstall = null;
+                            context.InstalledOutboundSparsePump = null;
+                        }
+
+                        context.PullSessionActive = true;
+                        context.PullCurrentPipelineDepth = V4SenderPumpDepth;
+                        context.RemoteNextExpectedChunkIndex = 0;
+                        context.RemoteGrantedUntilExclusive = 0;
+                        context.ChunksAcceptedForTransport = 0;
+                        context.BytesAcceptedForTransport = 0;
+                        context.V4LastStateEpoch = -1;
+                        context.V4TerminalReady = false;
+                        context.V4MixedScreenShareTransfer = context.V4MixedScreenShareTransfer || IsV4MixedScreenShareActive();
+                        context.SparseSenderPumpLastWakeReason = "startup";
+                        context.V4SenderCreditExhaustedSinceUtc = null;
+                        SettleAndClearFallbackFrontierRepairContractLocked(
+                            context,
+                            FallbackFrontierRepairSettlementOutcome.StaleRejected,
+                            "v4_sender_startup_reset");
+                        context.PullV4SenderPumpRepairQueue.Clear();
+                        context.PullV4SenderPumpRepairQueuedChunkIndices.Clear();
+                        context.PullV4SenderPumpRepairRequests.Clear();
+                        context.PullSentChunkCache.Clear();
+                        context.PullSentChunkCacheBytes = 0;
+                        runtimePublicationToken = openingPublication;
+                        senderRuntimeOwner = openingOwner;
+                        dataSession = openedDataSession;
+                        openedSessionAttached = true;
+                    }
+                }
+
+                if (!openedSessionAttached)
+                {
+                    try
+                    {
+                        openedDataSession.Dispose();
+                    }
+                    catch (Exception ex)
+                    {
+                        LocalOperationalLog.Warn(
+                            "FileTransferService",
+                            $"event=filetransfer_outbound_sparse_worker_handoff_rejected; install_generation=0; predecessor_install_generation=0; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; direction=outbound; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}; stage=data_session_unbound_dispose; decision_reason=unbound_data_session_dispose_failed; error={FormatProtocolLogValue(ex.GetType().Name)}; message={FormatProtocolLogValue(ex.Message)}");
+                    }
+                    await Task.Yield();
+                }
+            }
+
+            if (retiredDataSession is not null)
+            {
+                try
+                {
+                    UnsubscribeDataSessionEvents(retiredDataSession);
+                    retiredDataSession.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    LocalOperationalLog.Warn(
+                        "FileTransferService",
+                        $"event=filetransfer_outbound_sparse_worker_handoff_rejected; install_generation=0; predecessor_install_generation=0; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; direction=outbound; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}; stage=data_session_retire; decision_reason=retired_data_session_dispose_failed; error={FormatProtocolLogValue(ex.GetType().Name)}; message={FormatProtocolLogValue(ex.Message)}");
+                }
+            }
+
+            if (dataSessionReplaced)
+            {
+                SubscribeDataSessionEvents(dataSession);
+            }
+
+            OutboundSparsePumpRuntime? startupRuntime = null;
+            bool startupSessionOpenDispatched;
+            bool startupManifestDispatched;
+            int startupDispatchedProtocolVersion;
+            string? startupDispatchedRoute;
+            lock (gate)
+            {
+                startupSessionOpenDispatched = context.OutboundSparseSessionOpenDispatched;
+                startupManifestDispatched = context.OutboundSparseManifestDispatched;
+                startupDispatchedProtocolVersion = context.OutboundSparseSessionOpenProtocolVersion;
+                startupDispatchedRoute = context.OutboundSparseSessionOpenRoute;
+            }
+
+            if (resumableInstalledPump is not null)
+            {
+                while (startupRuntime is null)
+                {
+                    OutboundSparsePumpInstall? currentPredecessor;
+                    lock (gate)
+                    {
+                        if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
+                        {
+                            return;
+                        }
+
+                        currentPredecessor = context.InstalledOutboundSparsePump;
+                    }
+
+                    if (currentPredecessor is null)
+                    {
+                        resumableInstalledPump = null;
+                        break;
+                    }
+
+                    startupRuntime = await TryInstallOutboundSparsePumpAsync(
+                            context,
+                            currentPredecessor,
+                            reusableStream: null,
+                            reopenSource: true,
+                            reason: "receive_supervisor_restart",
+                            installCancellationToken: context.LifetimeCts.Token)
+                        .ConfigureAwait(false);
+                    if (startupRuntime is null)
+                    {
+                        await Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token).ConfigureAwait(false);
+                    }
+                }
+            }
+
+            if (startupRuntime is null)
+            {
+                while (startupRuntime is null)
+                {
+            var startupDataSessionUnavailable = false;
+            lock (gate)
+            {
+                if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
+                {
+                    return;
+                }
+
+                if (context.DataSession is null)
+                {
+                    startupDataSessionUnavailable = true;
+                }
+                else if (!ReferenceEquals(context.DataSession, dataSession))
+                {
+                    dataSession = context.DataSession;
+                    runtimePublicationToken = context.CurrentRoutePublicationToken;
+                    senderRuntimeOwner = context.CurrentRuntimeOwner;
+                    startupPumpInstall = null;
+                    LocalOperationalLog.Info(
+                        "FileTransferService",
+                        $"event=filetransfer_outbound_sparse_worker_handoff_required; install_generation=0; predecessor_install_generation=0; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; direction=outbound; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}; runtime_generation={context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; terminal_generation={context.TerminalGeneration}; data_session_generation={context.DataSessionGeneration}; decision_reason=startup_data_session_rebound");
+                }
+            }
+
+            if (startupDataSessionUnavailable)
+            {
+                await Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token).ConfigureAwait(false);
+                continue;
+            }
+
+            lock (gate)
+            {
+                if (context.PendingOutboundSparsePumpInstall is { } staleStartupPending &&
+                    !IsOutboundSparsePumpInstallCurrentLocked(
+                        context,
+                        staleStartupPending,
+                        dataSession,
+                        out var staleStartupReason))
+                {
+                    LogOutboundSparsePumpInstallRejected(
+                        context,
+                        staleStartupPending,
+                        "startup_restage",
+                        staleStartupReason);
+                    context.PendingOutboundSparsePumpInstall = null;
+                    startupPumpInstall = null;
+                }
+
+                if (!TryStageOutboundSparsePumpInstallLocked(
+                        context,
+                        predecessor: null,
+                        reason: "initial_runtime",
+                        out startupPumpInstall,
+                        out var stageRejection) ||
+                    startupPumpInstall is null)
+                {
+                    LogOutboundSparsePumpInstallRejected(
+                        context,
+                        startupPumpInstall,
+                        "startup_stage",
+                        stageRejection);
+                }
+            }
+
+            if (startupPumpInstall is null)
+            {
+                await Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token).ConfigureAwait(false);
+                continue;
+            }
+
+            if (senderPumpStream is null)
+            {
+                try
+                {
+                    senderPumpStream = await context.OpenReadStreamAsync(context.LifetimeCts.Token).ConfigureAwait(false);
+                    ValidateReadableStream(senderPumpStream);
+                    InitializeOutboundSenderRepairCachePolicy(context, senderPumpStream.CanSeek);
+                }
+                catch (OperationCanceledException) when (context.LifetimeCts.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    var sourceAuthorityCurrent = false;
+                    lock (gate)
+                    {
+                        sourceAuthorityCurrent = startupPumpInstall is not null &&
+                            IsOutboundSparsePumpInstallCurrentLocked(
+                                context,
+                                startupPumpInstall,
+                                dataSession,
+                                out _);
+                        if (!sourceAuthorityCurrent &&
+                            context.PendingOutboundSparsePumpInstall == startupPumpInstall)
+                        {
+                            context.PendingOutboundSparsePumpInstall = null;
+                        }
+                    }
+
+                    if (sourceAuthorityCurrent)
+                    {
+                        throw;
+                    }
+
+                    LogOutboundSparsePumpInstallRejected(
+                        context,
+                        startupPumpInstall,
+                        "startup_source_open",
+                        $"install_invalidated_{NormalizeReason(ex.GetType().Name) ?? "failure"}");
+                    await Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token).ConfigureAwait(false);
+                    continue;
+                }
+            }
+
+            var startupReady = false;
+            var startupRejectionReason = "startup_install_missing";
+            lock (gate)
+            {
+                if (startupPumpInstall is not null &&
+                    (!IsOutboundSparsePumpInstallCurrentLocked(
+                         context,
+                         startupPumpInstall,
+                         dataSession,
+                         out startupRejectionReason) ||
+                     context.PendingOutboundSparsePumpInstall != startupPumpInstall))
+                {
+                    LogOutboundSparsePumpInstallRejected(
+                        context,
+                        startupPumpInstall,
+                        "startup_source_open",
+                        startupRejectionReason);
+                    if (context.PendingOutboundSparsePumpInstall == startupPumpInstall)
+                    {
+                        context.PendingOutboundSparsePumpInstall = null;
+                    }
+
+                    startupPumpInstall = null;
+                }
+
+                if (startupPumpInstall is null &&
+                    !TryStageOutboundSparsePumpInstallLocked(
+                        context,
+                        predecessor: null,
+                        reason: "startup_authority_handoff",
+                        out startupPumpInstall,
+                        out startupRejectionReason))
+                {
+                    LogOutboundSparsePumpInstallRejected(
+                        context,
+                        startupPumpInstall,
+                        "startup_restage",
+                        startupRejectionReason);
+                }
+
+                if (startupPumpInstall is not null &&
+                    context.PendingOutboundSparsePumpInstall == startupPumpInstall &&
+                    IsOutboundSparsePumpInstallCurrentLocked(
+                        context,
+                        startupPumpInstall,
+                        dataSession,
+                        out startupRejectionReason))
+                {
+                    runtimePublicationToken = startupPumpInstall.RoutePublication;
+                    senderRuntimeOwner = startupPumpInstall.RuntimeOwner;
+                    startupReady = TryPublishRuntimeStartedIfAuthorizedLocked(
+                        context,
+                        "sender",
+                        "v4_sender_start",
+                        "runtime_started",
+                        routePublicationToken: startupPumpInstall.RoutePublication);
+                    if (!startupReady)
+                    {
+                        startupRejectionReason = "runtime_started_rejected";
+                    }
+                    else
+                    {
+                        TryReplayOutboundRuntimeUnlockPendingPreCommitProbeLocked(context, "data_session_attached");
+                        RetryOutboundFallbackTailLocalYieldProofIfPendingLocked(context, "data_session_attached");
+                    }
+                }
+            }
+
+            if (!startupReady ||
+                startupPumpInstall is null ||
+                runtimePublicationToken is not { IsDefault: false } startupPublication ||
+                senderRuntimeOwner is null ||
+                startupPublication != startupPumpInstall.RoutePublication ||
+                startupPublication.RuntimeOwner != senderRuntimeOwner)
+            {
+                LogOutboundSparsePumpInstallRejected(
+                    context,
+                    startupPumpInstall,
+                    "startup_authority",
+                    startupRejectionReason);
+                await Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token).ConfigureAwait(false);
+                continue;
+            }
+
+            useV6Envelope = startupPublication.ProtocolVersion >= FileTransferProtocol.ProtocolVersionV6;
             var sessionOpen = new FileTransferSessionOpenV2
             {
-                SessionId = context.SessionId,
-                TransferId = context.TransferId,
-                ProtocolVersion = context.NegotiatedDataProtocolVersion,
-                FileTransferRoute = context.RouteSelection.TelemetryToken,
+                SessionId = startupPublication.SessionId,
+                TransferId = startupPublication.TransferId,
+                ProtocolVersion = startupPublication.ProtocolVersion,
+                FileTransferRoute = startupPublication.RouteToken,
                 SessionRole = FileTransferProtocol.SessionRoleSender,
                 ChunkSizeBytes = context.ChunkSizeBytes,
                 InitialPipelineDepth = V4SenderPumpDepth,
             };
 
-            dataSession = await currentTransport
-                .OpenFileTransferDataSessionAsync(context.SessionId, context.TransferId, context.LifetimeCts.Token)
-                .ConfigureAwait(false);
-
-            lock (gate)
+            if (startupSessionOpenDispatched &&
+                !startupManifestDispatched &&
+                (startupDispatchedProtocolVersion != sessionOpen.ProtocolVersion ||
+                 !string.Equals(
+                     startupDispatchedRoute,
+                     sessionOpen.FileTransferRoute,
+                     StringComparison.Ordinal)))
             {
-                if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
-                {
-                    dataSession.Dispose();
-                    return;
-                }
-
-                if (runtimePublicationToken is { IsDefault: false } capturedPublication &&
-                    !TryValidateRoutePublicationForEmissionLocked(
+                var closed = await FailOutboundV4Async(
                         context,
-                        "v4_sender_start",
-                        "runtime_start_data_session_opened",
-                        routeCommitToken: null,
-                        requestedToken: capturedPublication,
-                        out _,
-                        out _))
+                        dataSession,
+                        startupPumpInstall.RuntimeOwner,
+                        FileTransferResultCodes.TransportIncompatible,
+                        "Outbound sparse startup authority changed route or protocol after session-open dispatch.",
+                        notifyPeer: true,
+                        requiredSparsePumpInstall: startupPumpInstall)
+                    .ConfigureAwait(false);
+                receiveSupervisorStopReason = closed
+                    ? "startup_authority_incompatible_after_session_open"
+                    : "startup_authority_incompatible_rejected";
+                if (closed)
                 {
-                    dataSession.Dispose();
                     return;
                 }
 
-                ReplaceOutboundDataSessionLocked(context, dataSession);
-                context.PullSessionActive = true;
-                context.PullCurrentPipelineDepth = V4SenderPumpDepth;
-                context.RemoteNextExpectedChunkIndex = 0;
-                context.RemoteGrantedUntilExclusive = 0;
-                context.ChunksAcceptedForTransport = 0;
-                context.BytesAcceptedForTransport = 0;
-                context.V4LastStateEpoch = -1;
-                context.V4TerminalReady = false;
-                context.V4MixedScreenShareTransfer = context.V4MixedScreenShareTransfer || IsV4MixedScreenShareActive();
-                context.SparseSenderPumpLastWakeReason = "startup";
-                context.V4SenderCreditExhaustedSinceUtc = null;
-                SettleAndClearFallbackFrontierRepairContractLocked(
-                    context,
-                    FallbackFrontierRepairSettlementOutcome.StaleRejected,
-                    "v4_sender_startup_reset");
-                context.PullV4SenderPumpRepairQueue.Clear();
-                context.PullV4SenderPumpRepairQueuedChunkIndices.Clear();
-                context.PullV4SenderPumpRepairRequests.Clear();
-                context.PullSentChunkCache.Clear();
-                context.PullSentChunkCacheBytes = 0;
-                if (!TryCaptureRuntimeOwnerLocked(
-                        context,
-                        FileTransferCoordinatorActionKind.RuntimeOwnerValidation,
-                        "v4_sender_start",
-                        "capture_runtime_owner",
-                        out var capturedOwner))
-                {
-                    dataSession.Dispose();
-                    return;
-                }
-
-                senderRuntimeOwner = capturedOwner;
+                await Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token).ConfigureAwait(false);
+                continue;
             }
 
-            LocalOperationalLog.Info(
-                "FileTransferService",
-                $"event={(useV6Envelope ? "filetransfer_v6_sender_started" : "filetransfer_v4_sender_started")}; transfer_id={context.TransferId}; session_id={context.SessionId}; protocol_version={context.NegotiatedDataProtocolVersion}; route={context.RouteSelection.TelemetryToken}; runtime_profile={FormatFileTransferRouteRuntimeProfile(context.RouteSelection.RuntimeProfile)}; frame_family={FormatFileTransferFrameFamily(context.RouteSelection.FrameFamily)}; bridge_recovery_policy={FormatFileTransferRouteBridgeRecoveryPolicy(context.RouteSelection.BridgeRecoveryPolicy)}; chunk_size_bytes={context.ChunkSizeBytes}; chunk_count={context.ChunkCount}; pipeline_depth={V4SenderPumpDepth}; pending_bytes_limit={V4SenderPumpPendingBytes}");
-            lock (gate)
+            if (!startupSessionOpenDispatched)
             {
-                if (ReferenceEquals(outboundTransfer, context) && !context.IsTerminal)
+                if (OutboundSparseBootstrapBarrierForTests is { } bootstrapBarrier)
                 {
-                    if (runtimePublicationToken is { IsDefault: false } publication)
-                    {
-                        TryPublishRuntimeStartedIfAuthorizedLocked(
+                    await bootstrapBarrier(
+                            context.TransferId,
+                            context.SessionId,
+                            "startup_state")
+                        .ConfigureAwait(false);
+                }
+
+                if (!TryUpdateOutboundSparseBootstrapStateIfCurrent(
+                        context,
+                        startupPumpInstall,
+                        dataSession,
+                        FileTransferTransferState.AwaitingStart,
+                        isPrimaryRegularNknBulkV6
+                            ? "Starting regular NKN bulk V6 transfer."
+                            : "Starting regular NKN V4 transfer.",
+                        markManifestDispatched: false,
+                        stage: "startup_state",
+                        out startupRejectionReason))
+                {
+                    await Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token).ConfigureAwait(false);
+                    continue;
+                }
+
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event={(useV6Envelope ? "filetransfer_v6_sender_started" : "filetransfer_v4_sender_started")}; transfer_id={context.TransferId}; session_id={context.SessionId}; protocol_version={startupPublication.ProtocolVersion}; route={startupPublication.RouteToken}; runtime_profile={FormatFileTransferRouteRuntimeProfile(context.RouteSelection.RuntimeProfile)}; frame_family={FormatFileTransferFrameFamily(context.RouteSelection.FrameFamily)}; bridge_recovery_policy={FormatFileTransferRouteBridgeRecoveryPolicy(context.RouteSelection.BridgeRecoveryPolicy)}; chunk_size_bytes={context.ChunkSizeBytes}; chunk_count={context.ChunkCount}; pipeline_depth={V4SenderPumpDepth}; pending_bytes_limit={V4SenderPumpPendingBytes}");
+                if (isPrimaryRegularNknBulkV6)
+                {
+                    LogPrimaryRegularNknBulkV6State(context, PrimaryRegularNknBulkV6State.ManifestExchange, "session_open");
+                }
+
+                var sessionOpenAuthorized = false;
+                lock (gate)
+                {
+                    sessionOpenAuthorized = context.PendingOutboundSparsePumpInstall == startupPumpInstall &&
+                        IsOutboundSparsePumpInstallCurrentLocked(
                             context,
-                            "sender",
-                            "v4_sender_start",
-                            "runtime_started",
-                            routePublicationToken: publication);
+                            startupPumpInstall,
+                            dataSession,
+                            out startupRejectionReason);
+                }
+
+                if (!sessionOpenAuthorized)
+                {
+                    LogOutboundSparsePumpInstallRejected(
+                        context,
+                        startupPumpInstall,
+                        "session_open",
+                        startupRejectionReason);
+                    await Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token).ConfigureAwait(false);
+                    continue;
+                }
+
+                try
+                {
+                    await currentTransport.SendFileTransferSessionOpenAsync(
+                            sessionOpen,
+                            context.LifetimeCts.Token)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (context.LifetimeCts.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    var sessionOpenAuthorityCurrent = false;
+                    lock (gate)
+                    {
+                        sessionOpenAuthorityCurrent = context.PendingOutboundSparsePumpInstall == startupPumpInstall &&
+                            IsOutboundSparsePumpInstallCurrentLocked(
+                                context,
+                                startupPumpInstall,
+                                dataSession,
+                                out _);
+                    }
+
+                    if (sessionOpenAuthorityCurrent)
+                    {
+                        throw;
+                    }
+
+                    LogOutboundSparsePumpInstallRejected(
+                        context,
+                        startupPumpInstall,
+                        "session_open_send",
+                        $"install_invalidated_{NormalizeReason(ex.GetType().Name) ?? "failure"}");
+                    await Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token).ConfigureAwait(false);
+                    continue;
+                }
+
+                if (OutboundSparseBootstrapBarrierForTests is { } sessionOpenCompletionBarrier)
+                {
+                    await sessionOpenCompletionBarrier(
+                            context.TransferId,
+                            context.SessionId,
+                            "session_open_completion")
+                        .ConfigureAwait(false);
+                }
+
+                var sessionOpenCompletionCurrent = false;
+                lock (gate)
+                {
+                    sessionOpenCompletionCurrent =
+                        context.PendingOutboundSparsePumpInstall == startupPumpInstall &&
+                        IsOutboundSparsePumpInstallCurrentLocked(
+                            context,
+                            startupPumpInstall,
+                            dataSession,
+                            out startupRejectionReason);
+                    if (sessionOpenCompletionCurrent)
+                    {
+                        context.OutboundSparseSessionOpenDispatched = true;
+                        context.OutboundSparseSessionOpenProtocolVersion = sessionOpen.ProtocolVersion;
+                        context.OutboundSparseSessionOpenRoute = sessionOpen.FileTransferRoute;
                     }
                 }
+
+                if (!sessionOpenCompletionCurrent)
+                {
+                    LogOutboundSparsePumpInstallRejected(
+                        context,
+                        startupPumpInstall,
+                        "session_open_completion",
+                        startupRejectionReason);
+                    await Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token).ConfigureAwait(false);
+                    continue;
+                }
+
+                startupSessionOpenDispatched = true;
+                startupDispatchedProtocolVersion = sessionOpen.ProtocolVersion;
+                startupDispatchedRoute = sessionOpen.FileTransferRoute;
+                LogTransferInfo(
+                    "filetransfer_session_opened",
+                    FileTransferDirection.Outbound,
+                    context.TransferId,
+                    sessionId: context.SessionId,
+                    reason: FormatFileTransferSessionOpenReason(sessionOpen.SessionRole, sessionOpen.ProtocolVersion, sessionOpen.ChunkSizeBytes, sessionOpen.InitialPipelineDepth, context.RouteSelection),
+                    routeSelection: context.RouteSelection);
             }
 
-            UpdateOutboundState(
-                context,
-                FileTransferTransferState.AwaitingStart,
-                0,
-                0,
-                isPrimaryRegularNknBulkV6 ? "Starting regular NKN bulk V6 transfer." : "Starting regular NKN V4 transfer.");
-            if (isPrimaryRegularNknBulkV6)
+            if (!startupManifestDispatched)
             {
-                LogPrimaryRegularNknBulkV6State(context, PrimaryRegularNknBulkV6State.ManifestExchange, "session_open");
+                var manifest = CreateOutboundV4ManifestFrame(context, useV6Envelope);
+
+                if (!await SendOutboundV4PrePumpFrameWithTunaActivationPauseRetryAsync(
+                        context,
+                        dataSession,
+                        manifest,
+                        frameKind: "manifest",
+                        payloadBytes: 0,
+                        requiredInstall: startupPumpInstall).ConfigureAwait(false))
+                {
+                    await Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token).ConfigureAwait(false);
+                    continue;
+                }
+
+                if (OutboundSparseBootstrapBarrierForTests is { } manifestCompletionBarrier)
+                {
+                    await manifestCompletionBarrier(
+                            context.TransferId,
+                            context.SessionId,
+                            "manifest_completion")
+                        .ConfigureAwait(false);
+                }
+
+                if (!TryUpdateOutboundSparseBootstrapStateIfCurrent(
+                        context,
+                        startupPumpInstall,
+                        dataSession,
+                        FileTransferTransferState.Sending,
+                        useV6Envelope
+                            ? "Waiting for V6 receiver state."
+                            : "Waiting for V4 receiver state.",
+                        markManifestDispatched: true,
+                        stage: "manifest_completion",
+                        out startupRejectionReason))
+                {
+                    await Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token).ConfigureAwait(false);
+                    continue;
+                }
+
+                startupManifestDispatched = true;
+                LogPullBinaryFrameSent(context.TransferId, context.SessionId, manifest, payloadBytes: 0);
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=filetransfer_v4_manifest_sent; transfer_id={context.TransferId}; session_id={context.SessionId}; file_size_bytes={context.FileSizeBytes}; chunk_size_bytes={context.ChunkSizeBytes}; chunk_count={context.ChunkCount}");
+                if (isPrimaryRegularNknBulkV6)
+                {
+                    LogPrimaryRegularNknBulkV6State(context, PrimaryRegularNknBulkV6State.AwaitingReceiverState, "manifest_sent");
+                }
             }
 
-            await currentTransport.SendFileTransferSessionOpenAsync(sessionOpen, context.LifetimeCts.Token).ConfigureAwait(false);
-            LogTransferInfo(
-                "filetransfer_session_opened",
-                FileTransferDirection.Outbound,
-                context.TransferId,
-                sessionId: context.SessionId,
-                reason: FormatFileTransferSessionOpenReason(sessionOpen.SessionRole, sessionOpen.ProtocolVersion, sessionOpen.ChunkSizeBytes, sessionOpen.InitialPipelineDepth, context.RouteSelection),
-                routeSelection: context.RouteSelection);
+            if (OutboundSparseBootstrapBarrierForTests is { } startupCommitBarrier)
+            {
+                await startupCommitBarrier(
+                        context.TransferId,
+                        context.SessionId,
+                        "startup_commit")
+                    .ConfigureAwait(false);
+            }
 
-            using var stream = await context.OpenReadStreamAsync(context.LifetimeCts.Token).ConfigureAwait(false);
-            ValidateReadableStream(stream);
-            InitializeOutboundSenderRepairCachePolicy(context, stream.CanSeek);
+            var restartStartupForDataSessionReplacement = false;
+            lock (gate)
+            {
+                if (!ReferenceEquals(outboundTransfer, context) ||
+                    context.IsTerminal)
+                {
+                    receiveSupervisorStopReason = context.IsTerminal
+                        ? "transfer_terminal"
+                        : "startup_context_replaced";
+                    return;
+                }
 
-            var manifest = CreateOutboundV4ManifestFrame(context);
+                if (!ReferenceEquals(context.DataSession, dataSession))
+                {
+                    if (context.DataSession is null)
+                    {
+                        restartStartupForDataSessionReplacement = true;
+                    }
+                    else
+                    {
+                        dataSession = context.DataSession;
+                        runtimePublicationToken = context.CurrentRoutePublicationToken;
+                        senderRuntimeOwner = context.CurrentRuntimeOwner;
+                        startupPumpInstall = null;
+                        restartStartupForDataSessionReplacement = true;
+                    }
+                }
 
-            if (!await SendOutboundV4PrePumpFrameWithTunaActivationPauseRetryAsync(
+                if (!restartStartupForDataSessionReplacement &&
+                    context.PendingOutboundSparsePumpInstall is { } stalePending &&
+                    !IsOutboundSparsePumpInstallCurrentLocked(
+                        context,
+                        stalePending,
+                        dataSession,
+                        out var staleReason))
+                {
+                    LogOutboundSparsePumpInstallRejected(
+                        context,
+                        stalePending,
+                        "startup_commit",
+                        staleReason);
+                    context.PendingOutboundSparsePumpInstall = null;
+                }
+
+                if (!restartStartupForDataSessionReplacement)
+                {
+                    startupPumpInstall = context.PendingOutboundSparsePumpInstall;
+                }
+            }
+
+            if (restartStartupForDataSessionReplacement)
+            {
+                await Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token).ConfigureAwait(false);
+                continue;
+            }
+
+            startupRuntime = await TryInstallOutboundSparsePumpAsync(
                     context,
-                    dataSession,
-                    manifest,
-                    frameKind: "manifest",
-                    payloadBytes: 0).ConfigureAwait(false))
+                    predecessor: null,
+                    reusableStream: senderPumpStream,
+                    reopenSource: false,
+                    reason: startupPumpInstall is null ? "startup_authority_handoff" : "initial_runtime",
+                    installCancellationToken: context.LifetimeCts.Token)
+                .ConfigureAwait(false);
+            if (startupRuntime is null)
             {
-                return;
+                await Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token).ConfigureAwait(false);
+                continue;
+            }
+            }
             }
 
-            LogPullBinaryFrameSent(context.TransferId, context.SessionId, manifest, payloadBytes: 0);
-            LocalOperationalLog.Info(
-                "FileTransferService",
-                $"event=filetransfer_v4_manifest_sent; transfer_id={context.TransferId}; session_id={context.SessionId}; file_size_bytes={context.FileSizeBytes}; chunk_size_bytes={context.ChunkSizeBytes}; chunk_count={context.ChunkCount}");
-            UpdateOutboundState(
-                context,
-                FileTransferTransferState.Sending,
-                0,
-                0,
-                useV6Envelope ? "Waiting for V6 receiver state." : "Waiting for V4 receiver state.");
-            if (isPrimaryRegularNknBulkV6)
+            senderPumpInstall = startupRuntime.Install;
+            startupPumpInstall = startupRuntime.Install;
+            senderRuntimeOwner = startupRuntime.Install.RuntimeOwner;
+            senderPumpStream = startupRuntime.Stream;
+            dataSession = startupRuntime.DataSession;
+            senderPumpCancellation = startupRuntime.Cancellation;
+            senderPumpTask = startupRuntime.PumpTask;
+
+            if (OutboundSparsePostInstallBarrierForTests is { } postInstallBarrier)
             {
-                LogPrimaryRegularNknBulkV6State(context, PrimaryRegularNknBulkV6State.AwaitingReceiverState, "manifest_sent");
+                await postInstallBarrier(context.TransferId, context.SessionId).ConfigureAwait(false);
             }
 
             if (context.UserPaused)
@@ -591,66 +2199,571 @@ public sealed partial class SessionFileTransferService
                 await SendOutboundV4PauseStateAsync(context, "user_paused_initial").ConfigureAwait(false);
             }
 
-            var senderPumpTask = RunOutboundV4SenderPumpAsync(context, stream, dataSession);
-            Task<FileTransferReceivedDataFrame>? pendingReceiveTask = null;
+            async Task<OutboundSparsePumpRuntime?> InstallCurrentPumpAsync(
+                string reason,
+                bool reopenSource,
+                bool previousPumpAlreadyObserved,
+                CancellationToken installCancellationToken)
+            {
+                var previousTask = senderPumpTask;
+                var previousStream = senderPumpStream;
+                var previousCancellation = senderPumpCancellation;
+                var previousTaskStillRunning = previousTask is { IsCompleted: false };
+                if (previousTaskStillRunning)
+                {
+                    try
+                    {
+                        previousCancellation?.Cancel();
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                    }
+                }
+
+                OutboundSparsePumpInstall? predecessor;
+                lock (gate)
+                {
+                    if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
+                    {
+                        return null;
+                    }
+
+                    predecessor = context.InstalledOutboundSparsePump;
+                }
+
+                // The install attempt owns the retired pump resources from this point. Clearing
+                // the active slots before its first await lets the receive supervisor continue
+                // independently while the source is reopened and the descriptor is revalidated.
+                senderPumpTask = null;
+                senderPumpStream = null;
+                senderPumpCancellation = null;
+
+                var replacement = await TryInstallOutboundSparsePumpAsync(
+                        context,
+                        predecessor,
+                        previousStream,
+                        reopenSource || previousTaskStillRunning,
+                        reason,
+                        installCancellationToken)
+                    .ConfigureAwait(false);
+
+                var replacementReusesPreviousStream = replacement is not null &&
+                    ReferenceEquals(previousStream, replacement.Stream);
+                if (previousStream is not null && !replacementReusesPreviousStream)
+                {
+                    if (previousTask is not null &&
+                        previousCancellation is not null &&
+                        previousTaskStillRunning &&
+                        !previousPumpAlreadyObserved)
+                    {
+                        _ = DisposeRetiredOutboundSparsePumpAsync(
+                            previousTask,
+                            previousStream,
+                            previousCancellation);
+                    }
+                    else
+                    {
+                        await DisposeOutboundSparsePumpStreamDiagnosticOnlyAsync(previousStream).ConfigureAwait(false);
+                        try
+                        {
+                            previousCancellation?.Dispose();
+                        }
+                        catch (ObjectDisposedException)
+                        {
+                        }
+                    }
+                }
+                else if (previousCancellation is not null &&
+                         !ReferenceEquals(previousCancellation, replacement?.Cancellation))
+                {
+                    try
+                    {
+                        previousCancellation.Dispose();
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                    }
+                }
+
+                if (replacement is null)
+                {
+                    return null;
+                }
+
+                return replacement;
+            }
+
+            var nextPumpInstallAttemptUtc = DateTimeOffset.MinValue;
+            void StartCurrentPumpInstall(
+                string reason,
+                bool reopenSource,
+                bool previousPumpAlreadyObserved)
+            {
+                if (pendingPumpInstallTask is not null ||
+                    DateTimeOffset.UtcNow < nextPumpInstallAttemptUtc)
+                {
+                    return;
+                }
+
+                pendingPumpInstallCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                    context.LifetimeCts.Token);
+                pendingPumpInstallTask = InstallCurrentPumpAsync(
+                    reason,
+                    reopenSource,
+                    previousPumpAlreadyObserved,
+                    pendingPumpInstallCancellation.Token);
+                lock (gate)
+                {
+                    pendingPumpInstallDescriptor = context.PendingOutboundSparsePumpInstall;
+                }
+            }
+
+            async Task<OutboundSparsePumpRuntime?> CompletePendingPumpInstallAsync()
+            {
+                if (pendingPumpInstallTask is null)
+                {
+                    return null;
+                }
+
+                var completingTask = pendingPumpInstallTask;
+                var completingCancellation = pendingPumpInstallCancellation;
+                var completingDescriptor = pendingPumpInstallDescriptor;
+                OutboundSparsePumpRuntime? replacement = null;
+                try
+                {
+                    replacement = await completingTask.ConfigureAwait(false);
+                }
+                catch
+                {
+                    lock (gate)
+                    {
+                        LogOutboundSparsePumpInstallRejected(
+                            context,
+                            completingDescriptor,
+                            "install_task",
+                            "install_task_failed");
+                        if (context.PendingOutboundSparsePumpInstall == completingDescriptor)
+                        {
+                            context.PendingOutboundSparsePumpInstall = null;
+                        }
+                    }
+                }
+
+                try
+                {
+                    completingCancellation?.Dispose();
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+
+                if (ReferenceEquals(pendingPumpInstallTask, completingTask))
+                {
+                    pendingPumpInstallTask = null;
+                    pendingPumpInstallCancellation = null;
+                    pendingPumpInstallDescriptor = null;
+                }
+
+                if (replacement is null)
+                {
+                    nextPumpInstallAttemptUtc = DateTimeOffset.UtcNow.AddMilliseconds(PullSessionReceivePollDelayMs);
+                    return null;
+                }
+
+                senderPumpInstall = replacement.Install;
+                senderRuntimeOwner = replacement.Install.RuntimeOwner;
+                senderPumpStream = replacement.Stream;
+                dataSession = replacement.DataSession;
+                senderPumpCancellation = replacement.Cancellation;
+                senderPumpTask = replacement.PumpTask;
+                nextPumpInstallAttemptUtc = DateTimeOffset.MinValue;
+                return replacement;
+            }
+
+            async Task RetirePendingReceiveAsync(string rejectionReason)
+            {
+                if (pendingReceiveTask is null)
+                {
+                    return;
+                }
+
+                var retiredReceiveTask = pendingReceiveTask;
+                var retiredReceiveCancellation = pendingReceiveCancellation;
+                var retiredReceiveInstall = pendingReceiveInstall;
+                var retiredReceiveDataSessionGeneration = pendingReceiveDataSessionGeneration;
+                try
+                {
+                    retiredReceiveCancellation?.Cancel();
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+
+                pendingReceiveTask = null;
+                pendingReceiveCancellation = null;
+                pendingReceiveInstall = null;
+                pendingReceiveRuntimeOwner = null;
+                pendingReceiveDataSession = null;
+                pendingReceiveDataSessionGeneration = 0;
+                await ObserveRetiredOutboundSparseReceiveAsync(
+                        context,
+                        retiredReceiveTask,
+                        retiredReceiveInstall,
+                        retiredReceiveDataSessionGeneration,
+                        retiredReceiveCancellation,
+                        rejectionReason)
+                    .ConfigureAwait(false);
+            }
+
+            void StartSessionGenerationReceiveIfNeeded()
+            {
+                if (pendingReceiveTask is not null)
+                {
+                    return;
+                }
+
+                IFileTransferDataSession? receiveDataSessionToStart = null;
+                OutboundSparsePumpInstall? receiveInstallToStart = null;
+                RuntimeOwnerToken? receiveRuntimeOwnerToStart = null;
+                long receiveDataSessionGenerationToStart = 0;
+                lock (gate)
+                {
+                    if (!ReferenceEquals(outboundTransfer, context) ||
+                        context.IsTerminal ||
+                        context.ActiveOutboundSparseReceiveSupervisorGeneration != receiveSupervisorGeneration ||
+                        context.DataSession is null ||
+                        context.DataSessionGeneration <= 0)
+                    {
+                        return;
+                    }
+
+                    receiveDataSessionToStart = context.DataSession;
+                    receiveDataSessionGenerationToStart = context.DataSessionGeneration;
+                    if (context.InstalledOutboundSparsePump is { } installedReceive &&
+                        IsOutboundSparsePumpInstallCurrentLocked(
+                            context,
+                            installedReceive,
+                            receiveDataSessionToStart,
+                            out _))
+                    {
+                        receiveInstallToStart = installedReceive;
+                    }
+                    else if (context.PendingOutboundSparsePumpInstall is { } pendingReceive &&
+                             IsOutboundSparsePumpInstallCurrentLocked(
+                                 context,
+                                 pendingReceive,
+                                 receiveDataSessionToStart,
+                                 out _))
+                    {
+                        receiveInstallToStart = pendingReceive;
+                    }
+
+                    receiveRuntimeOwnerToStart =
+                        receiveInstallToStart?.RuntimeOwner ?? context.CurrentRuntimeOwner;
+                }
+
+                var receiveCancellationToStart = CancellationTokenSource.CreateLinkedTokenSource(
+                    context.LifetimeCts.Token);
+                Task<FileTransferReceivedDataFrame> receiveTaskToStart;
+                try
+                {
+                    receiveTaskToStart = receiveDataSessionToStart
+                        .ReceiveWithMetadataAsync(receiveCancellationToStart.Token)
+                        .AsTask();
+                }
+                catch
+                {
+                    receiveCancellationToStart.Dispose();
+                    throw;
+                }
+
+                pendingReceiveInstall = receiveInstallToStart;
+                pendingReceiveRuntimeOwner = receiveRuntimeOwnerToStart;
+                pendingReceiveDataSession = receiveDataSessionToStart;
+                pendingReceiveDataSessionGeneration = receiveDataSessionGenerationToStart;
+                pendingReceiveCancellation = receiveCancellationToStart;
+                pendingReceiveTask = receiveTaskToStart;
+            }
+
             while (true)
             {
-                context.LifetimeCts.Token.ThrowIfCancellationRequested();
-                pendingReceiveTask ??= dataSession.ReceiveWithMetadataAsync(context.LifetimeCts.Token).AsTask();
-
-                var completed = await Task.WhenAny(
-                    pendingReceiveTask,
-                    senderPumpTask,
-                    Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token)).ConfigureAwait(false);
-                if (completed == senderPumpTask)
+                try
                 {
-                    if (isPrimaryRegularNknBulkV6)
+                context.LifetimeCts.Token.ThrowIfCancellationRequested();
+                IFileTransferDataSession? currentDataSession;
+                var pumpInstallCurrent = false;
+                var pendingInstallInvalidated = false;
+                var pendingReceiveInvalidated = false;
+                var pendingReceiveRejectionReason = "receive_install_replaced";
+                lock (gate)
+                {
+                    if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
+                    {
+                        receiveSupervisorStopReason = context.IsTerminal
+                            ? "transfer_terminal"
+                            : "transfer_context_replaced";
+                        return;
+                    }
+
+                    currentDataSession = context.DataSession;
+                    pumpInstallCurrent = senderPumpInstall is not null &&
+                        IsOutboundSparsePumpInstallCurrentLocked(
+                            context,
+                            senderPumpInstall,
+                            currentDataSession,
+                            out _);
+                    if (pendingPumpInstallTask is { IsCompleted: false } &&
+                        pendingPumpInstallDescriptor is not null &&
+                        !IsOutboundSparsePumpInstallCurrentLocked(
+                            context,
+                            pendingPumpInstallDescriptor,
+                            currentDataSession,
+                            out _))
+                    {
+                        pendingInstallInvalidated = true;
+                        if (context.PendingOutboundSparsePumpInstall == pendingPumpInstallDescriptor)
+                        {
+                            context.PendingOutboundSparsePumpInstall = null;
+                        }
+                    }
+
+                    if (pendingReceiveTask is not null &&
+                        !IsOutboundSparseReceiveSessionCurrentLocked(
+                            context,
+                            pendingReceiveDataSession,
+                            pendingReceiveDataSessionGeneration,
+                            receiveSupervisorGeneration,
+                            out pendingReceiveRejectionReason))
+                    {
+                        pendingReceiveInvalidated = true;
+                    }
+                }
+
+                if (pendingReceiveInvalidated)
+                {
+                    await RetirePendingReceiveAsync(pendingReceiveRejectionReason).ConfigureAwait(false);
+                }
+
+                if (pendingInstallInvalidated && pendingPumpInstallTask is not null)
+                {
+                    var retiredInstallTask = pendingPumpInstallTask;
+                    var retiredInstallCancellation = pendingPumpInstallCancellation;
+                    pendingPumpInstallTask = null;
+                    pendingPumpInstallCancellation = null;
+                    pendingPumpInstallDescriptor = null;
+                    try
+                    {
+                        retiredInstallCancellation?.Cancel();
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                    }
+
+                    _ = DisposeRetiredOutboundSparsePumpInstallAsync(
+                        context,
+                        receiveSupervisorGeneration,
+                        retiredInstallTask,
+                        retiredInstallCancellation);
+                    nextPumpInstallAttemptUtc = DateTimeOffset.MinValue;
+                }
+
+                if (currentDataSession is null)
+                {
+                    receiveSupervisorStopReason = "data_session_missing";
+                    return;
+                }
+
+                if (!ReferenceEquals(dataSession, currentDataSession))
+                {
+                    await RetirePendingReceiveAsync("data_session_replaced").ConfigureAwait(false);
+                    dataSession = currentDataSession;
+                    pumpInstallCurrent = false;
+                }
+
+                if (senderPumpTask is not null && !pumpInstallCurrent)
+                {
+                    StartCurrentPumpInstall(
+                        "coordinator_authority_handoff",
+                        reopenSource: true,
+                        previousPumpAlreadyObserved: false);
+                }
+
+                if (senderPumpTask is null && pendingPumpInstallTask is null)
+                {
+                    bool installRequired;
+                    lock (gate)
+                    {
+                        installRequired = ReferenceEquals(outboundTransfer, context) &&
+                            !context.IsTerminal &&
+                            (senderPumpInstall is null ||
+                             !IsOutboundSparsePumpInstallCurrentLocked(
+                                 context,
+                                 senderPumpInstall,
+                                 dataSession,
+                                 out _) ||
+                             HasOutboundSparsePumpWorkLocked(context));
+                    }
+
+                    if (installRequired)
+                    {
+                        StartCurrentPumpInstall(
+                            senderPumpInstall is null ? "initial_runtime" : "queued_sparse_runtime_work",
+                            reopenSource: senderPumpStream is null,
+                            previousPumpAlreadyObserved: true);
+                    }
+                }
+
+                StartSessionGenerationReceiveIfNeeded();
+
+                var pollTask = Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token);
+                var waitTasks = new List<Task>(4) { pollTask };
+                if (pendingReceiveTask is not null)
+                {
+                    waitTasks.Add(pendingReceiveTask);
+                }
+
+                if (pendingPumpInstallTask is not null)
+                {
+                    waitTasks.Add(pendingPumpInstallTask);
+                }
+
+                if (senderPumpTask is not null)
+                {
+                    waitTasks.Add(senderPumpTask);
+                }
+
+                var completed = await Task.WhenAny(waitTasks).ConfigureAwait(false);
+                if (pendingReceiveTask is { IsCompleted: true })
+                {
+                    completed = pendingReceiveTask;
+                }
+                else if (pendingPumpInstallTask is { IsCompleted: true })
+                {
+                    completed = pendingPumpInstallTask;
+                }
+                else if (senderPumpTask is { IsCompleted: true })
+                {
+                    completed = senderPumpTask;
+                }
+
+                if (pendingPumpInstallTask is not null && completed == pendingPumpInstallTask)
+                {
+                    await CompletePendingPumpInstallAsync().ConfigureAwait(false);
+                    continue;
+                }
+
+                if (senderPumpTask is not null && completed == senderPumpTask)
+                {
+                    if (IsCurrentPrimaryRegularNknBulkV6())
                     {
                         LogPrimaryRegularNknBulkV6State(context, PrimaryRegularNknBulkV6State.Finalizing, "sender_pump_completed");
                     }
 
+                    Exception? pumpFailure = null;
                     try
                     {
                         await senderPumpTask.ConfigureAwait(false);
                     }
-                    catch (OperationCanceledException ex) when (TryDeferOutboundPostTunaFallbackDataSessionCancellation(
-                               context,
-                               "sender_pump",
-                               ex))
+                    catch (Exception ex)
                     {
-                        senderPumpTask = RunOutboundV4SenderPumpAsync(context, stream, dataSession);
-                        pendingReceiveTask = null;
-                        continue;
+                        pumpFailure = ex;
                     }
-                    catch (OperationCanceledException ex) when (TryDeferOutboundRegularNknV4RecoveryTransportSendFailure(
-                               context,
-                               "sender_pump",
-                               ex))
+
+                    if (pumpFailure is OperationCanceledException && context.LifetimeCts.IsCancellationRequested)
                     {
-                        senderPumpTask = RunOutboundV4SenderPumpAsync(context, stream, dataSession);
-                        pendingReceiveTask = null;
-                        continue;
+                        receiveSupervisorStopReason = "lifetime_cancelled";
+                        return;
                     }
-                    catch (Exception ex) when (TryDeferOutboundPostTunaFallbackTransportSendFailure(
-                               context,
-                               "sender_pump",
-                               ex))
+
+                    var completedInstall = senderPumpInstall;
+                    bool completedInstallCurrent;
+                    lock (gate)
                     {
-                        senderPumpTask = RunOutboundV4SenderPumpAsync(context, stream, dataSession);
-                        pendingReceiveTask = null;
-                        continue;
+                        completedInstallCurrent = completedInstall is not null &&
+                            IsOutboundSparsePumpInstallCurrentLocked(
+                                context,
+                                completedInstall,
+                                dataSession,
+                                out _);
                     }
-                    catch (Exception ex) when (TryDeferOutboundRegularNknV4RecoveryTransportSendFailure(
-                               context,
-                               "sender_pump",
-                               ex))
+
+                    if (!completedInstallCurrent)
                     {
-                        senderPumpTask = RunOutboundV4SenderPumpAsync(context, stream, dataSession);
-                        pendingReceiveTask = null;
+                        StartCurrentPumpInstall(
+                            "stale_pump_completion",
+                            reopenSource: true,
+                            previousPumpAlreadyObserved: true);
                         continue;
                     }
 
-                    if (isPrimaryRegularNknBulkV6)
+                    if (pumpFailure is not null)
+                    {
+                        if (OutboundSparseFailureDeferralBarrierForTests is { } failureDeferralBarrier)
+                        {
+                            await failureDeferralBarrier(context.TransferId, context.SessionId).ConfigureAwait(false);
+                        }
+
+                        var deferred = pumpFailure switch
+                        {
+                            OperationCanceledException canceled =>
+                                TryDeferOutboundPostTunaFallbackDataSessionCancellationIfCurrent(
+                                    context,
+                                    "sender_pump",
+                                    canceled,
+                                    completedInstall,
+                                    dataSession) ||
+                                TryDeferOutboundRegularNknV4RecoveryTransportSendFailureIfCurrent(
+                                    context,
+                                    "sender_pump",
+                                    canceled,
+                                    completedInstall,
+                                    dataSession),
+                            _ => TryDeferOutboundPostTunaFallbackTransportSendFailureIfCurrent(
+                                     context,
+                                     "sender_pump",
+                                     pumpFailure,
+                                     completedInstall,
+                                     dataSession) ||
+                                 TryDeferOutboundRegularNknV4RecoveryTransportSendFailureIfCurrent(
+                                     context,
+                                     "sender_pump",
+                                     pumpFailure,
+                                     completedInstall,
+                                     dataSession),
+                        };
+                        if (deferred)
+                        {
+                            StartCurrentPumpInstall(
+                                "current_pump_recovery",
+                                reopenSource: true,
+                                previousPumpAlreadyObserved: true);
+                            continue;
+                        }
+
+                        var errorCode = ClassifyOutboundFailureErrorCode(pumpFailure, StreamReadFailedErrorCode);
+                        var failedCurrentPump = await FailOutboundV4Async(
+                                context,
+                                dataSession,
+                                completedInstall?.RuntimeOwner,
+                                errorCode,
+                                ClassifyOutboundFailureStatusMessage(pumpFailure, errorCode),
+                                notifyPeer: true,
+                                requiredSparsePumpInstall: completedInstall)
+                            .ConfigureAwait(false);
+                        if (!failedCurrentPump)
+                        {
+                            StartCurrentPumpInstall(
+                                "stale_pump_failure",
+                                reopenSource: true,
+                                previousPumpAlreadyObserved: true);
+                            continue;
+                        }
+
+                        receiveSupervisorStopReason = "current_pump_failed";
+                        return;
+                    }
+
+                    if (IsCurrentPrimaryRegularNknBulkV6())
                     {
                         FileTransferTransferState? terminalState;
                         lock (gate)
@@ -674,11 +2787,14 @@ public sealed partial class SessionFileTransferService
                     {
                         LocalOperationalLog.Info(
                             "FileTransferService",
-                            $"event=filetransfer_v4_receive_loop_kept_alive_after_sender_pump_completed; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.NegotiatedDataProtocolVersion}; reason=post_tuna_fallback_survival");
-                        senderPumpTask = Task.Delay(Timeout.InfiniteTimeSpan, CancellationToken.None);
+                            $"event=filetransfer_v4_receive_loop_kept_alive_after_sender_pump_completed; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.NegotiatedDataProtocolVersion}; reason=session_scoped_sparse_runtime");
+                        senderPumpTask = null;
+                        senderPumpCancellation?.Dispose();
+                        senderPumpCancellation = null;
                         continue;
                     }
 
+                    receiveSupervisorStopReason = "sender_pump_completed";
                     return;
                 }
 
@@ -707,7 +2823,7 @@ public sealed partial class SessionFileTransferService
 
                     if (feedbackStateRefreshRequest is not null)
                     {
-                        if (isPrimaryRegularNknBulkV6 &&
+                        if (IsCurrentPrimaryRegularNknBulkV6() &&
                             IsPrimaryRegularNknBulkV6CheckpointSyncRequest(feedbackStateRefreshRequest))
                         {
                             LogPrimaryRegularNknBulkV6State(context, PrimaryRegularNknBulkV6State.CheckpointSyncRequested, "feedback_stale");
@@ -718,15 +2834,20 @@ public sealed partial class SessionFileTransferService
                         }
                         else
                         {
-                            if (isPrimaryRegularNknBulkV6)
+                            if (IsCurrentPrimaryRegularNknBulkV6())
                             {
                                 LogPrimaryRegularNknBulkV6State(context, PrimaryRegularNknBulkV6State.StateRefreshRequested, "feedback_stale");
                             }
 
-                            QueueOutboundV4SparseRuntimeStateRefresh(
+                            QueueOutboundV4SparseRuntimeStateRefreshIfCurrent(
                                 context,
                                 dataSession,
-                                feedbackStateRefreshRequest);
+                                feedbackStateRefreshRequest,
+                                "state_refresh_send_queued",
+                                senderPumpInstall,
+                                senderPumpInstall?.RuntimeOwner,
+                                dataSession,
+                                senderPumpInstall?.DataSessionGeneration ?? 0);
                         }
                     }
 
@@ -734,52 +2855,364 @@ public sealed partial class SessionFileTransferService
                 }
 
                 FileTransferReceivedDataFrame received;
+                var completedReceiveInstall = pendingReceiveInstall;
+                var completedReceiveRuntimeOwner = pendingReceiveRuntimeOwner;
+                var completedReceiveDataSession = pendingReceiveDataSession;
+                var completedReceiveDataSessionGeneration = pendingReceiveDataSessionGeneration;
+                var completedReceiveCancellation = pendingReceiveCancellation;
                 try
                 {
                     received = await pendingReceiveTask.ConfigureAwait(false);
                 }
-                catch (OperationCanceledException ex) when (TryDeferOutboundPostTunaFallbackDataSessionCancellation(
-                           context,
-                           "receive_loop",
-                           ex))
+                catch (Exception ex)
                 {
                     pendingReceiveTask = null;
-                    await Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token).ConfigureAwait(false);
-                    continue;
+                    pendingReceiveCancellation = null;
+                    pendingReceiveInstall = null;
+                    pendingReceiveRuntimeOwner = null;
+                    pendingReceiveDataSession = null;
+                    pendingReceiveDataSessionGeneration = 0;
+                    try
+                    {
+                        completedReceiveCancellation?.Dispose();
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                    }
+                    if (ex is OperationCanceledException && context.LifetimeCts.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+
+                    bool receiveSessionCurrent;
+                    bool receiveAuthorityCurrent;
+                    RuntimeOwnerToken? currentReceiveRuntimeOwner;
+                    var receiveRejection = "accepted";
+                    lock (gate)
+                    {
+                        receiveSessionCurrent = ReferenceEquals(outboundTransfer, context) &&
+                            !context.IsTerminal &&
+                            ReferenceEquals(context.DataSession, completedReceiveDataSession) &&
+                            context.DataSessionGeneration == completedReceiveDataSessionGeneration;
+                        currentReceiveRuntimeOwner = ReferenceEquals(outboundTransfer, context)
+                            ? context.CurrentRuntimeOwner
+                            : null;
+                        receiveAuthorityCurrent = receiveSessionCurrent &&
+                            IsOutboundSparseReceiveResultCurrentLocked(
+                                context,
+                                completedReceiveInstall,
+                                completedReceiveRuntimeOwner,
+                                completedReceiveDataSession,
+                                completedReceiveDataSessionGeneration,
+                                out receiveRejection);
+                        if (!receiveSessionCurrent && string.Equals(receiveRejection, "accepted", StringComparison.Ordinal))
+                        {
+                            receiveRejection = context.IsTerminal
+                                ? "transfer_terminal"
+                                : !ReferenceEquals(context.DataSession, completedReceiveDataSession)
+                                    ? "data_session_replaced"
+                                    : "data_session_generation_mismatch";
+                        }
+                    }
+
+                    if (!receiveSessionCurrent)
+                    {
+                        LogOutboundSparsePumpInstallRejected(
+                            context,
+                            completedReceiveInstall,
+                            "receive_failure",
+                            receiveRejection);
+
+                        await Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    if (!receiveAuthorityCurrent)
+                    {
+                        if (completedReceiveRuntimeOwner is not null &&
+                            completedReceiveRuntimeOwner != currentReceiveRuntimeOwner)
+                        {
+                            var staleErrorCode = ClassifyOutboundFailureErrorCode(ex, StreamReadFailedErrorCode);
+                            await FailOutboundV4Async(
+                                    context,
+                                    completedReceiveDataSession,
+                                    completedReceiveRuntimeOwner,
+                                    staleErrorCode,
+                                    ClassifyOutboundFailureStatusMessage(ex, staleErrorCode),
+                                    notifyPeer: false)
+                                .ConfigureAwait(false);
+                        }
+                        else
+                        {
+                            LogOutboundSparsePumpInstallRejected(
+                                context,
+                                completedReceiveInstall,
+                                "receive_failure",
+                                receiveRejection);
+                        }
+
+                        await Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    if (OutboundSparseFailureDeferralBarrierForTests is { } failureDeferralBarrier)
+                    {
+                        await failureDeferralBarrier(context.TransferId, context.SessionId).ConfigureAwait(false);
+                    }
+
+                    var deferred = ex switch
+                    {
+                        OperationCanceledException canceled =>
+                            TryDeferOutboundPostTunaFallbackDataSessionCancellationIfCurrent(
+                                context,
+                                "receive_loop",
+                                canceled,
+                                completedReceiveInstall,
+                                completedReceiveDataSession) ||
+                            TryDeferOutboundRegularNknV4RecoveryTransportSendFailureIfCurrent(
+                                context,
+                                "receive_loop",
+                                canceled,
+                                completedReceiveInstall,
+                                completedReceiveDataSession),
+                        _ => TryDeferOutboundPostTunaFallbackTransportSendFailureIfCurrent(
+                                 context,
+                                 "receive_loop",
+                                 ex,
+                                 completedReceiveInstall,
+                                 completedReceiveDataSession) ||
+                             TryDeferOutboundRegularNknV4RecoveryTransportSendFailureIfCurrent(
+                                 context,
+                                 "receive_loop",
+                                 ex,
+                                 completedReceiveInstall,
+                                 completedReceiveDataSession),
+                    };
+                    if (deferred)
+                    {
+                        await Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    var errorCode = ClassifyOutboundFailureErrorCode(ex, StreamReadFailedErrorCode);
+                    var failedCurrentReceive = await FailOutboundV4Async(
+                            context,
+                            dataSession,
+                            completedReceiveRuntimeOwner ?? currentReceiveRuntimeOwner,
+                            errorCode,
+                            ClassifyOutboundFailureStatusMessage(ex, errorCode),
+                            notifyPeer: true,
+                            requiredSparsePumpInstall: completedReceiveInstall)
+                        .ConfigureAwait(false);
+                    if (!failedCurrentReceive)
+                    {
+                        await Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    receiveSupervisorStopReason = "current_receive_failed";
+                    return;
                 }
-                catch (Exception ex) when (TryDeferOutboundPostTunaFallbackTransportSendFailure(
-                           context,
-                           "receive_loop",
-                           ex))
+
+                if (OutboundSparseReceiveCompletionBarrierForTests is { } receiveCompletionBarrier)
                 {
-                    pendingReceiveTask = null;
-                    await Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token).ConfigureAwait(false);
-                    continue;
+                    await receiveCompletionBarrier(context.TransferId, context.SessionId).ConfigureAwait(false);
                 }
 
                 var frame = received.Frame;
                 pendingReceiveTask = null;
+                pendingReceiveCancellation = null;
+                pendingReceiveInstall = null;
+                pendingReceiveRuntimeOwner = null;
+                pendingReceiveDataSession = null;
+                pendingReceiveDataSessionGeneration = 0;
+                try
+                {
+                    completedReceiveCancellation?.Dispose();
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+                // Keep transport draining while a sender descriptor/source reopen is pending.
+                // Only the session/supervisor generation authorizes receive issuance; frame
+                // dispatch below still requires the exact current pending-or-installed tuple.
+                StartSessionGenerationReceiveIfNeeded();
+                bool receiveResultCurrent;
+                string receiveResultRejection;
+                lock (gate)
+                {
+                    receiveResultCurrent = IsOutboundSparseReceiveResultCurrentLocked(
+                        context,
+                        completedReceiveInstall,
+                        completedReceiveRuntimeOwner,
+                        completedReceiveDataSession,
+                        completedReceiveDataSessionGeneration,
+                        out receiveResultRejection);
+                    if (!receiveResultCurrent &&
+                        CanRebindOutboundSparseReceiveFrameAcrossInstall(frame) &&
+                        TryResolveOutboundSparseReceiveDispatchInstallLocked(
+                            context,
+                            completedReceiveDataSession,
+                            completedReceiveDataSessionGeneration,
+                            receiveSupervisorGeneration,
+                            out var dispatchInstall,
+                            out var dispatchRuntimeOwner,
+                            out receiveResultRejection))
+                    {
+                        receiveResultCurrent = true;
+                        completedReceiveInstall = dispatchInstall;
+                        completedReceiveRuntimeOwner = dispatchRuntimeOwner;
+                    }
+                }
+
+                if (!receiveResultCurrent &&
+                    CanRebindOutboundSparseReceiveFrameAcrossInstall(frame))
+                {
+                    StartCurrentPumpInstall(
+                        "frontier_receive_authority_gap",
+                        reopenSource: true,
+                        previousPumpAlreadyObserved: false);
+                    lock (gate)
+                    {
+                        var receiveSessionCurrent = IsOutboundSparseReceiveSessionCurrentLocked(
+                            context,
+                            completedReceiveDataSession,
+                            completedReceiveDataSessionGeneration,
+                            receiveSupervisorGeneration,
+                            out receiveResultRejection);
+                        if (receiveSessionCurrent &&
+                            TryResolveOutboundSparseReceiveDispatchInstallLocked(
+                                context,
+                                completedReceiveDataSession,
+                                completedReceiveDataSessionGeneration,
+                                receiveSupervisorGeneration,
+                                out var currentDispatchInstall,
+                                out var currentDispatchRuntimeOwner,
+                                out receiveResultRejection))
+                        {
+                            completedReceiveInstall = currentDispatchInstall;
+                            completedReceiveRuntimeOwner = currentDispatchRuntimeOwner;
+                            receiveResultCurrent = true;
+                        }
+                    }
+                }
+
+                if (!receiveResultCurrent)
+                {
+                    LogOutboundSparsePumpInstallRejected(
+                        context,
+                        completedReceiveInstall,
+                        "receive_result",
+                        receiveResultRejection);
+                    LogPullDataFrameIgnored(
+                        context.TransferId,
+                        context.SessionId,
+                        frame,
+                        "stale_outbound_sparse_receive_descriptor");
+                    continue;
+                }
+
                 LogPullDataFrameReceived(context.TransferId, context.SessionId, frame);
+
                 if (!IsFrameForContext(context, frame))
                 {
                     LogPullDataFrameIgnored(context.TransferId, context.SessionId, frame, "session_or_transfer_mismatch_v4");
                     continue;
                 }
 
-                if (await TryHandleRuntimeUnlockPreCommitProbeDataFrameAsync(
-                        context.SessionId,
-                        context.TransferId,
-                        FileTransferDirection.Outbound,
-                        frame,
-                        received.TransportKind,
-                        dataSession).ConfigureAwait(false))
+                if (frame is FileTransferRuntimeUnlockPreCommitProbeFrame or
+                    FileTransferRuntimeUnlockPreCommitProbeAckFrame)
                 {
+                    if (completedReceiveInstall is null ||
+                        completedReceiveRuntimeOwner is not { } receiveRuntimeOwner ||
+                        completedReceiveDataSession is not { } receiveDataSession)
+                    {
+                        LogOutboundSparsePumpInstallRejected(
+                            context,
+                            completedReceiveInstall,
+                            "precommit_probe_receive",
+                            "receive_authority_missing");
+                        LogRuntimeUnlockPreCommitProbeIgnored(
+                            FileTransferDirection.Outbound,
+                            context.TransferId,
+                            context.SessionId,
+                            (FileTransferRuntimeUnlockPreCommitProbeFrameBase)frame,
+                            received.TransportKind,
+                            "stale_outbound_sparse_receive_authority_missing");
+                        continue;
+                    }
+
+                    await TryHandleOutboundSparseRuntimeUnlockPreCommitProbeDataFrameAsync(
+                            context.SessionId,
+                            context.TransferId,
+                            frame,
+                            received.TransportKind,
+                            receiveDataSession,
+                            context,
+                            completedReceiveInstall,
+                            receiveRuntimeOwner,
+                            completedReceiveDataSessionGeneration,
+                            receiveSupervisorGeneration)
+                        .ConfigureAwait(false);
+                    continue;
+                }
+
+                if (OutboundSparseReceiveDispatchBarrierForTests is { } receiveDispatchBarrier)
+                {
+                    await receiveDispatchBarrier(context.TransferId, context.SessionId).ConfigureAwait(false);
+                }
+
+                lock (gate)
+                {
+                    receiveResultCurrent = IsOutboundSparseReceiveResultCurrentLocked(
+                        context,
+                        completedReceiveInstall,
+                        completedReceiveRuntimeOwner,
+                        completedReceiveDataSession,
+                        completedReceiveDataSessionGeneration,
+                        out receiveResultRejection);
+                    if (!receiveResultCurrent &&
+                        CanRebindOutboundSparseReceiveFrameAcrossInstall(frame) &&
+                        TryResolveOutboundSparseReceiveDispatchInstallLocked(
+                            context,
+                            completedReceiveDataSession,
+                            completedReceiveDataSessionGeneration,
+                            receiveSupervisorGeneration,
+                            out var dispatchInstall,
+                            out var dispatchRuntimeOwner,
+                            out receiveResultRejection))
+                    {
+                        receiveResultCurrent = true;
+                        completedReceiveInstall = dispatchInstall;
+                        completedReceiveRuntimeOwner = dispatchRuntimeOwner;
+                    }
+                }
+
+                if (!receiveResultCurrent)
+                {
+                    LogOutboundSparsePumpInstallRejected(
+                        context,
+                        completedReceiveInstall,
+                        "receive_dispatch",
+                        receiveResultRejection);
+                    LogPullDataFrameIgnored(
+                        context.TransferId,
+                        context.SessionId,
+                        frame,
+                        "stale_outbound_sparse_receive_dispatch");
                     continue;
                 }
 
                 if (!ShouldAcceptSparseCreditRuntimeDataFrame(context, frame))
                 {
-                    if (TryPromoteOutboundFileTunaV4FallbackFromPeerV6Proof(context, frame, out var promotedSnapshot) &&
+                    if (TryPromoteOutboundFileTunaV4FallbackFromPeerV6Proof(
+                            context,
+                            frame,
+                            out var promotedSnapshot,
+                            completedReceiveInstall,
+                            completedReceiveRuntimeOwner,
+                            completedReceiveDataSession,
+                            completedReceiveDataSessionGeneration) &&
                         promotedSnapshot is not null)
                     {
                         RaiseTransferChanged(promotedSnapshot);
@@ -795,6 +3228,13 @@ public sealed partial class SessionFileTransferService
                         {
                             if (ReferenceEquals(outboundTransfer, context) &&
                                 !context.IsTerminal &&
+                                IsOutboundSparseReceiveResultCurrentLocked(
+                                    context,
+                                    completedReceiveInstall,
+                                    completedReceiveRuntimeOwner,
+                                    completedReceiveDataSession,
+                                    completedReceiveDataSessionGeneration,
+                                    out _) &&
                                 TryRecoverOutboundV6RegularNknEpochFromLegacyV4PeerStateLocked(
                                     context,
                                     legacyState,
@@ -809,21 +3249,42 @@ public sealed partial class SessionFileTransferService
                     if (legacyProofSnapshot is not null)
                     {
                         RaiseTransferChanged(legacyProofSnapshot);
-                        TouchOutboundV6PeerLiveness(context, "regular_nkn_legacy_v4_state_proof");
-                        SignalOutboundSparseSenderPump(context);
+                        TouchOutboundV6PeerLiveness(
+                            context,
+                            "regular_nkn_legacy_v4_state_proof",
+                            completedReceiveInstall,
+                            completedReceiveRuntimeOwner,
+                            completedReceiveDataSession,
+                            completedReceiveDataSessionGeneration);
+                        SignalOutboundSparseSenderPump(
+                            context,
+                            completedReceiveInstall,
+                            completedReceiveRuntimeOwner,
+                            completedReceiveDataSession,
+                            completedReceiveDataSessionGeneration);
                     }
 
                     LogPullDataFrameIgnored(
                         context.TransferId,
                         context.SessionId,
                         frame,
-                        useV6Envelope ? "protocol_not_v6" : "protocol_not_v4");
+                        completedReceiveInstall!.RoutePublication.ProtocolVersion >= FileTransferProtocol.ProtocolVersionV6
+                            ? "protocol_not_v6"
+                            : "protocol_not_v4");
                     continue;
                 }
 
                 lock (gate)
                 {
-                    if (ReferenceEquals(outboundTransfer, context) && !context.IsTerminal)
+                    if (ReferenceEquals(outboundTransfer, context) &&
+                        !context.IsTerminal &&
+                        IsOutboundSparseReceiveResultCurrentLocked(
+                            context,
+                            completedReceiveInstall,
+                            completedReceiveRuntimeOwner,
+                            completedReceiveDataSession,
+                            completedReceiveDataSessionGeneration,
+                            out _))
                     {
                         var now = DateTimeOffset.UtcNow;
                         context.PullV4LastPeerFrameReceivedUtc = now;
@@ -833,7 +3294,7 @@ public sealed partial class SessionFileTransferService
                         if (frame is FileTransferReceiverStateFrameV6)
                         {
                             context.V6RegularNknStateRefreshFailureCount = 0;
-                            if (isPrimaryRegularNknBulkV6)
+                            if (IsCurrentPrimaryRegularNknBulkV6())
                             {
                                 context.V6RegularNknCheckpointSyncFailureCount = 0;
                             }
@@ -844,18 +3305,51 @@ public sealed partial class SessionFileTransferService
                 switch (frame)
                 {
                     case FileTransferTransportEpochFrameV6 handoff:
-                        ApplyOutboundV6HandoffFrame(context, handoff);
-                        SignalOutboundSparseSenderPump(context);
+                        ApplyOutboundV6HandoffFrame(context, handoff, completedReceiveInstall, completedReceiveRuntimeOwner, completedReceiveDataSession, completedReceiveDataSessionGeneration);
+                        SignalOutboundSparseSenderPump(context, completedReceiveInstall, completedReceiveRuntimeOwner, completedReceiveDataSession, completedReceiveDataSessionGeneration);
                         break;
                     case FileTransferFrontierRequestFrameV6 repairRequest:
-                        ApplyOutboundV6RepairRequestCore(context, repairRequest, received.TransportKind);
-                        SignalOutboundSparseSenderPump(context);
+                        if (OutboundSparseFrontierApplyBarrierForTests is { } frontierApplyBarrier)
+                        {
+                            await frontierApplyBarrier(context.TransferId, context.SessionId).ConfigureAwait(false);
+                        }
+
+                        ApplyOutboundV6RepairRequestCore(
+                            context,
+                            repairRequest,
+                            received.TransportKind,
+                            completedReceiveInstall,
+                            completedReceiveRuntimeOwner,
+                            completedReceiveDataSession,
+                            completedReceiveDataSessionGeneration,
+                            receiveSupervisorGeneration);
                         break;
                     case FileTransferRepairProofFrameV6 repairProof:
-                        ApplyOutboundV6RepairProof(context, repairProof);
-                        SignalOutboundSparseSenderPump(context);
+                        ApplyOutboundV6RepairProof(context, repairProof, completedReceiveInstall, completedReceiveRuntimeOwner, completedReceiveDataSession, completedReceiveDataSessionGeneration);
+                        SignalOutboundSparseSenderPump(context, completedReceiveInstall, completedReceiveRuntimeOwner, completedReceiveDataSession, completedReceiveDataSessionGeneration);
                         break;
                     case FileTransferTransportProbeFrameV6 probe:
+                        lock (gate)
+                        {
+                            receiveResultCurrent = IsOutboundSparseReceiveResultCurrentLocked(
+                                context,
+                                completedReceiveInstall,
+                                completedReceiveRuntimeOwner,
+                                completedReceiveDataSession,
+                                completedReceiveDataSessionGeneration,
+                                out receiveResultRejection);
+                        }
+
+                        if (!receiveResultCurrent)
+                        {
+                            LogOutboundSparsePumpInstallRejected(
+                                context,
+                                completedReceiveInstall,
+                                "probe_ack_dispatch",
+                                receiveResultRejection);
+                            break;
+                        }
+
                         await HandleReceivedV6TransportProbeFrameAsync(
                             context.SessionId,
                             context.TransferId,
@@ -864,14 +3358,14 @@ public sealed partial class SessionFileTransferService
                             received.TransportKind).ConfigureAwait(false);
                         break;
                     case FileTransferFallbackTailYieldFrameV6 yield:
-                        ApplyOutboundFallbackTailYieldProof(context, yield);
+                        ApplyOutboundFallbackTailYieldProof(context, yield, completedReceiveInstall, completedReceiveRuntimeOwner, completedReceiveDataSession, completedReceiveDataSessionGeneration);
                         break;
                     case FileTransferPauseControlFrameV4 pauseControl:
                         LogPullDataFrameIgnored(context.TransferId, context.SessionId, pauseControl, "lifecycle_data_frame_ignored_phase2");
                         break;
                     case FileTransferStateFrameV4 state:
-                        ApplyOutboundV4State(context, state);
-                        if (isPrimaryRegularNknBulkV6 &&
+                        await ApplyOutboundV4StateAsync(context, state, completedReceiveInstall, completedReceiveRuntimeOwner, completedReceiveDataSession, completedReceiveDataSessionGeneration).ConfigureAwait(false);
+                        if (IsCurrentPrimaryRegularNknBulkV6() &&
                             state is FileTransferReceiverStateFrameV6)
                         {
                             if (state is FileTransferReceiverStateFrameV6 receiverState &&
@@ -884,10 +3378,16 @@ public sealed partial class SessionFileTransferService
                             LogPrimaryRegularNknBulkV6State(context, PrimaryRegularNknBulkV6State.SendingBulk, "receiver_state");
                         }
 
-                        SignalOutboundSparseSenderPump(context);
+                        SignalOutboundSparseSenderPump(context, completedReceiveInstall, completedReceiveRuntimeOwner, completedReceiveDataSession, completedReceiveDataSessionGeneration);
                         break;
                     case FileTransferCompleteFrameV4 complete:
-                        if (await TryHandleOutboundLifecycleCompleteDataFrameAsync(context, complete).ConfigureAwait(false))
+                        if (await TryHandleOutboundLifecycleCompleteDataFrameAsync(
+                                context,
+                                complete,
+                                completedReceiveInstall,
+                                completedReceiveRuntimeOwner,
+                                completedReceiveDataSession,
+                                completedReceiveDataSessionGeneration).ConfigureAwait(false))
                         {
                             return;
                         }
@@ -902,19 +3402,31 @@ public sealed partial class SessionFileTransferService
                         LocalOperationalLog.Info(
                             "FileTransferService",
                             $"event=filetransfer_lifecycle_priority_received; kind=cancel; transfer_id={context.TransferId}; session_id={context.SessionId}; direction=outbound; reason={FormatProtocolLogValue(reason ?? CanceledReason)}; path=redundant_data_frame");
-                        await TransitionOutboundToTerminalAsync(
+                        var canceledCurrentReceive = await TransitionOutboundToTerminalAsync(
                                 context,
                                 FileTransferTransferState.Canceled,
                                 errorCode: FileTransferResultCodes.CanceledRemote,
                                 statusMessage: reason ?? "Transfer canceled by peer.",
                                 notifyPeer: false,
                                 cancelReason: null,
-                                ct: CancellationToken.None)
+                                ct: CancellationToken.None,
+                                requiredSparsePumpInstall: completedReceiveInstall)
                             .ConfigureAwait(false);
-                        return;
+                        if (canceledCurrentReceive)
+                        {
+                            return;
+                        }
+
+                        break;
                     }
                     case FileTransferErrorFrameV4 error:
-                        if (await TryHandleOutboundLifecycleErrorDataFrameAsync(context, error).ConfigureAwait(false))
+                        if (await TryHandleOutboundLifecycleErrorDataFrameAsync(
+                                context,
+                                error,
+                                completedReceiveInstall,
+                                completedReceiveRuntimeOwner,
+                                completedReceiveDataSession,
+                                completedReceiveDataSessionGeneration).ConfigureAwait(false))
                         {
                             return;
                         }
@@ -927,47 +3439,347 @@ public sealed partial class SessionFileTransferService
                         LogPullDataFrameIgnored(context.TransferId, context.SessionId, frame, "unexpected_outbound_frame_v4");
                         break;
                 }
+                }
+                catch (OperationCanceledException) when (context.LifetimeCts.IsCancellationRequested)
+                {
+                    receiveSupervisorStopReason = "lifetime_cancelled";
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    var failedInstall = pendingReceiveInstall ?? senderPumpInstall;
+                    var failedDataSession = pendingReceiveDataSession ?? dataSession;
+                    var failureCurrent = false;
+                    lock (gate)
+                    {
+                        failureCurrent = failedInstall is not null &&
+                            failedDataSession is not null &&
+                            IsOutboundSparsePumpInstallCurrentLocked(
+                                context,
+                                failedInstall,
+                                failedDataSession,
+                                out _);
+                    }
+
+                    if (failureCurrent &&
+                        OutboundSparseFailureDeferralBarrierForTests is { } failureDeferralBarrier)
+                    {
+                        await failureDeferralBarrier(context.TransferId, context.SessionId).ConfigureAwait(false);
+                    }
+
+                    if (failureCurrent &&
+                        (TryDeferOutboundPostTunaFallbackTransportSendFailureIfCurrent(
+                             context,
+                             "outbound_supervisor_iteration",
+                             ex,
+                             failedInstall,
+                             failedDataSession) ||
+                         TryDeferOutboundRegularNknV4RecoveryTransportSendFailureIfCurrent(
+                             context,
+                             "outbound_supervisor_iteration",
+                             ex,
+                             failedInstall,
+                             failedDataSession)))
+                    {
+                        StartCurrentPumpInstall(
+                            "current_transport_failure_deferred",
+                            reopenSource: true,
+                            previousPumpAlreadyObserved: false);
+                        continue;
+                    }
+
+                    var errorCode = ClassifyOutboundFailureErrorCode(ex, StreamReadFailedErrorCode);
+                    var failedCurrentInstall = await FailOutboundV4Async(
+                            context,
+                            failedDataSession,
+                            failedInstall?.RuntimeOwner,
+                            errorCode,
+                            ClassifyOutboundFailureStatusMessage(ex, errorCode),
+                            notifyPeer: true,
+                            requiredSparsePumpInstall: failedInstall)
+                        .ConfigureAwait(false);
+                    if (failedCurrentInstall)
+                    {
+                        receiveSupervisorStopReason = "current_outer_failure";
+                        return;
+                    }
+
+                    LogOutboundSparsePumpInstallRejected(
+                        context,
+                        failedInstall,
+                        "supervisor_iteration_failure",
+                        "install_invalidated");
+                    StartCurrentPumpInstall(
+                        "stale_outer_failure",
+                        reopenSource: true,
+                        previousPumpAlreadyObserved: false);
+                }
             }
         }
         catch (OperationCanceledException) when (context.LifetimeCts.IsCancellationRequested)
         {
-            if (isPrimaryRegularNknBulkV6)
+            receiveSupervisorStopReason = "lifetime_cancelled";
+            if (IsCurrentPrimaryRegularNknBulkV6())
             {
                 LogPrimaryRegularNknBulkV6State(context, PrimaryRegularNknBulkV6State.Cancelled, "lifetime_cancelled");
             }
         }
         catch (Exception ex)
         {
-            if (isPrimaryRegularNknBulkV6)
+            if (IsCurrentPrimaryRegularNknBulkV6())
             {
                 LogPrimaryRegularNknBulkV6State(context, PrimaryRegularNknBulkV6State.Failed, "exception");
             }
 
-            if (TryDeferOutboundPostTunaFallbackTransportSendFailure(context, "outbound_loop", ex))
+            var failedInstall = senderPumpInstall ?? startupPumpInstall;
+            var failureCurrent = false;
+            lock (gate)
             {
-                return;
+                failureCurrent = failedInstall is not null &&
+                    dataSession is not null &&
+                    IsOutboundSparsePumpInstallCurrentLocked(
+                        context,
+                        failedInstall,
+                        dataSession,
+                        out _);
             }
 
-            if (TryDeferOutboundRegularNknV4RecoveryTransportSendFailure(context, "outbound_loop", ex))
+            if (failureCurrent &&
+                OutboundSparseFailureDeferralBarrierForTests is { } failureDeferralBarrier)
             {
-                return;
+                await failureDeferralBarrier(context.TransferId, context.SessionId).ConfigureAwait(false);
             }
 
-            var errorCode = ClassifyOutboundFailureErrorCode(ex, StreamReadFailedErrorCode);
-            await FailOutboundV4Async(
-                context,
-                dataSession,
-                senderRuntimeOwner,
-                errorCode,
-                ClassifyOutboundFailureStatusMessage(ex, errorCode),
-                notifyPeer: true).ConfigureAwait(false);
+            if (failureCurrent &&
+                (TryDeferOutboundPostTunaFallbackTransportSendFailureIfCurrent(
+                     context,
+                     "outbound_loop",
+                     ex,
+                     failedInstall,
+                     dataSession) ||
+                 TryDeferOutboundRegularNknV4RecoveryTransportSendFailureIfCurrent(
+                     context,
+                     "outbound_loop",
+                     ex,
+                     failedInstall,
+                     dataSession)))
+            {
+                receiveSupervisorStopReason = "outer_failure_deferred";
+                restartSupervisorAfterCleanup = true;
+            }
+            else
+            {
+                var errorCode = ClassifyOutboundFailureErrorCode(ex, StreamReadFailedErrorCode);
+                var failedCurrentInstall = await FailOutboundV4Async(
+                        context,
+                        dataSession,
+                        failedInstall?.RuntimeOwner ?? senderRuntimeOwner,
+                        errorCode,
+                        ClassifyOutboundFailureStatusMessage(ex, errorCode),
+                        notifyPeer: true,
+                        requiredSparsePumpInstall: failedInstall)
+                    .ConfigureAwait(false);
+                receiveSupervisorStopReason = failedCurrentInstall
+                    ? "outer_failure"
+                    : "outer_failure_install_invalidated";
+                restartSupervisorAfterCleanup = !failedCurrentInstall;
+            }
         }
+        finally
+        {
+            if (pendingReceiveTask is not null)
+            {
+                try
+                {
+                    pendingReceiveCancellation?.Cancel();
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+
+                await ObserveRetiredOutboundSparseReceiveAsync(
+                        context,
+                        pendingReceiveTask,
+                        pendingReceiveInstall,
+                        pendingReceiveDataSessionGeneration,
+                        pendingReceiveCancellation)
+                    .ConfigureAwait(false);
+                pendingReceiveTask = null;
+                pendingReceiveCancellation = null;
+            }
+
+            if (receiveSupervisorGeneration > 0)
+            {
+                lock (gate)
+                {
+                    if (ReferenceEquals(outboundTransfer, context) &&
+                        context.ActiveOutboundSparseReceiveSupervisorGeneration == receiveSupervisorGeneration)
+                    {
+                        context.ActiveOutboundSparseReceiveSupervisorGeneration = 0;
+                        context.PendingOutboundSparsePumpInstall = null;
+                        if (context.IsTerminal)
+                        {
+                            context.InstalledOutboundSparsePump = null;
+                        }
+                    }
+                }
+            }
+
+            if (pendingPumpInstallTask is not null)
+            {
+                try
+                {
+                    pendingPumpInstallCancellation?.Cancel();
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+
+                _ = DisposeRetiredOutboundSparsePumpInstallAsync(
+                    context,
+                    receiveSupervisorGeneration,
+                    pendingPumpInstallTask,
+                    pendingPumpInstallCancellation);
+                pendingPumpInstallTask = null;
+                pendingPumpInstallCancellation = null;
+                pendingPumpInstallDescriptor = null;
+            }
+
+            try
+            {
+                senderPumpCancellation?.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+
+            if (senderPumpTask is not null &&
+                senderPumpStream is not null &&
+                senderPumpCancellation is not null)
+            {
+                _ = DisposeRetiredOutboundSparsePumpAsync(
+                    senderPumpTask,
+                    senderPumpStream,
+                    senderPumpCancellation);
+                senderPumpTask = null;
+                senderPumpStream = null;
+                senderPumpCancellation = null;
+            }
+
+            if (senderPumpStream is not null)
+            {
+                await DisposeOutboundSparsePumpStreamDiagnosticOnlyAsync(senderPumpStream).ConfigureAwait(false);
+            }
+
+            try
+            {
+                senderPumpCancellation?.Dispose();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+            if (receiveSupervisorGeneration > 0)
+            {
+                string tuple;
+                var terminal = false;
+                lock (gate)
+                {
+                    terminal = !ReferenceEquals(outboundTransfer, context) || context.IsTerminal;
+                    tuple = senderPumpInstall is null
+                        ? $"install_generation=0; predecessor_install_generation=0; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; direction=outbound; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}; runtime_generation={context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; terminal_generation={context.TerminalGeneration}; data_session_generation={context.DataSessionGeneration}"
+                        : FormatOutboundSparsePumpInstallTuple(senderPumpInstall);
+                }
+
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=filetransfer_outbound_sparse_receive_supervisor_stopped; {tuple}; receive_supervisor_generation={receiveSupervisorGeneration}; terminal={(terminal ? 1 : 0)}; decision_reason={FormatProtocolLogValue(receiveSupervisorStopReason)}");
+            }
+        }
+
+        if (restartSupervisorAfterCleanup)
+        {
+            var restartAuthorized = false;
+            lock (gate)
+            {
+                restartAuthorized = ReferenceEquals(outboundTransfer, context) &&
+                    !context.IsTerminal &&
+                    SupportsOutboundSparsePumpInstall(context) &&
+                    context.DataSession is not null &&
+                    context.DataSessionGeneration > 0;
+            }
+
+            if (restartAuthorized)
+            {
+                _ = Task.Run(
+                    async () =>
+                    {
+                        try
+                        {
+                            await Task.Delay(
+                                    PullSessionReceivePollDelayMs,
+                                    context.LifetimeCts.Token)
+                                .ConfigureAwait(false);
+                            await RunOutboundSparseCreditSenderAsync(context, runtimeKind).ConfigureAwait(false);
+                        }
+                        catch (OperationCanceledException) when (context.LifetimeCts.IsCancellationRequested)
+                        {
+                        }
+                        catch (Exception restartException)
+                        {
+                            LocalOperationalLog.Warn(
+                                "FileTransferService",
+                                $"event=filetransfer_outbound_sparse_worker_handoff_rejected; install_generation=0; predecessor_install_generation=0; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; direction=outbound; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}; stage=receive_supervisor_restart; decision_reason=restart_failed; error={FormatProtocolLogValue(restartException.GetType().Name)}; message={FormatProtocolLogValue(restartException.Message)}");
+                        }
+                    },
+                    CancellationToken.None);
+            }
+        }
+
+    }
+
+    private static FileTransferReceiveRecoveryRequest AttachOutboundSparsePumpInstallRecoveryAuthorityLocked(
+        OutboundTransferContext context,
+        OutboundSparsePumpInstall? install,
+        FileTransferReceiveRecoveryRequest request,
+        string authorityReason)
+    {
+        if (install is null)
+        {
+            return AttachFallbackLegAuthority(context, request, authorityReason);
+        }
+
+        var publication = install.RoutePublication;
+        var leg = context.CurrentTransferLeg;
+        return request with
+        {
+            RouteToken = publication.RouteToken,
+            ProtocolVersion = publication.ProtocolVersion,
+            LiveRouteEpoch = publication.LiveRouteEpoch,
+            TransferLegGeneration = install.LegGeneration,
+            BridgeRecoveryGeneration = leg?.BridgeRecoveryGeneration ?? 0,
+            TransportEpoch = leg?.TransportEpochId ?? 0,
+            CheckpointRequestId = leg?.CheckpointRequestId,
+            AuthorityReason = authorityReason,
+        };
     }
 
     private bool TryDeferOutboundPostTunaFallbackDataSessionCancellation(
         OutboundTransferContext context,
         string source,
         OperationCanceledException ex)
+        => TryDeferOutboundPostTunaFallbackDataSessionCancellationIfCurrent(
+            context,
+            source,
+            ex,
+            requiredInstall: null,
+            requiredDataSession: null);
+
+    private bool TryDeferOutboundPostTunaFallbackDataSessionCancellationIfCurrent(
+        OutboundTransferContext context,
+        string source,
+        OperationCanceledException ex,
+        OutboundSparsePumpInstall? requiredInstall,
+        IFileTransferDataSession? requiredDataSession)
     {
         SessionFileTransferSnapshot? snapshot;
         var now = DateTimeOffset.UtcNow;
@@ -976,6 +3788,12 @@ public sealed partial class SessionFileTransferService
             if (!ReferenceEquals(outboundTransfer, context) ||
                 context.IsTerminal ||
                 context.LifetimeCts.IsCancellationRequested ||
+                (requiredInstall is not null &&
+                 !IsOutboundSparsePumpInstallCurrentLocked(
+                     context,
+                     requiredInstall,
+                     requiredDataSession,
+                     out _)) ||
                 !IsOutboundPostTunaFallbackV6LiveSparseRecoveryActiveLocked(context))
             {
                 return false;
@@ -1001,7 +3819,12 @@ public sealed partial class SessionFileTransferService
             "FileTransferService",
             $"event=filetransfer_post_tuna_fallback_data_session_cancellation_deferred; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; source={FormatProtocolLogValue(source)}; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}; recovery_active={(context.PullPostTunaRecoveryActive ? 1 : 0)}; rebind_generation={context.PullTransportRebindGeneration}; transport_paused={(context.PullTransportPaused ? 1 : 0)}; error={FormatProtocolLogValue(ex.GetType().Name)}");
         RaiseTransferChanged(snapshot);
-        SignalOutboundSparseSenderPump(context);
+        SignalOutboundSparseSenderPump(
+            context,
+            requiredInstall,
+            requiredInstall?.RuntimeOwner,
+            requiredDataSession,
+            requiredInstall?.DataSessionGeneration ?? 0);
         return true;
     }
 
@@ -1009,6 +3832,19 @@ public sealed partial class SessionFileTransferService
         OutboundTransferContext context,
         string source,
         Exception ex)
+        => TryDeferOutboundRegularNknV4RecoveryTransportSendFailureIfCurrent(
+            context,
+            source,
+            ex,
+            requiredInstall: null,
+            requiredDataSession: null);
+
+    private bool TryDeferOutboundRegularNknV4RecoveryTransportSendFailureIfCurrent(
+        OutboundTransferContext context,
+        string source,
+        Exception ex,
+        OutboundSparsePumpInstall? requiredInstall,
+        IFileTransferDataSession? requiredDataSession)
     {
         if (!IsRecoverableRegularNknV4RecoveryTransportSendException(ex))
         {
@@ -1016,6 +3852,7 @@ public sealed partial class SessionFileTransferService
         }
 
         SessionFileTransferSnapshot? snapshot;
+        FileTransferReceiveRecoveryRequest recoveryRequest;
         var now = DateTimeOffset.UtcNow;
         var recoveryReason = "regular_v4_receive_stall_recovery_send_failure";
         lock (gate)
@@ -1023,6 +3860,12 @@ public sealed partial class SessionFileTransferService
             if (!ReferenceEquals(outboundTransfer, context) ||
                 context.IsTerminal ||
                 context.LifetimeCts.IsCancellationRequested ||
+                (requiredInstall is not null &&
+                 !IsOutboundSparsePumpInstallCurrentLocked(
+                     context,
+                     requiredInstall,
+                     requiredDataSession,
+                     out _)) ||
                 !IsOutboundRegularNknV4RecoverySendDeferrableLocked(context))
             {
                 return false;
@@ -1043,25 +3886,37 @@ public sealed partial class SessionFileTransferService
             context.V6SenderPumpLastWakeReason = "regular_v4_receive_stall_recovery_send_failure";
             MaybeQueueOutboundRegularNknV4PeerSilenceSafetyReplayLocked(context, recoveryReason);
             snapshot = CreateSnapshotLocked();
+            recoveryRequest = AttachOutboundSparsePumpInstallRecoveryAuthorityLocked(
+                context,
+                requiredInstall,
+                new FileTransferReceiveRecoveryRequest(
+                    context.SessionId,
+                    context.TransferId,
+                    FileTransferDirection.Outbound,
+                    recoveryReason)
+                {
+                    RouteToken = FileTransferRouteResolver.RegularNknV4FastToken,
+                    ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    AuthorityReason = recoveryReason,
+                },
+                recoveryReason);
         }
 
-        TryRequestFileTransferReceiveRecovery(
-            new FileTransferReceiveRecoveryRequest(
-                context.SessionId,
-                context.TransferId,
-                FileTransferDirection.Outbound,
-                recoveryReason)
-            {
-                RouteToken = FileTransferRouteResolver.RegularNknV4FastToken,
-                ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
-                AuthorityReason = recoveryReason,
-            });
+        TryRequestFileTransferReceiveRecoveryIfCurrent(
+            recoveryRequest,
+            requiredInstall,
+            requiredDataSession);
 
         LocalOperationalLog.Warn(
             "FileTransferService",
             $"event=filetransfer_regular_v4_recovery_transport_send_failure_deferred; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; source={FormatProtocolLogValue(source)}; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}; reason={FormatProtocolLogValue(recoveryReason)}; remote_next_expected_chunk_index={context.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}; transport_paused={(context.PullTransportPaused ? 1 : 0)}; error={FormatProtocolLogValue(ex.GetType().Name)}; message={FormatProtocolLogValue(ex.Message)}");
         RaiseTransferChanged(snapshot);
-        SignalOutboundSparseSenderPump(context);
+        SignalOutboundSparseSenderPump(
+            context,
+            requiredInstall,
+            requiredInstall?.RuntimeOwner,
+            requiredDataSession,
+            requiredInstall?.DataSessionGeneration ?? 0);
         return true;
     }
 
@@ -1107,6 +3962,19 @@ public sealed partial class SessionFileTransferService
         OutboundTransferContext context,
         string source,
         Exception ex)
+        => TryDeferOutboundPostTunaFallbackTransportSendFailureIfCurrent(
+            context,
+            source,
+            ex,
+            requiredInstall: null,
+            requiredDataSession: null);
+
+    private bool TryDeferOutboundPostTunaFallbackTransportSendFailureIfCurrent(
+        OutboundTransferContext context,
+        string source,
+        Exception ex,
+        OutboundSparsePumpInstall? requiredInstall,
+        IFileTransferDataSession? requiredDataSession)
     {
         if (!IsRecoverablePostTunaFallbackTransportSendException(ex))
         {
@@ -1114,12 +3982,19 @@ public sealed partial class SessionFileTransferService
         }
 
         SessionFileTransferSnapshot? snapshot;
+        FileTransferReceiveRecoveryRequest recoveryRequest;
         var now = DateTimeOffset.UtcNow;
         lock (gate)
         {
             if (!ReferenceEquals(outboundTransfer, context) ||
                 context.IsTerminal ||
                 context.LifetimeCts.IsCancellationRequested ||
+                (requiredInstall is not null &&
+                 !IsOutboundSparsePumpInstallCurrentLocked(
+                     context,
+                     requiredInstall,
+                     requiredDataSession,
+                     out _)) ||
                 !IsOutboundPostTunaFallbackV6LiveSparseRecoveryActiveLocked(context))
             {
                 return false;
@@ -1139,22 +4014,33 @@ public sealed partial class SessionFileTransferService
             context.SparseSenderPumpLastWakeReason = "post_tuna_fallback_bridge_restart_send_failure";
             context.V6SenderPumpLastWakeReason = "post_tuna_fallback_bridge_restart_send_failure";
             snapshot = CreateSnapshotLocked();
+            const string recoveryReason = "post_tuna_fallback_bridge_restart_send_failure";
+            recoveryRequest = AttachOutboundSparsePumpInstallRecoveryAuthorityLocked(
+                context,
+                requiredInstall,
+                new FileTransferReceiveRecoveryRequest(
+                    context.SessionId,
+                    context.TransferId,
+                    FileTransferDirection.Outbound,
+                    recoveryReason),
+                recoveryReason);
         }
 
-        TryRequestFileTransferReceiveRecovery(AttachFallbackLegAuthority(
-            context,
-            new FileTransferReceiveRecoveryRequest(
-                context.SessionId,
-                context.TransferId,
-                FileTransferDirection.Outbound,
-                "post_tuna_fallback_bridge_restart_send_failure"),
-            "post_tuna_fallback_bridge_restart_send_failure"));
+        TryRequestFileTransferReceiveRecoveryIfCurrent(
+            recoveryRequest,
+            requiredInstall,
+            requiredDataSession);
 
         LocalOperationalLog.Warn(
             "FileTransferService",
             $"event=filetransfer_post_tuna_fallback_transport_send_failure_deferred; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; source={FormatProtocolLogValue(source)}; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}; reason=post_tuna_fallback_bridge_restart_send_failure; recovery_active={(context.PullPostTunaRecoveryActive ? 1 : 0)}; rebind_generation={context.PullTransportRebindGeneration}; transport_paused={(context.PullTransportPaused ? 1 : 0)}; error={FormatProtocolLogValue(ex.GetType().Name)}; message={FormatProtocolLogValue(ex.Message)}");
         RaiseTransferChanged(snapshot);
-        SignalOutboundSparseSenderPump(context);
+        SignalOutboundSparseSenderPump(
+            context,
+            requiredInstall,
+            requiredInstall?.RuntimeOwner,
+            requiredDataSession,
+            requiredInstall?.DataSessionGeneration ?? 0);
         return true;
     }
 
@@ -2070,6 +4956,25 @@ public sealed partial class SessionFileTransferService
         IFileTransferDataSession dataSession,
         FileTransferFrontierRequestFrameV6 request,
         string source = "state_refresh_send_queued")
+        => QueueOutboundV4SparseRuntimeStateRefreshIfCurrent(
+            context,
+            dataSession,
+            request,
+            source,
+            requiredReceiveInstall: null,
+            requiredReceiveRuntimeOwner: null,
+            requiredReceiveDataSession: null,
+            requiredReceiveDataSessionGeneration: 0);
+
+    private void QueueOutboundV4SparseRuntimeStateRefreshIfCurrent(
+        OutboundTransferContext context,
+        IFileTransferDataSession dataSession,
+        FileTransferFrontierRequestFrameV6 request,
+        string source,
+        OutboundSparsePumpInstall? requiredReceiveInstall,
+        RuntimeOwnerToken? requiredReceiveRuntimeOwner,
+        IFileTransferDataSession? requiredReceiveDataSession,
+        long requiredReceiveDataSessionGeneration)
     {
         FileTransferReceiveRecoveryRequest? recoveryRequest = null;
         long sendGeneration;
@@ -2078,7 +4983,17 @@ public sealed partial class SessionFileTransferService
         lock (gate)
         {
             if (!ReferenceEquals(outboundTransfer, context) ||
-                context.IsTerminal)
+                context.IsTerminal ||
+                (requiredReceiveDataSession is not null &&
+                 !ReferenceEquals(dataSession, requiredReceiveDataSession)) ||
+                (requiredReceiveDataSession is not null &&
+                 !IsOutboundSparseReceiveResultCurrentLocked(
+                     context,
+                     requiredReceiveInstall,
+                     requiredReceiveRuntimeOwner,
+                     requiredReceiveDataSession,
+                     requiredReceiveDataSessionGeneration,
+                     out _)))
             {
                 return;
             }
@@ -2178,7 +5093,17 @@ public sealed partial class SessionFileTransferService
         {
             if (recoveryRequest is not null)
             {
-                TryRequestFileTransferReceiveRecovery(recoveryRequest);
+                if (requiredReceiveInstall is not null)
+                {
+                    TryRequestFileTransferReceiveRecoveryIfCurrent(
+                        recoveryRequest,
+                        requiredReceiveInstall,
+                        requiredReceiveDataSession);
+                }
+                else
+                {
+                    TryRequestFileTransferReceiveRecovery(recoveryRequest);
+                }
             }
 
             return;
@@ -2187,10 +5112,32 @@ public sealed partial class SessionFileTransferService
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_v6_regular_nkn_state_refresh_send_queued; transfer_id={context.TransferId}; session_id={context.SessionId}; request_id={FormatProtocolLogValue(request.RepairRequestId)}; generation={sendGeneration}; priority={FormatProtocolLogValue(request.Priority)}; timeout_ms={V6RegularNknSparseRuntimeStateRefreshSendTimeoutMs}; source={FormatProtocolLogValue(source)}; reused_pending_checkpoint={(reusedPendingCheckpointForSend ? 1 : 0)}");
-        _ = SendOutboundV4SparseRuntimeStateRefreshAsync(context, dataSession, request, sendGeneration);
+        _ = requiredReceiveInstall is not null && requiredReceiveDataSession is not null
+            ? SendOutboundV4SparseRuntimeStateRefreshIfCurrentAsync(
+                context,
+                dataSession,
+                request,
+                sendGeneration,
+                requiredReceiveInstall,
+                requiredReceiveDataSession)
+            : SendOutboundV4SparseRuntimeStateRefreshAsync(
+                context,
+                dataSession,
+                request,
+                sendGeneration);
         if (recoveryRequest is not null)
         {
-            TryRequestFileTransferReceiveRecovery(recoveryRequest);
+            if (requiredReceiveInstall is not null)
+            {
+                TryRequestFileTransferReceiveRecoveryIfCurrent(
+                    recoveryRequest,
+                    requiredReceiveInstall,
+                    requiredReceiveDataSession);
+            }
+            else
+            {
+                TryRequestFileTransferReceiveRecovery(recoveryRequest);
+            }
         }
     }
 
@@ -2280,6 +5227,7 @@ public sealed partial class SessionFileTransferService
         string resumeReason)
     {
         IFileTransferDataSession? dataSession = null;
+        OutboundSparsePumpInstall? stateRefreshInstall = null;
         FileTransferFrontierRequestFrameV6? request = null;
         string deferredReason = "(none)";
         DateTimeOffset? deferredUtc = null;
@@ -2309,6 +5257,15 @@ public sealed partial class SessionFileTransferService
                 discardReason = "data_session_missing";
             }
             else if (!context.DataSession.IsAvailable)
+            {
+                return;
+            }
+            else if (context.InstalledOutboundSparsePump is not { } installedPump ||
+                     !IsOutboundSparsePumpInstallCurrentLocked(
+                         context,
+                         installedPump,
+                         context.DataSession,
+                         out _))
             {
                 return;
             }
@@ -2345,6 +5302,7 @@ public sealed partial class SessionFileTransferService
             else
             {
                 dataSession = context.DataSession;
+                stateRefreshInstall = context.InstalledOutboundSparsePump;
                 request = context.V6RegularNknDeferredStateRefreshRequest;
                 deferredReason = context.V6RegularNknDeferredStateRefreshReason ?? "(none)";
                 deferredUtc = context.V6RegularNknDeferredStateRefreshCreatedUtc;
@@ -2371,6 +5329,7 @@ public sealed partial class SessionFileTransferService
         }
 
         if (dataSession is null ||
+            stateRefreshInstall is null ||
             request is null)
         {
             return;
@@ -2380,7 +5339,15 @@ public sealed partial class SessionFileTransferService
             "FileTransferService",
             $"event=filetransfer_post_tuna_fallback_state_refresh_deferred_replayed; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(resumeReason)}; deferred_reason={FormatProtocolLogValue(deferredReason)}; request_id={FormatProtocolLogValue(request.RepairRequestId)}; priority={FormatProtocolLogValue(request.Priority)}; deferred_age_ms={FormatNullableDurationMs(deferredUtc, DateTimeOffset.UtcNow)}; deferred_replace_count={replaceCount}; rebind_generation={context.PullTransportRebindGeneration}");
 
-        QueueOutboundV4SparseRuntimeStateRefresh(context, dataSession, request, "deferred_replay");
+        QueueOutboundV4SparseRuntimeStateRefreshIfCurrent(
+            context,
+            dataSession,
+            request,
+            "deferred_replay",
+            stateRefreshInstall,
+            stateRefreshInstall.RuntimeOwner,
+            dataSession,
+            stateRefreshInstall.DataSessionGeneration);
     }
 
     private static bool ShouldSuppressOutboundFallbackCheckpointSendForDeliveryRecoveryLocked(
@@ -2505,20 +5472,127 @@ public sealed partial class SessionFileTransferService
         context.V6RegularNknDeferredStateRefreshReplaceCount = 0;
     }
 
-    private async Task SendOutboundV4SparseRuntimeStateRefreshAsync(
+    private bool IsOutboundSparseStateRefreshInstallCurrentLocked(
+        OutboundTransferContext context,
+        IFileTransferDataSession dataSession,
+        OutboundSparsePumpInstall requiredInstall,
+        IFileTransferDataSession? requiredDataSession,
+        out string rejectionReason)
+    {
+        if (requiredDataSession is null ||
+            !ReferenceEquals(dataSession, requiredDataSession))
+        {
+            rejectionReason = "data_session_replaced";
+            return false;
+        }
+
+        if (context.InstalledOutboundSparsePump != requiredInstall)
+        {
+            rejectionReason = "install_generation_mismatch";
+            return false;
+        }
+
+        return IsOutboundSparsePumpInstallCurrentLocked(
+            context,
+            requiredInstall,
+            requiredDataSession,
+            out rejectionReason);
+    }
+
+    private bool TryValidateOutboundSparseStateRefreshInstall(
+        OutboundTransferContext context,
+        IFileTransferDataSession dataSession,
+        OutboundSparsePumpInstall requiredInstall,
+        IFileTransferDataSession? requiredDataSession,
+        string stage)
+    {
+        lock (gate)
+        {
+            if (IsOutboundSparseStateRefreshInstallCurrentLocked(
+                    context,
+                    dataSession,
+                    requiredInstall,
+                    requiredDataSession,
+                    out var rejectionReason))
+            {
+                return true;
+            }
+
+            LogOutboundSparsePumpInstallRejected(
+                context,
+                requiredInstall,
+                stage,
+                rejectionReason);
+            return false;
+        }
+    }
+
+    private Task SendOutboundV4SparseRuntimeStateRefreshAsync(
         OutboundTransferContext context,
         IFileTransferDataSession dataSession,
         FileTransferFrontierRequestFrameV6 request,
         long sendGeneration)
+        => SendOutboundV4SparseRuntimeStateRefreshCoreAsync(
+            context,
+            dataSession,
+            request,
+            sendGeneration,
+            requiredInstall: null,
+            requiredDataSession: null);
+
+    private Task SendOutboundV4SparseRuntimeStateRefreshIfCurrentAsync(
+        OutboundTransferContext context,
+        IFileTransferDataSession dataSession,
+        FileTransferFrontierRequestFrameV6 request,
+        long sendGeneration,
+        OutboundSparsePumpInstall requiredInstall,
+        IFileTransferDataSession requiredDataSession)
+        => SendOutboundV4SparseRuntimeStateRefreshCoreAsync(
+            context,
+            dataSession,
+            request,
+            sendGeneration,
+            requiredInstall,
+            requiredDataSession);
+
+    private async Task SendOutboundV4SparseRuntimeStateRefreshCoreAsync(
+        OutboundTransferContext context,
+        IFileTransferDataSession dataSession,
+        FileTransferFrontierRequestFrameV6 request,
+        long sendGeneration,
+        OutboundSparsePumpInstall? requiredInstall,
+        IFileTransferDataSession? requiredDataSession)
     {
         var retiredSendObserved = false;
         try
         {
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(context.LifetimeCts.Token);
             timeoutCts.CancelAfter(TimeSpan.FromMilliseconds(V6RegularNknSparseRuntimeStateRefreshSendTimeoutMs));
+            if (requiredInstall is not null &&
+                OutboundSparseStateRefreshPreSendBarrierForTests is { } preSendBarrier)
+            {
+                await preSendBarrier(context.TransferId, context.SessionId).ConfigureAwait(false);
+            }
+
             FileTransferControlPlaneDeliveryRequest? controlPlaneRequest = null;
             lock (gate)
             {
+                if (requiredInstall is not null &&
+                    !IsOutboundSparseStateRefreshInstallCurrentLocked(
+                        context,
+                        dataSession,
+                        requiredInstall,
+                        requiredDataSession,
+                        out var installRejectionReason))
+                {
+                    LogOutboundSparsePumpInstallRejected(
+                        context,
+                        requiredInstall,
+                        "state_refresh_pre_send",
+                        installRejectionReason);
+                    return;
+                }
+
                 if (TryObserveRetiredOutboundV4SparseRuntimeStateRefreshSendLocked(
                         context,
                         request,
@@ -2558,6 +5632,17 @@ public sealed partial class SessionFileTransferService
                 await dataSession.SendAsync(request, timeoutCts.Token).ConfigureAwait(false);
             }
 
+            if (requiredInstall is not null &&
+                !TryValidateOutboundSparseStateRefreshInstall(
+                    context,
+                    dataSession,
+                    requiredInstall,
+                    requiredDataSession,
+                    "state_refresh_sent"))
+            {
+                return;
+            }
+
             if (TryObserveRetiredOutboundV4SparseRuntimeStateRefreshSend(
                     context,
                     request,
@@ -2568,11 +5653,20 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
-            LogPullBinaryFrameSent(context.TransferId, context.SessionId, request, payloadBytes: 0);
             var reusedPendingCheckpoint = false;
+            var sentOutcomeCurrent = false;
             lock (gate)
             {
-                if (ReferenceEquals(outboundTransfer, context) &&
+                sentOutcomeCurrent = ReferenceEquals(outboundTransfer, context) &&
+                    !context.IsTerminal &&
+                    (requiredInstall is null ||
+                     IsOutboundSparseStateRefreshInstallCurrentLocked(
+                         context,
+                         dataSession,
+                         requiredInstall,
+                         requiredDataSession,
+                         out _));
+                if (sentOutcomeCurrent &&
                     context.V6RegularNknStateRefreshActiveSendGeneration == sendGeneration &&
                     string.Equals(context.V6RegularNknStateRefreshActiveRequestId, request.RepairRequestId, StringComparison.Ordinal))
                 {
@@ -2580,12 +5674,39 @@ public sealed partial class SessionFileTransferService
                 }
             }
 
+            if (!sentOutcomeCurrent)
+            {
+                if (requiredInstall is not null)
+                {
+                    LogOutboundSparsePumpInstallRejected(
+                        context,
+                        requiredInstall,
+                        "state_refresh_sent_outcome",
+                        "install_no_longer_current");
+                }
+
+                return;
+            }
+
+            LogPullBinaryFrameSent(context.TransferId, context.SessionId, request, payloadBytes: 0);
+
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=filetransfer_v6_regular_nkn_state_refresh_sent; transfer_id={context.TransferId}; session_id={context.SessionId}; request_id={FormatProtocolLogValue(request.RepairRequestId)}; generation={sendGeneration}; reused_pending_checkpoint={(reusedPendingCheckpoint ? 1 : 0)}; transport_epoch={request.TransportEpoch}; remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; credit_until_chunk_index_exclusive={context.RemoteGrantedUntilExclusive}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}");
         }
         catch (OperationCanceledException) when (!context.LifetimeCts.IsCancellationRequested)
         {
+            if (requiredInstall is not null &&
+                !TryValidateOutboundSparseStateRefreshInstall(
+                    context,
+                    dataSession,
+                    requiredInstall,
+                    requiredDataSession,
+                    "state_refresh_timeout"))
+            {
+                return;
+            }
+
             if (TryObserveRetiredOutboundV4SparseRuntimeStateRefreshSend(
                     context,
                     request,
@@ -2596,11 +5717,20 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
-            if (TryDeferOutboundPostTunaFallbackStateRefreshForTunaActivation(
+            var activationDeferred = requiredInstall is not null
+                ? TryDeferOutboundPostTunaFallbackStateRefreshForTunaActivationIfCurrent(
                     context,
                     request,
                     "post_tuna_fallback_state_refresh_send_timeout",
-                    null))
+                    null,
+                    requiredInstall,
+                    requiredDataSession)
+                : TryDeferOutboundPostTunaFallbackStateRefreshForTunaActivation(
+                    context,
+                    request,
+                    "post_tuna_fallback_state_refresh_send_timeout",
+                    null);
+            if (activationDeferred)
             {
                 return;
             }
@@ -2608,16 +5738,39 @@ public sealed partial class SessionFileTransferService
             LocalOperationalLog.Warn(
                 "FileTransferService",
                 $"event=filetransfer_v6_regular_nkn_state_refresh_send_timeout; transfer_id={context.TransferId}; session_id={context.SessionId}; request_id={FormatProtocolLogValue(request.RepairRequestId)}; generation={sendGeneration}; timeout_ms={V6RegularNknSparseRuntimeStateRefreshSendTimeoutMs}");
-            RequestOutboundPostTunaFallbackStateRefreshReceiveRecovery(
-                context,
-                request,
-                "post_tuna_fallback_state_refresh_send_timeout");
+            if (requiredInstall is not null)
+            {
+                RequestOutboundPostTunaFallbackStateRefreshReceiveRecoveryIfCurrent(
+                    context,
+                    request,
+                    "post_tuna_fallback_state_refresh_send_timeout",
+                    requiredInstall,
+                    requiredDataSession);
+            }
+            else
+            {
+                RequestOutboundPostTunaFallbackStateRefreshReceiveRecovery(
+                    context,
+                    request,
+                    "post_tuna_fallback_state_refresh_send_timeout");
+            }
         }
         catch (OperationCanceledException) when (context.LifetimeCts.IsCancellationRequested)
         {
         }
         catch (Exception ex)
         {
+            if (requiredInstall is not null &&
+                !TryValidateOutboundSparseStateRefreshInstall(
+                    context,
+                    dataSession,
+                    requiredInstall,
+                    requiredDataSession,
+                    "state_refresh_failed"))
+            {
+                return;
+            }
+
             if (TryObserveRetiredOutboundV4SparseRuntimeStateRefreshSend(
                     context,
                     request,
@@ -2628,11 +5781,20 @@ public sealed partial class SessionFileTransferService
                 return;
             }
 
-            if (TryDeferOutboundPostTunaFallbackStateRefreshForTunaActivation(
+            var activationDeferred = requiredInstall is not null
+                ? TryDeferOutboundPostTunaFallbackStateRefreshForTunaActivationIfCurrent(
                     context,
                     request,
                     "post_tuna_fallback_state_refresh_send_failed",
-                    ex))
+                    ex,
+                    requiredInstall,
+                    requiredDataSession)
+                : TryDeferOutboundPostTunaFallbackStateRefreshForTunaActivation(
+                    context,
+                    request,
+                    "post_tuna_fallback_state_refresh_send_failed",
+                    ex);
+            if (activationDeferred)
             {
                 return;
             }
@@ -2640,10 +5802,22 @@ public sealed partial class SessionFileTransferService
             LocalOperationalLog.Warn(
                 "FileTransferService",
                 $"event=filetransfer_v6_regular_nkn_state_refresh_send_failed; transfer_id={context.TransferId}; session_id={context.SessionId}; request_id={FormatProtocolLogValue(request.RepairRequestId)}; generation={sendGeneration}; reason={FormatProtocolLogValue(ex.Message)}");
-            RequestOutboundPostTunaFallbackStateRefreshReceiveRecovery(
-                context,
-                request,
-                "post_tuna_fallback_state_refresh_send_failed");
+            if (requiredInstall is not null)
+            {
+                RequestOutboundPostTunaFallbackStateRefreshReceiveRecoveryIfCurrent(
+                    context,
+                    request,
+                    "post_tuna_fallback_state_refresh_send_failed",
+                    requiredInstall,
+                    requiredDataSession);
+            }
+            else
+            {
+                RequestOutboundPostTunaFallbackStateRefreshReceiveRecovery(
+                    context,
+                    request,
+                    "post_tuna_fallback_state_refresh_send_failed");
+            }
         }
         finally
         {
@@ -2795,6 +5969,21 @@ public sealed partial class SessionFileTransferService
         FileTransferFrontierRequestFrameV6 request,
         string reason,
         Exception? ex)
+        => TryDeferOutboundPostTunaFallbackStateRefreshForTunaActivationIfCurrent(
+            context,
+            request,
+            reason,
+            ex,
+            requiredInstall: null,
+            requiredDataSession: null);
+
+    private bool TryDeferOutboundPostTunaFallbackStateRefreshForTunaActivationIfCurrent(
+        OutboundTransferContext context,
+        FileTransferFrontierRequestFrameV6 request,
+        string reason,
+        Exception? ex,
+        OutboundSparsePumpInstall? requiredInstall,
+        IFileTransferDataSession? requiredDataSession)
     {
         var signalSenderPump = false;
         var suppressActivationPause = false;
@@ -2808,6 +5997,14 @@ public sealed partial class SessionFileTransferService
         {
             if (!ReferenceEquals(outboundTransfer, context) ||
                 context.IsTerminal ||
+                (requiredInstall is not null &&
+                 (requiredDataSession is null ||
+                  !IsOutboundSparseStateRefreshInstallCurrentLocked(
+                      context,
+                      requiredDataSession,
+                      requiredInstall,
+                      requiredDataSession,
+                      out _))) ||
                 !IsOutboundPostTunaFallbackV6LiveSparseRecoveryActiveLocked(context))
             {
                 return false;
@@ -2876,7 +6073,12 @@ public sealed partial class SessionFileTransferService
 
         if (signalSenderPump)
         {
-            SignalOutboundSparseSenderPump(context);
+            SignalOutboundSparseSenderPump(
+                context,
+                requiredInstall,
+                requiredInstall?.RuntimeOwner,
+                requiredDataSession,
+                requiredInstall?.DataSessionGeneration ?? 0);
         }
 
         return !suppressActivationPause;
@@ -2886,6 +6088,19 @@ public sealed partial class SessionFileTransferService
         OutboundTransferContext context,
         FileTransferFrontierRequestFrameV6 request,
         string reason)
+        => RequestOutboundPostTunaFallbackStateRefreshReceiveRecoveryIfCurrent(
+            context,
+            request,
+            reason,
+            requiredInstall: null,
+            requiredDataSession: null);
+
+    private void RequestOutboundPostTunaFallbackStateRefreshReceiveRecoveryIfCurrent(
+        OutboundTransferContext context,
+        FileTransferFrontierRequestFrameV6 request,
+        string reason,
+        OutboundSparsePumpInstall? requiredInstall,
+        IFileTransferDataSession? requiredDataSession)
     {
         FileTransferReceiveRecoveryRequest? recoveryRequest = null;
         var signalSenderPump = false;
@@ -2901,6 +6116,14 @@ public sealed partial class SessionFileTransferService
         {
             if (!ReferenceEquals(outboundTransfer, context) ||
                 context.IsTerminal ||
+                (requiredInstall is not null &&
+                 (requiredDataSession is null ||
+                  !IsOutboundSparseStateRefreshInstallCurrentLocked(
+                      context,
+                      requiredDataSession,
+                      requiredInstall,
+                      requiredDataSession,
+                      out _))) ||
                 !IsOutboundPostTunaFallbackV6LiveSparseRecoveryActiveLocked(context))
             {
                 return;
@@ -2974,27 +6197,45 @@ public sealed partial class SessionFileTransferService
                     "FileTransferService",
                     $"event=filetransfer_post_tuna_fallback_state_refresh_receive_recovery_requested; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; request_id={FormatProtocolLogValue(request.RepairRequestId)}; stale_inflight_recovery={(staleInflightEscalation ? 1 : 0)}; stale_credit_recovery={(staleCreditEscalation ? 1 : 0)}; tail_reconciliation={(tailReconciliationEscalation ? 1 : 0)}; state_refresh_send_timeout={(stateRefreshSendTimeout ? 1 : 0)}; recovery_reason={FormatProtocolLogValue(recoveryReason)}; failure_count={context.V6RegularNknStateRefreshFailureCount}; feedback_silence_ms={(long)Math.Max(0, feedbackSilence.TotalMilliseconds)}; remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; highest_accepted_chunk_index={Math.Max(-1, context.ChunksAcceptedForTransport - 1)}; transport_backlog_chunks={transportBacklogChunks}; available_credit_chunks={availableCreditChunks}; credit_ceiling_chunk_index={creditCeiling}; rebind_generation={context.PullTransportRebindGeneration}; bridge_recovery_policy={FormatFileTransferBridgeRecoveryPolicy(context.BridgeRecoveryPolicy)}");
 
-                recoveryRequest = AttachFallbackLegAuthority(
+                recoveryRequest = AttachOutboundSparsePumpInstallRecoveryAuthorityLocked(
                     context,
+                    requiredInstall,
                     new FileTransferReceiveRecoveryRequest(
                         context.SessionId,
                         context.TransferId,
                         FileTransferDirection.Outbound,
                         recoveryReason),
-                    recoveryReason,
-                    checkpointRequestIdForRecovery,
-                    request.TransportEpoch);
+                    recoveryReason) with
+                {
+                    CheckpointRequestId = checkpointRequestIdForRecovery,
+                    TransportEpoch = request.TransportEpoch,
+                };
             }
         }
 
         if (signalSenderPump)
         {
-            SignalOutboundSparseSenderPump(context);
+            SignalOutboundSparseSenderPump(
+                context,
+                requiredInstall,
+                requiredInstall?.RuntimeOwner,
+                requiredDataSession,
+                requiredInstall?.DataSessionGeneration ?? 0);
         }
 
         if (recoveryRequest is not null)
         {
-            TryRequestFileTransferReceiveRecovery(recoveryRequest);
+            if (requiredInstall is not null)
+            {
+                TryRequestFileTransferReceiveRecoveryIfCurrent(
+                    recoveryRequest,
+                    requiredInstall,
+                    requiredDataSession);
+            }
+            else
+            {
+                TryRequestFileTransferReceiveRecovery(recoveryRequest);
+            }
         }
     }
 
@@ -4166,7 +7407,8 @@ public sealed partial class SessionFileTransferService
         IFileTransferDataSession dataSession,
         FileTransferDataFrame frame,
         string frameKind,
-        int payloadBytes)
+        int payloadBytes,
+        OutboundSparsePumpInstall requiredInstall)
     {
         var loggedDeferred = false;
         while (true)
@@ -4177,9 +7419,29 @@ public sealed partial class SessionFileTransferService
 
             lock (gate)
             {
-                if (!ReferenceEquals(outboundTransfer, context) ||
-                    context.IsTerminal)
+                var installRejection = !ReferenceEquals(outboundTransfer, context)
+                    ? "transfer_context_replaced"
+                    : context.IsTerminal
+                        ? "transfer_terminal"
+                        : "accepted";
+                var installCurrent = ReferenceEquals(outboundTransfer, context) &&
+                    !context.IsTerminal &&
+                    IsOutboundSparsePumpInstallCurrentLocked(
+                        context,
+                        requiredInstall,
+                        dataSession,
+                        out installRejection);
+                if (!installCurrent)
                 {
+                    if (!string.Equals(installRejection, "accepted", StringComparison.Ordinal))
+                    {
+                        LogOutboundSparsePumpInstallRejected(
+                            context,
+                            requiredInstall,
+                            $"{frameKind}_send",
+                            installRejection);
+                    }
+
                     return false;
                 }
 
@@ -4207,7 +7469,40 @@ public sealed partial class SessionFileTransferService
 
             try
             {
-                await dataSession.SendAsync(frame, context.LifetimeCts.Token).ConfigureAwait(false);
+                FileTransferDataPathSendAuthority? sendAuthority;
+                lock (gate)
+                {
+                    if (!IsOutboundSparsePumpInstallCurrentLocked(
+                            context,
+                            requiredInstall,
+                            dataSession,
+                            out var sendRejection))
+                    {
+                        LogOutboundSparsePumpInstallRejected(
+                            context,
+                            requiredInstall,
+                            $"{frameKind}_send",
+                            sendRejection);
+                        return false;
+                    }
+
+                    sendAuthority = CreateDataPathSendAuthority(
+                        requiredInstall.RoutePublication,
+                        requiredInstall.RoutePublication.Reason);
+                }
+
+                if (sendAuthority is not null &&
+                    dataSession is IFileTransferDataPathAuthoritySession authoritySession)
+                {
+                    await authoritySession
+                        .SendAsync(frame, sendAuthority, context.LifetimeCts.Token)
+                        .ConfigureAwait(false);
+                }
+                else
+                {
+                    await dataSession.SendAsync(frame, context.LifetimeCts.Token).ConfigureAwait(false);
+                }
+
                 return true;
             }
             catch (Exception ex) when (ex is InvalidOperationException or OperationCanceledException)
@@ -4217,6 +7512,20 @@ public sealed partial class SessionFileTransferService
                 var rebindGeneration = 0;
                 lock (gate)
                 {
+                    if (!IsOutboundSparsePumpInstallCurrentLocked(
+                            context,
+                            requiredInstall,
+                            dataSession,
+                            out var sendRejection))
+                    {
+                        LogOutboundSparsePumpInstallRejected(
+                            context,
+                            requiredInstall,
+                            $"{frameKind}_send_failure",
+                            sendRejection);
+                        return false;
+                    }
+
                     deferred = TryDeferOutboundV4SendForTunaActivationPauseLocked(
                         context,
                         dataSession.IsAvailable,
@@ -4315,11 +7624,23 @@ public sealed partial class SessionFileTransferService
     private async Task RunOutboundV4SenderPumpAsync(
         OutboundTransferContext context,
         Stream stream,
-        IFileTransferDataSession dataSession)
+        IFileTransferDataSession dataSession,
+        CancellationToken pumpCancellationToken = default,
+        OutboundSparsePumpInstall? pumpInstall = null)
     {
+        using var pumpLifetime = CancellationTokenSource.CreateLinkedTokenSource(
+            context.LifetimeCts.Token,
+            pumpCancellationToken);
+        var pumpToken = pumpLifetime.Token;
         while (true)
         {
-            context.LifetimeCts.Token.ThrowIfCancellationRequested();
+            pumpToken.ThrowIfCancellationRequested();
+            if (OutboundSparseSenderPumpNormalCompletionForTests?.Invoke(
+                    context.TransferId,
+                    context.SessionId) == true)
+            {
+                return;
+            }
 
             PullV4QueuedRepairSend? repairSend = null;
             List<int>? chunkIndicesToSend = null;
@@ -4333,14 +7654,22 @@ public sealed partial class SessionFileTransferService
                     return;
                 }
 
+                if (pumpInstall is not null &&
+                    !IsOutboundSparsePumpInstallCurrentLocked(
+                        context,
+                        pumpInstall,
+                        dataSession,
+                        out _))
+                {
+                    return;
+                }
+
                 var transportPaused = ShouldPauseOutboundV4SenderPumpForTransportPauseLocked(context);
                 var allowPausedRepair = transportPaused &&
                     ShouldAllowOutboundV4RepairWhileTransportPausedLocked(context);
                 if (ShouldCompleteOutboundV4FromTerminalReadyStateLocked(context))
                 {
                     completeFromTerminalReady = true;
-                    context.State = FileTransferTransferState.AwaitingCompletion;
-                    context.StatusMessage = "Receiver verified transfer.";
                     MaybeLogOutboundV4SenderPumpSummaryLocked(context, DateTimeOffset.UtcNow, force: true);
                     LocalOperationalLog.Info(
                         "FileTransferService",
@@ -4505,6 +7834,11 @@ public sealed partial class SessionFileTransferService
 
             if (completeFromTerminalReady)
             {
+                if (OutboundSparseTerminalCompletionBarrierForTests is { } terminalCompletionBarrier)
+                {
+                    await terminalCompletionBarrier(context.TransferId, context.SessionId).ConfigureAwait(false);
+                }
+
                 await TransitionOutboundToTerminalAsync(
                     context,
                     FileTransferTransferState.Completed,
@@ -4512,13 +7846,27 @@ public sealed partial class SessionFileTransferService
                     statusMessage: "Transfer complete.",
                     notifyPeer: false,
                     cancelReason: null,
-                    ct: CancellationToken.None).ConfigureAwait(false);
+                    ct: CancellationToken.None,
+                    requiredSparsePumpInstall: pumpInstall).ConfigureAwait(false);
                 return;
             }
 
             if (tailStateRefreshRequest is not null)
             {
-                QueueOutboundV4SparseRuntimeStateRefresh(context, dataSession, tailStateRefreshRequest, "tail_reconciliation");
+                if (OutboundSparseTailReconciliationQueueBarrierForTests is { } tailReconciliationQueueBarrier)
+                {
+                    await tailReconciliationQueueBarrier(context.TransferId, context.SessionId).ConfigureAwait(false);
+                }
+
+                QueueOutboundV4SparseRuntimeStateRefreshIfCurrent(
+                    context,
+                    dataSession,
+                    tailStateRefreshRequest,
+                    "tail_reconciliation",
+                    pumpInstall,
+                    pumpInstall?.RuntimeOwner,
+                    dataSession,
+                    pumpInstall?.DataSessionGeneration ?? 0);
                 continue;
             }
 
@@ -4698,15 +8046,32 @@ public sealed partial class SessionFileTransferService
                         repairDeliveryMode: repairSend.DeliveryMode,
                         repairDeliveryReason: repairSend.DeliveryEscalationReason,
                         fallbackFrontierRepairContract: fallbackFrontierContractForDispatch,
-                        observeSendAuthority: authority => repairSendAuthority ??= authority).ConfigureAwait(false);
+                        observeSendAuthority: authority => repairSendAuthority ??= authority,
+                        pumpInstall: pumpInstall,
+                        pumpCancellationToken: pumpToken).ConfigureAwait(false);
+                }
+
+                if (pumpInstall is not null &&
+                    OutboundSparseRepairContinuationBarrierForTests is { } repairContinuationBarrier)
+                {
+                    await repairContinuationBarrier(
+                            context.TransferId,
+                            context.SessionId,
+                            "repair_send_completion")
+                        .ConfigureAwait(false);
                 }
 
                 var sentUtc = DateTimeOffset.UtcNow;
+                var pumpCompletionCurrent = false;
                 var fallbackRepairCompletionCurrent = true;
                 var regularV4RepairCompletionCurrent = true;
                 lock (gate)
                 {
-                    if (ReferenceEquals(outboundTransfer, context))
+                    pumpCompletionCurrent = IsOutboundSparsePumpContinuationCurrentLocked(
+                        context,
+                        pumpInstall,
+                        dataSession);
+                    if (pumpCompletionCurrent && ReferenceEquals(outboundTransfer, context))
                     {
                         var fallbackCompletionRejectionReason = context.IsTerminal
                             ? "legacy_sparse_pump_completion_after_terminal"
@@ -4775,6 +8140,16 @@ public sealed partial class SessionFileTransferService
                     }
                 }
 
+                if (!pumpCompletionCurrent)
+                {
+                    LogOutboundSparsePumpInstallRejected(
+                        context,
+                        pumpInstall,
+                        "repair_send_completion",
+                        "install_no_longer_current");
+                    continue;
+                }
+
                 if (!fallbackRepairCompletionCurrent)
                 {
                     LocalOperationalLog.Info(
@@ -4801,9 +8176,19 @@ public sealed partial class SessionFileTransferService
                     var requeuedRegularV4PeerSilenceRepairChunkCount = 0;
                     var requeueSettlementObserved = false;
                     FileTransferRegularV4FrontierRepairAuthority? successorRegularV4RepairAuthority = null;
-                    var pendingRuntimeUnlockRetryRequest = regularV4PeerSilenceRepair
-                        ? GetPendingRuntimeUnlockRetryDispatchAuthorityRequest(context)
-                        : null;
+                    RuntimeUnlockRetryDispatchAuthorityRequest? pendingRuntimeUnlockRetryRequest = null;
+                    lock (gate)
+                    {
+                        if (regularV4PeerSilenceRepair &&
+                            IsOutboundSparsePumpContinuationCurrentLocked(
+                                context,
+                                pumpInstall,
+                                dataSession))
+                        {
+                            pendingRuntimeUnlockRetryRequest =
+                                GetPendingRuntimeUnlockRetryDispatchAuthorityRequest(context);
+                        }
+                    }
                     var pendingRuntimeUnlockRetryDispatch = pendingRuntimeUnlockRetryRequest is not null;
                     var requeuedFallbackFrontierRepair = false;
                     var requeuedFallbackFrontierRepairChunkCount = 0;
@@ -4813,7 +8198,10 @@ public sealed partial class SessionFileTransferService
                     {
                         lock (gate)
                         {
-                            if (ReferenceEquals(outboundTransfer, context) && !context.IsTerminal)
+                            if (IsOutboundSparsePumpContinuationCurrentLocked(
+                                    context,
+                                    pumpInstall,
+                                    dataSession))
                             {
                                 requeuedFallbackFrontierRepair =
                                     TryRequeueOutboundFallbackFrontierV4RetryLocked(
@@ -4828,11 +8216,20 @@ public sealed partial class SessionFileTransferService
                     if (pendingRuntimeUnlockRetryRequest is { } pendingRetryRequest &&
                         regularV4RepairContractForDispatch is { } pendingReleaseContract)
                     {
-                        requeueSettlementObserved = TrySettleRegularV4FrontierRepairContract(
-                            pendingReleaseContract,
-                            FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch,
-                            repairSend.RequestedChunkCount,
-                            "regular_v4_frontier_repair_missing_dispatch");
+                        lock (gate)
+                        {
+                            if (IsOutboundSparsePumpContinuationCurrentLocked(
+                                    context,
+                                    pumpInstall,
+                                    dataSession))
+                            {
+                                requeueSettlementObserved = TrySettleRegularV4FrontierRepairContract(
+                                    pendingReleaseContract,
+                                    FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch,
+                                    repairSend.RequestedChunkCount,
+                                    "regular_v4_frontier_repair_missing_dispatch");
+                            }
+                        }
                         pendingRuntimeUnlockRetryDispatch = requeueSettlementObserved;
                     }
 
@@ -4878,8 +8275,10 @@ public sealed partial class SessionFileTransferService
                     {
                         lock (gate)
                         {
-                            if (ReferenceEquals(outboundTransfer, context) &&
-                                !context.IsTerminal)
+                            if (IsOutboundSparsePumpContinuationCurrentLocked(
+                                    context,
+                                    pumpInstall,
+                                    dataSession))
                             {
                                 requeuedRegularV4PeerSilenceRepair =
                                     TryRequeueOutboundRegularNknV4PeerSilenceSafetyReplayLocked(
@@ -4905,21 +8304,42 @@ public sealed partial class SessionFileTransferService
                                 repairSend.ChunkIndices.Count,
                                 requeuedRegularV4PeerSilenceRepairChunkCount,
                                 "send_timeout_successor_authorized");
-                            ObserveRegularV4FrontierRepairDispatchBlocker(
-                                context,
-                                successorAuthority,
-                                requeuedRegularV4PeerSilenceRepairChunkCount,
-                                "regular_v4_frontier_repair_successor_authorized");
+                            var observeSuccessorCurrent = false;
+                            lock (gate)
+                            {
+                                observeSuccessorCurrent = IsOutboundSparsePumpContinuationCurrentLocked(
+                                    context,
+                                    pumpInstall,
+                                    dataSession);
+                            }
+
+                            if (observeSuccessorCurrent)
+                            {
+                                ObserveRegularV4FrontierRepairDispatchBlocker(
+                                    context,
+                                    successorAuthority,
+                                    requeuedRegularV4PeerSilenceRepairChunkCount,
+                                    "regular_v4_frontier_repair_successor_authorized");
+                            }
                         }
                         else if (!requeueSettlementObserved)
                         {
                             if (regularV4PeerSilenceRepair)
                             {
-                                TrySettleRegularV4FrontierRepairContract(
-                                    regularV4RepairContractForDispatch,
-                                    FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch,
-                                    repairSend.RequestedChunkCount,
-                                    "regular_v4_frontier_repair_missing_dispatch");
+                                lock (gate)
+                                {
+                                    if (IsOutboundSparsePumpContinuationCurrentLocked(
+                                            context,
+                                            pumpInstall,
+                                            dataSession))
+                                    {
+                                        TrySettleRegularV4FrontierRepairContract(
+                                            regularV4RepairContractForDispatch,
+                                            FileTransferRegularV4FrontierRepairSettlementOutcome.MissingDispatch,
+                                            repairSend.RequestedChunkCount,
+                                            "regular_v4_frontier_repair_missing_dispatch");
+                                    }
+                                }
                             }
                         }
                     }
@@ -4941,8 +8361,10 @@ public sealed partial class SessionFileTransferService
                 var fileTunaV4PostTunaRebindGeneration = 0;
                 lock (gate)
                 {
-                    if (ReferenceEquals(outboundTransfer, context) &&
-                        !context.IsTerminal &&
+                    if (IsOutboundSparsePumpContinuationCurrentLocked(
+                            context,
+                            pumpInstall,
+                            dataSession) &&
                         ShouldPauseOutboundV4SenderPumpForFileTunaV4PostTunaRecoveryLocked(context))
                     {
                         context.PullTransportPaused = false;
@@ -4987,8 +8409,19 @@ public sealed partial class SessionFileTransferService
 
                 if (logRegularV4FrontierRepairDispatchProof && regularV4RepairAuthorityForDispatch is { } regularDispatchAuthority)
                 {
-                    if (regularV4RepairContractForDispatch is not null &&
-                        TryMarkRegularV4FrontierRepairDispatched(regularV4RepairContractForDispatch))
+                    var regularDispatchMarked = false;
+                    lock (gate)
+                    {
+                        regularDispatchMarked =
+                            regularV4RepairContractForDispatch is not null &&
+                            IsOutboundSparsePumpContinuationCurrentLocked(
+                                context,
+                                pumpInstall,
+                                dataSession) &&
+                            TryMarkRegularV4FrontierRepairDispatched(regularV4RepairContractForDispatch);
+                    }
+
+                    if (regularDispatchMarked)
                     {
                         LogFileTransferRegularV4FrontierRepairDispatched(
                             FileTransferDirection.Outbound,
@@ -5011,18 +8444,40 @@ public sealed partial class SessionFileTransferService
 
             if (chunkIndicesToSend is not null)
             {
-                await SendChunkIndicesV4Async(context, stream, dataSession, chunkIndicesToSend, repairSend: false).ConfigureAwait(false);
+                await SendChunkIndicesV4Async(
+                    context,
+                    stream,
+                    dataSession,
+                    chunkIndicesToSend,
+                    repairSend: false,
+                    pumpInstall: pumpInstall,
+                    pumpCancellationToken: pumpToken).ConfigureAwait(false);
                 continue;
             }
 
             if (waitForSignal is not null)
             {
-                var completed = await Task.WhenAny(waitForSignal, Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token)).ConfigureAwait(false);
+                var completed = await Task.WhenAny(waitForSignal, Task.Delay(PullSessionReceivePollDelayMs, pumpToken)).ConfigureAwait(false);
                 if (completed != waitForSignal)
                 {
+                    if (pumpInstall is not null &&
+                        OutboundSparseRepairContinuationBarrierForTests is { } idleContinuationBarrier)
+                    {
+                        await idleContinuationBarrier(
+                                context.TransferId,
+                                context.SessionId,
+                                "idle_delay")
+                            .ConfigureAwait(false);
+                    }
+
+                    var idleContinuationCurrent = false;
                     lock (gate)
                     {
-                        if (ReferenceEquals(outboundTransfer, context) && !context.IsTerminal)
+                        idleContinuationCurrent = IsOutboundSparsePumpContinuationCurrentLocked(
+                            context,
+                            pumpInstall,
+                            dataSession);
+                        if (idleContinuationCurrent)
                         {
                             if (TrySettleOutboundRegularV4FrontierRepairStalledLocked(
                                     context,
@@ -5047,6 +8502,16 @@ public sealed partial class SessionFileTransferService
 
                             MaybeLogOutboundV4SenderPumpSummaryLocked(context, DateTimeOffset.UtcNow, force: false);
                         }
+                    }
+
+                    if (!idleContinuationCurrent)
+                    {
+                        LogOutboundSparsePumpInstallRejected(
+                            context,
+                            pumpInstall,
+                            "idle_delay",
+                            "install_no_longer_current");
+                        return;
                     }
                 }
             }
@@ -5755,7 +9220,18 @@ public sealed partial class SessionFileTransferService
         return true;
     }
 
-    private void ApplyOutboundV4State(OutboundTransferContext context, FileTransferStateFrameV4 state)
+    private void ApplyOutboundV4State(
+        OutboundTransferContext context,
+        FileTransferStateFrameV4 state)
+        => ApplyOutboundV4StateAsync(context, state).GetAwaiter().GetResult();
+
+    private async Task ApplyOutboundV4StateAsync(
+        OutboundTransferContext context,
+        FileTransferStateFrameV4 state,
+        OutboundSparsePumpInstall? receiveInstall = null,
+        RuntimeOwnerToken? receiveRuntimeOwner = null,
+        IFileTransferDataSession? receiveDataSession = null,
+        long receiveDataSessionGeneration = 0)
     {
         SessionFileTransferSnapshot? snapshot = null;
         var shouldEnqueueRepairs = false;
@@ -5765,7 +9241,16 @@ public sealed partial class SessionFileTransferService
         IFileTransferDataSession? fallbackCheckpointReissueDataSession = null;
         lock (gate)
         {
-            if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
+            if (!ReferenceEquals(outboundTransfer, context) ||
+                context.IsTerminal ||
+                (receiveDataSession is not null &&
+                 !IsOutboundSparseReceiveResultCurrentLocked(
+                     context,
+                     receiveInstall,
+                     receiveRuntimeOwner,
+                     receiveDataSession,
+                     receiveDataSessionGeneration,
+                     out _)))
             {
                 return;
             }
@@ -6088,15 +9573,55 @@ public sealed partial class SessionFileTransferService
             }
         }
 
-        if (fallbackCheckpointReissueRequest is not null)
+        if (OutboundSparseStateApplyBarrierForTests is { } stateApplyBarrier)
+        {
+            await stateApplyBarrier(context.TransferId, context.SessionId).ConfigureAwait(false);
+        }
+
+        var sideEffectsCurrent = false;
+        lock (gate)
+        {
+            sideEffectsCurrent = ReferenceEquals(outboundTransfer, context) &&
+                !context.IsTerminal &&
+                (receiveDataSession is null ||
+                 IsOutboundSparseReceiveResultCurrentLocked(
+                     context,
+                     receiveInstall,
+                     receiveRuntimeOwner,
+                     receiveDataSession,
+                     receiveDataSessionGeneration,
+                     out _));
+            if (!sideEffectsCurrent)
+            {
+                snapshot = null;
+                shouldSignalSenderPump = false;
+            }
+            else if (shouldEnqueueRepairs)
+            {
+                EnqueueV4RepairsFromState(
+                    context,
+                    state,
+                    receiveInstall,
+                    receiveRuntimeOwner,
+                    receiveDataSession,
+                    receiveDataSessionGeneration);
+                shouldEnqueueRepairs = false;
+            }
+        }
+
+        if (sideEffectsCurrent && fallbackCheckpointReissueRequest is not null)
         {
             if (fallbackCheckpointReissueDataSession is not null)
             {
-                QueueOutboundV4SparseRuntimeStateRefresh(
+                QueueOutboundV4SparseRuntimeStateRefreshIfCurrent(
                     context,
                     fallbackCheckpointReissueDataSession,
                     fallbackCheckpointReissueRequest,
-                    "checkpoint_reissue");
+                    "checkpoint_reissue",
+                    receiveInstall,
+                    receiveRuntimeOwner,
+                    receiveDataSession,
+                    receiveDataSessionGeneration);
             }
             else
             {
@@ -6106,21 +9631,22 @@ public sealed partial class SessionFileTransferService
             }
         }
 
-        if (shouldEnqueueRepairs)
-        {
-            EnqueueV4RepairsFromState(context, state);
-        }
-
         if (snapshot is not null)
         {
             RaiseTransferChanged(snapshot);
             MaybeLogProgressMilestone(context, FileTransferDirection.Outbound);
         }
 
-        if (shouldSignalSenderPump)
+        if (sideEffectsCurrent && shouldSignalSenderPump)
         {
-            SignalOutboundSparseSenderPump(context);
+            SignalOutboundSparseSenderPump(
+                context,
+                receiveInstall,
+                receiveRuntimeOwner,
+                receiveDataSession,
+                receiveDataSessionGeneration);
         }
+
     }
 
     private bool TryRebindOutboundRegularNknV4AcceptedFrontierFromRecoveryStateLocked(
@@ -6868,12 +10394,26 @@ public sealed partial class SessionFileTransferService
         return true;
     }
 
-    private void ApplyOutboundV6HandoffFrame(OutboundTransferContext context, FileTransferTransportEpochFrameV6 handoff)
+    private void ApplyOutboundV6HandoffFrame(
+        OutboundTransferContext context,
+        FileTransferTransportEpochFrameV6 handoff,
+        OutboundSparsePumpInstall? receiveInstall = null,
+        RuntimeOwnerToken? receiveRuntimeOwner = null,
+        IFileTransferDataSession? receiveDataSession = null,
+        long receiveDataSessionGeneration = 0)
     {
         lock (gate)
         {
             if (!ReferenceEquals(outboundTransfer, context) ||
                 context.IsTerminal ||
+                (receiveDataSession is not null &&
+                 !IsOutboundSparseReceiveResultCurrentLocked(
+                     context,
+                     receiveInstall,
+                     receiveRuntimeOwner,
+                     receiveDataSession,
+                     receiveDataSessionGeneration,
+                     out _)) ||
                 handoff.TransportEpoch <= 0)
             {
                 return;
@@ -6967,7 +10507,12 @@ public sealed partial class SessionFileTransferService
     private void ApplyOutboundV6RepairRequestCore(
         OutboundTransferContext context,
         FileTransferFrontierRequestFrameV6 repairRequest,
-        FileTransferTransportKind receivedTransportKind)
+        FileTransferTransportKind receivedTransportKind,
+        OutboundSparsePumpInstall? receiveInstall = null,
+        RuntimeOwnerToken? receiveRuntimeOwner = null,
+        IFileTransferDataSession? receiveDataSession = null,
+        long receiveDataSessionGeneration = 0,
+        long receiveSupervisorGeneration = 0)
     {
         var rawFirstStartChunkIndex = repairRequest.MissingRanges.Count > 0
             ? repairRequest.MissingRanges[0].StartChunkIndex
@@ -6999,6 +10544,21 @@ public sealed partial class SessionFileTransferService
         }
 
         var first = repairRequest.MissingRanges[0];
+        var syntheticState = new FileTransferReceiverStateFrameV6
+        {
+            SessionId = repairRequest.SessionId,
+            TransferId = repairRequest.TransferId,
+            Epoch = Math.Max(0, Environment.TickCount & 0x3fffffff),
+            ContiguousCommittedChunkIndex = Math.Max(0, first.StartChunkIndex),
+            DurableReceivedHighestChunkIndex = Math.Max(first.StartChunkIndex, first.StartChunkIndex + first.ChunkCount - 1),
+            CreditUntilChunkIndexExclusive = Math.Max(first.StartChunkIndex + first.ChunkCount, first.StartChunkIndex + 1),
+            MissingRanges = repairRequest.MissingRanges,
+            BytesCommitted = 0,
+            TransportEpoch = repairRequest.TransportEpoch,
+            RepairRequestId = repairRequest.RepairRequestId,
+            Priority = repairRequest.Priority,
+            RecoveryMode = repairRequest.RecoveryMode,
+        };
         FallbackFrontierRepairContract? fallbackFrontierContract = null;
         var fallbackFrontierContractNewlyIssued = false;
         lock (gate)
@@ -7012,8 +10572,34 @@ public sealed partial class SessionFileTransferService
                 first.StartChunkIndex,
                 first.ChunkCount,
                 repairRequest.MissingRanges.Count);
+            var receiveAuthorityCurrent = receiveDataSession is null ||
+                IsOutboundSparseReceiveResultCurrentLocked(
+                    context,
+                    receiveInstall,
+                    receiveRuntimeOwner,
+                    receiveDataSession,
+                    receiveDataSessionGeneration,
+                    out _);
+            if (!receiveAuthorityCurrent &&
+                receiveDataSession is not null &&
+                receiveSupervisorGeneration > 0 &&
+                TryResolveOutboundSparseReceiveDispatchInstallLocked(
+                    context,
+                    receiveDataSession,
+                    receiveDataSessionGeneration,
+                    receiveSupervisorGeneration,
+                    out var currentDispatchInstall,
+                    out var currentDispatchRuntimeOwner,
+                    out _))
+            {
+                receiveInstall = currentDispatchInstall;
+                receiveRuntimeOwner = currentDispatchRuntimeOwner;
+                receiveAuthorityCurrent = true;
+            }
+
             if (!ReferenceEquals(outboundTransfer, context) ||
-                context.IsTerminal)
+                context.IsTerminal ||
+                !receiveAuthorityCurrent)
             {
                 LogOutboundV6FrontierRequestReceiveDispatch(
                     context,
@@ -7024,6 +10610,34 @@ public sealed partial class SessionFileTransferService
                     first.StartChunkIndex,
                     first.ChunkCount,
                     repairRequest.MissingRanges.Count);
+                return;
+            }
+
+            // A receive can stay active while a replacement sender stream is being reopened.
+            // Preserve the frame, but do not let it mutate repair/frontier state or claim an
+            // authoritative Core dispatch until that exact pending descriptor is committed.
+            if (receiveInstall is not null &&
+                context.PendingOutboundSparsePumpInstall == receiveInstall &&
+                context.InstalledOutboundSparsePump != receiveInstall)
+            {
+                StageOutboundSparseFrontierDispatchProofLocked(
+                    context,
+                    receiveInstall,
+                    repairRequest,
+                    receivedTransportKind,
+                    first.StartChunkIndex,
+                    first.ChunkCount,
+                    repairRequest.MissingRanges.Count);
+                LogOutboundV6FrontierRequestReceiveDispatch(
+                    context,
+                    repairRequest,
+                    receivedTransportKind,
+                    "staged",
+                    "pending_sender_install",
+                    first.StartChunkIndex,
+                    first.ChunkCount,
+                    repairRequest.MissingRanges.Count,
+                    receiveInstall);
                 return;
             }
 
@@ -7289,40 +10903,26 @@ public sealed partial class SessionFileTransferService
                     repairRequest,
                     first);
             }
-        }
 
-        var syntheticState = new FileTransferReceiverStateFrameV6
-        {
-            SessionId = repairRequest.SessionId,
-            TransferId = repairRequest.TransferId,
-            Epoch = Math.Max(0, Environment.TickCount & 0x3fffffff),
-            ContiguousCommittedChunkIndex = Math.Max(0, first.StartChunkIndex),
-            DurableReceivedHighestChunkIndex = Math.Max(first.StartChunkIndex, first.StartChunkIndex + first.ChunkCount - 1),
-            CreditUntilChunkIndexExclusive = Math.Max(first.StartChunkIndex + first.ChunkCount, first.StartChunkIndex + 1),
-            MissingRanges = repairRequest.MissingRanges,
-            BytesCommitted = 0,
-            TransportEpoch = repairRequest.TransportEpoch,
-            RepairRequestId = repairRequest.RepairRequestId,
-            Priority = repairRequest.Priority,
-            RecoveryMode = repairRequest.RecoveryMode,
-        };
-        EnqueueAuthorizedV4RepairsFromState(
-            context,
-            syntheticState,
-            fallbackFrontierContract,
-            fallbackFrontierContractNewlyIssued);
-        LogOutboundV6FrontierRequestReceiveDispatch(
-            context,
-            repairRequest,
-            receivedTransportKind,
-            "dispatched",
-            "queued_for_legacy_sender_repair",
-            first.StartChunkIndex,
-            first.ChunkCount,
-            repairRequest.MissingRanges.Count);
-        LocalOperationalLog.Info(
-            "FileTransferService",
-            $"event=filetransfer_v6_frontier_repair_requested; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={repairRequest.TransportEpoch}; repair_request_id={FormatProtocolLogValue(repairRequest.RepairRequestId ?? "(none)")}; priority={FormatProtocolLogValue(repairRequest.Priority ?? "(none)")}; first_start_chunk_index={first.StartChunkIndex}; requested_chunk_count={first.ChunkCount}; range_count={repairRequest.MissingRanges.Count}");
+            EnqueueAuthorizedV4RepairsFromState(
+                context,
+                syntheticState,
+                fallbackFrontierContract,
+                fallbackFrontierContractNewlyIssued);
+            LogOutboundV6FrontierRequestReceiveDispatch(
+                context,
+                repairRequest,
+                receivedTransportKind,
+                "dispatched",
+                "queued_for_legacy_sender_repair",
+                first.StartChunkIndex,
+                first.ChunkCount,
+                repairRequest.MissingRanges.Count,
+                receiveInstall);
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_v6_frontier_repair_requested; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={repairRequest.TransportEpoch}; repair_request_id={FormatProtocolLogValue(repairRequest.RepairRequestId ?? "(none)")}; priority={FormatProtocolLogValue(repairRequest.Priority ?? "(none)")}; first_start_chunk_index={first.StartChunkIndex}; requested_chunk_count={first.ChunkCount}; range_count={repairRequest.MissingRanges.Count}");
+        }
     }
 
     private static bool IsEpochlessOutboundPostTunaFallbackV6FrontierRequestLocked(
@@ -7397,12 +10997,26 @@ public sealed partial class SessionFileTransferService
             $"event=filetransfer_v6_frontier_request_advanced_remote_frontier; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={request.TransportEpoch}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId ?? "(none)")}; previous_remote_frontier_chunk_index={previousRemoteFrontier}; inferred_remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}");
     }
 
-    private void ApplyOutboundV6RepairProof(OutboundTransferContext context, FileTransferRepairProofFrameV6 repairProof)
+    private void ApplyOutboundV6RepairProof(
+        OutboundTransferContext context,
+        FileTransferRepairProofFrameV6 repairProof,
+        OutboundSparsePumpInstall? receiveInstall = null,
+        RuntimeOwnerToken? receiveRuntimeOwner = null,
+        IFileTransferDataSession? receiveDataSession = null,
+        long receiveDataSessionGeneration = 0)
     {
         lock (gate)
         {
             if (!ReferenceEquals(outboundTransfer, context) ||
                 context.IsTerminal ||
+                (receiveDataSession is not null &&
+                 !IsOutboundSparseReceiveResultCurrentLocked(
+                     context,
+                     receiveInstall,
+                     receiveRuntimeOwner,
+                     receiveDataSession,
+                     receiveDataSessionGeneration,
+                     out _)) ||
                 repairProof.TransportEpoch <= 0)
             {
                 return;
@@ -7555,19 +11169,48 @@ public sealed partial class SessionFileTransferService
 
     private void EnqueueV4RepairsFromState(
         OutboundTransferContext context,
-        FileTransferStateFrameV4 state)
+        FileTransferStateFrameV4 state,
+        OutboundSparsePumpInstall? requiredReceiveInstall = null,
+        RuntimeOwnerToken? requiredReceiveRuntimeOwner = null,
+        IFileTransferDataSession? requiredReceiveDataSession = null,
+        long requiredReceiveDataSessionGeneration = 0)
         => EnqueueAuthorizedV4RepairsFromState(
             context,
             state,
             fallbackFrontierContract: null,
-            fallbackFrontierContractNewlyIssued: false);
+            fallbackFrontierContractNewlyIssued: false,
+            requiredReceiveInstall: requiredReceiveInstall,
+            requiredReceiveRuntimeOwner: requiredReceiveRuntimeOwner,
+            requiredReceiveDataSession: requiredReceiveDataSession,
+            requiredReceiveDataSessionGeneration: requiredReceiveDataSessionGeneration);
 
     private void EnqueueAuthorizedV4RepairsFromState(
         OutboundTransferContext context,
         FileTransferStateFrameV4 state,
         FallbackFrontierRepairContract? fallbackFrontierContract,
-        bool fallbackFrontierContractNewlyIssued)
+        bool fallbackFrontierContractNewlyIssued,
+        OutboundSparsePumpInstall? requiredReceiveInstall = null,
+        RuntimeOwnerToken? requiredReceiveRuntimeOwner = null,
+        IFileTransferDataSession? requiredReceiveDataSession = null,
+        long requiredReceiveDataSessionGeneration = 0)
     {
+        if (requiredReceiveDataSession is not null)
+        {
+            lock (gate)
+            {
+                if (!IsOutboundSparseReceiveResultCurrentLocked(
+                        context,
+                        requiredReceiveInstall,
+                        requiredReceiveRuntimeOwner,
+                        requiredReceiveDataSession,
+                        requiredReceiveDataSessionGeneration,
+                        out _))
+                {
+                    return;
+                }
+            }
+        }
+
         if (state.MissingRanges.Count == 0)
         {
             return;
@@ -7919,6 +11562,18 @@ public sealed partial class SessionFileTransferService
                         context.IsTerminal ? "queue_after_terminal" : "queue_for_stale_context");
                 }
 
+                return;
+            }
+
+            if (requiredReceiveDataSession is not null &&
+                !IsOutboundSparseReceiveResultCurrentLocked(
+                    context,
+                    requiredReceiveInstall,
+                    requiredReceiveRuntimeOwner,
+                    requiredReceiveDataSession,
+                    requiredReceiveDataSessionGeneration,
+                    out _))
+            {
                 return;
             }
 
@@ -8615,11 +12270,35 @@ public sealed partial class SessionFileTransferService
         FileTransferV4RepairDeliveryMode repairDeliveryMode = FileTransferV4RepairDeliveryMode.BulkOnly,
         string repairDeliveryReason = "normal",
         FallbackFrontierRepairContract? fallbackFrontierRepairContract = null,
-        Action<FileTransferDataPathSendAuthority?>? observeSendAuthority = null)
+        Action<FileTransferDataPathSendAuthority?>? observeSendAuthority = null,
+        OutboundSparsePumpInstall? pumpInstall = null,
+        CancellationToken pumpCancellationToken = default)
     {
         if (chunkIndices.Count == 0)
         {
             return true;
+        }
+
+        bool IsPumpInstallCurrentLocked()
+            => pumpInstall is null ||
+               IsOutboundSparsePumpInstallCurrentLocked(
+                   context,
+                   pumpInstall,
+                   dataSession,
+                   out _);
+
+        var sendLifetimeToken = pumpCancellationToken.CanBeCanceled
+            ? pumpCancellationToken
+            : context.LifetimeCts.Token;
+
+        lock (gate)
+        {
+            if (!ReferenceEquals(outboundTransfer, context) ||
+                context.IsTerminal ||
+                !IsPumpInstallCurrentLocked())
+            {
+                return false;
+            }
         }
 
         var isRegularV4PeerSilenceSafetyRepair =
@@ -8784,7 +12463,7 @@ public sealed partial class SessionFileTransferService
                             var remaining = sendTimeout - elapsed;
                             if (remaining <= TimeSpan.Zero)
                             {
-                                context.LifetimeCts.Token.ThrowIfCancellationRequested();
+                                sendLifetimeToken.ThrowIfCancellationRequested();
                                 timedOutForBoundTransport = true;
                                 break;
                             }
@@ -8794,7 +12473,7 @@ public sealed partial class SessionFileTransferService
                                 : TimeSpan.FromMilliseconds(PullSessionReceivePollDelayMs);
                             var completed = await Task.WhenAny(
                                     pendingSend.SendTask,
-                                    Task.Delay(delay, context.LifetimeCts.Token))
+                                    Task.Delay(delay, sendLifetimeToken))
                                 .ConfigureAwait(false);
                             if (completed == pendingSend.SendTask)
                             {
@@ -9037,20 +12716,83 @@ public sealed partial class SessionFileTransferService
                 }
 
                 var sentUtc = DateTimeOffset.UtcNow;
+                var pumpCompletionCurrent = false;
+                lock (gate)
+                {
+                    pumpCompletionCurrent = ReferenceEquals(outboundTransfer, context) &&
+                        !context.IsTerminal &&
+                        IsPumpInstallCurrentLocked();
+                    if (!pumpCompletionCurrent && ReferenceEquals(outboundTransfer, context))
+                    {
+                        context.PullSenderPipelineCurrentInFlightFrames = Math.Max(
+                            0,
+                            context.PullSenderPipelineCurrentInFlightFrames - 1);
+                        context.PullSenderPipelineCurrentInFlightBytes = Math.Max(
+                            0,
+                            context.PullSenderPipelineCurrentInFlightBytes - pendingSend.Prepared.RawBytes);
+                    }
+                }
+
+                if (!pumpCompletionCurrent)
+                {
+                    pendingSend.SendCts?.Dispose();
+                    LogOutboundSparsePumpInstallRejected(
+                        context,
+                        pumpInstall,
+                        "send_completion",
+                        "stale_pump_install");
+                    return;
+                }
+
+                if (OutboundSparseSendCompletionBarrierForTests is { } sendCompletionBarrier)
+                {
+                    await sendCompletionBarrier(context.TransferId, context.SessionId).ConfigureAwait(false);
+                }
+
+                lock (gate)
+                {
+                    pumpCompletionCurrent = ReferenceEquals(outboundTransfer, context) &&
+                        !context.IsTerminal &&
+                        IsPumpInstallCurrentLocked();
+                    if (!pumpCompletionCurrent && ReferenceEquals(outboundTransfer, context))
+                    {
+                        context.PullSenderPipelineCurrentInFlightFrames = Math.Max(
+                            0,
+                            context.PullSenderPipelineCurrentInFlightFrames - 1);
+                        context.PullSenderPipelineCurrentInFlightBytes = Math.Max(
+                            0,
+                            context.PullSenderPipelineCurrentInFlightBytes - pendingSend.Prepared.RawBytes);
+                    }
+                }
+
+                if (!pumpCompletionCurrent)
+                {
+                    pendingSend.SendCts?.Dispose();
+                    LogOutboundSparsePumpInstallRejected(
+                        context,
+                        pumpInstall,
+                        "send_completion",
+                        "stale_pump_install");
+                    return;
+                }
+
                 if (fallbackFrontierRepairContract is not null)
                 {
                     var fallbackCompletionCurrent = false;
+                    var pumpAuthorityCurrent = false;
                     var fallbackCompletionRejectionReason = "legacy_sparse_callback_for_stale_context";
                     lock (gate)
                     {
-                        fallbackCompletionCurrent =
-                            ReferenceEquals(outboundTransfer, context) &&
+                        pumpAuthorityCurrent = ReferenceEquals(outboundTransfer, context) &&
                             !context.IsTerminal &&
+                            IsPumpInstallCurrentLocked();
+                        fallbackCompletionCurrent =
+                            pumpAuthorityCurrent &&
                             TryValidateOutboundFallbackFrontierDispatchLocked(
                                 context,
                                 fallbackFrontierRepairContract,
                                 out fallbackCompletionRejectionReason);
-                        if (!fallbackCompletionCurrent)
+                        if (!fallbackCompletionCurrent && pumpAuthorityCurrent)
                         {
                             TrySettleFallbackFrontierRepairContract(
                                 fallbackFrontierRepairContract,
@@ -9069,6 +12811,10 @@ public sealed partial class SessionFileTransferService
                                     0,
                                     context.PullSenderPipelineCurrentInFlightBytes - pendingSend.Prepared.RawBytes);
                             }
+                        }
+                        else if (!pumpAuthorityCurrent)
+                        {
+                            fallbackCompletionRejectionReason = "stale_pump_install";
                         }
                     }
 
@@ -9099,15 +12845,13 @@ public sealed partial class SessionFileTransferService
 
                 if (timedOutForBoundTransport)
                 {
-                    stopForTransportPause = true;
-                    completedWithoutTransportPause = false;
-                    transportStopReason = repairSend
-                        ? "repair_transport_send_timeout"
-                        : "normal_transport_send_timeout";
-                    pendingSend.SendCts?.Cancel();
+                    var timeoutCompletionCurrent = false;
                     lock (gate)
                     {
-                        if (ReferenceEquals(outboundTransfer, context))
+                        timeoutCompletionCurrent = ReferenceEquals(outboundTransfer, context) &&
+                            !context.IsTerminal &&
+                            IsPumpInstallCurrentLocked();
+                        if (timeoutCompletionCurrent)
                         {
                             context.PullSenderPipelineCurrentInFlightFrames = Math.Max(0, context.PullSenderPipelineCurrentInFlightFrames - 1);
                             context.PullSenderPipelineCurrentInFlightBytes = Math.Max(0, context.PullSenderPipelineCurrentInFlightBytes - pendingSend.Prepared.RawBytes);
@@ -9116,6 +12860,30 @@ public sealed partial class SessionFileTransferService
                             context.SparseSenderPumpLastWakeReason = "transport_send_timeout";
                         }
                     }
+
+                    pendingSend.SendCts?.Cancel();
+                    if (!timeoutCompletionCurrent)
+                    {
+                        _ = ObserveAbandonedOutboundV4TransportSendAsync(
+                            pendingSend.SendTask,
+                            pendingSend.SendCts,
+                            context.TransferId,
+                            context.SessionId,
+                            pendingSend.Prepared.StartChunkIndex,
+                            pendingSend.Prepared.ChunkCount);
+                        LogOutboundSparsePumpInstallRejected(
+                            context,
+                            pumpInstall,
+                            "send_timeout",
+                            "stale_pump_install");
+                        return;
+                    }
+
+                    stopForTransportPause = true;
+                    completedWithoutTransportPause = false;
+                    transportStopReason = repairSend
+                        ? "repair_transport_send_timeout"
+                        : "normal_transport_send_timeout";
 
                     _ = ObserveAbandonedOutboundV4TransportSendAsync(
                         pendingSend.SendTask,
@@ -9147,9 +12915,13 @@ public sealed partial class SessionFileTransferService
                 pendingSend.SendCts?.Dispose();
 
                 var fifoWaitMs = (long)Math.Max(0, (sentUtc - pendingSend.ScheduledUtc).TotalMilliseconds);
+                var sendStatisticsCurrent = false;
                 lock (gate)
                 {
-                    if (ReferenceEquals(outboundTransfer, context))
+                    sendStatisticsCurrent = ReferenceEquals(outboundTransfer, context) &&
+                        !context.IsTerminal &&
+                        IsPumpInstallCurrentLocked();
+                    if (sendStatisticsCurrent)
                     {
                         context.PullSenderPipelineCurrentInFlightFrames = Math.Max(0, context.PullSenderPipelineCurrentInFlightFrames - 1);
                         context.PullSenderPipelineCurrentInFlightBytes = Math.Max(0, context.PullSenderPipelineCurrentInFlightBytes - pendingSend.Prepared.RawBytes);
@@ -9167,6 +12939,16 @@ public sealed partial class SessionFileTransferService
                     }
                 }
 
+                if (!sendStatisticsCurrent)
+                {
+                    LogOutboundSparsePumpInstallRejected(
+                        context,
+                        pumpInstall,
+                        "send_statistics",
+                        "stale_pump_install");
+                    return;
+                }
+
                 if (sendException is not null)
                 {
                     var deferredForTransportPause = false;
@@ -9175,11 +12957,14 @@ public sealed partial class SessionFileTransferService
                     var activationPauseAlreadyRecovered = false;
                     string pauseReason = "transport_paused";
                     int rebindGeneration = 0;
+                    var errorCompletionCurrent = false;
                     lock (gate)
                     {
-                        var blockForTransportPause = ShouldBlockOutboundV4TransportSendForTransportPauseLocked(context, repairSend);
-                        if (ReferenceEquals(outboundTransfer, context) &&
+                        errorCompletionCurrent = ReferenceEquals(outboundTransfer, context) &&
                             !context.IsTerminal &&
+                            IsPumpInstallCurrentLocked();
+                        var blockForTransportPause = ShouldBlockOutboundV4TransportSendForTransportPauseLocked(context, repairSend);
+                        if (errorCompletionCurrent &&
                             blockForTransportPause)
                         {
                             deferredForTransportPause = true;
@@ -9187,7 +12972,8 @@ public sealed partial class SessionFileTransferService
                             rebindGeneration = context.PullTransportRebindGeneration;
                             MarkStopForTransportPauseLocked();
                         }
-                        else if (TryDeferOutboundV4SendForTunaActivationPauseLocked(
+                        else if (errorCompletionCurrent &&
+                                 TryDeferOutboundV4SendForTunaActivationPauseLocked(
                                      context,
                                      dataSession.IsAvailable,
                                      sendException,
@@ -9201,7 +12987,8 @@ public sealed partial class SessionFileTransferService
                             completedWithoutTransportPause = false;
                             transportStopReason = pauseReason;
                         }
-                        else if (TryDeferOutboundV4SendForFileTunaFallbackHandoffLocked(
+                        else if (errorCompletionCurrent &&
+                                 TryDeferOutboundV4SendForFileTunaFallbackHandoffLocked(
                                      context,
                                      sendException,
                                      out pauseReason,
@@ -9213,6 +13000,16 @@ public sealed partial class SessionFileTransferService
                             completedWithoutTransportPause = false;
                             transportStopReason = pauseReason;
                         }
+                    }
+
+                    if (!errorCompletionCurrent)
+                    {
+                        LogOutboundSparsePumpInstallRejected(
+                            context,
+                            pumpInstall,
+                            "send_failure",
+                            "stale_pump_install");
+                        return;
                     }
 
                     if (deferredForTransportPause)
@@ -9250,11 +13047,14 @@ public sealed partial class SessionFileTransferService
                 if (fallbackFrontierRepairContract is not null)
                 {
                     var authorizedCompletion = false;
+                    var pumpAuthorityCurrent = false;
                     var fallbackCompletionRejectionReason = "legacy_sparse_send_completed_for_stale_context";
                     lock (gate)
                     {
-                        if (ReferenceEquals(outboundTransfer, context) &&
+                        pumpAuthorityCurrent = ReferenceEquals(outboundTransfer, context) &&
                             !context.IsTerminal &&
+                            IsPumpInstallCurrentLocked();
+                        if (pumpAuthorityCurrent &&
                             TryValidateOutboundFallbackFrontierDispatchLocked(
                                 context,
                                 fallbackFrontierRepairContract,
@@ -9272,7 +13072,7 @@ public sealed partial class SessionFileTransferService
                                     context.ChunksAcceptedForTransport);
                             }
                         }
-                        else
+                        else if (pumpAuthorityCurrent)
                         {
                             TrySettleFallbackFrontierRepairContract(
                                 fallbackFrontierRepairContract,
@@ -9282,6 +13082,10 @@ public sealed partial class SessionFileTransferService
                                 context.IsTerminal
                                     ? "legacy_sparse_send_completed_after_terminal"
                                     : fallbackCompletionRejectionReason);
+                        }
+                        else
+                        {
+                            fallbackCompletionRejectionReason = "stale_pump_install";
                         }
                     }
 
@@ -9294,64 +13098,81 @@ public sealed partial class SessionFileTransferService
                     }
                 }
 
+                var progressCompletionCurrent = false;
+                lock (gate)
+                {
+                    progressCompletionCurrent = ReferenceEquals(outboundTransfer, context) &&
+                        !context.IsTerminal &&
+                        IsPumpInstallCurrentLocked();
+                    if (!progressCompletionCurrent)
+                    {
+                        // The completion belongs to a retired sender child. Its transport
+                        // observation is not authority to mutate the successor runtime.
+                    }
+                    else
+                    {
+                        var startChunkIndex = pendingSend.Prepared.StartChunkIndex;
+                        for (var chunkOffset = 0; chunkOffset < pendingSend.Prepared.ChunkCount; chunkOffset++)
+                        {
+                            var chunkIndex = startChunkIndex + chunkOffset;
+                            context.SentAwaitingAck[chunkIndex] = sentUtc;
+                            context.LastChunkSentUtc[chunkIndex] = sentUtc;
+                            if (!repairSend)
+                            {
+                                context.ChunksAcceptedForTransport = Math.Max(context.ChunksAcceptedForTransport, chunkIndex + 1);
+                            }
+
+                            context.RecentPullChunkSentUtc.Enqueue(sentUtc);
+                        }
+
+                        if (!repairSend)
+                        {
+                            context.BytesAcceptedForTransport = context.ChunksAcceptedForTransport >= context.ChunkCount
+                                ? context.FileSizeBytes
+                                : Math.Min(context.FileSizeBytes, (long)context.ChunksAcceptedForTransport * context.ChunkSizeBytes);
+                        }
+
+                        TrimRecentEvents(context.RecentPullChunkSentUtc, sentUtc);
+                        context.PullUsefulPayloadBytesRecent += pendingSend.Prepared.RawBytes;
+                        context.PullSenderRawBytesRecent += pendingSend.Prepared.RawBytes;
+                        context.PullSenderRawBytesTotal += pendingSend.Prepared.RawBytes;
+                        context.PullSenderBatchFramesRecent++;
+                        context.PullSenderBatchFramesTotal++;
+                        context.PullSenderChunkCountRecent += pendingSend.Prepared.ChunkCount;
+                        context.PullSenderChunkCountTotal += pendingSend.Prepared.ChunkCount;
+                        if (repairSend)
+                        {
+                            context.PullSenderRepairRawBytesTotal += pendingSend.Prepared.RawBytes;
+                            context.PullSenderRepairBatchFramesTotal++;
+                            context.PullSenderRepairChunkCountTotal += pendingSend.Prepared.ChunkCount;
+                            context.PullSenderRepairSendCountRecent += pendingSend.Prepared.ChunkCount;
+                        }
+                        else
+                        {
+                            context.PullSenderNormalRawBytesTotal += pendingSend.Prepared.RawBytes;
+                            context.PullSenderNormalBatchFramesTotal++;
+                            context.PullSenderNormalChunkCountTotal += pendingSend.Prepared.ChunkCount;
+                        }
+
+                        MaybeLogOutboundV4SenderPumpSummaryLocked(context, sentUtc, force: false);
+                    }
+                }
+
+                if (!progressCompletionCurrent)
+                {
+                    LogOutboundSparsePumpInstallRejected(
+                        context,
+                        pumpInstall,
+                        "send_progress",
+                        "stale_pump_install");
+                    return;
+                }
+
                 LogPullBinaryFrameSent(
                     context.TransferId,
                     context.SessionId,
                     pendingSend.Prepared.Frame,
                     pendingSend.Prepared.RawBytes);
-
-                lock (gate)
-                {
-                    if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
-                    {
-                        return;
-                    }
-
-                    var startChunkIndex = pendingSend.Prepared.StartChunkIndex;
-                    for (var chunkOffset = 0; chunkOffset < pendingSend.Prepared.ChunkCount; chunkOffset++)
-                    {
-                        var chunkIndex = startChunkIndex + chunkOffset;
-                        context.SentAwaitingAck[chunkIndex] = sentUtc;
-                        context.LastChunkSentUtc[chunkIndex] = sentUtc;
-                        if (!repairSend)
-                        {
-                            context.ChunksAcceptedForTransport = Math.Max(context.ChunksAcceptedForTransport, chunkIndex + 1);
-                        }
-
-                        context.RecentPullChunkSentUtc.Enqueue(sentUtc);
-                    }
-
-                    if (!repairSend)
-                    {
-                        context.BytesAcceptedForTransport = context.ChunksAcceptedForTransport >= context.ChunkCount
-                            ? context.FileSizeBytes
-                            : Math.Min(context.FileSizeBytes, (long)context.ChunksAcceptedForTransport * context.ChunkSizeBytes);
-                    }
-
-                    TrimRecentEvents(context.RecentPullChunkSentUtc, sentUtc);
-                    context.PullUsefulPayloadBytesRecent += pendingSend.Prepared.RawBytes;
-                    context.PullSenderRawBytesRecent += pendingSend.Prepared.RawBytes;
-                    context.PullSenderRawBytesTotal += pendingSend.Prepared.RawBytes;
-                    context.PullSenderBatchFramesRecent++;
-                    context.PullSenderBatchFramesTotal++;
-                    context.PullSenderChunkCountRecent += pendingSend.Prepared.ChunkCount;
-                    context.PullSenderChunkCountTotal += pendingSend.Prepared.ChunkCount;
-                    if (repairSend)
-                    {
-                        context.PullSenderRepairRawBytesTotal += pendingSend.Prepared.RawBytes;
-                        context.PullSenderRepairBatchFramesTotal++;
-                        context.PullSenderRepairChunkCountTotal += pendingSend.Prepared.ChunkCount;
-                        context.PullSenderRepairSendCountRecent += pendingSend.Prepared.ChunkCount;
-                    }
-                    else
-                    {
-                        context.PullSenderNormalRawBytesTotal += pendingSend.Prepared.RawBytes;
-                        context.PullSenderNormalBatchFramesTotal++;
-                        context.PullSenderNormalChunkCountTotal += pendingSend.Prepared.ChunkCount;
-                    }
-
-                    MaybeLogOutboundV4SenderPumpSummaryLocked(context, sentUtc, force: false);
-                }
 
                 if (repairSend || FileTransferDiagnosticLogPolicy.TraceEnabled)
                 {
@@ -9388,12 +13209,13 @@ public sealed partial class SessionFileTransferService
                     }
                 }
 
-                context.LifetimeCts.Token.ThrowIfCancellationRequested();
+                sendLifetimeToken.ThrowIfCancellationRequested();
                 lock (gate)
                 {
                     var blockForTransportPause = ShouldBlockOutboundV4TransportSendForTransportPauseLocked(context, repairSend);
                     if (!ReferenceEquals(outboundTransfer, context) ||
                         context.IsTerminal ||
+                        !IsPumpInstallCurrentLocked() ||
                         context.UserPaused ||
                         context.PeerPaused ||
                         blockForTransportPause)
@@ -9426,11 +13248,11 @@ public sealed partial class SessionFileTransferService
                 FileTransferDataPathSendAuthority? sendAuthority = null;
                 try
                 {
-                    var sendToken = context.LifetimeCts.Token;
+                    var sendToken = sendLifetimeToken;
                     if (ShouldBoundOutboundV4TransportSend(context) ||
                         isRegularV4PeerSilenceSafetyRepair)
                     {
-                        sendCts = CancellationTokenSource.CreateLinkedTokenSource(context.LifetimeCts.Token);
+                        sendCts = CancellationTokenSource.CreateLinkedTokenSource(sendLifetimeToken);
                         sendToken = sendCts.Token;
                     }
 
@@ -9439,7 +13261,8 @@ public sealed partial class SessionFileTransferService
                     lock (gate)
                     {
                         if (!ReferenceEquals(outboundTransfer, context) ||
-                            context.IsTerminal)
+                            context.IsTerminal ||
+                            !IsPumpInstallCurrentLocked())
                         {
                             sendException = new OperationCanceledException(sendToken);
                         }
@@ -9496,7 +13319,9 @@ public sealed partial class SessionFileTransferService
 
                 lock (gate)
                 {
-                    if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
+                    if (!ReferenceEquals(outboundTransfer, context) ||
+                        context.IsTerminal ||
+                        !IsPumpInstallCurrentLocked())
                     {
                         return false;
                     }
@@ -9553,7 +13378,7 @@ public sealed partial class SessionFileTransferService
 
             for (var index = 0; index < chunkIndices.Count; index++)
             {
-                context.LifetimeCts.Token.ThrowIfCancellationRequested();
+                sendLifetimeToken.ThrowIfCancellationRequested();
                 if (repairSend)
                 {
                     var originalIndex = index;
@@ -9561,7 +13386,8 @@ public sealed partial class SessionFileTransferService
                     lock (gate)
                     {
                         if (!ReferenceEquals(outboundTransfer, context) ||
-                            context.IsTerminal)
+                            context.IsTerminal ||
+                            !IsPumpInstallCurrentLocked())
                         {
                             break;
                         }
@@ -9599,6 +13425,7 @@ public sealed partial class SessionFileTransferService
                         ShouldBlockOutboundV4NormalSendAheadForFileTunaV4PostTunaRecoveryLocked(context);
                     if (!ReferenceEquals(outboundTransfer, context) ||
                         context.IsTerminal ||
+                        !IsPumpInstallCurrentLocked() ||
                         context.UserPaused ||
                         context.PeerPaused ||
                         blockForTransportPause ||
@@ -9650,7 +13477,9 @@ public sealed partial class SessionFileTransferService
                 var batchPrepareDurationMs = (long)Math.Max(0, Stopwatch.GetElapsedTime(batchPrepareStarted).TotalMilliseconds);
                 lock (gate)
                 {
-                    if (ReferenceEquals(outboundTransfer, context) && !context.IsTerminal)
+                    if (ReferenceEquals(outboundTransfer, context) &&
+                        !context.IsTerminal &&
+                        IsPumpInstallCurrentLocked())
                     {
                         context.PullSenderFeedBatchFramesPreparedRecent++;
                         context.PullSenderFeedChunkCountPreparedRecent += preparedBatch.ChunkCount;
@@ -9665,7 +13494,8 @@ public sealed partial class SessionFileTransferService
                     lock (gate)
                     {
                         if (!ReferenceEquals(outboundTransfer, context) ||
-                            context.IsTerminal)
+                            context.IsTerminal ||
+                            !IsPumpInstallCurrentLocked())
                         {
                             break;
                         }
@@ -10133,11 +13963,25 @@ public sealed partial class SessionFileTransferService
         return $"{Math.Max(0, firstStart)}:{Math.Max(0, requestedChunkCount)}:{rangeText}";
     }
 
-    private void SignalOutboundSparseSenderPump(OutboundTransferContext context)
+    private void SignalOutboundSparseSenderPump(
+        OutboundTransferContext context,
+        OutboundSparsePumpInstall? receiveInstall = null,
+        RuntimeOwnerToken? receiveRuntimeOwner = null,
+        IFileTransferDataSession? receiveDataSession = null,
+        long receiveDataSessionGeneration = 0)
     {
         lock (gate)
         {
-            if (ReferenceEquals(outboundTransfer, context) && !context.IsTerminal)
+            if (ReferenceEquals(outboundTransfer, context) &&
+                !context.IsTerminal &&
+                (receiveDataSession is null ||
+                 IsOutboundSparseReceiveResultCurrentLocked(
+                     context,
+                     receiveInstall,
+                     receiveRuntimeOwner,
+                     receiveDataSession,
+                     receiveDataSessionGeneration,
+                     out _)))
             {
                 context.SignalSparseSenderPump();
             }
@@ -10598,19 +14442,20 @@ public sealed partial class SessionFileTransferService
             $"event=filetransfer_v4_efficiency_summary; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; terminal_state={terminalState.ToString().ToLowerInvariant()}; route={context.RouteSelection.TelemetryToken}; protocol_version={context.NegotiatedDataProtocolVersion}; runtime_profile={FormatFileTransferRouteRuntimeProfile(context.RouteSelection.RuntimeProfile)}; frame_family={FormatFileTransferFrameFamily(context.RouteSelection.FrameFamily)}; bridge_recovery_policy={FormatFileTransferRouteBridgeRecoveryPolicy(context.RouteSelection.BridgeRecoveryPolicy)}; file_size_bytes={fileSizeBytes}; bytes_transferred={context.BytesTransferred}; sparse_bytes_written={context.ReceiverSparseBytesWritten}; next_chunk_index={context.NextChunkIndex}; highest_received_chunk_index={context.PullHighestReceivedChunkIndex}; raw_batch_bytes_received_total={context.PullReceiverRawBatchBytesTotal}; raw_batch_frames_received_total={context.PullReceiverRawBatchFramesTotal}; accepted_raw_bytes_received_total={context.PullReceiverAcceptedRawBytesTotal}; duplicate_or_stale_raw_bytes_received_total={context.PullReceiverDuplicateOrStaleRawBytesTotal}; raw_to_file_permille={rawToFilePermille}; accepted_to_file_permille={acceptedToFilePermille}; duplicate_or_stale_to_raw_permille={duplicateToRawPermille}; accepted_to_raw_permille={acceptedToRawPermille}; chunk_count_received_total={context.PullReceiverChunkCountTotal}; accepted_chunk_count_total={context.PullReceiverAcceptedChunkCountTotal}; duplicate_or_stale_chunk_count_total={context.PullReceiverDuplicateOrStaleChunkCountTotal}; repair_overlap_chunk_count_total={context.PullReceiverRepairOverlapChunkCountTotal}; repair_accepted_chunk_count_total={context.PullReceiverRepairAcceptedChunkCountTotal}; repair_duplicate_or_stale_chunk_count_total={context.PullReceiverRepairDuplicateOrStaleChunkCountTotal}; repair_duplicate_or_stale_raw_bytes_total={context.PullReceiverRepairDuplicateOrStaleRawBytesTotal}; sparse_write_batch_count_total={context.PullReceiverSparseWriteBatchCountTotal}; sparse_write_duration_ms_total={context.PullReceiverSparseWriteDurationMsTotal}; receiver_state_sent_total={context.PullV4StateSentCountTotal}; repair_request_count_total={context.PullV4RepairRequestCountTotal}; repair_requested_chunk_count_total={context.PullV4RepairRequestedChunkCountTotal}; repair_suppressed_count_total={context.PullV4RepairSuppressedCountTotal}; frontier_tail_repair_request_count_total={context.PullV4FrontierTailRepairRequestCountTotal}; frontier_stall_suppressed_count_total={context.V4FrontierStallSuppressedCountTotal}; pending_repair_request_count={context.V4ReceiverRepairRequests.Count}; pending_write_chunk_count={context.ReceiverSparseChunksPendingWrite.Count}; pending_bytes={context.BufferedBytes}");
     }
 
-    private async Task FailOutboundV4Async(
+    private async Task<bool> FailOutboundV4Async(
         OutboundTransferContext context,
         IFileTransferDataSession? dataSession,
         RuntimeOwnerToken? runtimeOwner,
         string errorCode,
         string statusMessage,
-        bool notifyPeer)
+        bool notifyPeer,
+        OutboundSparsePumpInstall? requiredSparsePumpInstall = null)
     {
         lock (gate)
         {
             if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
             {
-                return;
+                return false;
             }
 
             if (!TryAuthorizeRuntimeOwnerActionLocked(
@@ -10621,7 +14466,7 @@ public sealed partial class SessionFileTransferService
                     errorCode,
                     out _))
             {
-                return;
+                return false;
             }
         }
 
@@ -10629,14 +14474,21 @@ public sealed partial class SessionFileTransferService
             "FileTransferService",
             $"event=filetransfer_v4_sender_failed; transfer_id={context.TransferId}; session_id={context.SessionId}; error_code={errorCode}; reason={FormatProtocolLogValue(statusMessage)}");
 
-        await TransitionOutboundToTerminalAsync(
+        if (requiredSparsePumpInstall is not null &&
+            OutboundSparseFailureAuthorizationBarrierForTests is { } failureAuthorizationBarrier)
+        {
+            await failureAuthorizationBarrier(context.TransferId, context.SessionId).ConfigureAwait(false);
+        }
+
+        return await TransitionOutboundToTerminalAsync(
             context,
             FileTransferTransferState.Failed,
             errorCode: errorCode,
             statusMessage: statusMessage,
             notifyPeer: notifyPeer,
             cancelReason: null,
-            ct: CancellationToken.None).ConfigureAwait(false);
+            ct: CancellationToken.None,
+            requiredSparsePumpInstall: requiredSparsePumpInstall).ConfigureAwait(false);
     }
 
     private async Task<bool> SendOutboundV4PauseStateAsync(OutboundTransferContext context, string reason)
@@ -11319,7 +15171,32 @@ public sealed partial class SessionFileTransferService
                             out var checkpointReissueRequest) &&
                         checkpointReissueRequest is not null)
                     {
-                        QueueOutboundV4SparseRuntimeStateRefresh(context, checkpointDataSession, checkpointReissueRequest, "checkpoint_response_timeout_reissue");
+                        if (context.InstalledOutboundSparsePump is { } checkpointInstall &&
+                            IsOutboundSparsePumpInstallCurrentLocked(
+                                context,
+                                checkpointInstall,
+                                checkpointDataSession,
+                                out _))
+                        {
+                            QueueOutboundV4SparseRuntimeStateRefreshIfCurrent(
+                                context,
+                                checkpointDataSession,
+                                checkpointReissueRequest,
+                                "checkpoint_response_timeout_reissue",
+                                checkpointInstall,
+                                checkpointInstall.RuntimeOwner,
+                                checkpointDataSession,
+                                checkpointInstall.DataSessionGeneration);
+                        }
+                        else
+                        {
+                            QueueOutboundV4SparseRuntimeStateRefresh(
+                                context,
+                                checkpointDataSession,
+                                checkpointReissueRequest,
+                                "checkpoint_response_timeout_reissue");
+                        }
+
                         return;
                     }
 

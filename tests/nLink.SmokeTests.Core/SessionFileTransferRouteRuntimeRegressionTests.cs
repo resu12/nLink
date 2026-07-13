@@ -192,6 +192,7 @@ public sealed class SessionFileTransferRouteRuntimeRegressionTests : SessionFile
     }
 
     [Fact]
+    [Trait("FileTransferRuntimeSuite", "SparseWorkerHandoff")]
     public async Task DiagnosticRegularNknV6_RequiresExplicitOptIn()
     {
         const string defaultTransferId = "p4_diag_default";
@@ -215,6 +216,7 @@ public sealed class SessionFileTransferRouteRuntimeRegressionTests : SessionFile
             diagnosticTransferId,
             static transport => transport.IsDiagnosticRegularNknV6RouteEnabled = true);
         AssertWireRoute(diagnosticResult, FileTransferRouteResolver.DiagnosticRegularNknV6Token, FileTransferProtocol.ProtocolVersionV6);
+        AssertFrameFamily(diagnosticResult, FileTransferProtocol.ProtocolVersionV6);
         AssertRouteAwareLogConsistency(
             diagnosticResult.LogTail,
             diagnosticTransferId,
@@ -224,6 +226,15 @@ public sealed class SessionFileTransferRouteRuntimeRegressionTests : SessionFile
             "v6",
             "primary_regular_nkn_quiet");
         Assert.Contains("event=filetransfer_primary_regular_nkn_bulk_v6_selected; direction=outbound; transfer_id=" + diagnosticTransferId, diagnosticResult.LogTail, StringComparison.Ordinal);
+        var diagnosticTransferLog = FilterTransferLog(diagnosticResult.LogTail, diagnosticTransferId);
+        Assert.Contains(
+            diagnosticTransferLog.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries),
+            static line =>
+                line.Contains("event=filetransfer_outbound_sparse_worker_handoff_installed;", StringComparison.Ordinal) &&
+                line.Contains("install_generation=1; predecessor_install_generation=0;", StringComparison.Ordinal) &&
+                line.Contains("session_id=p4_session_diag_opt; transfer_id=p4_diag_opt; direction=outbound;", StringComparison.Ordinal) &&
+                line.Contains("route=diagnostic_regular_nkn_v6; protocol_version=6;", StringComparison.Ordinal) &&
+                line.Contains("decision_reason=initial_runtime", StringComparison.Ordinal));
     }
 
     [Fact]

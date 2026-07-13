@@ -3016,6 +3016,566 @@ function Test-TunaGuiLatestFallbackFrontierRequestDispatchMissing {
     return $true
 }
 
+function Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Lines)
+
+    function Get-WorkerHandoffFieldValue {
+        param(
+            [AllowNull()][string]$Line,
+            [Parameter(Mandatory = $true)][string]$Name
+        )
+
+        if ([string]::IsNullOrWhiteSpace($Line)) {
+            return ''
+        }
+
+        $match = [regex]::Match(
+            $Line,
+            "(?i)(?:^|;\s*)$([regex]::Escape($Name))=([^;`r`n]+)")
+        return $(if ($match.Success) { $match.Groups[1].Value.Trim() } else { '' })
+    }
+
+    function Test-WorkerHandoffIdentityMatch {
+        param(
+            [AllowNull()][string]$SourceLine,
+            [AllowNull()][string]$CandidateLine
+        )
+
+        foreach ($fieldName in @('session_id', 'transfer_id')) {
+            $sourceValue = Get-WorkerHandoffFieldValue -Line $SourceLine -Name $fieldName
+            $candidateValue = Get-WorkerHandoffFieldValue -Line $CandidateLine -Name $fieldName
+            if ([string]::IsNullOrWhiteSpace($sourceValue) -or
+                $sourceValue -eq '(none)' -or
+                [string]::IsNullOrWhiteSpace($candidateValue) -or
+                $candidateValue -eq '(none)' -or
+                -not [string]::Equals($sourceValue, $candidateValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Test-WorkerHandoffAcceptedPublication {
+        param(
+            [AllowNull()][string]$Line,
+            [AllowNull()][string]$ScopeLine
+        )
+
+        $publicationEvent = $false
+        foreach ($eventName in @(
+                'filetransfer_route_transitioned',
+                'filetransfer_route_selected',
+                'filetransfer_live_route_epoch_started',
+                'filetransfer_live_route_epoch_recovered',
+                'filetransfer_runtime_started')) {
+            if ($Line.IndexOf("event=$eventName", [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $publicationEvent = $true
+                break
+            }
+        }
+
+        return $publicationEvent -and
+            $Line.IndexOf('direction=outbound', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $Line.IndexOf('route_publication_action_kind=RoutePublication', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $Line.IndexOf('coordinator_decision_reason=accepted', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            (Test-WorkerHandoffIdentityMatch -SourceLine $ScopeLine -CandidateLine $Line)
+    }
+
+    function Test-WorkerHandoffPublicationTupleMatch {
+        param(
+            [AllowNull()][string]$AnchorLine,
+            [AllowNull()][string]$CandidateLine
+        )
+
+        if (-not (Test-WorkerHandoffPublicationTupleComplete -Line $AnchorLine) -or
+            -not (Test-WorkerHandoffPublicationTupleComplete -Line $CandidateLine) -or
+            -not (Test-WorkerHandoffIdentityMatch -SourceLine $AnchorLine -CandidateLine $CandidateLine)) {
+            return $false
+        }
+
+        foreach ($fieldName in @(
+                'route',
+                'protocol_version',
+                'live_route_epoch',
+                'runtime_generation',
+                'terminal_generation',
+                'leg_generation',
+                'route_publication_generation',
+                'route_commit_generation',
+                'target_route',
+                'target_protocol_version',
+                'target_transport')) {
+            $anchorValue = Get-WorkerHandoffFieldValue -Line $AnchorLine -Name $fieldName
+            $candidateValue = Get-WorkerHandoffFieldValue -Line $CandidateLine -Name $fieldName
+            if ([string]::IsNullOrWhiteSpace($anchorValue) -or
+                $anchorValue -eq '(none)' -or
+                [string]::IsNullOrWhiteSpace($candidateValue) -or
+                $candidateValue -eq '(none)' -or
+                -not [string]::Equals($anchorValue, $candidateValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Test-WorkerHandoffPublicationTupleComplete {
+        param([AllowNull()][string]$Line)
+
+        if ([string]::IsNullOrWhiteSpace($Line) -or
+            $Line.IndexOf('direction=outbound', [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            return $false
+        }
+
+        foreach ($fieldName in @('session_id', 'transfer_id')) {
+            $value = Get-WorkerHandoffFieldValue -Line $Line -Name $fieldName
+            if ([string]::IsNullOrWhiteSpace($value) -or $value -in @('(none)', 'none')) {
+                return $false
+            }
+        }
+
+        foreach ($fieldName in @(
+                'route',
+                'protocol_version',
+                'live_route_epoch',
+                'runtime_generation',
+                'terminal_generation',
+                'leg_generation',
+                'route_publication_generation',
+                'route_commit_generation',
+                'target_route',
+                'target_protocol_version',
+                'target_transport')) {
+            $value = Get-WorkerHandoffFieldValue -Line $Line -Name $fieldName
+            if ([string]::IsNullOrWhiteSpace($value) -or $value -in @('(none)', 'none')) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Test-WorkerHandoffFrontierTupleMatch {
+        param(
+            [AllowNull()][string]$PublicationLine,
+            [AllowNull()][string]$CandidateLine
+        )
+
+        if (-not (Test-WorkerHandoffPublicationTupleComplete -Line $PublicationLine) -or
+            -not (Test-WorkerHandoffIdentityMatch -SourceLine $PublicationLine -CandidateLine $CandidateLine)) {
+            return $false
+        }
+
+        foreach ($fieldName in @('route', 'protocol_version', 'live_route_epoch', 'leg_generation')) {
+            $publicationValue = Get-WorkerHandoffFieldValue -Line $PublicationLine -Name $fieldName
+            $candidateValue = Get-WorkerHandoffFieldValue -Line $CandidateLine -Name $fieldName
+            if ([string]::IsNullOrWhiteSpace($candidateValue) -or
+                $candidateValue -in @('(none)', 'none') -or
+                -not [string]::Equals($publicationValue, $candidateValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Get-WorkerHandoffFrontierCorrelationKey {
+        param([AllowNull()][string]$Line)
+
+        $repairRequestId = Get-WorkerHandoffFieldValue -Line $Line -Name 'repair_request_id'
+        $requestCorrelationId = Get-WorkerHandoffFieldValue -Line $Line -Name 'request_correlation_id'
+        if ([string]::IsNullOrWhiteSpace($repairRequestId) -or
+            $repairRequestId -in @('(none)', 'none') -or
+            [string]::IsNullOrWhiteSpace($requestCorrelationId) -or
+            $requestCorrelationId -in @('(none)', 'none')) {
+            return ''
+        }
+
+        return ('{0}|{1}' -f $repairRequestId, $requestCorrelationId).ToLowerInvariant()
+    }
+
+    function Get-WorkerHandoffInstallDescriptorFieldNames {
+        @(
+            'descriptor_terminal_generation',
+            'descriptor_leg_generation',
+            'installation_reason',
+            'runtime_owner_session_id',
+            'runtime_owner_transfer_id',
+            'runtime_owner_direction',
+            'runtime_owner_route',
+            'runtime_owner_route_token',
+            'runtime_owner_protocol_version',
+            'runtime_owner_live_route_epoch',
+            'runtime_owner_runtime_generation',
+            'runtime_owner_terminal_generation',
+            'runtime_owner_runtime_family',
+            'runtime_owner_created_reason',
+            'route_publication_session_id',
+            'route_publication_transfer_id',
+            'route_publication_direction',
+            'route_publication_route',
+            'route_publication_route_token',
+            'route_publication_protocol_version',
+            'route_publication_live_route_epoch',
+            'route_publication_runtime_generation',
+            'route_publication_terminal_generation',
+            'route_publication_leg_generation',
+            'route_publication_route_commit_generation',
+            'route_publication_target_route',
+            'route_publication_target_protocol_version',
+            'route_publication_target_transport',
+            'route_publication_token_generation',
+            'route_publication_action_kind',
+            'route_publication_reason',
+            'route_publication_owner_session_id',
+            'route_publication_owner_transfer_id',
+            'route_publication_owner_direction',
+            'route_publication_owner_route',
+            'route_publication_owner_route_token',
+            'route_publication_owner_protocol_version',
+            'route_publication_owner_live_route_epoch',
+            'route_publication_owner_runtime_generation',
+            'route_publication_owner_terminal_generation',
+            'route_publication_owner_runtime_family',
+            'route_publication_owner_created_reason'
+        )
+    }
+
+    function Test-WorkerHandoffInstallDescriptorComplete {
+        param([AllowNull()][string]$Line)
+
+        if (-not (Test-WorkerHandoffPublicationTupleComplete -Line $Line)) {
+            return $false
+        }
+
+        $installGenerationText = Get-WorkerHandoffFieldValue -Line $Line -Name 'install_generation'
+        $predecessorGenerationText = Get-WorkerHandoffFieldValue -Line $Line -Name 'predecessor_install_generation'
+        $dataSessionGenerationText = Get-WorkerHandoffFieldValue -Line $Line -Name 'data_session_generation'
+        $runtimeFamily = Get-WorkerHandoffFieldValue -Line $Line -Name 'runtime_family'
+        if ($installGenerationText -notmatch '^\d+$' -or
+            $predecessorGenerationText -notmatch '^\d+$' -or
+            $dataSessionGenerationText -notmatch '^\d+$' -or
+            [string]::IsNullOrWhiteSpace($runtimeFamily) -or
+            $runtimeFamily -in @('(none)', 'none')) {
+            return $false
+        }
+
+        foreach ($fieldName in Get-WorkerHandoffInstallDescriptorFieldNames) {
+            $value = Get-WorkerHandoffFieldValue -Line $Line -Name $fieldName
+            if ([string]::IsNullOrWhiteSpace($value) -or $value -in @('(none)', 'none')) {
+                return $false
+            }
+        }
+
+        foreach ($fieldName in @(
+                'descriptor_terminal_generation',
+                'descriptor_leg_generation',
+                'runtime_owner_protocol_version',
+                'runtime_owner_live_route_epoch',
+                'runtime_owner_runtime_generation',
+                'runtime_owner_terminal_generation',
+                'route_publication_protocol_version',
+                'route_publication_live_route_epoch',
+                'route_publication_runtime_generation',
+                'route_publication_terminal_generation',
+                'route_publication_leg_generation',
+                'route_publication_route_commit_generation',
+                'route_publication_target_protocol_version',
+                'route_publication_token_generation',
+                'route_publication_owner_protocol_version',
+                'route_publication_owner_live_route_epoch',
+                'route_publication_owner_runtime_generation',
+                'route_publication_owner_terminal_generation')) {
+            if ((Get-WorkerHandoffFieldValue -Line $Line -Name $fieldName) -notmatch '^\d+$') {
+                return $false
+            }
+        }
+
+        foreach ($fieldName in @('runtime_owner_direction', 'route_publication_direction', 'route_publication_owner_direction')) {
+            if ((Get-WorkerHandoffFieldValue -Line $Line -Name $fieldName) -ne 'outbound') {
+                return $false
+            }
+        }
+
+        $installGeneration = [int64]$installGenerationText
+        $predecessorGeneration = [int64]$predecessorGenerationText
+        $dataSessionGeneration = [int64]$dataSessionGenerationText
+        return $installGeneration -gt 0 -and
+            $predecessorGeneration -ge 0 -and
+            $predecessorGeneration -lt $installGeneration -and
+            $dataSessionGeneration -gt 0
+    }
+
+    function Test-WorkerHandoffInstallDescriptorMatch {
+        param(
+            [AllowNull()][string]$AnchorLine,
+            [AllowNull()][string]$CandidateLine
+        )
+
+        if (-not (Test-WorkerHandoffInstallDescriptorComplete -Line $AnchorLine) -or
+            -not (Test-WorkerHandoffInstallDescriptorComplete -Line $CandidateLine) -or
+            -not (Test-WorkerHandoffPublicationTupleMatch -AnchorLine $AnchorLine -CandidateLine $CandidateLine)) {
+            return $false
+        }
+
+        foreach ($fieldName in @(
+                'install_generation',
+                'predecessor_install_generation',
+                'data_session_generation',
+                'runtime_family') + @(Get-WorkerHandoffInstallDescriptorFieldNames)) {
+            $anchorValue = Get-WorkerHandoffFieldValue -Line $AnchorLine -Name $fieldName
+            $candidateValue = Get-WorkerHandoffFieldValue -Line $CandidateLine -Name $fieldName
+            if (-not [string]::Equals($anchorValue, $candidateValue, [System.StringComparison]::Ordinal)) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Test-WorkerHandoffDispatchTupleMatch {
+        param(
+            [AllowNull()][string]$InstallLine,
+            [AllowNull()][string]$CandidateLine
+        )
+
+        return Test-WorkerHandoffInstallDescriptorMatch -AnchorLine $InstallLine -CandidateLine $CandidateLine
+    }
+
+    function Test-WorkerHandoffProgressMatch {
+        param(
+            [AllowNull()][string]$InstallLine,
+            [AllowNull()][string]$ProgressLine,
+            [int]$ProgressIndex,
+            [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Dispatches
+        )
+
+        if ([string]::IsNullOrWhiteSpace($InstallLine) -or
+            [string]::IsNullOrWhiteSpace($ProgressLine) -or
+            $ProgressLine.IndexOf('event=filetransfer_fallback_frontier_repair_progress_observed', [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -or
+            (Get-WorkerHandoffFieldValue -Line $ProgressLine -Name 'direction') -ne 'inbound' -or
+            -not (Test-WorkerHandoffIdentityMatch -SourceLine $InstallLine -CandidateLine $ProgressLine)) {
+            return $false
+        }
+
+        $repairRequestKey = Get-WorkerHandoffFieldValue -Line $ProgressLine -Name 'repair_request_key'
+        $frontierBeforeText = Get-WorkerHandoffFieldValue -Line $ProgressLine -Name 'committed_frontier_before'
+        $frontierAfterText = Get-WorkerHandoffFieldValue -Line $ProgressLine -Name 'committed_frontier_after'
+        $requestedChunkCountText = Get-WorkerHandoffFieldValue -Line $ProgressLine -Name 'requested_chunk_count'
+        if ([string]::IsNullOrWhiteSpace($repairRequestKey) -or
+            $repairRequestKey -in @('(none)', 'none') -or
+            $frontierBeforeText -notmatch '^\d+$' -or
+            $frontierAfterText -notmatch '^\d+$' -or
+            $requestedChunkCountText -notmatch '^\d+$' -or
+            [int64]$frontierAfterText -le [int64]$frontierBeforeText -or
+            [int64]$requestedChunkCountText -le 0) {
+            return $false
+        }
+
+        return @($Dispatches | Where-Object {
+            $_.Index -lt $ProgressIndex -and
+            (Test-WorkerHandoffInstallDescriptorMatch -AnchorLine $InstallLine -CandidateLine $_.Line) -and
+            [string]::Equals(
+                (Get-WorkerHandoffFieldValue -Line $_.Line -Name 'repair_request_id'),
+                $repairRequestKey,
+                [System.StringComparison]::Ordinal)
+        } | Select-Object -First 1).Count -gt 0
+    }
+
+    $lineCount = $Lines.Count
+    $handoffCandidates = @(
+        for ($index = 0; $index -lt $lineCount; $index++) {
+            $line = [string]$Lines[$index]
+            $staleWorker = $line.IndexOf(
+                    'event=filetransfer_runtime_owner_stale_update_rejected',
+                    [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                (Test-TunaGuiLogLineContainsAll -Line $line -Needles @(
+                    'direction=outbound',
+                    'source=v4_sender_failed',
+                    'attempted_action=read_failed',
+                    'reason=runtime_generation_mismatch',
+                    'current_route=post_tuna_fallback_v6'))
+            if ($staleWorker) {
+                [pscustomobject]@{ Index = $index; Line = $line }
+            }
+        }
+    )
+
+    foreach ($candidate in $handoffCandidates) {
+        $candidateLine = [string]$candidate.Line
+        $currentRuntimeGeneration = Get-WorkerHandoffFieldValue -Line $candidateLine -Name 'current_runtime_generation'
+        $currentTerminalGeneration = Get-WorkerHandoffFieldValue -Line $candidateLine -Name 'current_terminal_generation'
+        $currentLiveRouteEpoch = Get-WorkerHandoffFieldValue -Line $candidateLine -Name 'current_live_route_epoch'
+        $currentProtocolVersion = Get-WorkerHandoffFieldValue -Line $candidateLine -Name 'current_protocol_version'
+        if ([string]::IsNullOrWhiteSpace($currentRuntimeGeneration) -or
+            [string]::IsNullOrWhiteSpace($currentTerminalGeneration) -or
+            [string]::IsNullOrWhiteSpace($currentLiveRouteEpoch) -or
+            $currentProtocolVersion -ne '6') {
+            continue
+        }
+
+        $publicationLine = ''
+        $publicationIndex = -1
+        for ($index = $candidate.Index - 1; $index -ge 0; $index--) {
+            $line = [string]$Lines[$index]
+            if (-not (Test-WorkerHandoffAcceptedPublication -Line $line -ScopeLine $candidateLine) -or
+                (Get-WorkerHandoffFieldValue -Line $line -Name 'route') -ne 'post_tuna_fallback_v6' -or
+                (Get-WorkerHandoffFieldValue -Line $line -Name 'protocol_version') -ne '6' -or
+                (Get-WorkerHandoffFieldValue -Line $line -Name 'runtime_generation') -ne $currentRuntimeGeneration -or
+                (Get-WorkerHandoffFieldValue -Line $line -Name 'terminal_generation') -ne $currentTerminalGeneration -or
+                (Get-WorkerHandoffFieldValue -Line $line -Name 'live_route_epoch') -ne $currentLiveRouteEpoch) {
+                continue
+            }
+
+            if (Test-WorkerHandoffPublicationTupleComplete -Line $line) {
+                $publicationLine = $line
+                $publicationIndex = $index
+                break
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($publicationLine)) {
+            continue
+        }
+
+        $requiredDescriptors = @(
+            for ($requiredIndex = 0; $requiredIndex -lt $lineCount; $requiredIndex++) {
+                $requiredLine = [string]$Lines[$requiredIndex]
+                if ($requiredLine.IndexOf('event=filetransfer_outbound_sparse_worker_handoff_required', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                    (Test-WorkerHandoffInstallDescriptorComplete -Line $requiredLine) -and
+                    (Test-WorkerHandoffPublicationTupleMatch -AnchorLine $publicationLine -CandidateLine $requiredLine)) {
+                    [pscustomobject]@{ Index = $requiredIndex; Line = $requiredLine }
+                }
+            }
+        )
+
+        $fallbackDeliveryOrQueue = $false
+        $currentInstallLine = ''
+        $currentConsumerProven = $false
+        $terminalClosed = $false
+        $publicationSuperseded = $false
+        $descriptorDispatches = New-Object System.Collections.Generic.List[object]
+        $matchedFrontierCorrelationKeys = [System.Collections.Generic.HashSet[string]]::new(
+            [System.StringComparer]::OrdinalIgnoreCase)
+        for ($index = $publicationIndex + 1; $index -lt $lineCount; $index++) {
+            $line = [string]$Lines[$index]
+            if ($index -gt $candidate.Index -and
+                (Test-WorkerHandoffAcceptedPublication -Line $line -ScopeLine $candidateLine)) {
+                if (-not (Test-WorkerHandoffPublicationTupleMatch -AnchorLine $publicationLine -CandidateLine $line)) {
+                    $publicationSuperseded = $true
+                    break
+                }
+                continue
+            }
+            if ($index -gt $candidate.Index -and
+                ($line.IndexOf('event=file_transfer_outbound_terminal', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                    ($line.IndexOf('event=transfer_terminal', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                        $line.IndexOf('direction=outbound', [System.StringComparison]::OrdinalIgnoreCase) -ge 0))) {
+                if (Test-WorkerHandoffIdentityMatch -SourceLine $candidateLine -CandidateLine $line) {
+                    $terminalClosed = $true
+                    break
+                }
+                continue
+            }
+
+            if ($line.IndexOf('event=filetransfer_outbound_sparse_worker_handoff_installed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                (Test-WorkerHandoffInstallDescriptorComplete -Line $line) -and
+                (Test-WorkerHandoffPublicationTupleMatch -AnchorLine $publicationLine -CandidateLine $line)) {
+                $matchingRequired = @($requiredDescriptors | Where-Object {
+                    $_.Index -lt $index -and
+                    (Test-WorkerHandoffInstallDescriptorMatch -AnchorLine $_.Line -CandidateLine $line)
+                } | Sort-Object Index -Descending | Select-Object -First 1)
+                if ($matchingRequired.Count -gt 0) {
+                    if ([string]::IsNullOrWhiteSpace($currentInstallLine) -or
+                        -not (Test-WorkerHandoffInstallDescriptorMatch -AnchorLine $currentInstallLine -CandidateLine $line)) {
+                        $currentConsumerProven = $false
+                    }
+                    $currentInstallLine = $line
+                }
+                continue
+            }
+
+            if ($line.IndexOf('event=filetransfer_outbound_sparse_receive_supervisor_stopped', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                -not [string]::IsNullOrWhiteSpace($currentInstallLine) -and
+                (Test-WorkerHandoffInstallDescriptorMatch -AnchorLine $currentInstallLine -CandidateLine $line)) {
+                $stopTerminal = Get-WorkerHandoffFieldValue -Line $line -Name 'terminal'
+                if ($index -gt $candidate.Index -and $stopTerminal -eq '1') {
+                    $terminalClosed = $true
+                    break
+                }
+                if ($stopTerminal -eq '0') {
+                    $currentInstallLine = ''
+                    $currentConsumerProven = $false
+                }
+                continue
+            }
+
+            if ($index -gt $candidate.Index -and
+                $line.IndexOf('event=filetransfer_v6_frontier_request_receive_dispatched', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                (Test-WorkerHandoffInstallDescriptorComplete -Line $line) -and
+                (Test-WorkerHandoffPublicationTupleMatch -AnchorLine $publicationLine -CandidateLine $line)) {
+                $descriptorDispatches.Add([pscustomobject]@{ Index = $index; Line = $line }) | Out-Null
+                if (-not [string]::IsNullOrWhiteSpace($currentInstallLine) -and
+                    (Test-WorkerHandoffDispatchTupleMatch -InstallLine $currentInstallLine -CandidateLine $line)) {
+                    $currentConsumerProven = $true
+                }
+                continue
+            }
+
+            if ($index -gt $candidate.Index -and
+                -not [string]::IsNullOrWhiteSpace($currentInstallLine) -and
+                (Test-WorkerHandoffProgressMatch `
+                    -InstallLine $currentInstallLine `
+                    -ProgressLine $line `
+                    -ProgressIndex $index `
+                    -Dispatches $descriptorDispatches.ToArray())) {
+                $currentConsumerProven = $true
+                continue
+            }
+
+            if ($index -le $candidate.Index) {
+                continue
+            }
+
+            if (($line.IndexOf('event=filetransfer_control_plane_delivery_result', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                    $line.IndexOf('event=filetransfer_control_plane_delivery_observed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -and
+                (Test-TunaGuiLogLineContainsAll -Line $line -Needles @(
+                    'frame_type=filetransfer.frontier_request.v6',
+                    'peer_visible_any=1',
+                    'accepted_any=1')) -and
+                (Test-WorkerHandoffFrontierTupleMatch -PublicationLine $publicationLine -CandidateLine $line)) {
+                $correlationKey = Get-WorkerHandoffFrontierCorrelationKey -Line $line
+                if (-not [string]::IsNullOrWhiteSpace($correlationKey)) {
+                    $matchedFrontierCorrelationKeys.Add($correlationKey) | Out-Null
+                    $fallbackDeliveryOrQueue = $true
+                }
+                continue
+            }
+
+            if (($line.IndexOf('event=filetransfer_v6_frontier_request_transport_queued', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                    $line.IndexOf('event=filetransfer_v6_frontier_request_transport_rejected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -and
+                $line.IndexOf('frame_type=filetransfer.frontier_request.v6', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                (Test-WorkerHandoffIdentityMatch -SourceLine $candidateLine -CandidateLine $line)) {
+                $correlationKey = Get-WorkerHandoffFrontierCorrelationKey -Line $line
+                if (-not [string]::IsNullOrWhiteSpace($correlationKey) -and
+                    $matchedFrontierCorrelationKeys.Contains($correlationKey)) {
+                    $fallbackDeliveryOrQueue = $true
+                }
+                continue
+            }
+        }
+
+        if ($publicationSuperseded -or $terminalClosed) {
+            continue
+        }
+        if ($fallbackDeliveryOrQueue -and -not $currentConsumerProven) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
 function Test-TunaGuiBridgeBootstrapNotReadyEvidence {
     param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Lines)
 
@@ -3081,6 +3641,9 @@ function Get-TunaGuiExplicitFailureClassification {
             }
             'runtime_unlock_retry_dispatch_contract_unsettled' {
                 return [pscustomobject]@{ Phase = 'runtime_unlock_retry'; Reason = $failureClass }
+            }
+            'post_tuna_fallback_outbound_receive_worker_handoff_missing' {
+                return [pscustomobject]@{ Phase = 'outbound_sparse_worker_handoff'; Reason = $failureClass }
             }
             'fallback_tail_yield_authority_invalid' {
                 return [pscustomobject]@{ Phase = 'fallback_tail_yield'; Reason = $failureClass }
@@ -3736,6 +4299,8 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_control_plane_delivery_observed', 'kind=frontier_request', 'frame_type=filetransfer.frontier_request.v6', 'peer_visible_any=1', 'accepted_any=1'))
     $fallbackFrontierRequestReceiveDispatched = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_v6_frontier_request_receive_dispatched')
     $fallbackFrontierRequestReceiveRejected = Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_v6_frontier_request_receive_dispatch_rejected')
+    $postTunaFallbackOutboundReceiveWorkerHandoffMissing =
+        Test-TunaGuiPostTunaFallbackOutboundReceiveWorkerHandoffMissing -Lines $evidenceLines
     $postTunaFallbackRouteEvidence = (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('route=post_tuna_fallback_v6', 'protocol_version=6')) -or
         (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('phase=measured_post_tuna_fallback_v6'))
     $postTunaFallbackFrontierRescueObserved = (Test-TunaGuiLogLinesContain -Lines $evidenceLines -Needles @('event=filetransfer_v6_post_tuna_fallback_frontier_rescue_requested')) -or
@@ -3826,6 +4391,7 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
         $regularV4FrontierRepairSettledStalledUnclosed -or
         $regularV4FrontierRepairSendDeferred -or
         $regularV4FrontierRepairStalled -or
+        $postTunaFallbackOutboundReceiveWorkerHandoffMissing -or
         $fallbackFrontierRequestDispatchMissing -or
         $fallbackFrontierRepairStalled -or
         $fallbackTailYieldAuthorityRejected -or
@@ -3937,6 +4503,10 @@ function Get-TunaGuiFileTransferSetupFailureClassification {
     elseif ($regularV4ReceiveRecoveryRejectedBeforeRuntimeUnlock) {
         $phase = 'runtime_unlock_retry'
         $reason = 'regular_v4_receive_recovery_rejected_before_runtime_unlock'
+    }
+    elseif ($postTunaFallbackOutboundReceiveWorkerHandoffMissing) {
+        $phase = 'outbound_sparse_worker_handoff'
+        $reason = 'post_tuna_fallback_outbound_receive_worker_handoff_missing'
     }
     elseif ($fallbackFrontierRequestDispatchMissing) {
         $phase = 'fallback_frontier_repair'

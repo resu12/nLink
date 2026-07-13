@@ -475,6 +475,61 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
     }
 
     [Fact]
+    public async Task RunFileTransferRouteAcceptance_Phase5PreservesWorkerHandoffCandidateUnderIncompleteProof()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "phase5-worker-handoff-runtime-failure");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-worker-handoff-runtime-failure");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_ROUTE"] = "regular_nkn_v4_fast,file_tuna_v4,post_tuna_fallback_v6";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_TRANSIENT_SETUP_FAILURE"] = "1";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_TRANSIENT_SETUP_PHASE"] = "outbound_sparse_worker_handoff";
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_TRANSIENT_SETUP_REASON"] = "post_tuna_fallback_outbound_receive_worker_handoff_missing";
+
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ScenarioName", "regular-v4-live-activation-off-on-off-256mb",
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.NotEqual(0, result.ExitCode);
+
+            const string prefix = "regular-v4-live-activation-off-on-off-256mb";
+            var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal("FAIL", summary["verdict"]);
+            Assert.Equal("post_tuna_fallback_v6", summary[$"{prefix}.final_route"]);
+            Assert.Equal("post_tuna_fallback_outbound_receive_worker_handoff_missing", summary[$"{prefix}.acceptance_failure_class"]);
+            Assert.Equal("incomplete_proof", summary[$"{prefix}.runtime_correctness_verdict"]);
+            Assert.False(summary.ContainsKey($"{prefix}.setup_failure_phase"));
+            Assert.False(summary.ContainsKey($"{prefix}.setup_failure_reason"));
+            var summaryText = File.ReadAllText(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.txt"));
+            Assert.Contains(
+                "Tuna GUI runtime failure: phase=outbound_sparse_worker_handoff; reason=post_tuna_fallback_outbound_receive_worker_handoff_missing",
+                summaryText,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain("fallback_frontier_repair_stalled", summaryText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
     [Trait("Category", "Smoke")]
     public async Task RunFileTransferRouteAcceptance_Phase5RegularActivationClassifiesFallbackRepairBeforeMissingSecondTuna()
     {
