@@ -179,7 +179,11 @@ public sealed record FileTransferRecoveryLivenessSnapshot(
     bool ReceiveProofObserved,
     bool RecoveryExhausted,
     bool AuthorityCompleted,
-    bool TerminalRecommended);
+    bool TerminalRecommended)
+{
+    internal RuntimeUnlockRegularV4RecoveryLeaseClosureContinuationProof?
+        RegularV4RecoveryLeaseClosureContinuationProof { get; init; }
+}
 
 public interface IFileTransferRecoveryLivenessState
 {
@@ -688,6 +692,24 @@ internal readonly record struct RuntimeUnlockRegularV4RecoveryLifecycleReport(
 
     public bool IsDefault => RecoveryAuthority.IsDefault ||
                              string.IsNullOrWhiteSpace(Reason);
+}
+
+internal readonly record struct RuntimeUnlockRegularV4RecoveryLeaseClosureContinuationProof(
+    RuntimeUnlockRegularV4RecoveryLifecycleReport LifecycleReport,
+    RecoveryLivenessLease RetiredRecoveryLivenessLease,
+    RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus DecisionStatus,
+    string DecisionReason,
+    DateTimeOffset MaximumLivenessDeferralDeadlineUtc)
+{
+    public bool IsDefault => LifecycleReport.IsDefault ||
+                             RetiredRecoveryLivenessLease.IsDefault ||
+                             RetiredRecoveryLivenessLease.State != RecoveryLivenessLeaseState.Retired ||
+                             DecisionStatus is not (
+                                 RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Accepted or
+                                 RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Idempotent) ||
+                             string.IsNullOrWhiteSpace(DecisionReason) ||
+                             !string.Equals(DecisionReason, DecisionReason.Trim(), StringComparison.Ordinal) ||
+                             MaximumLivenessDeferralDeadlineUtc == default;
 }
 
 internal sealed class RuntimeUnlockRetryDispatchContract

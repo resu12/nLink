@@ -62,6 +62,7 @@ internal enum FileTransferCoordinatorActionKind
     RecoveryLivenessLeaseBegin,
     RecoveryLivenessLeaseValidate,
     RecoveryLivenessLeaseRetire,
+    RecoveryLeaseClosureLivenessDeferral,
 }
 
 internal enum RuntimeUnlockAdmissionStatus
@@ -675,6 +676,9 @@ internal readonly record struct FileTransferCoordinatorActionRequest(
     TransportEpochActionKind? TransportEpochActionKind = null,
     BridgeRecoveryKind? BridgeRecoveryKind = null,
     RecoveryLivenessLease? RecoveryLivenessLease = null,
+    RuntimeUnlockRegularV4RecoveryLeaseClosureContinuationProof?
+        RegularV4RecoveryLeaseClosureContinuationProof = null,
+    DateTimeOffset? LivenessDeferralDeadlineUtc = null,
     int? RecoveryDecisionGeneration = null,
     int? RuntimeGeneration = null,
     int? TerminalGeneration = null,
@@ -971,7 +975,8 @@ internal static class FileTransferCoordinator
               request.FallbackControlPlaneToken?.RuntimeOwner ??
               request.FallbackCheckpointLease?.RuntimeOwner ??
               request.FallbackControlPlanePressureToken?.RuntimeOwner ??
-              request.RecoveryLivenessLease?.RuntimeOwner
+              request.RecoveryLivenessLease?.RuntimeOwner ??
+              request.RegularV4RecoveryLeaseClosureContinuationProof?.RetiredRecoveryLivenessLease.RuntimeOwner
             : request.RuntimeOwner ??
               request.RuntimeUnlockAdmissionToken?.RuntimeOwner ??
               request.RouteCommitToken?.RuntimeOwner ??
@@ -980,7 +985,8 @@ internal static class FileTransferCoordinator
               request.FallbackControlPlaneToken?.RuntimeOwner ??
               request.FallbackCheckpointLease?.RuntimeOwner ??
               request.FallbackControlPlanePressureToken?.RuntimeOwner ??
-              request.RecoveryLivenessLease?.RuntimeOwner;
+              request.RecoveryLivenessLease?.RuntimeOwner ??
+              request.RegularV4RecoveryLeaseClosureContinuationProof?.RetiredRecoveryLivenessLease.RuntimeOwner;
         if (effectiveRuntimeOwner is { } runtimeOwner)
         {
             if (!IsRuntimeOwnerCurrent(state, runtimeOwner, out var ownerRejectionReason))
@@ -1306,6 +1312,8 @@ internal static class FileTransferCoordinator
             FileTransferCoordinatorActionKind.LivenessDeferral or
             FileTransferCoordinatorActionKind.RecoveryLivenessLeaseValidate
                 => request.RecoveryLivenessLease,
+            FileTransferCoordinatorActionKind.RecoveryLeaseClosureLivenessDeferral
+                => request.RegularV4RecoveryLeaseClosureContinuationProof?.RetiredRecoveryLivenessLease,
             FileTransferCoordinatorActionKind.RecoveryLivenessLeaseRetire
                 => request.RecoveryLivenessLease is { } lease
                     ? lease with
@@ -6601,6 +6609,11 @@ internal static class FileTransferCoordinator
 
         if (recoveryLivenessLease is { } livenessLease)
         {
+            if (kind == FileTransferCoordinatorActionKind.RecoveryLeaseClosureLivenessDeferral)
+            {
+                return next;
+            }
+
             var startsRegularV4Recovery =
                 kind == FileTransferCoordinatorActionKind.BridgeReceiveStallRecovery &&
                 bridgeRecoveryDecision is not null;
@@ -6877,6 +6890,15 @@ internal static class FileTransferCoordinator
             {
                 return false;
             }
+        }
+
+        if (request.Kind == FileTransferCoordinatorActionKind.RecoveryLeaseClosureLivenessDeferral &&
+            !TryValidateRuntimeUnlockRegularV4RecoveryLeaseClosureContinuation(
+                state,
+                request,
+                out rejectionReason))
+        {
+            return false;
         }
 
         if (request.Kind == FileTransferCoordinatorActionKind.PeerEpochPromotion)
@@ -7219,6 +7241,72 @@ internal static class FileTransferCoordinator
                    FileTransferCoordinatorActionKind.FallbackTailQuiescent or
                    FileTransferCoordinatorActionKind.FallbackTailFailed;
 
+    private static bool TryValidateRuntimeUnlockRegularV4RecoveryLeaseClosureContinuation(
+        FileTransferCoordinatorState state,
+        FileTransferCoordinatorActionRequest request,
+        out string rejectionReason)
+    {
+        rejectionReason = "accepted";
+        if (request.RegularV4RecoveryLeaseClosureContinuationProof is not { } proof ||
+            proof.IsDefault)
+        {
+            rejectionReason = "regular_v4_recovery_lease_closure_continuation_proof_missing";
+            return false;
+        }
+
+        if (request.LivenessDeferralDeadlineUtc is not { } requestedDeadline ||
+            requestedDeadline == default)
+        {
+            rejectionReason = "regular_v4_recovery_lease_closure_continuation_deadline_missing";
+            return false;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        if (requestedDeadline <= now ||
+            proof.MaximumLivenessDeferralDeadlineUtc <= now)
+        {
+            rejectionReason = "regular_v4_recovery_lease_closure_continuation_deadline_expired";
+            return false;
+        }
+
+        if (requestedDeadline > proof.MaximumLivenessDeferralDeadlineUtc)
+        {
+            rejectionReason = "regular_v4_recovery_lease_closure_continuation_deadline_exceeded";
+            return false;
+        }
+
+        var expectedDecisionReason = proof.DecisionStatus switch
+        {
+            RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Accepted
+                => "regular_v4_recovery_lifecycle_accepted",
+            RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Idempotent
+                => "regular_v4_recovery_lifecycle_duplicate",
+            _ => string.Empty,
+        };
+        if (string.IsNullOrWhiteSpace(expectedDecisionReason) ||
+            !string.Equals(proof.DecisionReason, NormalizeReason(proof.DecisionReason), StringComparison.Ordinal) ||
+            !string.Equals(proof.DecisionReason, expectedDecisionReason, StringComparison.Ordinal))
+        {
+            rejectionReason = "regular_v4_recovery_lease_closure_continuation_decision_invalid";
+            return false;
+        }
+
+        if (state.CurrentRecoveryLivenessLease is not null ||
+            state.LastRuntimeUnlockRegularV4RecoveryLifecycle != proof.LifecycleReport ||
+            state.LastRetiredRecoveryLivenessLease != proof.RetiredRecoveryLivenessLease ||
+            request.RecoveryLivenessLease is { } suppliedLease &&
+            suppliedLease != proof.RetiredRecoveryLivenessLease ||
+            !IsRuntimeUnlockRegularV4RecoveryAuthorityCurrentOrAcceptedClosure(
+                state,
+                proof.LifecycleReport.RecoveryAuthority))
+        {
+            rejectionReason = "regular_v4_recovery_lease_closure_continuation_stale";
+            return false;
+        }
+
+        return true;
+    }
+
     private static bool IsRecoveryAuthorityAction(FileTransferCoordinatorActionKind kind)
         => kind is FileTransferCoordinatorActionKind.RepairReplay or
                    FileTransferCoordinatorActionKind.TransportEpochAdoption or
@@ -7231,7 +7319,8 @@ internal static class FileTransferCoordinator
                    FileTransferCoordinatorActionKind.LivenessDeferral or
                    FileTransferCoordinatorActionKind.RecoveryLivenessLeaseBegin or
                    FileTransferCoordinatorActionKind.RecoveryLivenessLeaseValidate or
-                   FileTransferCoordinatorActionKind.RecoveryLivenessLeaseRetire;
+                   FileTransferCoordinatorActionKind.RecoveryLivenessLeaseRetire or
+                   FileTransferCoordinatorActionKind.RecoveryLeaseClosureLivenessDeferral;
 
     private static bool IsTransportEpochAuthorityAction(FileTransferCoordinatorActionKind kind)
         => kind is FileTransferCoordinatorActionKind.TransportEpochAdoption or

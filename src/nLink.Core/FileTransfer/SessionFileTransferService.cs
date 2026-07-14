@@ -7512,7 +7512,9 @@ public sealed partial class SessionFileTransferService : IDisposable
         int? attemptedLegGeneration,
         long? attemptedTransportEpoch,
         int? attemptedBridgeRecoveryGeneration,
-        out FileTransferRecoveryLivenessDeferralGrant? grant)
+        out FileTransferRecoveryLivenessDeferralGrant? grant,
+        RuntimeUnlockRegularV4RecoveryLeaseClosureContinuationProof? closureContinuationProof = null,
+        FileTransferRecoveryLivenessState? recoveryLivenessState = null)
     {
         grant = null;
         if (context.CurrentRuntimeOwner is not { } owner)
@@ -7543,6 +7545,17 @@ public sealed partial class SessionFileTransferService : IDisposable
                 null,
                 null,
                 null);
+            if (closureContinuationProof is { } rejectedProof)
+            {
+                LogRuntimeUnlockRegularV4RecoveryLeaseClosureLivenessDeferral(
+                    granted: false,
+                    rejectedProof,
+                    livenessDeferralDeadlineUtc,
+                    recoveryLivenessState,
+                    "runtime_owner_missing",
+                    source,
+                    attemptedAction);
+            }
             return false;
         }
 
@@ -7558,7 +7571,10 @@ public sealed partial class SessionFileTransferService : IDisposable
             attemptedLiveRouteEpoch,
             attemptedLegGeneration,
             attemptedTransportEpoch,
-            attemptedBridgeRecoveryGeneration);
+            attemptedBridgeRecoveryGeneration,
+            livenessDeferralDeadlineUtc,
+            closureContinuationProof,
+            recoveryLivenessState);
         if (!decision.Accepted || decision.RecoveryLivenessLease is null)
         {
             var rejection = decision.Accepted ? "recovery_liveness_lease_missing" : decision.RejectionReason;
@@ -7594,6 +7610,17 @@ public sealed partial class SessionFileTransferService : IDisposable
                 null,
                 null,
                 null);
+            if (closureContinuationProof is { } rejectedProof)
+            {
+                LogRuntimeUnlockRegularV4RecoveryLeaseClosureLivenessDeferral(
+                    granted: false,
+                    rejectedProof,
+                    livenessDeferralDeadlineUtc,
+                    recoveryLivenessState,
+                    rejection,
+                    source,
+                    attemptedAction);
+            }
             return false;
         }
 
@@ -7608,6 +7635,17 @@ public sealed partial class SessionFileTransferService : IDisposable
             decision.RecoveryLivenessLease.Value,
             livenessDeferralDeadlineUtc,
             decision.Kind);
+        if (closureContinuationProof is { } acceptedProof)
+        {
+            LogRuntimeUnlockRegularV4RecoveryLeaseClosureLivenessDeferral(
+                granted: true,
+                acceptedProof,
+                livenessDeferralDeadlineUtc,
+                recoveryLivenessState,
+                decision.RejectionReason,
+                source,
+                attemptedAction);
+        }
         return true;
     }
 
@@ -7623,7 +7661,9 @@ public sealed partial class SessionFileTransferService : IDisposable
         int? attemptedLegGeneration,
         long? attemptedTransportEpoch,
         int? attemptedBridgeRecoveryGeneration,
-        out FileTransferRecoveryLivenessDeferralGrant? grant)
+        out FileTransferRecoveryLivenessDeferralGrant? grant,
+        RuntimeUnlockRegularV4RecoveryLeaseClosureContinuationProof? closureContinuationProof = null,
+        FileTransferRecoveryLivenessState? recoveryLivenessState = null)
     {
         grant = null;
         if (context.CurrentRuntimeOwner is not { } owner)
@@ -7654,6 +7694,17 @@ public sealed partial class SessionFileTransferService : IDisposable
                 null,
                 null,
                 null);
+            if (closureContinuationProof is { } rejectedProof)
+            {
+                LogRuntimeUnlockRegularV4RecoveryLeaseClosureLivenessDeferral(
+                    granted: false,
+                    rejectedProof,
+                    livenessDeferralDeadlineUtc,
+                    recoveryLivenessState,
+                    "runtime_owner_missing",
+                    source,
+                    attemptedAction);
+            }
             return false;
         }
 
@@ -7669,7 +7720,10 @@ public sealed partial class SessionFileTransferService : IDisposable
             attemptedLiveRouteEpoch,
             attemptedLegGeneration,
             attemptedTransportEpoch,
-            attemptedBridgeRecoveryGeneration);
+            attemptedBridgeRecoveryGeneration,
+            livenessDeferralDeadlineUtc,
+            closureContinuationProof,
+            recoveryLivenessState);
         if (!decision.Accepted || decision.RecoveryLivenessLease is null)
         {
             var rejection = decision.Accepted ? "recovery_liveness_lease_missing" : decision.RejectionReason;
@@ -7705,6 +7759,17 @@ public sealed partial class SessionFileTransferService : IDisposable
                 null,
                 null,
                 null);
+            if (closureContinuationProof is { } rejectedProof)
+            {
+                LogRuntimeUnlockRegularV4RecoveryLeaseClosureLivenessDeferral(
+                    granted: false,
+                    rejectedProof,
+                    livenessDeferralDeadlineUtc,
+                    recoveryLivenessState,
+                    rejection,
+                    source,
+                    attemptedAction);
+            }
             return false;
         }
 
@@ -7719,6 +7784,17 @@ public sealed partial class SessionFileTransferService : IDisposable
             decision.RecoveryLivenessLease.Value,
             livenessDeferralDeadlineUtc,
             decision.Kind);
+        if (closureContinuationProof is { } acceptedProof)
+        {
+            LogRuntimeUnlockRegularV4RecoveryLeaseClosureLivenessDeferral(
+                granted: true,
+                acceptedProof,
+                livenessDeferralDeadlineUtc,
+                recoveryLivenessState,
+                decision.RejectionReason,
+                source,
+                attemptedAction);
+        }
         return true;
     }
 
@@ -7734,7 +7810,10 @@ public sealed partial class SessionFileTransferService : IDisposable
         int? attemptedLiveRouteEpoch,
         int? attemptedLegGeneration,
         long? attemptedTransportEpoch,
-        int? attemptedBridgeRecoveryGeneration)
+        int? attemptedBridgeRecoveryGeneration,
+        DateTimeOffset livenessDeferralDeadlineUtc,
+        RuntimeUnlockRegularV4RecoveryLeaseClosureContinuationProof? closureContinuationProof,
+        FileTransferRecoveryLivenessState? recoveryLivenessState)
     {
         var route = TryResolveRequestRoute(attemptedRouteToken, attemptedProtocolVersion ?? 0, out var routeSelection)
             ? routeSelection.Route
@@ -7746,9 +7825,18 @@ public sealed partial class SessionFileTransferService : IDisposable
             route == FileTransferRoute.RegularNknV4Fast &&
             (attemptedProtocolVersion ?? leg?.ProtocolVersion ?? owner.ProtocolVersion) ==
             FileTransferProtocol.ProtocolVersionV4;
-        var actionKind = activeLease is not null || requiresPreissuedRegularV4Lease
-            ? FileTransferCoordinatorActionKind.LivenessDeferral
-            : FileTransferCoordinatorActionKind.RecoveryLivenessLeaseBegin;
+        var useClosureContinuation =
+            activeLease is null &&
+            requiresPreissuedRegularV4Lease &&
+            state.RuntimeUnlockRecoveryLeaseClosureAvailable &&
+            recoveryLivenessState ==
+                FileTransferRecoveryLivenessState.BridgeRecoveryCompletedAwaitingProof &&
+            closureContinuationProof is { IsDefault: false };
+        var actionKind = useClosureContinuation
+            ? FileTransferCoordinatorActionKind.RecoveryLeaseClosureLivenessDeferral
+            : activeLease is not null || requiresPreissuedRegularV4Lease
+                ? FileTransferCoordinatorActionKind.LivenessDeferral
+                : FileTransferCoordinatorActionKind.RecoveryLivenessLeaseBegin;
         return FileTransferCoordinator.AuthorizeAction(
             state,
             new FileTransferCoordinatorActionRequest(
@@ -7762,7 +7850,10 @@ public sealed partial class SessionFileTransferService : IDisposable
                 LegGeneration: attemptedLegGeneration ?? leg?.Generation,
                 TransportEpochId: attemptedTransportEpoch ?? leg?.TransportEpochId,
                 BridgeRecoveryGeneration: attemptedBridgeRecoveryGeneration ?? leg?.BridgeRecoveryGeneration,
-                RecoveryLivenessLease: activeLease));
+                RecoveryLivenessLease: activeLease,
+                RegularV4RecoveryLeaseClosureContinuationProof:
+                    useClosureContinuation ? closureContinuationProof : null,
+                LivenessDeferralDeadlineUtc: livenessDeferralDeadlineUtc));
     }
 
     private static FileTransferRecoveryLivenessDeferralGrant CreateRecoveryLivenessDeferralGrant(
@@ -8637,6 +8728,33 @@ public sealed partial class SessionFileTransferService : IDisposable
         => LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_recovery_liveness_lease_granted; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; action_kind={FormatProtocolLogValue(actionKind.ToString())}; source={FormatProtocolLogValue(source)}; attempted_action={FormatProtocolLogValue(attemptedAction)}; reason={FormatProtocolLogValue(lease.Reason)}; route={FormatProtocolLogValue(lease.RouteToken)}; protocol_version={lease.ProtocolVersion}; live_route_epoch={lease.LiveRouteEpoch}; runtime_generation={lease.RuntimeGeneration}; terminal_generation={lease.TerminalGeneration}; leg_generation={lease.LegGeneration}; transport_epoch={lease.TransportEpoch}; bridge_recovery_generation={lease.BridgeRecoveryGeneration}; recovery_liveness_lease_authority_id={FormatProtocolLogValue(lease.AuthorityId.ToString())}; recovery_liveness_lease_generation={lease.LeaseGeneration}; recovery_liveness_lease_state={FormatProtocolLogValue(lease.State.ToString())}; liveness_deferral_applied={(livenessDeferralApplied ? 1 : 0)}; liveness_deferral_deadline_utc_ms={livenessDeferralDeadlineUtc.ToUnixTimeMilliseconds()}");
+
+    private static void LogRuntimeUnlockRegularV4RecoveryLeaseClosureLivenessDeferral(
+        bool granted,
+        RuntimeUnlockRegularV4RecoveryLeaseClosureContinuationProof proof,
+        DateTimeOffset requestedDeadlineUtc,
+        FileTransferRecoveryLivenessState? localRecoveryState,
+        string decisionReason,
+        string source,
+        string attemptedAction)
+    {
+        var lifecycle = proof.LifecycleReport;
+        var authority = lifecycle.Authority;
+        var lease = proof.RetiredRecoveryLivenessLease;
+        var eventName = granted
+            ? "runtime_unlock_regular_v4_recovery_lease_closure_liveness_deferral_granted"
+            : "runtime_unlock_regular_v4_recovery_lease_closure_liveness_deferral_rejected";
+        var message =
+            $"event={eventName}; session_id={FormatProtocolLogValue(authority.SessionId)}; transfer_id={FormatProtocolLogValue(authority.TransferId)}; direction={authority.Direction.ToString().ToLowerInvariant()}; source={FormatProtocolLogValue(source)}; attempted_action={FormatProtocolLogValue(attemptedAction)}; route={FormatProtocolLogValue(authority.RouteToken)}; protocol_version={authority.ProtocolVersion}; live_route_epoch={authority.LiveRouteEpoch}; runtime_generation={authority.RuntimeGeneration}; terminal_generation={authority.TerminalGeneration}; leg_generation={authority.TransferLegGeneration}; transport_epoch={authority.TransportEpoch}; bridge_recovery_generation={authority.BridgeRecoveryGeneration}; bridge_decision_generation={authority.BridgeDecisionGeneration}; recovery_liveness_lease_authority_id={FormatProtocolLogValue(lease.AuthorityId.ToString())}; recovery_liveness_lease_generation={lease.LeaseGeneration}; recovery_liveness_lease_state={FormatProtocolLogValue(lease.State.ToString())}; lifecycle_outcome={FormatProtocolLogValue(lifecycle.Outcome.ToString())}; lifecycle_reason={FormatProtocolLogValue(lifecycle.Reason)}; lifecycle_decision_status={FormatProtocolLogValue(proof.DecisionStatus.ToString())}; lifecycle_decision_reason={FormatProtocolLogValue(proof.DecisionReason)}; local_recovery_state={FormatProtocolLogValue(localRecoveryState?.ToString() ?? "(none)")}; requested_liveness_deferral_deadline_utc_ms={requestedDeadlineUtc.ToUnixTimeMilliseconds()}; maximum_liveness_deferral_deadline_utc_ms={proof.MaximumLivenessDeferralDeadlineUtc.ToUnixTimeMilliseconds()}; decision_reason={FormatProtocolLogValue(decisionReason)}";
+        if (granted)
+        {
+            LocalOperationalLog.Info("FileTransferService", message);
+        }
+        else
+        {
+            LocalOperationalLog.Warn("FileTransferService", message);
+        }
+    }
 
     private static void LogFileTransferCoordinatorLegMutationRejected(
         FileTransferDirection direction,

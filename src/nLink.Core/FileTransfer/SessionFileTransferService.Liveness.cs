@@ -43,11 +43,18 @@ public sealed partial class SessionFileTransferService
         var attemptedAction = string.IsNullOrWhiteSpace(reason)
             ? "session_liveness_recovery_state"
             : reason.Trim();
+        var continuationDirection = snapshot
+            .RegularV4RecoveryLeaseClosureContinuationProof?
+            .LifecycleReport
+            .Authority
+            .Direction;
         lock (gate)
         {
             if (outboundTransfer is { } outbound &&
                 string.Equals(outbound.SessionId, snapshot.SessionId, StringComparison.Ordinal) &&
-                string.Equals(outbound.TransferId, snapshot.TransferId, StringComparison.Ordinal))
+                string.Equals(outbound.TransferId, snapshot.TransferId, StringComparison.Ordinal) &&
+                (continuationDirection is null ||
+                 continuationDirection == FileTransferDirection.Outbound))
             {
                 return TryAuthorizeRecoveryLivenessLeaseLocked(
                     outbound,
@@ -61,12 +68,16 @@ public sealed partial class SessionFileTransferService
                     snapshot.TransferLegGeneration,
                     snapshot.TransportEpoch,
                     snapshot.BridgeRecoveryGeneration,
-                    out grant);
+                    out grant,
+                    snapshot.RegularV4RecoveryLeaseClosureContinuationProof,
+                    snapshot.State);
             }
 
             if (inboundTransfer is { } inbound &&
                 string.Equals(inbound.SessionId, snapshot.SessionId, StringComparison.Ordinal) &&
-                string.Equals(inbound.TransferId, snapshot.TransferId, StringComparison.Ordinal))
+                string.Equals(inbound.TransferId, snapshot.TransferId, StringComparison.Ordinal) &&
+                (continuationDirection is null ||
+                 continuationDirection == FileTransferDirection.Inbound))
             {
                 return TryAuthorizeRecoveryLivenessLeaseLocked(
                     inbound,
@@ -80,13 +91,26 @@ public sealed partial class SessionFileTransferService
                     snapshot.TransferLegGeneration,
                     snapshot.TransportEpoch,
                     snapshot.BridgeRecoveryGeneration,
-                    out grant);
+                    out grant,
+                    snapshot.RegularV4RecoveryLeaseClosureContinuationProof,
+                    snapshot.State);
             }
         }
 
         LocalOperationalLog.Warn(
             "FileTransferService",
             $"event=filetransfer_recovery_liveness_lease_rejected; direction=unknown; transfer_id={FormatProtocolLogValue(snapshot.TransferId)}; session_id={FormatProtocolLogValue(snapshot.SessionId)}; action_kind={FormatProtocolLogValue(FileTransferCoordinatorActionKind.LivenessDeferral.ToString())}; source=session_liveness_recovery_state; attempted_action={FormatProtocolLogValue(attemptedAction)}; rejection_reason=current_transfer_missing; reason=current_transfer_missing; route={FormatProtocolLogValue(snapshot.RouteToken)}; protocol_version={snapshot.ProtocolVersion}; live_route_epoch={snapshot.LiveRouteEpoch}; leg_generation={snapshot.TransferLegGeneration}; transport_epoch={snapshot.TransportEpoch}; bridge_recovery_generation={snapshot.BridgeRecoveryGeneration}");
+        if (snapshot.RegularV4RecoveryLeaseClosureContinuationProof is { } rejectedProof)
+        {
+            LogRuntimeUnlockRegularV4RecoveryLeaseClosureLivenessDeferral(
+                granted: false,
+                rejectedProof,
+                livenessDeferralDeadlineUtc,
+                snapshot.State,
+                "current_transfer_missing",
+                "session_liveness_recovery_state",
+                attemptedAction);
+        }
         return false;
     }
 

@@ -63,6 +63,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("0", summary["fallback_tail_bridge_recovery_generation_mismatch_distinct_count"]);
             Assert.Equal("0", summary["fallback_tail_bridge_recovery_generation_mismatch_recovered_count"]);
             Assert.Equal("0", summary["fallback_tail_bridge_recovery_generation_mismatch_unresolved_count"]);
+            Assert.Equal("0", summary["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_raw_count"]);
+            Assert.Equal("0", summary["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_distinct_count"]);
+            Assert.Equal("0", summary["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count"]);
+            Assert.Equal("0", summary["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count"]);
+            Assert.Equal("none", summary["runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict"]);
             Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-256mb.manifest_present"]);
             Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-256mb.cursor_integrity_verdict"]);
             Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.current_runtime_proof"]);
@@ -73,6 +78,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.fallback_tail_bridge_recovery_generation_mismatch_distinct_count"]);
             Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.fallback_tail_bridge_recovery_generation_mismatch_recovered_count"]);
             Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.fallback_tail_bridge_recovery_generation_mismatch_unresolved_count"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_raw_count"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_distinct_count"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count"]);
+            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict"]);
             var manifestPath = Path.Combine(runRoot, "route-acceptance-run-manifest.json");
             Assert.True(File.Exists(manifestPath), "Expected immutable route-acceptance manifest.");
             await using (var manifestStream = File.OpenRead(manifestPath))
@@ -93,6 +103,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                 Assert.Equal(0, root.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchDistinctCount").GetInt32());
                 Assert.Equal(0, root.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount").GetInt32());
                 Assert.Equal(0, root.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount").GetInt32());
+                Assert.Equal(0, root.GetProperty("runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount").GetInt32());
+                Assert.Equal(0, root.GetProperty("runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount").GetInt32());
+                Assert.Equal(0, root.GetProperty("runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount").GetInt32());
+                Assert.Equal(0, root.GetProperty("runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount").GetInt32());
+                Assert.Equal("none", root.GetProperty("runtimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict").GetString());
 
                 var run = Assert.Single(root.GetProperty("runs").EnumerateArray());
                 Assert.Equal("none", run.GetProperty("fallbackTailBridgeRecoveryGenerationPairingVerdict").GetString());
@@ -100,6 +115,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                 Assert.Equal(0, run.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchDistinctCount").GetInt32());
                 Assert.Equal(0, run.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount").GetInt32());
                 Assert.Equal(0, run.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount").GetInt32());
+                Assert.Equal(0, run.GetProperty("runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount").GetInt32());
+                Assert.Equal(0, run.GetProperty("runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount").GetInt32());
+                Assert.Equal(0, run.GetProperty("runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount").GetInt32());
+                Assert.Equal(0, run.GetProperty("runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount").GetInt32());
+                Assert.Equal("none", run.GetProperty("runtimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict").GetString());
             }
             Assert.True(File.Exists(Path.Combine(runRoot, "phase5-summary-writer-diagnostics.txt")), "Expected Phase 5 summary writer diagnostics.");
             Assert.True(File.Exists(Path.Combine(runRoot, "phase5-summary-writer-diagnostics.json")), "Expected Phase 5 summary writer JSON diagnostics.");
@@ -244,6 +264,76 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal(1, run.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchDistinctCount").GetInt32());
             Assert.Equal(0, run.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount").GetInt32());
             Assert.Equal(1, run.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount").GetInt32());
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
+    public async Task RunFileTransferRouteAcceptance_ClosureWindowLivenessCountsReachScenarioAndRootSummaries()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string scenario = "regular-v4-live-activation-off-on-off-256mb";
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "phase5-closure-liveness-summary-propagation");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-closure-liveness-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_RECOVERY_LEASE_CLOSURE_LIVENESS_SUMMARY_FIXTURE"] = "1";
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ScenarioName", scenario,
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"Expected fake closure-liveness propagation run to pass.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+
+            var evidence = ReadArtifactReport(Path.Combine(runRoot, scenario), "filetransfer-operator-verdict.txt");
+            Assert.Equal("1", evidence["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_raw_count"]);
+            Assert.Equal("1", evidence["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_distinct_count"]);
+            Assert.Equal("0", evidence["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count"]);
+            Assert.Equal("1", evidence["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count"]);
+            Assert.Equal("fail", evidence["runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict"]);
+
+            var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal("1", summary["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_raw_count"]);
+            Assert.Equal("1", summary["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_distinct_count"]);
+            Assert.Equal("0", summary["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count"]);
+            Assert.Equal("1", summary["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count"]);
+            Assert.Equal("fail", summary["runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict"]);
+            Assert.Equal("1", summary[$"{scenario}.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_raw_count"]);
+            Assert.Equal("1", summary[$"{scenario}.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count"]);
+            Assert.Equal("fail", summary[$"{scenario}.runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict"]);
+
+            using var summaryJson = JsonDocument.Parse(
+                await File.ReadAllTextAsync(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.json")));
+            var root = summaryJson.RootElement;
+            Assert.Equal(1, root.GetProperty("runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount").GetInt32());
+            Assert.Equal(0, root.GetProperty("runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount").GetInt32());
+            Assert.Equal("fail", root.GetProperty("runtimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict").GetString());
+
+            var run = Assert.Single(root.GetProperty("runs").EnumerateArray());
+            Assert.Equal(1, run.GetProperty("runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount").GetInt32());
+            Assert.Equal("fail", run.GetProperty("runtimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict").GetString());
         }
         finally
         {

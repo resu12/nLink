@@ -2178,6 +2178,205 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
         Assert.Equal("1", verdict["runtime_unlock_regular_v4_recovery_lease_closure_rejected_count"]);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_CurrentArtifactClosureWindowLivenessFailure_OwnsFirstProofEdge(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRegularV4ClosureWindowLivenessCurrentArtifactFixture(),
+            ["-LiveRouteProofMode", "RegularActivationCycle"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
+        Assert.Equal("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved", verdict["recovery_failure_class"]);
+        Assert.Equal("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("filetransfer_recovery_authority_rejected", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal("recovery_liveness_lease_missing", verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("1643", verdict["first_proof_chain_failure_sequence"]);
+        Assert.Equal("1", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count"]);
+        Assert.Equal("fail", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_regular_v4_recovery_settlement_missing_count"]);
+
+        var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
+        Assert.Equal(verdict["recovery_failure_class"], stability["recovery_failure_class"]);
+        Assert.Equal(verdict["first_proof_chain_failure_sequence"], stability["first_proof_chain_failure_sequence"]);
+        Assert.Equal("1", stability["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_ClosureWindowRejectionThenMatchingGrant_IsRecovered(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_closure_liveness_recovered";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                FileTransferBridgeRecoveryAuthorityGrantedLine(transferId),
+                FileTransferRecoveryLivenessLeaseGrantedLine(transferId),
+                RuntimeUnlockRegularV4RecoveryLifecycleReportedLine(transferId),
+                RuntimeUnlockRegularV4RecoveryLifecycleDecidedLine(transferId),
+                RuntimeUnlockRegularV4RecoveryLeaseClosureRetainedLine(transferId),
+                RuntimeUnlockRegularV4RecoveryClosureLivenessRejectedLine(transferId),
+                RuntimeUnlockRegularV4RecoveryClosureLivenessGrantedLine(transferId),
+                RuntimeUnlockRegularV4RecoveryLeaseClosureAdoptedLine(transferId),
+                RuntimeUnlockRegularV4RecoveryLeaseClosureConsumedLine(transferId),
+                RuntimeUnlockRetryLeaseClosureGrantedLine(transferId)),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.NotEqual("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved", verdict["recovery_failure_class"]);
+        Assert.Equal("1", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_distinct_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count"]);
+        Assert.Equal("pass", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict"]);
+        Assert.Equal("1", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_deferral_granted_count"]);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task AnalyzeRetained_ClosureWindowMismatchedProofGrant_DoesNotRecover(
+        bool compact,
+        bool maximumDeadlineMismatch)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_closure_liveness_cross_closure";
+        var rejection = maximumDeadlineMismatch
+            ? RuntimeUnlockRegularV4RecoveryClosureLivenessDedicatedRejectedLine(transferId)
+            : RuntimeUnlockRegularV4RecoveryClosureLivenessRejectedLine(transferId);
+        var mismatchedGrant = maximumDeadlineMismatch
+            ? RuntimeUnlockRegularV4RecoveryClosureLivenessGrantedLine(
+                transferId,
+                maximumDeadlineUtcMs: 1700000090001)
+            : RuntimeUnlockRegularV4RecoveryClosureLivenessGrantedLine(
+                transferId,
+                bridgeDecisionGeneration: 6,
+                leaseAuthorityId: "fta2-recovery-lease-2");
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                FileTransferBridgeRecoveryAuthorityGrantedLine(transferId),
+                FileTransferRecoveryLivenessLeaseGrantedLine(transferId),
+                RuntimeUnlockRegularV4RecoveryLifecycleReportedLine(transferId),
+                RuntimeUnlockRegularV4RecoveryLifecycleDecidedLine(transferId),
+                RuntimeUnlockRegularV4RecoveryLeaseClosureRetainedLine(transferId),
+                rejection,
+                mismatchedGrant),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal(
+            "runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved",
+            verdict["recovery_failure_class"]);
+        Assert.Equal("1", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count"]);
+        Assert.Equal("fail", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task AnalyzeRetained_ClosureWindowRecoveryAuthorityBoundary_DistinguishesReplacementFromDuplicate(
+        bool compact,
+        bool replacement)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_closure_liveness_replacement";
+        var repeatedAuthority = FileTransferBridgeRecoveryAuthorityGrantedLine(
+            transferId,
+            bridgeDecisionGeneration: replacement ? 6 : 5);
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                FileTransferBridgeRecoveryAuthorityGrantedLine(transferId),
+                FileTransferRecoveryLivenessLeaseGrantedLine(transferId),
+                RuntimeUnlockRegularV4RecoveryLifecycleReportedLine(transferId),
+                RuntimeUnlockRegularV4RecoveryLifecycleDecidedLine(transferId),
+                RuntimeUnlockRegularV4RecoveryLeaseClosureRetainedLine(transferId),
+                repeatedAuthority,
+                RuntimeUnlockRegularV4RecoveryClosureLivenessRejectedLine(transferId)),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        if (replacement)
+        {
+            Assert.NotEqual(
+                "runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved",
+                verdict["recovery_failure_class"]);
+            Assert.Equal("0", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_raw_count"]);
+            Assert.Equal("0", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count"]);
+            Assert.Equal("none", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict"]);
+        }
+        else
+        {
+            Assert.Equal(
+                "runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved",
+                verdict["recovery_failure_class"]);
+            Assert.Equal("1", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_raw_count"]);
+            Assert.Equal("1", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count"]);
+            Assert.Equal("fail", verdict["runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict"]);
+        }
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_TunaProbeRecoveryHeldThenLocallyRejected_ClassifiesAuthorityLoss()
@@ -3499,7 +3698,62 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     }
 
     private static string RuntimeUnlockRegularV4RecoveryLeaseClosureRetainedLine(string transferId)
-        => $"event=runtime_unlock_regular_v4_recovery_lease_closure_retained; direction=outbound; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; runtime_generation=4; terminal_generation=0; leg_generation=9; transport_epoch=2; bridge_recovery_generation=3; bridge_decision_generation=5; regular_v4_liveness_generation=3; lease_authority_id=fta2-recovery-lease-1; lease_generation=3; lifecycle_outcome=Completed; lifecycle_reason=bridge_lifecycle_completed; lifecycle_decision_status=Accepted; lifecycle_decision_reason=regular_v4_recovery_lifecycle_accepted; decision_reason=coordinator_lease_closure_accepted";
+        => $"event=runtime_unlock_regular_v4_recovery_lease_closure_retained; direction=outbound; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; runtime_generation=4; terminal_generation=0; leg_generation=9; transport_epoch=2; bridge_recovery_generation=3; bridge_decision_generation=5; regular_v4_liveness_generation=3; lease_authority_id=fta2-recovery-lease-1; lease_generation=3; lease_state=Retired; lifecycle_outcome=Completed; lifecycle_reason=bridge_lifecycle_completed; lifecycle_decision_status=Accepted; lifecycle_decision_reason=regular_v4_recovery_lifecycle_accepted; decision_reason=coordinator_lease_closure_accepted";
+
+    private static string RuntimeUnlockRegularV4RecoveryClosureLivenessRejectedLine(string transferId)
+        => $"event=filetransfer_recovery_authority_rejected; direction=outbound; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; action_kind=LivenessDeferral; source=session_liveness_recovery_state; attempted_action=session_liveness_recovery_state; rejection_reason=recovery_liveness_lease_missing; reason=recovery_liveness_lease_missing; current_route=regular_nkn_v4_fast; current_protocol_version=4; current_live_route_epoch=1; current_runtime_generation=4; current_terminal_generation=0; attempted_route=regular_nkn_v4_fast; attempted_protocol_version=4; attempted_live_route_epoch=1; attempted_runtime_generation=4; attempted_terminal_generation=0; attempted_leg_generation=9; attempted_transport_epoch=2; attempted_bridge_recovery_generation=3; recovery_decision_generation=0; recovery_liveness_lease_generation=0";
+
+    private static string RuntimeUnlockRegularV4RecoveryClosureLivenessGrantedLine(
+        string transferId,
+        int bridgeDecisionGeneration = 5,
+        string leaseAuthorityId = "fta2-recovery-lease-1",
+        long maximumDeadlineUtcMs = 1700000090000)
+        => $"event=runtime_unlock_regular_v4_recovery_lease_closure_liveness_deferral_granted; direction=outbound; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; action_kind=RecoveryLeaseClosureLivenessDeferral; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; runtime_generation=4; terminal_generation=0; leg_generation=9; transport_epoch=2; bridge_recovery_generation=3; bridge_decision_generation={bridgeDecisionGeneration}; regular_v4_liveness_generation=3; recovery_liveness_lease_authority_id={leaseAuthorityId}; recovery_liveness_lease_generation=3; recovery_liveness_lease_state=Retired; lifecycle_outcome=Completed; lifecycle_decision_status=Accepted; lifecycle_decision_reason=regular_v4_recovery_lifecycle_accepted; requested_liveness_deferral_deadline_utc_ms=1700000090000; maximum_liveness_deferral_deadline_utc_ms={maximumDeadlineUtcMs}; local_recovery_state=BridgeRecoveryCompletedAwaitingProof; decision_reason=recovery_lease_closure_liveness_deferral_accepted";
+
+    private static string RuntimeUnlockRegularV4RecoveryClosureLivenessDedicatedRejectedLine(
+        string transferId,
+        long maximumDeadlineUtcMs = 1700000090000)
+        => $"event=runtime_unlock_regular_v4_recovery_lease_closure_liveness_deferral_rejected; direction=outbound; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; action_kind=RecoveryLeaseClosureLivenessDeferral; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; runtime_generation=4; terminal_generation=0; leg_generation=9; transport_epoch=2; bridge_recovery_generation=3; bridge_decision_generation=5; regular_v4_liveness_generation=3; recovery_liveness_lease_authority_id=fta2-recovery-lease-1; recovery_liveness_lease_generation=3; recovery_liveness_lease_state=Retired; lifecycle_outcome=Completed; lifecycle_decision_status=Accepted; lifecycle_decision_reason=regular_v4_recovery_lifecycle_accepted; requested_liveness_deferral_deadline_utc_ms=1700000090000; maximum_liveness_deferral_deadline_utc_ms={maximumDeadlineUtcMs}; local_recovery_state=BridgeRecoveryCompletedAwaitingProof; rejection_reason=recovery_liveness_lease_missing; decision_reason=recovery_liveness_lease_missing";
+
+    private static string[] BuildRuntimeUnlockRegularV4ClosureWindowLivenessCurrentArtifactFixture()
+    {
+        const string sessionId = "sess_runtime_unlock_dispatch_proof";
+        const string transferId = "transfer_runtime_unlock_closure_window_liveness";
+        var lines = new List<string>
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; session_id={sessionId}; transfer_id={transferId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; handoff_kind=none; selection_reason=regular_nkn_default_v4", secondsOffset: 0),
+            LogLine(RuntimeUnlockRetryBlockedByRegularV4RecoveryLine(transferId), secondsOffset: 1),
+            LogLine(FileTransferBridgeRecoveryAuthorityGrantedLine(transferId), secondsOffset: 2),
+            LogLine(FileTransferRecoveryLivenessLeaseGrantedLine(transferId), secondsOffset: 3),
+            LogLine(RuntimeUnlockRegularV4RecoveryLifecycleReportedLine(transferId), secondsOffset: 4),
+            LogLine(RuntimeUnlockRegularV4RecoveryLifecycleDecidedLine(transferId), secondsOffset: 5),
+            LogLine(RuntimeUnlockRegularV4RecoveryLeaseClosureRetainedLine(transferId), secondsOffset: 6)
+        };
+
+        void FillUntil(int lineCount)
+        {
+            while (lines.Count < lineCount)
+            {
+                lines.Add(LogLine(
+                    $"event=runtime_unlock_recovery_diagnostic_sample; session_id={sessionId}; transfer_id={transferId}; sample_index={lines.Count + 1}; decision_reason=diagnostic_only",
+                    secondsOffset: lines.Count));
+            }
+        }
+
+        FillUntil(1642);
+        lines.Add(LogLine(RuntimeUnlockRegularV4RecoveryClosureLivenessRejectedLine(transferId), secondsOffset: lines.Count));
+        lines.Add(LogLine(
+            $"event=runtime_unlock_retry_regular_v4_recovery_settlement_missing; direction=outbound; session_id={sessionId}; transfer_id={transferId}; decision_reason=regular_v4_recovery_settlement_handoff_unconsumed_at_exhaustion",
+            secondsOffset: lines.Count));
+        FillUntil(1689);
+        lines.Add(LogLine(
+            $"event=file_transfer_outbound_terminal; role=Helpee; direction=outbound; session_id={sessionId}; transfer_id={transferId}; state=Failed; error_code=peer_disconnected; route=regular_nkn_v4_fast; protocol_version=4",
+            secondsOffset: lines.Count));
+        lines.Add(LogLine(
+            $"event=session_liveness_timeout; session_id={sessionId}; transfer_id={transferId}; reason=downstream_session_liveness_timeout",
+            secondsOffset: lines.Count));
+        return lines.ToArray();
+    }
 
     private static string RuntimeUnlockRegularV4RecoveryLeaseClosureAdoptedLine(string transferId)
         => $"event=runtime_unlock_regular_v4_recovery_lease_closure_adopted; direction=outbound; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; runtime_generation=4; terminal_generation=0; leg_generation=9; transport_epoch=2; bridge_recovery_generation=3; bridge_decision_generation=5; regular_v4_liveness_generation=3; lease_authority_id=fta2-recovery-lease-1; lease_generation=3; lifecycle_outcome=Completed; lifecycle_reason=bridge_lifecycle_completed; adoption_boundary=regular_v4_receive_proof_observed; decision_reason=matching_local_receive_proof";

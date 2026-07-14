@@ -1759,6 +1759,112 @@ public sealed class FileTransferCoordinatorTests
         Assert.True(reconstructed.State.RuntimeUnlockRecoveryLeaseClosureAvailable);
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void RecoveryLeaseClosureLivenessDeferral_IsBoundedAndStatePreserving(
+        int outcomeValue)
+    {
+        var outcome = (RuntimeUnlockRegularV4RecoveryLifecycleOutcome)outcomeValue;
+        var state = CreateActiveRegularV4RecoveryState();
+        var owner = Assert.IsType<RuntimeOwnerToken>(state.CurrentRuntimeOwner);
+        var leg = Assert.IsType<FileTransferLeg>(state.CurrentLeg);
+        var report = CreateRegularV4RecoveryLifecycleReport(state, outcome);
+        var lifecycle = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoveryLifecycle(
+            state,
+            null,
+            report);
+        Assert.Equal(RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Accepted, lifecycle.Status);
+        var retiredLease = Assert.IsType<RecoveryLivenessLease>(
+            lifecycle.State.LastRetiredRecoveryLivenessLease);
+        var maximumDeadline = DateTimeOffset.UtcNow.AddSeconds(90);
+        var proof = new RuntimeUnlockRegularV4RecoveryLeaseClosureContinuationProof(
+            report,
+            retiredLease,
+            lifecycle.Status,
+            lifecycle.Reason,
+            maximumDeadline);
+
+        var granted = FileTransferCoordinator.AuthorizeAction(
+            lifecycle.State,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RecoveryLeaseClosureLivenessDeferral,
+                owner,
+                leg,
+                closureContinuationProof: proof,
+                livenessDeferralDeadlineUtc: maximumDeadline));
+
+        Assert.True(granted.Accepted);
+        Assert.Equal(retiredLease, granted.RecoveryLivenessLease);
+        Assert.Same(lifecycle.State, granted.State);
+        Assert.Null(granted.State.CurrentRecoveryLivenessLease);
+        Assert.Equal(retiredLease, granted.State.LastRetiredRecoveryLivenessLease);
+        Assert.Equal(report, granted.State.LastRuntimeUnlockRegularV4RecoveryLifecycle);
+        Assert.True(granted.State.RuntimeUnlockRecoveryLeaseClosureAvailable);
+        Assert.Equal(
+            lifecycle.State.LastRecoveryLivenessLeaseGeneration,
+            granted.State.LastRecoveryLivenessLeaseGeneration);
+
+        var duplicate = FileTransferCoordinator.AuthorizeAction(
+            granted.State,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RecoveryLeaseClosureLivenessDeferral,
+                owner,
+                leg,
+                closureContinuationProof: proof,
+                livenessDeferralDeadlineUtc: maximumDeadline));
+        Assert.True(duplicate.Accepted);
+        Assert.Same(granted.State, duplicate.State);
+        Assert.Equal(retiredLease, duplicate.RecoveryLivenessLease);
+
+        var excessive = FileTransferCoordinator.AuthorizeAction(
+            granted.State,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RecoveryLeaseClosureLivenessDeferral,
+                owner,
+                leg,
+                closureContinuationProof: proof,
+                livenessDeferralDeadlineUtc: maximumDeadline.AddTicks(1)));
+        Assert.False(excessive.Accepted);
+        Assert.Equal(
+            "regular_v4_recovery_lease_closure_continuation_deadline_exceeded",
+            excessive.RejectionReason);
+        Assert.Same(granted.State, excessive.State);
+
+        var expiredDeadline = DateTimeOffset.UtcNow.AddSeconds(-1);
+        var expiredProof = proof with
+        {
+            MaximumLivenessDeferralDeadlineUtc = expiredDeadline,
+        };
+        var expired = FileTransferCoordinator.AuthorizeAction(
+            granted.State,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RecoveryLeaseClosureLivenessDeferral,
+                owner,
+                leg,
+                closureContinuationProof: expiredProof,
+                livenessDeferralDeadlineUtc: expiredDeadline));
+        Assert.False(expired.Accepted);
+        Assert.Equal(
+            "regular_v4_recovery_lease_closure_continuation_deadline_expired",
+            expired.RejectionReason);
+        Assert.Same(granted.State, expired.State);
+
+        var missingProof = FileTransferCoordinator.AuthorizeAction(
+            granted.State,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RecoveryLeaseClosureLivenessDeferral,
+                owner,
+                leg,
+                livenessDeferralDeadlineUtc: maximumDeadline));
+        Assert.False(missingProof.Accepted);
+        Assert.Equal(
+            "regular_v4_recovery_lease_closure_continuation_proof_missing",
+            missingProof.RejectionReason);
+        Assert.Null(missingProof.State.CurrentRecoveryLivenessLease);
+        Assert.True(missingProof.State.RuntimeUnlockRecoveryLeaseClosureAvailable);
+    }
+
     [Fact]
     public void NewRegularV4Recovery_SupersedesBothAuthoritiesAndClearsPriorClosure()
     {
@@ -6191,6 +6297,8 @@ public sealed class FileTransferCoordinatorTests
         TransportEpochActionKind? transportEpochActionKind = null,
         BridgeRecoveryKind? bridgeRecoveryKind = null,
         RecoveryLivenessLease? recoveryLivenessLease = null,
+        RuntimeUnlockRegularV4RecoveryLeaseClosureContinuationProof? closureContinuationProof = null,
+        DateTimeOffset? livenessDeferralDeadlineUtc = null,
         int? recoveryDecisionGeneration = null,
         FileTransferRoute? targetRoute = null,
         int? targetProtocolVersion = null,
@@ -6215,6 +6323,8 @@ public sealed class FileTransferCoordinatorTests
             TransportEpochActionKind: transportEpochActionKind,
             BridgeRecoveryKind: bridgeRecoveryKind,
             RecoveryLivenessLease: recoveryLivenessLease,
+            RegularV4RecoveryLeaseClosureContinuationProof: closureContinuationProof,
+            LivenessDeferralDeadlineUtc: livenessDeferralDeadlineUtc,
             RecoveryDecisionGeneration: recoveryDecisionGeneration,
             PredecessorAuthorityId: predecessorAuthorityId);
 
