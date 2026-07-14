@@ -209,7 +209,7 @@ function Invoke-TestLane {
         "FileTransferInfraContract" {
             Invoke-DotnetTest `
                 -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
-                -Filter "FullyQualifiedName~NknAccelerationTransportTests" `
+                -Filter "FullyQualifiedName~NknAccelerationTransportTests&(FullyQualifiedName~RuntimeUnlockRetry|FullyQualifiedName~RegularV4Recovery|FullyQualifiedName~RegularV4Closure|FullyQualifiedName~FileTransferReceiveRecovery|FullyQualifiedName~RuntimeUnlockProbeRecovery|FullyQualifiedName~RuntimeUnlockBridgeRecoveryWaitTimeoutArmsRetry|FullyQualifiedName~RuntimeUnlockSendTimeoutRequestsBridgeRecoveryBeforeReplay|FullyQualifiedName~RegularV4PressureSendTimeoutRequestsRecoveryAndDefersRetry)" `
                 -ResultSuffix "infra"
         }
         "FileTransferNknTransportContract" {
@@ -221,8 +221,16 @@ function Invoke-TestLane {
         "FileTransferCoreRuntimeContract" {
             Invoke-DotnetTest `
                 -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
-                -Filter "FullyQualifiedName~SessionFileTransferRuntimeUnlockRetryAuthorityTests|FullyQualifiedName~SessionFileTransferRuntimeTests|FileTransferRuntimeSuite=SparseWorkerHandoff|FileTransferRuntimeSuite=FallbackTailChurn" `
-                -ResultSuffix "core-runtime"
+                -Filter "FullyQualifiedName~SessionFileTransferRuntimeUnlockRetryAuthorityTests" `
+                -ResultSuffix "core-runtime-unlock"
+            Invoke-DotnetTest `
+                -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
+                -Filter "FullyQualifiedName~SessionFileTransferRuntimeTests&FullyQualifiedName!~SessionRuntime_FileTransferPauseResume_AuthorizedInboundAfterAccept&FullyQualifiedName!~SessionRuntime_FileTransfer_RoundTrip_Completes_ThroughRuntimeServiceSurface&FullyQualifiedName!~ChatPanelBindings_FileTransferBindings_ProjectPendingAndCompletedState_FromRuntimeSnapshots" `
+                -ResultSuffix "core-runtime-session"
+            Invoke-DotnetTest `
+                -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
+                -Filter "(FileTransferRuntimeSuite=SparseWorkerHandoff|FileTransferRuntimeSuite=FallbackTailChurn|FileTransferRuntimeSuite=RegularV4RecoveryAuthority)&FullyQualifiedName!~RegularNknV4Fast_LiveTunaActivationCanThenCycleOffOnOffSameTransfer&FullyQualifiedName!~FileTunaV4_LiveSwitchOffRecovery_DoesNotUseLiveV4RepairAndCompletesSameTransfer" `
+                -ResultSuffix "core-runtime-contracts"
         }
         "FileTransferAnalyzer" {
             foreach ($analyzerLane in @(
@@ -266,9 +274,18 @@ function Invoke-TestLane {
                 -ResultSuffix "v4-transport"
         }
         "FileTransferAcceptanceFake" {
+            $coreProject = Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core"
             Invoke-DotnetTest `
-                -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
-                -Filter "OpsSuite=ScriptSurface|OpsSuite=GuiHarness|OpsSuite=AcceptancePhase4|OpsSuite=AcceptancePhase5Fast|OpsSuite=AcceptancePhase5Full|OpsSuite=NknSoakAndBaseline|FullyQualifiedName~FileTransferSoakRunnerTests"
+                -Target $coreProject `
+                -Filter "OpsSuite=ScriptSurface|OpsSuite=GuiHarness|OpsSuite=AcceptancePhase4|OpsSuite=AcceptancePhase5Fast|OpsSuite=AcceptancePhase5Full|OpsSuite=NknSoakAndBaseline" `
+                -ResultSuffix "acceptance"
+            # The soak runner mutates process-wide logging and environment hooks by design.
+            # Keep its deterministic coverage in this lane, but isolate it from the script
+            # and analyzer fixtures so neither group can inherit the other's test host state.
+            Invoke-DotnetTest `
+                -Target $coreProject `
+                -Filter "FullyQualifiedName~FileTransferSoakRunnerTests" `
+                -ResultSuffix "soak"
         }
         "Smoke" {
             Invoke-DomainProjectsWithFilter `

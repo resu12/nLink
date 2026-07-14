@@ -1449,7 +1449,7 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
-    public void RuntimeUnlockRegularV4RecoverySettlement_ValidatesCoordinatorRecoveryTuple()
+    public void RuntimeUnlockRegularV4RecoverySettlement_NewRecoverySupersedesPriorSettlement()
     {
         var (correlatedState, _, _) = AuthorizeRegularRuntimeUnlockRetryDispatchSource();
         var report = Assert.IsType<RuntimeUnlockRegularV4RecoverySettlementReport>(
@@ -1461,27 +1461,25 @@ public sealed class FileTransferCoordinatorTests
         };
         var owner = rawState.CurrentRuntimeOwner!.Value;
         var leg = rawState.CurrentLeg!;
-        var bridge = FileTransferCoordinator.AuthorizeAction(
+        var recovery = FileTransferCoordinator.AuthorizeAction(
             rawState,
             RecoveryActionRequest(
-                FileTransferCoordinatorActionKind.BridgeRecovery,
+                FileTransferCoordinatorActionKind.BridgeReceiveStallRecovery,
                 owner,
                 leg,
-                bridgeRecoveryKind: BridgeRecoveryKind.ReceiveRecoveryRequest));
-        Assert.True(bridge.Accepted);
-        var recovery = FileTransferCoordinator.AuthorizeAction(
-            bridge.State,
-            RecoveryActionRequest(
-                FileTransferCoordinatorActionKind.RecoveryLivenessLeaseBegin,
-                owner,
-                leg));
+                bridgeRecoveryKind: BridgeRecoveryKind.BridgeReceiveStallRecovery));
         Assert.True(recovery.Accepted);
+        Assert.NotNull(recovery.BridgeRecoveryDecision);
+        Assert.NotNull(recovery.RecoveryLivenessLease);
+        Assert.Null(recovery.State.LastCoordinatorIssuedRegularV4RecoverySettlement);
+        Assert.Null(recovery.State.LastRuntimeUnlockRegularV4RecoverySettlement);
+        Assert.False(recovery.State.RuntimeUnlockRegularV4RecoverySettlementAvailable);
         var lease = recovery.State.CurrentRecoveryLivenessLease!.Value;
-        const int infraLivenessGeneration = 7;
+        var infraLivenessGeneration = lease.LeaseGeneration;
         var activeReport = report with
         {
             RegularV4LivenessGeneration = infraLivenessGeneration,
-            BridgeDecisionGeneration = bridge.BridgeRecoveryDecision!.Value.BridgeDecisionGeneration,
+            BridgeDecisionGeneration = recovery.BridgeRecoveryDecision!.Value.BridgeDecisionGeneration,
         };
 
         var zeroWhileActive = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoverySettlement(
@@ -1490,7 +1488,7 @@ public sealed class FileTransferCoordinatorTests
             report);
         Assert.Equal(RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Rejected, zeroWhileActive.Status);
         Assert.Equal(
-            "regular_v4_recovery_settlement_zero_tuple_recovery_active",
+            "regular_v4_recovery_settlement_not_coordinator_issued",
             zeroWhileActive.Reason);
 
         var beforeLifecycle = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoverySettlement(
@@ -1498,11 +1496,10 @@ public sealed class FileTransferCoordinatorTests
             null,
             activeReport);
         Assert.Equal(RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Rejected, beforeLifecycle.Status);
-        Assert.Equal("regular_v4_recovery_settlement_liveness_generation_stale", beforeLifecycle.Reason);
+        Assert.Equal("regular_v4_recovery_settlement_not_coordinator_issued", beforeLifecycle.Reason);
 
         var lifecycleReport = CreateRegularV4RecoveryLifecycleReport(
             recovery.State,
-            infraLivenessGeneration,
             RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Completed);
         var lifecycle = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoveryLifecycle(
             recovery.State,
@@ -1518,14 +1515,15 @@ public sealed class FileTransferCoordinatorTests
             null,
             activeReport with { RegularV4LivenessGeneration = infraLivenessGeneration + 1 });
         Assert.Equal(RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Rejected, stale.Status);
-        Assert.Equal("regular_v4_recovery_settlement_liveness_generation_stale", stale.Reason);
+        Assert.Equal("regular_v4_recovery_settlement_not_coordinator_issued", stale.Reason);
 
-        var accepted = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoverySettlement(
+        var superseded = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoverySettlement(
             lifecycle.State,
             null,
             activeReport);
-        Assert.Equal(RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Accepted, accepted.Status);
-        Assert.True(accepted.State.RuntimeUnlockRegularV4RecoverySettlementAvailable);
+        Assert.Equal(RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Rejected, superseded.Status);
+        Assert.Equal("regular_v4_recovery_settlement_not_coordinator_issued", superseded.Reason);
+        Assert.False(superseded.State.RuntimeUnlockRegularV4RecoverySettlementAvailable);
     }
 
     [Fact]
@@ -1535,7 +1533,6 @@ public sealed class FileTransferCoordinatorTests
         var lease = Assert.IsType<RecoveryLivenessLease>(state.CurrentRecoveryLivenessLease);
         var report = CreateRegularV4RecoveryLifecycleReport(
             state,
-            regularV4LivenessGeneration: 11,
             RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Exhausted);
 
         var accepted = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoveryLifecycle(
@@ -1568,14 +1565,268 @@ public sealed class FileTransferCoordinatorTests
             null,
             report with
             {
-                Authority = report.Authority with
+                RecoveryAuthority = report.RecoveryAuthority with
                 {
-                    BridgeDecisionGeneration = report.Authority.BridgeDecisionGeneration + 1,
+                    BridgeRecoveryAuthority = report.Authority with
+                    {
+                        BridgeDecisionGeneration = report.Authority.BridgeDecisionGeneration + 1,
+                    },
                 },
             });
         Assert.Equal(RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Rejected, stale.Status);
         Assert.NotNull(stale.State.CurrentRecoveryLivenessLease);
         Assert.Null(stale.State.LastRuntimeUnlockRegularV4RecoveryLifecycle);
+    }
+
+    [Fact]
+    public void BridgeReceiveStallRecovery_AtomicallyIssuesBridgeDecisionAndRecoveryLease()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var state = StartRegular(regular).State;
+        var owner = Assert.IsType<RuntimeOwnerToken>(state.CurrentRuntimeOwner);
+        var leg = Assert.IsType<FileTransferLeg>(state.CurrentLeg);
+
+        var recovery = FileTransferCoordinator.AuthorizeAction(
+            state,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.BridgeReceiveStallRecovery,
+                owner,
+                leg,
+                bridgeRecoveryKind: BridgeRecoveryKind.BridgeReceiveStallRecovery,
+                reason: " Receive Stall "));
+
+        Assert.True(recovery.Accepted);
+        var bridge = Assert.IsType<BridgeRecoveryDecision>(recovery.BridgeRecoveryDecision);
+        var lease = Assert.IsType<RecoveryLivenessLease>(recovery.RecoveryLivenessLease);
+        Assert.Equal(bridge, recovery.State.CurrentBridgeRecoveryDecision);
+        Assert.Equal(lease, recovery.State.CurrentRecoveryLivenessLease);
+        Assert.Equal(RecoveryLivenessLeaseState.Active, lease.State);
+        Assert.Equal("Receive Stall", bridge.Reason);
+        Assert.Equal("Receive Stall", lease.Reason);
+        Assert.Equal(bridge.RuntimeOwner, lease.RuntimeOwner);
+        Assert.Equal(bridge.CurrentRoute, lease.Route);
+        Assert.Equal(bridge.CurrentProtocolVersion, lease.ProtocolVersion);
+        Assert.Equal(bridge.CurrentLiveRouteEpoch, lease.LiveRouteEpoch);
+        Assert.Equal(bridge.CurrentRuntimeGeneration, lease.RuntimeGeneration);
+        Assert.Equal(bridge.CurrentTerminalGeneration, lease.TerminalGeneration);
+        Assert.Equal(bridge.CurrentLegGeneration, lease.LegGeneration);
+        Assert.Equal(bridge.TransportEpoch, lease.TransportEpoch);
+        Assert.Equal(bridge.BridgeRecoveryGeneration, lease.BridgeRecoveryGeneration);
+
+        var composite = CreateRegularV4RecoveryLifecycleReport(
+            recovery.State,
+            RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Completed).RecoveryAuthority;
+        Assert.False(composite.IsDefault);
+        Assert.True((composite with
+        {
+            BridgeRecoveryAuthority = composite.BridgeRecoveryAuthority with
+            {
+                RecoveryKind = "ReceiveRecoveryRequest",
+            },
+        }).IsDefault);
+    }
+
+    [Fact]
+    public void BridgeReceiveStallRecovery_RejectsWithoutPartialAuthority()
+    {
+        var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
+        var active = StartRegular(regular).State;
+        var owner = Assert.IsType<RuntimeOwnerToken>(active.CurrentRuntimeOwner);
+        var state = active with { CurrentRuntimeOwner = null };
+
+        var recovery = FileTransferCoordinator.AuthorizeAction(
+            state,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.BridgeReceiveStallRecovery,
+                owner,
+                Assert.IsType<FileTransferLeg>(state.CurrentLeg),
+                bridgeRecoveryKind: BridgeRecoveryKind.BridgeReceiveStallRecovery));
+
+        Assert.False(recovery.Accepted);
+        Assert.Null(recovery.BridgeRecoveryDecision);
+        Assert.Null(recovery.RecoveryLivenessLease);
+        Assert.Null(recovery.State.CurrentBridgeRecoveryDecision);
+        Assert.Null(recovery.State.CurrentRecoveryLivenessLease);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRegularV4RecoveryLifecycle_RequiresLeaseEvenWhenNoLeaseWasEverIssued()
+    {
+        var active = CreateActiveRegularV4RecoveryState();
+        var report = CreateRegularV4RecoveryLifecycleReport(
+            active,
+            RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Completed);
+        var missing = active with
+        {
+            CurrentRecoveryLivenessLease = null,
+            LastRecoveryLivenessLeaseGeneration = 0,
+        };
+
+        var decision = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoveryLifecycle(
+            missing,
+            null,
+            report);
+
+        Assert.Equal(RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Rejected, decision.Status);
+        Assert.Equal("regular_v4_recovery_lifecycle_lease_missing", decision.Reason);
+        Assert.Null(decision.State.LastRuntimeUnlockRegularV4RecoveryLifecycle);
+        Assert.False(decision.State.RuntimeUnlockRecoveryLeaseClosureAvailable);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRegularV4RecoveryLifecycle_RejectsArbitraryLivenessGeneration()
+    {
+        var state = CreateActiveRegularV4RecoveryState();
+        var report = CreateRegularV4RecoveryLifecycleReport(
+            state,
+            RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Completed);
+        var suppliedLease = report.RecoveryAuthority.RecoveryLivenessLease;
+        var staleReport = report with
+        {
+            RecoveryAuthority = report.RecoveryAuthority with
+            {
+                RecoveryLivenessLease = suppliedLease with
+                {
+                    LeaseGeneration = suppliedLease.LeaseGeneration + 1,
+                },
+            },
+        };
+
+        var decision = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoveryLifecycle(
+            state,
+            null,
+            staleReport);
+
+        Assert.Equal(RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Rejected, decision.Status);
+        Assert.Equal("regular_v4_recovery_lifecycle_authority_stale", decision.Reason);
+        Assert.Equal(suppliedLease, decision.State.CurrentRecoveryLivenessLease);
+        Assert.False(decision.State.RuntimeUnlockRecoveryLeaseClosureAvailable);
+    }
+
+    [Fact]
+    public void RecoveryLivenessDeferral_ReusesAtomicLeaseAndCannotReconstructItAfterCompletion()
+    {
+        var state = CreateActiveRegularV4RecoveryState();
+        var owner = Assert.IsType<RuntimeOwnerToken>(state.CurrentRuntimeOwner);
+        var leg = Assert.IsType<FileTransferLeg>(state.CurrentLeg);
+        var lease = Assert.IsType<RecoveryLivenessLease>(state.CurrentRecoveryLivenessLease);
+
+        var reused = FileTransferCoordinator.AuthorizeAction(
+            state,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.LivenessDeferral,
+                owner,
+                leg,
+                recoveryLivenessLease: lease,
+                recoveryDecisionGeneration: lease.LeaseGeneration));
+        Assert.True(reused.Accepted);
+        Assert.Equal(lease, reused.RecoveryLivenessLease);
+        Assert.Equal(lease, reused.State.CurrentRecoveryLivenessLease);
+        Assert.Equal(state.LastRecoveryLivenessLeaseGeneration, reused.State.LastRecoveryLivenessLeaseGeneration);
+
+        var report = CreateRegularV4RecoveryLifecycleReport(
+            reused.State,
+            RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Completed);
+        var completed = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoveryLifecycle(
+            reused.State,
+            null,
+            report);
+        Assert.Equal(RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Accepted, completed.Status);
+
+        var late = FileTransferCoordinator.AuthorizeAction(
+            completed.State,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.LivenessDeferral,
+                owner,
+                leg,
+                recoveryLivenessLease: lease,
+                recoveryDecisionGeneration: lease.LeaseGeneration));
+        Assert.False(late.Accepted);
+        Assert.Null(late.State.CurrentRecoveryLivenessLease);
+        Assert.True(late.State.RuntimeUnlockRecoveryLeaseClosureAvailable);
+
+        var reconstructed = FileTransferCoordinator.AuthorizeAction(
+            completed.State,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RecoveryLivenessLeaseBegin,
+                owner,
+                leg));
+        Assert.False(reconstructed.Accepted);
+        Assert.Equal(
+            "regular_v4_recovery_liveness_lease_must_be_issued_atomically",
+            reconstructed.RejectionReason);
+        Assert.Null(reconstructed.State.CurrentRecoveryLivenessLease);
+        Assert.True(reconstructed.State.RuntimeUnlockRecoveryLeaseClosureAvailable);
+    }
+
+    [Fact]
+    public void NewRegularV4Recovery_SupersedesBothAuthoritiesAndClearsPriorClosure()
+    {
+        var first = CreateActiveRegularV4RecoveryState();
+        var firstBridge = Assert.IsType<BridgeRecoveryDecision>(first.CurrentBridgeRecoveryDecision);
+        var firstLease = Assert.IsType<RecoveryLivenessLease>(first.CurrentRecoveryLivenessLease);
+        var completed = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoveryLifecycle(
+            first,
+            null,
+            CreateRegularV4RecoveryLifecycleReport(
+                first,
+                RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Completed));
+        Assert.True(completed.State.RuntimeUnlockRecoveryLeaseClosureAvailable);
+
+        var second = FileTransferCoordinator.AuthorizeAction(
+            completed.State,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.BridgeReceiveStallRecovery,
+                Assert.IsType<RuntimeOwnerToken>(completed.State.CurrentRuntimeOwner),
+                Assert.IsType<FileTransferLeg>(completed.State.CurrentLeg),
+                bridgeRecoveryKind: BridgeRecoveryKind.BridgeReceiveStallRecovery));
+
+        Assert.True(second.Accepted);
+        Assert.True(second.BridgeRecoveryDecision!.Value.BridgeDecisionGeneration > firstBridge.BridgeDecisionGeneration);
+        Assert.True(second.RecoveryLivenessLease!.Value.LeaseGeneration > firstLease.LeaseGeneration);
+        Assert.Null(second.State.LastRetiredRecoveryLivenessLease);
+        Assert.Null(second.State.LastRuntimeUnlockRegularV4RecoveryLifecycle);
+        Assert.Null(second.State.LastRuntimeUnlockRegularV4RecoverySettlement);
+        Assert.Null(second.State.LastCoordinatorIssuedRegularV4RecoverySettlement);
+        Assert.False(second.State.RuntimeUnlockRecoveryLeaseClosureAvailable);
+        Assert.False(second.State.RuntimeUnlockRegularV4RecoverySettlementAvailable);
+    }
+
+    [Fact]
+    public void BridgeDecisionReplacement_InvalidatesExistingRegularV4RecoveryLease()
+    {
+        var state = CreateActiveRegularV4RecoveryState();
+        var oldLease = Assert.IsType<RecoveryLivenessLease>(state.CurrentRecoveryLivenessLease);
+        var owner = Assert.IsType<RuntimeOwnerToken>(state.CurrentRuntimeOwner);
+        var leg = Assert.IsType<FileTransferLeg>(state.CurrentLeg);
+
+        var replacement = FileTransferCoordinator.AuthorizeAction(
+            state,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.BridgeRecovery,
+                owner,
+                leg,
+                bridgeRecoveryKind: BridgeRecoveryKind.ReceiveRecoveryRequest,
+                reason: "replacement_bridge_recovery"));
+
+        Assert.True(replacement.Accepted);
+        Assert.NotNull(replacement.BridgeRecoveryDecision);
+        Assert.Null(replacement.RecoveryLivenessLease);
+        Assert.Null(replacement.State.CurrentRecoveryLivenessLease);
+        Assert.Null(replacement.State.LastRetiredRecoveryLivenessLease);
+        Assert.Null(replacement.State.LastRuntimeUnlockRegularV4RecoveryLifecycle);
+        Assert.False(replacement.State.RuntimeUnlockRecoveryLeaseClosureAvailable);
+
+        var staleDeferral = FileTransferCoordinator.AuthorizeAction(
+            replacement.State,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.LivenessDeferral,
+                owner,
+                leg,
+                recoveryLivenessLease: oldLease,
+                recoveryDecisionGeneration: oldLease.LeaseGeneration));
+        Assert.False(staleDeferral.Accepted);
+        Assert.Equal("recovery_decision_generation_mismatch", staleDeferral.RejectionReason);
     }
 
     [Fact]
@@ -2735,39 +2986,32 @@ public sealed class FileTransferCoordinatorTests
                 TargetRoute: regular.Route,
                 TargetProtocolVersion: regular.ProtocolVersion,
                 TargetTransport: FileTransferTransportKind.RegularNkn));
-        var firstBegin = FileTransferCoordinator.AuthorizeAction(
+        var recovery = FileTransferCoordinator.AuthorizeAction(
             publicationDecision.State,
             RecoveryActionRequest(
-                FileTransferCoordinatorActionKind.RecoveryLivenessLeaseBegin,
+                FileTransferCoordinatorActionKind.BridgeReceiveStallRecovery,
                 owner,
-                publicationDecision.State.CurrentLeg!));
-        var firstLease = firstBegin.RecoveryLivenessLease!.Value;
-        var firstRetire = FileTransferCoordinator.AuthorizeAction(
-            firstBegin.State,
-            RecoveryActionRequest(
-                FileTransferCoordinatorActionKind.RecoveryLivenessLeaseRetire,
-                owner,
-                firstBegin.State.CurrentLeg!,
-                recoveryLivenessLease: firstLease));
-        var secondBegin = FileTransferCoordinator.AuthorizeAction(
-            firstRetire.State,
-            RecoveryActionRequest(
-                FileTransferCoordinatorActionKind.RecoveryLivenessLeaseBegin,
-                owner,
-                firstRetire.State.CurrentLeg!));
-        var secondLease = secondBegin.RecoveryLivenessLease!.Value;
-        var secondRetire = FileTransferCoordinator.AuthorizeAction(
-            secondBegin.State,
-            RecoveryActionRequest(
-                FileTransferCoordinatorActionKind.RecoveryLivenessLeaseRetire,
-                owner,
-                secondBegin.State.CurrentLeg!,
-                recoveryLivenessLease: secondLease));
-        var publication = secondRetire.State.CurrentRoutePublicationToken!.Value;
+                publicationDecision.State.CurrentLeg!,
+                bridgeRecoveryKind: BridgeRecoveryKind.BridgeReceiveStallRecovery));
+        Assert.True(recovery.Accepted);
+        var activeLease = Assert.IsType<RecoveryLivenessLease>(recovery.RecoveryLivenessLease);
+        var bridgeDecision = Assert.IsType<BridgeRecoveryDecision>(recovery.BridgeRecoveryDecision);
+        var lifecycle = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoveryLifecycle(
+            recovery.State,
+            null,
+            CreateRegularV4RecoveryLifecycleReport(
+                recovery.State,
+                RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Completed));
+        Assert.Equal(RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Accepted, lifecycle.Status);
+        Assert.True(lifecycle.State.RuntimeUnlockRecoveryLeaseClosureAvailable);
+        var retiredLease = Assert.IsType<RecoveryLivenessLease>(
+            lifecycle.State.LastRetiredRecoveryLivenessLease);
+        Assert.Equal(activeLease.AuthorityId, retiredLease.AuthorityId);
+        var publication = lifecycle.State.CurrentRoutePublicationToken!.Value;
         var request = new RuntimeUnlockRetryDispatchAuthorityRequest(
-            secondRetire.State.SessionId,
-            secondRetire.State.TransferId,
-            secondRetire.State.Direction,
+            lifecycle.State.SessionId,
+            lifecycle.State.TransferId,
+            lifecycle.State.Direction,
             new FileTransferRoutePublicationAuthority(
                 publication.SessionId,
                 publication.TransferId,
@@ -2790,34 +3034,53 @@ public sealed class FileTransferCoordinatorTests
             DispatchAttemptGeneration: 1,
             RetryReason: "runtime_unlock_offer_send_not_observed",
             RecoveryReason: "regular_v4_receive_recovery_closed",
-            RegularV4LivenessGeneration: secondLease.LeaseGeneration,
-            BridgeDecisionGeneration: 0);
+            RegularV4LivenessGeneration: retiredLease.LeaseGeneration,
+            BridgeDecisionGeneration: bridgeDecision.BridgeDecisionGeneration);
 
-        var closureState = secondRetire.State with
-        {
-            RuntimeUnlockRecoveryLeaseClosureAvailable = true,
-        };
+        var closureState = lifecycle.State;
         var stale = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
             closureState,
             request,
             null,
             RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure,
-            firstLease.AuthorityId,
-            firstLease.LeaseGeneration,
+            new FileTransferAuthorityId("fta1-stale-recovery-lease"),
+            retiredLease.LeaseGeneration,
             RecoveryLivenessLeaseState.Retired.ToString());
         Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, stale.Status);
         Assert.Equal("receive_recovery_lease_stale", stale.Reason);
+
+        var staleLivenessGeneration = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            closureState,
+            request with { RegularV4LivenessGeneration = retiredLease.LeaseGeneration + 1 },
+            null,
+            RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure,
+            retiredLease.AuthorityId,
+            retiredLease.LeaseGeneration,
+            RecoveryLivenessLeaseState.Retired.ToString());
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, staleLivenessGeneration.Status);
+        Assert.Equal("receive_recovery_lease_stale", staleLivenessGeneration.Reason);
+
+        var staleBridgeGeneration = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            closureState,
+            request with { BridgeDecisionGeneration = bridgeDecision.BridgeDecisionGeneration + 1 },
+            null,
+            RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure,
+            retiredLease.AuthorityId,
+            retiredLease.LeaseGeneration,
+            RecoveryLivenessLeaseState.Retired.ToString());
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, staleBridgeGeneration.Status);
+        Assert.Equal("receive_recovery_lease_stale", staleBridgeGeneration.Reason);
 
         var granted = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
             closureState,
             request,
             null,
             RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure,
-            secondLease.AuthorityId,
-            secondLease.LeaseGeneration,
+            retiredLease.AuthorityId,
+            retiredLease.LeaseGeneration,
             RecoveryLivenessLeaseState.Retired.ToString());
         Assert.True(granted.Granted);
-        Assert.Equal(secondLease.AuthorityId, granted.Contract!.Authority.ReleaseAuthorityId);
+        Assert.Equal(retiredLease.AuthorityId, granted.Contract!.Authority.ReleaseAuthorityId);
         Assert.False(granted.State.RuntimeUnlockRecoveryLeaseClosureAvailable);
 
         var independentRequest = request with
@@ -2829,8 +3092,8 @@ public sealed class FileTransferCoordinatorTests
             independentRequest,
             null,
             RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure,
-            secondLease.AuthorityId,
-            secondLease.LeaseGeneration,
+            retiredLease.AuthorityId,
+            retiredLease.LeaseGeneration,
             RecoveryLivenessLeaseState.Retired.ToString());
         Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, reused.Status);
         Assert.Equal("receive_recovery_lease_stale", reused.Reason);
@@ -3011,6 +3274,10 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(
             bridge.BridgeRecoveryDecision.Value.BridgeDecisionGeneration,
             bridge.State.CurrentBridgeRecoveryDecision?.BridgeDecisionGeneration);
+        Assert.NotNull(bridge.RecoveryLivenessLease);
+        Assert.Equal(
+            bridge.RecoveryLivenessLease.Value.LeaseGeneration,
+            bridge.State.CurrentRecoveryLivenessLease?.LeaseGeneration);
 
         var liveness = FileTransferCoordinator.AuthorizeAction(
             state,
@@ -3103,6 +3370,20 @@ public sealed class FileTransferCoordinatorTests
                 recoveryLivenessLease: staleLease));
         Assert.False(stale.Accepted);
         Assert.Equal("leg_generation_mismatch", stale.RejectionReason);
+
+        var reconstructedLease = lease with
+        {
+            AuthorityId = new FileTransferAuthorityId("test-reconstructed-lease"),
+        };
+        var reconstructed = FileTransferCoordinator.AuthorizeAction(
+            stored,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.RecoveryLivenessLeaseValidate,
+                owner,
+                leg,
+                recoveryLivenessLease: reconstructedLease));
+        Assert.False(reconstructed.Accepted);
+        Assert.Equal("recovery_liveness_lease_authority_mismatch", reconstructed.RejectionReason);
 
         var retire = FileTransferCoordinator.AuthorizeAction(
             stored,
@@ -6016,13 +6297,23 @@ public sealed class FileTransferCoordinatorTests
     private static FileTransferCoordinatorState CreateActiveRegularV4RecoveryState()
     {
         var regular = FileTransferRouteResolver.Resolve(FileTransferRoute.RegularNknV4Fast);
-        return StateWithRecoveryAuthority(StartRegular(regular).State);
+        var state = StartRegular(regular).State;
+        var recovery = FileTransferCoordinator.AuthorizeAction(
+            state,
+            RecoveryActionRequest(
+                FileTransferCoordinatorActionKind.BridgeReceiveStallRecovery,
+                state.CurrentRuntimeOwner!.Value,
+                state.CurrentLeg!,
+                bridgeRecoveryKind: BridgeRecoveryKind.BridgeReceiveStallRecovery));
+        Assert.True(recovery.Accepted);
+        Assert.NotNull(recovery.BridgeRecoveryDecision);
+        Assert.NotNull(recovery.RecoveryLivenessLease);
+        return recovery.State;
     }
 
     private static RuntimeUnlockRegularV4RecoveryLifecycleReport
         CreateRegularV4RecoveryLifecycleReport(
             FileTransferCoordinatorState state,
-            int regularV4LivenessGeneration,
             RuntimeUnlockRegularV4RecoveryLifecycleOutcome outcome)
     {
         var owner = Assert.IsType<RuntimeOwnerToken>(state.CurrentRuntimeOwner);
@@ -6044,8 +6335,9 @@ public sealed class FileTransferCoordinatorTests
             bridge.RecoveryKind.ToString(),
             bridge.Reason);
         return new RuntimeUnlockRegularV4RecoveryLifecycleReport(
-            authority,
-            regularV4LivenessGeneration,
+            new RuntimeUnlockRegularV4RecoveryAuthority(
+                authority,
+                Assert.IsType<RecoveryLivenessLease>(state.CurrentRecoveryLivenessLease)),
             outcome,
             $"bridge_lifecycle_{outcome.ToString().ToLowerInvariant()}");
     }

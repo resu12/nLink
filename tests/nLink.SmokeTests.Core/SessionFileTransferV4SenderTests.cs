@@ -528,6 +528,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     }
 
     [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
     public void RegularNknV4ReceiveRecoveryRequest_ArmsPeerSilenceSafetyReplayWithBoundedNormalSends()
     {
         const string transferId = "transfer_regular_v4_receive_recovery_replay";
@@ -567,6 +568,51 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         var recoveryRequest = Assert.Single(transport.ReceiveRecoveryRequests);
         Assert.Equal(transferId, recoveryRequest.TransferId);
         Assert.Equal(FileTransferDirection.Outbound, recoveryRequest.Direction);
+        var compositeAuthority = Assert.IsType<RuntimeUnlockRegularV4RecoveryAuthority>(
+            recoveryRequest.RegularV4RecoveryAuthority);
+        Assert.Equal(recoveryRequest.BridgeRecoveryAuthority, compositeAuthority.BridgeRecoveryAuthority);
+        Assert.Equal(
+            RecoveryLivenessLeaseState.Active,
+            compositeAuthority.RecoveryLivenessLease.State);
+        Assert.Equal(
+            compositeAuthority.RecoveryLivenessLease.LeaseGeneration,
+            GetPrivateProperty<int>(context, "LastRecoveryLivenessLeaseGeneration"));
+        Assert.Equal(
+            compositeAuthority.RecoveryLivenessLease,
+            GetPrivateProperty<RecoveryLivenessLease>(context, "CurrentRecoveryLivenessLease"));
+
+        var leaseBeforeDeferral = compositeAuthority.RecoveryLivenessLease;
+        var deferralDeadline = DateTimeOffset.UtcNow.AddSeconds(5);
+        Assert.True(service.TryAuthorizeRecoveryLivenessDeferral(
+            new FileTransferRecoveryLivenessSnapshot(
+                recoveryRequest.SessionId,
+                recoveryRequest.TransferId,
+                recoveryRequest.RouteToken!,
+                recoveryRequest.ProtocolVersion,
+                recoveryRequest.LiveRouteEpoch,
+                recoveryRequest.TransferLegGeneration,
+                recoveryRequest.BridgeRecoveryGeneration,
+                recoveryRequest.TransportEpoch,
+                recoveryRequest.CheckpointRequestId,
+                recoveryRequest.AuthorityReason ?? recoveryRequest.Reason,
+                FileTransferRecoveryLivenessState.BridgeRecoveryStarted,
+                DateTimeOffset.UtcNow,
+                deferralDeadline,
+                BridgeRecoveryRequested: true,
+                BridgeRecoveryStarted: true,
+                BridgeRecoveryCompleted: false,
+                ReceiveProofObserved: false,
+                RecoveryExhausted: false,
+                AuthorityCompleted: false,
+                TerminalRecommended: false),
+            "regular_v4_atomic_lease_reuse",
+            deferralDeadline,
+            out var deferralGrant));
+        Assert.NotNull(deferralGrant);
+        Assert.Equal(leaseBeforeDeferral.LeaseGeneration, deferralGrant!.LeaseGeneration);
+        Assert.Equal(
+            leaseBeforeDeferral,
+            GetPrivateProperty<RecoveryLivenessLease>(context, "CurrentRecoveryLivenessLease"));
 
         var replay = Assert.Single(GetQueuedV4RepairSends(context));
         Assert.Equal(100, GetIntProperty(replay, "FirstStartChunkIndex"));
@@ -577,8 +623,171 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.Contains("event=filetransfer_regular_v4_peer_silence_safety_replay_started;", log, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_regular_v4_receive_recovery_peer_silence_replay_armed;", log, StringComparison.Ordinal);
         Assert.Contains("regular_v4_peer_silence_replay_armed=1", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_recovery_liveness_lease_granted;", log, StringComparison.Ordinal);
+        Assert.Contains("liveness_deferral_applied=0", log, StringComparison.Ordinal);
+        Assert.Contains("action_kind=LivenessDeferral", log, StringComparison.Ordinal);
         Assert.DoesNotContain("filetransfer_v4_transport_send_abandoned_for_regular_v4_peer_silence_recovery", log, StringComparison.Ordinal);
         Assert.DoesNotContain("file_tuna_v6", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
+    public void RegularNknV4ReceiveRecoveryRequest_ControllerThrowRetiresLeaseWithoutArmingReplay()
+    {
+        const string transferId = "transfer_regular_v4_receive_recovery_dispatch_throw";
+        var logStart = GetOperationalLogLength();
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}")
+        {
+            ReceiveRecoveryException = new InvalidOperationException("test_receive_recovery_dispatch_rejected"),
+        };
+        service.AttachTransport(transport);
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 100,
+            chunksAcceptedForTransport: 256,
+            remoteGrantedUntilExclusive: 256,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        SetPrivateProperty(context, "PullSourceCanSeek", true);
+        SetPrivateProperty(context, "PullV4LastPeerFrameReceivedUtc", DateTimeOffset.UtcNow - TimeSpan.FromSeconds(10));
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        var dispatched = (bool)typeof(SessionFileTransferService)
+            .GetMethod("TryRequestFileTransferReceiveRecovery", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(
+                service,
+                [
+                    new FileTransferReceiveRecoveryRequest(
+                        $"session_{transferId}",
+                        transferId,
+                        FileTransferDirection.Outbound,
+                        "session_liveness_timeout_pending"),
+                ])!;
+
+        Assert.False(dispatched);
+        Assert.Empty(transport.ReceiveRecoveryRequests);
+        Assert.Empty(GetQueuedV4RepairSends(context));
+        Assert.Equal(0, GetPrivateProperty<int>(context, "PullRegularNknV4PeerSilenceSafetyReplayCount"));
+        Assert.Null(GetPrivatePropertyValue(context, "CurrentRecoveryLivenessLease"));
+        Assert.False(GetPrivateProperty<bool>(context, "RuntimeUnlockRecoveryLeaseClosureAvailable"));
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_v6_transport_receive_recovery_request_failed;", log, StringComparison.Ordinal);
+        Assert.Contains("lifecycle_outcome=Discarded", log, StringComparison.Ordinal);
+        Assert.Contains("decision_status=Accepted", log, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "event=filetransfer_regular_v4_receive_recovery_peer_silence_replay_armed;",
+            log,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
+    public void RecoveryLivenessDeferral_AfterAcceptedLifecycleCompletion_DoesNotReconstructLeaseOrDeadline()
+    {
+        const string transferId = "transfer_regular_v4_liveness_after_completion";
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var (context, recoveryRequest) = StartRegularV4RecoveryForLivenessDeferralTest(
+            service,
+            transport,
+            transferId);
+        var recoveryAuthority = Assert.IsType<RuntimeUnlockRegularV4RecoveryAuthority>(
+            recoveryRequest.RegularV4RecoveryAuthority);
+        var lifecycle = new RuntimeUnlockRegularV4RecoveryLifecycleReport(
+            recoveryAuthority,
+            RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Completed,
+            "bridge_lifecycle_completed");
+
+        var completed = ObserveRegularV4RecoveryLifecycleForTest(context, lifecycle);
+
+        Assert.Equal(RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Accepted, completed.Status);
+        Assert.Null(GetPrivatePropertyValue(context, "CurrentRecoveryLivenessLease"));
+        Assert.True(GetPrivateProperty<bool>(context, "RuntimeUnlockRecoveryLeaseClosureAvailable"));
+        var lastLeaseGeneration = GetPrivateProperty<int>(context, "LastRecoveryLivenessLeaseGeneration");
+        var deadline = DateTimeOffset.UtcNow.AddMinutes(7);
+        var logStart = GetOperationalLogLength();
+
+        var accepted = service.TryAuthorizeRecoveryLivenessDeferral(
+            CreateRecoveryLivenessSnapshot(recoveryRequest, deadline),
+            "late_deferral_after_completed_lifecycle",
+            deadline,
+            out var grant);
+
+        Assert.False(accepted);
+        Assert.Null(grant);
+        Assert.Null(GetPrivatePropertyValue(context, "CurrentRecoveryLivenessLease"));
+        Assert.Equal(
+            lastLeaseGeneration,
+            GetPrivateProperty<int>(context, "LastRecoveryLivenessLeaseGeneration"));
+        Assert.True(GetPrivateProperty<bool>(context, "RuntimeUnlockRecoveryLeaseClosureAvailable"));
+        AssertNoLateRecoveryLivenessLeaseGrant(logStart, deadline);
+    }
+
+    [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
+    public void RecoveryLivenessDeferral_AfterBridgeDecisionReplacement_DoesNotReconstructLeaseOrDeadline()
+    {
+        const string transferId = "transfer_regular_v4_liveness_after_bridge_replacement";
+        using var service = new SessionFileTransferService();
+        using var transport = new LoopbackFileTransferTransport($"session_{transferId}");
+        service.AttachTransport(transport);
+        var (context, recoveryRequest) = StartRegularV4RecoveryForLivenessDeferralTest(
+            service,
+            transport,
+            transferId);
+        var owner = Assert.IsType<RuntimeOwnerToken>(
+            GetPrivatePropertyValue(context, "CurrentRuntimeOwner"));
+        var leg = Assert.IsType<FileTransferLeg>(
+            GetPrivatePropertyValue(context, "CurrentTransferLeg"));
+        var replacement = FileTransferCoordinator.AuthorizeAction(
+            CreateCoordinatorStateForTest(context),
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.BridgeRecovery,
+                "unit_test_bridge_decision_replacement",
+                "unit_test_bridge_decision_replacement",
+                RuntimeOwner: owner,
+                Route: leg.RouteSelection.Route,
+                ProtocolVersion: leg.ProtocolVersion,
+                LiveRouteEpoch: leg.LiveRouteEpochId,
+                LegGeneration: leg.Generation,
+                TransportEpochId: leg.TransportEpochId,
+                BridgeRecoveryGeneration: leg.BridgeRecoveryGeneration,
+                BridgeRecoveryKind: BridgeRecoveryKind.ReceiveRecoveryRequest));
+
+        Assert.True(replacement.Accepted);
+        Assert.NotNull(replacement.BridgeRecoveryDecision);
+        Assert.Null(replacement.RecoveryLivenessLease);
+        ApplyCoordinatorActionDecisionForTest(context, replacement);
+        Assert.Null(GetPrivatePropertyValue(context, "CurrentRecoveryLivenessLease"));
+        Assert.False(GetPrivateProperty<bool>(context, "RuntimeUnlockRecoveryLeaseClosureAvailable"));
+        var replacementBridgeDecision = GetPrivateProperty<BridgeRecoveryDecision>(
+            context,
+            "CurrentBridgeRecoveryDecision");
+        var lastLeaseGeneration = GetPrivateProperty<int>(context, "LastRecoveryLivenessLeaseGeneration");
+        var deadline = DateTimeOffset.UtcNow.AddMinutes(9);
+        var logStart = GetOperationalLogLength();
+
+        var accepted = service.TryAuthorizeRecoveryLivenessDeferral(
+            CreateRecoveryLivenessSnapshot(recoveryRequest, deadline),
+            "late_deferral_after_bridge_replacement",
+            deadline,
+            out var grant);
+
+        Assert.False(accepted);
+        Assert.Null(grant);
+        Assert.Null(GetPrivatePropertyValue(context, "CurrentRecoveryLivenessLease"));
+        Assert.Equal(
+            replacementBridgeDecision,
+            GetPrivateProperty<BridgeRecoveryDecision>(context, "CurrentBridgeRecoveryDecision"));
+        Assert.Equal(
+            lastLeaseGeneration,
+            GetPrivateProperty<int>(context, "LastRecoveryLivenessLeaseGeneration"));
+        Assert.False(GetPrivateProperty<bool>(context, "RuntimeUnlockRecoveryLeaseClosureAvailable"));
+        AssertNoLateRecoveryLivenessLeaseGrant(logStart, deadline);
     }
 
     [Fact]
@@ -1171,6 +1380,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
     }
 
     [Fact]
+    [Trait("FileTransferRuntimeSuite", "RegularV4RecoveryAuthority")]
     public void RegularNknV4ReceiveRecoveryRequest_DoesNotArmReplayForInboundOrFreshPeer()
     {
         const string transferId = "transfer_regular_v4_receive_recovery_no_replay";
@@ -1219,6 +1429,28 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         Assert.True(outboundDispatched);
         Assert.True(inboundDispatched);
         Assert.Equal(2, transport.ReceiveRecoveryRequests.Count);
+        foreach (var recoveryRequest in transport.ReceiveRecoveryRequests)
+        {
+            var compositeAuthority = Assert.IsType<RuntimeUnlockRegularV4RecoveryAuthority>(
+                recoveryRequest.RegularV4RecoveryAuthority);
+            Assert.False(compositeAuthority.IsDefault);
+            Assert.Equal(recoveryRequest.BridgeRecoveryAuthority, compositeAuthority.BridgeRecoveryAuthority);
+            Assert.Equal(recoveryRequest.Direction, compositeAuthority.RecoveryLivenessLease.Direction);
+            Assert.Equal(RecoveryLivenessLeaseState.Active, compositeAuthority.RecoveryLivenessLease.State);
+        }
+
+        var outboundRecovery = Assert.Single(
+            transport.ReceiveRecoveryRequests,
+            recoveryRequest => recoveryRequest.Direction == FileTransferDirection.Outbound);
+        var inboundRecovery = Assert.Single(
+            transport.ReceiveRecoveryRequests,
+            recoveryRequest => recoveryRequest.Direction == FileTransferDirection.Inbound);
+        Assert.Equal(
+            outboundRecovery.RegularV4RecoveryAuthority!.Value.RecoveryLivenessLease,
+            GetPrivateProperty<RecoveryLivenessLease>(context, "CurrentRecoveryLivenessLease"));
+        Assert.Equal(
+            inboundRecovery.RegularV4RecoveryAuthority!.Value.RecoveryLivenessLease,
+            GetPrivateProperty<RecoveryLivenessLease>(inboundContext, "CurrentRecoveryLivenessLease"));
         Assert.Empty(GetQueuedV4RepairSends(context));
 
         var log = ReadOperationalLogTail(logStart);
@@ -4810,8 +5042,30 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         var suppressFallbackFeedback = 0;
         var routeProofLog = string.Empty;
         var routeProofLines = new HashSet<string>(StringComparer.Ordinal);
+        var routeCycleLog = string.Empty;
+        var routeCycleLogLines = new HashSet<string>(StringComparer.Ordinal);
         string ReadRouteCycleLog()
-            => FilterV4SenderTransferLog(ReadOperationalLogTail(logStart), transferId);
+        {
+            var nextLogStart = GetOperationalLogLength();
+            var retainedSlice = FilterV4SenderTransferLog(
+                ReadOperationalLogTail(logStart),
+                transferId);
+            logStart = nextLogStart;
+            foreach (var line in retainedSlice.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+            {
+                if ((line.Contains("event=filetransfer_transport_paused;", StringComparison.Ordinal) ||
+                     line.Contains("event=filetransfer_live_route_epoch_", StringComparison.Ordinal) ||
+                     line.Contains("event=filetransfer_route_selected;", StringComparison.Ordinal) ||
+                     line.Contains("event=filetransfer_runtime_started;", StringComparison.Ordinal) ||
+                     line.Contains("event=filetransfer_outbound_sparse_worker_handoff_installed;", StringComparison.Ordinal)) &&
+                    routeCycleLogLines.Add(line))
+                {
+                    routeCycleLog += line + Environment.NewLine;
+                }
+            }
+
+            return routeCycleLog;
+        }
         string ExtractLiveRouteProofLines(string logText)
             => string.Join(
                 Environment.NewLine,
@@ -4827,7 +5081,7 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
 
         void CaptureRouteProofLog()
         {
-            var proofLines = ExtractLiveRouteProofLines(ReadOperationalLogTail(logStart));
+            var proofLines = ExtractLiveRouteProofLines(ReadRouteCycleLog());
             foreach (var proofLine in proofLines.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
             {
                 if (routeProofLines.Add(proofLine))
@@ -21263,6 +21517,117 @@ public sealed partial class SessionFileTransferV4SenderTests : SessionFileTransf
         public void Dispose()
         {
         }
+    }
+
+    private static (object Context, FileTransferReceiveRecoveryRequest RecoveryRequest)
+        StartRegularV4RecoveryForLivenessDeferralTest(
+            SessionFileTransferService service,
+            LoopbackFileTransferTransport transport,
+            string transferId)
+    {
+        var context = CreateRegularNknV4OutboundContext(
+            transferId,
+            remoteNextExpectedChunkIndex: 0,
+            chunksAcceptedForTransport: 1,
+            remoteGrantedUntilExclusive: 1,
+            lastGrantReceivedUtc: DateTimeOffset.UtcNow);
+        SetPrivateProperty(context, "PullSourceCanSeek", true);
+        SetPrivateProperty(context, "PullV4LastPeerFrameReceivedUtc", DateTimeOffset.UtcNow);
+        typeof(SessionFileTransferService)
+            .GetField("outboundTransfer", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(service, context);
+
+        Assert.True(service.RequestFileTransferReceiveRecovery(
+            new FileTransferReceiveRecoveryRequest(
+                $"session_{transferId}",
+                transferId,
+                FileTransferDirection.Outbound,
+                "session_liveness_timeout_pending")));
+        var recoveryRequest = Assert.Single(transport.ReceiveRecoveryRequests);
+        Assert.IsType<RuntimeUnlockRegularV4RecoveryAuthority>(
+            recoveryRequest.RegularV4RecoveryAuthority);
+        return (context, recoveryRequest);
+    }
+
+    private static FileTransferRecoveryLivenessSnapshot CreateRecoveryLivenessSnapshot(
+        FileTransferReceiveRecoveryRequest recoveryRequest,
+        DateTimeOffset deadline)
+        => new(
+            recoveryRequest.SessionId,
+            recoveryRequest.TransferId,
+            recoveryRequest.RouteToken!,
+            recoveryRequest.ProtocolVersion,
+            recoveryRequest.LiveRouteEpoch,
+            recoveryRequest.TransferLegGeneration,
+            recoveryRequest.BridgeRecoveryGeneration,
+            recoveryRequest.TransportEpoch,
+            recoveryRequest.CheckpointRequestId,
+            recoveryRequest.AuthorityReason ?? recoveryRequest.Reason,
+            FileTransferRecoveryLivenessState.BridgeRecoveryStarted,
+            DateTimeOffset.UtcNow,
+            deadline,
+            BridgeRecoveryRequested: true,
+            BridgeRecoveryStarted: true,
+            BridgeRecoveryCompleted: false,
+            ReceiveProofObserved: false,
+            RecoveryExhausted: false,
+            AuthorityCompleted: false,
+            TerminalRecommended: false);
+
+    private static RuntimeUnlockRegularV4RecoveryLifecycleDecision
+        ObserveRegularV4RecoveryLifecycleForTest(
+            object context,
+            RuntimeUnlockRegularV4RecoveryLifecycleReport report)
+    {
+        var method = typeof(SessionFileTransferService)
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(candidate =>
+                candidate.Name == "ObserveRuntimeUnlockRegularV4RecoveryLifecycleLocked" &&
+                candidate.GetParameters().Length == 2 &&
+                candidate.GetParameters()[0].ParameterType == context.GetType());
+        return Assert.IsType<RuntimeUnlockRegularV4RecoveryLifecycleDecision>(
+            method.Invoke(null, [context, report]));
+    }
+
+    private static FileTransferCoordinatorState CreateCoordinatorStateForTest(object context)
+    {
+        var method = typeof(SessionFileTransferService)
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(candidate =>
+                candidate.Name == "CreateCoordinatorStateLocked" &&
+                candidate.GetParameters().Length == 1 &&
+                candidate.GetParameters()[0].ParameterType == context.GetType());
+        return Assert.IsType<FileTransferCoordinatorState>(method.Invoke(null, [context]));
+    }
+
+    private static void ApplyCoordinatorActionDecisionForTest(
+        object context,
+        FileTransferCoordinatorActionDecision decision)
+    {
+        var method = typeof(SessionFileTransferService)
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
+            .Single(candidate =>
+                candidate.Name == "ApplyCoordinatorActionDecisionToContextLocked" &&
+                candidate.GetParameters().Length == 2 &&
+                candidate.GetParameters()[0].ParameterType == context.GetType() &&
+                candidate.GetParameters()[1].ParameterType == typeof(FileTransferCoordinatorActionDecision));
+        method.Invoke(null, [context, decision]);
+    }
+
+    private static void AssertNoLateRecoveryLivenessLeaseGrant(
+        int logStart,
+        DateTimeOffset attemptedDeadline)
+    {
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_recovery_authority_rejected;", log, StringComparison.Ordinal);
+        Assert.Contains("action_kind=LivenessDeferral", log, StringComparison.Ordinal);
+        Assert.Contains("rejection_reason=recovery_liveness_lease_missing", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("action_kind=RecoveryLivenessLeaseBegin", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_recovery_liveness_lease_granted;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            $"liveness_deferral_deadline_utc_ms={attemptedDeadline.ToUnixTimeMilliseconds()}",
+            log,
+            StringComparison.Ordinal);
     }
 
     private static string FilterV4SenderTransferLog(string logText, string transferId)

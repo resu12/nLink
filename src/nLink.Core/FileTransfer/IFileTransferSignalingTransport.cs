@@ -43,6 +43,62 @@ public sealed record FileTransferBridgeRecoveryAuthority(
     string RecoveryKind,
     string Reason);
 
+internal readonly record struct RuntimeUnlockRegularV4RecoveryAuthority(
+    FileTransferBridgeRecoveryAuthority BridgeRecoveryAuthority,
+    RecoveryLivenessLease RecoveryLivenessLease)
+{
+    public bool IsDefault =>
+        BridgeRecoveryAuthority is null ||
+        string.IsNullOrWhiteSpace(BridgeRecoveryAuthority.SessionId) ||
+        string.IsNullOrWhiteSpace(BridgeRecoveryAuthority.TransferId) ||
+        string.IsNullOrWhiteSpace(BridgeRecoveryAuthority.RouteToken) ||
+        BridgeRecoveryAuthority.ProtocolVersion <= 0 ||
+        BridgeRecoveryAuthority.LiveRouteEpoch < 0 ||
+        BridgeRecoveryAuthority.RuntimeGeneration <= 0 ||
+        BridgeRecoveryAuthority.TerminalGeneration < 0 ||
+        BridgeRecoveryAuthority.TransferLegGeneration < 0 ||
+        BridgeRecoveryAuthority.TransportEpoch < 0 ||
+        BridgeRecoveryAuthority.BridgeRecoveryGeneration < 0 ||
+        BridgeRecoveryAuthority.BridgeDecisionGeneration <= 0 ||
+        !string.Equals(
+            BridgeRecoveryAuthority.RecoveryKind,
+            "BridgeReceiveStallRecovery",
+            StringComparison.Ordinal) ||
+        !IsNormalizedReason(BridgeRecoveryAuthority.Reason) ||
+        RecoveryLivenessLease.IsDefault ||
+        RecoveryLivenessLease.State != RecoveryLivenessLeaseState.Active ||
+        !IsNormalizedReason(RecoveryLivenessLease.Reason) ||
+        !HasExactSharedAuthorityTuple(BridgeRecoveryAuthority, RecoveryLivenessLease);
+
+    private static bool HasExactSharedAuthorityTuple(
+        FileTransferBridgeRecoveryAuthority bridge,
+        RecoveryLivenessLease lease)
+        => string.Equals(bridge.SessionId, lease.SessionId, StringComparison.Ordinal) &&
+           string.Equals(bridge.TransferId, lease.TransferId, StringComparison.Ordinal) &&
+           bridge.Direction == lease.Direction &&
+           string.Equals(bridge.RouteToken, lease.RouteToken, StringComparison.Ordinal) &&
+           bridge.ProtocolVersion == lease.ProtocolVersion &&
+           bridge.LiveRouteEpoch == lease.LiveRouteEpoch &&
+           bridge.RuntimeGeneration == lease.RuntimeGeneration &&
+           bridge.TerminalGeneration == lease.TerminalGeneration &&
+           bridge.TransferLegGeneration == lease.LegGeneration &&
+           bridge.TransportEpoch == lease.TransportEpoch &&
+           bridge.BridgeRecoveryGeneration == lease.BridgeRecoveryGeneration &&
+           string.Equals(lease.RuntimeOwner.SessionId, lease.SessionId, StringComparison.Ordinal) &&
+           string.Equals(lease.RuntimeOwner.TransferId, lease.TransferId, StringComparison.Ordinal) &&
+           lease.RuntimeOwner.Direction == lease.Direction &&
+           lease.RuntimeOwner.Route == lease.Route &&
+           string.Equals(lease.RuntimeOwner.RouteToken, lease.RouteToken, StringComparison.Ordinal) &&
+           lease.RuntimeOwner.ProtocolVersion == lease.ProtocolVersion &&
+           lease.RuntimeOwner.LiveRouteEpoch == lease.LiveRouteEpoch &&
+           lease.RuntimeOwner.RuntimeGeneration == lease.RuntimeGeneration &&
+           lease.RuntimeOwner.TerminalGeneration == lease.TerminalGeneration;
+
+    private static bool IsNormalizedReason(string? reason)
+        => !string.IsNullOrWhiteSpace(reason) &&
+           string.Equals(reason, reason.Trim(), StringComparison.Ordinal);
+}
+
 public sealed record FileTransferRecoveryLivenessDeferralGrant(
     string SessionId,
     string TransferId,
@@ -83,6 +139,8 @@ public sealed record FileTransferReceiveRecoveryRequest(
     public string? AuthorityReason { get; init; }
 
     public FileTransferBridgeRecoveryAuthority? BridgeRecoveryAuthority { get; init; }
+
+    internal RuntimeUnlockRegularV4RecoveryAuthority? RegularV4RecoveryAuthority { get; init; }
 }
 
 public interface IFileTransferReceiveRecoveryController
@@ -620,15 +678,15 @@ internal readonly record struct RuntimeUnlockRegularV4RecoverySettlementReport(
 }
 
 internal readonly record struct RuntimeUnlockRegularV4RecoveryLifecycleReport(
-    FileTransferBridgeRecoveryAuthority Authority,
-    int RegularV4LivenessGeneration,
+    RuntimeUnlockRegularV4RecoveryAuthority RecoveryAuthority,
     RuntimeUnlockRegularV4RecoveryLifecycleOutcome Outcome,
     string Reason)
 {
-    public bool IsDefault => Authority is null ||
-                             string.IsNullOrWhiteSpace(Authority.SessionId) ||
-                             string.IsNullOrWhiteSpace(Authority.TransferId) ||
-                             RegularV4LivenessGeneration <= 0 ||
+    public FileTransferBridgeRecoveryAuthority Authority => RecoveryAuthority.BridgeRecoveryAuthority;
+
+    public int RegularV4LivenessGeneration => RecoveryAuthority.RecoveryLivenessLease.LeaseGeneration;
+
+    public bool IsDefault => RecoveryAuthority.IsDefault ||
                              string.IsNullOrWhiteSpace(Reason);
 }
 

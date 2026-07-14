@@ -1014,6 +1014,24 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     $nonCurrentSendCount = 0
     $runtimeOwnerStaleRejectedCount = Get-FileTransferCompactIndexEventCount -Index $Index -Name 'filetransfer_runtime_owner_stale_update_rejected'
     $outboundReceiveWorkerHandoffProof = Get-FileTransferCompactOutboundReceiveWorkerHandoffProof -Index $Index
+    [object[]]$runtimeUnlockRegularV4RecoveryLeaseEvents = @(
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_bridge_recovery_authority_granted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_recovery_liveness_lease_granted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_lifecycle_decided') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_lease_closure_rejected') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_lease_closure_retained') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_lease_closure_adopted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_regular_v4_recovery_lease_closure_consumed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_blocked_by_regular_v4_receive_recovery') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_held_by_regular_v4_receive_recovery') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'runtime_unlock_retry_dispatch_authority_granted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'transfer_terminal') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_inbound_terminal') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_outbound_terminal')
+    )
+    $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof =
+        Get-FileTransferRuntimeUnlockRegularV4RecoveryLeaseCorrelation `
+            -Events $runtimeUnlockRegularV4RecoveryLeaseEvents
     [object[]]$fallbackTailPairingEvents = @(
         @($routeEvents) +
         @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_live_route_epoch_recovered') +
@@ -1067,6 +1085,20 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
             Class = 'post_tuna_fallback_paired_yield_bridge_recovery_generation_mismatch'
             Event = $candidateEvent
             Reason = 'bridge_recovery_generation_mismatch'
+        }) | Out-Null
+    }
+    foreach ($candidateEvent in @($runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.UnresolvedCandidateEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'runtime_unlock_regular_v4_recovery_lease_not_issued'
+            Event = $candidateEvent
+            Reason = 'coordinator_recovery_liveness_lease_missing'
+        }) | Out-Null
+    }
+    foreach ($candidateEvent in @($runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureNotAdoptedUnresolvedCandidateEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted'
+            Event = $candidateEvent
+            Reason = 'regular_v4_receive_recovery_pending'
         }) | Out-Null
     }
     $firstCompactProofChainFailure = @(
@@ -1126,7 +1158,13 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $gateStatus = 'warn'
     }
 
-    if ($compactProofChainCandidates.Count -gt 0) {
+    if ($runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.UnresolvedCount -gt 0 -or
+        $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureNotAdoptedUnresolvedCount -gt 0) {
+        $verdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
+        $gateStatus = 'fail'
+        $acceptanceFailureClass = 'route_runtime'
+    }
+    elseif ($compactProofChainCandidates.Count -gt 0) {
         $verdict = 'INCONCLUSIVE'
         $gateStatus = 'fail'
         $acceptanceFailureClass = 'incomplete_proof'
@@ -1212,6 +1250,17 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("first_proof_chain_failure_sequence={0}" -f $firstProofChainFailureSequence),
         ("first_proof_chain_failure_source_path={0}" -f $firstProofChainFailureSourcePath),
         ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
+        ("runtime_unlock_regular_v4_recovery_lease_closure_rejected_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureRejectedCount),
+        ("runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RawCount),
+        ("runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.DistinctCount),
+        ("runtime_unlock_regular_v4_recovery_lease_not_issued_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RecoveredCount),
+        ("runtime_unlock_regular_v4_recovery_lease_not_issued_unresolved_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.UnresolvedCount),
+        ("runtime_unlock_regular_v4_recovery_lease_issuance_verdict={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.Verdict),
+        ("runtime_unlock_recovery_lease_closure_not_adopted_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureNotAdoptedRawCount),
+        ("runtime_unlock_recovery_lease_closure_not_adopted_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureNotAdoptedDistinctCount),
+        ("runtime_unlock_recovery_lease_closure_not_adopted_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureNotAdoptedRecoveredCount),
+        ("runtime_unlock_recovery_lease_closure_not_adopted_unresolved_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureNotAdoptedUnresolvedCount),
+        ("runtime_unlock_recovery_lease_closure_adoption_verdict={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureAdoptionVerdict),
         ("post_tuna_fallback_outbound_receive_worker_handoff_missing_count={0}" -f $outboundReceiveWorkerHandoffProof.Count),
         ("fallback_tail_owner_generation_mismatch_count={0}" -f $fallbackTailOwnerGenerationMismatchCount),
         ("fallback_tail_bridge_recovery_generation_pairing_verdict={0}" -f $fallbackTailBridgeRecoveryPairingProof.Verdict),
@@ -1262,6 +1311,17 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("first_proof_chain_failure_sequence={0}" -f $firstProofChainFailureSequence),
         ("first_proof_chain_failure_source_path={0}" -f $firstProofChainFailureSourcePath),
         ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
+        ("runtime_unlock_regular_v4_recovery_lease_closure_rejected_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureRejectedCount),
+        ("runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RawCount),
+        ("runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.DistinctCount),
+        ("runtime_unlock_regular_v4_recovery_lease_not_issued_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RecoveredCount),
+        ("runtime_unlock_regular_v4_recovery_lease_not_issued_unresolved_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.UnresolvedCount),
+        ("runtime_unlock_regular_v4_recovery_lease_issuance_verdict={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.Verdict),
+        ("runtime_unlock_recovery_lease_closure_not_adopted_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureNotAdoptedRawCount),
+        ("runtime_unlock_recovery_lease_closure_not_adopted_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureNotAdoptedDistinctCount),
+        ("runtime_unlock_recovery_lease_closure_not_adopted_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureNotAdoptedRecoveredCount),
+        ("runtime_unlock_recovery_lease_closure_not_adopted_unresolved_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureNotAdoptedUnresolvedCount),
+        ("runtime_unlock_recovery_lease_closure_adoption_verdict={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureAdoptionVerdict),
         ("post_tuna_fallback_outbound_receive_worker_handoff_missing_count={0}" -f $outboundReceiveWorkerHandoffProof.Count),
         ("fallback_tail_owner_generation_mismatch_count={0}" -f $fallbackTailOwnerGenerationMismatchCount),
         ("fallback_tail_bridge_recovery_generation_pairing_verdict={0}" -f $fallbackTailBridgeRecoveryPairingProof.Verdict),
@@ -1304,6 +1364,17 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("first_proof_chain_failure_sequence={0}" -f $firstProofChainFailureSequence),
         ("first_proof_chain_failure_source_path={0}" -f $firstProofChainFailureSourcePath),
         ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
+        ("runtime_unlock_regular_v4_recovery_lease_closure_rejected_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureRejectedCount),
+        ("runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RawCount),
+        ("runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.DistinctCount),
+        ("runtime_unlock_regular_v4_recovery_lease_not_issued_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RecoveredCount),
+        ("runtime_unlock_regular_v4_recovery_lease_not_issued_unresolved_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.UnresolvedCount),
+        ("runtime_unlock_regular_v4_recovery_lease_issuance_verdict={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.Verdict),
+        ("runtime_unlock_recovery_lease_closure_not_adopted_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureNotAdoptedRawCount),
+        ("runtime_unlock_recovery_lease_closure_not_adopted_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureNotAdoptedDistinctCount),
+        ("runtime_unlock_recovery_lease_closure_not_adopted_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureNotAdoptedRecoveredCount),
+        ("runtime_unlock_recovery_lease_closure_not_adopted_unresolved_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureNotAdoptedUnresolvedCount),
+        ("runtime_unlock_recovery_lease_closure_adoption_verdict={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureAdoptionVerdict),
         ("post_tuna_fallback_outbound_receive_worker_handoff_missing_count={0}" -f $outboundReceiveWorkerHandoffProof.Count),
         ("fallback_tail_owner_generation_mismatch_count={0}" -f $fallbackTailOwnerGenerationMismatchCount),
         ("fallback_tail_bridge_recovery_generation_pairing_verdict={0}" -f $fallbackTailBridgeRecoveryPairingProof.Verdict),
@@ -1333,6 +1404,17 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("first_proof_chain_failure_sequence={0}" -f $firstProofChainFailureSequence),
         ("first_proof_chain_failure_source_path={0}" -f $firstProofChainFailureSourcePath),
         ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
+        ("runtime_unlock_regular_v4_recovery_lease_closure_rejected_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureRejectedCount),
+        ("runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RawCount),
+        ("runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.DistinctCount),
+        ("runtime_unlock_regular_v4_recovery_lease_not_issued_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RecoveredCount),
+        ("runtime_unlock_regular_v4_recovery_lease_not_issued_unresolved_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.UnresolvedCount),
+        ("runtime_unlock_regular_v4_recovery_lease_issuance_verdict={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.Verdict),
+        ("runtime_unlock_recovery_lease_closure_not_adopted_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureNotAdoptedRawCount),
+        ("runtime_unlock_recovery_lease_closure_not_adopted_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureNotAdoptedDistinctCount),
+        ("runtime_unlock_recovery_lease_closure_not_adopted_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureNotAdoptedRecoveredCount),
+        ("runtime_unlock_recovery_lease_closure_not_adopted_unresolved_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureNotAdoptedUnresolvedCount),
+        ("runtime_unlock_recovery_lease_closure_adoption_verdict={0}" -f $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureAdoptionVerdict),
         ("fallback_tail_owner_generation_mismatch_count={0}" -f $fallbackTailOwnerGenerationMismatchCount),
         ("fallback_tail_bridge_recovery_generation_pairing_verdict={0}" -f $fallbackTailBridgeRecoveryPairingProof.Verdict),
         ("fallback_tail_bridge_recovery_generation_mismatch_raw_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.RawCount),
@@ -1366,6 +1448,17 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         first_proof_chain_failure_sequence = $firstProofChainFailureSequence
         first_proof_chain_failure_source_path = $firstProofChainFailureSourcePath
         first_proof_chain_failure_line_number = $firstProofChainFailureLineNumber
+        runtime_unlock_regular_v4_recovery_lease_closure_rejected_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureRejectedCount
+        runtime_unlock_regular_v4_recovery_lease_not_issued_raw_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RawCount
+        runtime_unlock_regular_v4_recovery_lease_not_issued_distinct_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.DistinctCount
+        runtime_unlock_regular_v4_recovery_lease_not_issued_recovered_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.RecoveredCount
+        runtime_unlock_regular_v4_recovery_lease_not_issued_unresolved_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.UnresolvedCount
+        runtime_unlock_regular_v4_recovery_lease_issuance_verdict = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.Verdict
+        runtime_unlock_recovery_lease_closure_not_adopted_raw_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureNotAdoptedRawCount
+        runtime_unlock_recovery_lease_closure_not_adopted_distinct_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureNotAdoptedDistinctCount
+        runtime_unlock_recovery_lease_closure_not_adopted_recovered_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureNotAdoptedRecoveredCount
+        runtime_unlock_recovery_lease_closure_not_adopted_unresolved_count = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureNotAdoptedUnresolvedCount
+        runtime_unlock_recovery_lease_closure_adoption_verdict = $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof.ClosureAdoptionVerdict
         post_tuna_fallback_outbound_receive_worker_handoff_missing_count = $outboundReceiveWorkerHandoffProof.Count
         fallback_tail_owner_generation_mismatch_count = $fallbackTailOwnerGenerationMismatchCount
         fallback_tail_bridge_recovery_generation_pairing_verdict = $fallbackTailBridgeRecoveryPairingProof.Verdict

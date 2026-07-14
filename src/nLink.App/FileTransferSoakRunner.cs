@@ -165,7 +165,7 @@ internal static class FileTransferSoakRunner
             "FileTransferSoak",
             $"event=filetransfer_local_soak_started; run_id={runId}; mode={options.Mode}; cycles={options.Cycles}; payload_sizes={string.Join(",", options.PayloadSizes)}; direction={options.Direction}; seed={options.Seed}; impairment_profile={options.ImpairmentProfile}; payload_efficiency_profile={options.PayloadEfficiencyProfile}; artifact_dir={artifactDir}");
 
-        var payloadEfficiencyRestore = SetPayloadEfficiencyProfileEnvironment(options);
+        var payloadEfficiencyRestore = SetPayloadEfficiencyProfileEnvironment(options, artifactDir);
         try
         {
             for (var cycleIndex = 0; cycleIndex < options.Cycles; cycleIndex++)
@@ -447,24 +447,32 @@ internal static class FileTransferSoakRunner
         return true;
     }
 
-    private static (string? Profile, string? AllowScreenShare, string? UnsafeDeveloperMode) SetPayloadEfficiencyProfileEnvironment(FileTransferSoakRunnerOptions options)
+    private static (string? Profile, string? AllowScreenShare, string? UnsafeDeveloperMode, string? InboundRoot) SetPayloadEfficiencyProfileEnvironment(
+        FileTransferSoakRunnerOptions options,
+        string artifactDir)
     {
         var previousProfile = Environment.GetEnvironmentVariable(FileTransferPayloadEfficiencyProfile.EnvironmentVariableName);
         var previousAllowScreenShare = Environment.GetEnvironmentVariable(FileTransferPayloadEfficiencyProfile.AllowScreenShareEnvironmentVariableName);
         var previousUnsafeDeveloperMode = Environment.GetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar);
+        var previousInboundRoot = Environment.GetEnvironmentVariable("NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT");
+        var inboundRoot = Path.Combine(artifactDir, "received");
+        Directory.CreateDirectory(inboundRoot);
 
         Environment.SetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar, "1");
         Environment.SetEnvironmentVariable(FileTransferPayloadEfficiencyProfile.EnvironmentVariableName, options.PayloadEfficiencyProfile);
         Environment.SetEnvironmentVariable(FileTransferPayloadEfficiencyProfile.AllowScreenShareEnvironmentVariableName, null);
+        Environment.SetEnvironmentVariable("NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT", inboundRoot);
 
-        return (previousProfile, previousAllowScreenShare, previousUnsafeDeveloperMode);
+        return (previousProfile, previousAllowScreenShare, previousUnsafeDeveloperMode, previousInboundRoot);
     }
 
-    private static void RestorePayloadEfficiencyProfileEnvironment((string? Profile, string? AllowScreenShare, string? UnsafeDeveloperMode) restore)
+    private static void RestorePayloadEfficiencyProfileEnvironment(
+        (string? Profile, string? AllowScreenShare, string? UnsafeDeveloperMode, string? InboundRoot) restore)
     {
         Environment.SetEnvironmentVariable(FileTransferPayloadEfficiencyProfile.EnvironmentVariableName, restore.Profile);
         Environment.SetEnvironmentVariable(FileTransferPayloadEfficiencyProfile.AllowScreenShareEnvironmentVariableName, restore.AllowScreenShare);
         Environment.SetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar, restore.UnsafeDeveloperMode);
+        Environment.SetEnvironmentVariable("NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT", restore.InboundRoot);
     }
 
     private static bool TryParsePayloadSize(string value, out long size)
@@ -856,7 +864,7 @@ internal static class FileTransferSoakRunner
     {
         if (!completed)
         {
-            return $"terminal_not_completed sender={outbound?.State.ToString() ?? "(none)"} receiver={inbound?.State.ToString() ?? "(none)"} sender_error={outbound?.ErrorCode ?? "(none)"} receiver_error={inbound?.ErrorCode ?? "(none)"}";
+            return $"terminal_not_completed sender={outbound?.State.ToString() ?? "(none)"} receiver={inbound?.State.ToString() ?? "(none)"} sender_error={outbound?.ErrorCode ?? "(none)"} receiver_error={inbound?.ErrorCode ?? "(none)"} sender_status={NormalizeDiagnosticValue(outbound?.StatusMessage)} receiver_status={NormalizeDiagnosticValue(inbound?.StatusMessage)}";
         }
 
         if (integrityOk)
@@ -881,6 +889,11 @@ internal static class FileTransferSoakRunner
 
         return "integrity_unknown";
     }
+
+    private static string NormalizeDiagnosticValue(string? value)
+        => string.IsNullOrWhiteSpace(value)
+            ? "(none)"
+            : value.Replace('\r', ' ').Replace('\n', ' ').Replace(';', ',').Trim();
 
     private static DevLocalImpairmentMetricsSnapshot CombineImpairmentMetrics(
         DevLocalImpairmentMetricsSnapshot first,

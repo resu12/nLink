@@ -86,7 +86,7 @@ public sealed partial class SessionFileTransferService
 
         LocalOperationalLog.Warn(
             "FileTransferService",
-            $"event=filetransfer_recovery_liveness_lease_rejected; direction=unknown; transfer_id={FormatProtocolLogValue(snapshot.TransferId)}; session_id={FormatProtocolLogValue(snapshot.SessionId)}; action_kind={FormatProtocolLogValue(FileTransferCoordinatorActionKind.RecoveryLivenessLeaseBegin.ToString())}; source=session_liveness_recovery_state; attempted_action={FormatProtocolLogValue(attemptedAction)}; rejection_reason=current_transfer_missing; reason=current_transfer_missing; route={FormatProtocolLogValue(snapshot.RouteToken)}; protocol_version={snapshot.ProtocolVersion}; live_route_epoch={snapshot.LiveRouteEpoch}; leg_generation={snapshot.TransferLegGeneration}; transport_epoch={snapshot.TransportEpoch}; bridge_recovery_generation={snapshot.BridgeRecoveryGeneration}");
+            $"event=filetransfer_recovery_liveness_lease_rejected; direction=unknown; transfer_id={FormatProtocolLogValue(snapshot.TransferId)}; session_id={FormatProtocolLogValue(snapshot.SessionId)}; action_kind={FormatProtocolLogValue(FileTransferCoordinatorActionKind.LivenessDeferral.ToString())}; source=session_liveness_recovery_state; attempted_action={FormatProtocolLogValue(attemptedAction)}; rejection_reason=current_transfer_missing; reason=current_transfer_missing; route={FormatProtocolLogValue(snapshot.RouteToken)}; protocol_version={snapshot.ProtocolVersion}; live_route_epoch={snapshot.LiveRouteEpoch}; leg_generation={snapshot.TransferLegGeneration}; transport_epoch={snapshot.TransportEpoch}; bridge_recovery_generation={snapshot.BridgeRecoveryGeneration}");
         return false;
     }
 
@@ -182,29 +182,13 @@ public sealed partial class SessionFileTransferService
 
             controller = transport as IFileTransferReceiveRecoveryController;
             bridgeRecoveryPolicy = ResolveReceiveRecoveryPolicyForRequestLocked(request);
-            regularV4ReplayArmed = TryQueueOutboundRegularNknV4ReceiveRecoveryReplayLocked(request);
-            if (request.Direction == FileTransferDirection.Outbound &&
-                outboundTransfer is { } regularV4Outbound &&
-                string.Equals(regularV4Outbound.SessionId, request.SessionId, StringComparison.Ordinal) &&
-                string.Equals(regularV4Outbound.TransferId, request.TransferId, StringComparison.Ordinal))
-            {
-                regularV4RepairContext = regularV4Outbound;
-                regularV4RepairAuthority = GetCurrentRegularV4FrontierRepairAuthority(regularV4Outbound);
-            }
-        }
-
-        if (regularV4RepairContext is { } repairContext &&
-            regularV4RepairAuthority is { } repairAuthority)
-        {
-            ObserveRegularV4FrontierRepairDispatchBlocker(
-                repairContext,
-                repairAuthority,
-                repairAuthority.PendingRepairCount,
-                "regular_v4_receive_recovery_repair_armed");
         }
 
         if (controller is null)
         {
+            RetireUndispatchedRegularV4RecoveryAuthority(
+                request,
+                "receive_recovery_controller_missing");
             var authorityFields = FormatReceiveRecoveryAuthorityFields(request);
             LocalOperationalLog.Info(
                 "FileTransferService",
@@ -212,9 +196,52 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        lock (gate)
+        {
+            if (!IsRegularV4RecoveryDispatchAuthorityCurrentLocked(request))
+            {
+                LocalOperationalLog.Warn(
+                    "FileTransferService",
+                    $"event=filetransfer_bridge_recovery_authority_rejected; direction={request.Direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(request.TransferId)}; session_id={FormatProtocolLogValue(request.SessionId)}; action_kind={FormatProtocolLogValue(FileTransferCoordinatorActionKind.BridgeReceiveStallRecovery.ToString())}; source=filetransfer_receive_recovery; attempted_action={FormatProtocolLogValue(request.Reason)}; rejection_reason=regular_v4_recovery_authority_stale_before_dispatch; reason=regular_v4_recovery_authority_stale_before_dispatch{FormatReceiveRecoveryAuthorityFields(request)}");
+                return false;
+            }
+        }
+
         try
         {
             controller.RequestFileTransferReceiveRecovery(request);
+            lock (gate)
+            {
+                if (IsRegularV4RecoveryDispatchAuthorityCurrentOrAcceptedClosureLocked(request))
+                {
+                    regularV4ReplayArmed = TryQueueOutboundRegularNknV4ReceiveRecoveryReplayLocked(request);
+                    if (request.Direction == FileTransferDirection.Outbound &&
+                        outboundTransfer is { } regularV4Outbound &&
+                        string.Equals(regularV4Outbound.SessionId, request.SessionId, StringComparison.Ordinal) &&
+                        string.Equals(regularV4Outbound.TransferId, request.TransferId, StringComparison.Ordinal))
+                    {
+                        regularV4RepairContext = regularV4Outbound;
+                        regularV4RepairAuthority = GetCurrentRegularV4FrontierRepairAuthority(regularV4Outbound);
+                    }
+                }
+                else
+                {
+                    LocalOperationalLog.Warn(
+                        "FileTransferService",
+                        $"event=filetransfer_bridge_recovery_dispatch_became_stale; direction={request.Direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(request.TransferId)}; session_id={FormatProtocolLogValue(request.SessionId)}; reason=regular_v4_recovery_authority_stale_after_dispatch{FormatReceiveRecoveryAuthorityFields(request)}");
+                }
+            }
+
+            if (regularV4RepairContext is { } repairContext &&
+                regularV4RepairAuthority is { } repairAuthority)
+            {
+                ObserveRegularV4FrontierRepairDispatchBlocker(
+                    repairContext,
+                    repairAuthority,
+                    repairAuthority.PendingRepairCount,
+                    "regular_v4_receive_recovery_repair_armed");
+            }
+
             var authorityFields = FormatReceiveRecoveryAuthorityFields(request);
             LocalOperationalLog.Info(
                 "FileTransferService",
@@ -223,11 +250,116 @@ public sealed partial class SessionFileTransferService
         }
         catch (Exception ex)
         {
+            RetireUndispatchedRegularV4RecoveryAuthority(
+                request,
+                $"receive_recovery_controller_{ex.GetType().Name}");
             var authorityFields = FormatReceiveRecoveryAuthorityFields(request);
             LocalOperationalLog.Warn(
                 "FileTransferService",
                 $"event=filetransfer_v6_transport_receive_recovery_request_failed; direction={request.Direction.ToString().ToLowerInvariant()}; transfer_id={request.TransferId}; session_id={request.SessionId}; reason={FormatProtocolLogValue(request.Reason)}; error={FormatProtocolLogValue(ex.GetType().Name)}; bridge_recovery_policy={FormatFileTransferBridgeRecoveryPolicy(bridgeRecoveryPolicy)}{authorityFields}");
             return false;
+        }
+    }
+
+    private bool IsRegularV4RecoveryDispatchAuthorityCurrentLocked(
+        FileTransferReceiveRecoveryRequest request)
+    {
+        if (request.RegularV4RecoveryAuthority is not { IsDefault: false } recoveryAuthority)
+        {
+            return request.RegularV4RecoveryAuthority is null;
+        }
+
+        if (request.Direction == FileTransferDirection.Outbound &&
+            outboundTransfer is { } outbound &&
+            string.Equals(outbound.SessionId, request.SessionId, StringComparison.Ordinal) &&
+            string.Equals(outbound.TransferId, request.TransferId, StringComparison.Ordinal))
+        {
+            return FileTransferCoordinator.IsRuntimeUnlockRegularV4RecoveryAuthorityCurrent(
+                CreateCoordinatorStateLocked(outbound),
+                recoveryAuthority);
+        }
+
+        if (request.Direction == FileTransferDirection.Inbound &&
+            inboundTransfer is { } inbound &&
+            string.Equals(inbound.SessionId, request.SessionId, StringComparison.Ordinal) &&
+            string.Equals(inbound.TransferId, request.TransferId, StringComparison.Ordinal))
+        {
+            return FileTransferCoordinator.IsRuntimeUnlockRegularV4RecoveryAuthorityCurrent(
+                CreateCoordinatorStateLocked(inbound),
+                recoveryAuthority);
+        }
+
+        return false;
+    }
+
+    private bool IsRegularV4RecoveryDispatchAuthorityCurrentOrAcceptedClosureLocked(
+        FileTransferReceiveRecoveryRequest request)
+    {
+        if (request.RegularV4RecoveryAuthority is not { IsDefault: false } recoveryAuthority)
+        {
+            return request.RegularV4RecoveryAuthority is null;
+        }
+
+        if (request.Direction == FileTransferDirection.Outbound &&
+            outboundTransfer is { } outbound &&
+            string.Equals(outbound.SessionId, request.SessionId, StringComparison.Ordinal) &&
+            string.Equals(outbound.TransferId, request.TransferId, StringComparison.Ordinal))
+        {
+            return FileTransferCoordinator.IsRuntimeUnlockRegularV4RecoveryAuthorityCurrentOrAcceptedClosure(
+                CreateCoordinatorStateLocked(outbound),
+                recoveryAuthority);
+        }
+
+        if (request.Direction == FileTransferDirection.Inbound &&
+            inboundTransfer is { } inbound &&
+            string.Equals(inbound.SessionId, request.SessionId, StringComparison.Ordinal) &&
+            string.Equals(inbound.TransferId, request.TransferId, StringComparison.Ordinal))
+        {
+            return FileTransferCoordinator.IsRuntimeUnlockRegularV4RecoveryAuthorityCurrentOrAcceptedClosure(
+                CreateCoordinatorStateLocked(inbound),
+                recoveryAuthority);
+        }
+
+        return false;
+    }
+
+    private void RetireUndispatchedRegularV4RecoveryAuthority(
+        FileTransferReceiveRecoveryRequest request,
+        string reason)
+    {
+        if (request.RegularV4RecoveryAuthority is not { IsDefault: false } recoveryAuthority)
+        {
+            return;
+        }
+
+        var report = new RuntimeUnlockRegularV4RecoveryLifecycleReport(
+            recoveryAuthority,
+            RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Discarded,
+            string.IsNullOrWhiteSpace(reason) ? "receive_recovery_dispatch_failed" : reason.Trim());
+        RuntimeUnlockRegularV4RecoveryLifecycleDecision? decision = null;
+        lock (gate)
+        {
+            if (request.Direction == FileTransferDirection.Outbound &&
+                outboundTransfer is { } outbound &&
+                string.Equals(outbound.SessionId, request.SessionId, StringComparison.Ordinal) &&
+                string.Equals(outbound.TransferId, request.TransferId, StringComparison.Ordinal))
+            {
+                decision = ObserveRuntimeUnlockRegularV4RecoveryLifecycleLocked(outbound, report);
+            }
+            else if (request.Direction == FileTransferDirection.Inbound &&
+                     inboundTransfer is { } inbound &&
+                     string.Equals(inbound.SessionId, request.SessionId, StringComparison.Ordinal) &&
+                     string.Equals(inbound.TransferId, request.TransferId, StringComparison.Ordinal))
+            {
+                decision = ObserveRuntimeUnlockRegularV4RecoveryLifecycleLocked(inbound, report);
+            }
+        }
+
+        if (decision is { } resolved)
+        {
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=runtime_unlock_regular_v4_recovery_lifecycle_decided; session_id={FormatProtocolLogValue(request.SessionId)}; transfer_id={FormatProtocolLogValue(request.TransferId)}; direction={request.Direction.ToString().ToLowerInvariant()}; lifecycle_outcome={RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Discarded}; lifecycle_reason={FormatProtocolLogValue(report.Reason)}; decision_status={resolved.Status}; decision_reason={FormatProtocolLogValue(resolved.Reason)}; recovery_liveness_lease_authority_id={FormatProtocolLogValue(recoveryAuthority.RecoveryLivenessLease.AuthorityId.ToString())}; recovery_liveness_lease_generation={recoveryAuthority.RecoveryLivenessLease.LeaseGeneration}; closure_available={(resolved.State?.RuntimeUnlockRecoveryLeaseClosureAvailable == true ? 1 : 0)}");
         }
     }
 

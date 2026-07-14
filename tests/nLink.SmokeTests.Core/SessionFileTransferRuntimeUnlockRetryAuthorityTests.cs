@@ -20,12 +20,14 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         Assert.Equal(1, bridge.AuthorityRequestSubscriberCount);
         Assert.Equal(1, bridge.SettlementReportSubscriberCount);
         Assert.Equal(1, bridge.RegularV4SettlementReportSubscriberCount);
+        Assert.Equal(1, bridge.RegularV4LifecycleReportSubscriberCount);
 
         service.DetachTransport();
 
         Assert.Equal(0, bridge.AuthorityRequestSubscriberCount);
         Assert.Equal(0, bridge.SettlementReportSubscriberCount);
         Assert.Equal(0, bridge.RegularV4SettlementReportSubscriberCount);
+        Assert.Equal(0, bridge.RegularV4LifecycleReportSubscriberCount);
     }
 
     [Fact]
@@ -105,7 +107,12 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             RuntimeUnlockRegularV4RecoverySettlementDecisionStatus.Idempotent,
             duplicate.Status);
 
-        var contract = Grant(fixture, fixture.InitialRequest);
+        var settlementRequest = fixture.InitialRequest with
+        {
+            RegularV4LivenessGeneration = report.RegularV4LivenessGeneration,
+            BridgeDecisionGeneration = report.BridgeDecisionGeneration,
+        };
+        var contract = Grant(fixture, settlementRequest);
         Assert.Equal(
             RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement,
             contract.Authority.ReleaseKind);
@@ -146,10 +153,16 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             GetOptionalStructProperty<RuntimeUnlockRegularV4RecoveryLifecycleReport>(
                 fixture.Context,
                 "LastRuntimeUnlockRegularV4RecoveryLifecycle"));
+        Assert.True(GetRequiredProperty<bool>(
+            fixture.Context,
+            "RuntimeUnlockRecoveryLeaseClosureAvailable"));
 
         fixture.Bridge.RaiseRegularV4LifecycleReport(report);
         var duplicate = fixture.Bridge.DequeueRegularV4LifecycleDecision();
         Assert.Equal(RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Idempotent, duplicate.Status);
+        Assert.True(GetRequiredProperty<bool>(
+            fixture.Context,
+            "RuntimeUnlockRecoveryLeaseClosureAvailable"));
     }
 
     [Fact]
@@ -340,7 +353,7 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             Assert.NotNull(started);
 
             var context = GetOutboundContext(service);
-            SeedRetiredRecoveryLivenessLease(context);
+            var recoveryClosure = SeedRetiredRecoveryLivenessLease(context);
             var publicationToken = GetRequiredProperty<RoutePublicationToken>(
                 context,
                 "CurrentRoutePublicationToken");
@@ -358,8 +371,8 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
                 DispatchAttemptGeneration: 1,
                 RetryReason: "runtime_unlock_offer_send_not_observed",
                 RecoveryReason: "receive_recovery_lease_retired",
-                RegularV4LivenessGeneration: 0,
-                BridgeDecisionGeneration: 0);
+                RegularV4LivenessGeneration: recoveryClosure.LeaseGeneration,
+                BridgeDecisionGeneration: recoveryClosure.BridgeDecisionGeneration);
             return new RetryFixture(service, bridge, peer, context, transferId, request);
         }
         catch
@@ -371,7 +384,8 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         }
     }
 
-    private static void SeedRetiredRecoveryLivenessLease(object context)
+    private static (int LeaseGeneration, int BridgeDecisionGeneration)
+        SeedRetiredRecoveryLivenessLease(object context)
     {
         var sessionId = GetRequiredProperty<string>(context, "SessionId");
         var transferId = GetRequiredProperty<string>(context, "TransferId");
@@ -380,7 +394,11 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         var leg = GetRequiredProperty<FileTransferLeg>(context, "CurrentTransferLeg");
         var owner = GetRequiredProperty<RuntimeOwnerToken>(context, "CurrentRuntimeOwner");
         var terminalGeneration = GetRequiredProperty<int>(context, "TerminalGeneration");
-        var lease = new RecoveryLivenessLease(
+        const int leaseGeneration = 1;
+        const int bridgeDecisionGeneration = 1;
+        const string bridgeReason = "test_recovery_bridge";
+        const string lifecycleReason = "bridge_lifecycle_completed";
+        var activeLease = new RecoveryLivenessLease(
             sessionId,
             transferId,
             FileTransferDirection.Outbound,
@@ -394,12 +412,56 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             leg.Generation,
             leg.TransportEpochId,
             leg.BridgeRecoveryGeneration,
-            LeaseGeneration: 1,
+            LeaseGeneration: leaseGeneration,
             new FileTransferAuthorityId($"fta2-test-recovery-lease-{transferId}"),
-            RecoveryLivenessLeaseState.Retired,
-            "test_recovery_lease_retired");
+            RecoveryLivenessLeaseState.Active,
+            bridgeReason);
+        var bridgeDecision = new BridgeRecoveryDecision(
+            true,
+            BridgeRecoveryKind.BridgeReceiveStallRecovery,
+            bridgeReason,
+            bridgeDecisionGeneration,
+            route.Route,
+            route.ProtocolVersion,
+            epoch?.EpochId ?? 0,
+            owner.RuntimeGeneration,
+            terminalGeneration,
+            leg.Generation,
+            leg.TransportEpochId,
+            leg.BridgeRecoveryGeneration,
+            owner);
+        var bridgeAuthority = new FileTransferBridgeRecoveryAuthority(
+            sessionId,
+            transferId,
+            FileTransferDirection.Outbound,
+            route.TelemetryToken,
+            route.ProtocolVersion,
+            epoch?.EpochId ?? 0,
+            owner.RuntimeGeneration,
+            terminalGeneration,
+            leg.Generation,
+            leg.TransportEpochId,
+            leg.BridgeRecoveryGeneration,
+            bridgeDecisionGeneration,
+            BridgeRecoveryKind.BridgeReceiveStallRecovery.ToString(),
+            bridgeReason);
+        var lifecycle = new RuntimeUnlockRegularV4RecoveryLifecycleReport(
+            new RuntimeUnlockRegularV4RecoveryAuthority(bridgeAuthority, activeLease),
+            RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Completed,
+            lifecycleReason);
+        var retiredLease = activeLease with
+        {
+            State = RecoveryLivenessLeaseState.Retired,
+            Reason = lifecycleReason,
+        };
         SetProperty(context, "CurrentRecoveryLivenessLease", null);
-        SetProperty(context, "LastRetiredRecoveryLivenessLease", lease);
+        SetProperty(context, "LastRetiredRecoveryLivenessLease", retiredLease);
+        SetProperty(context, "LastRecoveryLivenessLeaseGeneration", leaseGeneration);
+        SetProperty(context, "CurrentBridgeRecoveryDecision", bridgeDecision);
+        SetProperty(context, "LastBridgeRecoveryDecisionGeneration", bridgeDecisionGeneration);
+        SetProperty(context, "LastRuntimeUnlockRegularV4RecoveryLifecycle", lifecycle);
+        SetProperty(context, "RuntimeUnlockRecoveryLeaseClosureAvailable", true);
+        return (leaseGeneration, bridgeDecisionGeneration);
     }
 
     private static RuntimeUnlockRegularV4RecoverySettlementReport
@@ -467,6 +529,10 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         };
         SetProperty(context, "LastCoordinatorIssuedRegularV4RecoverySettlement", settlement);
         SetProperty(context, "RuntimeUnlockRegularV4RecoverySettlementAvailable", false);
+        SetProperty(context, "CurrentRecoveryLivenessLease", null);
+        SetProperty(context, "LastRetiredRecoveryLivenessLease", null);
+        SetProperty(context, "LastRuntimeUnlockRegularV4RecoveryLifecycle", null);
+        SetProperty(context, "RuntimeUnlockRecoveryLeaseClosureAvailable", false);
         return new RuntimeUnlockRegularV4RecoverySettlementReport(
             settlement,
             RegularV4LivenessGeneration: 0,
@@ -488,7 +554,7 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         const int bridgeDecisionGeneration = 1;
         var bridge = new BridgeRecoveryDecision(
             true,
-            BridgeRecoveryKind.ReceiveRecoveryRequest,
+            BridgeRecoveryKind.BridgeReceiveStallRecovery,
             "test_regular_v4_lifecycle",
             bridgeDecisionGeneration,
             route.Route,
@@ -523,6 +589,8 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
         SetProperty(context, "CurrentRecoveryLivenessLease", lease);
         SetProperty(context, "LastRecoveryLivenessLeaseGeneration", 1);
         SetProperty(context, "LastRetiredRecoveryLivenessLease", null);
+        SetProperty(context, "LastRuntimeUnlockRegularV4RecoveryLifecycle", null);
+        SetProperty(context, "RuntimeUnlockRecoveryLeaseClosureAvailable", false);
         var authority = new FileTransferBridgeRecoveryAuthority(
             sessionId,
             transferId,
@@ -536,11 +604,10 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
             leg.TransportEpochId,
             leg.BridgeRecoveryGeneration,
             bridgeDecisionGeneration,
-            BridgeRecoveryKind.ReceiveRecoveryRequest.ToString(),
+            BridgeRecoveryKind.BridgeReceiveStallRecovery.ToString(),
             "test_regular_v4_lifecycle");
         return new RuntimeUnlockRegularV4RecoveryLifecycleReport(
-            authority,
-            RegularV4LivenessGeneration: 1,
+            new RuntimeUnlockRegularV4RecoveryAuthority(authority, lease),
             RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Completed,
             "bridge_lifecycle_completed");
     }
@@ -703,6 +770,9 @@ public sealed class SessionFileTransferRuntimeUnlockRetryAuthorityTests :
 
         public int RegularV4SettlementReportSubscriberCount =>
             regularV4SettlementReported?.GetInvocationList().Length ?? 0;
+
+        public int RegularV4LifecycleReportSubscriberCount =>
+            regularV4LifecycleReported?.GetInvocationList().Length ?? 0;
 
         public RuntimeUnlockRetryDispatchContract? InfraCurrentContract { get; private set; }
 

@@ -208,6 +208,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         public bool AllowUnavailableV4FallbackRecoveryFramesForTests { get; set; }
         public Func<FileTransferCompleteV1, CancellationToken, Task>? BeforeCompleteDeliveredAsync { get; set; }
         public Exception? OfferSendException { get; init; }
+        public Exception? ReceiveRecoveryException { get; set; }
         public ConcurrentQueue<FileTransferErrorV1> SentErrors { get; } = [];
         public ConcurrentQueue<FileTransferOfferV2> SentOffers { get; } = [];
         public ConcurrentQueue<FileTransferAcceptV1> SentAccepts { get; } = [];
@@ -335,7 +336,14 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             => ObservedRouteHints.Enqueue(notification);
 
         public void RequestFileTransferReceiveRecovery(FileTransferReceiveRecoveryRequest request)
-            => ReceiveRecoveryRequests.Enqueue(request);
+        {
+            if (ReceiveRecoveryException is { } exception)
+            {
+                throw exception;
+            }
+
+            ReceiveRecoveryRequests.Enqueue(request);
+        }
 
         public void ObserveRegularV4ControlFeedbackPressure(FileTransferRegularV4ControlFeedbackPressure pressure)
             => RegularV4ControlFeedbackPressures.Enqueue(pressure);
