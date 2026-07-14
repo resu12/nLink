@@ -1925,6 +1925,76 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_TunaProbeRecoveryHeldThenLocallyRejected_ClassifiesAuthorityLoss()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string sessionId = "sess_runtime_unlock_probe_authority_lost";
+        const string transferId = "transfer_runtime_unlock_probe_authority_lost";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; session_id={sessionId}; transfer_id={transferId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; target_transport=regular_nkn", secondsOffset: 0),
+            LogLine($"event=runtime_unlock_transaction_path_probe_failed; session_id={sessionId}; transaction_generation=1; offer_generation=1; path_probe_failure_reason=runtime_unlock_tuna_probe_sidecar_closed; failure_reason=runtime_unlock_tuna_probe_sidecar_closed; reason=runtime_unlock_tuna_probe_sidecar_closed", secondsOffset: 1),
+            LogLine($"event=session_recovery_contract_started; session_id={sessionId}; transfer_id={transferId}; contract_generation=1; offer_generation=0; retired_offer_generation=0; kind=runtime_unlock_activation; state=recoverypending; retry_reason=runtime_unlock_tuna_probe_sidecar_closed; recovery_reason=runtime_unlock_tuna_probe_sidecar_closed; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0", secondsOffset: 2),
+            LogLine($"event=runtime_unlock_retry_dispatch_authority_held; session_id={sessionId}; transfer_id={transferId}; contract_generation=1; retired_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; retry_reason=runtime_unlock_tuna_probe_sidecar_closed; recovery_reason=runtime_unlock_tuna_probe_sidecar_closed; decision_reason=regular_v4_repair_settlement_pending", secondsOffset: 3),
+            LogLine($"event=runtime_unlock_retry_dispatch_authority_rejected; session_id={sessionId}; transfer_id={transferId}; contract_generation=1; retired_generation=0; offer_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; decision_reason=missing_runtime_unlock_retry_authority", secondsOffset: 4),
+            LogLine($"event=session_recovery_contract_failed; session_id={sessionId}; transfer_id={transferId}; contract_generation=1; kind=runtime_unlock_activation; state=failed; retry_reason=runtime_unlock_tuna_probe_sidecar_closed; recovery_reason=runtime_unlock_tuna_probe_sidecar_closed; authority_failure_reason=missing_runtime_unlock_retry_authority", secondsOffset: 5),
+            LogLine($"event=filetransfer_frontier_request_dispatch_missing; session_id={sessionId}; transfer_id={transferId}; decision_reason=downstream_only", secondsOffset: 6),
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "None"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("runtime_unlock_tuna_probe_recovery_authority_lost", verdict["recovery_failure_class"]);
+        Assert.Equal("runtime_unlock_tuna_probe_recovery_authority_lost", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("runtime_unlock_retry_dispatch_authority_rejected", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal("missing_runtime_unlock_retry_authority", verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("5", verdict["first_proof_chain_failure_sequence"]);
+        Assert.Equal("1", verdict["runtime_unlock_probe_recovery_trigger_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_probe_recovery_authority_lost_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_probe_recovery_authority_lost_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_probe_recovery_authority_lost_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_probe_recovery_authority_lost_unresolved_count"]);
+        Assert.Equal("fail", verdict["runtime_unlock_probe_recovery_authority_verdict"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_TunaProbeRecoveryAuthorityLossThenAcceptedHandoffAndFreshTransaction_IsRecovered()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string sessionId = "sess_runtime_unlock_probe_authority_recovered";
+        const string transferId = "transfer_runtime_unlock_probe_authority_recovered";
+        var lines = new[]
+        {
+            LogLine($"event=filetransfer_route_selected; direction=outbound; session_id={sessionId}; transfer_id={transferId}; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; target_transport=regular_nkn", secondsOffset: 0),
+            LogLine($"event=runtime_unlock_transaction_path_probe_failed; session_id={sessionId}; transaction_generation=1; offer_generation=1; path_probe_failure_reason=runtime_unlock_tuna_probe_sidecar_closed; failure_reason=runtime_unlock_tuna_probe_sidecar_closed; reason=runtime_unlock_tuna_probe_sidecar_closed", secondsOffset: 1),
+            LogLine($"event=runtime_unlock_retry_dispatch_authority_held; session_id={sessionId}; transfer_id={transferId}; contract_generation=1; retired_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; retry_reason=runtime_unlock_tuna_probe_sidecar_closed; recovery_reason=runtime_unlock_tuna_probe_sidecar_closed; decision_reason=regular_v4_repair_settlement_pending", secondsOffset: 2),
+            LogLine($"event=runtime_unlock_retry_dispatch_authority_rejected; session_id={sessionId}; transfer_id={transferId}; contract_generation=1; retired_generation=0; offer_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; decision_reason=missing_runtime_unlock_retry_authority", secondsOffset: 3),
+            LogLine($"event=runtime_unlock_regular_v4_recovery_settlement_decided; session_id={sessionId}; transfer_id={transferId}; disposition=Consumed; decision_status=Accepted; decision_reason=regular_v4_recovery_settlement_accepted", secondsOffset: 4),
+            LogLine($"event=runtime_unlock_retry_dispatch_authority_granted; session_id={sessionId}; transfer_id={transferId}; contract_generation=2; authority_schema=2; authority_id=fta2-recovered; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; decision_reason=retry_dispatch_authority_granted", secondsOffset: 5),
+            LogLine($"event=runtime_unlock_transaction_offer_generation_created; session_id={sessionId}; transfer_id={transferId}; transaction_generation=2; offer_generation=2; parent_runtime_unlock_retry_authority_id=fta2-recovered", secondsOffset: 6),
+        };
+
+        var result = await RunAnalyzeFixtureAsync(lines, ["-LiveRouteProofMode", "None"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("0", verdict["runtime_unlock_probe_recovery_authority_lost_unresolved_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_probe_recovery_authority_lost_recovered_count"]);
+        Assert.Equal("recovered", verdict["runtime_unlock_probe_recovery_authority_verdict"]);
+        Assert.NotEqual("runtime_unlock_tuna_probe_recovery_authority_lost", verdict["recovery_failure_class"]);
+        Assert.NotEqual("runtime_unlock_tuna_probe_recovery_authority_lost", verdict["first_proof_chain_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_RuntimeUnlockRetryPhase2ReportAndLegacyReleaseWithoutDecision_RemainsMissingSettlement()
     {
         if (!OperatingSystem.IsWindows())

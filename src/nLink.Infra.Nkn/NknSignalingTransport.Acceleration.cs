@@ -457,6 +457,8 @@ public sealed partial class NknSignalingTransport
 
         public bool DispatchObserved { get; set; }
 
+        public RuntimeUnlockRetryDispatchDecisionStatus? DispatchDecisionStatus { get; set; }
+
         public string? DispatchDecisionReason { get; set; }
 
         public string? DispatchRoute { get; set; }
@@ -4058,6 +4060,21 @@ public sealed partial class NknSignalingTransport
                 sessionId,
                 out var runtimeUnlockSnapshot))
         {
+            if (runtimeUnlockSnapshot.IsTerminal &&
+                IsRuntimeUnlockRetryDispatchAuthorityHeldForSession(
+                    sessionId,
+                    out var heldReason))
+            {
+                TryResumeFileTransferDataSessionsAfterTunaActivationNegotiation(
+                    "runtime_unlock_retry_dispatch_authority_held",
+                    sessionId,
+                    "terminal_transaction_waiting_for_retry_authority");
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=runtime_unlock_terminal_transaction_handoff_held_for_retry_authority; session_id={SanitizeLogToken(sessionId)}; reason={normalizedReason}; lanes={FormatAccelerationLanesForLog(lanes)}; transaction_generation={runtimeUnlockSnapshot.TransactionGeneration}; offer_generation={runtimeUnlockSnapshot.OfferGeneration}; state={runtimeUnlockSnapshot.State.ToString().ToLowerInvariant()}; path_probe_state={runtimeUnlockSnapshot.PathProbeState.ToString().ToLowerInvariant()}; dispatch_decision_status=Held; decision_reason={SanitizeLogToken(heldReason)}; source=tuna_activation_handoff");
+                return;
+            }
+
             LocalOperationalLog.Info(
                 "NKN.Tuna",
                 $"event=filetransfer_runtime_unlock_handoff_pending_route_commit; session_id={SanitizeLogToken(sessionId)}; reason={normalizedReason}; lanes={FormatAccelerationLanesForLog(lanes)}; transaction_generation={runtimeUnlockSnapshot.TransactionGeneration}; offer_generation={runtimeUnlockSnapshot.OfferGeneration}; state={runtimeUnlockSnapshot.State.ToString().ToLowerInvariant()}; path_probe_state={runtimeUnlockSnapshot.PathProbeState.ToString().ToLowerInvariant()}; route_commit_pending={(runtimeUnlockSnapshot.RouteCommitPending ? 1 : 0)}; route_committed={(runtimeUnlockSnapshot.RouteCommitted ? 1 : 0)}; source=tuna_activation_handoff");
@@ -5146,15 +5163,12 @@ public sealed partial class NknSignalingTransport
         if (!TryGetRuntimeUnlockRetryAuthorityForCurrentOffer(out var authorityState, sessionId) ||
             authorityState is null)
         {
-            blockerReason = hasRuntimeUnlockOffer
-                ? "missing_runtime_unlock_retry_authority"
-                : "not_current_runtime_unlock_offer";
-            if (hasRuntimeUnlockOffer)
-            {
-                RejectRuntimeUnlockRetryDispatchAuthorityForCurrentContract(
-                    sessionId,
-                    "missing_runtime_unlock_retry_authority");
-            }
+            blockerReason = hasRuntimeUnlockOffer &&
+                IsRuntimeUnlockRetryDispatchAuthorityHeldForSession(sessionId, out var heldReason)
+                    ? heldReason
+                    : hasRuntimeUnlockOffer
+                        ? "missing_runtime_unlock_retry_authority"
+                        : "not_current_runtime_unlock_offer";
 
             return false;
         }
@@ -7640,7 +7654,7 @@ public sealed partial class NknSignalingTransport
 
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event={SanitizeLogToken(eventName)}; session_id={SanitizeLogToken(stateSnapshot.SessionId)}; transfer_id={SanitizeLogToken(stateSnapshot.TransferId ?? "(none)")}; contract_generation={stateSnapshot.ContractGeneration}; offer_generation={(stateSnapshot.CurrentOfferGeneration > 0 ? stateSnapshot.CurrentOfferGeneration : stateSnapshot.RetiredOfferGeneration)}; retired_offer_generation={stateSnapshot.RetiredOfferGeneration}; kind=runtime_unlock_activation; state={SanitizeLogToken(stateSnapshot.ContractState.ToString().ToLowerInvariant())}; retry_reason={SanitizeLogToken(stateSnapshot.RetryReason)}; recovery_reason={SanitizeLogToken(stateSnapshot.RecoveryReason)}; recovery_pending={(!stateSnapshot.Settled ? 1 : 0)}; recovery_settled={(stateSnapshot.Settled ? 1 : 0)}; retry_required={(IsSessionRecoveryContractRetryRequired(stateSnapshot) ? 1 : 0)}; retry_dispatching={(stateSnapshot.RetryDispatching ? 1 : 0)}; retry_dispatched={(stateSnapshot.RetryDispatched ? 1 : 0)}; retry_observed={(stateSnapshot.RetryObserved ? 1 : 0)}; queued_behind_active_negotiation={(stateSnapshot.QueuedBehindActiveNegotiation ? 1 : 0)}; retry_authority_pending={(stateSnapshot.RetryAuthorityPending ? 1 : 0)}; retry_authority_granted={(stateSnapshot.RetryAuthorityGranted ? 1 : 0)}; observed_send_pending={(stateSnapshot.ObservedSendPending ? 1 : 0)}; authority_attempt={stateSnapshot.AuthorityAttempt}; dispatch_attempt_generation={stateSnapshot.DispatchAttemptGeneration}; missing_dispatch_successor_generation={stateSnapshot.MissingDispatchSuccessorGeneration}; missing_dispatch_successor_limit={FileTransferCoordinator.RuntimeUnlockRetryMissingDispatchSuccessorLimit}; authorized_observed_lane={SanitizeLogToken(stateSnapshot.AuthorizedObservedLane ?? "(none)")}; authority_failure_reason={SanitizeLogToken(stateSnapshot.AuthorityFailureReason ?? "(none)")}; dispatch_authority_granted={(stateSnapshot.DispatchAuthorityGranted ? 1 : 0)}; dispatch_authority_rejected={(stateSnapshot.DispatchAuthorityRejected ? 1 : 0)}; dispatch_observed={(stateSnapshot.DispatchObserved ? 1 : 0)}; dispatch_decision_reason={SanitizeLogToken(stateSnapshot.DispatchDecisionReason ?? "(none)")}; requires_local_listener_retry={(stateSnapshot.RequiresLocalListenerRetry ? 1 : 0)}; listener_rearm_completed={(stateSnapshot.ListenerRearmCompleted ? 1 : 0)}; cutthrough_pending={(stateSnapshot.CutThroughPending ? 1 : 0)}; cutthrough_active={(stateSnapshot.CutThroughActive ? 1 : 0)}; cutthrough_offer_sent={(stateSnapshot.CutThroughOfferSent ? 1 : 0)}; cutthrough_peer_received={(stateSnapshot.CutThroughPeerReceived ? 1 : 0)}; cutthrough_completed={(stateSnapshot.CutThroughCompleted ? 1 : 0)}; cutthrough_attempt={stateSnapshot.CutThroughAttempt}; regular_v4_activation_window_started={(stateSnapshot.RegularV4ActivationWindowStarted ? 1 : 0)}; regular_v4_activation_window_peer_visible={(stateSnapshot.RegularV4ActivationWindowPeerVisible ? 1 : 0)}; regular_v4_activation_window_failed={(stateSnapshot.RegularV4ActivationWindowFailed ? 1 : 0)}; blocked_by_regular_v4_receive_recovery={(stateSnapshot.BlockedByRegularV4ReceiveRecovery ? 1 : 0)}; regular_v4_liveness_generation={stateSnapshot.RegularV4RecoveryLivenessGeneration}; regular_v4_blocked_transfer_id={SanitizeLogToken(stateSnapshot.RegularV4RecoveryBlockedTransferId ?? "(none)")}; regular_v4_blocked_route={SanitizeLogToken(stateSnapshot.RegularV4RecoveryRouteToken ?? "(none)")}; regular_v4_blocked_protocol_version={stateSnapshot.RegularV4RecoveryProtocolVersion}; regular_v4_blocked_live_route_epoch={stateSnapshot.RegularV4RecoveryLiveRouteEpoch}; regular_v4_blocked_bridge_decision_generation={stateSnapshot.RegularV4RecoveryBridgeDecisionGeneration}; regular_v4_blocker_reason={SanitizeLogToken(stateSnapshot.RegularV4RecoveryBlockerReason ?? "(none)")}; broken_state_fresh_retry_attempt={stateSnapshot.BrokenStateFreshRetryAttempt}; broken_state_fresh_retry_limit={stateSnapshot.BrokenStateFreshRetryLimit}; broken_state_finalized={(stateSnapshot.BrokenStateFinalized ? 1 : 0)}; broken_state_failure_reason={SanitizeLogToken(stateSnapshot.BrokenStateFailureReason ?? "(none)")}; observed_send_deadline_utc_ms={stateSnapshot.ObservedSendDeadlineUtcMs}; retry_deadline_utc_ms={stateSnapshot.RetryDeadlineUtcMs}; dispatch_deadline_utc_ms={stateSnapshot.DispatchDeadlineUtcMs}; liveness_deferral_deadline_utc_ms={stateSnapshot.LivenessDeferralDeadlineUtcMs}");
+            $"event={SanitizeLogToken(eventName)}; session_id={SanitizeLogToken(stateSnapshot.SessionId)}; transfer_id={SanitizeLogToken(stateSnapshot.TransferId ?? "(none)")}; contract_generation={stateSnapshot.ContractGeneration}; offer_generation={(stateSnapshot.CurrentOfferGeneration > 0 ? stateSnapshot.CurrentOfferGeneration : stateSnapshot.RetiredOfferGeneration)}; retired_offer_generation={stateSnapshot.RetiredOfferGeneration}; kind=runtime_unlock_activation; state={SanitizeLogToken(stateSnapshot.ContractState.ToString().ToLowerInvariant())}; retry_reason={SanitizeLogToken(stateSnapshot.RetryReason)}; recovery_reason={SanitizeLogToken(stateSnapshot.RecoveryReason)}; recovery_pending={(!stateSnapshot.Settled ? 1 : 0)}; recovery_settled={(stateSnapshot.Settled ? 1 : 0)}; retry_required={(IsSessionRecoveryContractRetryRequired(stateSnapshot) ? 1 : 0)}; retry_dispatching={(stateSnapshot.RetryDispatching ? 1 : 0)}; retry_dispatched={(stateSnapshot.RetryDispatched ? 1 : 0)}; retry_observed={(stateSnapshot.RetryObserved ? 1 : 0)}; queued_behind_active_negotiation={(stateSnapshot.QueuedBehindActiveNegotiation ? 1 : 0)}; retry_authority_pending={(stateSnapshot.RetryAuthorityPending ? 1 : 0)}; retry_authority_granted={(stateSnapshot.RetryAuthorityGranted ? 1 : 0)}; observed_send_pending={(stateSnapshot.ObservedSendPending ? 1 : 0)}; authority_attempt={stateSnapshot.AuthorityAttempt}; dispatch_attempt_generation={stateSnapshot.DispatchAttemptGeneration}; missing_dispatch_successor_generation={stateSnapshot.MissingDispatchSuccessorGeneration}; missing_dispatch_successor_limit={FileTransferCoordinator.RuntimeUnlockRetryMissingDispatchSuccessorLimit}; authorized_observed_lane={SanitizeLogToken(stateSnapshot.AuthorizedObservedLane ?? "(none)")}; authority_failure_reason={SanitizeLogToken(stateSnapshot.AuthorityFailureReason ?? "(none)")}; dispatch_authority_granted={(stateSnapshot.DispatchAuthorityGranted ? 1 : 0)}; dispatch_authority_rejected={(stateSnapshot.DispatchAuthorityRejected ? 1 : 0)}; dispatch_observed={(stateSnapshot.DispatchObserved ? 1 : 0)}; dispatch_decision_status={SanitizeLogToken(stateSnapshot.DispatchDecisionStatus?.ToString() ?? "(none)")}; dispatch_decision_reason={SanitizeLogToken(stateSnapshot.DispatchDecisionReason ?? "(none)")}; requires_local_listener_retry={(stateSnapshot.RequiresLocalListenerRetry ? 1 : 0)}; listener_rearm_completed={(stateSnapshot.ListenerRearmCompleted ? 1 : 0)}; cutthrough_pending={(stateSnapshot.CutThroughPending ? 1 : 0)}; cutthrough_active={(stateSnapshot.CutThroughActive ? 1 : 0)}; cutthrough_offer_sent={(stateSnapshot.CutThroughOfferSent ? 1 : 0)}; cutthrough_peer_received={(stateSnapshot.CutThroughPeerReceived ? 1 : 0)}; cutthrough_completed={(stateSnapshot.CutThroughCompleted ? 1 : 0)}; cutthrough_attempt={stateSnapshot.CutThroughAttempt}; regular_v4_activation_window_started={(stateSnapshot.RegularV4ActivationWindowStarted ? 1 : 0)}; regular_v4_activation_window_peer_visible={(stateSnapshot.RegularV4ActivationWindowPeerVisible ? 1 : 0)}; regular_v4_activation_window_failed={(stateSnapshot.RegularV4ActivationWindowFailed ? 1 : 0)}; blocked_by_regular_v4_receive_recovery={(stateSnapshot.BlockedByRegularV4ReceiveRecovery ? 1 : 0)}; regular_v4_liveness_generation={stateSnapshot.RegularV4RecoveryLivenessGeneration}; regular_v4_blocked_transfer_id={SanitizeLogToken(stateSnapshot.RegularV4RecoveryBlockedTransferId ?? "(none)")}; regular_v4_blocked_route={SanitizeLogToken(stateSnapshot.RegularV4RecoveryRouteToken ?? "(none)")}; regular_v4_blocked_protocol_version={stateSnapshot.RegularV4RecoveryProtocolVersion}; regular_v4_blocked_live_route_epoch={stateSnapshot.RegularV4RecoveryLiveRouteEpoch}; regular_v4_blocked_bridge_decision_generation={stateSnapshot.RegularV4RecoveryBridgeDecisionGeneration}; regular_v4_blocker_reason={SanitizeLogToken(stateSnapshot.RegularV4RecoveryBlockerReason ?? "(none)")}; broken_state_fresh_retry_attempt={stateSnapshot.BrokenStateFreshRetryAttempt}; broken_state_fresh_retry_limit={stateSnapshot.BrokenStateFreshRetryLimit}; broken_state_finalized={(stateSnapshot.BrokenStateFinalized ? 1 : 0)}; broken_state_failure_reason={SanitizeLogToken(stateSnapshot.BrokenStateFailureReason ?? "(none)")}; observed_send_deadline_utc_ms={stateSnapshot.ObservedSendDeadlineUtcMs}; retry_deadline_utc_ms={stateSnapshot.RetryDeadlineUtcMs}; dispatch_deadline_utc_ms={stateSnapshot.DispatchDeadlineUtcMs}; liveness_deferral_deadline_utc_ms={stateSnapshot.LivenessDeferralDeadlineUtcMs}");
     }
 
     private void LogRuntimeUnlockRetryDispatchProof(
@@ -12328,6 +12342,7 @@ public sealed partial class NknSignalingTransport
                     state.DispatchContract = contract;
                     state.DispatchAuthorityGranted = true;
                     state.DispatchAuthorityRejected = false;
+                    state.DispatchDecisionStatus = RuntimeUnlockRetryDispatchDecisionStatus.Granted;
                     state.DispatchObserved = false;
                     state.DispatchDecisionReason = decision.Reason;
                     state.DispatchRoute = authority.RouteToken;
@@ -12399,6 +12414,7 @@ public sealed partial class NknSignalingTransport
                     state.DispatchAuthorityGranted = false;
                     state.DispatchAuthorityRejected = false;
                 }
+                state.DispatchDecisionStatus = RuntimeUnlockRetryDispatchDecisionStatus.Held;
                 state.DispatchDecisionReason = decision.Reason;
                 state.AuthorityFailureReason = decision.Reason;
                 state.RetryAuthorityPending = true;
@@ -12426,6 +12442,7 @@ public sealed partial class NknSignalingTransport
                 state.PendingDispatchSuccessorRequestIssued = false;
                 state.PendingDispatchSuccessorRequestHeld = false;
                 state.PendingDispatchSuccessorHeldLogged = false;
+                state.DispatchDecisionStatus = RuntimeUnlockRetryDispatchDecisionStatus.Rejected;
                 state.DispatchDecisionReason = decision.Reason;
                 stateSnapshot = state;
             }
@@ -12472,12 +12489,14 @@ public sealed partial class NknSignalingTransport
                     // The settled predecessor remains the sole current authority. Only the
                     // coordinator's exact bounded-limit rejection may retire this chain.
                     state.DispatchDecisionReason = decision.Reason;
+                    state.DispatchDecisionStatus = RuntimeUnlockRetryDispatchDecisionStatus.Rejected;
                     state.AuthorityFailureReason = decision.Reason;
                 }
                 stateSnapshot = state;
             }
             else
             {
+                state.DispatchDecisionStatus = RuntimeUnlockRetryDispatchDecisionStatus.Rejected;
                 rejectedHadDispatchContract = state.DispatchContract is not null;
                 _ = MarkRuntimeUnlockRetryDispatchAuthorityRejectedUnsafe(
                     state,
@@ -13213,6 +13232,7 @@ public sealed partial class NknSignalingTransport
                     state.PendingDispatchSuccessorHeldLogged = false;
                     state.RetryAuthorityPending = false;
                     state.RetryAuthorityGranted = false;
+                    state.DispatchDecisionStatus = null;
                     state.DispatchDecisionReason = "regular_v4_recovery_handoff_pending";
                     state.AuthorityFailureReason = "regular_v4_recovery_handoff_pending";
                     return;
@@ -13276,6 +13296,7 @@ public sealed partial class NknSignalingTransport
                         state.DispatchPredecessorContract = currentContract;
                         state.TransferId = publication.TransferId;
                         state.PendingDispatchAuthorityRequest = request;
+                        state.DispatchDecisionStatus = null;
                         state.PendingDispatchSuccessorRequestIssued = true;
                         state.PendingDispatchSuccessorRequestHeld = false;
                         state.RetryAuthorityPending = true;
@@ -13304,6 +13325,7 @@ public sealed partial class NknSignalingTransport
                         MissingDispatchSuccessorGeneration: 0);
                     state.TransferId = publication.TransferId;
                     state.PendingDispatchAuthorityRequest = request;
+                    state.DispatchDecisionStatus = null;
                     state.RetryAuthorityPending = true;
                 }
             }
@@ -13836,6 +13858,42 @@ public sealed partial class NknSignalingTransport
         }
     }
 
+    private bool IsRuntimeUnlockRetryDispatchAuthorityHeldForSession(
+        string? sessionId,
+        out string decisionReason)
+    {
+        decisionReason = "runtime_unlock_retry_dispatch_authority_not_held";
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return false;
+        }
+
+        var normalizedSessionId = sessionId.Trim();
+        lock (accelerationGate)
+        {
+            var state = runtimeUnlockRecoveryRetryState;
+            var pending = state?.PendingDispatchAuthorityRequest;
+            if (state is null ||
+                pending is not { } request ||
+                state.DispatchDecisionStatus != RuntimeUnlockRetryDispatchDecisionStatus.Held ||
+                state.ContractState is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed ||
+                !string.Equals(state.SessionId, normalizedSessionId, StringComparison.Ordinal) ||
+                !string.Equals(request.SessionId, normalizedSessionId, StringComparison.Ordinal) ||
+                request.RecoveryContractGeneration != state.ContractGeneration ||
+                request.RetiredOfferGeneration != state.RetiredOfferGeneration ||
+                request.DispatchAttemptGeneration != state.DispatchAttemptGeneration ||
+                request.MissingDispatchSuccessorGeneration != state.MissingDispatchSuccessorGeneration ||
+                request.SourcePublicationAuthority != state.SourcePublicationAuthority)
+            {
+                return false;
+            }
+
+            decisionReason = state.DispatchDecisionReason ??
+                "runtime_unlock_retry_dispatch_authority_held";
+            return true;
+        }
+    }
+
     private static bool HasCurrentGrantedRuntimeUnlockRetryDispatchContractUnsafe(
         RuntimeUnlockRecoveryRetryState state,
         out RuntimeUnlockRetryDispatchContract contract)
@@ -13906,6 +13964,7 @@ public sealed partial class NknSignalingTransport
     {
         if (state.DispatchContract is null)
         {
+            state.DispatchDecisionStatus = RuntimeUnlockRetryDispatchDecisionStatus.Rejected;
             state.DispatchDecisionReason = decisionReason;
             state.AuthorityFailureReason = decisionReason;
             state.DispatchAuthorityGranted = false;
@@ -13936,6 +13995,7 @@ public sealed partial class NknSignalingTransport
         RuntimeUnlockRecoveryRetryState state,
         string decisionReason)
     {
+        state.DispatchDecisionStatus = RuntimeUnlockRetryDispatchDecisionStatus.Rejected;
         state.DispatchAuthorityGranted = false;
         state.DispatchAuthorityRejected = false;
         state.DispatchObserved = false;
@@ -13963,6 +14023,7 @@ public sealed partial class NknSignalingTransport
         state.PendingDispatchSuccessorRequestIssued = false;
         state.PendingDispatchSuccessorRequestHeld = false;
         state.PendingDispatchSuccessorHeldLogged = false;
+        state.DispatchDecisionStatus = null;
         state.DispatchAuthorityGranted = false;
         state.DispatchAuthorityRejected = false;
         state.DispatchObserved = false;
@@ -14029,6 +14090,7 @@ public sealed partial class NknSignalingTransport
         state.PendingDispatchSuccessorRequestIssued = false;
         state.PendingDispatchSuccessorRequestHeld = false;
         state.PendingDispatchSuccessorHeldLogged = false;
+        state.DispatchDecisionStatus = null;
         state.DispatchAuthorityGranted = false;
         state.DispatchAuthorityRejected = false;
         state.DispatchObserved = false;
@@ -18214,6 +18276,13 @@ public sealed partial class NknSignalingTransport
             $"event=tuna_acceleration_runtime_unlock_retry_after_recovery_armed; session_id={SanitizeLogToken(normalizedSessionId)}; retired_generation={retiredOfferGeneration}; retry_reason={SanitizeLogToken(retryReason)}; recovery_reason={SanitizeLogToken(recoveryReason)}; requires_local_listener_retry={(requiresLocalListenerRetry ? 1 : 0)}");
         LogRuntimeUnlockRecoveryContract("session_recovery_contract_started", normalizedSessionId);
         RequestRuntimeUnlockRetryDispatchAuthority(normalizedSessionId, "retry_contract_armed");
+        if (!hasActiveRegularV4Recovery &&
+            TryConsumePendingRuntimeUnlockRegularV4FrontierRepairSettlementForIndependentRetry(
+                normalizedSessionId,
+                "retry_contract_armed"))
+        {
+            return;
+        }
         if (ShouldDeferRuntimeUnlockRetryForActivePostTunaFallbackRepair(normalizedSessionId))
         {
             ScheduleRuntimeUnlockRetryAfterFallbackRepairSoftSettle(
@@ -18427,6 +18496,158 @@ public sealed partial class NknSignalingTransport
         state.RegularV4FrontierRepairPayerDecisionId = 0;
         state.RegularV4FrontierRepairBlockerReason = null;
         state.RegularV4FrontierRepairBlockedUtcMs = 0;
+    }
+
+    private bool TryConsumePendingRuntimeUnlockRegularV4FrontierRepairSettlementForIndependentRetry(
+        string sessionId,
+        string settlementTrigger)
+    {
+        PendingRuntimeUnlockRegularV4FrontierRepairSettlement? pendingSettlement;
+        RuntimeUnlockRecoveryRetryState? stateSnapshot;
+        lock (accelerationGate)
+        {
+            pendingSettlement = pendingRuntimeUnlockRegularV4FrontierRepairSettlement;
+            stateSnapshot = runtimeUnlockRecoveryRetryState;
+        }
+
+        var settlement = pendingSettlement?.Settlement;
+        var publication = stateSnapshot?.SourcePublicationAuthority;
+        if (settlement is null ||
+            publication is null ||
+            stateSnapshot is null ||
+            pendingSettlement!.Disposition != RegularV4FrontierRepairSettlementHandoffDisposition.Pending ||
+            stateSnapshot.BlockedByRegularV4ReceiveRecovery ||
+            stateSnapshot.DispatchDecisionStatus != RuntimeUnlockRetryDispatchDecisionStatus.Held ||
+            stateSnapshot.ContractState is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed ||
+            !string.Equals(stateSnapshot.SessionId, sessionId, StringComparison.Ordinal) ||
+            !string.Equals(settlement.SessionId, publication.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(settlement.TransferId, publication.TransferId, StringComparison.Ordinal) ||
+            settlement.Direction != publication.Direction ||
+            !string.Equals(settlement.RouteToken, publication.RouteToken, StringComparison.Ordinal) ||
+            settlement.ProtocolVersion != publication.ProtocolVersion ||
+            settlement.LiveRouteEpoch != publication.LiveRouteEpoch ||
+            settlement.RuntimeGeneration != publication.RuntimeGeneration ||
+            settlement.TerminalGeneration != publication.TerminalGeneration ||
+            settlement.LegGeneration != publication.LegGeneration ||
+            settlement.LegGeneration is <= 0 or > int.MaxValue ||
+            settlement.RoutePublicationGeneration != publication.RoutePublicationGeneration ||
+            (settlement.RouteCommitGeneration ?? 0) != (publication.RouteCommitGeneration ?? 0) ||
+            settlement.TargetTransport != publication.TargetTransport ||
+            settlement.AuthorityId.IsDefault ||
+            settlement.DecisionGeneration <= 0)
+        {
+            return false;
+        }
+
+        var currentnessSnapshot = new FileTransferRegularV4RecoveryLivenessSnapshot(
+            settlement.SessionId,
+            settlement.TransferId,
+            settlement.Direction,
+            Generation: 0,
+            settlement.RouteToken,
+            settlement.ProtocolVersion,
+            settlement.LiveRouteEpoch,
+            (int)settlement.LegGeneration,
+            settlement.TransportEpoch,
+            settlement.BridgeRecoveryGeneration,
+            settlement.BridgeDecisionGeneration,
+            AuthorityReason: "independent_retry_precontract_settlement",
+            BridgeRecoveryCompleted: true,
+            ReceiveProofObserved: settlement.Outcome ==
+                FileTransferRegularV4FrontierRepairSettlementOutcome.ProgressObserved,
+            RecoveryExhausted: false,
+            Completed: false,
+            DeadlineExpired: false,
+            DeadlineRemainingMs: 0,
+            StateReason: SanitizeLogToken(settlementTrigger));
+        if (!IsRegularV4FrontierRepairSettlementCurrentForReceiveRecovery(
+                currentnessSnapshot,
+                settlement,
+                blockedState: null,
+                out var rejectionReason,
+                allowPreRecoveryBridgeDecisionGeneration: false,
+                acceptedPrecontractAuthority: pendingSettlement))
+        {
+            LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
+                "runtime_unlock_regular_v4_frontier_repair_settlement_handoff_rejected",
+                settlement,
+                settlement.SessionId,
+                settlement.TransferId,
+                rejectionReason,
+                retryReason: stateSnapshot.RetryReason,
+                stateSnapshot: stateSnapshot,
+                handoff: pendingSettlement);
+            return false;
+        }
+
+        RuntimeUnlockRegularV4RecoverySettlementReport report;
+        lock (accelerationGate)
+        {
+            if (!ReferenceEquals(runtimeUnlockRecoveryRetryState, stateSnapshot) ||
+                !ReferenceEquals(pendingRuntimeUnlockRegularV4FrontierRepairSettlement, pendingSettlement) ||
+                pendingSettlement.Disposition != RegularV4FrontierRepairSettlementHandoffDisposition.Pending ||
+                stateSnapshot.DispatchDecisionStatus != RuntimeUnlockRetryDispatchDecisionStatus.Held ||
+                stateSnapshot.ContractState is SessionRecoveryContractState.Completed or SessionRecoveryContractState.Failed)
+            {
+                return false;
+            }
+
+            pendingSettlement.Disposition = RegularV4FrontierRepairSettlementHandoffDisposition.Consumed;
+            pendingSettlement.AdoptedRecoveryLivenessGeneration = 0;
+            pendingSettlement.AdoptedBridgeDecisionGeneration = 0;
+            pendingSettlement.LifecycleBoundary = "no_active_recovery_boundary_precontract";
+            report = new RuntimeUnlockRegularV4RecoverySettlementReport(
+                settlement,
+                0,
+                0,
+                RuntimeUnlockRegularV4RecoverySettlementDisposition.Consumed,
+                "no_active_recovery_boundary_precontract");
+        }
+
+        var reportQueued = PublishRuntimeUnlockRegularV4RecoverySettlementReport(
+            pendingSettlement,
+            report,
+            stateSnapshot,
+            () =>
+            {
+                lock (accelerationGate)
+                {
+                    if (!ReferenceEquals(runtimeUnlockRecoveryRetryState, stateSnapshot) ||
+                        pendingSettlement.LastAppliedReport != report ||
+                        stateSnapshot.ContractState is SessionRecoveryContractState.Completed or
+                            SessionRecoveryContractState.Failed)
+                    {
+                        return;
+                    }
+                }
+
+                LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
+                    "runtime_unlock_regular_v4_frontier_repair_precontract_settlement_consumed",
+                    settlement,
+                    settlement.SessionId,
+                    settlement.TransferId,
+                    "coordinator_consumption_accepted",
+                    retryReason: stateSnapshot.RetryReason,
+                    stateSnapshot: stateSnapshot,
+                    handoff: pendingSettlement);
+                RequestRuntimeUnlockRetryDispatchAuthority(
+                    stateSnapshot.SessionId,
+                    "regular_v4_precontract_consumption_accepted");
+                ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed(settlementTrigger);
+            });
+
+        LogRuntimeUnlockRegularV4FrontierRepairSettlementHandoff(
+            "runtime_unlock_regular_v4_frontier_repair_settlement_held",
+            settlement,
+            settlement.SessionId,
+            settlement.TransferId,
+            reportQueued
+                ? "awaiting_coordinator_consumption_decision"
+                : "coordinator_consumption_decision_not_accepted",
+            retryReason: stateSnapshot.RetryReason,
+            stateSnapshot: stateSnapshot,
+            handoff: pendingSettlement);
+        return true;
     }
 
     private bool TryConsumePendingRuntimeUnlockRegularV4FrontierRepairSettlementForReceiveRecovery(
@@ -20782,6 +21003,7 @@ public sealed partial class NknSignalingTransport
         RuntimeUnlockRecoveryRetryState? stateToSchedule = null;
         RuntimeUnlockRecoveryRetryState? rejectedDispatchState = null;
         RuntimeUnlockRecoveryRetryState? activeNegotiationHeldState = null;
+        RuntimeUnlockRecoveryRetryState? coordinatorHeldState = null;
         RuntimeUnlockRetryDispatchSettlementReport rejectedSettlementReport = default;
         var rejectedDispatchHadContract = false;
         var queuedBehindActiveNegotiation = false;
@@ -20840,7 +21062,34 @@ public sealed partial class NknSignalingTransport
 
             state.Settled = true;
             queuedBehindActiveNegotiation = Volatile.Read(ref accelerationNegotiationScheduled) != 0;
-            if (requiresDispatchProof &&
+            var pendingDispatchRequest = state.PendingDispatchAuthorityRequest;
+            var exactCoordinatorHold =
+                requiresDispatchProof &&
+                state.DispatchDecisionStatus == RuntimeUnlockRetryDispatchDecisionStatus.Held &&
+                pendingDispatchRequest is { } heldRequest &&
+                heldRequest.RecoveryContractGeneration == state.ContractGeneration &&
+                heldRequest.RetiredOfferGeneration == state.RetiredOfferGeneration &&
+                heldRequest.DispatchAttemptGeneration == state.DispatchAttemptGeneration &&
+                heldRequest.MissingDispatchSuccessorGeneration ==
+                    state.MissingDispatchSuccessorGeneration &&
+                string.Equals(heldRequest.SessionId, state.SessionId, StringComparison.Ordinal) &&
+                string.Equals(heldRequest.TransferId, state.TransferId, StringComparison.Ordinal) &&
+                heldRequest.SourcePublicationAuthority == state.SourcePublicationAuthority;
+            if (exactCoordinatorHold)
+            {
+                state.RetryQueued = false;
+                state.RetryDispatching = false;
+                state.RetryDispatched = false;
+                state.RetryAuthorityPending = true;
+                state.RetryAuthorityGranted = state.DispatchContract is not null;
+                state.ObservedSendPending = false;
+                state.QueuedBehindActiveNegotiation = false;
+                state.DispatchObserved = false;
+                state.ContractState = SessionRecoveryContractState.RecoverySettled;
+                coordinatorHeldState = state;
+                stateToSchedule = state;
+            }
+            else if (requiresDispatchProof &&
                 queuedBehindActiveNegotiation &&
                 !holdDispatchGrantForListenerRearm)
             {
@@ -20903,6 +21152,22 @@ public sealed partial class NknSignalingTransport
 
         if (stateToSchedule is null)
         {
+            return;
+        }
+
+        if (coordinatorHeldState is not null)
+        {
+            LogRuntimeUnlockRetryDispatchProof(
+                "runtime_unlock_retry_dispatch_authority_hold_preserved",
+                coordinatorHeldState,
+                coordinatorHeldState.DispatchDecisionReason ?? "runtime_unlock_retry_dispatch_authority_held");
+            LogRuntimeUnlockRecoveryContract(
+                "session_recovery_contract_recovery_settled",
+                coordinatorHeldState.SessionId);
+            ResumeFileTransferDataSessionsAfterTunaActivationNegotiation(
+                "runtime_unlock_retry_dispatch_authority_held",
+                coordinatorHeldState.SessionId,
+                "runtime_unlock_retry_dispatch_authority_hold_preserved");
             return;
         }
 
@@ -23478,10 +23743,11 @@ public sealed partial class NknSignalingTransport
         if (!TryGetRuntimeUnlockRetryAuthorityForCurrentOffer(out var authorityState, normalizedSessionId) ||
             authorityState is null)
         {
-            reason = "missing_runtime_unlock_retry_authority";
-            RejectRuntimeUnlockRetryDispatchAuthorityForCurrentContract(
+            reason = IsRuntimeUnlockRetryDispatchAuthorityHeldForSession(
                 normalizedSessionId,
-                reason);
+                out var heldReason)
+                ? heldReason
+                : "missing_runtime_unlock_retry_authority";
             return false;
         }
 
@@ -23576,10 +23842,11 @@ public sealed partial class NknSignalingTransport
         if (!TryGetRuntimeUnlockRetryAuthorityForCurrentOffer(out var authorityState, normalizedSessionId) ||
             authorityState is null)
         {
-            reason = "missing_runtime_unlock_retry_authority";
-            RejectRuntimeUnlockRetryDispatchAuthorityForCurrentContract(
+            reason = IsRuntimeUnlockRetryDispatchAuthorityHeldForSession(
                 normalizedSessionId,
-                reason);
+                out var heldReason)
+                ? heldReason
+                : "missing_runtime_unlock_retry_authority";
             return false;
         }
 
