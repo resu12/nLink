@@ -369,6 +369,12 @@ public sealed partial class NknSignalingTransport
         string? ObservedLane,
         bool TerminalClosureRequested = false);
 
+    private sealed record RuntimeUnlockRegularV4RecoveryLeaseClosureReceipt(
+        RuntimeUnlockRegularV4RecoveryLifecycleReport Report,
+        RecoveryLivenessLease RetiredLease,
+        RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus DecisionStatus,
+        string DecisionReason);
+
     private sealed class RuntimeUnlockRecoveryRetryState
     {
         public required long ContractGeneration { get; init; }
@@ -642,6 +648,14 @@ public sealed partial class NknSignalingTransport
         public RuntimeUnlockRegularV4RecoveryLifecycleDecision? PendingLifecycleDecision { get; set; }
 
         public RuntimeUnlockRegularV4RecoveryLifecycleReport? LastAppliedLifecycleReport { get; set; }
+
+        public RuntimeUnlockRegularV4RecoveryLeaseClosureReceipt? LeaseClosureReceipt { get; set; }
+
+        public bool LeaseClosureAdopted { get; set; }
+
+        public bool LeaseClosureConsumed { get; set; }
+
+        public string? LeaseClosureAdoptionBoundary { get; set; }
     }
 
     private sealed class PendingRuntimeUnlockRegularV4FrontierRepairSettlement
@@ -1712,6 +1726,225 @@ public sealed partial class NknSignalingTransport
         }
     }
 
+    private static bool TryCreateRuntimeUnlockRegularV4RecoveryLeaseClosureReceipt(
+        RuntimeUnlockRegularV4RecoveryLifecycleDecision decision,
+        out RuntimeUnlockRegularV4RecoveryLeaseClosureReceipt receipt,
+        out string rejectionReason)
+    {
+        receipt = null!;
+        rejectionReason = "accepted";
+        var report = decision.Report;
+        var authority = report.Authority;
+        if (report.IsDefault ||
+            report.Outcome is not (
+                RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Completed or
+                RuntimeUnlockRegularV4RecoveryLifecycleOutcome.ReceiveProofObserved))
+        {
+            rejectionReason = "regular_v4_recovery_lease_closure_outcome_invalid";
+            return false;
+        }
+
+        if (decision.State is null ||
+            !decision.State.RuntimeUnlockRecoveryLeaseClosureAvailable ||
+            decision.State.LastRetiredRecoveryLivenessLease is not { } lease ||
+            lease.IsDefault ||
+            lease.State != RecoveryLivenessLeaseState.Retired ||
+            !string.Equals(lease.SessionId, authority.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(lease.TransferId, authority.TransferId, StringComparison.Ordinal) ||
+            lease.Direction != authority.Direction ||
+            !string.Equals(lease.RouteToken, authority.RouteToken, StringComparison.Ordinal) ||
+            lease.ProtocolVersion != authority.ProtocolVersion ||
+            lease.LiveRouteEpoch != authority.LiveRouteEpoch ||
+            lease.RuntimeGeneration != authority.RuntimeGeneration ||
+            lease.TerminalGeneration != authority.TerminalGeneration ||
+            lease.LegGeneration != authority.TransferLegGeneration ||
+            lease.TransportEpoch != authority.TransportEpoch ||
+            lease.BridgeRecoveryGeneration != authority.BridgeRecoveryGeneration ||
+            lease.LeaseGeneration != report.RegularV4LivenessGeneration ||
+            lease.RuntimeOwner.IsDefault ||
+            !string.Equals(lease.RuntimeOwner.SessionId, authority.SessionId, StringComparison.Ordinal) ||
+            !string.Equals(lease.RuntimeOwner.TransferId, authority.TransferId, StringComparison.Ordinal) ||
+            lease.RuntimeOwner.Direction != authority.Direction ||
+            !string.Equals(lease.RuntimeOwner.RouteToken, authority.RouteToken, StringComparison.Ordinal) ||
+            lease.RuntimeOwner.ProtocolVersion != authority.ProtocolVersion ||
+            lease.RuntimeOwner.LiveRouteEpoch != authority.LiveRouteEpoch ||
+            lease.RuntimeOwner.RuntimeGeneration != authority.RuntimeGeneration ||
+            lease.RuntimeOwner.TerminalGeneration != authority.TerminalGeneration)
+        {
+            rejectionReason = "regular_v4_recovery_lease_closure_tuple_mismatch";
+            return false;
+        }
+
+        receipt = new RuntimeUnlockRegularV4RecoveryLeaseClosureReceipt(
+            report,
+            lease,
+            decision.Status,
+            SanitizeLogToken(decision.Reason));
+        return true;
+    }
+
+    private static string FormatRuntimeUnlockRegularV4RecoveryLeaseClosureReceipt(
+        RuntimeUnlockRegularV4RecoveryLeaseClosureReceipt receipt)
+    {
+        var report = receipt.Report;
+        var authority = report.Authority;
+        var lease = receipt.RetiredLease;
+        return $"session_id={SanitizeLogToken(authority.SessionId)}; transfer_id={SanitizeLogToken(authority.TransferId)}; direction={authority.Direction.ToString().ToLowerInvariant()}; route={SanitizeLogToken(authority.RouteToken)}; protocol_version={authority.ProtocolVersion}; live_route_epoch={authority.LiveRouteEpoch}; runtime_generation={authority.RuntimeGeneration}; terminal_generation={authority.TerminalGeneration}; leg_generation={authority.TransferLegGeneration}; transport_epoch={authority.TransportEpoch}; bridge_recovery_generation={authority.BridgeRecoveryGeneration}; bridge_decision_generation={authority.BridgeDecisionGeneration}; regular_v4_liveness_generation={report.RegularV4LivenessGeneration}; lease_authority_id={SanitizeLogToken(lease.AuthorityId.ToString())}; lease_generation={lease.LeaseGeneration}; lifecycle_outcome={SanitizeLogToken(report.Outcome.ToString())}; lifecycle_reason={SanitizeLogToken(report.Reason)}; lifecycle_decision_status={SanitizeLogToken(receipt.DecisionStatus.ToString())}; lifecycle_decision_reason={SanitizeLogToken(receipt.DecisionReason)}";
+    }
+
+    private bool TryAdoptRuntimeUnlockRegularV4RecoveryLeaseClosure(
+        FileTransferRegularV4RecoveryLivenessState expectedState,
+        string adoptionBoundary,
+        out RuntimeUnlockRegularV4RecoveryLeaseClosureReceipt? receipt)
+    {
+        receipt = null;
+        var adopted = false;
+        lock (fileTransferFallbackProofGate)
+        {
+            var state = fileTransferRegularV4RecoveryLivenessState;
+            if (!ReferenceEquals(state, expectedState) ||
+                state.LeaseClosureReceipt is not { } candidate ||
+                candidate.Report.Authority != state.BridgeRecoveryAuthority ||
+                candidate.Report.RegularV4LivenessGeneration != state.Generation ||
+                candidate.RetiredLease.LeaseGeneration != state.Generation ||
+                state.RecoveryExhausted)
+            {
+                return false;
+            }
+
+            receipt = candidate;
+            if (state.LeaseClosureAdopted)
+            {
+                return true;
+            }
+
+            state.LeaseClosureAdopted = true;
+            state.LeaseClosureAdoptionBoundary = SanitizeLogToken(adoptionBoundary);
+            state.ReceiveProofObserved = true;
+            state.Completed = true;
+            adopted = true;
+        }
+
+        if (adopted && receipt is not null)
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=runtime_unlock_regular_v4_recovery_lease_closure_adopted; {FormatRuntimeUnlockRegularV4RecoveryLeaseClosureReceipt(receipt)}; adoption_boundary={SanitizeLogToken(adoptionBoundary)}; decision_reason=matching_local_receive_proof");
+        }
+
+        return receipt is not null;
+    }
+
+    private bool TryGetAdoptedRuntimeUnlockRegularV4RecoveryLeaseClosure(
+        string sessionId,
+        out RuntimeUnlockRegularV4RecoveryLeaseClosureReceipt? receipt)
+    {
+        lock (fileTransferFallbackProofGate)
+        {
+            var state = fileTransferRegularV4RecoveryLivenessState;
+            if (state is not null &&
+                state.LeaseClosureAdopted &&
+                !state.LeaseClosureConsumed &&
+                state.LeaseClosureReceipt is { } candidate &&
+                string.Equals(state.SessionId, sessionId, StringComparison.Ordinal))
+            {
+                receipt = candidate;
+                return true;
+            }
+        }
+
+        receipt = null;
+        return false;
+    }
+
+    private static bool IsRuntimeUnlockRegularV4RecoveryLeaseClosureCurrentForBlockedRetry(
+        RuntimeUnlockRegularV4RecoveryLeaseClosureReceipt? receipt,
+        RuntimeUnlockRecoveryRetryState state)
+    {
+        if (receipt is null)
+        {
+            return false;
+        }
+
+        var report = receipt.Report;
+        var authority = report.Authority;
+        return string.Equals(authority.SessionId, state.SessionId, StringComparison.Ordinal) &&
+               string.Equals(
+                   authority.TransferId,
+                   state.RegularV4RecoveryBlockedTransferId ?? state.TransferId,
+                   StringComparison.Ordinal) &&
+               (!state.RegularV4RecoveryDirection.HasValue ||
+                authority.Direction == state.RegularV4RecoveryDirection.Value) &&
+               report.RegularV4LivenessGeneration == state.RegularV4RecoveryLivenessGeneration &&
+               string.Equals(authority.RouteToken, state.RegularV4RecoveryRouteToken, StringComparison.Ordinal) &&
+               authority.ProtocolVersion == state.RegularV4RecoveryProtocolVersion &&
+               authority.LiveRouteEpoch == state.RegularV4RecoveryLiveRouteEpoch &&
+               authority.TransferLegGeneration == state.RegularV4RecoveryTransferLegGeneration &&
+               authority.TransportEpoch == state.RegularV4RecoveryTransportEpoch &&
+               authority.BridgeRecoveryGeneration == state.RegularV4RecoveryBridgeRecoveryGeneration &&
+               authority.BridgeDecisionGeneration == state.RegularV4RecoveryBridgeDecisionGeneration;
+    }
+
+    private bool TryConsumeRuntimeUnlockRegularV4RecoveryLeaseClosure(
+        RuntimeUnlockRetryDispatchAuthority authority)
+    {
+        RuntimeUnlockRegularV4RecoveryLeaseClosureReceipt? receipt = null;
+        lock (fileTransferFallbackProofGate)
+        {
+            var state = fileTransferRegularV4RecoveryLivenessState;
+            if (authority.ReleaseKind != RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure ||
+                state is null ||
+                !state.LeaseClosureAdopted ||
+                state.LeaseClosureConsumed ||
+                state.LeaseClosureReceipt is not { } candidate ||
+                candidate.Report.Authority != state.BridgeRecoveryAuthority ||
+                authority.ReleaseAuthorityId != candidate.RetiredLease.AuthorityId ||
+                authority.ReleaseGeneration != candidate.RetiredLease.LeaseGeneration ||
+                !string.Equals(authority.SessionId, state.SessionId, StringComparison.Ordinal) ||
+                !string.Equals(authority.TransferId, state.TransferId, StringComparison.Ordinal) ||
+                authority.Direction != state.Direction ||
+                authority.BridgeDecisionGeneration != state.BridgeDecisionGeneration)
+            {
+                return false;
+            }
+
+            state.LeaseClosureConsumed = true;
+            receipt = candidate;
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=runtime_unlock_regular_v4_recovery_lease_closure_consumed; {FormatRuntimeUnlockRegularV4RecoveryLeaseClosureReceipt(receipt!)}; retry_authority_id={SanitizeLogToken(authority.AuthorityId.ToString())}; dispatch_attempt_generation={authority.DispatchAttemptGeneration}; missing_dispatch_successor_generation={authority.MissingDispatchSuccessorGeneration}; decision_reason=initial_retry_authority_granted");
+        return true;
+    }
+
+    private static bool IsRuntimeUnlockRegularV4RecoveryLeaseClosureCurrentForGrant(
+        RuntimeUnlockRegularV4RecoveryLeaseClosureReceipt? receipt,
+        RuntimeUnlockRetryDispatchAuthority authority)
+    {
+        if (receipt is null ||
+            authority.ReleaseKind != RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure)
+        {
+            return false;
+        }
+
+        var reportAuthority = receipt.Report.Authority;
+        return authority.ReleaseAuthorityId == receipt.RetiredLease.AuthorityId &&
+               authority.ReleaseGeneration == receipt.RetiredLease.LeaseGeneration &&
+               string.Equals(authority.SessionId, reportAuthority.SessionId, StringComparison.Ordinal) &&
+               string.Equals(authority.TransferId, reportAuthority.TransferId, StringComparison.Ordinal) &&
+               authority.Direction == reportAuthority.Direction &&
+               string.Equals(authority.RouteToken, reportAuthority.RouteToken, StringComparison.Ordinal) &&
+               authority.ProtocolVersion == reportAuthority.ProtocolVersion &&
+               authority.LiveRouteEpoch == reportAuthority.LiveRouteEpoch &&
+               authority.RuntimeGeneration == reportAuthority.RuntimeGeneration &&
+               authority.TerminalGeneration == reportAuthority.TerminalGeneration &&
+               authority.LegGeneration == reportAuthority.TransferLegGeneration &&
+               authority.TransportEpoch == reportAuthority.TransportEpoch &&
+               authority.BridgeRecoveryGeneration == reportAuthority.BridgeRecoveryGeneration &&
+               authority.BridgeDecisionGeneration == reportAuthority.BridgeDecisionGeneration;
+    }
+
     private void MarkFileTransferRegularV4RecoveryLivenessBridgeRecoveryLifecycle(
         string lifecycle,
         string? reason)
@@ -1792,6 +2025,53 @@ public sealed partial class NknSignalingTransport
                 "receive_resumed" => RuntimeUnlockRegularV4RecoveryLifecycleOutcome.ReceiveProofObserved,
                 _ => RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Discarded,
             };
+            if (string.Equals(lifecycle, "completed", StringComparison.Ordinal))
+            {
+                if (!PublishRuntimeUnlockRegularV4RecoveryLifecycleReport(
+                        state,
+                        lifecycleOutcome,
+                        settlementTrigger))
+                {
+                    LocalOperationalLog.Warn(
+                        "NKN.Tuna",
+                        $"event=runtime_unlock_regular_v4_recovery_lifecycle_report_failed_closed; session_id={state.SessionId}; transfer_id={state.TransferId}; generation={state.Generation}; lifecycle={SanitizeLogToken(lifecycle)}; decision_reason=lifecycle_report_not_accepted");
+                }
+
+                // Coordinator lease completion is retained as release authority, but the
+                // local receive-recovery boundary remains open until receive proof arrives.
+                return;
+            }
+
+            if (string.Equals(lifecycle, "receive_resumed", StringComparison.Ordinal))
+            {
+                if (!TryAdoptRuntimeUnlockRegularV4RecoveryLeaseClosure(
+                        state,
+                        settlementTrigger,
+                        out _) &&
+                    (!PublishRuntimeUnlockRegularV4RecoveryLifecycleReport(
+                         state,
+                         lifecycleOutcome,
+                         settlementTrigger) ||
+                     !TryAdoptRuntimeUnlockRegularV4RecoveryLeaseClosure(
+                         state,
+                         settlementTrigger,
+                         out _)))
+                {
+                    LocalOperationalLog.Warn(
+                        "NKN.Tuna",
+                        $"event=runtime_unlock_regular_v4_recovery_lease_closure_rejected; session_id={state.SessionId}; transfer_id={state.TransferId}; regular_v4_liveness_generation={state.Generation}; adoption_boundary={SanitizeLogToken(settlementTrigger)}; decision_reason=matching_closure_receipt_missing");
+                    return;
+                }
+
+                var adoptionSnapshot = CreateFileTransferRegularV4RecoveryLivenessSnapshot(state);
+                DiscardPendingRegularV4FrontierRepairSettlement(
+                    adoptionSnapshot,
+                    settlementTrigger,
+                    "receive_recovery_lease_closure_won");
+                ResolveRuntimeUnlockRetryBlockedByRegularV4Recovery(adoptionSnapshot, settlementTrigger);
+                return;
+            }
+
             if (!PublishRuntimeUnlockRegularV4RecoveryLifecycleReport(
                     state,
                     lifecycleOutcome,
@@ -1804,21 +2084,6 @@ public sealed partial class NknSignalingTransport
             }
 
             var snapshot = CreateFileTransferRegularV4RecoveryLivenessSnapshot(state);
-            if (string.Equals(lifecycle, "receive_resumed", StringComparison.Ordinal))
-            {
-                DiscardPendingRegularV4FrontierRepairSettlement(
-                    snapshot,
-                    settlementTrigger,
-                    "receive_recovery_proof_won");
-            }
-            else if (lifecycle is "completed" or "exhausted" &&
-                     TryConsumePendingRuntimeUnlockRegularV4FrontierRepairSettlementForReceiveRecovery(
-                         snapshot,
-                         settlementTrigger))
-            {
-                return;
-            }
-
             ResolveRuntimeUnlockRetryBlockedByRegularV4Recovery(snapshot, settlementTrigger);
         }
     }
@@ -1883,28 +2148,37 @@ public sealed partial class NknSignalingTransport
 
         if (shouldResolve && state is not null)
         {
-            if (!PublishRuntimeUnlockRegularV4RecoveryLifecycleReport(
+            const string adoptionBoundary = "regular_v4_receive_proof_observed";
+            if (!TryAdoptRuntimeUnlockRegularV4RecoveryLeaseClosure(
                     state,
-                    RuntimeUnlockRegularV4RecoveryLifecycleOutcome.ReceiveProofObserved,
-                    "regular_v4_receive_proof_observed"))
+                    adoptionBoundary,
+                    out _) &&
+                (!PublishRuntimeUnlockRegularV4RecoveryLifecycleReport(
+                     state,
+                     RuntimeUnlockRegularV4RecoveryLifecycleOutcome.ReceiveProofObserved,
+                     adoptionBoundary) ||
+                 !TryAdoptRuntimeUnlockRegularV4RecoveryLeaseClosure(
+                     state,
+                     adoptionBoundary,
+                     out _)))
             {
                 LocalOperationalLog.Warn(
                     "NKN.Tuna",
-                    $"event=runtime_unlock_regular_v4_recovery_lifecycle_report_failed_closed; session_id={state.SessionId}; transfer_id={state.TransferId}; generation={state.Generation}; lifecycle=receive_proof_observed; decision_reason=lifecycle_report_not_accepted");
+                    $"event=runtime_unlock_regular_v4_recovery_lease_closure_rejected; session_id={state.SessionId}; transfer_id={state.TransferId}; regular_v4_liveness_generation={state.Generation}; adoption_boundary={adoptionBoundary}; decision_reason=matching_closure_receipt_missing");
                 return;
             }
 
             var snapshot = CreateFileTransferRegularV4RecoveryLivenessSnapshot(state);
             DiscardPendingRegularV4FrontierRepairSettlement(
                 snapshot,
-                "regular_v4_receive_proof_observed",
-                "receive_recovery_proof_won");
+                adoptionBoundary,
+                "receive_recovery_lease_closure_won");
             if (!ResolveRuntimeUnlockRetryBlockedByRegularV4Recovery(
                     snapshot,
-                    "regular_v4_receive_proof_observed") &&
+                    adoptionBoundary) &&
                 shouldLog)
             {
-                ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed("regular_v4_receive_proof_observed");
+                ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed(adoptionBoundary);
             }
         }
     }
@@ -12244,6 +12518,9 @@ public sealed partial class NknSignalingTransport
         out RuntimeUnlockRetryDispatchAuthorityRequest request)
     {
         request = default;
+        _ = TryGetAdoptedRuntimeUnlockRegularV4RecoveryLeaseClosure(
+            sessionId?.Trim() ?? string.Empty,
+            out var adoptedLeaseClosure);
         lock (accelerationGate)
         {
             var state = runtimeUnlockRecoveryRetryState;
@@ -12259,11 +12536,17 @@ public sealed partial class NknSignalingTransport
             if (state!.BlockedByRegularV4ReceiveRecovery)
             {
                 var consumedReport = pendingRuntimeUnlockRegularV4FrontierRepairSettlement?.LastAppliedReport;
+                var closureCurrent =
+                    IsRuntimeUnlockRegularV4RecoveryLeaseClosureCurrentForBlockedRetry(
+                        adoptedLeaseClosure,
+                        state);
+                var settlementCurrent =
+                    consumedReport is { Disposition: RuntimeUnlockRegularV4RecoverySettlementDisposition.Consumed } &&
+                    consumedReport.Value.RegularV4LivenessGeneration == state.RegularV4RecoveryLivenessGeneration &&
+                    consumedReport.Value.BridgeDecisionGeneration == state.RegularV4RecoveryBridgeDecisionGeneration;
                 if (candidate.RegularV4LivenessGeneration != state.RegularV4RecoveryLivenessGeneration ||
                     candidate.BridgeDecisionGeneration != state.RegularV4RecoveryBridgeDecisionGeneration ||
-                    consumedReport is not { Disposition: RuntimeUnlockRegularV4RecoverySettlementDisposition.Consumed } ||
-                    consumedReport.Value.RegularV4LivenessGeneration != state.RegularV4RecoveryLivenessGeneration ||
-                    consumedReport.Value.BridgeDecisionGeneration != state.RegularV4RecoveryBridgeDecisionGeneration)
+                    (!closureCurrent && !settlementCurrent))
                 {
                     return false;
                 }
@@ -12295,6 +12578,17 @@ public sealed partial class NknSignalingTransport
         var newlyGranted = false;
         var rejected = false;
         var rejectedHadDispatchContract = false;
+        RuntimeUnlockRegularV4RecoveryLeaseClosureReceipt? adoptedLeaseClosure = null;
+        if (decision.Contract is { } decisionContract &&
+            decisionContract.Authority.ReleaseKind == RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure &&
+            decisionContract.Authority.PredecessorAuthorityId is null &&
+            (decisionContract.RegularV4LivenessGeneration > 0 ||
+             decisionContract.RequestBridgeDecisionGeneration > 0))
+        {
+            _ = TryGetAdoptedRuntimeUnlockRegularV4RecoveryLeaseClosure(
+                decisionContract.Authority.SessionId,
+                out adoptedLeaseClosure);
+        }
         lock (accelerationGate)
         {
             var state = runtimeUnlockRecoveryRetryState;
@@ -12322,6 +12616,19 @@ public sealed partial class NknSignalingTransport
                     tupleRejectedRequest = pending;
                     tupleRejectedContract = contract;
                     tupleMismatchField = mismatchField;
+                }
+                else if (contract.Authority.ReleaseKind ==
+                             RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure &&
+                         contract.Authority.PredecessorAuthorityId is null &&
+                         (contract.RegularV4LivenessGeneration > 0 ||
+                          contract.RequestBridgeDecisionGeneration > 0) &&
+                         !IsRuntimeUnlockRegularV4RecoveryLeaseClosureCurrentForGrant(
+                             adoptedLeaseClosure,
+                             contract.Authority))
+                {
+                    tupleRejectedRequest = pending;
+                    tupleRejectedContract = contract;
+                    tupleMismatchField = "receive_recovery_lease_closure_receipt";
                 }
                 else if (ReferenceEquals(state.DispatchContract, contract))
                 {
@@ -12595,6 +12902,19 @@ public sealed partial class NknSignalingTransport
 
         if (newlyGranted && grantedContract is not null && stateSnapshot is not null)
         {
+            if (grantedContract.Authority.ReleaseKind ==
+                    RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure &&
+                grantedContract.Authority.PredecessorAuthorityId is null &&
+                (grantedContract.RegularV4LivenessGeneration > 0 ||
+                 grantedContract.RequestBridgeDecisionGeneration > 0) &&
+                !TryConsumeRuntimeUnlockRegularV4RecoveryLeaseClosure(grantedContract.Authority))
+            {
+                LocalOperationalLog.Warn(
+                    "NKN.Tuna",
+                    $"event=runtime_unlock_regular_v4_recovery_lease_closure_rejected; session_id={SanitizeLogToken(grantedContract.Authority.SessionId)}; transfer_id={SanitizeLogToken(grantedContract.Authority.TransferId)}; lease_authority_id={SanitizeLogToken(grantedContract.Authority.ReleaseAuthorityId?.ToString() ?? "(none)")}; lease_generation={grantedContract.Authority.ReleaseGeneration}; decision_reason=closure_consumption_failed_closed");
+                return false;
+            }
+
             if (grantedContract.TryMarkGrantLogged())
             {
                 LocalOperationalLog.Info(
@@ -13155,6 +13475,7 @@ public sealed partial class NknSignalingTransport
     {
         var accepted = false;
         var rejectionReason = "none";
+        RuntimeUnlockRegularV4RecoveryLeaseClosureReceipt? retainedReceipt = null;
         lock (fileTransferFallbackProofGate)
         {
             var state = fileTransferRegularV4RecoveryLivenessState;
@@ -13180,11 +13501,33 @@ public sealed partial class NknSignalingTransport
             {
                 rejectionReason = "regular_v4_recovery_lifecycle_decision_state_mismatch";
             }
+            else if (pending.Outcome is (
+                         RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Completed or
+                         RuntimeUnlockRegularV4RecoveryLifecycleOutcome.ReceiveProofObserved) &&
+                     !TryCreateRuntimeUnlockRegularV4RecoveryLeaseClosureReceipt(
+                         decision,
+                         out retainedReceipt,
+                         out rejectionReason))
+            {
+                // The coordinator accepted a final lifecycle outcome, but Infra must not
+                // adopt it unless the retired lease and current recovery tuple are exact.
+            }
+            else if (retainedReceipt is not null &&
+                     state.LeaseClosureReceipt is { } existingReceipt &&
+                     existingReceipt != retainedReceipt)
+            {
+                retainedReceipt = null;
+                rejectionReason = "regular_v4_recovery_lease_closure_receipt_conflict";
+            }
             else
             {
                 state.PendingLifecycleDecision = decision;
                 state.LastAppliedLifecycleReport = pending;
                 state.PendingLifecycleReport = null;
+                if (retainedReceipt is not null)
+                {
+                    state.LeaseClosureReceipt ??= retainedReceipt;
+                }
                 accepted = true;
             }
         }
@@ -13194,6 +13537,20 @@ public sealed partial class NknSignalingTransport
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=runtime_unlock_regular_v4_recovery_lifecycle_decided; session_id={SanitizeLogToken(authority?.SessionId ?? "(none)")}; transfer_id={SanitizeLogToken(authority?.TransferId ?? "(none)")}; direction={authority?.Direction.ToString().ToLowerInvariant() ?? "unknown"}; route={SanitizeLogToken(authority?.RouteToken ?? "(none)")}; protocol_version={authority?.ProtocolVersion ?? 0}; live_route_epoch={authority?.LiveRouteEpoch ?? 0}; runtime_generation={authority?.RuntimeGeneration ?? 0}; terminal_generation={authority?.TerminalGeneration ?? 0}; leg_generation={authority?.TransferLegGeneration ?? 0}; transport_epoch={authority?.TransportEpoch ?? 0}; bridge_recovery_generation={authority?.BridgeRecoveryGeneration ?? 0}; bridge_decision_generation={authority?.BridgeDecisionGeneration ?? 0}; regular_v4_liveness_generation={report.RegularV4LivenessGeneration}; lifecycle_outcome={SanitizeLogToken(report.Outcome.ToString())}; lifecycle_reason={SanitizeLogToken(report.Reason)}; decision_status={SanitizeLogToken(decision.Status.ToString())}; decision_reason={SanitizeLogToken(accepted ? decision.Reason : rejectionReason)}");
+        if (accepted && retainedReceipt is not null)
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=runtime_unlock_regular_v4_recovery_lease_closure_retained; {FormatRuntimeUnlockRegularV4RecoveryLeaseClosureReceipt(retainedReceipt)}; decision_reason=coordinator_lease_closure_accepted");
+        }
+        else if (!accepted && report.Outcome is (
+                     RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Completed or
+                     RuntimeUnlockRegularV4RecoveryLifecycleOutcome.ReceiveProofObserved))
+        {
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=runtime_unlock_regular_v4_recovery_lease_closure_rejected; session_id={SanitizeLogToken(authority?.SessionId ?? "(none)")}; transfer_id={SanitizeLogToken(authority?.TransferId ?? "(none)")}; regular_v4_liveness_generation={report.RegularV4LivenessGeneration}; lifecycle_outcome={SanitizeLogToken(report.Outcome.ToString())}; decision_status={SanitizeLogToken(decision.Status.ToString())}; decision_reason={SanitizeLogToken(rejectionReason)}");
+        }
         return accepted;
     }
 
@@ -13207,6 +13564,9 @@ public sealed partial class NknSignalingTransport
         RuntimeUnlockRetrySuccessorIntent? newlyRequestedSuccessor = null;
         RuntimeUnlockRetryDispatchSettlementReport missingSourceSettlementReport = default;
         var missingSourceHadDispatchContract = false;
+        _ = TryGetAdoptedRuntimeUnlockRegularV4RecoveryLeaseClosure(
+            sessionId?.Trim() ?? string.Empty,
+            out var adoptedLeaseClosure);
         lock (accelerationGate)
         {
             var state = runtimeUnlockRecoveryRetryState;
@@ -13221,10 +13581,15 @@ public sealed partial class NknSignalingTransport
             {
                 var handoff = pendingRuntimeUnlockRegularV4FrontierRepairSettlement;
                 var consumedReport = handoff?.LastAppliedReport;
-                if (handoff is not null &&
-                    (consumedReport is not { Disposition: RuntimeUnlockRegularV4RecoverySettlementDisposition.Consumed } ||
-                     consumedReport.Value.RegularV4LivenessGeneration != state.RegularV4RecoveryLivenessGeneration ||
-                     consumedReport.Value.BridgeDecisionGeneration != state.RegularV4RecoveryBridgeDecisionGeneration))
+                var closureCurrent =
+                    IsRuntimeUnlockRegularV4RecoveryLeaseClosureCurrentForBlockedRetry(
+                        adoptedLeaseClosure,
+                        state);
+                var settlementCurrent =
+                    consumedReport is { Disposition: RuntimeUnlockRegularV4RecoverySettlementDisposition.Consumed } &&
+                    consumedReport.Value.RegularV4LivenessGeneration == state.RegularV4RecoveryLivenessGeneration &&
+                    consumedReport.Value.BridgeDecisionGeneration == state.RegularV4RecoveryBridgeDecisionGeneration;
+                if (!closureCurrent && !settlementCurrent)
                 {
                     state.PendingDispatchAuthorityRequest = null;
                     state.PendingDispatchSuccessorRequestIssued = false;
@@ -19436,7 +19801,9 @@ public sealed partial class NknSignalingTransport
             {
                 if (state.DispatchContract is { } contract &&
                     !contract.Lifecycle.IsSettled &&
-                    contract.Authority.ReleaseKind == RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement &&
+                    contract.Authority.ReleaseKind is (
+                        RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement or
+                        RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure) &&
                     contract.Authority.RecoveryContractGeneration == state.ContractGeneration)
                 {
                     ClearRuntimeUnlockRetryBlockedByRegularV4ReceiveRecoveryUnsafe(state);

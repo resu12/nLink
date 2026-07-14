@@ -599,7 +599,8 @@ internal sealed record FileTransferCoordinatorState(
     RuntimeUnlockRegularV4RecoverySettlementReport? LastRuntimeUnlockRegularV4RecoverySettlement = null,
     FileTransferRegularV4FrontierRepairSettlement? LastCoordinatorIssuedRegularV4RecoverySettlement = null,
     bool RuntimeUnlockRegularV4RecoverySettlementAvailable = false,
-    RuntimeUnlockRegularV4RecoveryLifecycleReport? LastRuntimeUnlockRegularV4RecoveryLifecycle = null)
+    RuntimeUnlockRegularV4RecoveryLifecycleReport? LastRuntimeUnlockRegularV4RecoveryLifecycle = null,
+    bool RuntimeUnlockRecoveryLeaseClosureAvailable = false)
 {
     public FileTransferRouteRuntimeDescriptor RouteRuntime => RouteSelection.RuntimeDescriptor;
 }
@@ -2786,6 +2787,7 @@ internal static class FileTransferCoordinator
             LastRuntimeUnlockRegularV4RecoverySettlement = null,
             LastCoordinatorIssuedRegularV4RecoverySettlement = null,
             RuntimeUnlockRegularV4RecoverySettlementAvailable = false,
+            RuntimeUnlockRecoveryLeaseClosureAvailable = false,
         };
 
     private static FileTransferCoordinatorState InvalidateRoutePublicationAuthority(FileTransferCoordinatorState state)
@@ -4159,6 +4161,11 @@ internal static class FileTransferCoordinator
                 authorizedReleaseKind == RuntimeUnlockRetryReleaseKind.RegularV4RepairSettlement
                     ? false
                     : state.RuntimeUnlockRegularV4RecoverySettlementAvailable,
+            RuntimeUnlockRecoveryLeaseClosureAvailable =
+                currentContract is null &&
+                authorizedReleaseKind == RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure
+                    ? false
+                    : state.RuntimeUnlockRecoveryLeaseClosureAvailable,
         };
         return Decision(
             RuntimeUnlockRetryDispatchDecisionStatus.Granted,
@@ -4541,6 +4548,11 @@ internal static class FileTransferCoordinator
                 ? Math.Max(state.LastRecoveryLivenessLeaseGeneration, retired.LeaseGeneration)
                 : state.LastRecoveryLivenessLeaseGeneration,
             LastRuntimeUnlockRegularV4RecoveryLifecycle = report,
+            RuntimeUnlockRecoveryLeaseClosureAvailable =
+                retiredLease is not null &&
+                report.Outcome is (
+                    RuntimeUnlockRegularV4RecoveryLifecycleOutcome.Completed or
+                    RuntimeUnlockRegularV4RecoveryLifecycleOutcome.ReceiveProofObserved),
         };
         return Decision(
             RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Accepted,
@@ -5003,6 +5015,7 @@ internal static class FileTransferCoordinator
             if (releaseKind == RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure)
             {
                 if (state.CurrentRecoveryLivenessLease is not null ||
+                    !state.RuntimeUnlockRecoveryLeaseClosureAvailable ||
                     state.LastRetiredRecoveryLivenessLease is not { } retiredLease ||
                     releaseAuthorityId is not { IsDefault: false } ||
                     retiredLease.AuthorityId != releaseAuthorityId ||
@@ -6465,6 +6478,10 @@ internal static class FileTransferCoordinator
                         kind == FileTransferCoordinatorActionKind.RecoveryLivenessLeaseBegin
                             ? null
                             : next.LastRuntimeUnlockRegularV4RecoveryLifecycle,
+                    RuntimeUnlockRecoveryLeaseClosureAvailable =
+                        kind == FileTransferCoordinatorActionKind.RecoveryLivenessLeaseBegin
+                            ? false
+                            : next.RuntimeUnlockRecoveryLeaseClosureAvailable,
                     RuntimeUnlockRegularV4RecoverySettlementAvailable =
                         kind == FileTransferCoordinatorActionKind.RecoveryLivenessLeaseBegin
                             ? false

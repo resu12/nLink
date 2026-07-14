@@ -1925,6 +1925,68 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_AcceptedRecoveryLeaseClosureThenRetryHold_ClassifiesClosureNotAdopted()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_lease_closure_not_adopted";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                RuntimeUnlockRegularV4RecoveryLifecycleReportedLine(transferId),
+                RuntimeUnlockRegularV4RecoveryLifecycleDecidedLine(transferId),
+                RuntimeUnlockRegularV4RecoveryLeaseClosureRetainedLine(transferId),
+                RuntimeUnlockRetryHeldByRegularV4RecoveryLine(transferId)),
+            ["-LiveRouteProofMode", "None"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("runtime_unlock_regular_v4_recovery_lease_closure_not_adopted", verdict["recovery_failure_class"]);
+        Assert.Equal("runtime_unlock_regular_v4_recovery_lease_closure_not_adopted", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("runtime_unlock_retry_dispatch_held_by_regular_v4_receive_recovery", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal("regular_v4_receive_recovery_pending", verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("1", verdict["runtime_unlock_recovery_lease_closure_not_adopted_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_recovery_lease_closure_not_adopted_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_recovery_lease_closure_not_adopted_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_recovery_lease_closure_not_adopted_unresolved_count"]);
+        Assert.Equal("fail", verdict["runtime_unlock_recovery_lease_closure_adoption_verdict"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_AcceptedRecoveryLeaseClosureAdoptedAndGranted_ClearsCandidate()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_runtime_unlock_lease_closure_adopted";
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockRetryDispatchProofFixture(
+                transferId,
+                RuntimeUnlockRegularV4RecoveryLifecycleReportedLine(transferId),
+                RuntimeUnlockRegularV4RecoveryLifecycleDecidedLine(transferId),
+                RuntimeUnlockRegularV4RecoveryLeaseClosureRetainedLine(transferId),
+                RuntimeUnlockRetryHeldByRegularV4RecoveryLine(transferId),
+                RuntimeUnlockRegularV4RecoveryLeaseClosureAdoptedLine(transferId),
+                RuntimeUnlockRegularV4RecoveryLeaseClosureConsumedLine(transferId),
+                RuntimeUnlockRetryLeaseClosureGrantedLine(transferId),
+                RuntimeUnlockRetryReleasedLine(transferId)),
+            ["-LiveRouteProofMode", "None"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.NotEqual("runtime_unlock_regular_v4_recovery_lease_closure_not_adopted", verdict["recovery_failure_class"]);
+        Assert.Equal("1", verdict["runtime_unlock_recovery_lease_closure_not_adopted_distinct_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_recovery_lease_closure_not_adopted_recovered_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_recovery_lease_closure_not_adopted_unresolved_count"]);
+        Assert.Equal("pass", verdict["runtime_unlock_recovery_lease_closure_adoption_verdict"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_TunaProbeRecoveryHeldThenLocallyRejected_ClassifiesAuthorityLoss()
     {
         if (!OperatingSystem.IsWindows())
@@ -3122,6 +3184,18 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
 
     private static string RuntimeUnlockRegularV4RecoveryLifecycleDecidedLine(string transferId)
         => $"event=runtime_unlock_regular_v4_recovery_lifecycle_decided; direction=outbound; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; runtime_generation=4; terminal_generation=0; leg_generation=9; transport_epoch=2; bridge_recovery_generation=3; bridge_decision_generation=5; regular_v4_liveness_generation=3; lifecycle_outcome=Completed; lifecycle_reason=bridge_lifecycle_completed; decision_status=Accepted; decision_reason=regular_v4_recovery_lifecycle_accepted";
+
+    private static string RuntimeUnlockRegularV4RecoveryLeaseClosureRetainedLine(string transferId)
+        => $"event=runtime_unlock_regular_v4_recovery_lease_closure_retained; direction=outbound; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; runtime_generation=4; terminal_generation=0; leg_generation=9; transport_epoch=2; bridge_recovery_generation=3; bridge_decision_generation=5; regular_v4_liveness_generation=3; lease_authority_id=fta2-recovery-lease-1; lease_generation=3; lifecycle_outcome=Completed; lifecycle_reason=bridge_lifecycle_completed; lifecycle_decision_status=Accepted; lifecycle_decision_reason=regular_v4_recovery_lifecycle_accepted; decision_reason=coordinator_lease_closure_accepted";
+
+    private static string RuntimeUnlockRegularV4RecoveryLeaseClosureAdoptedLine(string transferId)
+        => $"event=runtime_unlock_regular_v4_recovery_lease_closure_adopted; direction=outbound; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; runtime_generation=4; terminal_generation=0; leg_generation=9; transport_epoch=2; bridge_recovery_generation=3; bridge_decision_generation=5; regular_v4_liveness_generation=3; lease_authority_id=fta2-recovery-lease-1; lease_generation=3; lifecycle_outcome=Completed; lifecycle_reason=bridge_lifecycle_completed; adoption_boundary=regular_v4_receive_proof_observed; decision_reason=matching_local_receive_proof";
+
+    private static string RuntimeUnlockRegularV4RecoveryLeaseClosureConsumedLine(string transferId)
+        => $"event=runtime_unlock_regular_v4_recovery_lease_closure_consumed; direction=outbound; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; runtime_generation=4; terminal_generation=0; leg_generation=9; transport_epoch=2; bridge_recovery_generation=3; bridge_decision_generation=5; regular_v4_liveness_generation=3; lease_authority_id=fta2-recovery-lease-1; lease_generation=3; lifecycle_outcome=Completed; lifecycle_reason=bridge_lifecycle_completed; retry_authority_id=fta2-runtime-unlock-test-1; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; decision_reason=initial_retry_authority_granted";
+
+    private static string RuntimeUnlockRetryLeaseClosureGrantedLine(string transferId)
+        => $"event=runtime_unlock_retry_dispatch_authority_granted; authority_schema=2; authority_id=fta2-runtime-unlock-test-1; predecessor_authority_id=(none); direction=outbound; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; runtime_generation=4; terminal_generation=0; leg_generation=9; transport_epoch=2; bridge_recovery_generation=3; bridge_decision_generation=5; route_publication_generation=6; route_commit_generation=0; contract_generation=7; retired_generation=11; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=session_liveness_timeout_pending; release_kind=ReceiveRecoveryLeaseClosure; release_authority_id=fta2-recovery-lease-1; release_generation=3; release_outcome=Retired; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; request_regular_v4_liveness_generation=3; request_bridge_decision_generation=5; offer_generation=0; queued_behind_active_negotiation=0; decision_reason=runtime_unlock_retry_dispatch_authority_granted";
 
     private static string RuntimeUnlockRetryDispatchPendingRequestRecheckedLine(
         string transferId,

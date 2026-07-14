@@ -5126,6 +5126,7 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         if (context.RouteSelection.Route == FileTransferRoute.RegularNknV4Fast &&
             context.CurrentRecoveryLivenessLease is null &&
+            context.RuntimeUnlockRecoveryLeaseClosureAvailable &&
             context.LastRetiredRecoveryLivenessLease is { } retiredLease)
         {
             releaseKind = RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure;
@@ -5175,6 +5176,7 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         if (context.RouteSelection.Route == FileTransferRoute.RegularNknV4Fast &&
             context.CurrentRecoveryLivenessLease is null &&
+            context.RuntimeUnlockRecoveryLeaseClosureAvailable &&
             context.LastRetiredRecoveryLivenessLease is { } retiredLease)
         {
             releaseKind = RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure;
@@ -5249,7 +5251,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.LastRuntimeUnlockRegularV4RecoverySettlement,
             context.LastCoordinatorIssuedRegularV4RecoverySettlement,
             context.RuntimeUnlockRegularV4RecoverySettlementAvailable,
-            context.LastRuntimeUnlockRegularV4RecoveryLifecycle);
+            context.LastRuntimeUnlockRegularV4RecoveryLifecycle,
+            context.RuntimeUnlockRecoveryLeaseClosureAvailable);
 
     private static void ApplyCoordinatorDecisionToContextLocked(
         OutboundTransferContext context,
@@ -5314,6 +5317,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             decision.State.RuntimeUnlockRegularV4RecoverySettlementAvailable;
         context.LastRuntimeUnlockRegularV4RecoveryLifecycle =
             decision.State.LastRuntimeUnlockRegularV4RecoveryLifecycle;
+        context.RuntimeUnlockRecoveryLeaseClosureAvailable =
+            decision.State.RuntimeUnlockRecoveryLeaseClosureAvailable;
         var legHistory = decision.State.LegHistory.ToList();
         context.TransferLegHistory.Clear();
         context.TransferLegHistory.AddRange(legHistory);
@@ -5387,6 +5392,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             decision.State.RuntimeUnlockRegularV4RecoverySettlementAvailable;
         context.LastRuntimeUnlockRegularV4RecoveryLifecycle =
             decision.State.LastRuntimeUnlockRegularV4RecoveryLifecycle;
+        context.RuntimeUnlockRecoveryLeaseClosureAvailable =
+            decision.State.RuntimeUnlockRecoveryLeaseClosureAvailable;
         var legHistory = decision.State.LegHistory.ToList();
         context.TransferLegHistory.Clear();
         context.TransferLegHistory.AddRange(legHistory);
@@ -5635,7 +5642,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.LastRuntimeUnlockRegularV4RecoverySettlement,
             context.LastCoordinatorIssuedRegularV4RecoverySettlement,
             context.RuntimeUnlockRegularV4RecoverySettlementAvailable,
-            context.LastRuntimeUnlockRegularV4RecoveryLifecycle);
+            context.LastRuntimeUnlockRegularV4RecoveryLifecycle,
+            context.RuntimeUnlockRecoveryLeaseClosureAvailable);
 
     private static bool TryCaptureRuntimeOwnerLocked(
         OutboundTransferContext context,
@@ -18125,6 +18133,8 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public bool RuntimeUnlockRegularV4RecoverySettlementAvailable { get; set; }
 
+        public bool RuntimeUnlockRecoveryLeaseClosureAvailable { get; set; }
+
         public FileTransferRuntimeProfile RuntimeProfile { get; set; }
 
         public FileTransferBridgeRecoveryPolicy BridgeRecoveryPolicy { get; set; } =
@@ -19125,6 +19135,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         public FileTransferRegularV4FrontierRepairSettlement? LastCoordinatorIssuedRegularV4RecoverySettlement { get; set; }
 
         public bool RuntimeUnlockRegularV4RecoverySettlementAvailable { get; set; }
+
+        public bool RuntimeUnlockRecoveryLeaseClosureAvailable { get; set; }
 
         public FileTransferRuntimeProfile RuntimeProfile { get; set; }
 

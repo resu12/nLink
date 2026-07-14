@@ -214,6 +214,8 @@ public sealed partial class SessionFileTransferService
             context.LastRecoveryLivenessLeaseGeneration = decision.State.LastRecoveryLivenessLeaseGeneration;
             context.LastRuntimeUnlockRegularV4RecoveryLifecycle =
                 decision.State.LastRuntimeUnlockRegularV4RecoveryLifecycle;
+            context.RuntimeUnlockRecoveryLeaseClosureAvailable =
+                decision.State.RuntimeUnlockRecoveryLeaseClosureAvailable;
         }
 
         return decision;
@@ -235,6 +237,8 @@ public sealed partial class SessionFileTransferService
             context.LastRecoveryLivenessLeaseGeneration = decision.State.LastRecoveryLivenessLeaseGeneration;
             context.LastRuntimeUnlockRegularV4RecoveryLifecycle =
                 decision.State.LastRuntimeUnlockRegularV4RecoveryLifecycle;
+            context.RuntimeUnlockRecoveryLeaseClosureAvailable =
+                decision.State.RuntimeUnlockRecoveryLeaseClosureAvailable;
         }
 
         return decision;
@@ -257,6 +261,8 @@ public sealed partial class SessionFileTransferService
                 decision.State.LastCoordinatorIssuedRegularV4RecoverySettlement;
             context.RuntimeUnlockRegularV4RecoverySettlementAvailable =
                 decision.State.RuntimeUnlockRegularV4RecoverySettlementAvailable;
+            context.RuntimeUnlockRecoveryLeaseClosureAvailable =
+                decision.State.RuntimeUnlockRecoveryLeaseClosureAvailable;
         }
 
         return decision;
@@ -279,6 +285,8 @@ public sealed partial class SessionFileTransferService
                 decision.State.LastCoordinatorIssuedRegularV4RecoverySettlement;
             context.RuntimeUnlockRegularV4RecoverySettlementAvailable =
                 decision.State.RuntimeUnlockRegularV4RecoverySettlementAvailable;
+            context.RuntimeUnlockRecoveryLeaseClosureAvailable =
+                decision.State.RuntimeUnlockRecoveryLeaseClosureAvailable;
         }
 
         return decision;
@@ -333,6 +341,8 @@ public sealed partial class SessionFileTransferService
             decision.State.LastCoordinatorIssuedRegularV4RecoverySettlement;
         context.RuntimeUnlockRegularV4RecoverySettlementAvailable =
             decision.State.RuntimeUnlockRegularV4RecoverySettlementAvailable;
+        context.RuntimeUnlockRecoveryLeaseClosureAvailable =
+            decision.State.RuntimeUnlockRecoveryLeaseClosureAvailable;
     }
 
     private static void ApplyRuntimeUnlockRetryDispatchSettlementDecisionLocked(
@@ -356,6 +366,8 @@ public sealed partial class SessionFileTransferService
             decision.State.LastCoordinatorIssuedRegularV4RecoverySettlement;
         context.RuntimeUnlockRegularV4RecoverySettlementAvailable =
             decision.State.RuntimeUnlockRegularV4RecoverySettlementAvailable;
+        context.RuntimeUnlockRecoveryLeaseClosureAvailable =
+            decision.State.RuntimeUnlockRecoveryLeaseClosureAvailable;
     }
 
     private static void ApplyRuntimeUnlockRetryDispatchAuthorityDecisionLocked(
@@ -382,6 +394,8 @@ public sealed partial class SessionFileTransferService
                 decision.State.LastCoordinatorIssuedRegularV4RecoverySettlement;
             context.RuntimeUnlockRegularV4RecoverySettlementAvailable =
                 decision.State.RuntimeUnlockRegularV4RecoverySettlementAvailable;
+            context.RuntimeUnlockRecoveryLeaseClosureAvailable =
+                decision.State.RuntimeUnlockRecoveryLeaseClosureAvailable;
             return;
         }
 
@@ -422,6 +436,8 @@ public sealed partial class SessionFileTransferService
                 decision.State.LastCoordinatorIssuedRegularV4RecoverySettlement;
             context.RuntimeUnlockRegularV4RecoverySettlementAvailable =
                 decision.State.RuntimeUnlockRegularV4RecoverySettlementAvailable;
+            context.RuntimeUnlockRecoveryLeaseClosureAvailable =
+                decision.State.RuntimeUnlockRecoveryLeaseClosureAvailable;
             return;
         }
 
@@ -461,6 +477,8 @@ public sealed partial class SessionFileTransferService
             state.LastCoordinatorIssuedRegularV4RecoverySettlement;
         context.RuntimeUnlockRegularV4RecoverySettlementAvailable =
             state.RuntimeUnlockRegularV4RecoverySettlementAvailable;
+        context.RuntimeUnlockRecoveryLeaseClosureAvailable =
+            state.RuntimeUnlockRecoveryLeaseClosureAvailable;
     }
 
     private static void ApplyBoundedRuntimeUnlockRetryDispatchClosureLocked(
@@ -486,5 +504,7 @@ public sealed partial class SessionFileTransferService
             state.LastCoordinatorIssuedRegularV4RecoverySettlement;
         context.RuntimeUnlockRegularV4RecoverySettlementAvailable =
             state.RuntimeUnlockRegularV4RecoverySettlementAvailable;
+        context.RuntimeUnlockRecoveryLeaseClosureAvailable =
+            state.RuntimeUnlockRecoveryLeaseClosureAvailable;
     }
 }

@@ -8509,6 +8509,15 @@ function New-FileTransferStabilityGateSummaryLines {
         ("first_proof_chain_failure_sequence={0}" -f $recoveryClassification.FirstProofChainFailureSequence),
         ("first_proof_chain_failure_source_path={0}" -f $recoveryClassification.FirstProofChainFailureSourcePath),
         ("first_proof_chain_failure_line_number={0}" -f $recoveryClassification.FirstProofChainFailureLineNumber),
+        ("runtime_unlock_regular_v4_recovery_lease_closure_retained_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureRetainedCount),
+        ("runtime_unlock_regular_v4_recovery_lease_closure_adopted_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureAdoptedCount),
+        ("runtime_unlock_regular_v4_recovery_lease_closure_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureRejectedCount),
+        ("runtime_unlock_regular_v4_recovery_lease_closure_consumed_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureConsumedCount),
+        ("runtime_unlock_recovery_lease_closure_not_adopted_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRecoveryLeaseClosureNotAdoptedRawCount),
+        ("runtime_unlock_recovery_lease_closure_not_adopted_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRecoveryLeaseClosureNotAdoptedDistinctCount),
+        ("runtime_unlock_recovery_lease_closure_not_adopted_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRecoveryLeaseClosureNotAdoptedRecoveredCount),
+        ("runtime_unlock_recovery_lease_closure_not_adopted_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRecoveryLeaseClosureNotAdoptedUnresolvedCount),
+        ("runtime_unlock_recovery_lease_closure_adoption_verdict={0}" -f $recoveryClassification.RuntimeUnlockRecoveryLeaseClosureAdoptionVerdict),
         ("runtime_unlock_offer_not_observed_count={0}" -f $recoveryClassification.RuntimeUnlockOfferNotObservedCount),
         ("runtime_unlock_retry_scheduled_count={0}" -f $recoveryClassification.RuntimeUnlockRetryScheduledCount),
         ("runtime_unlock_retry_queued_behind_active_negotiation_count={0}" -f $recoveryClassification.RuntimeUnlockRetryQueuedBehindActiveNegotiationCount),
@@ -9303,6 +9312,18 @@ function Get-FileTransferRecoveryFailureClassification {
     })
     $runtimeUnlockRegularV4RecoveryLifecycleAcceptedEvents = @($runtimeUnlockRegularV4RecoveryLifecycleDecidedEvents | Where-Object {
         (Get-FileTransferEventField -Event $_ -Name 'decision_status' -Default '') -in @('Accepted', 'Idempotent')
+    })
+    $runtimeUnlockRegularV4RecoveryLeaseClosureRetainedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_regular_v4_recovery_lease_closure_retained'
+    })
+    $runtimeUnlockRegularV4RecoveryLeaseClosureAdoptedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_regular_v4_recovery_lease_closure_adopted'
+    })
+    $runtimeUnlockRegularV4RecoveryLeaseClosureRejectedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_regular_v4_recovery_lease_closure_rejected'
+    })
+    $runtimeUnlockRegularV4RecoveryLeaseClosureConsumedEvents = @($events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_regular_v4_recovery_lease_closure_consumed'
     })
     $runtimeUnlockRegularV4RecoverySettlementProtocolObserved =
         $runtimeUnlockRegularV4RecoverySettlementReportedEvents.Count -gt 0 -or
@@ -10681,6 +10702,81 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     $runtimeUnlockRetryRegularV4RecoverySettlementMissingCount = $runtimeUnlockRetryRegularV4RecoverySettlementMissingCandidateEvents.Count
     $runtimeUnlockRetryRegularV4SettlementHandoffBypassedCount = $runtimeUnlockRetryRegularV4SettlementHandoffBypassedCandidateEvents.Count
+
+    # Coordinator lease completion is not itself a failure: Infra may still be
+    # waiting for local receive proof. The edge becomes conclusive only when the
+    # same recovery tuple blocks retry after an accepted completion and no exact
+    # adoption/consumption/grant chain closes that hold.
+    $runtimeUnlockRecoveryLeaseClosureNotAdoptedRawEvents = New-Object System.Collections.Generic.List[object]
+    $runtimeUnlockRecoveryLeaseClosureNotAdoptedDistinctEvents = New-Object System.Collections.Generic.List[object]
+    $runtimeUnlockRecoveryLeaseClosureAdoptedRecoveryEvents = New-Object System.Collections.Generic.List[object]
+    $runtimeUnlockRecoveryLeaseClosureNotAdoptedUnresolvedEvents = New-Object System.Collections.Generic.List[object]
+    $seenRecoveryLeaseClosureTupleKeys = @{}
+    foreach ($lifecycleDecision in @($runtimeUnlockRegularV4RecoveryLifecycleAcceptedEvents | Where-Object {
+                (Get-FileTransferEventField -Event $_ -Name 'lifecycle_outcome' -Default '') -in @('Completed', 'ReceiveProofObserved')
+            } | Sort-Object Sequence)) {
+        $decisionSequence = [int64]$lifecycleDecision.Sequence
+        $matchingHold = @(
+            @($runtimeUnlockRetryBlockedByRegularV4RecoveryEvents + $runtimeUnlockRetryHeldByRegularV4RecoveryEvents) |
+                Where-Object {
+                    [int64]$_.Sequence -gt $decisionSequence -and
+                    (Get-RuntimeUnlockRegularV4RecoveryTupleKey -Event $_) -eq
+                        (Get-RuntimeUnlockRegularV4RecoveryTupleKey -Event $lifecycleDecision)
+                } |
+                Sort-Object Sequence |
+                Select-Object -First 1
+        )
+        if ($matchingHold.Count -eq 0) {
+            continue
+        }
+
+        $hold = $matchingHold[0]
+        $runtimeUnlockRecoveryLeaseClosureNotAdoptedRawEvents.Add($hold) | Out-Null
+        $tupleKey = Get-RuntimeUnlockRegularV4RecoveryTupleKey -Event $hold
+        if ($seenRecoveryLeaseClosureTupleKeys.ContainsKey($tupleKey)) {
+            continue
+        }
+        $seenRecoveryLeaseClosureTupleKeys[$tupleKey] = $true
+        $runtimeUnlockRecoveryLeaseClosureNotAdoptedDistinctEvents.Add($hold) | Out-Null
+
+        $holdSequence = [int64]$hold.Sequence
+        $adoption = @($runtimeUnlockRegularV4RecoveryLeaseClosureAdoptedEvents | Where-Object {
+            [int64]$_.Sequence -gt $holdSequence -and
+            (Get-RuntimeUnlockRegularV4RecoveryTupleKey -Event $_) -eq $tupleKey
+        } | Sort-Object Sequence | Select-Object -First 1)
+        $consumption = @($runtimeUnlockRegularV4RecoveryLeaseClosureConsumedEvents | Where-Object {
+            [int64]$_.Sequence -gt $holdSequence -and
+            (Get-RuntimeUnlockRegularV4RecoveryTupleKey -Event $_) -eq $tupleKey
+        } | Sort-Object Sequence | Select-Object -First 1)
+        $grant = @($runtimeUnlockRetryDispatchAuthorityGrantedEvents | Where-Object {
+            [int64]$_.Sequence -gt $holdSequence -and
+            (Get-FileTransferEventField -Event $_ -Name 'release_kind' -Default '') -eq 'ReceiveRecoveryLeaseClosure' -and
+            (Test-RuntimeUnlockRegularV4RecoveryGrantMatch -Blocked $hold -Candidate $_)
+        } | Sort-Object Sequence | Select-Object -First 1)
+        if ($adoption.Count -gt 0 -and
+            $consumption.Count -gt 0 -and
+            $grant.Count -gt 0 -and
+            [int64]$adoption[0].Sequence -lt [int64]$consumption[0].Sequence -and
+            [int64]$consumption[0].Sequence -le [int64]$grant[0].Sequence) {
+            $runtimeUnlockRecoveryLeaseClosureAdoptedRecoveryEvents.Add($hold) | Out-Null
+        }
+        else {
+            $runtimeUnlockRecoveryLeaseClosureNotAdoptedUnresolvedEvents.Add($hold) | Out-Null
+        }
+    }
+    $runtimeUnlockRecoveryLeaseClosureNotAdoptedRawCount = $runtimeUnlockRecoveryLeaseClosureNotAdoptedRawEvents.Count
+    $runtimeUnlockRecoveryLeaseClosureNotAdoptedDistinctCount = $runtimeUnlockRecoveryLeaseClosureNotAdoptedDistinctEvents.Count
+    $runtimeUnlockRecoveryLeaseClosureNotAdoptedRecoveredCount = $runtimeUnlockRecoveryLeaseClosureAdoptedRecoveryEvents.Count
+    $runtimeUnlockRecoveryLeaseClosureNotAdoptedUnresolvedCount = $runtimeUnlockRecoveryLeaseClosureNotAdoptedUnresolvedEvents.Count
+    $runtimeUnlockRecoveryLeaseClosureAdoptionVerdict = if ($runtimeUnlockRecoveryLeaseClosureNotAdoptedUnresolvedCount -gt 0) {
+        'fail'
+    }
+    elseif ($runtimeUnlockRecoveryLeaseClosureNotAdoptedDistinctCount -gt 0) {
+        'pass'
+    }
+    else {
+        'none'
+    }
 
     # A failed Tuna path probe is a recoverable trigger. The proof-chain failure
     # begins only when Core has explicitly held the matching retry authority and
@@ -12561,6 +12657,12 @@ function Get-FileTransferRecoveryFailureClassification {
         -Events @($fallbackTailProof.BridgeRecoveryGenerationMismatchCandidateEvents) `
         -DefaultReason 'bridge_recovery_generation_mismatch' `
         -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted' `
+        -Events @($runtimeUnlockRecoveryLeaseClosureNotAdoptedUnresolvedEvents.ToArray()) `
+        -DefaultReason 'regular_v4_receive_recovery_pending' `
+        -UseDefaultReason
 
     $grantBypassSequences = @(
         @($runtimeUnlockRetryDispatchGrantBypassedByRetryBudgetEvents) +
@@ -12862,6 +12964,9 @@ function Get-FileTransferRecoveryFailureClassification {
     }
     elseif ($runtimeUnlockRetryDispatchMissingAfterAuthorityGrantedCount -gt 0) {
         $class = 'runtime_unlock_retry_dispatch_missing_after_authority_granted'
+    }
+    elseif ($runtimeUnlockRecoveryLeaseClosureNotAdoptedUnresolvedCount -gt 0) {
+        $class = 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted'
     }
     elseif ($runtimeUnlockRetryRegularV4SettlementHandoffBypassedCount -gt 0) {
         $class = 'runtime_unlock_retry_regular_v4_settlement_handoff_bypassed'
@@ -13265,6 +13370,15 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockRegularV4RecoverySettlementIdempotentCount = $runtimeUnlockRegularV4RecoverySettlementIdempotentEvents.Count
         RuntimeUnlockRegularV4RecoverySettlementRejectedCount = $runtimeUnlockRegularV4RecoverySettlementRejectedEvents.Count
         RuntimeUnlockRetryRegularV4SettlementHandoffBypassedCount = $runtimeUnlockRetryRegularV4SettlementHandoffBypassedCount
+        RuntimeUnlockRegularV4RecoveryLeaseClosureRetainedCount = $runtimeUnlockRegularV4RecoveryLeaseClosureRetainedEvents.Count
+        RuntimeUnlockRegularV4RecoveryLeaseClosureAdoptedCount = $runtimeUnlockRegularV4RecoveryLeaseClosureAdoptedEvents.Count
+        RuntimeUnlockRegularV4RecoveryLeaseClosureRejectedCount = $runtimeUnlockRegularV4RecoveryLeaseClosureRejectedEvents.Count
+        RuntimeUnlockRegularV4RecoveryLeaseClosureConsumedCount = $runtimeUnlockRegularV4RecoveryLeaseClosureConsumedEvents.Count
+        RuntimeUnlockRecoveryLeaseClosureNotAdoptedRawCount = $runtimeUnlockRecoveryLeaseClosureNotAdoptedRawCount
+        RuntimeUnlockRecoveryLeaseClosureNotAdoptedDistinctCount = $runtimeUnlockRecoveryLeaseClosureNotAdoptedDistinctCount
+        RuntimeUnlockRecoveryLeaseClosureNotAdoptedRecoveredCount = $runtimeUnlockRecoveryLeaseClosureNotAdoptedRecoveredCount
+        RuntimeUnlockRecoveryLeaseClosureNotAdoptedUnresolvedCount = $runtimeUnlockRecoveryLeaseClosureNotAdoptedUnresolvedCount
+        RuntimeUnlockRecoveryLeaseClosureAdoptionVerdict = $runtimeUnlockRecoveryLeaseClosureAdoptionVerdict
         RuntimeUnlockProbeRecoveryTriggerCount = $runtimeUnlockTransactionPathProbeSidecarClosedEvents.Count
         RuntimeUnlockProbeRecoveryAuthorityLostRawCount = $runtimeUnlockProbeRecoveryAuthorityLostRawEvents.Count
         RuntimeUnlockProbeRecoveryAuthorityLostDistinctCount = $runtimeUnlockProbeRecoveryAuthorityLostDistinctEvents.Count
@@ -13890,6 +14004,15 @@ function Write-FileTransferDiagnosticsArtifacts {
     }
 
     $verdictLines = @(
+        ("runtime_unlock_regular_v4_recovery_lease_closure_retained_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureRetainedCount),
+        ("runtime_unlock_regular_v4_recovery_lease_closure_adopted_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureAdoptedCount),
+        ("runtime_unlock_regular_v4_recovery_lease_closure_rejected_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureRejectedCount),
+        ("runtime_unlock_regular_v4_recovery_lease_closure_consumed_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureConsumedCount),
+        ("runtime_unlock_recovery_lease_closure_not_adopted_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRecoveryLeaseClosureNotAdoptedRawCount),
+        ("runtime_unlock_recovery_lease_closure_not_adopted_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRecoveryLeaseClosureNotAdoptedDistinctCount),
+        ("runtime_unlock_recovery_lease_closure_not_adopted_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRecoveryLeaseClosureNotAdoptedRecoveredCount),
+        ("runtime_unlock_recovery_lease_closure_not_adopted_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRecoveryLeaseClosureNotAdoptedUnresolvedCount),
+        ("runtime_unlock_recovery_lease_closure_adoption_verdict={0}" -f $recoveryClassification.RuntimeUnlockRecoveryLeaseClosureAdoptionVerdict),
         ("verdict={0}" -f $effectiveVerdict),
         ("gate_status={0}" -f $effectiveGateStatus),
         ("transfer_id={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.TransferId)) { '(none)' } else { $Summary.TransferId }))),

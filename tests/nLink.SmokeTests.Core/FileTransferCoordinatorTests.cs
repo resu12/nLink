@@ -1511,6 +1511,7 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(RuntimeUnlockRegularV4RecoveryLifecycleDecisionStatus.Accepted, lifecycle.Status);
         Assert.Null(lifecycle.State.CurrentRecoveryLivenessLease);
         Assert.Equal(lease.AuthorityId, lifecycle.State.LastRetiredRecoveryLivenessLease?.AuthorityId);
+        Assert.True(lifecycle.State.RuntimeUnlockRecoveryLeaseClosureAvailable);
 
         var stale = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoverySettlement(
             lifecycle.State,
@@ -1546,6 +1547,7 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal(lease.AuthorityId, accepted.State.LastRetiredRecoveryLivenessLease?.AuthorityId);
         Assert.Equal(RecoveryLivenessLeaseState.Retired, accepted.State.LastRetiredRecoveryLivenessLease?.State);
         Assert.Equal(report, accepted.State.LastRuntimeUnlockRegularV4RecoveryLifecycle);
+        Assert.False(accepted.State.RuntimeUnlockRecoveryLeaseClosureAvailable);
 
         var duplicate = FileTransferCoordinator.ObserveRuntimeUnlockRegularV4RecoveryLifecycle(
             accepted.State,
@@ -2791,8 +2793,12 @@ public sealed class FileTransferCoordinatorTests
             RegularV4LivenessGeneration: secondLease.LeaseGeneration,
             BridgeDecisionGeneration: 0);
 
+        var closureState = secondRetire.State with
+        {
+            RuntimeUnlockRecoveryLeaseClosureAvailable = true,
+        };
         var stale = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
-            secondRetire.State,
+            closureState,
             request,
             null,
             RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure,
@@ -2803,7 +2809,7 @@ public sealed class FileTransferCoordinatorTests
         Assert.Equal("receive_recovery_lease_stale", stale.Reason);
 
         var granted = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
-            secondRetire.State,
+            closureState,
             request,
             null,
             RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure,
@@ -2812,6 +2818,22 @@ public sealed class FileTransferCoordinatorTests
             RecoveryLivenessLeaseState.Retired.ToString());
         Assert.True(granted.Granted);
         Assert.Equal(secondLease.AuthorityId, granted.Contract!.Authority.ReleaseAuthorityId);
+        Assert.False(granted.State.RuntimeUnlockRecoveryLeaseClosureAvailable);
+
+        var independentRequest = request with
+        {
+            RecoveryContractGeneration = request.RecoveryContractGeneration + 1,
+        };
+        var reused = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            granted.State with { CurrentRuntimeUnlockRetryDispatchAuthority = null },
+            independentRequest,
+            null,
+            RuntimeUnlockRetryReleaseKind.ReceiveRecoveryLeaseClosure,
+            secondLease.AuthorityId,
+            secondLease.LeaseGeneration,
+            RecoveryLivenessLeaseState.Retired.ToString());
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, reused.Status);
+        Assert.Equal("receive_recovery_lease_stale", reused.Reason);
     }
 
     [Fact]
