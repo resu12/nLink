@@ -3826,7 +3826,6 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             leg.RouteSelection.TelemetryToken,
             leg.ProtocolVersion,
             leg.LiveRouteEpochId,
-            leg.BridgeRecoveryGeneration,
             leg.TransportEpochId,
             checkpointSnapshot);
         SetPrivateProperty(context, "LastFallbackTailYieldDecision", decision.FallbackTailYieldDecision);

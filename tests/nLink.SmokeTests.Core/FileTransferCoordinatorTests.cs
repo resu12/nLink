@@ -793,7 +793,8 @@ public sealed class FileTransferCoordinatorTests
         Assert.EndsWith("|(none)", quiescent.FallbackTailYieldDecision.Value.OwnerKey, StringComparison.Ordinal);
         Assert.EndsWith("|(none)", quiescent.FallbackTailYieldDecision.Value.PairKey, StringComparison.Ordinal);
         Assert.Equal(9, quiescent.FallbackTailYieldDecision.Value.OwnerKey.Split('|').Length);
-        Assert.Equal(8, quiescent.FallbackTailYieldDecision.Value.PairKey.Split('|').Length);
+        Assert.Equal(7, quiescent.FallbackTailYieldDecision.Value.PairKey.Split('|').Length);
+        Assert.Equal(leg.BridgeRecoveryGeneration, quiescent.FallbackTailYieldDecision.Value.CurrentBridgeRecoveryGeneration);
         Assert.DoesNotContain("checkpoint:tail", quiescent.FallbackTailYieldDecision.Value.OwnerKey, StringComparison.Ordinal);
         Assert.DoesNotContain("checkpoint:tail", quiescent.FallbackTailYieldDecision.Value.PairKey, StringComparison.Ordinal);
 
@@ -831,6 +832,59 @@ public sealed class FileTransferCoordinatorTests
                 fallbackTailYieldKind: FallbackTailYieldKind.Quiescent));
         Assert.False(staleTransport.Accepted);
         Assert.Equal("transport_epoch_mismatch", staleTransport.RejectionReason);
+
+        var currentYield = firstYield.FallbackTailYieldDecision!.Value;
+        Assert.True(FileTransferCoordinator.IsFallbackTailYieldDecisionCurrent(firstYield.State, currentYield, out _));
+        firstYield.State.CurrentLeg!.BridgeRecoveryGeneration++;
+        Assert.False(FileTransferCoordinator.IsFallbackTailYieldDecisionCurrent(firstYield.State, currentYield, out var bridgeReason));
+        Assert.Equal("fallback_tail_yield_authority_tuple_mismatch", bridgeReason);
+    }
+
+    [Fact]
+    public void FallbackTailYield_PairScopeExcludesDirectionLocalBridgeGeneration()
+    {
+        const string sessionId = "session_pair_scope";
+        const string transferId = "transfer_pair_scope";
+        const string route = "post_tuna_fallback_v6";
+        const int protocolVersion = FileTransferProtocol.ProtocolVersionV6;
+        const int liveRouteEpoch = 4;
+        const int legGeneration = 5;
+        const long transportEpoch = 9;
+
+        var ownerAtBridgeOne = FileTransferCoordinator.BuildFallbackTailYieldOwnerKey(
+            sessionId,
+            transferId,
+            route,
+            protocolVersion,
+            liveRouteEpoch,
+            legGeneration,
+            bridgeRecoveryGeneration: 1,
+            transportEpoch,
+            "(none)");
+        var ownerAtBridgeTwo = FileTransferCoordinator.BuildFallbackTailYieldOwnerKey(
+            sessionId,
+            transferId,
+            route,
+            protocolVersion,
+            liveRouteEpoch,
+            legGeneration,
+            bridgeRecoveryGeneration: 2,
+            transportEpoch,
+            "(none)");
+        var pairKey = FileTransferCoordinator.BuildFallbackTailYieldPairKey(
+            sessionId,
+            transferId,
+            route,
+            protocolVersion,
+            liveRouteEpoch,
+            transportEpoch,
+            "(none)");
+
+        Assert.NotEqual(ownerAtBridgeOne, ownerAtBridgeTwo);
+        Assert.Equal(9, ownerAtBridgeOne.Split('|').Length);
+        Assert.Equal(9, ownerAtBridgeTwo.Split('|').Length);
+        Assert.Equal(7, pairKey.Split('|').Length);
+        Assert.Equal("session_pair_scope|transfer_pair_scope|post_tuna_fallback_v6|6|4|9|(none)", pairKey);
     }
 
     [Fact]

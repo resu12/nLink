@@ -28016,6 +28016,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                     publication.RuntimeGeneration,
                     publication.TerminalGeneration,
                     checked((int)publication.LegGeneration),
+                    0,
                     null,
                     fallbackSurvival)
                 {

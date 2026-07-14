@@ -221,7 +221,7 @@ function Invoke-TestLane {
         "FileTransferCoreRuntimeContract" {
             Invoke-DotnetTest `
                 -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
-                -Filter "FullyQualifiedName~SessionFileTransferRuntimeUnlockRetryAuthorityTests|FullyQualifiedName~SessionFileTransferRuntimeTests|FileTransferRuntimeSuite=SparseWorkerHandoff" `
+                -Filter "FullyQualifiedName~SessionFileTransferRuntimeUnlockRetryAuthorityTests|FullyQualifiedName~SessionFileTransferRuntimeTests|FileTransferRuntimeSuite=SparseWorkerHandoff|FileTransferRuntimeSuite=FallbackTailChurn" `
                 -ResultSuffix "core-runtime"
         }
         "FileTransferAnalyzer" {

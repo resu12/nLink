@@ -58,11 +58,21 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("pass", summary["cursor_integrity_verdict"]);
             Assert.Equal("complete", summary["transfer_evidence_status"]);
             Assert.Equal("incomplete_proof", summary["runtime_correctness_verdict"]);
+            Assert.Equal("none", summary["fallback_tail_bridge_recovery_generation_pairing_verdict"]);
+            Assert.Equal("0", summary["fallback_tail_bridge_recovery_generation_mismatch_raw_count"]);
+            Assert.Equal("0", summary["fallback_tail_bridge_recovery_generation_mismatch_distinct_count"]);
+            Assert.Equal("0", summary["fallback_tail_bridge_recovery_generation_mismatch_recovered_count"]);
+            Assert.Equal("0", summary["fallback_tail_bridge_recovery_generation_mismatch_unresolved_count"]);
             Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-256mb.manifest_present"]);
             Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-256mb.cursor_integrity_verdict"]);
             Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.current_runtime_proof"]);
             Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.fallback_receiver_state_churn_warning_count"]);
             Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.fallback_receiver_state_churn_efficiency_class"]);
+            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.fallback_tail_bridge_recovery_generation_pairing_verdict"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.fallback_tail_bridge_recovery_generation_mismatch_raw_count"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.fallback_tail_bridge_recovery_generation_mismatch_distinct_count"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.fallback_tail_bridge_recovery_generation_mismatch_recovered_count"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.fallback_tail_bridge_recovery_generation_mismatch_unresolved_count"]);
             var manifestPath = Path.Combine(runRoot, "route-acceptance-run-manifest.json");
             Assert.True(File.Exists(manifestPath), "Expected immutable route-acceptance manifest.");
             await using (var manifestStream = File.OpenRead(manifestPath))
@@ -72,7 +82,25 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                 Assert.Equal("fake", manifest.RootElement.GetProperty("executionMode").GetString());
                 Assert.Single(manifest.RootElement.GetProperty("scenarioAttempts").EnumerateArray());
             }
-            Assert.True(File.Exists(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.json")), "Expected Phase 5 JSON summary.");
+            var summaryJsonPath = Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.json");
+            Assert.True(File.Exists(summaryJsonPath), "Expected Phase 5 JSON summary.");
+            await using (var summaryJsonStream = File.OpenRead(summaryJsonPath))
+            using (var summaryJson = await JsonDocument.ParseAsync(summaryJsonStream))
+            {
+                var root = summaryJson.RootElement;
+                Assert.Equal("none", root.GetProperty("fallbackTailBridgeRecoveryGenerationPairingVerdict").GetString());
+                Assert.Equal(0, root.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchRawCount").GetInt32());
+                Assert.Equal(0, root.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchDistinctCount").GetInt32());
+                Assert.Equal(0, root.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount").GetInt32());
+                Assert.Equal(0, root.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount").GetInt32());
+
+                var run = Assert.Single(root.GetProperty("runs").EnumerateArray());
+                Assert.Equal("none", run.GetProperty("fallbackTailBridgeRecoveryGenerationPairingVerdict").GetString());
+                Assert.Equal(0, run.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchRawCount").GetInt32());
+                Assert.Equal(0, run.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchDistinctCount").GetInt32());
+                Assert.Equal(0, run.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount").GetInt32());
+                Assert.Equal(0, run.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount").GetInt32());
+            }
             Assert.True(File.Exists(Path.Combine(runRoot, "phase5-summary-writer-diagnostics.txt")), "Expected Phase 5 summary writer diagnostics.");
             Assert.True(File.Exists(Path.Combine(runRoot, "phase5-summary-writer-diagnostics.json")), "Expected Phase 5 summary writer JSON diagnostics.");
 
@@ -133,6 +161,89 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("terminal_before_fallback_switch_off", summary["regular-v4-live-activation-off-on-off-256mb.acceptance_failure_class"]);
             var summaryText = File.ReadAllText(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.txt"));
             Assert.Contains("terminal_before_fallback_switch_off", summaryText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RunFileTransferRouteAcceptance_Phase5PairingEvidencePropagatesToScenarioAndRootSummaries()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string scenario = "regular-v4-live-activation-off-on-off-256mb";
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "phase5-pairing-summary-propagation");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-pairing-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_FALLBACK_TAIL_BRIDGE_RECOVERY_GENERATION_PAIRING_SUMMARY_FIXTURE"] = "1";
+
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ScenarioName", scenario,
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"Expected fake pairing-summary propagation run to pass.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+
+            foreach (var reportName in new[]
+                     {
+                         "filetransfer-route-consistency-summary.txt",
+                         "filetransfer-operator-verdict.txt"
+                     })
+            {
+                var evidence = ReadArtifactReport(Path.Combine(runRoot, scenario), reportName);
+                Assert.Equal("fail", evidence["fallback_tail_bridge_recovery_generation_pairing_verdict"]);
+                Assert.Equal("4", evidence["fallback_tail_bridge_recovery_generation_mismatch_raw_count"]);
+                Assert.Equal("1", evidence["fallback_tail_bridge_recovery_generation_mismatch_distinct_count"]);
+                Assert.Equal("0", evidence["fallback_tail_bridge_recovery_generation_mismatch_recovered_count"]);
+                Assert.Equal("1", evidence["fallback_tail_bridge_recovery_generation_mismatch_unresolved_count"]);
+            }
+
+            var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal("fail", summary["fallback_tail_bridge_recovery_generation_pairing_verdict"]);
+            Assert.Equal("4", summary["fallback_tail_bridge_recovery_generation_mismatch_raw_count"]);
+            Assert.Equal("1", summary["fallback_tail_bridge_recovery_generation_mismatch_distinct_count"]);
+            Assert.Equal("0", summary["fallback_tail_bridge_recovery_generation_mismatch_recovered_count"]);
+            Assert.Equal("1", summary["fallback_tail_bridge_recovery_generation_mismatch_unresolved_count"]);
+            Assert.Equal("fail", summary[$"{scenario}.fallback_tail_bridge_recovery_generation_pairing_verdict"]);
+            Assert.Equal("4", summary[$"{scenario}.fallback_tail_bridge_recovery_generation_mismatch_raw_count"]);
+            Assert.Equal("1", summary[$"{scenario}.fallback_tail_bridge_recovery_generation_mismatch_distinct_count"]);
+            Assert.Equal("0", summary[$"{scenario}.fallback_tail_bridge_recovery_generation_mismatch_recovered_count"]);
+            Assert.Equal("1", summary[$"{scenario}.fallback_tail_bridge_recovery_generation_mismatch_unresolved_count"]);
+
+            using var summaryJson = JsonDocument.Parse(
+                await File.ReadAllTextAsync(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.json")));
+            var root = summaryJson.RootElement;
+            Assert.Equal("fail", root.GetProperty("fallbackTailBridgeRecoveryGenerationPairingVerdict").GetString());
+            Assert.Equal(4, root.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchRawCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchDistinctCount").GetInt32());
+            Assert.Equal(0, root.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount").GetInt32());
+
+            var run = Assert.Single(root.GetProperty("runs").EnumerateArray());
+            Assert.Equal("fail", run.GetProperty("fallbackTailBridgeRecoveryGenerationPairingVerdict").GetString());
+            Assert.Equal(4, run.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchRawCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchDistinctCount").GetInt32());
+            Assert.Equal(0, run.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount").GetInt32());
         }
         finally
         {

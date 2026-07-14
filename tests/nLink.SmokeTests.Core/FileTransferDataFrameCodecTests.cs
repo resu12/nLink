@@ -209,6 +209,33 @@ public sealed class FileTransferDataFrameCodecTests
     }
 
     [Fact]
+    [Trait("FileTransferRuntimeSuite", "FallbackTailChurn")]
+    public void V6FallbackTailYieldFrame_CanonicalSevenPartPairKeyRoundTripsWithoutSchemaChange()
+    {
+        const string canonicalPairKey =
+            "session_a|transfer_tail_yield|post_tuna_fallback_v6|6|4|9|(none)";
+        var source = CreateFallbackTailYieldFrame(
+            "fta2-fallback_tail_yield-0123456789abcdef01234567") with
+        {
+            PairKey = canonicalPairKey,
+        };
+
+        var payload = FileTransferDataFrameCodec.Serialize(source);
+        var parsed = FileTransferDataFrameCodec.TryDeserialize(payload, out var frame);
+
+        var yieldFrame = Assert.IsType<FileTransferFallbackTailYieldFrameV6>(frame);
+        Assert.True(parsed);
+        Assert.Equal(FileTransferProtocol.FallbackTailYieldFrameTypeV6, yieldFrame.Type);
+        Assert.Equal(FileTransferAuthoritySchema.Current, yieldFrame.AuthoritySchema);
+        Assert.Equal(source.AuthorityId, yieldFrame.AuthorityId);
+        Assert.Equal(source.OwnerKey, yieldFrame.OwnerKey);
+        Assert.Equal(9, yieldFrame.OwnerKey.Split('|').Length);
+        Assert.Equal(canonicalPairKey, yieldFrame.PairKey);
+        Assert.Equal(7, yieldFrame.PairKey.Split('|').Length);
+        Assert.Equal(source.BridgeRecoveryGeneration, yieldFrame.BridgeRecoveryGeneration);
+    }
+
+    [Fact]
     public void V6FallbackTailYieldFrame_LegacyPayloadParsesDiagnosticOnly()
     {
         const string authorityId = "fta2-fallback_tail_yield-0123456789abcdef01234567";

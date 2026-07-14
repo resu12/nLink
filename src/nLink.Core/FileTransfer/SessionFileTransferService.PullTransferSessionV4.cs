@@ -3358,7 +3358,7 @@ public sealed partial class SessionFileTransferService
                             received.TransportKind).ConfigureAwait(false);
                         break;
                     case FileTransferFallbackTailYieldFrameV6 yield:
-                        ApplyOutboundFallbackTailYieldProof(context, yield, completedReceiveInstall, completedReceiveRuntimeOwner, completedReceiveDataSession, completedReceiveDataSessionGeneration);
+                        ApplyOutboundFallbackTailYieldProofFromReceive(context, yield, completedReceiveInstall, completedReceiveRuntimeOwner, completedReceiveDataSession, completedReceiveDataSessionGeneration);
                         break;
                     case FileTransferPauseControlFrameV4 pauseControl:
                         LogPullDataFrameIgnored(context.TransferId, context.SessionId, pauseControl, "lifecycle_data_frame_ignored_phase2");
@@ -9598,7 +9598,7 @@ public sealed partial class SessionFileTransferService
             }
             else if (shouldEnqueueRepairs)
             {
-                EnqueueV4RepairsFromState(
+                EnqueueV4RepairsFromReceiveState(
                     context,
                     state,
                     receiveInstall,
@@ -11169,11 +11169,22 @@ public sealed partial class SessionFileTransferService
 
     private void EnqueueV4RepairsFromState(
         OutboundTransferContext context,
+        FileTransferStateFrameV4 state)
+        => EnqueueV4RepairsFromReceiveState(
+            context,
+            state,
+            requiredReceiveInstall: null,
+            requiredReceiveRuntimeOwner: null,
+            requiredReceiveDataSession: null,
+            requiredReceiveDataSessionGeneration: 0);
+
+    private void EnqueueV4RepairsFromReceiveState(
+        OutboundTransferContext context,
         FileTransferStateFrameV4 state,
-        OutboundSparsePumpInstall? requiredReceiveInstall = null,
-        RuntimeOwnerToken? requiredReceiveRuntimeOwner = null,
-        IFileTransferDataSession? requiredReceiveDataSession = null,
-        long requiredReceiveDataSessionGeneration = 0)
+        OutboundSparsePumpInstall? requiredReceiveInstall,
+        RuntimeOwnerToken? requiredReceiveRuntimeOwner,
+        IFileTransferDataSession? requiredReceiveDataSession,
+        long requiredReceiveDataSessionGeneration)
         => EnqueueAuthorizedV4RepairsFromState(
             context,
             state,

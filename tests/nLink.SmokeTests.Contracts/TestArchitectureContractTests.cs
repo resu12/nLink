@@ -371,6 +371,22 @@ public sealed class TestArchitectureContractTests
     }
 
     [Fact]
+    public void FileTransferCoreRuntimeContract_OwnsSparseWorkerAndFallbackTailRuntimeSuites()
+    {
+        var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var scriptText = File.ReadAllText(Path.Combine(repoRoot, "tools", "Test-Lanes.ps1"));
+        var runtimeCase = Regex.Match(
+            scriptText,
+            "\\\"FileTransferCoreRuntimeContract\\\"\\s*\\{(?<body>.*?)^\\s*\\}",
+            RegexOptions.Multiline | RegexOptions.Singleline);
+
+        Assert.True(runtimeCase.Success, "Expected the FileTransferCoreRuntimeContract lane case.");
+        var runtimeBody = runtimeCase.Groups["body"].Value;
+        Assert.Contains("FileTransferRuntimeSuite=SparseWorkerHandoff", runtimeBody, StringComparison.Ordinal);
+        Assert.Contains("FileTransferRuntimeSuite=FallbackTailChurn", runtimeBody, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TestsReadme_DocumentsDefaultAndOptInTestMatrix()
     {
         var repoRoot = CoreSmokeTestsBase.FindRepoRoot();

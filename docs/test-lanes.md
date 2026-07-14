@@ -49,7 +49,7 @@ powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane GuiSmoke -
 | `FileTransferCoordinatorContract` | `FileTransferCoordinatorTests` | Coordinator authority and state-machine contracts. |
 | `FileTransferInfraContract` | `NknAccelerationTransportTests` | Infra acceleration, retry, settlement, and bridge contracts. |
 | `FileTransferNknTransportContract` | `NknFileTransferTransportTests` | Fake-NKN file-transfer transport contracts. |
-| `FileTransferCoreRuntimeContract` | Session file-transfer runtime and retry-authority classes | Core lock, bridge-event, and context synchronization contracts. |
+| `FileTransferCoreRuntimeContract` | Session runtime/retry classes plus `SparseWorkerHandoff` and `FallbackTailChurn` suites | Core lock, bridge-event, sparse-worker handoff, and fallback-tail pairing contracts. |
 | `FileTransferAnalyzer` | Five retained-analyzer shards | Complete deterministic file-transfer analyzer contract sweep. |
 | `FileTransferAnalyzerAuthority` | `OpsSuite=RetainedAuthorityProof` | Retained authority and rejected-effect isolation analyzer shard. |
 | `FileTransferAnalyzerRouteLaw` | `OpsSuite=RetainedRouteLaw` | Route-law analyzer shard. |

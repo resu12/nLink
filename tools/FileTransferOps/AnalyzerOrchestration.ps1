@@ -1007,12 +1007,79 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $fallbackYieldEvents |
             Where-Object { (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'inbound' }
     ).Count
-    $fallbackPairedYield = $fallbackOutboundYieldCount -gt 0 -and $fallbackInboundYieldCount -gt 0
+    $fallbackPairedYieldGrantedCount =
+        Get-FileTransferCompactIndexEventCount -Index $Index -Name 'filetransfer_fallback_tail_paired_yield_granted'
     $fallbackTerminalProofCount = Get-FileTransferCompactIndexEventCount -Index $Index -Name 'filetransfer_fallback_tail_terminal_proof_consumed'
     $retiredStaleSendCount = Get-FileTransferCompactIndexEventCount -Index $Index -Name 'filetransfer_control_plane_send_retired_stale_generation'
     $nonCurrentSendCount = 0
     $runtimeOwnerStaleRejectedCount = Get-FileTransferCompactIndexEventCount -Index $Index -Name 'filetransfer_runtime_owner_stale_update_rejected'
     $outboundReceiveWorkerHandoffProof = Get-FileTransferCompactOutboundReceiveWorkerHandoffProof -Index $Index
+    [object[]]$fallbackTailPairingEvents = @(
+        @($routeEvents) +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_live_route_epoch_recovered') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_route_hint_authorized_publication_accepted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_runtime_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_leg_authority_started') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_leg_transport_epoch_adopted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_leg_authority_completed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_leg_authority_superseded_by_route_hint') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_leg_frozen') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_quiescent_yield_granted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_yield_proof_sent') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_yield_proof_received') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_paired_yield_granted') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_owner_generation_mismatch') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'filetransfer_fallback_tail_terminal_proof_consumed') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'transfer_terminal') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_inbound_terminal') +
+        @(Get-FileTransferCompactIndexEventsByName -Index $Index -Name 'file_transfer_outbound_terminal')
+    )
+    $fallbackTailPairedYieldValidation =
+        Get-FileTransferFallbackTailPairedYieldValidation -Events $fallbackTailPairingEvents
+    $fallbackSchema2YieldCount = @($fallbackTailPairedYieldValidation.Schema2YieldEvents).Count
+    $fallbackOwnerGenerationMismatchRawCount =
+        Get-FileTransferCompactIndexEventCount -Index $Index -Name 'filetransfer_fallback_tail_owner_generation_mismatch'
+    $fallbackTailBridgeRecoveryPairingProof =
+        Get-FileTransferFallbackTailBridgeRecoveryPairingProof -Events $fallbackTailPairingEvents
+    $validFallbackTerminalProofCount =
+        @($fallbackTailBridgeRecoveryPairingProof.ValidTerminalProofEvents).Count
+    $fallbackPairedYield = @($fallbackTailBridgeRecoveryPairingProof.LifecycleValidPairedEvents).Count -gt 0 -or
+        ($fallbackSchema2YieldCount -eq 0 -and
+            $fallbackOwnerGenerationMismatchRawCount -eq 0 -and
+            ($fallbackPairedYieldGrantedCount -gt 0 -or
+                ($fallbackOutboundYieldCount -gt 0 -and $fallbackInboundYieldCount -gt 0)))
+    $fallbackTailOwnerGenerationMismatchCount =
+        @($fallbackTailBridgeRecoveryPairingProof.OtherOwnerGenerationMismatchEvents).Count
+    $compactProofChainCandidates = New-Object System.Collections.Generic.List[object]
+    if ($outboundReceiveWorkerHandoffProof.Count -gt 0 -and
+        $null -ne $outboundReceiveWorkerHandoffProof.FirstCandidate) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'post_tuna_fallback_outbound_receive_worker_handoff_missing'
+            Event = $outboundReceiveWorkerHandoffProof.FirstCandidate
+            Reason = Get-FileTransferEventField `
+                -Event $outboundReceiveWorkerHandoffProof.FirstCandidate `
+                -Name 'reason' `
+                -Default 'runtime_generation_mismatch'
+        }) | Out-Null
+    }
+    foreach ($candidateEvent in @($fallbackTailBridgeRecoveryPairingProof.CandidateEvents)) {
+        $compactProofChainCandidates.Add([pscustomobject]@{
+            Class = 'post_tuna_fallback_paired_yield_bridge_recovery_generation_mismatch'
+            Event = $candidateEvent
+            Reason = 'bridge_recovery_generation_mismatch'
+        }) | Out-Null
+    }
+    $firstCompactProofChainFailure = @(
+        $compactProofChainCandidates.ToArray() |
+            Sort-Object @{ Expression = { [int64]$_.Event.Sequence } }, @{ Expression = { [int]$_.Event.LineNumber } }, Class |
+            Select-Object -First 1
+    )
+    $firstCompactProofChainFailure = if ($firstCompactProofChainFailure.Count -gt 0) {
+        $firstCompactProofChainFailure[0]
+    }
+    else {
+        $null
+    }
     $warningKinds = New-Object System.Collections.Generic.List[string]
     $fallbackFrontierRepairRawCount =
         (Get-FileTransferCompactIndexEventCount -Index $Index -Name 'filetransfer_v6_frontier_request_sent') +
@@ -1059,14 +1126,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         $gateStatus = 'warn'
     }
 
-    if ($outboundReceiveWorkerHandoffProof.Count -gt 0) {
+    if ($compactProofChainCandidates.Count -gt 0) {
         $verdict = 'INCONCLUSIVE'
         $gateStatus = 'fail'
         $acceptanceFailureClass = 'incomplete_proof'
     }
 
-    $recoveryFailureClass = if ($outboundReceiveWorkerHandoffProof.Count -gt 0) {
-        'post_tuna_fallback_outbound_receive_worker_handoff_missing'
+    $recoveryFailureClass = if ($null -ne $firstCompactProofChainFailure) {
+        [string]$firstCompactProofChainFailure.Class
     }
     elseif ($verdict -eq 'PASS') {
         'none'
@@ -1074,9 +1141,14 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     else {
         $acceptanceFailureClass
     }
-    $firstProofChainFailure = $outboundReceiveWorkerHandoffProof.FirstCandidate
-    $firstProofChainFailureClass = if ($null -ne $firstProofChainFailure) {
-        'post_tuna_fallback_outbound_receive_worker_handoff_missing'
+    $firstProofChainFailure = if ($null -ne $firstCompactProofChainFailure) {
+        $firstCompactProofChainFailure.Event
+    }
+    else {
+        $null
+    }
+    $firstProofChainFailureClass = if ($null -ne $firstCompactProofChainFailure) {
+        [string]$firstCompactProofChainFailure.Class
     }
     else {
         '(none)'
@@ -1087,8 +1159,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     else {
         '(none)'
     }
-    $firstProofChainFailureReason = if ($null -ne $firstProofChainFailure) {
-        Get-FileTransferEventField -Event $firstProofChainFailure -Name 'reason' -Default 'runtime_generation_mismatch'
+    $firstProofChainFailureReason = if ($null -ne $firstCompactProofChainFailure) {
+        [string]$firstCompactProofChainFailure.Reason
     }
     else {
         '(none)'
@@ -1098,8 +1170,8 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
     $firstProofChainFailureLineNumber = if ($null -ne $firstProofChainFailure) { [int]$firstProofChainFailure.LineNumber } else { 0 }
 
     $runtimeUnlockProbeCommitVerdict = if ($probeAckCount -gt 0 -and $pairedCommitCount -gt 0) { 'pass' } else { 'none' }
-    $fallbackTailQuiescenceVerdict = if ($fallbackPairedYield -or $fallbackTerminalProofCount -gt 0) { 'pass' } elseif ($fallbackYieldCount -gt 0) { 'fail' } elseif ($guiCompleted) { 'pass' } else { 'pending' }
-    $fallbackTailPairedYieldVerdict = if ($fallbackPairedYield -or $fallbackTerminalProofCount -gt 0) { 'pass' } elseif ($fallbackYieldCount -gt 0) { 'fail' } else { 'none' }
+    $fallbackTailQuiescenceVerdict = if ($fallbackPairedYield -or $validFallbackTerminalProofCount -gt 0) { 'pass' } elseif ($fallbackYieldCount -gt 0) { 'fail' } elseif ($guiCompleted) { 'pass' } else { 'pending' }
+    $fallbackTailPairedYieldVerdict = if ($fallbackPairedYield -or $validFallbackTerminalProofCount -gt 0) { 'pass' } elseif ($fallbackYieldCount -gt 0) { 'fail' } else { 'none' }
     $liveRouteProofVerdict = if ($liveRouteChanges.Count -gt 0 -or $LiveRouteProofMode -eq 'None') { 'pass' } else { 'none' }
     $selectedRouteDetailLines = New-Object System.Collections.Generic.List[string]
     $selectedRouteDetailLines.Add(("route_selected_count={0}" -f $selectedRouteChanges.Count)) | Out-Null
@@ -1141,6 +1213,12 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("first_proof_chain_failure_source_path={0}" -f $firstProofChainFailureSourcePath),
         ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
         ("post_tuna_fallback_outbound_receive_worker_handoff_missing_count={0}" -f $outboundReceiveWorkerHandoffProof.Count),
+        ("fallback_tail_owner_generation_mismatch_count={0}" -f $fallbackTailOwnerGenerationMismatchCount),
+        ("fallback_tail_bridge_recovery_generation_pairing_verdict={0}" -f $fallbackTailBridgeRecoveryPairingProof.Verdict),
+        ("fallback_tail_bridge_recovery_generation_mismatch_raw_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.RawCount),
+        ("fallback_tail_bridge_recovery_generation_mismatch_distinct_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.DistinctCount),
+        ("fallback_tail_bridge_recovery_generation_mismatch_recovered_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.RecoveredCount),
+        ("fallback_tail_bridge_recovery_generation_mismatch_unresolved_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.UnresolvedCount),
         ("runtime_unlock_precommit_probe_acked_count={0}" -f $probeAckCount),
         ("runtime_unlock_paired_commit_confirmed_count={0}" -f $pairedCommitCount),
         ("runtime_unlock_probe_commit_verdict={0}" -f $runtimeUnlockProbeCommitVerdict),
@@ -1148,6 +1226,7 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("fallback_tail_quiescent_yield_granted_count={0}" -f $fallbackYieldCount),
         ("fallback_tail_outbound_yield_granted_count={0}" -f $fallbackOutboundYieldCount),
         ("fallback_tail_inbound_yield_granted_count={0}" -f $fallbackInboundYieldCount),
+        ("fallback_tail_paired_yield_granted_count={0}" -f $fallbackPairedYieldGrantedCount),
         ("fallback_tail_paired_yield_verdict={0}" -f $fallbackTailPairedYieldVerdict),
         ("fallback_tail_terminal_proof_consumed_count={0}" -f $fallbackTerminalProofCount),
         ("control_plane_stale_send_retired_count={0}" -f $retiredStaleSendCount),
@@ -1184,6 +1263,12 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("first_proof_chain_failure_source_path={0}" -f $firstProofChainFailureSourcePath),
         ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
         ("post_tuna_fallback_outbound_receive_worker_handoff_missing_count={0}" -f $outboundReceiveWorkerHandoffProof.Count),
+        ("fallback_tail_owner_generation_mismatch_count={0}" -f $fallbackTailOwnerGenerationMismatchCount),
+        ("fallback_tail_bridge_recovery_generation_pairing_verdict={0}" -f $fallbackTailBridgeRecoveryPairingProof.Verdict),
+        ("fallback_tail_bridge_recovery_generation_mismatch_raw_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.RawCount),
+        ("fallback_tail_bridge_recovery_generation_mismatch_distinct_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.DistinctCount),
+        ("fallback_tail_bridge_recovery_generation_mismatch_recovered_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.RecoveredCount),
+        ("fallback_tail_bridge_recovery_generation_mismatch_unresolved_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.UnresolvedCount),
         'fallback_leg_authority_proof_verdict=pass',
         'clean_fallback_leg_proof_verdict=pass',
         ("fallback_tail_quiescence_verdict={0}" -f $fallbackTailQuiescenceVerdict),
@@ -1220,6 +1305,12 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("first_proof_chain_failure_source_path={0}" -f $firstProofChainFailureSourcePath),
         ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
         ("post_tuna_fallback_outbound_receive_worker_handoff_missing_count={0}" -f $outboundReceiveWorkerHandoffProof.Count),
+        ("fallback_tail_owner_generation_mismatch_count={0}" -f $fallbackTailOwnerGenerationMismatchCount),
+        ("fallback_tail_bridge_recovery_generation_pairing_verdict={0}" -f $fallbackTailBridgeRecoveryPairingProof.Verdict),
+        ("fallback_tail_bridge_recovery_generation_mismatch_raw_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.RawCount),
+        ("fallback_tail_bridge_recovery_generation_mismatch_distinct_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.DistinctCount),
+        ("fallback_tail_bridge_recovery_generation_mismatch_recovered_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.RecoveredCount),
+        ("fallback_tail_bridge_recovery_generation_mismatch_unresolved_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.UnresolvedCount),
         ("liveness_timeout_count={0}" -f $livenessTimeoutCount),
         ("liveness_timeout_before_terminal_count={0}" -f $preTerminalLivenessTimeoutCount),
         ("liveness_timeout_after_terminal_count={0}" -f $postTerminalLivenessTimeoutCount)
@@ -1242,6 +1333,12 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         ("first_proof_chain_failure_sequence={0}" -f $firstProofChainFailureSequence),
         ("first_proof_chain_failure_source_path={0}" -f $firstProofChainFailureSourcePath),
         ("first_proof_chain_failure_line_number={0}" -f $firstProofChainFailureLineNumber),
+        ("fallback_tail_owner_generation_mismatch_count={0}" -f $fallbackTailOwnerGenerationMismatchCount),
+        ("fallback_tail_bridge_recovery_generation_pairing_verdict={0}" -f $fallbackTailBridgeRecoveryPairingProof.Verdict),
+        ("fallback_tail_bridge_recovery_generation_mismatch_raw_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.RawCount),
+        ("fallback_tail_bridge_recovery_generation_mismatch_distinct_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.DistinctCount),
+        ("fallback_tail_bridge_recovery_generation_mismatch_recovered_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.RecoveredCount),
+        ("fallback_tail_bridge_recovery_generation_mismatch_unresolved_count={0}" -f $fallbackTailBridgeRecoveryPairingProof.UnresolvedCount),
         'late_frame_classification=none'
     )
     Set-Content -LiteralPath (Join-Path $ArtifactDir 'phase0-invariant-ledger.txt') -Value $invariantLines -Encoding UTF8
@@ -1270,6 +1367,12 @@ function Write-FileTransferCompactRetainedAnalysisArtifacts {
         first_proof_chain_failure_source_path = $firstProofChainFailureSourcePath
         first_proof_chain_failure_line_number = $firstProofChainFailureLineNumber
         post_tuna_fallback_outbound_receive_worker_handoff_missing_count = $outboundReceiveWorkerHandoffProof.Count
+        fallback_tail_owner_generation_mismatch_count = $fallbackTailOwnerGenerationMismatchCount
+        fallback_tail_bridge_recovery_generation_pairing_verdict = $fallbackTailBridgeRecoveryPairingProof.Verdict
+        fallback_tail_bridge_recovery_generation_mismatch_raw_count = $fallbackTailBridgeRecoveryPairingProof.RawCount
+        fallback_tail_bridge_recovery_generation_mismatch_distinct_count = $fallbackTailBridgeRecoveryPairingProof.DistinctCount
+        fallback_tail_bridge_recovery_generation_mismatch_recovered_count = $fallbackTailBridgeRecoveryPairingProof.RecoveredCount
+        fallback_tail_bridge_recovery_generation_mismatch_unresolved_count = $fallbackTailBridgeRecoveryPairingProof.UnresolvedCount
     }
     $compactDto | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-retained-compact-summary.json') -Encoding UTF8
 

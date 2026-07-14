@@ -383,6 +383,7 @@ internal readonly record struct FallbackTailYieldDecision(
     int CurrentRuntimeGeneration,
     int CurrentTerminalGeneration,
     int CurrentLegGeneration,
+    int CurrentBridgeRecoveryGeneration,
     FallbackCheckpointLease? CheckpointLease,
     RuntimeUnlockFallbackSurvivalState FallbackSurvivalState)
 {
@@ -3331,7 +3332,6 @@ internal static class FileTransferCoordinator
                 state.RouteSelection.TelemetryToken,
                 state.RouteSelection.ProtocolVersion,
                 state.CurrentLiveRouteEpoch?.EpochId ?? leg.LiveRouteEpochId,
-                leg.BridgeRecoveryGeneration,
                 leg.TransportEpochId,
                 checkpointSnapshot);
 
@@ -3349,6 +3349,7 @@ internal static class FileTransferCoordinator
             state.CurrentRuntimeOwner?.RuntimeGeneration ?? state.LastRuntimeOwnerGeneration,
             state.TerminalGeneration,
             leg?.Generation ?? 0,
+            leg?.BridgeRecoveryGeneration ?? 0,
             state.CurrentFallbackCheckpointLease,
             NormalizeRuntimeUnlockFallbackSurvivalState(state))
         {
@@ -3394,7 +3395,8 @@ internal static class FileTransferCoordinator
             decision.CurrentLiveRouteEpoch != (state.CurrentLiveRouteEpoch?.EpochId ?? 0) ||
             decision.CurrentRuntimeGeneration != (state.CurrentRuntimeOwner?.RuntimeGeneration ?? 0) ||
             decision.CurrentTerminalGeneration != state.TerminalGeneration ||
-            decision.CurrentLegGeneration != leg.Generation)
+            decision.CurrentLegGeneration != leg.Generation ||
+            decision.CurrentBridgeRecoveryGeneration != leg.BridgeRecoveryGeneration)
         {
             rejectionReason = "fallback_tail_yield_authority_tuple_mismatch";
             return false;
@@ -3437,7 +3439,6 @@ internal static class FileTransferCoordinator
         string routeToken,
         int protocolVersion,
         int liveRouteEpoch,
-        int bridgeRecoveryGeneration,
         long transportEpoch,
         string? checkpointRequestIdSnapshot)
         => string.Join(
@@ -3447,7 +3448,6 @@ internal static class FileTransferCoordinator
             routeToken,
             protocolVersion.ToString(System.Globalization.CultureInfo.InvariantCulture),
             liveRouteEpoch.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            bridgeRecoveryGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture),
             transportEpoch.ToString(System.Globalization.CultureInfo.InvariantCulture),
             string.IsNullOrWhiteSpace(checkpointRequestIdSnapshot) ? "(none)" : checkpointRequestIdSnapshot);
 

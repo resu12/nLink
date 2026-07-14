@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using NLink.App.Views;
 using NLink.Core.Configuration;
@@ -118,6 +119,22 @@ public sealed class FileTransferPhase5PreflightTests : FileTransferAcceptancePha
             Assert.Equal("0", summary["current_runtime_proof"]);
             Assert.Equal("not_started", summary["transfer_evidence_status"]);
             Assert.Equal("incomplete_proof", summary["runtime_correctness_verdict"]);
+            Assert.Equal("none", summary["fallback_tail_bridge_recovery_generation_pairing_verdict"]);
+            Assert.Equal("0", summary["fallback_tail_bridge_recovery_generation_mismatch_raw_count"]);
+            Assert.Equal("0", summary["fallback_tail_bridge_recovery_generation_mismatch_distinct_count"]);
+            Assert.Equal("0", summary["fallback_tail_bridge_recovery_generation_mismatch_recovered_count"]);
+            Assert.Equal("0", summary["fallback_tail_bridge_recovery_generation_mismatch_unresolved_count"]);
+
+            using (var summaryJson = JsonDocument.Parse(
+                       await File.ReadAllTextAsync(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.json"))))
+            {
+                var root = summaryJson.RootElement;
+                Assert.Equal("none", root.GetProperty("fallbackTailBridgeRecoveryGenerationPairingVerdict").GetString());
+                Assert.Equal(0, root.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchRawCount").GetInt32());
+                Assert.Equal(0, root.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchDistinctCount").GetInt32());
+                Assert.Equal(0, root.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount").GetInt32());
+                Assert.Equal(0, root.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount").GetInt32());
+            }
             Assert.True(File.Exists(Path.Combine(runRoot, "route-acceptance-run-manifest.json")), "Expected preflight-only immutable evidence manifest.");
             Assert.Contains("phase5-preflight-bridge-ready: nkn_bridge_bootstrap_not_ready", summaryText, StringComparison.Ordinal);
             Assert.False(Directory.Exists(Path.Combine(runRoot, "regular-nkn-v4-64mb")), "Preflight failure should not consume the Phase 5 scenario matrix.");

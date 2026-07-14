@@ -9300,7 +9300,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         string reason)
         => LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_tail_quiescent_yield_granted; direction={direction.ToString().ToLowerInvariant()}; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(decision.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(decision.PredecessorAuthorityId?.ToString() ?? "(none)")}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; leg_id={FormatProtocolLogValue(leg.LegId)}; leg_generation={leg.Generation}; route={leg.RouteSelection.TelemetryToken}; protocol_version={leg.ProtocolVersion}; live_route_epoch={leg.LiveRouteEpochId}; runtime_generation={decision.CurrentRuntimeGeneration}; terminal_generation={decision.CurrentTerminalGeneration}; transport_epoch={leg.TransportEpochId}; bridge_recovery_generation={leg.BridgeRecoveryGeneration}; checkpoint_request_id={FormatProtocolLogValue(decision.CheckpointRequestIdSnapshot)}; owner_key={FormatProtocolLogValue(decision.OwnerKey)}; pair_key={FormatProtocolLogValue(decision.PairKey)}; yield_generation={decision.YieldGeneration}; committed_chunk={committedChunk}; highest_observed_chunk={highestObservedChunk}; state={FormatProtocolLogValue(FileTransferCoordinator.FormatLegState(leg.State))}; can_send_data={(leg.CanSendData ? 1 : 0)}; reason={FormatProtocolLogValue(reason)}");
+            $"event=filetransfer_fallback_tail_quiescent_yield_granted; direction={direction.ToString().ToLowerInvariant()}; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(decision.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(decision.PredecessorAuthorityId?.ToString() ?? "(none)")}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; leg_id={FormatProtocolLogValue(leg.LegId)}; leg_generation={leg.Generation}; route={leg.RouteSelection.TelemetryToken}; protocol_version={leg.ProtocolVersion}; live_route_epoch={leg.LiveRouteEpochId}; runtime_generation={decision.CurrentRuntimeGeneration}; terminal_generation={decision.CurrentTerminalGeneration}; transport_epoch={leg.TransportEpochId}; bridge_recovery_generation={leg.BridgeRecoveryGeneration}; checkpoint_request_id={FormatProtocolLogValue(decision.CheckpointRequestIdSnapshot)}; owner_key={FormatProtocolLogValue(decision.OwnerKey)}; pair_key={FormatProtocolLogValue(decision.PairKey)}; raw_pair_key={FormatProtocolLogValue(decision.PairKey)}; canonical_pair_key={FormatProtocolLogValue(NormalizeFallbackTailYieldPairKey(decision.PairKey, decision.OwnerKey))}; pair_key_format={FormatProtocolLogValue(GetFallbackTailYieldPairKeyFormat(decision.PairKey, decision.OwnerKey))}; yield_generation={decision.YieldGeneration}; committed_chunk={committedChunk}; highest_observed_chunk={highestObservedChunk}; state={FormatProtocolLogValue(FileTransferCoordinator.FormatLegState(leg.State))}; can_send_data={(leg.CanSendData ? 1 : 0)}; reason={FormatProtocolLogValue(reason)}");
 
     private static void LogFileTransferFallbackTailYieldProofSent(
         FileTransferDirection direction,
@@ -9313,7 +9313,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         string reason)
         => LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_tail_yield_proof_sent; direction={direction.ToString().ToLowerInvariant()}; authority_schema={frame?.AuthoritySchema ?? 0}; authority_id={FormatProtocolLogValue(frame?.AuthorityId ?? "(none)")}; predecessor_authority_id={FormatProtocolLogValue(frame?.PredecessorAuthorityId ?? "(none)")}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; leg_id={FormatProtocolLogValue(leg?.LegId ?? "(none)")}; leg_generation={leg?.Generation ?? frame?.FallbackLegGeneration ?? 0}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? FileTransferRouteResolver.PostTunaFallbackV6Token)}; protocol_version={leg?.ProtocolVersion ?? FileTransferProtocol.ProtocolVersionV6}; live_route_epoch={leg?.LiveRouteEpochId ?? frame?.LiveRouteEpoch ?? 0}; runtime_generation={decision?.CurrentRuntimeGeneration ?? 0}; terminal_generation={decision?.CurrentTerminalGeneration ?? 0}; transport_epoch={frame?.TransportEpoch ?? leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? frame?.BridgeRecoveryGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(decision?.CheckpointRequestIdSnapshot ?? leg?.CheckpointRequestId ?? frame?.RepairRequestId ?? "(none)")}; owner_key={FormatProtocolLogValue(frame?.OwnerKey ?? "(none)")}; pair_key={FormatProtocolLogValue(frame?.PairKey ?? "(none)")}; yield_generation={frame?.YieldGeneration ?? 0}; committed_chunk={frame?.CommittedChunkIndex ?? 0}; highest_observed_chunk={frame?.HighestObservedChunkIndex ?? -1}; peer_visible_any={(result?.PeerVisibleAny == true ? 1 : 0)}; accepted_any={(result?.AcceptedAny == true ? 1 : 0)}; reason={FormatProtocolLogValue(reason)}");
+            $"event=filetransfer_fallback_tail_yield_proof_sent; direction={direction.ToString().ToLowerInvariant()}; authority_schema={frame?.AuthoritySchema ?? 0}; authority_id={FormatProtocolLogValue(frame?.AuthorityId ?? "(none)")}; predecessor_authority_id={FormatProtocolLogValue(frame?.PredecessorAuthorityId ?? "(none)")}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; leg_id={FormatProtocolLogValue(leg?.LegId ?? "(none)")}; leg_generation={leg?.Generation ?? frame?.FallbackLegGeneration ?? 0}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? FileTransferRouteResolver.PostTunaFallbackV6Token)}; protocol_version={leg?.ProtocolVersion ?? FileTransferProtocol.ProtocolVersionV6}; live_route_epoch={leg?.LiveRouteEpochId ?? frame?.LiveRouteEpoch ?? 0}; runtime_generation={decision?.CurrentRuntimeGeneration ?? 0}; terminal_generation={decision?.CurrentTerminalGeneration ?? 0}; transport_epoch={frame?.TransportEpoch ?? leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? frame?.BridgeRecoveryGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(decision?.CheckpointRequestIdSnapshot ?? leg?.CheckpointRequestId ?? frame?.RepairRequestId ?? "(none)")}; owner_key={FormatProtocolLogValue(frame?.OwnerKey ?? "(none)")}; pair_key={FormatProtocolLogValue(frame?.PairKey ?? "(none)")}; raw_pair_key={FormatProtocolLogValue(frame?.PairKey ?? "(none)")}; canonical_pair_key={FormatProtocolLogValue(NormalizeFallbackTailYieldPairKey(frame?.PairKey, frame?.OwnerKey))}; pair_key_format={FormatProtocolLogValue(GetFallbackTailYieldPairKeyFormat(frame?.PairKey, frame?.OwnerKey))}; yield_generation={frame?.YieldGeneration ?? 0}; committed_chunk={frame?.CommittedChunkIndex ?? 0}; highest_observed_chunk={frame?.HighestObservedChunkIndex ?? -1}; peer_visible_any={(result?.PeerVisibleAny == true ? 1 : 0)}; accepted_any={(result?.AcceptedAny == true ? 1 : 0)}; reason={FormatProtocolLogValue(reason)}");
 
     private static void LogFileTransferFallbackTailYieldProofReceived(
         FileTransferDirection direction,
@@ -9323,7 +9323,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         FileTransferFallbackTailYieldFrameV6 frame)
         => LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_tail_yield_proof_received; direction={direction.ToString().ToLowerInvariant()}; authority_schema={frame.AuthoritySchema}; authority_id={FormatProtocolLogValue(frame.AuthorityId)}; predecessor_authority_id={FormatProtocolLogValue(frame.PredecessorAuthorityId ?? "(none)")}; peer_direction={FormatProtocolLogValue(frame.Direction)}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; leg_id={FormatProtocolLogValue(leg?.LegId ?? "(none)")}; leg_generation={leg?.Generation ?? 0}; peer_leg_generation={frame.FallbackLegGeneration}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? FileTransferRouteResolver.PostTunaFallbackV6Token)}; protocol_version={leg?.ProtocolVersion ?? FileTransferProtocol.ProtocolVersionV6}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(leg?.CheckpointRequestId ?? "(none)")}; owner_key={FormatProtocolLogValue(frame.OwnerKey)}; pair_key={FormatProtocolLogValue(frame.PairKey)}; yield_generation={frame.YieldGeneration}; committed_chunk={frame.CommittedChunkIndex}; highest_observed_chunk={frame.HighestObservedChunkIndex}");
+            $"event=filetransfer_fallback_tail_yield_proof_received; direction={direction.ToString().ToLowerInvariant()}; authority_schema={frame.AuthoritySchema}; authority_id={FormatProtocolLogValue(frame.AuthorityId)}; predecessor_authority_id={FormatProtocolLogValue(frame.PredecessorAuthorityId ?? "(none)")}; peer_direction={FormatProtocolLogValue(frame.Direction)}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; leg_id={FormatProtocolLogValue(leg?.LegId ?? "(none)")}; leg_generation={leg?.Generation ?? 0}; peer_leg_generation={frame.FallbackLegGeneration}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? FileTransferRouteResolver.PostTunaFallbackV6Token)}; protocol_version={leg?.ProtocolVersion ?? FileTransferProtocol.ProtocolVersionV6}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; peer_live_route_epoch={frame.LiveRouteEpoch}; transport_epoch={leg?.TransportEpochId ?? 0}; peer_transport_epoch={frame.TransportEpoch}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; peer_bridge_recovery_generation={frame.BridgeRecoveryGeneration}; checkpoint_request_id={FormatProtocolLogValue(leg?.CheckpointRequestId ?? "(none)")}; peer_checkpoint_request_id={FormatProtocolLogValue(frame.RepairRequestId ?? "(none)")}; owner_key={FormatProtocolLogValue(frame.OwnerKey)}; pair_key={FormatProtocolLogValue(frame.PairKey)}; raw_pair_key={FormatProtocolLogValue(frame.PairKey)}; canonical_pair_key={FormatProtocolLogValue(NormalizeFallbackTailYieldPairKey(frame.PairKey, frame.OwnerKey))}; pair_key_format={FormatProtocolLogValue(GetFallbackTailYieldPairKeyFormat(frame.PairKey, frame.OwnerKey))}; yield_generation={frame.YieldGeneration}; committed_chunk={frame.CommittedChunkIndex}; highest_observed_chunk={frame.HighestObservedChunkIndex}");
 
     private static void LogFileTransferFallbackTailYieldLocalAuthorityRejected(
         FileTransferDirection direction,
@@ -9335,7 +9335,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         string source)
         => LocalOperationalLog.Warn(
             "FileTransferService",
-            $"event=filetransfer_fallback_tail_yield_local_authority_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(decision.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(decision.PredecessorAuthorityId?.ToString() ?? "(none)")}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? "(none)")}; protocol_version={leg?.ProtocolVersion ?? 0}; live_route_epoch={decision.CurrentLiveRouteEpoch}; runtime_generation={decision.CurrentRuntimeGeneration}; terminal_generation={decision.CurrentTerminalGeneration}; leg_generation={decision.CurrentLegGeneration}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(decision.CheckpointRequestIdSnapshot)}; owner_key={FormatProtocolLogValue(decision.OwnerKey)}; pair_key={FormatProtocolLogValue(decision.PairKey)}; yield_generation={decision.YieldGeneration}; decision_reason={FormatProtocolLogValue(decisionReason)}; source={FormatProtocolLogValue(source)}");
+            $"event=filetransfer_fallback_tail_yield_local_authority_rejected; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(decision.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(decision.PredecessorAuthorityId?.ToString() ?? "(none)")}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? "(none)")}; protocol_version={leg?.ProtocolVersion ?? 0}; live_route_epoch={decision.CurrentLiveRouteEpoch}; runtime_generation={decision.CurrentRuntimeGeneration}; terminal_generation={decision.CurrentTerminalGeneration}; leg_generation={decision.CurrentLegGeneration}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(decision.CheckpointRequestIdSnapshot)}; owner_key={FormatProtocolLogValue(decision.OwnerKey)}; pair_key={FormatProtocolLogValue(decision.PairKey)}; raw_pair_key={FormatProtocolLogValue(decision.PairKey)}; canonical_pair_key={FormatProtocolLogValue(NormalizeFallbackTailYieldPairKey(decision.PairKey, decision.OwnerKey))}; pair_key_format={FormatProtocolLogValue(GetFallbackTailYieldPairKeyFormat(decision.PairKey, decision.OwnerKey))}; yield_generation={decision.YieldGeneration}; decision_reason={FormatProtocolLogValue(decisionReason)}; source={FormatProtocolLogValue(source)}");
 
     private static void LogFileTransferFallbackTailYieldProofDuplicateIgnored(
         FileTransferDirection direction,
@@ -9345,7 +9345,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         FileTransferFallbackTailYieldFrameV6 frame)
         => LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_tail_yield_proof_duplicate_ignored; authority_schema={frame.AuthoritySchema}; authority_id={FormatProtocolLogValue(frame.AuthorityId)}; predecessor_authority_id={FormatProtocolLogValue(frame.PredecessorAuthorityId ?? "(none)")}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? "(none)")}; protocol_version={leg?.ProtocolVersion ?? 0}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; leg_generation={leg?.Generation ?? 0}; transport_epoch={frame.TransportEpoch}; bridge_recovery_generation={frame.BridgeRecoveryGeneration}; checkpoint_request_id={FormatProtocolLogValue(frame.RepairRequestId ?? "(none)")}; owner_key={FormatProtocolLogValue(frame.OwnerKey)}; pair_key={FormatProtocolLogValue(frame.PairKey)}; yield_generation={frame.YieldGeneration}; decision_reason=duplicate_authority_tuple");
+            $"event=filetransfer_fallback_tail_yield_proof_duplicate_ignored; authority_schema={frame.AuthoritySchema}; authority_id={FormatProtocolLogValue(frame.AuthorityId)}; predecessor_authority_id={FormatProtocolLogValue(frame.PredecessorAuthorityId ?? "(none)")}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? "(none)")}; protocol_version={leg?.ProtocolVersion ?? 0}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; leg_generation={leg?.Generation ?? 0}; transport_epoch={frame.TransportEpoch}; bridge_recovery_generation={frame.BridgeRecoveryGeneration}; peer_bridge_recovery_generation={frame.BridgeRecoveryGeneration}; checkpoint_request_id={FormatProtocolLogValue(frame.RepairRequestId ?? "(none)")}; owner_key={FormatProtocolLogValue(frame.OwnerKey)}; pair_key={FormatProtocolLogValue(frame.PairKey)}; raw_pair_key={FormatProtocolLogValue(frame.PairKey)}; canonical_pair_key={FormatProtocolLogValue(NormalizeFallbackTailYieldPairKey(frame.PairKey, frame.OwnerKey))}; pair_key_format={FormatProtocolLogValue(GetFallbackTailYieldPairKeyFormat(frame.PairKey, frame.OwnerKey))}; yield_generation={frame.YieldGeneration}; decision_reason=duplicate_authority_tuple");
 
     private static void LogFileTransferFallbackTailPairedYieldGranted(
         FileTransferDirection direction,
@@ -9356,13 +9356,14 @@ public sealed partial class SessionFileTransferService : IDisposable
         string? peerAuthorityId,
         string? peerPredecessorAuthorityId,
         long peerYieldGeneration,
+        FallbackTailYieldPeerProofSnapshot? peerProof,
         string ownerKey,
         string pairKey,
         long yieldGeneration,
         string reason)
         => LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_fallback_tail_paired_yield_granted; direction={direction.ToString().ToLowerInvariant()}; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(localDecision.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(localDecision.PredecessorAuthorityId?.ToString() ?? "(none)")}; peer_authority_id={FormatProtocolLogValue(peerAuthorityId ?? "(none)")}; peer_predecessor_authority_id={FormatProtocolLogValue(peerPredecessorAuthorityId ?? "(none)")}; peer_yield_generation={peerYieldGeneration}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; leg_id={FormatProtocolLogValue(leg?.LegId ?? "(none)")}; leg_generation={leg?.Generation ?? 0}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? FileTransferRouteResolver.PostTunaFallbackV6Token)}; protocol_version={leg?.ProtocolVersion ?? FileTransferProtocol.ProtocolVersionV6}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; runtime_generation={localDecision.CurrentRuntimeGeneration}; terminal_generation={localDecision.CurrentTerminalGeneration}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(localDecision.CheckpointRequestIdSnapshot)}; owner_key={FormatProtocolLogValue(ownerKey)}; pair_key={FormatProtocolLogValue(pairKey)}; yield_generation={yieldGeneration}; reason={FormatProtocolLogValue(reason)}");
+            $"event=filetransfer_fallback_tail_paired_yield_granted; direction={direction.ToString().ToLowerInvariant()}; authority_schema={FileTransferAuthoritySchema.Current}; authority_id={FormatProtocolLogValue(localDecision.AuthorityId.ToString())}; predecessor_authority_id={FormatProtocolLogValue(localDecision.PredecessorAuthorityId?.ToString() ?? "(none)")}; peer_authority_id={FormatProtocolLogValue(peerAuthorityId ?? "(none)")}; peer_predecessor_authority_id={FormatProtocolLogValue(peerPredecessorAuthorityId ?? "(none)")}; peer_yield_generation={peerYieldGeneration}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; leg_id={FormatProtocolLogValue(leg?.LegId ?? "(none)")}; leg_generation={leg?.Generation ?? 0}; peer_leg_generation={peerProof?.FallbackLegGeneration ?? 0}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? FileTransferRouteResolver.PostTunaFallbackV6Token)}; protocol_version={leg?.ProtocolVersion ?? FileTransferProtocol.ProtocolVersionV6}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; peer_live_route_epoch={peerProof?.LiveRouteEpoch ?? 0}; runtime_generation={localDecision.CurrentRuntimeGeneration}; terminal_generation={localDecision.CurrentTerminalGeneration}; transport_epoch={leg?.TransportEpochId ?? 0}; peer_transport_epoch={peerProof?.TransportEpoch ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; peer_bridge_recovery_generation={peerProof?.BridgeRecoveryGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(localDecision.CheckpointRequestIdSnapshot)}; peer_checkpoint_request_id={FormatProtocolLogValue(peerProof?.CheckpointRequestIdSnapshot ?? "(none)")}; owner_key={FormatProtocolLogValue(ownerKey)}; pair_key={FormatProtocolLogValue(pairKey)}; raw_pair_key={FormatProtocolLogValue(pairKey)}; canonical_pair_key={FormatProtocolLogValue(NormalizeFallbackTailYieldPairKey(pairKey, ownerKey))}; pair_key_format={FormatProtocolLogValue(GetFallbackTailYieldPairKeyFormat(pairKey, ownerKey))}; peer_owner_key={FormatProtocolLogValue(peerProof?.OwnerKey ?? "(none)")}; peer_raw_pair_key={FormatProtocolLogValue(peerProof?.RawPairKey ?? "(none)")}; peer_canonical_pair_key={FormatProtocolLogValue(peerProof?.PairKey ?? "(none)")}; peer_pair_key_format={FormatProtocolLogValue(FormatFallbackTailYieldPairKeyFormat(peerProof?.PairKeyFormat ?? FallbackTailYieldPairKeyFormat.Unknown))}; yield_generation={yieldGeneration}; reason={FormatProtocolLogValue(reason)}");
 
     private static void LogFileTransferFallbackTailYieldOwnerSnapshot(
         FileTransferDirection direction,
@@ -9389,14 +9390,21 @@ public sealed partial class SessionFileTransferService : IDisposable
         string canonicalOwnerKey,
         string canonicalPairKey,
         string checkpointRequestIdSnapshot,
+        string? localAuthorityId,
+        string? localPredecessorAuthorityId,
+        string? peerAuthorityId,
+        string? peerPredecessorAuthorityId,
+        long peerBridgeRecoveryGeneration,
         string? localOwnerKey,
         string? peerOwnerKey,
+        string? localRawPairKey,
+        string? peerRawPairKey,
         string? localPairKey,
         string? peerPairKey,
         string decisionReason)
         => LocalOperationalLog.Warn(
             "FileTransferService",
-            $"event=filetransfer_fallback_tail_paired_yield_rejected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; leg_id={FormatProtocolLogValue(leg?.LegId ?? "(none)")}; leg_generation={leg?.Generation ?? 0}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? FileTransferRouteResolver.PostTunaFallbackV6Token)}; protocol_version={leg?.ProtocolVersion ?? FileTransferProtocol.ProtocolVersionV6}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(leg?.CheckpointRequestId ?? "(none)")}; checkpoint_request_id_snapshot={FormatProtocolLogValue(checkpointRequestIdSnapshot)}; canonical_owner_key={FormatProtocolLogValue(canonicalOwnerKey)}; canonical_pair_key={FormatProtocolLogValue(canonicalPairKey)}; local_owner_key={FormatProtocolLogValue(localOwnerKey ?? "(none)")}; peer_owner_key={FormatProtocolLogValue(peerOwnerKey ?? "(none)")}; local_pair_key={FormatProtocolLogValue(localPairKey ?? "(none)")}; peer_pair_key={FormatProtocolLogValue(peerPairKey ?? "(none)")}; decision_reason={FormatProtocolLogValue(decisionReason)}");
+            $"event=filetransfer_fallback_tail_paired_yield_rejected; authority_schema={FileTransferAuthoritySchema.Current}; local_authority_id={FormatProtocolLogValue(localAuthorityId ?? "(none)")}; local_predecessor_authority_id={FormatProtocolLogValue(localPredecessorAuthorityId ?? "(none)")}; peer_authority_id={FormatProtocolLogValue(peerAuthorityId ?? "(none)")}; peer_predecessor_authority_id={FormatProtocolLogValue(peerPredecessorAuthorityId ?? "(none)")}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; leg_id={FormatProtocolLogValue(leg?.LegId ?? "(none)")}; leg_generation={leg?.Generation ?? 0}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? FileTransferRouteResolver.PostTunaFallbackV6Token)}; protocol_version={leg?.ProtocolVersion ?? FileTransferProtocol.ProtocolVersionV6}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; peer_bridge_recovery_generation={peerBridgeRecoveryGeneration}; checkpoint_request_id={FormatProtocolLogValue(leg?.CheckpointRequestId ?? "(none)")}; checkpoint_request_id_snapshot={FormatProtocolLogValue(checkpointRequestIdSnapshot)}; canonical_owner_key={FormatProtocolLogValue(canonicalOwnerKey)}; canonical_pair_key={FormatProtocolLogValue(canonicalPairKey)}; local_owner_key={FormatProtocolLogValue(localOwnerKey ?? "(none)")}; peer_owner_key={FormatProtocolLogValue(peerOwnerKey ?? "(none)")}; local_pair_key={FormatProtocolLogValue(localPairKey ?? "(none)")}; peer_pair_key={FormatProtocolLogValue(peerPairKey ?? "(none)")}; local_raw_pair_key={FormatProtocolLogValue(localRawPairKey ?? "(none)")}; local_canonical_pair_key={FormatProtocolLogValue(NormalizeFallbackTailYieldPairKey(localRawPairKey, localOwnerKey))}; local_pair_key_format={FormatProtocolLogValue(GetFallbackTailYieldPairKeyFormat(localRawPairKey, localOwnerKey))}; peer_raw_pair_key={FormatProtocolLogValue(peerRawPairKey ?? "(none)")}; peer_canonical_pair_key={FormatProtocolLogValue(NormalizeFallbackTailYieldPairKey(peerRawPairKey, peerOwnerKey))}; peer_pair_key_format={FormatProtocolLogValue(GetFallbackTailYieldPairKeyFormat(peerRawPairKey, peerOwnerKey))}; decision_reason={FormatProtocolLogValue(decisionReason)}");
 
     private static void LogFileTransferFallbackTailLocalYieldBlocked(
         FileTransferDirection direction,
@@ -9423,10 +9431,12 @@ public sealed partial class SessionFileTransferService : IDisposable
         FileTransferLeg leg,
         FileTransferFallbackTailYieldFrameV6 frame,
         string expectedOwnerKey,
-        string expectedPairKey)
+        string expectedPairKey,
+        string mismatchKind,
+        string decisionReason)
         => LocalOperationalLog.Warn(
             "FileTransferService",
-            $"event=filetransfer_fallback_tail_owner_generation_mismatch; direction={direction.ToString().ToLowerInvariant()}; peer_direction={FormatProtocolLogValue(frame.Direction)}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; leg_id={FormatProtocolLogValue(leg.LegId)}; leg_generation={leg.Generation}; route={leg.RouteSelection.TelemetryToken}; protocol_version={leg.ProtocolVersion}; live_route_epoch={leg.LiveRouteEpochId}; transport_epoch={leg.TransportEpochId}; bridge_recovery_generation={leg.BridgeRecoveryGeneration}; checkpoint_request_id={FormatProtocolLogValue(leg.CheckpointRequestId ?? "(none)")}; peer_live_route_epoch={frame.LiveRouteEpoch}; peer_leg_generation={frame.FallbackLegGeneration}; peer_transport_epoch={frame.TransportEpoch}; peer_bridge_recovery_generation={frame.BridgeRecoveryGeneration}; peer_checkpoint_request_id={FormatProtocolLogValue(frame.RepairRequestId ?? "(none)")}; expected_owner_key={FormatProtocolLogValue(expectedOwnerKey)}; expected_pair_key={FormatProtocolLogValue(expectedPairKey)}; peer_owner_key={FormatProtocolLogValue(frame.OwnerKey)}; peer_pair_key={FormatProtocolLogValue(frame.PairKey)}; yield_generation={frame.YieldGeneration}");
+            $"event=filetransfer_fallback_tail_owner_generation_mismatch; authority_schema={frame.AuthoritySchema}; authority_id={FormatProtocolLogValue(frame.AuthorityId)}; predecessor_authority_id={FormatProtocolLogValue(frame.PredecessorAuthorityId ?? "(none)")}; direction={direction.ToString().ToLowerInvariant()}; peer_direction={FormatProtocolLogValue(frame.Direction)}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; leg_id={FormatProtocolLogValue(leg.LegId)}; leg_generation={leg.Generation}; route={leg.RouteSelection.TelemetryToken}; protocol_version={leg.ProtocolVersion}; live_route_epoch={leg.LiveRouteEpochId}; transport_epoch={leg.TransportEpochId}; bridge_recovery_generation={leg.BridgeRecoveryGeneration}; checkpoint_request_id={FormatProtocolLogValue(leg.CheckpointRequestId ?? "(none)")}; peer_live_route_epoch={frame.LiveRouteEpoch}; peer_leg_generation={frame.FallbackLegGeneration}; peer_transport_epoch={frame.TransportEpoch}; peer_bridge_recovery_generation={frame.BridgeRecoveryGeneration}; peer_checkpoint_request_id={FormatProtocolLogValue(frame.RepairRequestId ?? "(none)")}; expected_owner_key={FormatProtocolLogValue(expectedOwnerKey)}; expected_pair_key={FormatProtocolLogValue(expectedPairKey)}; peer_owner_key={FormatProtocolLogValue(frame.OwnerKey)}; peer_pair_key={FormatProtocolLogValue(frame.PairKey)}; peer_raw_pair_key={FormatProtocolLogValue(frame.PairKey)}; peer_canonical_pair_key={FormatProtocolLogValue(NormalizeFallbackTailYieldPairKey(frame.PairKey, frame.OwnerKey))}; peer_pair_key_format={FormatProtocolLogValue(GetFallbackTailYieldPairKeyFormat(frame.PairKey, frame.OwnerKey))}; yield_generation={frame.YieldGeneration}; mismatch_kind={FormatProtocolLogValue(mismatchKind)}; decision_reason={FormatProtocolLogValue(decisionReason)}");
 
     private static void LogFileTransferFallbackTailYieldProofStaleIgnored(
         FileTransferDirection direction,
@@ -9453,7 +9463,7 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         LocalOperationalLog.Warn(
             "FileTransferService",
-            $"event=filetransfer_fallback_tail_yield_proof_stale_ignored; authority_schema={frame?.AuthoritySchema ?? 0}; authority_id={FormatProtocolLogValue(frame?.AuthorityId ?? "(none)")}; predecessor_authority_id={FormatProtocolLogValue(frame?.PredecessorAuthorityId ?? "(none)")}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; leg_id={FormatProtocolLogValue(leg?.LegId ?? "(none)")}; leg_generation={leg?.Generation ?? 0}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? FileTransferRouteResolver.PostTunaFallbackV6Token)}; protocol_version={leg?.ProtocolVersion ?? FileTransferProtocol.ProtocolVersionV6}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(leg?.CheckpointRequestId ?? "(none)")}; peer_owner_key={FormatProtocolLogValue(frame?.OwnerKey ?? "(none)")}; peer_pair_key={FormatProtocolLogValue(frame?.PairKey ?? "(none)")}; yield_generation={frame?.YieldGeneration ?? 0}; reason={FormatProtocolLogValue(reason)}");
+            $"event=filetransfer_fallback_tail_yield_proof_stale_ignored; authority_schema={frame?.AuthoritySchema ?? 0}; authority_id={FormatProtocolLogValue(frame?.AuthorityId ?? "(none)")}; predecessor_authority_id={FormatProtocolLogValue(frame?.PredecessorAuthorityId ?? "(none)")}; direction={direction.ToString().ToLowerInvariant()}; transfer_id={FormatProtocolLogValue(transferId)}; session_id={FormatProtocolLogValue(sessionId)}; leg_id={FormatProtocolLogValue(leg?.LegId ?? "(none)")}; leg_generation={leg?.Generation ?? 0}; route={FormatProtocolLogValue(leg?.RouteSelection.TelemetryToken ?? FileTransferRouteResolver.PostTunaFallbackV6Token)}; protocol_version={leg?.ProtocolVersion ?? FileTransferProtocol.ProtocolVersionV6}; live_route_epoch={leg?.LiveRouteEpochId ?? 0}; transport_epoch={leg?.TransportEpochId ?? 0}; bridge_recovery_generation={leg?.BridgeRecoveryGeneration ?? 0}; peer_bridge_recovery_generation={frame?.BridgeRecoveryGeneration ?? 0}; checkpoint_request_id={FormatProtocolLogValue(leg?.CheckpointRequestId ?? "(none)")}; peer_owner_key={FormatProtocolLogValue(frame?.OwnerKey ?? "(none)")}; peer_pair_key={FormatProtocolLogValue(frame?.PairKey ?? "(none)")}; raw_pair_key={FormatProtocolLogValue(frame?.PairKey ?? "(none)")}; canonical_pair_key={FormatProtocolLogValue(NormalizeFallbackTailYieldPairKey(frame?.PairKey, frame?.OwnerKey))}; pair_key_format={FormatProtocolLogValue(GetFallbackTailYieldPairKeyFormat(frame?.PairKey, frame?.OwnerKey))}; yield_generation={frame?.YieldGeneration ?? 0}; reason={FormatProtocolLogValue(reason)}");
     }
 
     private static void LogFileTransferFallbackTailTerminalProofConsumed(
@@ -9564,6 +9574,35 @@ public sealed partial class SessionFileTransferService : IDisposable
         string PairKey,
         string CheckpointRequestIdSnapshot);
 
+    private enum FallbackTailYieldPairKeyFormat
+    {
+        Unknown = 0,
+        CanonicalShared = 1,
+        LegacyDirectionLocal = 2,
+        OwnerDerived = 3
+    }
+
+    private readonly record struct FallbackTailYieldPairKeyNormalization(
+        string PairKey,
+        FallbackTailYieldPairKeyFormat Format);
+
+    private readonly record struct FallbackTailYieldPeerProofSnapshot(
+        string AuthorityId,
+        string? PredecessorAuthorityId,
+        long YieldGeneration,
+        string Direction,
+        string OwnerKey,
+        string RawPairKey,
+        string PairKey,
+        FallbackTailYieldPairKeyFormat PairKeyFormat,
+        int LiveRouteEpoch,
+        int FallbackLegGeneration,
+        int BridgeRecoveryGeneration,
+        long TransportEpoch,
+        string CheckpointRequestIdSnapshot,
+        int CommittedChunkIndex,
+        int HighestObservedChunkIndex);
+
     private static FallbackTailYieldOwnerSnapshot BuildFallbackTailYieldOwnerSnapshot(
         OutboundTransferContext context,
         FileTransferLeg leg)
@@ -9600,7 +9639,8 @@ public sealed partial class SessionFileTransferService : IDisposable
             decision.CurrentRoute == leg.RouteSelection.Route &&
             decision.CurrentProtocolVersion == leg.ProtocolVersion &&
             decision.CurrentLiveRouteEpoch == leg.LiveRouteEpochId &&
-            decision.CurrentLegGeneration == leg.Generation)
+            decision.CurrentLegGeneration == leg.Generation &&
+            decision.CurrentBridgeRecoveryGeneration == leg.BridgeRecoveryGeneration)
         {
             var decisionCheckpointSnapshot = string.IsNullOrWhiteSpace(decision.CheckpointRequestIdSnapshot)
                 ? "(none)"
@@ -9650,7 +9690,6 @@ public sealed partial class SessionFileTransferService : IDisposable
                     leg.RouteSelection.TelemetryToken,
                     leg.ProtocolVersion,
                     leg.LiveRouteEpochId,
-                    leg.BridgeRecoveryGeneration,
                     leg.TransportEpochId,
                     decisionCheckpointSnapshot);
                 if (string.Equals(decision.OwnerKey, decisionOwnerKey, StringComparison.Ordinal) &&
@@ -9680,7 +9719,6 @@ public sealed partial class SessionFileTransferService : IDisposable
             leg.RouteSelection.TelemetryToken,
             leg.ProtocolVersion,
             leg.LiveRouteEpochId,
-            leg.BridgeRecoveryGeneration,
             leg.TransportEpochId,
             currentCheckpointSnapshot);
 
@@ -9898,8 +9936,9 @@ public sealed partial class SessionFileTransferService : IDisposable
         string checkpointRequestIdSnapshot,
         string pairKey)
     {
-        var parts = pairKey.Split('|');
-        if (parts.Length != 8)
+        var normalizedPairKey = NormalizeFallbackTailYieldPairKey(pairKey, ownerKey: null);
+        var parts = normalizedPairKey.Split('|');
+        if (parts.Length != 7)
         {
             return false;
         }
@@ -9912,13 +9951,12 @@ public sealed partial class SessionFileTransferService : IDisposable
             !string.Equals(parts[2], leg.RouteSelection.TelemetryToken, StringComparison.Ordinal) ||
             !string.Equals(parts[3], leg.ProtocolVersion.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal) ||
             !string.Equals(parts[4], leg.LiveRouteEpochId.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal) ||
-            !string.Equals(parts[5], leg.BridgeRecoveryGeneration.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal) ||
-            !string.Equals(parts[7], checkpointRequestId, StringComparison.Ordinal))
+            !string.Equals(parts[6], checkpointRequestId, StringComparison.Ordinal))
         {
             return false;
         }
 
-        return long.TryParse(parts[6], NumberStyles.Integer, CultureInfo.InvariantCulture, out var yieldedTransportEpoch) &&
+        return long.TryParse(parts[5], NumberStyles.Integer, CultureInfo.InvariantCulture, out var yieldedTransportEpoch) &&
                yieldedTransportEpoch > 0 &&
                yieldedTransportEpoch <= leg.TransportEpochId;
     }
@@ -9926,12 +9964,139 @@ public sealed partial class SessionFileTransferService : IDisposable
     private static string NormalizeFallbackTailYieldPairKey(
         string? pairKey,
         string? ownerKey)
-        => !string.IsNullOrWhiteSpace(pairKey) &&
-           pairKey.Split('|').Length == 8
-            ? pairKey
+        => TryNormalizeFallbackTailYieldPairKey(pairKey, out var normalization)
+            ? normalization.PairKey
             : TryBuildFallbackTailYieldPairKeyFromOwnerKey(ownerKey, out var derivedPairKey)
                 ? derivedPairKey
                 : pairKey ?? string.Empty;
+
+    private static bool TryNormalizeFallbackTailYieldFramePairKey(
+        FileTransferFallbackTailYieldFrameV6 frame,
+        out FallbackTailYieldPairKeyNormalization normalization,
+        out string rejectionReason)
+    {
+        rejectionReason = "current";
+        if (TryNormalizeFallbackTailYieldPairKey(frame.PairKey, out normalization))
+        {
+            if (normalization.Format == FallbackTailYieldPairKeyFormat.LegacyDirectionLocal)
+            {
+                var legacyParts = frame.PairKey.Split('|');
+                if (!string.Equals(
+                        legacyParts[5],
+                        frame.BridgeRecoveryGeneration.ToString(CultureInfo.InvariantCulture),
+                        StringComparison.Ordinal))
+                {
+                    normalization = default;
+                    rejectionReason = "legacy_pair_key_bridge_generation_mismatch";
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        if ((string.IsNullOrWhiteSpace(frame.PairKey) ||
+             string.Equals(frame.PairKey, frame.OwnerKey, StringComparison.Ordinal)) &&
+            TryBuildFallbackTailYieldPairKeyFromOwnerKey(frame.OwnerKey, out var derivedPairKey))
+        {
+            normalization = new(
+                derivedPairKey,
+                FallbackTailYieldPairKeyFormat.OwnerDerived);
+            return true;
+        }
+
+        normalization = default;
+        rejectionReason = "fallback_tail_pair_key_malformed";
+        return false;
+    }
+
+    private static bool TryNormalizeFallbackTailYieldPairKey(
+        string? pairKey,
+        out FallbackTailYieldPairKeyNormalization normalization)
+    {
+        normalization = default;
+        if (string.IsNullOrWhiteSpace(pairKey))
+        {
+            return false;
+        }
+
+        var parts = pairKey.Split('|');
+        if (parts.Length == 7)
+        {
+            normalization = new(
+                pairKey,
+                FallbackTailYieldPairKeyFormat.CanonicalShared);
+            return true;
+        }
+
+        if (parts.Length != 8)
+        {
+            return false;
+        }
+
+        normalization = new(
+            string.Join(
+                "|",
+                parts[0],
+                parts[1],
+                parts[2],
+                parts[3],
+                parts[4],
+                parts[6],
+                parts[7]),
+            FallbackTailYieldPairKeyFormat.LegacyDirectionLocal);
+        return true;
+    }
+
+    private static string GetFallbackTailYieldPairKeyFormat(string? pairKey, string? ownerKey)
+        => FormatFallbackTailYieldPairKeyFormat(
+            ResolveFallbackTailYieldPairKeyFormat(pairKey, ownerKey));
+
+    private static FallbackTailYieldPairKeyFormat ResolveFallbackTailYieldPairKeyFormat(
+        string? pairKey,
+        string? ownerKey)
+    {
+        if (string.IsNullOrWhiteSpace(pairKey))
+        {
+            return FallbackTailYieldPairKeyFormat.OwnerDerived;
+        }
+
+        var partCount = pairKey.Split('|').Length;
+        if (partCount == 7)
+        {
+            return FallbackTailYieldPairKeyFormat.CanonicalShared;
+        }
+
+        if (partCount == 8)
+        {
+            return FallbackTailYieldPairKeyFormat.LegacyDirectionLocal;
+        }
+
+        return string.Equals(pairKey, ownerKey, StringComparison.Ordinal) && partCount == 9
+            ? FallbackTailYieldPairKeyFormat.OwnerDerived
+            : FallbackTailYieldPairKeyFormat.Unknown;
+    }
+
+    private static string FormatFallbackTailYieldPairKeyFormat(
+        FallbackTailYieldPairKeyFormat format)
+        => format switch
+        {
+            FallbackTailYieldPairKeyFormat.CanonicalShared => "canonical_7",
+            FallbackTailYieldPairKeyFormat.LegacyDirectionLocal => "legacy_bridge_scoped_8",
+            FallbackTailYieldPairKeyFormat.OwnerDerived => "owner_derived",
+            _ => "malformed"
+        };
+
+    private static bool CanPreserveFallbackTailYieldPeerProof(
+        FallbackTailYieldPeerProofSnapshot? peerProof,
+        FileTransferLeg leg,
+        string pairKey)
+        => peerProof is { } proof &&
+           string.Equals(proof.PairKey, pairKey, StringComparison.Ordinal) &&
+           (proof.PairKeyFormat == FallbackTailYieldPairKeyFormat.CanonicalShared ||
+            ((proof.PairKeyFormat == FallbackTailYieldPairKeyFormat.LegacyDirectionLocal ||
+              proof.PairKeyFormat == FallbackTailYieldPairKeyFormat.OwnerDerived) &&
+             proof.BridgeRecoveryGeneration == leg.BridgeRecoveryGeneration));
 
     private static string NormalizeFallbackTailYieldFrameCheckpointSnapshot(FileTransferFallbackTailYieldFrameV6 frame)
         => string.IsNullOrWhiteSpace(frame.RepairRequestId) ? "(none)" : frame.RepairRequestId;
@@ -9959,7 +10124,6 @@ public sealed partial class SessionFileTransferService : IDisposable
             parts[2],
             parts[3],
             parts[4],
-            parts[6],
             parts[7],
             parts[8]);
         return true;
@@ -10035,12 +10199,12 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.LocalFallbackTailYieldAuthorityId,
             authorityId,
             StringComparison.Ordinal);
-        var peerPairKey = NormalizeFallbackTailYieldPairKey(
-            context.PeerFallbackTailYieldPairKey,
-            context.PeerFallbackTailYieldOwnerKey);
         var preservePeerYield =
             context.PeerFallbackTailYieldGranted &&
-            string.Equals(peerPairKey, pairKey, StringComparison.Ordinal);
+            CanPreserveFallbackTailYieldPeerProof(
+                context.PeerFallbackTailYieldProof,
+                leg,
+                pairKey);
         if (!string.Equals(context.LocalFallbackTailYieldOwnerKey, ownerKey, StringComparison.Ordinal))
         {
             context.FallbackTailYieldGeneration = yieldDecision.YieldGeneration;
@@ -10054,6 +10218,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 context.PeerFallbackTailYieldAuthorityId = null;
                 context.PeerFallbackTailYieldPredecessorAuthorityId = null;
                 context.PeerFallbackTailYieldGeneration = 0;
+                context.PeerFallbackTailYieldProof = null;
                 context.PeerFallbackTailYieldCommittedChunkIndex = -1;
                 context.PeerFallbackTailYieldHighestObservedChunkIndex = -1;
                 context.PeerFallbackTailYieldGranted = false;
@@ -10153,12 +10318,12 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.LocalFallbackTailYieldAuthorityId,
             authorityId,
             StringComparison.Ordinal);
-        var peerPairKey = NormalizeFallbackTailYieldPairKey(
-            context.PeerFallbackTailYieldPairKey,
-            context.PeerFallbackTailYieldOwnerKey);
         var preservePeerYield =
             context.PeerFallbackTailYieldGranted &&
-            string.Equals(peerPairKey, pairKey, StringComparison.Ordinal);
+            CanPreserveFallbackTailYieldPeerProof(
+                context.PeerFallbackTailYieldProof,
+                leg,
+                pairKey);
         if (!string.Equals(context.LocalFallbackTailYieldOwnerKey, ownerKey, StringComparison.Ordinal))
         {
             context.FallbackTailYieldGeneration = yieldDecision.YieldGeneration;
@@ -10172,6 +10337,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 context.PeerFallbackTailYieldAuthorityId = null;
                 context.PeerFallbackTailYieldPredecessorAuthorityId = null;
                 context.PeerFallbackTailYieldGeneration = 0;
+                context.PeerFallbackTailYieldProof = null;
                 context.PeerFallbackTailYieldCommittedChunkIndex = -1;
                 context.PeerFallbackTailYieldHighestObservedChunkIndex = -1;
                 context.PeerFallbackTailYieldGranted = false;
@@ -10593,11 +10759,22 @@ public sealed partial class SessionFileTransferService : IDisposable
 
     private void ApplyOutboundFallbackTailYieldProof(
         OutboundTransferContext context,
+        FileTransferFallbackTailYieldFrameV6 frame)
+        => ApplyOutboundFallbackTailYieldProofFromReceive(
+            context,
+            frame,
+            receiveInstall: null,
+            receiveRuntimeOwner: null,
+            receiveDataSession: null,
+            receiveDataSessionGeneration: 0);
+
+    private void ApplyOutboundFallbackTailYieldProofFromReceive(
+        OutboundTransferContext context,
         FileTransferFallbackTailYieldFrameV6 frame,
-        OutboundSparsePumpInstall? receiveInstall = null,
-        RuntimeOwnerToken? receiveRuntimeOwner = null,
-        IFileTransferDataSession? receiveDataSession = null,
-        long receiveDataSessionGeneration = 0)
+        OutboundSparsePumpInstall? receiveInstall,
+        RuntimeOwnerToken? receiveRuntimeOwner,
+        IFileTransferDataSession? receiveDataSession,
+        long receiveDataSessionGeneration)
     {
         lock (gate)
         {
@@ -10637,10 +10814,10 @@ public sealed partial class SessionFileTransferService : IDisposable
             var peerPairKey = NormalizeFallbackTailYieldPairKey(frame.PairKey, frame.OwnerKey);
             if (!TryAcceptPeerFallbackTailYieldAuthority(
                     frame,
+                    peerPairKey,
                     context.PeerFallbackTailYieldGranted,
-                    context.PeerFallbackTailYieldAuthorityId,
-                    context.PeerFallbackTailYieldPredecessorAuthorityId,
-                    context.PeerFallbackTailYieldGeneration,
+                    context.PeerFallbackTailYieldProof,
+                    out var peerProof,
                     out var duplicate,
                     out reason))
             {
@@ -10673,6 +10850,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.PeerFallbackTailYieldAuthorityId = frame.AuthorityId;
             context.PeerFallbackTailYieldPredecessorAuthorityId = frame.PredecessorAuthorityId;
             context.PeerFallbackTailYieldGeneration = frame.YieldGeneration;
+            context.PeerFallbackTailYieldProof = peerProof;
             context.PeerFallbackTailYieldCommittedChunkIndex = frame.CommittedChunkIndex;
             context.PeerFallbackTailYieldHighestObservedChunkIndex = frame.HighestObservedChunkIndex;
             LogFileTransferFallbackTailYieldProofReceived(
@@ -10716,10 +10894,10 @@ public sealed partial class SessionFileTransferService : IDisposable
             var peerPairKey = NormalizeFallbackTailYieldPairKey(frame.PairKey, frame.OwnerKey);
             if (!TryAcceptPeerFallbackTailYieldAuthority(
                     frame,
+                    peerPairKey,
                     context.PeerFallbackTailYieldGranted,
-                    context.PeerFallbackTailYieldAuthorityId,
-                    context.PeerFallbackTailYieldPredecessorAuthorityId,
-                    context.PeerFallbackTailYieldGeneration,
+                    context.PeerFallbackTailYieldProof,
+                    out var peerProof,
                     out var duplicate,
                     out reason))
             {
@@ -10752,6 +10930,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.PeerFallbackTailYieldAuthorityId = frame.AuthorityId;
             context.PeerFallbackTailYieldPredecessorAuthorityId = frame.PredecessorAuthorityId;
             context.PeerFallbackTailYieldGeneration = frame.YieldGeneration;
+            context.PeerFallbackTailYieldProof = peerProof;
             context.PeerFallbackTailYieldCommittedChunkIndex = frame.CommittedChunkIndex;
             context.PeerFallbackTailYieldHighestObservedChunkIndex = frame.HighestObservedChunkIndex;
             LogFileTransferFallbackTailYieldProofReceived(
@@ -10766,13 +10945,14 @@ public sealed partial class SessionFileTransferService : IDisposable
 
     private static bool TryAcceptPeerFallbackTailYieldAuthority(
         FileTransferFallbackTailYieldFrameV6 frame,
+        string normalizedPairKey,
         bool peerYieldGranted,
-        string? currentAuthorityId,
-        string? currentPredecessorAuthorityId,
-        long currentYieldGeneration,
+        FallbackTailYieldPeerProofSnapshot? currentProof,
+        out FallbackTailYieldPeerProofSnapshot acceptedProof,
         out bool duplicate,
         out string reason)
     {
+        acceptedProof = CreateFallbackTailYieldPeerProofSnapshot(frame, normalizedPairKey);
         duplicate = false;
         if (!TryValidateFallbackTailYieldFrameAuthorityEnvelope(frame, out reason))
         {
@@ -10784,19 +10964,16 @@ public sealed partial class SessionFileTransferService : IDisposable
             return true;
         }
 
-        if (!FileTransferAuthorityIdParser.TryNormalizeFallbackTailYield(currentAuthorityId, out _))
+        if (currentProof is not { } current ||
+            !FileTransferAuthorityIdParser.TryNormalizeFallbackTailYield(current.AuthorityId, out _))
         {
             reason = "peer_yield_authority_state_missing";
             return false;
         }
 
-        if (string.Equals(frame.AuthorityId, currentAuthorityId, StringComparison.Ordinal))
+        if (string.Equals(frame.AuthorityId, current.AuthorityId, StringComparison.Ordinal))
         {
-            if (frame.YieldGeneration != currentYieldGeneration ||
-                !string.Equals(
-                    frame.PredecessorAuthorityId,
-                    currentPredecessorAuthorityId,
-                    StringComparison.Ordinal))
+            if (acceptedProof != current)
             {
                 reason = "authority_tuple_mismatch";
                 return false;
@@ -10806,15 +10983,15 @@ public sealed partial class SessionFileTransferService : IDisposable
             return true;
         }
 
-        if (!string.Equals(frame.PredecessorAuthorityId, currentAuthorityId, StringComparison.Ordinal))
+        if (!string.Equals(frame.PredecessorAuthorityId, current.AuthorityId, StringComparison.Ordinal))
         {
-            reason = frame.YieldGeneration <= currentYieldGeneration
+            reason = frame.YieldGeneration <= current.YieldGeneration
                 ? "late_predecessor"
                 : "predecessor_mismatch";
             return false;
         }
 
-        if (frame.YieldGeneration <= currentYieldGeneration)
+        if (frame.YieldGeneration <= current.YieldGeneration)
         {
             reason = "late_predecessor";
             return false;
@@ -10822,6 +10999,26 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         return true;
     }
+
+    private static FallbackTailYieldPeerProofSnapshot CreateFallbackTailYieldPeerProofSnapshot(
+        FileTransferFallbackTailYieldFrameV6 frame,
+        string normalizedPairKey)
+        => new(
+            frame.AuthorityId,
+            string.IsNullOrWhiteSpace(frame.PredecessorAuthorityId) ? null : frame.PredecessorAuthorityId,
+            frame.YieldGeneration,
+            frame.Direction,
+            frame.OwnerKey,
+            frame.PairKey,
+            normalizedPairKey,
+            ResolveFallbackTailYieldPairKeyFormat(frame.PairKey, frame.OwnerKey),
+            frame.LiveRouteEpoch,
+            frame.FallbackLegGeneration,
+            frame.BridgeRecoveryGeneration,
+            frame.TransportEpoch,
+            NormalizeFallbackTailYieldFrameCheckpointSnapshot(frame),
+            frame.CommittedChunkIndex,
+            frame.HighestObservedChunkIndex);
 
     private static bool TryValidateFallbackTailYieldFrameAuthorityEnvelope(
         FileTransferFallbackTailYieldFrameV6 frame,
@@ -11116,8 +11313,75 @@ public sealed partial class SessionFileTransferService : IDisposable
         var expectedPeerDirection = direction == FileTransferDirection.Outbound
             ? "inbound"
             : "outbound";
-        var framePairKey = NormalizeFallbackTailYieldPairKey(frame.PairKey, frame.OwnerKey);
         var frameCheckpointSnapshot = NormalizeFallbackTailYieldFrameCheckpointSnapshot(frame);
+        if (!TryNormalizeFallbackTailYieldFramePairKey(
+                frame,
+                out var framePairKeyNormalization,
+                out var pairKeyRejectionReason))
+        {
+            reason = pairKeyRejectionReason;
+            LogFileTransferFallbackTailYieldProofStaleIgnored(
+                direction,
+                transferId,
+                sessionId,
+                currentLeg,
+                frame,
+                reason,
+                suppressionKeys);
+            return false;
+        }
+
+        var framePairKey = framePairKeyNormalization.PairKey;
+
+        var expectedPeerOwnerKey = FileTransferCoordinator.BuildFallbackTailYieldOwnerKey(
+            sessionId,
+            transferId,
+            currentLeg.RouteSelection.TelemetryToken,
+            currentLeg.ProtocolVersion,
+            frame.LiveRouteEpoch,
+            frame.FallbackLegGeneration,
+            frame.BridgeRecoveryGeneration,
+            frame.TransportEpoch,
+            frameCheckpointSnapshot);
+        if (frame.LiveRouteEpoch <= 0 ||
+            frame.FallbackLegGeneration <= 0 ||
+            frame.BridgeRecoveryGeneration < 0 ||
+            frame.TransportEpoch <= 0 ||
+            frame.OwnerKey.Split('|').Length != 9 ||
+            !string.Equals(frame.OwnerKey, expectedPeerOwnerKey, StringComparison.Ordinal))
+        {
+            reason = "fallback_tail_owner_generation_mismatch";
+            LogFileTransferFallbackTailOwnerGenerationMismatch(
+                direction,
+                transferId,
+                sessionId,
+                currentLeg,
+                frame,
+                expectedPeerOwnerKey,
+                expectedPairKey,
+                "peer_owner_tuple_mismatch",
+                "peer_owner_tuple_mismatch");
+            return false;
+        }
+
+        if ((framePairKeyNormalization.Format == FallbackTailYieldPairKeyFormat.LegacyDirectionLocal ||
+             framePairKeyNormalization.Format == FallbackTailYieldPairKeyFormat.OwnerDerived) &&
+            frame.BridgeRecoveryGeneration != currentLeg.BridgeRecoveryGeneration)
+        {
+            reason = "legacy_pair_key_bridge_generation_mismatch";
+            LogFileTransferFallbackTailOwnerGenerationMismatch(
+                direction,
+                transferId,
+                sessionId,
+                currentLeg,
+                frame,
+                expectedOwnerKey,
+                expectedPairKey,
+                "legacy_pair_key_bridge_generation_mismatch",
+                reason);
+            return false;
+        }
+
         var checkpointMatchesCurrent = string.Equals(
             frameCheckpointSnapshot,
             ownerSnapshot.CheckpointRequestIdSnapshot,
@@ -11148,7 +11412,6 @@ public sealed partial class SessionFileTransferService : IDisposable
                 currentLeg.RouteSelection.TelemetryToken,
                 currentLeg.ProtocolVersion,
                 currentLeg.LiveRouteEpochId,
-                currentLeg.BridgeRecoveryGeneration,
                 currentLeg.TransportEpochId,
                 frameCheckpointSnapshot);
             var coordinatorDecisionAllowsCanonicalSnapshot =
@@ -11157,6 +11420,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 decision.CurrentProtocolVersion == currentLeg.ProtocolVersion &&
                 decision.CurrentLiveRouteEpoch == currentLeg.LiveRouteEpochId &&
                 decision.CurrentLegGeneration == currentLeg.Generation &&
+                decision.CurrentBridgeRecoveryGeneration == currentLeg.BridgeRecoveryGeneration &&
                 string.Equals(decision.CheckpointRequestIdSnapshot, frameCheckpointSnapshot, StringComparison.Ordinal) &&
                 string.Equals(decision.OwnerKey, canonicalOwnerKey, StringComparison.Ordinal) &&
                 string.Equals(decision.PairKey, canonicalPairKey, StringComparison.Ordinal) &&
@@ -11184,12 +11448,11 @@ public sealed partial class SessionFileTransferService : IDisposable
                 matchedCheckpointSnapshot = frameCheckpointSnapshot;
             }
 
-            var peerProofCarriesCanonicalCurrentOwner =
+            var peerProofCarriesCanonicalPair =
                 lastTailYieldDecision is null &&
-                string.Equals(frame.OwnerKey, canonicalOwnerKey, StringComparison.Ordinal) &&
                 string.Equals(framePairKey, canonicalPairKey, StringComparison.Ordinal);
             if (matchedPairKey is null &&
-                peerProofCarriesCanonicalCurrentOwner)
+                peerProofCarriesCanonicalPair)
             {
                 matchedOwnerKey = canonicalOwnerKey;
                 matchedPairKey = canonicalPairKey;
@@ -11201,10 +11464,17 @@ public sealed partial class SessionFileTransferService : IDisposable
             !string.Equals(frame.Direction, expectedPeerDirection, StringComparison.Ordinal) ||
             frame.LiveRouteEpoch != expectedLiveRouteEpoch ||
             frame.LiveRouteEpoch != currentLeg.LiveRouteEpochId ||
-            frame.BridgeRecoveryGeneration != currentLeg.BridgeRecoveryGeneration ||
             frame.TransportEpoch != currentLeg.TransportEpochId)
         {
             reason = "fallback_tail_owner_generation_mismatch";
+            var mismatchKind = matchedPairKey is null
+                ? "pair_scope_mismatch"
+                : !string.Equals(frame.Direction, expectedPeerDirection, StringComparison.Ordinal)
+                    ? "peer_direction_mismatch"
+                    : frame.LiveRouteEpoch != expectedLiveRouteEpoch ||
+                      frame.LiveRouteEpoch != currentLeg.LiveRouteEpochId
+                        ? "live_route_epoch_mismatch"
+                        : "transport_epoch_mismatch";
             LogFileTransferFallbackTailOwnerGenerationMismatch(
                 direction,
                 transferId,
@@ -11212,7 +11482,9 @@ public sealed partial class SessionFileTransferService : IDisposable
                 currentLeg,
                 frame,
                 matchedOwnerKey,
-                matchedPairKey ?? expectedPairKey);
+                matchedPairKey ?? expectedPairKey,
+                mismatchKind,
+                mismatchKind);
             return false;
         }
 
@@ -11474,7 +11746,6 @@ public sealed partial class SessionFileTransferService : IDisposable
                 currentLeg.RouteSelection.TelemetryToken,
                 currentLeg.ProtocolVersion,
                 currentLeg.LiveRouteEpochId,
-                currentLeg.BridgeRecoveryGeneration,
                 currentLeg.TransportEpochId,
                 "(none)");
         var peerYieldCanSettleCanonicalCheckpoint =
@@ -11611,7 +11882,6 @@ public sealed partial class SessionFileTransferService : IDisposable
                 currentLeg.RouteSelection.TelemetryToken,
                 currentLeg.ProtocolVersion,
                 currentLeg.LiveRouteEpochId,
-                currentLeg.BridgeRecoveryGeneration,
                 currentLeg.TransportEpochId,
                 "(none)");
         var peerYieldCanSettleCanonicalCheckpoint =
@@ -11756,8 +12026,15 @@ public sealed partial class SessionFileTransferService : IDisposable
                     ownerSnapshot.OwnerKey,
                     ownerSnapshot.PairKey,
                     ownerSnapshot.CheckpointRequestIdSnapshot,
+                    context.LocalFallbackTailYieldAuthorityId,
+                    context.LastFallbackTailYieldDecision?.PredecessorAuthorityId?.ToString(),
+                    context.PeerFallbackTailYieldAuthorityId,
+                    context.PeerFallbackTailYieldPredecessorAuthorityId,
+                    context.PeerFallbackTailYieldProof?.BridgeRecoveryGeneration ?? 0,
                     context.LocalFallbackTailYieldOwnerKey,
                     context.PeerFallbackTailYieldOwnerKey,
+                    context.LocalFallbackTailYieldPairKey,
+                    context.PeerFallbackTailYieldProof?.RawPairKey ?? context.PeerFallbackTailYieldPairKey,
                     localPairKey,
                     peerPairKey,
                     "paired_yield_owner_mismatch");
@@ -11778,6 +12055,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.PeerFallbackTailYieldAuthorityId,
             context.PeerFallbackTailYieldPredecessorAuthorityId,
             context.PeerFallbackTailYieldGeneration,
+            context.PeerFallbackTailYieldProof,
             context.LocalFallbackTailYieldOwnerKey,
             localPairKey,
             context.FallbackTailYieldGeneration,
@@ -11847,8 +12125,15 @@ public sealed partial class SessionFileTransferService : IDisposable
                     ownerSnapshot.OwnerKey,
                     ownerSnapshot.PairKey,
                     ownerSnapshot.CheckpointRequestIdSnapshot,
+                    context.LocalFallbackTailYieldAuthorityId,
+                    context.LastFallbackTailYieldDecision?.PredecessorAuthorityId?.ToString(),
+                    context.PeerFallbackTailYieldAuthorityId,
+                    context.PeerFallbackTailYieldPredecessorAuthorityId,
+                    context.PeerFallbackTailYieldProof?.BridgeRecoveryGeneration ?? 0,
                     context.LocalFallbackTailYieldOwnerKey,
                     context.PeerFallbackTailYieldOwnerKey,
+                    context.LocalFallbackTailYieldPairKey,
+                    context.PeerFallbackTailYieldProof?.RawPairKey ?? context.PeerFallbackTailYieldPairKey,
                     localPairKey,
                     peerPairKey,
                     "paired_yield_owner_mismatch");
@@ -11870,6 +12155,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             context.PeerFallbackTailYieldAuthorityId,
             context.PeerFallbackTailYieldPredecessorAuthorityId,
             context.PeerFallbackTailYieldGeneration,
+            context.PeerFallbackTailYieldProof,
             context.LocalFallbackTailYieldOwnerKey,
             localPairKey,
             context.FallbackTailYieldGeneration,
@@ -18033,6 +18319,8 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public long PeerFallbackTailYieldGeneration { get; set; }
 
+        public FallbackTailYieldPeerProofSnapshot? PeerFallbackTailYieldProof { get; set; }
+
         public int PeerFallbackTailYieldCommittedChunkIndex { get; set; } = -1;
 
         public int PeerFallbackTailYieldHighestObservedChunkIndex { get; set; } = -1;
@@ -19256,6 +19544,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         public string? PeerFallbackTailYieldPredecessorAuthorityId { get; set; }
 
         public long PeerFallbackTailYieldGeneration { get; set; }
+
+        public FallbackTailYieldPeerProofSnapshot? PeerFallbackTailYieldProof { get; set; }
 
         public int PeerFallbackTailYieldCommittedChunkIndex { get; set; } = -1;
 

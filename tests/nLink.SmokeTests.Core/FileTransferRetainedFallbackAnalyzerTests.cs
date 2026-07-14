@@ -2448,9 +2448,17 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
         Assert.Equal("fallback_tail_yield_authority_invalid", verdict["recovery_failure_class"]);
     }
 
-    [Fact]
-    [Trait("Category", "Smoke")]
-    public async Task AnalyzeRetained_CurrentFallbackTailYieldAuthorityChainMatchesCompleteTuple()
+    [Theory]
+    [InlineData(2, 1, "canonical_7", "pass")]
+    [InlineData(2, 1, "legacy_bridge_scoped_8", "fail")]
+    [InlineData(2, 1, "owner_derived", "fail")]
+    [InlineData(1, 1, "legacy_bridge_scoped_8", "pass")]
+    [Trait("RetainedFallbackSuite", "FallbackTailBridgeRecoveryPairing")]
+    public async Task AnalyzeRetained_CurrentFallbackTailYieldAuthorityChainMatchesCompleteTuple(
+        int localBridgeGeneration,
+        int peerBridgeGeneration,
+        string pairFormat,
+        string expectedVerdict)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -2460,27 +2468,56 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
         const string transferId = "transfer_fallback_tail_yield_schema2";
         const string localAuthorityId = "fta2-fallback_tail_yield-0123456789abcdef01234567";
         const string peerAuthorityId = "fta2-fallback_tail_yield-89abcdef0123456701234567";
-        var ownerKey = $"sess_a|{transferId}|post_tuna_fallback_v6|6|6|8|2|3|(none)";
-        var pairKey = $"sess_a|{transferId}|post_tuna_fallback_v6|6|6|2|3|(none)";
-        var stableTuple = $"transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=6; runtime_generation=10; terminal_generation=0; leg_generation=8; transport_epoch=3; bridge_recovery_generation=2; checkpoint_request_id=(none); owner_key={ownerKey}; pair_key={pairKey}; yield_generation=1";
-        var peerTuple = $"transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=6; leg_generation=8; transport_epoch=3; bridge_recovery_generation=2; checkpoint_request_id=(none); owner_key={ownerKey}; pair_key={pairKey}; yield_generation=1";
+        var ownerKey = $"sess_a|{transferId}|post_tuna_fallback_v6|6|6|8|{localBridgeGeneration}|3|(none)";
+        var peerOwnerKey = $"sess_a|{transferId}|post_tuna_fallback_v6|6|6|9|{peerBridgeGeneration}|3|(none)";
+        var canonicalPairKey = $"sess_a|{transferId}|post_tuna_fallback_v6|6|6|3|(none)";
+        var pairKey = pairFormat switch
+        {
+            "canonical_7" => canonicalPairKey,
+            "owner_derived" => ownerKey,
+            _ => $"sess_a|{transferId}|post_tuna_fallback_v6|6|6|{localBridgeGeneration}|3|(none)"
+        };
+        var peerRawPairKey = pairFormat switch
+        {
+            "canonical_7" => canonicalPairKey,
+            "owner_derived" => peerOwnerKey,
+            _ => $"sess_a|{transferId}|post_tuna_fallback_v6|6|6|{peerBridgeGeneration}|3|(none)"
+        };
+        var localScope = $"transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=6; runtime_generation=10; terminal_generation=0; leg_generation=8; transport_epoch=3; bridge_recovery_generation={localBridgeGeneration}; checkpoint_request_id=(none)";
+        var stableTuple = $"{localScope}; owner_key={ownerKey}; pair_key={pairKey}; yield_generation=1";
+        var peerTuple = $"{localScope}; peer_live_route_epoch=6; peer_leg_generation=9; peer_transport_epoch=3; peer_bridge_recovery_generation={peerBridgeGeneration}; peer_checkpoint_request_id=(none); owner_key={peerOwnerKey}; pair_key={peerRawPairKey}; raw_pair_key={peerRawPairKey}; canonical_pair_key={canonicalPairKey}; pair_key_format={pairFormat}; yield_generation=1";
         var lines = new[]
         {
-            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; live_route_epoch=6"),
-            LogLine($"event=filetransfer_fallback_tail_quiescent_yield_granted; direction=outbound; authority_schema=2; authority_id={localAuthorityId}; predecessor_authority_id=(none); {stableTuple}; committed_chunk=2786; highest_observed_chunk=2785; reason=fallback_tail_quiescent", secondsOffset: 1),
-            LogLine($"event=filetransfer_fallback_tail_yield_proof_sent; direction=outbound; authority_schema=2; authority_id={localAuthorityId}; predecessor_authority_id=(none); {stableTuple}; peer_visible_any=1; accepted_any=1; reason=fallback_tail_paired_yield", secondsOffset: 2),
-            LogLine($"event=filetransfer_fallback_tail_yield_proof_received; direction=outbound; authority_schema=2; authority_id={peerAuthorityId}; predecessor_authority_id=(none); peer_direction=inbound; {peerTuple}", secondsOffset: 3),
-            LogLine($"event=filetransfer_fallback_tail_paired_yield_granted; direction=outbound; authority_schema=2; authority_id={localAuthorityId}; predecessor_authority_id=(none); peer_authority_id={peerAuthorityId}; peer_predecessor_authority_id=(none); peer_yield_generation=1; {stableTuple}; reason=fallback_tail_paired_yield", secondsOffset: 4),
-            LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none)", secondsOffset: 5),
-            LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=x", secondsOffset: 5)
+            LogLine($"event=filetransfer_route_selected; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; live_route_epoch=6; route_publication_generation=5; runtime_generation=10; terminal_generation=0; leg_generation=8; route_commit_generation=0; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted"),
+            LogLine($"event=filetransfer_fallback_leg_transport_epoch_adopted; direction=outbound; transfer_id={transferId}; session_id=sess_a; leg_id=leg:8; leg_generation=8; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=6; previous_transport_epoch=2; transport_epoch=3; bridge_recovery_generation={localBridgeGeneration}; retired_checkpoint_request_id=(none); current_checkpoint_request_id=(none); state=recovery_active; can_send_data=1; reason=transport_recovered_unproven", secondsOffset: 1),
+            LogLine($"event=filetransfer_fallback_tail_quiescent_yield_granted; direction=outbound; authority_schema=2; authority_id={localAuthorityId}; predecessor_authority_id=(none); {stableTuple}; committed_chunk=2786; highest_observed_chunk=2785; reason=fallback_tail_quiescent", secondsOffset: 2),
+            LogLine($"event=filetransfer_fallback_tail_yield_proof_sent; direction=outbound; authority_schema=2; authority_id={localAuthorityId}; predecessor_authority_id=(none); {stableTuple}; peer_visible_any=1; accepted_any=1; reason=fallback_tail_paired_yield", secondsOffset: 3),
+            LogLine($"event=filetransfer_fallback_tail_yield_proof_received; direction=outbound; authority_schema=2; authority_id={peerAuthorityId}; predecessor_authority_id=(none); peer_direction=inbound; {peerTuple}", secondsOffset: 4),
+            LogLine($"event=filetransfer_fallback_tail_paired_yield_granted; direction=outbound; authority_schema=2; authority_id={localAuthorityId}; predecessor_authority_id=(none); peer_authority_id={peerAuthorityId}; peer_predecessor_authority_id=(none); peer_yield_generation=1; peer_leg_generation=9; peer_live_route_epoch=6; peer_transport_epoch=3; peer_bridge_recovery_generation={peerBridgeGeneration}; peer_checkpoint_request_id=(none); peer_owner_key={peerOwnerKey}; peer_raw_pair_key={peerRawPairKey}; peer_canonical_pair_key={canonicalPairKey}; peer_pair_key_format={pairFormat}; {stableTuple}; reason=fallback_tail_paired_yield", secondsOffset: 5),
+            LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none)", secondsOffset: 6),
+            LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=x", secondsOffset: 6)
         };
 
-        var result = await RunAnalyzeFixtureAsync(lines);
-
-        Assert.Equal(0, result.Script.ExitCode);
-        var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
-        Assert.Equal("0", route["fallback_tail_yield_authority_rejected_count"]);
-        Assert.Equal("pass", route["fallback_tail_paired_yield_verdict"]);
+        foreach (var compact in new[] { false, true })
+        {
+            var result = compact
+                ? await RunAnalyzeFixtureAsync(
+                    lines,
+                    environment: new Dictionary<string, string>
+                    {
+                        ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                    })
+                : await RunAnalyzeFixtureAsync(lines);
+            Assert.Equal(0, result.Script.ExitCode);
+            var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+            if (!compact)
+            {
+                Assert.Equal(
+                    expectedVerdict == "pass" ? "0" : "1",
+                    route["fallback_tail_yield_authority_rejected_count"]);
+            }
+            Assert.Equal(expectedVerdict, route["fallback_tail_paired_yield_verdict"]);
+        }
     }
 
     [Fact]
@@ -3188,6 +3225,644 @@ public sealed class FileTransferRetainedFallbackAnalyzerTests : FileTransferOpsS
                 "0",
                 verdict["post_tuna_fallback_outbound_receive_worker_handoff_missing_count"]);
         }
+    }
+
+    [Fact]
+    [Trait("RetainedFallbackSuite", "FallbackTailBridgeRecoveryPairing")]
+    public async Task AnalyzeRetained_CurrentArtifactBridgeRecoveryMismatchIsDeduplicatedAndPrecedesDownstreamSymptoms()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildFallbackTailBridgeRecoveryMismatchFixture(includeDownstreamSymptoms: true);
+        foreach (var compact in new[] { false, true })
+        {
+            var result = compact
+                ? await RunAnalyzeFixtureAsync(
+                    lines,
+                    environment: new Dictionary<string, string>
+                    {
+                        ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                    })
+                : await RunAnalyzeFixtureAsync(lines);
+
+            Assert.Equal(0, result.Script.ExitCode);
+            var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+            Assert.Equal(
+                "post_tuna_fallback_paired_yield_bridge_recovery_generation_mismatch",
+                verdict["recovery_failure_class"]);
+            Assert.Equal(
+                "post_tuna_fallback_paired_yield_bridge_recovery_generation_mismatch",
+                verdict["first_proof_chain_failure_class"]);
+            Assert.Equal(
+                "filetransfer_fallback_tail_owner_generation_mismatch",
+                verdict["first_proof_chain_failure_event"]);
+            Assert.Equal("bridge_recovery_generation_mismatch", verdict["first_proof_chain_failure_reason"]);
+            Assert.Equal("6", verdict["first_proof_chain_failure_sequence"]);
+            Assert.Equal("6", verdict["first_proof_chain_failure_line_number"]);
+            Assert.Equal("fail", verdict["fallback_tail_bridge_recovery_generation_pairing_verdict"]);
+            Assert.Equal("4", verdict["fallback_tail_bridge_recovery_generation_mismatch_raw_count"]);
+            Assert.Equal("1", verdict["fallback_tail_bridge_recovery_generation_mismatch_distinct_count"]);
+            Assert.Equal("0", verdict["fallback_tail_bridge_recovery_generation_mismatch_recovered_count"]);
+            Assert.Equal("1", verdict["fallback_tail_bridge_recovery_generation_mismatch_unresolved_count"]);
+
+            var route = ReadArtifactReport(result.ArtifactDir, "filetransfer-route-consistency-summary.txt");
+            Assert.Equal(
+                "post_tuna_fallback_paired_yield_bridge_recovery_generation_mismatch",
+                route["first_proof_chain_failure_class"]);
+            Assert.Equal("6", route["first_proof_chain_failure_line_number"]);
+            Assert.Equal("0", route["fallback_tail_owner_generation_mismatch_count"]);
+            Assert.NotEqual("fallback_frontier_request_dispatch_missing", verdict["recovery_failure_class"]);
+            Assert.NotEqual("fallback_frontier_repair_stalled", verdict["recovery_failure_class"]);
+
+            if (compact)
+            {
+                Assert.Equal("incomplete_proof", verdict["acceptance_failure_class"]);
+                var compactJson = await File.ReadAllTextAsync(
+                    Path.Combine(result.ArtifactDir, "filetransfer-retained-compact-summary.json"));
+                using var compactDocument = System.Text.Json.JsonDocument.Parse(compactJson);
+                Assert.Equal(
+                    "post_tuna_fallback_paired_yield_bridge_recovery_generation_mismatch",
+                    compactDocument.RootElement.GetProperty("first_proof_chain_failure_class").GetString());
+                Assert.Equal(
+                    1,
+                    compactDocument.RootElement
+                        .GetProperty("fallback_tail_bridge_recovery_generation_mismatch_unresolved_count")
+                        .GetInt32());
+            }
+        }
+    }
+
+    [Fact]
+    [Trait("RetainedFallbackSuite", "FallbackTailBridgeRecoveryPairing")]
+    public async Task AnalyzeRetained_CurrentTupleUsesMaximumPublicationAndCoreMutationOrdering()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_bridge_pairing";
+        var lines = BuildFallbackTailBridgeRecoveryMismatchFixture(includeDownstreamSymptoms: true).ToList();
+        var firstMismatch = lines.FindIndex(line => line.Contains(
+            "event=filetransfer_fallback_tail_owner_generation_mismatch;",
+            StringComparison.Ordinal));
+        lines.InsertRange(
+            firstMismatch,
+            new[]
+            {
+                LogLine($"event=filetransfer_leg_frozen; direction=inbound; transfer_id={transferId}; session_id=sess_a; leg_id=leg:2; leg_generation=2; route=file_tuna_v4; protocol_version=4; live_route_epoch=1; transport_epoch=0; bridge_recovery_generation=0; reason=older_leg_replaced", secondsOffset: 4),
+                LogLine($"event=filetransfer_fallback_tail_recovery_owner_retired_after_yield; direction=inbound; transfer_id={transferId}; session_id=sess_a; leg_id=leg:3; leg_generation=3; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; transport_epoch=2; reason=cleanup_only", secondsOffset: 4),
+                LogLine($"event=filetransfer_fallback_leg_authority_completed; direction=inbound; transfer_id={transferId}; session_id=sess_a; leg_id=leg:3; leg_generation=3; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; transport_epoch=2; bridge_recovery_generation=9; checkpoint_request_id=(none); authority_reason=late_infra_evidence; proof=receiver_state_control_plane", secondsOffset: 4),
+                LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; route_publication_generation=3; runtime_generation=2; terminal_generation=0; leg_generation=2; route_commit_generation=0; target_route=regular_nkn_v4_fast; target_protocol_version=4; target_transport=regular_nkn; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted", secondsOffset: 4),
+                LogLine($"event=filetransfer_runtime_started; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; route_publication_generation=4; runtime_generation=3; terminal_generation=0; leg_generation=3", secondsOffset: 4)
+            });
+
+        foreach (var compact in new[] { false, true })
+        {
+            var result = compact
+                ? await RunAnalyzeFixtureAsync(
+                    lines.ToArray(),
+                    environment: new Dictionary<string, string>
+                    {
+                        ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                    })
+                : await RunAnalyzeFixtureAsync(lines.ToArray());
+            Assert.Equal(0, result.Script.ExitCode);
+            var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+            Assert.Equal("fail", verdict["fallback_tail_bridge_recovery_generation_pairing_verdict"]);
+            Assert.Equal("4", verdict["fallback_tail_bridge_recovery_generation_mismatch_raw_count"]);
+            Assert.Equal("1", verdict["fallback_tail_bridge_recovery_generation_mismatch_distinct_count"]);
+            Assert.Equal("1", verdict["fallback_tail_bridge_recovery_generation_mismatch_unresolved_count"]);
+        }
+    }
+
+    [Fact]
+    [Trait("RetainedFallbackSuite", "FallbackTailBridgeRecoveryPairing")]
+    public async Task AnalyzeRetained_LaterCompleteCrossGenerationPairClearsMismatchInFullAndCompactModes()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildFallbackTailBridgeRecoveryMismatchFixture(includeDownstreamSymptoms: false).ToList();
+        AppendCompleteCrossGenerationPair(lines);
+
+        foreach (var compact in new[] { false, true })
+        {
+            var result = compact
+                ? await RunAnalyzeFixtureAsync(
+                    lines.ToArray(),
+                    environment: new Dictionary<string, string>
+                    {
+                        ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                    })
+                : await RunAnalyzeFixtureAsync(lines.ToArray());
+
+            Assert.Equal(0, result.Script.ExitCode);
+            var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+            Assert.NotEqual(
+                "post_tuna_fallback_paired_yield_bridge_recovery_generation_mismatch",
+                verdict["recovery_failure_class"]);
+            Assert.Equal("pass", verdict["fallback_tail_bridge_recovery_generation_pairing_verdict"]);
+            Assert.Equal("4", verdict["fallback_tail_bridge_recovery_generation_mismatch_raw_count"]);
+            Assert.Equal("1", verdict["fallback_tail_bridge_recovery_generation_mismatch_distinct_count"]);
+            Assert.Equal("1", verdict["fallback_tail_bridge_recovery_generation_mismatch_recovered_count"]);
+            Assert.Equal("0", verdict["fallback_tail_bridge_recovery_generation_mismatch_unresolved_count"]);
+        }
+    }
+
+    [Fact]
+    [Trait("RetainedFallbackSuite", "FallbackTailBridgeRecoveryPairing")]
+    public async Task AnalyzeRetained_ProductionShapedTerminalProofClearsMismatchInFullAndCompactModes()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_bridge_pairing";
+        var lines = BuildFallbackTailBridgeRecoveryMismatchFixture(includeDownstreamSymptoms: false)
+            .Append(LogLine(
+                $"event=filetransfer_fallback_tail_terminal_proof_consumed; direction=inbound; transfer_id={transferId}; session_id=sess_a; leg_id=leg:3; leg_generation=3; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; transport_epoch=2; committed_chunk=12484; chunk_count=12484; reason=chunk_batch_committed",
+                secondsOffset: 9))
+            .Append(LogLine(
+                $"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); integrity_ok=1",
+                secondsOffset: 10))
+            .Append(LogLine(
+                $"event=file_transfer_inbound_terminal; role=helper; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=x; integrity_ok=1",
+                secondsOffset: 10))
+            .ToArray();
+
+        foreach (var compact in new[] { false, true })
+        {
+            var result = compact
+                ? await RunAnalyzeFixtureAsync(
+                    lines,
+                    environment: new Dictionary<string, string>
+                    {
+                        ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                    })
+                : await RunAnalyzeFixtureAsync(lines);
+
+            Assert.Equal(0, result.Script.ExitCode);
+            var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+            Assert.NotEqual(
+                "post_tuna_fallback_paired_yield_bridge_recovery_generation_mismatch",
+                verdict["recovery_failure_class"]);
+            Assert.Equal("pass", verdict["fallback_tail_bridge_recovery_generation_pairing_verdict"]);
+            Assert.Equal("4", verdict["fallback_tail_bridge_recovery_generation_mismatch_raw_count"]);
+            Assert.Equal("1", verdict["fallback_tail_bridge_recovery_generation_mismatch_distinct_count"]);
+            Assert.Equal("1", verdict["fallback_tail_bridge_recovery_generation_mismatch_recovered_count"]);
+            Assert.Equal("0", verdict["fallback_tail_bridge_recovery_generation_mismatch_unresolved_count"]);
+            Assert.Equal("pass", verdict["fallback_tail_paired_yield_verdict"]);
+        }
+    }
+
+    [Fact]
+    [Trait("RetainedFallbackSuite", "FallbackTailBridgeRecoveryPairing")]
+    public async Task AnalyzeRetained_OnlyAuthorizedSecondTunaPublicationClearsBridgeMismatch()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var prefix = BuildFallbackTailBridgeRecoveryMismatchFixture(includeDownstreamSymptoms: false);
+        const string transferId = "transfer_fallback_bridge_pairing";
+        var unrelatedFallbackPublication = LogLine(
+            $"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=4; route_publication_generation=6; runtime_generation=4; terminal_generation=0; leg_generation=4; route_commit_generation=0; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted",
+            secondsOffset: 10);
+        var secondTunaPublication = LogLine(
+            $"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=file_tuna_v4; protocol_version=4; live_route_epoch=3; route_publication_generation=6; runtime_generation=4; terminal_generation=0; leg_generation=4; route_commit_generation=2; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; route_publication_action_kind=RouteCommitPublication; coordinator_decision_reason=accepted",
+            secondsOffset: 10);
+        var nonCommitTunaPublication = LogLine(
+            $"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=file_tuna_v4; protocol_version=4; live_route_epoch=3; route_publication_generation=6; runtime_generation=4; terminal_generation=0; leg_generation=4; route_commit_generation=2; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted",
+            secondsOffset: 10);
+
+        foreach (var compact in new[] { false, true })
+        {
+            async Task<Dictionary<string, string>> AnalyzeAsync(string publication)
+            {
+                var lines = prefix
+                    .Append(publication)
+                    .Append(LogLine(
+                        $"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); integrity_ok=1",
+                        secondsOffset: 11))
+                    .Append(LogLine(
+                        $"event=file_transfer_inbound_terminal; role=helper; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=x; integrity_ok=1",
+                        secondsOffset: 11))
+                    .ToArray();
+                var result = compact
+                    ? await RunAnalyzeFixtureAsync(
+                        lines,
+                        environment: new Dictionary<string, string>
+                        {
+                            ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                        })
+                    : await RunAnalyzeFixtureAsync(lines);
+                Assert.Equal(0, result.Script.ExitCode);
+                return ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+            }
+
+            var unrelated = await AnalyzeAsync(unrelatedFallbackPublication);
+            Assert.Equal("1", unrelated["fallback_tail_bridge_recovery_generation_mismatch_unresolved_count"]);
+            Assert.Equal(
+                "post_tuna_fallback_paired_yield_bridge_recovery_generation_mismatch",
+                unrelated["recovery_failure_class"]);
+
+            var nonCommitTuna = await AnalyzeAsync(nonCommitTunaPublication);
+            Assert.Equal("1", nonCommitTuna["fallback_tail_bridge_recovery_generation_mismatch_unresolved_count"]);
+            Assert.Equal(
+                "post_tuna_fallback_paired_yield_bridge_recovery_generation_mismatch",
+                nonCommitTuna["recovery_failure_class"]);
+
+            var secondTuna = await AnalyzeAsync(secondTunaPublication);
+            Assert.Equal("1", secondTuna["fallback_tail_bridge_recovery_generation_mismatch_recovered_count"]);
+            Assert.Equal("0", secondTuna["fallback_tail_bridge_recovery_generation_mismatch_unresolved_count"]);
+            Assert.NotEqual(
+                "post_tuna_fallback_paired_yield_bridge_recovery_generation_mismatch",
+                secondTuna["recovery_failure_class"]);
+        }
+    }
+
+    [Theory]
+    [InlineData("owner_key")]
+    [InlineData("authority_id")]
+    [InlineData("reason")]
+    [InlineData("canonical_pair")]
+    [InlineData("owner_derived_pair")]
+    [InlineData("peer_direction")]
+    [Trait("RetainedFallbackSuite", "FallbackTailBridgeRecoveryPairing")]
+    public async Task AnalyzeRetained_UncorrelatedNewSchemaBridgeMismatchRemainsGenericCoverage(
+        string corruption)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string peerAuthorityId = "fta2-fallback_tail_yield-0123456789abcdef01234567";
+        const string peerPredecessorAuthorityId = "fta2-fallback_tail_yield-89abcdef0123456701234567";
+        const string mismatchEvent = "event=filetransfer_fallback_tail_owner_generation_mismatch;";
+        var lines = BuildFallbackTailBridgeRecoveryMismatchFixture(includeDownstreamSymptoms: true)
+            .Select(line =>
+            {
+                if (!line.Contains(mismatchEvent, StringComparison.Ordinal))
+                {
+                    return line;
+                }
+
+                var current = line.Replace(
+                    mismatchEvent,
+                    $"{mismatchEvent} authority_schema=2; authority_id={peerAuthorityId}; predecessor_authority_id={peerPredecessorAuthorityId}; mismatch_kind=bridge_recovery_generation; decision_reason=bridge_recovery_generation_mismatch;",
+                    StringComparison.Ordinal);
+                return corruption switch
+                {
+                    "owner_key" => current.Replace(
+                        "peer_owner_key=sess_a|transfer_fallback_bridge_pairing|post_tuna_fallback_v6|6|2|3|2|2|(none)",
+                        "peer_owner_key=sess_a|transfer_fallback_bridge_pairing|post_tuna_fallback_v6|6|2|3|9|2|(none)",
+                        StringComparison.Ordinal),
+                    "authority_id" => current.Replace(
+                        $"authority_id={peerAuthorityId}",
+                        "authority_id=fta2-fallback_tail_yield-deadbeefdeadbeefdeadbeef",
+                        StringComparison.Ordinal),
+                    "reason" => current.Replace(
+                        "mismatch_kind=bridge_recovery_generation; decision_reason=bridge_recovery_generation_mismatch",
+                        "mismatch_kind=leg_generation; decision_reason=owner_generation_mismatch",
+                        StringComparison.Ordinal),
+                    "canonical_pair" => current
+                        .Replace(
+                            "expected_pair_key=sess_a|transfer_fallback_bridge_pairing|post_tuna_fallback_v6|6|2|1|2|(none)",
+                            "expected_pair_key=sess_a|transfer_fallback_bridge_pairing|post_tuna_fallback_v6|6|2|2|(none)",
+                            StringComparison.Ordinal)
+                        .Replace(
+                            "peer_pair_key=sess_a|transfer_fallback_bridge_pairing|post_tuna_fallback_v6|6|2|2|2|(none)",
+                            "peer_pair_key=sess_a|transfer_fallback_bridge_pairing|post_tuna_fallback_v6|6|2|2|(none)",
+                            StringComparison.Ordinal),
+                    "owner_derived_pair" => current
+                        .Replace(
+                            "expected_pair_key=sess_a|transfer_fallback_bridge_pairing|post_tuna_fallback_v6|6|2|1|2|(none)",
+                            "expected_pair_key=sess_a|transfer_fallback_bridge_pairing|post_tuna_fallback_v6|6|2|3|1|2|(none)",
+                            StringComparison.Ordinal)
+                        .Replace(
+                            "peer_pair_key=sess_a|transfer_fallback_bridge_pairing|post_tuna_fallback_v6|6|2|2|2|(none)",
+                            "peer_pair_key=sess_a|transfer_fallback_bridge_pairing|post_tuna_fallback_v6|6|2|3|2|2|(none)",
+                            StringComparison.Ordinal),
+                    "peer_direction" => current.Replace(
+                        "direction=inbound; peer_direction=outbound",
+                        "direction=inbound; peer_direction=inbound",
+                        StringComparison.Ordinal),
+                    _ => throw new InvalidOperationException(corruption)
+                };
+            })
+            .ToArray();
+
+        foreach (var compact in new[] { false, true })
+        {
+            var result = compact
+                ? await RunAnalyzeFixtureAsync(
+                    lines,
+                    environment: new Dictionary<string, string>
+                    {
+                        ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                    })
+                : await RunAnalyzeFixtureAsync(lines);
+            Assert.Equal(0, result.Script.ExitCode);
+            var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+            Assert.Equal("4", verdict["fallback_tail_owner_generation_mismatch_count"]);
+            Assert.Equal("0", verdict["fallback_tail_bridge_recovery_generation_mismatch_distinct_count"]);
+            Assert.Equal("0", verdict["fallback_tail_bridge_recovery_generation_mismatch_unresolved_count"]);
+            Assert.NotEqual(
+                "post_tuna_fallback_paired_yield_bridge_recovery_generation_mismatch",
+                verdict["recovery_failure_class"]);
+        }
+    }
+
+    [Fact]
+    [Trait("RetainedFallbackSuite", "FallbackTailBridgeRecoveryPairing")]
+    public async Task AnalyzeRetained_DeduplicationKeepsDistinctMatchedPredecessorAuthorities()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string authorityId = "fta2-fallback_tail_yield-0123456789abcdef01234567";
+        const string firstPredecessor = "fta2-fallback_tail_yield-89abcdef0123456701234567";
+        const string secondPredecessor = "fta2-fallback_tail_yield-aaaaaaaaaaaaaaaaaaaaaaaa";
+        const string mismatchMarker = "event=filetransfer_fallback_tail_owner_generation_mismatch;";
+        var baseLines = BuildFallbackTailBridgeRecoveryMismatchFixture(includeDownstreamSymptoms: false).ToList();
+        baseLines.Insert(
+            5,
+            LogLine(
+                $"event=filetransfer_fallback_tail_yield_proof_sent; direction=outbound; authority_schema=2; authority_id={authorityId}; predecessor_authority_id={secondPredecessor}; transfer_id=transfer_fallback_bridge_pairing; session_id=sess_a; leg_id=leg:3; leg_generation=3; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; transport_epoch=2; bridge_recovery_generation=2; checkpoint_request_id=(none); owner_key=sess_a|transfer_fallback_bridge_pairing|post_tuna_fallback_v6|6|2|3|2|2|(none); pair_key=sess_a|transfer_fallback_bridge_pairing|post_tuna_fallback_v6|6|2|2|2|(none); yield_generation=2; peer_visible_any=1; accepted_any=1; reason=fallback_tail_quiescent",
+                secondsOffset: 4));
+        var mismatchOrdinal = 0;
+        var lines = baseLines.Select(line =>
+        {
+            if (!line.Contains(mismatchMarker, StringComparison.Ordinal))
+            {
+                return line;
+            }
+
+            var predecessor = mismatchOrdinal++ < 2 ? firstPredecessor : secondPredecessor;
+            return line.Replace(
+                mismatchMarker,
+                $"{mismatchMarker} authority_schema=2; authority_id={authorityId}; predecessor_authority_id={predecessor}; mismatch_kind=bridge_recovery_generation; decision_reason=bridge_recovery_generation_mismatch;",
+                StringComparison.Ordinal);
+        }).ToArray();
+        lines = lines
+            .Append(LogLine("event=file_transfer_outbound_terminal; role=helpee; session_id=sess_a; transfer_id=transfer_fallback_bridge_pairing; state=Completed; error_code=(none); integrity_ok=1", secondsOffset: 10))
+            .Append(LogLine("event=file_transfer_inbound_terminal; role=helper; session_id=sess_a; transfer_id=transfer_fallback_bridge_pairing; state=Completed; error_code=(none); saved_path=x; integrity_ok=1", secondsOffset: 10))
+            .ToArray();
+
+        foreach (var compact in new[] { false, true })
+        {
+            var result = compact
+                ? await RunAnalyzeFixtureAsync(
+                    lines,
+                    environment: new Dictionary<string, string>
+                    {
+                        ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                    })
+                : await RunAnalyzeFixtureAsync(lines);
+            Assert.Equal(0, result.Script.ExitCode);
+            var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+            Assert.Equal("4", verdict["fallback_tail_bridge_recovery_generation_mismatch_raw_count"]);
+            Assert.Equal("2", verdict["fallback_tail_bridge_recovery_generation_mismatch_distinct_count"]);
+            Assert.Equal("0", verdict["fallback_tail_bridge_recovery_generation_mismatch_recovered_count"]);
+            Assert.Equal("2", verdict["fallback_tail_bridge_recovery_generation_mismatch_unresolved_count"]);
+        }
+    }
+
+    [Theory]
+    [InlineData("route_replaced")]
+    [InlineData("authority_superseded")]
+    [InlineData("leg_frozen")]
+    [InlineData("transfer_terminal")]
+    [Trait("RetainedFallbackSuite", "FallbackTailBridgeRecoveryPairing")]
+    public async Task AnalyzeRetained_LateMismatchFromRetiredLifecycleIsDiagnosticOnly(string retirement)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_bridge_pairing";
+        var retirementEvent = retirement switch
+        {
+            "route_replaced" => LogLine(
+                $"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=file_tuna_v4; protocol_version=4; live_route_epoch=3; route_publication_generation=5; runtime_generation=4; terminal_generation=0; leg_generation=4; route_commit_generation=2; target_route=file_tuna_v4; target_protocol_version=4; target_transport=tuna; route_publication_action_kind=RouteCommitPublication; coordinator_decision_reason=accepted",
+                secondsOffset: 4),
+            "authority_superseded" => LogLine(
+                $"event=filetransfer_fallback_leg_authority_superseded_by_route_hint; direction=inbound; transfer_id={transferId}; session_id=sess_a; leg_id=leg:3; leg_generation=3; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; transport_epoch=2; bridge_recovery_generation=1; checkpoint_request_id=(none); reason=route_hint_authority_replacement",
+                secondsOffset: 4),
+            "leg_frozen" => LogLine(
+                $"event=filetransfer_leg_frozen; direction=inbound; transfer_id={transferId}; session_id=sess_a; leg_id=leg:3; leg_generation=3; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; transport_epoch=2; bridge_recovery_generation=1; reason=route_replacement",
+                secondsOffset: 4),
+            "transfer_terminal" => LogLine(
+                $"event=file_transfer_inbound_terminal; role=helper; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=x; integrity_ok=1",
+                secondsOffset: 4),
+            _ => throw new InvalidOperationException(retirement)
+        };
+        var lines = BuildFallbackTailBridgeRecoveryMismatchFixture(includeDownstreamSymptoms: false).ToList();
+        lines.Insert(5, retirementEvent);
+        if (retirement is "authority_superseded" or "leg_frozen" or "transfer_terminal")
+        {
+            lines.Insert(
+                6,
+                LogLine(
+                    $"event=filetransfer_fallback_leg_authority_started; direction=inbound; transfer_id={transferId}; session_id=sess_a; leg_id=leg:3; leg_generation=3; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; transport_epoch=2; bridge_recovery_generation=1; checkpoint_request_id=(none); authority_reason=late_same_leg_evidence",
+                    secondsOffset: 4));
+        }
+
+        foreach (var compact in new[] { false, true })
+        {
+            var result = compact
+                ? await RunAnalyzeFixtureAsync(
+                    lines.ToArray(),
+                    environment: new Dictionary<string, string>
+                    {
+                        ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                    })
+                : await RunAnalyzeFixtureAsync(lines.ToArray());
+            Assert.Equal(0, result.Script.ExitCode);
+            var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+            Assert.Equal("none", verdict["fallback_tail_bridge_recovery_generation_pairing_verdict"]);
+            Assert.Equal("0", verdict["fallback_tail_bridge_recovery_generation_mismatch_distinct_count"]);
+            Assert.Equal("0", verdict["fallback_tail_owner_generation_mismatch_count"]);
+            Assert.NotEqual(
+                "post_tuna_fallback_paired_yield_bridge_recovery_generation_mismatch",
+                verdict["recovery_failure_class"]);
+            Assert.NotEqual("fallback_tail_owner_generation_mismatch", verdict["recovery_failure_class"]);
+        }
+    }
+
+    [Theory]
+    [InlineData("peer_predecessor")]
+    [InlineData("route_replaced")]
+    [InlineData("transfer_terminal")]
+    [Trait("RetainedFallbackSuite", "FallbackTailBridgeRecoveryPairing")]
+    public async Task AnalyzeRetained_InvalidOrStaleGrantCannotRecoverBridgeMismatchInEitherMode(
+        string invalidation)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildFallbackTailBridgeRecoveryMismatchFixture(includeDownstreamSymptoms: false).ToList();
+        AppendCompleteCrossGenerationPair(
+            lines,
+            mismatchPeerPredecessor: invalidation == "peer_predecessor",
+            barrierBeforeGrant: invalidation == "peer_predecessor" ? null : invalidation);
+        foreach (var compact in new[] { false, true })
+        {
+            var result = compact
+                ? await RunAnalyzeFixtureAsync(
+                    lines.ToArray(),
+                    environment: new Dictionary<string, string>
+                    {
+                        ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                    })
+                : await RunAnalyzeFixtureAsync(lines.ToArray());
+            Assert.Equal(0, result.Script.ExitCode);
+            var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+            Assert.Equal("fail", verdict["fallback_tail_bridge_recovery_generation_pairing_verdict"]);
+            Assert.Equal("0", verdict["fallback_tail_bridge_recovery_generation_mismatch_recovered_count"]);
+            Assert.Equal("1", verdict["fallback_tail_bridge_recovery_generation_mismatch_unresolved_count"]);
+            Assert.Equal("fail", verdict["fallback_tail_paired_yield_verdict"]);
+        }
+    }
+
+    [Theory]
+    [InlineData("peer_owner_key")]
+    [InlineData("peer_pair_key_format")]
+    [Trait("RetainedFallbackSuite", "FallbackTailBridgeRecoveryPairing")]
+    public async Task AnalyzeRetained_PairedGrantPeerIdentityMutationCannotRecoverMismatch(
+        string mutation)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string pairedGrant = "event=filetransfer_fallback_tail_paired_yield_granted;";
+        var lines = BuildFallbackTailBridgeRecoveryMismatchFixture(includeDownstreamSymptoms: false).ToList();
+        AppendCompleteCrossGenerationPair(lines);
+        lines = lines.Select(line =>
+        {
+            if (!line.Contains(pairedGrant, StringComparison.Ordinal))
+            {
+                return line;
+            }
+
+            return mutation switch
+            {
+                "peer_owner_key" => line.Replace(
+                    "peer_owner_key=sess_a|transfer_fallback_bridge_pairing|post_tuna_fallback_v6|6|2|3|2|2|(none)",
+                    "peer_owner_key=sess_a|transfer_fallback_bridge_pairing|post_tuna_fallback_v6|6|2|3|9|2|(none)",
+                    StringComparison.Ordinal),
+                "peer_pair_key_format" => line.Replace(
+                    "peer_pair_key_format=canonical_7",
+                    "peer_pair_key_format=legacy_bridge_scoped_8",
+                    StringComparison.Ordinal),
+                _ => throw new InvalidOperationException(mutation)
+            };
+        }).ToList();
+
+        foreach (var compact in new[] { false, true })
+        {
+            var result = compact
+                ? await RunAnalyzeFixtureAsync(
+                    lines.ToArray(),
+                    environment: new Dictionary<string, string>
+                    {
+                        ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                    })
+                : await RunAnalyzeFixtureAsync(lines.ToArray());
+            Assert.Equal(0, result.Script.ExitCode);
+            var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+            Assert.Equal("fail", verdict["fallback_tail_bridge_recovery_generation_pairing_verdict"]);
+            Assert.Equal("0", verdict["fallback_tail_bridge_recovery_generation_mismatch_recovered_count"]);
+            Assert.Equal("1", verdict["fallback_tail_bridge_recovery_generation_mismatch_unresolved_count"]);
+            Assert.Equal("fail", verdict["fallback_tail_paired_yield_verdict"]);
+        }
+    }
+
+    private static void AppendCompleteCrossGenerationPair(
+        List<string> lines,
+        bool mismatchPeerPredecessor = false,
+        string? barrierBeforeGrant = null)
+    {
+        const string transferId = "transfer_fallback_bridge_pairing";
+        const string priorPeerAuthorityId = "fta2-fallback_tail_yield-0123456789abcdef01234567";
+        const string peerAuthorityId = "fta2-fallback_tail_yield-13579bdf2468ace013579bdf";
+        const string peerPredecessorAuthorityId = priorPeerAuthorityId;
+        const string localAuthorityId = "fta2-fallback_tail_yield-fedcba987654321001234567";
+        const string localOwnerKey = "sess_a|transfer_fallback_bridge_pairing|post_tuna_fallback_v6|6|2|3|3|2|(none)";
+        const string peerOwnerKey = "sess_a|transfer_fallback_bridge_pairing|post_tuna_fallback_v6|6|2|3|2|2|(none)";
+        const string canonicalPairKey = "sess_a|transfer_fallback_bridge_pairing|post_tuna_fallback_v6|6|2|2|(none)";
+        const string peerRawPairKey = canonicalPairKey;
+        var receivedPredecessorAuthorityId = mismatchPeerPredecessor
+            ? "fta2-fallback_tail_yield-deadbeefdeadbeefdeadbeef"
+            : peerPredecessorAuthorityId;
+        var localScope =
+            $"transfer_id={transferId}; session_id=sess_a; leg_id=leg:3; leg_generation=3; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; transport_epoch=2; bridge_recovery_generation=3; checkpoint_request_id=(none)";
+        var localTuple = $"{localScope}; owner_key={localOwnerKey}; pair_key={canonicalPairKey}";
+        lines.Add(LogLine($"event=filetransfer_fallback_leg_transport_epoch_adopted; direction=inbound; transfer_id={transferId}; session_id=sess_a; leg_id=leg:3; leg_generation=3; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; previous_transport_epoch=2; transport_epoch=2; bridge_recovery_generation=3; retired_checkpoint_request_id=(none); current_checkpoint_request_id=(none); state=recovery_active; can_send_data=1; reason=bridge_reauthenticated", secondsOffset: 9));
+        lines.Add(LogLine($"event=filetransfer_fallback_tail_quiescent_yield_granted; direction=inbound; authority_schema=2; authority_id={localAuthorityId}; predecessor_authority_id=(none); {localTuple}; yield_generation=3; committed_chunk=6955; highest_observed_chunk=9954; reason=bridge_generation_pairing_reconciled", secondsOffset: 10));
+        lines.Add(LogLine($"event=filetransfer_fallback_tail_yield_proof_sent; direction=inbound; authority_schema=2; authority_id={localAuthorityId}; predecessor_authority_id=(none); {localTuple}; yield_generation=3; peer_visible_any=1; accepted_any=1; reason=bridge_generation_pairing_reconciled", secondsOffset: 11));
+        if (barrierBeforeGrant is not null)
+        {
+            lines.Add(barrierBeforeGrant switch
+            {
+                "route_replaced" => LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=3; route_publication_generation=5; runtime_generation=4; terminal_generation=0; leg_generation=4; route_commit_generation=0; target_route=regular_nkn_v4_fast; target_protocol_version=4; target_transport=regular_nkn; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted", secondsOffset: 12),
+                "transfer_terminal" => LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_a; transfer_id={transferId}; state=Failed; error_code=peer_disconnected; saved_path=(none)", secondsOffset: 12),
+                _ => throw new InvalidOperationException(barrierBeforeGrant)
+            });
+        }
+        lines.Add(LogLine($"event=filetransfer_fallback_tail_yield_proof_received; direction=inbound; authority_schema=2; authority_id={peerAuthorityId}; predecessor_authority_id={receivedPredecessorAuthorityId}; peer_direction=outbound; {localScope}; peer_live_route_epoch=2; peer_leg_generation=3; peer_transport_epoch=2; peer_bridge_recovery_generation=2; peer_checkpoint_request_id=(none); owner_key={peerOwnerKey}; pair_key={peerRawPairKey}; raw_pair_key={peerRawPairKey}; canonical_pair_key={canonicalPairKey}; pair_key_format=canonical_7; yield_generation=3", secondsOffset: 13));
+        lines.Add(LogLine($"event=filetransfer_fallback_tail_paired_yield_granted; direction=inbound; authority_schema=2; authority_id={localAuthorityId}; predecessor_authority_id=(none); peer_authority_id={peerAuthorityId}; peer_predecessor_authority_id={peerPredecessorAuthorityId}; peer_yield_generation=3; peer_leg_generation=3; peer_live_route_epoch=2; peer_transport_epoch=2; peer_bridge_recovery_generation=2; peer_checkpoint_request_id=(none); peer_owner_key={peerOwnerKey}; peer_raw_pair_key={peerRawPairKey}; peer_canonical_pair_key={canonicalPairKey}; peer_pair_key_format=canonical_7; {localTuple}; yield_generation=3; reason=fallback_tail_paired_yield", secondsOffset: 14));
+        lines.Add(LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); integrity_ok=1", secondsOffset: 14));
+        lines.Add(LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_a; transfer_id={transferId}; state=Completed; error_code=(none); saved_path=x; integrity_ok=1", secondsOffset: 14));
+    }
+
+    private static string[] BuildFallbackTailBridgeRecoveryMismatchFixture(bool includeDownstreamSymptoms)
+    {
+        const string transferId = "transfer_fallback_bridge_pairing";
+        const string peerAuthorityId = "fta2-fallback_tail_yield-0123456789abcdef01234567";
+        const string peerPredecessorAuthorityId = "fta2-fallback_tail_yield-89abcdef0123456701234567";
+        const string expectedOwnerKey = "sess_a|transfer_fallback_bridge_pairing|post_tuna_fallback_v6|6|2|3|1|2|(none)";
+        const string expectedPairKey = "sess_a|transfer_fallback_bridge_pairing|post_tuna_fallback_v6|6|2|1|2|(none)";
+        const string peerOwnerKey = "sess_a|transfer_fallback_bridge_pairing|post_tuna_fallback_v6|6|2|3|2|2|(none)";
+        const string peerPairKey = "sess_a|transfer_fallback_bridge_pairing|post_tuna_fallback_v6|6|2|2|2|(none)";
+        var lines = new List<string>
+        {
+            LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=default_v6; frame_family=v6; live_route_epoch=2; route_publication_generation=4; runtime_generation=3; terminal_generation=0; leg_generation=3; route_commit_generation=0; target_route=post_tuna_fallback_v6; target_protocol_version=6; target_transport=regular_nkn; route_publication_action_kind=RoutePublication; coordinator_decision_reason=accepted", secondsOffset: 0),
+            LogLine($"event=filetransfer_fallback_leg_transport_epoch_adopted; direction=inbound; transfer_id={transferId}; session_id=sess_a; leg_id=leg:3; leg_generation=3; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; previous_transport_epoch=1; transport_epoch=2; bridge_recovery_generation=1; retired_checkpoint_request_id=(none); current_checkpoint_request_id=(none); state=recovery_active; can_send_data=1; reason=transport_recovered_unproven", secondsOffset: 1),
+            LogLine($"event=filetransfer_fallback_tail_quiescent_yield_granted; direction=outbound; authority_schema=2; authority_id={peerAuthorityId}; predecessor_authority_id={peerPredecessorAuthorityId}; transfer_id={transferId}; session_id=sess_a; leg_id=leg:3; leg_generation=3; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; transport_epoch=2; bridge_recovery_generation=2; checkpoint_request_id=(none); owner_key={peerOwnerKey}; pair_key={peerPairKey}; yield_generation=2; committed_chunk=6955; highest_observed_chunk=9954; reason=receiver_state_sparse_runtime", secondsOffset: 2),
+            LogLine($"event=filetransfer_runtime_unlock_admission_denied; direction=outbound; transfer_id={transferId}; session_id=sess_a; source=route_hint; reason=fallback_tail_quiescent; admission_generation=0; admission_reason=paired_fallback_tail_yield_missing; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; leg_generation=3; fallback_active=1; fallback_current=1; fallback_terminalized=0; paired_fallback_yield_granted=0", secondsOffset: 3),
+            LogLine($"event=filetransfer_fallback_tail_yield_proof_sent; direction=outbound; authority_schema=2; authority_id={peerAuthorityId}; predecessor_authority_id={peerPredecessorAuthorityId}; transfer_id={transferId}; session_id=sess_a; leg_id=leg:3; leg_generation=3; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; transport_epoch=2; bridge_recovery_generation=2; checkpoint_request_id=(none); owner_key={peerOwnerKey}; pair_key={peerPairKey}; yield_generation=2; peer_visible_any=1; accepted_any=1; reason=fallback_tail_quiescent", secondsOffset: 4)
+        };
+        var mismatch = LogLine($"event=filetransfer_fallback_tail_owner_generation_mismatch; direction=inbound; peer_direction=outbound; transfer_id={transferId}; session_id=sess_a; leg_id=leg:3; leg_generation=3; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; transport_epoch=2; bridge_recovery_generation=1; checkpoint_request_id=(none); peer_live_route_epoch=2; peer_leg_generation=3; peer_transport_epoch=2; peer_bridge_recovery_generation=2; peer_checkpoint_request_id=(none); expected_owner_key={expectedOwnerKey}; expected_pair_key={expectedPairKey}; peer_owner_key={peerOwnerKey}; peer_pair_key={peerPairKey}; yield_generation=2", secondsOffset: 5);
+        lines.AddRange(new[] { mismatch, mismatch, mismatch, mismatch });
+
+        if (includeDownstreamSymptoms)
+        {
+            lines.Add(LogLine($"event=filetransfer_control_plane_delivery_result; direction=inbound; kind=frontier_request; transfer_id={transferId}; session_id=sess_a; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; leg_generation=3; bridge_recovery_generation=1; transport_epoch=2; frame_type=filetransfer.frontier_request.v6; repair_request_id=v6-frontier:8476:29; request_correlation_id=frq-downstream; first_start_chunk_index=8476; first_chunk_count=1; range_count=1; peer_visible_any=1; accepted_any=1", secondsOffset: 6));
+            lines.Add(LogLine($"event=filetransfer_fallback_frontier_repair_stalled; direction=inbound; transfer_id={transferId}; session_id=sess_a; repair_request_key=v6-frontier:8476:29; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; leg_generation=3; transport_epoch=2; bridge_recovery_generation=1; reason=repeated_frontier_repair_without_progress; frontier_chunk_index=8476; durable_received_highest_chunk_index=8475; requested_chunk_count=1; attempt_count=2", secondsOffset: 7));
+            lines.Add(LogLine($"event=filetransfer_v6_frontier_request_transport_rejected; transport=nkn; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.frontier_request.v6; priority=1; queue_capacity_bypassed=1; queued_frames=64; queued_bytes=65536; transport_epoch=2; repair_request_id=v6-frontier:8476:29; request_correlation_id=frq-downstream; decision_reason=priority_control_queue_capacity_exceeded", secondsOffset: 8));
+            lines.Add(LogLine($"event=filetransfer_gui_progress_timeout; transfer_id={transferId}; session_id=sess_a; reason=normal_to_tuna_live_epoch_missing", secondsOffset: 9));
+            lines.Add(LogLine($"event=file_transfer_outbound_terminal; role=helpee; session_id=sess_a; transfer_id={transferId}; state=Failed; error_code=peer_disconnected", secondsOffset: 10));
+            lines.Add(LogLine($"event=file_transfer_inbound_terminal; role=helper; session_id=sess_a; transfer_id={transferId}; state=Failed; error_code=peer_disconnected; saved_path=(none)", secondsOffset: 10));
+        }
+
+        return lines.ToArray();
     }
 
     private static string OutboundSparseInstallDescriptor(

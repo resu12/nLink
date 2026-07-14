@@ -948,6 +948,11 @@ function New-RouteAcceptanceRunResult {
         cleanFallbackLegProofVerdict = '(missing)'
         bridgeLivenessIntegrationVerdict = '(missing)'
         controlPlaneIsolationVerdict = '(missing)'
+        fallbackTailBridgeRecoveryGenerationPairingVerdict = 'none'
+        fallbackTailBridgeRecoveryGenerationMismatchRawCount = 0
+        fallbackTailBridgeRecoveryGenerationMismatchDistinctCount = 0
+        fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount = 0
+        fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount = 0
         sessionLivenessTimeoutCount = 0
         bridgeLivenessStaleDeferralCount = 0
         bridgeLivenessTimeoutDuringValidRecoveryCount = 0
@@ -2112,6 +2117,11 @@ function Assert-Phase4RouteSummary {
     $Result.cleanFallbackLegProofVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'clean_fallback_leg_proof_verdict' -DefaultValue $Result.fallbackLegAuthorityProofVerdict
     $Result.bridgeLivenessIntegrationVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'bridge_liveness_integration_verdict' -DefaultValue '(missing)'
     $Result.controlPlaneIsolationVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'control_plane_isolation_verdict' -DefaultValue '(missing)'
+    $Result.fallbackTailBridgeRecoveryGenerationPairingVerdict = Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'fallback_tail_bridge_recovery_generation_pairing_verdict' -DefaultValue 'none'
+    $Result.fallbackTailBridgeRecoveryGenerationMismatchRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'fallback_tail_bridge_recovery_generation_mismatch_raw_count' -DefaultValue '0')
+    $Result.fallbackTailBridgeRecoveryGenerationMismatchDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'fallback_tail_bridge_recovery_generation_mismatch_distinct_count' -DefaultValue '0')
+    $Result.fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'fallback_tail_bridge_recovery_generation_mismatch_recovered_count' -DefaultValue '0')
+    $Result.fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'fallback_tail_bridge_recovery_generation_mismatch_unresolved_count' -DefaultValue '0')
     $Result.bridgeLivenessStaleDeferralCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'bridge_liveness_stale_deferral_count' -DefaultValue '0')
     $Result.bridgeLivenessTimeoutDuringValidRecoveryCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $routeSummary -Name 'session_liveness_timeout_during_valid_recovery_count' -DefaultValue '0')
 
@@ -2305,6 +2315,11 @@ function Assert-Phase4OperatorVerdict {
     $warningRawEventCounts = Get-RouteAcceptanceReportValue -Report $operator -Name 'warning_kind_raw_event_counts' -DefaultValue '(none)'
     $warningCapExceeded = Get-RouteAcceptanceReportValue -Report $operator -Name 'warning_cap_exceeded_kinds' -DefaultValue '(none)'
     $Result.warningCapExceededKinds = $warningCapExceeded
+    $Result.fallbackTailBridgeRecoveryGenerationPairingVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'fallback_tail_bridge_recovery_generation_pairing_verdict' -DefaultValue ([string]$Result.fallbackTailBridgeRecoveryGenerationPairingVerdict)
+    $Result.fallbackTailBridgeRecoveryGenerationMismatchRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'fallback_tail_bridge_recovery_generation_mismatch_raw_count' -DefaultValue ([string]$Result.fallbackTailBridgeRecoveryGenerationMismatchRawCount))
+    $Result.fallbackTailBridgeRecoveryGenerationMismatchDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'fallback_tail_bridge_recovery_generation_mismatch_distinct_count' -DefaultValue ([string]$Result.fallbackTailBridgeRecoveryGenerationMismatchDistinctCount))
+    $Result.fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'fallback_tail_bridge_recovery_generation_mismatch_recovered_count' -DefaultValue ([string]$Result.fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount))
+    $Result.fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'fallback_tail_bridge_recovery_generation_mismatch_unresolved_count' -DefaultValue ([string]$Result.fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount))
     $Result.fallbackReceiverStateDeferredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'fallback_v6_receiver_state_deferred_count' -DefaultValue '0')
     $Result.fallbackReceiverStateCoalescedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'fallback_v6_receiver_state_coalesced_count' -DefaultValue '0')
     $firstProofClass = Get-RouteAcceptanceReportValue -Report $operator -Name 'first_proof_chain_failure_class' -DefaultValue '(none)'
@@ -3736,6 +3751,32 @@ function Write-RouteAcceptanceFakePhase4Run {
             error = 'Injected fake transient setup failure.'
             failedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
         } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-error.json') -Encoding UTF8
+    }
+
+    if (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'FALLBACK_TAIL_BRIDGE_RECOVERY_GENERATION_PAIRING_SUMMARY_FIXTURE') {
+        $pairingFixtureLines = @(
+            'fallback_tail_bridge_recovery_generation_pairing_verdict=fail',
+            'fallback_tail_bridge_recovery_generation_mismatch_raw_count=4',
+            'fallback_tail_bridge_recovery_generation_mismatch_distinct_count=1',
+            'fallback_tail_bridge_recovery_generation_mismatch_recovered_count=0',
+            'fallback_tail_bridge_recovery_generation_mismatch_unresolved_count=1'
+        )
+        foreach ($reportName in @('filetransfer-route-consistency-summary.txt', 'filetransfer-operator-verdict.txt')) {
+            $reportPath = Join-Path $ArtifactDir $reportName
+            $reportText = Get-Content -LiteralPath $reportPath -Raw
+            foreach ($fixtureLine in $pairingFixtureLines) {
+                $separatorIndex = $fixtureLine.IndexOf('=')
+                $fixtureKey = $fixtureLine.Substring(0, $separatorIndex)
+                $fixturePattern = '(?m)^{0}=.*$' -f [regex]::Escape($fixtureKey)
+                if ([regex]::IsMatch($reportText, $fixturePattern)) {
+                    $reportText = [regex]::Replace($reportText, $fixturePattern, $fixtureLine)
+                }
+                else {
+                    $reportText = $reportText.TrimEnd("`r", "`n") + [Environment]::NewLine + $fixtureLine + [Environment]::NewLine
+                }
+            }
+            Set-Content -LiteralPath $reportPath -Value $reportText -Encoding UTF8
+        }
     }
 
     if ($forcePostArtifactExecutionFailure) {
@@ -5575,6 +5616,11 @@ function Write-Phase5PreflightFailureSummaryFiles {
         ("current_runtime_proof_reasons={0}" -f (Join-RouteAcceptanceTokenList -Values $preflightProofReasons)),
         'transfer_evidence_status=not_started',
         'runtime_correctness_verdict=incomplete_proof',
+        'fallback_tail_bridge_recovery_generation_pairing_verdict=none',
+        'fallback_tail_bridge_recovery_generation_mismatch_raw_count=0',
+        'fallback_tail_bridge_recovery_generation_mismatch_distinct_count=0',
+        'fallback_tail_bridge_recovery_generation_mismatch_recovered_count=0',
+        'fallback_tail_bridge_recovery_generation_mismatch_unresolved_count=0',
         ("baseline_manifest={0}" -f $BaselinePath),
         'correctness_gate_policy=strict_no_exceptions',
         'preflight_verdict=FAIL',
@@ -5634,6 +5680,11 @@ function Write-Phase5PreflightFailureSummaryFiles {
         currentRuntimeProofReasons = @(ConvertTo-RouteAcceptanceSummaryStringArray -Values $preflightProofReasons -Limit 32)
         transferEvidenceStatus = 'not_started'
         runtimeCorrectnessVerdict = 'incomplete_proof'
+        fallbackTailBridgeRecoveryGenerationPairingVerdict = 'none'
+        fallbackTailBridgeRecoveryGenerationMismatchRawCount = 0
+        fallbackTailBridgeRecoveryGenerationMismatchDistinctCount = 0
+        fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount = 0
+        fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount = 0
         baselineManifest = $BaselinePath
         generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
         preflightVerdict = 'FAIL'
@@ -7133,6 +7184,11 @@ function New-RouteAcceptanceSummaryRunDto {
         cleanFallbackLegProofVerdict = [string]$Result.cleanFallbackLegProofVerdict
         bridgeLivenessIntegrationVerdict = [string]$Result.bridgeLivenessIntegrationVerdict
         controlPlaneIsolationVerdict = [string]$Result.controlPlaneIsolationVerdict
+        fallbackTailBridgeRecoveryGenerationPairingVerdict = [string]$Result.fallbackTailBridgeRecoveryGenerationPairingVerdict
+        fallbackTailBridgeRecoveryGenerationMismatchRawCount = [int]$Result.fallbackTailBridgeRecoveryGenerationMismatchRawCount
+        fallbackTailBridgeRecoveryGenerationMismatchDistinctCount = [int]$Result.fallbackTailBridgeRecoveryGenerationMismatchDistinctCount
+        fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount = [int]$Result.fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount
+        fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount = [int]$Result.fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount
         operatorVerdict = [string]$Result.operatorVerdict
         hardFailureCount = [int]$Result.hardFailureCount
         warningCount = [int]$Result.warningCount
@@ -7259,6 +7315,29 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     else {
         '(none)'
     }
+    $fallbackTailBridgeRecoveryGenerationMismatchRawCount = 0
+    $fallbackTailBridgeRecoveryGenerationMismatchDistinctCount = 0
+    $fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount = 0
+    $fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount = 0
+    foreach ($runDto in $runDtos) {
+        $fallbackTailBridgeRecoveryGenerationMismatchRawCount += [int]$runDto.fallbackTailBridgeRecoveryGenerationMismatchRawCount
+        $fallbackTailBridgeRecoveryGenerationMismatchDistinctCount += [int]$runDto.fallbackTailBridgeRecoveryGenerationMismatchDistinctCount
+        $fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount += [int]$runDto.fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount
+        $fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount += [int]$runDto.fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount
+    }
+    $fallbackTailBridgeRecoveryGenerationPairingVerdict = if (
+        $fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.fallbackTailBridgeRecoveryGenerationPairingVerdict -eq 'fail' }).Count -gt 0) {
+        'fail'
+    }
+    elseif (
+        $fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.fallbackTailBridgeRecoveryGenerationPairingVerdict -eq 'pass' }).Count -gt 0) {
+        'pass'
+    }
+    else {
+        'none'
+    }
 
     $failureLines = @()
     foreach ($result in $runDtos) {
@@ -7327,6 +7406,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("transfer_evidence_status={0}" -f $transferEvidenceStatus),
         ("runtime_correctness_verdict={0}" -f $runtimeCorrectnessVerdict),
         ("runtime_failure_candidate={0}" -f $runtimeFailureCandidate),
+        ("fallback_tail_bridge_recovery_generation_pairing_verdict={0}" -f $fallbackTailBridgeRecoveryGenerationPairingVerdict),
+        ("fallback_tail_bridge_recovery_generation_mismatch_raw_count={0}" -f $fallbackTailBridgeRecoveryGenerationMismatchRawCount),
+        ("fallback_tail_bridge_recovery_generation_mismatch_distinct_count={0}" -f $fallbackTailBridgeRecoveryGenerationMismatchDistinctCount),
+        ("fallback_tail_bridge_recovery_generation_mismatch_recovered_count={0}" -f $fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount),
+        ("fallback_tail_bridge_recovery_generation_mismatch_unresolved_count={0}" -f $fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount),
         ("baseline_manifest={0}" -f $BaselinePath),
         ("goodput_regression_tolerance_percent={0:F1}" -f [double]$GoodputRegressionTolerancePercent),
         'correctness_gate_policy=strict_no_exceptions',
@@ -7359,6 +7443,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.clean_fallback_leg_proof_verdict={1}" -f $prefix, $result.cleanFallbackLegProofVerdict)
         $textLines += ("{0}.bridge_liveness_integration_verdict={1}" -f $prefix, $result.bridgeLivenessIntegrationVerdict)
         $textLines += ("{0}.control_plane_isolation_verdict={1}" -f $prefix, $result.controlPlaneIsolationVerdict)
+        $textLines += ("{0}.fallback_tail_bridge_recovery_generation_pairing_verdict={1}" -f $prefix, $result.fallbackTailBridgeRecoveryGenerationPairingVerdict)
+        $textLines += ("{0}.fallback_tail_bridge_recovery_generation_mismatch_raw_count={1}" -f $prefix, $result.fallbackTailBridgeRecoveryGenerationMismatchRawCount)
+        $textLines += ("{0}.fallback_tail_bridge_recovery_generation_mismatch_distinct_count={1}" -f $prefix, $result.fallbackTailBridgeRecoveryGenerationMismatchDistinctCount)
+        $textLines += ("{0}.fallback_tail_bridge_recovery_generation_mismatch_recovered_count={1}" -f $prefix, $result.fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount)
+        $textLines += ("{0}.fallback_tail_bridge_recovery_generation_mismatch_unresolved_count={1}" -f $prefix, $result.fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount)
         $textLines += ("{0}.operator_verdict={1}" -f $prefix, $result.operatorVerdict)
         $textLines += ("{0}.hard_failure_count={1}" -f $prefix, $result.hardFailureCount)
         $textLines += ("{0}.warning_count={1}" -f $prefix, $result.warningCount)
@@ -7502,6 +7591,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         transferEvidenceStatus = $transferEvidenceStatus
         runtimeCorrectnessVerdict = $runtimeCorrectnessVerdict
         runtimeFailureCandidate = $runtimeFailureCandidate
+        fallbackTailBridgeRecoveryGenerationPairingVerdict = $fallbackTailBridgeRecoveryGenerationPairingVerdict
+        fallbackTailBridgeRecoveryGenerationMismatchRawCount = $fallbackTailBridgeRecoveryGenerationMismatchRawCount
+        fallbackTailBridgeRecoveryGenerationMismatchDistinctCount = $fallbackTailBridgeRecoveryGenerationMismatchDistinctCount
+        fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount = $fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount
+        fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount = $fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount
         baselineManifest = $BaselinePath
         generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
         goodputRegressionTolerancePercent = $GoodputRegressionTolerancePercent
