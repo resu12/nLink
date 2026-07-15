@@ -2223,6 +2223,271 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task AnalyzeRetained_CurrentArtifactFallbackTailUnblockWithoutHeldRetryRecheck_OwnsFirstProofEdge(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunAnalyzeFixtureAsync(
+            BuildRuntimeUnlockFallbackTailUnblockRecheckMissingCurrentArtifactFixture(),
+            ["-LiveRouteProofMode", "RegularActivationCycle"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("route_runtime", verdict["acceptance_failure_class"]);
+        Assert.Equal(
+            "runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing",
+            verdict["recovery_failure_class"]);
+        Assert.Equal(
+            "runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing",
+            verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("filetransfer_v6_epoch_tail_unblocked", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal("fallback_tail_unblock_retry_recheck_missing", verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("16647", verdict["first_proof_chain_failure_sequence"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count"]);
+        Assert.Equal("fail", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict"]);
+
+        var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
+        Assert.Equal(verdict["recovery_failure_class"], stability["recovery_failure_class"]);
+        Assert.Equal("1", stability["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_FallbackTailUnblockExactRecheckDecision_RecoversCandidate(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_tail_recheck_recovered";
+        var lines = BuildRuntimeUnlockFallbackTailUnblockRecheckFixture(transferId).ToList();
+        var insertionIndex = lines.Count - 2;
+        lines.Insert(
+            insertionIndex++,
+            LogLine(RuntimeUnlockFallbackTailUnblockRecheckRequestedLine(transferId), secondsOffset: lines.Count));
+        lines.Insert(
+            insertionIndex,
+            LogLine(RuntimeUnlockFallbackTailUnblockRecheckDecidedLine(transferId), secondsOffset: lines.Count));
+        var result = await RunAnalyzeFixtureAsync(
+            lines.ToArray(),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.NotEqual(
+            "runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing",
+            verdict["recovery_failure_class"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_distinct_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_recovered_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count"]);
+        Assert.Equal("pass", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_FallbackTailUnblockDecisionWithoutPublishedRequest_RemainsUnresolved(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_tail_recheck_missing_request";
+        var lines = BuildRuntimeUnlockFallbackTailUnblockRecheckFixture(transferId).ToList();
+        lines.Insert(
+            lines.Count - 2,
+            LogLine(RuntimeUnlockFallbackTailUnblockRecheckDecidedLine(transferId), secondsOffset: lines.Count));
+
+        var verdict = await AnalyzeFallbackTailUnblockFixtureAsync(lines, compact);
+
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count"]);
+        Assert.Equal("fail", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_FallbackTailUnblockSparseDecision_RemainsUnresolved(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_tail_recheck_sparse_decision";
+        var lines = BuildRuntimeUnlockFallbackTailUnblockRecheckFixture(transferId).ToList();
+        var insertionIndex = lines.Count - 2;
+        lines.Insert(
+            insertionIndex++,
+            LogLine(RuntimeUnlockFallbackTailUnblockRecheckRequestedLine(transferId), secondsOffset: lines.Count));
+        lines.Insert(
+            insertionIndex,
+            LogLine(
+                RuntimeUnlockFallbackTailUnblockRecheckDecidedLine(transferId)
+                    .Replace("; source_target_transport=tuna", string.Empty, StringComparison.Ordinal),
+                secondsOffset: lines.Count));
+
+        var verdict = await AnalyzeFallbackTailUnblockFixtureAsync(lines, compact);
+
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_FallbackTailUnblockDecisionAfterTerminal_RemainsUnresolved(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_tail_recheck_late_decision";
+        var lines = BuildRuntimeUnlockFallbackTailUnblockRecheckFixture(transferId).ToList();
+        var terminalIndex = lines.FindIndex(
+            line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
+        lines.Insert(
+            terminalIndex,
+            LogLine(RuntimeUnlockFallbackTailUnblockRecheckRequestedLine(transferId), secondsOffset: lines.Count));
+        lines.Insert(
+            terminalIndex + 2,
+            LogLine(RuntimeUnlockFallbackTailUnblockRecheckDecidedLine(transferId), secondsOffset: lines.Count));
+
+        var verdict = await AnalyzeFallbackTailUnblockFixtureAsync(lines, compact);
+
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_recovered_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_FallbackTailUnblockUnrelatedLaterHold_DoesNotMaskEligibleHold(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_tail_recheck_unrelated_hold";
+        var lines = BuildRuntimeUnlockFallbackTailUnblockRecheckFixture(transferId).ToList();
+        var boundaryIndex = lines.FindIndex(
+            line => line.Contains("event=filetransfer_v6_epoch_tail_unblocked", StringComparison.Ordinal));
+        var unrelatedTuple = RuntimeUnlockFallbackTailUnblockRequestTuple(transferId)
+            .Replace("direction=outbound", "direction=inbound", StringComparison.Ordinal)
+            .Replace("source_route=post_tuna_fallback_v6", "source_route=regular_nkn_v4_fast", StringComparison.Ordinal)
+            .Replace("source_protocol_version=6", "source_protocol_version=4", StringComparison.Ordinal);
+        lines.Insert(
+            boundaryIndex++,
+            LogLine(
+                $"event=runtime_unlock_retry_dispatch_authority_held; {unrelatedTuple}; decision_reason=fallback_paired_tail_yield_pending",
+                secondsOffset: lines.Count));
+        var terminalIndex = lines.FindIndex(
+            line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
+        lines.Insert(
+            terminalIndex++,
+            LogLine(RuntimeUnlockFallbackTailUnblockRecheckRequestedLine(transferId), secondsOffset: lines.Count));
+        lines.Insert(
+            terminalIndex,
+            LogLine(RuntimeUnlockFallbackTailUnblockRecheckDecidedLine(transferId), secondsOffset: lines.Count));
+
+        var verdict = await AnalyzeFallbackTailUnblockFixtureAsync(lines, compact);
+
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_recovered_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count"]);
+    }
+
+    [Theory]
+    [InlineData(false, "runtime_unlock_retry_dispatch_authority_granted")]
+    [InlineData(true, "runtime_unlock_retry_dispatch_authority_granted")]
+    [InlineData(false, "runtime_unlock_retry_dispatch_authority_rejected")]
+    [InlineData(true, "runtime_unlock_retry_dispatch_authority_rejected")]
+    [InlineData(false, "session_recovery_contract_completed")]
+    [InlineData(true, "session_recovery_contract_completed")]
+    [InlineData(false, "session_recovery_contract_failed")]
+    [InlineData(true, "session_recovery_contract_failed")]
+    public async Task AnalyzeRetained_FallbackTailUnblockAuthoritativeDisposalBeforeBoundary_HasNoCandidate(
+        bool compact,
+        string disposalEvent)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_tail_recheck_disposed";
+        var lines = BuildRuntimeUnlockFallbackTailUnblockRecheckFixture(transferId).ToList();
+        var boundaryIndex = lines.FindIndex(
+            line => line.Contains("event=filetransfer_v6_epoch_tail_unblocked", StringComparison.Ordinal));
+        lines.Insert(
+            boundaryIndex,
+            LogLine(
+                $"event={disposalEvent}; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=outbound; contract_generation=1; retired_generation=2; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; decision_reason=authoritative_disposal",
+                secondsOffset: lines.Count));
+
+        var verdict = await AnalyzeFallbackTailUnblockFixtureAsync(lines, compact);
+
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_raw_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_distinct_count"]);
+        Assert.Equal("0", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AnalyzeRetained_FallbackTailUnblockDuplicateLogicalBoundary_DedupesDistinctCandidate(
+        bool compact)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_fallback_tail_recheck_duplicate_boundary";
+        var lines = BuildRuntimeUnlockFallbackTailUnblockRecheckFixture(transferId).ToList();
+        var boundaryIndex = lines.FindIndex(
+            line => line.Contains("event=filetransfer_v6_epoch_tail_unblocked", StringComparison.Ordinal));
+        lines.Insert(boundaryIndex + 1, lines[boundaryIndex]);
+
+        var verdict = await AnalyzeFallbackTailUnblockFixtureAsync(lines, compact);
+
+        Assert.Equal("2", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_raw_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_distinct_count"]);
+        Assert.Equal("1", verdict["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task AnalyzeRetained_ClosureWindowRejectionThenMatchingGrant_IsRecovered(
         bool compact)
     {
@@ -3754,6 +4019,87 @@ public sealed class FileTransferRetainedRuntimeUnlockAnalyzerTests : FileTransfe
             secondsOffset: lines.Count));
         return lines.ToArray();
     }
+
+    private async Task<Dictionary<string, string>> AnalyzeFallbackTailUnblockFixtureAsync(
+        IReadOnlyCollection<string> lines,
+        bool compact)
+    {
+        var result = await RunAnalyzeFixtureAsync(
+            lines.ToArray(),
+            ["-LiveRouteProofMode", "None"],
+            compact
+                ? new Dictionary<string, string>
+                {
+                    ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+                }
+                : null);
+
+        Assert.True(result.Script.ExitCode == 0, result.Script.Stdout + Environment.NewLine + result.Script.Stderr);
+        return ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+    }
+
+    private static string[] BuildRuntimeUnlockFallbackTailUnblockRecheckMissingCurrentArtifactFixture()
+    {
+        const string sessionId = "sess_runtime_unlock_dispatch_proof";
+        const string transferId = "transfer_fallback_tail_recheck_current_artifact";
+        var lines = BuildRuntimeUnlockFallbackTailUnblockRecheckFixture(transferId).ToList();
+        var holdIndex = lines.FindIndex(
+            line => line.Contains("event=runtime_unlock_retry_dispatch_authority_held", StringComparison.Ordinal));
+        lines[holdIndex] = LogLine(
+            RuntimeUnlockFallbackTailUnblockLegacyHoldPreservedLine(transferId),
+            secondsOffset: holdIndex);
+        var tail = lines.Single(line => line.Contains("event=filetransfer_v6_epoch_tail_unblocked", StringComparison.Ordinal));
+        lines.Remove(tail);
+        lines.RemoveRange(lines.Count - 2, 2);
+        while (lines.Count < 16646)
+        {
+            lines.Add(LogLine(
+                $"event=runtime_unlock_recovery_diagnostic_sample; session_id={sessionId}; transfer_id={transferId}; sample_index={lines.Count + 1}; decision_reason=diagnostic_only",
+                secondsOffset: lines.Count));
+        }
+
+        lines.Add(tail);
+        lines.Add(LogLine(
+            $"event=runtime_unlock_retry_dispatch_authority_granted; session_id={sessionId}; transfer_id={transferId}; contract_generation=2; retired_generation=0; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; decision_reason=accepted",
+            secondsOffset: lines.Count));
+        lines.Add(LogLine(
+            $"event=runtime_unlock_retry_dispatch_authority_rejected; session_id={sessionId}; transfer_id={transferId}; contract_generation=2; retired_generation=0; dispatch_attempt_generation=2; missing_dispatch_successor_generation=1; decision_reason=retry_dispatch_successor_retired_offer_mismatch",
+            secondsOffset: lines.Count));
+        lines.Add(LogLine($"event=file_transfer_inbound_terminal; role=Helper; session_id={sessionId}; transfer_id={transferId}; state=Completed; error_code=(none); sha256_match=1; integrity_ok=1", secondsOffset: lines.Count));
+        lines.Add(LogLine($"event=file_transfer_outbound_terminal; role=Helpee; session_id={sessionId}; transfer_id={transferId}; state=Completed; error_code=(none); sha256_match=1; integrity_ok=1", secondsOffset: lines.Count));
+        return lines.ToArray();
+    }
+
+    private static string[] BuildRuntimeUnlockFallbackTailUnblockRecheckFixture(string transferId)
+    {
+        const string sessionId = "sess_runtime_unlock_dispatch_proof";
+        var requestTuple = RuntimeUnlockFallbackTailUnblockRequestTuple(transferId);
+        return
+        [
+            LogLine($"event=filetransfer_route_selected; direction=outbound; session_id={sessionId}; transfer_id={transferId}; route=post_tuna_fallback_v6; protocol_version=6; runtime_profile=post_tuna_fallback_v6; frame_family=v6; handoff_kind=tuna_to_normal_fallback; selection_reason=header_switch_off", secondsOffset: 0),
+            LogLine($"event=filetransfer_fallback_tail_paired_yield_granted; direction=outbound; session_id={sessionId}; transfer_id={transferId}; leg_generation=3; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; transport_epoch=1; bridge_recovery_generation=1; yield_generation=2; reason=fallback_tail_paired_yield", secondsOffset: 1),
+            LogLine($"event=filetransfer_fallback_tail_paired_yield_granted; direction=inbound; session_id={sessionId}; transfer_id={transferId}; leg_generation=3; route=post_tuna_fallback_v6; protocol_version=6; live_route_epoch=2; runtime_generation=3; terminal_generation=0; transport_epoch=1; bridge_recovery_generation=1; yield_generation=1; reason=fallback_tail_peer_yield", secondsOffset: 2),
+            LogLine($"event=runtime_unlock_retry_dispatch_authority_held; {requestTuple}; decision_reason=fallback_paired_tail_yield_pending", secondsOffset: 3),
+            LogLine($"event=filetransfer_v6_epoch_tail_unblocked; direction=outbound; transfer_id={transferId}; session_id={sessionId}; transport_epoch=2; handoff_kind=regular_nkn_recovery; source_transport=regular_nkn; target_transport=regular_nkn; reason=frontier_repair_proof", secondsOffset: 4),
+            LogLine($"event=file_transfer_inbound_terminal; role=Helper; session_id={sessionId}; transfer_id={transferId}; state=Completed; error_code=(none); sha256_match=1; integrity_ok=1", secondsOffset: 5),
+            LogLine($"event=file_transfer_outbound_terminal; role=Helpee; session_id={sessionId}; transfer_id={transferId}; state=Completed; error_code=(none); sha256_match=1; integrity_ok=1", secondsOffset: 6)
+        ];
+    }
+
+    private static string RuntimeUnlockFallbackTailUnblockRequestTuple(string transferId)
+        => $"session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; direction=outbound; contract_generation=1; retired_generation=2; dispatch_attempt_generation=1; missing_dispatch_successor_generation=0; predecessor_authority_id=(none); request_active_predecessor_supersession=0; retry_reason=runtime_unlock_offer_send_not_observed; recovery_reason=post_tuna_fallback_session_liveness_timeout_pending; regular_v4_liveness_generation=0; bridge_decision_generation=0; source_session_id=sess_runtime_unlock_dispatch_proof; source_transfer_id={transferId}; source_direction=outbound; source_route=post_tuna_fallback_v6; source_protocol_version=6; source_live_route_epoch=2; source_runtime_generation=3; source_terminal_generation=0; source_leg_generation=3; source_route_publication_generation=5; source_route_commit_generation=(none); source_route_commit_generation_present=0; source_target_route=file_tuna_v4; source_target_protocol_version=4; source_target_transport=tuna; source_route_publication_action_kind=RoutePublication; source_coordinator_decision_reason=accepted";
+
+    private static string RuntimeUnlockFallbackTailUnblockLegacyHoldPreservedLine(string transferId)
+        => $"event=runtime_unlock_retry_dispatch_authority_hold_preserved; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; contract_generation=1; retired_generation=2; offer_generation=2; route=(none); protocol_version=0; live_route_epoch=0; runtime_generation=0; terminal_generation=0; leg_generation=0; regular_v4_liveness_generation=0; bridge_decision_generation=0; queued_behind_active_negotiation=0; decision_reason=fallback_paired_tail_yield_pending; attempted_source_publication_session_id=sess_runtime_unlock_dispatch_proof; attempted_source_publication_transfer_id={transferId}; attempted_source_publication_direction=outbound; attempted_source_publication_route=post_tuna_fallback_v6; attempted_source_publication_protocol_version=6; attempted_source_publication_live_route_epoch=2; attempted_source_publication_runtime_generation=3; attempted_source_publication_terminal_generation=0; attempted_source_publication_leg_generation=3; attempted_source_publication_route_publication_generation=5; attempted_source_publication_route_commit_generation=0; attempted_source_publication_target_route=post_tuna_fallback_v6; attempted_source_publication_target_protocol_version=6; attempted_source_publication_target_transport=regular_nkn; attempted_source_publication_route_publication_action_kind=RoutePublication";
+
+    private static string RuntimeUnlockFallbackTailUnblockRecheckBoundaryTuple()
+        => "recovered_transport_epoch=2; handoff_kind=regular_nkn_recovery; boundary_source_transport=regular_nkn; boundary_target_transport=regular_nkn; fallback_epoch=1; boundary_reason=frontier_repair_proof; boundary_identity=fallback-tail-boundary-1; original_hold_reason=fallback_paired_tail_yield_pending; recheck_generation=1";
+
+    private static string RuntimeUnlockFallbackTailUnblockRecheckRequestedLine(string transferId)
+        => $"event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested; {RuntimeUnlockFallbackTailUnblockRequestTuple(transferId)}; {RuntimeUnlockFallbackTailUnblockRecheckBoundaryTuple()}; decision_status=Pending; decision_valid=0; decision_reason=recheck_requested";
+
+    private static string RuntimeUnlockFallbackTailUnblockRecheckDecidedLine(string transferId)
+        => $"event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided; {RuntimeUnlockFallbackTailUnblockRequestTuple(transferId)}; {RuntimeUnlockFallbackTailUnblockRecheckBoundaryTuple()}; decision_status=Granted; decision_valid=1; decision_reason=accepted";
 
     private static string RuntimeUnlockRegularV4RecoveryLeaseClosureAdoptedLine(string transferId)
         => $"event=runtime_unlock_regular_v4_recovery_lease_closure_adopted; direction=outbound; session_id=sess_runtime_unlock_dispatch_proof; transfer_id={transferId}; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=1; runtime_generation=4; terminal_generation=0; leg_generation=9; transport_epoch=2; bridge_recovery_generation=3; bridge_decision_generation=5; regular_v4_liveness_generation=3; lease_authority_id=fta2-recovery-lease-1; lease_generation=3; lifecycle_outcome=Completed; lifecycle_reason=bridge_lifecycle_completed; adoption_boundary=regular_v4_receive_proof_observed; decision_reason=matching_local_receive_proof";

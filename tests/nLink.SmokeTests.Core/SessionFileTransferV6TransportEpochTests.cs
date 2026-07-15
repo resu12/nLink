@@ -1681,6 +1681,15 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             snapshot.State == V6TransportEpochState.Recovered &&
             snapshot.HandoffKind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
             snapshot.TargetTransport == FileTransferTransportKind.RegularNkn);
+        var recoveredAfterProof = senderTransport.ObservedV6TransportEpochs.Last(static snapshot =>
+            snapshot.State == V6TransportEpochState.Recovered &&
+            snapshot.HandoffKind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
+            snapshot.TargetTransport == FileTransferTransportKind.RegularNkn);
+        Assert.True(recoveredAfterProof.RecoveryBoundaryGeneration > 0);
+        Assert.True(recoveredAfterProof.ObservationCompleted.IsCompleted);
+        Assert.All(
+            senderTransport.V6TransportEpochObservationCompletionStates,
+            static completedInsideObserver => Assert.False(completedInsideObserver));
 
         senderTransport.SetLocalDataSessionsUnavailableForTests("sender_request_feedback_stalled");
         senderTransport.RequestAllDataSessionHandoffs(
@@ -1695,6 +1704,18 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                 snapshot.State == V6TransportEpochState.Recovered &&
                 snapshot.HandoffKind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
                 snapshot.TargetTransport == FileTransferTransportKind.RegularNkn) > observedRecoveredCountAfterProof);
+        var recoveredAfterSuppressedRestart = senderTransport.ObservedV6TransportEpochs.Last(static snapshot =>
+            snapshot.State == V6TransportEpochState.Recovered &&
+            snapshot.HandoffKind == FileTransferTransportHandoffKind.TunaToNormalFallback &&
+            snapshot.TargetTransport == FileTransferTransportKind.RegularNkn);
+        Assert.Equal(recoveredAfterProof.TransportEpoch, recoveredAfterSuppressedRestart.TransportEpoch);
+        Assert.True(
+            recoveredAfterSuppressedRestart.RecoveryBoundaryGeneration >
+            recoveredAfterProof.RecoveryBoundaryGeneration);
+        Assert.True(recoveredAfterSuppressedRestart.ObservationCompleted.IsCompleted);
+        Assert.All(
+            senderTransport.V6TransportEpochObservationCompletionStates,
+            static completedInsideObserver => Assert.False(completedInsideObserver));
         var logTail = ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_v6_epoch_recovered_restart_suppressed", logTail, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_v6_epoch_recovered_restart_pause_cleared", logTail, StringComparison.Ordinal);

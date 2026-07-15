@@ -8530,6 +8530,14 @@ function New-FileTransferStabilityGateSummaryLines {
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict),
+        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckRequestedCount),
+        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount),
+        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount),
+        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRawCount),
+        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingDistinctCount),
+        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount),
+        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount),
+        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict),
         ("runtime_unlock_offer_not_observed_count={0}" -f $recoveryClassification.RuntimeUnlockOfferNotObservedCount),
         ("runtime_unlock_retry_scheduled_count={0}" -f $recoveryClassification.RuntimeUnlockRetryScheduledCount),
         ("runtime_unlock_retry_queued_behind_active_negotiation_count={0}" -f $recoveryClassification.RuntimeUnlockRetryQueuedBehindActiveNegotiationCount),
@@ -10205,6 +10213,654 @@ function Get-FileTransferRuntimeUnlockRegularV4RecoveryLeaseCorrelation {
     }
 }
 
+function Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation {
+    param(
+        [AllowEmptyCollection()][object[]]$Events = @()
+    )
+
+    [object[]]$heldEvents = @($Events | Where-Object {
+        $_.EventName -in @(
+            'runtime_unlock_retry_dispatch_authority_held',
+            'runtime_unlock_retry_dispatch_authority_hold_preserved') -and
+        (Get-FileTransferEventField -Event $_ -Name 'decision_reason' -Default '') -eq
+            'fallback_paired_tail_yield_pending'
+    } | Sort-Object Sequence)
+    [object[]]$pairedYieldEvents = @($Events | Where-Object {
+        $_.EventName -eq 'filetransfer_fallback_tail_paired_yield_granted' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+        (Get-FileTransferEventField -Event $_ -Name 'route' -Default '') -eq 'post_tuna_fallback_v6' -and
+        (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -eq '6'
+    } | Sort-Object Sequence)
+    [object[]]$tailUnblockedEvents = @($Events | Where-Object {
+        $_.EventName -eq 'filetransfer_v6_epoch_tail_unblocked' -and
+        (Get-FileTransferEventField -Event $_ -Name 'direction' -Default '') -eq 'outbound' -and
+        (Get-FileTransferEventField -Event $_ -Name 'target_transport' -Default '') -eq 'regular_nkn' -and
+        (Get-FileTransferEventField -Event $_ -Name 'handoff_kind' -Default '') -in @(
+            'tuna_to_normal_fallback',
+            'regular_nkn_recovery')
+    } | Sort-Object Sequence)
+    [object[]]$recheckRequestedEvents = @($Events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested'
+    } | Sort-Object Sequence)
+    [object[]]$recheckDecidedEvents = @($Events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided'
+    } | Sort-Object Sequence)
+    [object[]]$recheckDiscardedEvents = @($Events | Where-Object {
+        $_.EventName -eq 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded'
+    } | Sort-Object Sequence)
+
+    function Get-FallbackTailRecheckField {
+        param(
+            [Parameter(Mandatory = $true)]$Event,
+            [Parameter(Mandatory = $true)][string[]]$Names,
+            [string]$Default = ''
+        )
+
+        foreach ($name in $Names) {
+            $value = Get-FileTransferEventField -Event $Event -Name $name -Default ''
+            if (-not [string]::IsNullOrWhiteSpace($value) -and $value -notin @('(none)', 'none')) {
+                return $value
+            }
+        }
+
+        return $Default
+    }
+
+    function Get-FallbackTailRecheckExactField {
+        param(
+            [Parameter(Mandatory = $true)]$Event,
+            [Parameter(Mandatory = $true)][string[]]$Names
+        )
+
+        foreach ($name in $Names) {
+            $value = Get-FileTransferEventField -Event $Event -Name $name -Default ''
+            if (-not [string]::IsNullOrWhiteSpace($value)) {
+                return $value
+            }
+        }
+
+        return ''
+    }
+
+    function Test-FallbackTailRecheckEventComplete {
+        param(
+            [Parameter(Mandatory = $true)]$Event,
+            [Parameter(Mandatory = $true)][ValidateSet('Hold', 'Requested', 'Decided', 'Boundary')][string]$Kind
+        )
+
+        if ($Kind -eq 'Boundary') {
+            $required = @(
+                'session_id',
+                'transfer_id',
+                'direction',
+                'transport_epoch',
+                'handoff_kind',
+                'source_transport',
+                'target_transport',
+                'reason')
+        }
+        else {
+            $required = @(
+                'session_id',
+                'transfer_id',
+                'direction|attempted_source_publication_direction',
+                'contract_generation',
+                'retired_generation|retired_offer_generation',
+                'dispatch_attempt_generation',
+                'missing_dispatch_successor_generation',
+                'predecessor_authority_id',
+                'request_active_predecessor_supersession',
+                'retry_reason',
+                'recovery_reason',
+                'regular_v4_liveness_generation',
+                'bridge_decision_generation',
+                'source_session_id|source_publication_session_id|attempted_source_publication_session_id',
+                'source_transfer_id|source_publication_transfer_id|attempted_source_publication_transfer_id',
+                'source_direction|source_publication_direction|attempted_source_publication_direction',
+                'source_route|source_publication_route|attempted_source_publication_route',
+                'source_protocol_version|source_publication_protocol_version|attempted_source_publication_protocol_version',
+                'source_live_route_epoch|source_publication_live_route_epoch|attempted_source_publication_live_route_epoch',
+                'source_runtime_generation|source_publication_runtime_generation|attempted_source_publication_runtime_generation',
+                'source_terminal_generation|source_publication_terminal_generation|attempted_source_publication_terminal_generation',
+                'source_leg_generation|source_publication_leg_generation|attempted_source_publication_leg_generation',
+                'source_route_publication_generation|source_publication_generation|attempted_source_publication_route_publication_generation',
+                'source_route_commit_generation|source_publication_route_commit_generation|attempted_source_publication_route_commit_generation',
+                'source_route_commit_generation_present|source_publication_route_commit_generation_present|attempted_source_publication_route_commit_generation_present',
+                'source_target_route|source_publication_target_route|attempted_source_publication_target_route',
+                'source_target_protocol_version|source_publication_target_protocol_version|attempted_source_publication_target_protocol_version',
+                'source_target_transport|source_publication_target_transport|attempted_source_publication_target_transport',
+                'source_route_publication_action_kind|source_publication_action_kind|attempted_source_publication_route_publication_action_kind',
+                'source_coordinator_decision_reason|source_publication_reason|attempted_source_publication_coordinator_decision_reason')
+
+            if ($Kind -in @('Requested', 'Decided')) {
+                $required += @(
+                    'recovered_transport_epoch',
+                    'handoff_kind',
+                    'boundary_source_transport',
+                    'boundary_target_transport',
+                    'fallback_epoch',
+                    'boundary_reason',
+                    'boundary_identity',
+                    'original_hold_reason',
+                    'recheck_generation')
+            }
+            if ($Kind -eq 'Decided') {
+                $required += @(
+                    'decision_status',
+                    'decision_valid',
+                    'decision_reason')
+            }
+        }
+
+        foreach ($aliasSpec in $required) {
+            [string[]]$aliases = $aliasSpec -split '\|'
+            if ([string]::IsNullOrWhiteSpace(
+                    (Get-FallbackTailRecheckExactField -Event $Event -Names $aliases))) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Test-FallbackTailRecheckHoldEligible {
+        param(
+            [Parameter(Mandatory = $true)]$Event
+        )
+
+        if (Test-FallbackTailRecheckEventComplete -Event $Event -Kind Hold) {
+            return $true
+        }
+
+        # Artifacts captured before the recheck protocol logged the complete request tuple.
+        # Retain those holds only as evidence that the historical boundary was abandoned;
+        # they can never satisfy the strict requested/decided recovery proof below.
+        foreach ($aliasSpec in @(
+                'session_id',
+                'transfer_id',
+                'contract_generation',
+                'retired_generation|retired_offer_generation',
+                'regular_v4_liveness_generation',
+                'bridge_decision_generation',
+                'attempted_source_publication_session_id',
+                'attempted_source_publication_transfer_id',
+                'attempted_source_publication_direction',
+                'attempted_source_publication_route',
+                'attempted_source_publication_protocol_version',
+                'attempted_source_publication_live_route_epoch',
+                'attempted_source_publication_runtime_generation',
+                'attempted_source_publication_terminal_generation',
+                'attempted_source_publication_leg_generation',
+                'attempted_source_publication_route_publication_generation',
+                'attempted_source_publication_route_commit_generation',
+                'attempted_source_publication_target_route',
+                'attempted_source_publication_target_protocol_version',
+                'attempted_source_publication_target_transport',
+                'attempted_source_publication_route_publication_action_kind')) {
+            [string[]]$aliases = $aliasSpec -split '\|'
+            if ([string]::IsNullOrWhiteSpace(
+                    (Get-FallbackTailRecheckExactField -Event $Event -Names $aliases))) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Test-FallbackTailRecheckIdentityMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Left,
+            [Parameter(Mandatory = $true)]$Right
+        )
+
+        foreach ($field in @('session_id', 'transfer_id')) {
+            $leftValue = Get-FallbackTailRecheckField -Event $Left -Names @($field)
+            $rightValue = Get-FallbackTailRecheckField -Event $Right -Names @($field)
+            if ([string]::IsNullOrWhiteSpace($leftValue) -or
+                [string]::IsNullOrWhiteSpace($rightValue) -or
+                -not [string]::Equals($leftValue, $rightValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Test-FallbackTailRecheckRequestMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Hold,
+            [Parameter(Mandatory = $true)]$Decision,
+            [ValidateSet('Hold', 'Requested', 'Decided')][string]$DecisionKind = 'Requested'
+        )
+
+        if (-not (Test-FallbackTailRecheckIdentityMatch -Left $Hold -Right $Decision)) {
+            return $false
+        }
+
+        if (-not (Test-FallbackTailRecheckEventComplete -Event $Hold -Kind Hold) -or
+            -not (Test-FallbackTailRecheckEventComplete -Event $Decision -Kind $DecisionKind)) {
+            return $false
+        }
+
+        $fieldAliases = @(
+            [pscustomobject]@{ Hold = @('direction', 'attempted_source_publication_direction'); Decision = @('direction', 'request_direction') },
+            [pscustomobject]@{ Hold = @('source_route', 'source_publication_route', 'attempted_source_publication_route', 'route'); Decision = @('source_route', 'source_publication_route', 'request_source_route') },
+            [pscustomobject]@{ Hold = @('source_protocol_version', 'source_publication_protocol_version', 'attempted_source_publication_protocol_version', 'protocol_version'); Decision = @('source_protocol_version', 'source_publication_protocol_version', 'request_source_protocol_version') },
+            [pscustomobject]@{ Hold = @('source_live_route_epoch', 'source_publication_live_route_epoch', 'attempted_source_publication_live_route_epoch', 'live_route_epoch'); Decision = @('source_live_route_epoch', 'source_publication_live_route_epoch', 'request_source_live_route_epoch') },
+            [pscustomobject]@{ Hold = @('source_runtime_generation', 'source_publication_runtime_generation', 'attempted_source_publication_runtime_generation', 'runtime_generation'); Decision = @('source_runtime_generation', 'source_publication_runtime_generation', 'request_source_runtime_generation') },
+            [pscustomobject]@{ Hold = @('source_terminal_generation', 'source_publication_terminal_generation', 'attempted_source_publication_terminal_generation', 'terminal_generation'); Decision = @('source_terminal_generation', 'source_publication_terminal_generation', 'request_source_terminal_generation') },
+            [pscustomobject]@{ Hold = @('source_leg_generation', 'source_publication_leg_generation', 'attempted_source_publication_leg_generation', 'leg_generation'); Decision = @('source_leg_generation', 'source_publication_leg_generation', 'request_source_leg_generation') },
+            [pscustomobject]@{ Hold = @('source_route_commit_generation', 'source_publication_route_commit_generation', 'attempted_source_publication_route_commit_generation', 'route_commit_generation'); Decision = @('source_route_commit_generation', 'source_publication_route_commit_generation', 'request_source_route_commit_generation') },
+            [pscustomobject]@{ Hold = @('contract_generation'); Decision = @('contract_generation', 'request_contract_generation') },
+            [pscustomobject]@{ Hold = @('retired_generation'); Decision = @('retired_generation', 'request_retired_generation') },
+            [pscustomobject]@{ Hold = @('dispatch_attempt_generation'); Decision = @('dispatch_attempt_generation', 'request_dispatch_attempt_generation') },
+            [pscustomobject]@{ Hold = @('missing_dispatch_successor_generation'); Decision = @('missing_dispatch_successor_generation', 'request_missing_dispatch_successor_generation') },
+            [pscustomobject]@{ Hold = @('predecessor_authority_id'); Decision = @('predecessor_authority_id', 'request_predecessor_authority_id') },
+            [pscustomobject]@{ Hold = @('request_active_predecessor_supersession'); Decision = @('request_active_predecessor_supersession') },
+            [pscustomobject]@{ Hold = @('retry_reason'); Decision = @('retry_reason') },
+            [pscustomobject]@{ Hold = @('recovery_reason'); Decision = @('recovery_reason') },
+            [pscustomobject]@{ Hold = @('regular_v4_liveness_generation'); Decision = @('regular_v4_liveness_generation') },
+            [pscustomobject]@{ Hold = @('bridge_decision_generation'); Decision = @('bridge_decision_generation') },
+            [pscustomobject]@{ Hold = @('source_session_id', 'source_publication_session_id', 'attempted_source_publication_session_id'); Decision = @('source_session_id') },
+            [pscustomobject]@{ Hold = @('source_transfer_id', 'source_publication_transfer_id', 'attempted_source_publication_transfer_id'); Decision = @('source_transfer_id') },
+            [pscustomobject]@{ Hold = @('source_direction', 'source_publication_direction', 'attempted_source_publication_direction'); Decision = @('source_direction') },
+            [pscustomobject]@{ Hold = @('source_route_publication_generation', 'source_publication_generation', 'attempted_source_publication_route_publication_generation'); Decision = @('source_route_publication_generation') },
+            [pscustomobject]@{ Hold = @('source_route_commit_generation_present', 'source_publication_route_commit_generation_present', 'attempted_source_publication_route_commit_generation_present'); Decision = @('source_route_commit_generation_present') },
+            [pscustomobject]@{ Hold = @('source_target_route', 'source_publication_target_route', 'attempted_source_publication_target_route'); Decision = @('source_target_route') },
+            [pscustomobject]@{ Hold = @('source_target_protocol_version', 'source_publication_target_protocol_version', 'attempted_source_publication_target_protocol_version'); Decision = @('source_target_protocol_version') },
+            [pscustomobject]@{ Hold = @('source_target_transport', 'source_publication_target_transport', 'attempted_source_publication_target_transport'); Decision = @('source_target_transport') },
+            [pscustomobject]@{ Hold = @('source_route_publication_action_kind', 'source_publication_action_kind', 'attempted_source_publication_route_publication_action_kind'); Decision = @('source_route_publication_action_kind') },
+            [pscustomobject]@{ Hold = @('source_coordinator_decision_reason', 'source_publication_reason', 'attempted_source_publication_coordinator_decision_reason'); Decision = @('source_coordinator_decision_reason') }
+        )
+        foreach ($aliases in $fieldAliases) {
+            $holdValue = Get-FallbackTailRecheckExactField -Event $Hold -Names $aliases.Hold
+            $decisionValue = Get-FallbackTailRecheckExactField -Event $Decision -Names $aliases.Decision
+            if ([string]::IsNullOrWhiteSpace($holdValue) -or
+                [string]::IsNullOrWhiteSpace($decisionValue) -or
+                -not [string]::Equals($holdValue, $decisionValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Test-FallbackTailRecheckBoundaryMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Boundary,
+            [Parameter(Mandatory = $true)]$Decision
+        )
+
+        if (-not (Test-FallbackTailRecheckEventComplete -Event $Boundary -Kind Boundary) -or
+            -not (Test-FallbackTailRecheckEventComplete -Event $Decision -Kind Requested) -or
+            -not (Test-FallbackTailRecheckIdentityMatch -Left $Boundary -Right $Decision)) {
+            return $false
+        }
+
+        foreach ($aliases in @(
+                [pscustomobject]@{ Boundary = @('transport_epoch'); Decision = @('recovered_transport_epoch', 'transport_epoch') },
+                [pscustomobject]@{ Boundary = @('handoff_kind'); Decision = @('handoff_kind', 'recovery_handoff_kind') },
+                [pscustomobject]@{ Boundary = @('source_transport'); Decision = @('boundary_source_transport') },
+                [pscustomobject]@{ Boundary = @('target_transport'); Decision = @('boundary_target_transport') },
+                [pscustomobject]@{ Boundary = @('reason'); Decision = @('boundary_reason', 'recovery_boundary_reason') })) {
+            $boundaryValue = Get-FallbackTailRecheckExactField -Event $Boundary -Names $aliases.Boundary
+            $decisionValue = Get-FallbackTailRecheckExactField -Event $Decision -Names $aliases.Decision
+            if ([string]::IsNullOrWhiteSpace($boundaryValue) -or
+                [string]::IsNullOrWhiteSpace($decisionValue) -or
+                -not [string]::Equals($boundaryValue, $decisionValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    function Test-FallbackTailRecheckPublishedDecisionMatch {
+        param(
+            [Parameter(Mandatory = $true)]$Requested,
+            [Parameter(Mandatory = $true)]$Decided
+        )
+
+        if (-not (Test-FallbackTailRecheckEventComplete -Event $Requested -Kind Requested) -or
+            -not (Test-FallbackTailRecheckEventComplete -Event $Decided -Kind Decided) -or
+            -not (Test-FallbackTailRecheckRequestMatch `
+                -Hold $Requested `
+                -Decision $Decided `
+                -DecisionKind Decided)) {
+            return $false
+        }
+
+        foreach ($field in @(
+                'recovered_transport_epoch',
+                'handoff_kind',
+                'boundary_source_transport',
+                'boundary_target_transport',
+                'fallback_epoch',
+                'boundary_reason',
+                'boundary_identity',
+                'original_hold_reason',
+                'recheck_generation')) {
+            $requestedValue = Get-FallbackTailRecheckExactField -Event $Requested -Names @($field)
+            $decidedValue = Get-FallbackTailRecheckExactField -Event $Decided -Names @($field)
+            if ([string]::IsNullOrWhiteSpace($requestedValue) -or
+                [string]::IsNullOrWhiteSpace($decidedValue) -or
+                -not [string]::Equals(
+                    $requestedValue,
+                    $decidedValue,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $false
+            }
+        }
+
+        return (Get-FileTransferEventField -Event $Decided -Name 'decision_valid' -Default '') -eq '1' -and
+               (Get-FileTransferEventField -Event $Decided -Name 'decision_status' -Default '') -in @(
+                   'Held',
+                   'Granted',
+                   'Rejected')
+    }
+
+    function Test-FallbackTailRecheckInvalidationEvent {
+        param(
+            [Parameter(Mandatory = $true)]$Anchor,
+            [Parameter(Mandatory = $true)]$Requested,
+            [Parameter(Mandatory = $true)]$Candidate
+        )
+
+        if (-not (Test-FallbackTailRecheckIdentityMatch -Left $Anchor -Right $Candidate)) {
+            return $false
+        }
+
+        $direction = Get-FallbackTailRecheckExactField -Event $Candidate -Names @('direction')
+        if (-not [string]::IsNullOrWhiteSpace($direction) -and $direction -ne 'outbound') {
+            return $false
+        }
+
+        if ($Candidate.EventName -in @(
+                'file_transfer_inbound_terminal',
+                'file_transfer_outbound_terminal',
+                'transfer_terminal',
+                'filetransfer_runtime_terminalized',
+                'runtime_unlock_retry_dispatch_chain_closed')) {
+            return $true
+        }
+
+        if ($Candidate.EventName -in @(
+                'runtime_unlock_retry_dispatch_authority_granted',
+                'runtime_unlock_retry_dispatch_authority_rejected')) {
+            return $true
+        }
+
+        if ($Candidate.EventName -in @(
+                'runtime_unlock_retry_dispatch_authority_held',
+                'runtime_unlock_retry_dispatch_authority_hold_preserved')) {
+            $requestOrdinalAliases = @(
+                [pscustomobject]@{ Requested = @('contract_generation'); Candidate = @('contract_generation') },
+                [pscustomobject]@{ Requested = @('retired_generation', 'retired_offer_generation'); Candidate = @('retired_generation', 'retired_offer_generation') },
+                [pscustomobject]@{ Requested = @('dispatch_attempt_generation'); Candidate = @('dispatch_attempt_generation') },
+                [pscustomobject]@{ Requested = @('missing_dispatch_successor_generation'); Candidate = @('missing_dispatch_successor_generation') })
+            $completeOrdinalTuple = $true
+            $ordinalMismatch = $false
+            foreach ($aliases in $requestOrdinalAliases) {
+                $requestedValue = Get-FallbackTailRecheckExactField -Event $Requested -Names $aliases.Requested
+                $candidateValue = Get-FallbackTailRecheckExactField -Event $Candidate -Names $aliases.Candidate
+                if ([string]::IsNullOrWhiteSpace($requestedValue) -or
+                    [string]::IsNullOrWhiteSpace($candidateValue)) {
+                    $completeOrdinalTuple = $false
+                    break
+                }
+                if (-not [string]::Equals(
+                        $requestedValue,
+                        $candidateValue,
+                        [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $ordinalMismatch = $true
+                }
+            }
+            if ($completeOrdinalTuple -and $ordinalMismatch) {
+                return $true
+            }
+
+            if (Test-FallbackTailRecheckEventComplete -Event $Candidate -Kind Hold) {
+                return -not (Test-FallbackTailRecheckRequestMatch `
+                    -Hold $Requested `
+                    -Decision $Candidate `
+                    -DecisionKind Hold)
+            }
+
+            return $false
+        }
+
+        $requestedContract = Get-FallbackTailRecheckExactField -Event $Requested -Names @('contract_generation')
+        $candidateContract = Get-FallbackTailRecheckExactField -Event $Candidate -Names @('contract_generation')
+        if ($Candidate.EventName -like 'session_recovery_contract_*') {
+            if ($Candidate.EventName -in @(
+                    'session_recovery_contract_completed',
+                    'session_recovery_contract_failed')) {
+                return $true
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($candidateContract) -and
+                $candidateContract -ne $requestedContract) {
+                return $true
+            }
+        }
+
+        if ($Candidate.EventName -notin @(
+                'filetransfer_route_transitioned',
+                'filetransfer_route_selected',
+                'filetransfer_live_route_epoch_started',
+                'filetransfer_live_route_epoch_recovered',
+                'filetransfer_runtime_started',
+                'filetransfer_runtime_owner_changed',
+                'filetransfer_bridge_recovery_authority_granted')) {
+            return $false
+        }
+
+        $tupleAliases = @(
+            [pscustomobject]@{ Requested = @('source_route'); Candidate = @('route', 'current_route') },
+            [pscustomobject]@{ Requested = @('source_protocol_version'); Candidate = @('protocol_version', 'current_protocol_version') },
+            [pscustomobject]@{ Requested = @('source_live_route_epoch'); Candidate = @('live_route_epoch', 'current_live_route_epoch') },
+            [pscustomobject]@{ Requested = @('source_runtime_generation'); Candidate = @('runtime_generation', 'current_runtime_generation') },
+            [pscustomobject]@{ Requested = @('source_terminal_generation'); Candidate = @('terminal_generation', 'current_terminal_generation') },
+            [pscustomobject]@{ Requested = @('source_leg_generation'); Candidate = @('leg_generation', 'current_leg_generation') },
+            [pscustomobject]@{ Requested = @('source_route_publication_generation'); Candidate = @('route_publication_generation', 'source_publication_generation') },
+            [pscustomobject]@{ Requested = @('bridge_decision_generation'); Candidate = @('bridge_decision_generation') })
+        foreach ($aliases in $tupleAliases) {
+            $requestedValue = Get-FallbackTailRecheckExactField -Event $Requested -Names $aliases.Requested
+            $candidateValue = Get-FallbackTailRecheckExactField -Event $Candidate -Names $aliases.Candidate
+            if ([string]::IsNullOrWhiteSpace($candidateValue)) {
+                continue
+            }
+
+            if ([string]::IsNullOrWhiteSpace($requestedValue) -or
+                -not [string]::Equals(
+                    $requestedValue,
+                    $candidateValue,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $true
+            }
+        }
+
+        return $false
+    }
+
+    $rawCandidates = New-Object System.Collections.Generic.List[object]
+    $distinctCandidates = New-Object System.Collections.Generic.List[object]
+    $recoveredCandidates = New-Object System.Collections.Generic.List[object]
+    $unresolvedCandidates = New-Object System.Collections.Generic.List[object]
+    $seenCandidateKeys = @{}
+
+    foreach ($boundary in $tailUnblockedEvents) {
+        $boundarySequence = [int64]$boundary.Sequence
+        $matchingHolds = @($heldEvents | Where-Object {
+            [int64]$_.Sequence -lt $boundarySequence -and
+            (Test-FallbackTailRecheckIdentityMatch -Left $_ -Right $boundary) -and
+            (Test-FallbackTailRecheckHoldEligible -Event $_) -and
+            (Get-FallbackTailRecheckExactField -Event $_ -Names @('direction', 'attempted_source_publication_direction')) -eq 'outbound' -and
+            (Get-FallbackTailRecheckExactField -Event $_ -Names @('source_route', 'source_publication_route', 'attempted_source_publication_route', 'route')) -eq 'post_tuna_fallback_v6' -and
+            (Get-FallbackTailRecheckExactField -Event $_ -Names @('source_protocol_version', 'source_publication_protocol_version', 'attempted_source_publication_protocol_version', 'protocol_version')) -eq '6'
+        } | Sort-Object Sequence -Descending)
+        if ($matchingHolds.Count -eq 0) {
+            continue
+        }
+
+        $hold = $matchingHolds[0]
+        $holdSequence = [int64]$hold.Sequence
+        $pairedYield = @($pairedYieldEvents | Where-Object {
+            [int64]$_.Sequence -lt $boundarySequence -and
+            (Test-FallbackTailRecheckIdentityMatch -Left $_ -Right $boundary)
+        } | Sort-Object Sequence -Descending | Select-Object -First 1)
+        if ($pairedYield.Count -eq 0) {
+            continue
+        }
+
+        $holdRoute = Get-FallbackTailRecheckField `
+            -Event $hold `
+            -Names @('source_route', 'source_publication_route', 'attempted_source_publication_route', 'route')
+        $holdProtocol = Get-FallbackTailRecheckField `
+            -Event $hold `
+            -Names @('source_protocol_version', 'source_publication_protocol_version', 'attempted_source_publication_protocol_version', 'protocol_version')
+        $holdDirection = Get-FallbackTailRecheckField `
+            -Event $hold `
+            -Names @('direction', 'attempted_source_publication_direction')
+        if ($holdRoute -ne 'post_tuna_fallback_v6' -or
+            $holdProtocol -ne '6' -or
+            $holdDirection -ne 'outbound') {
+            continue
+        }
+
+        $ownerTupleMatches = $true
+        foreach ($aliases in @(
+                [pscustomobject]@{ Hold = @('source_live_route_epoch', 'source_publication_live_route_epoch', 'attempted_source_publication_live_route_epoch', 'live_route_epoch'); Paired = @('live_route_epoch') },
+                [pscustomobject]@{ Hold = @('source_runtime_generation', 'source_publication_runtime_generation', 'attempted_source_publication_runtime_generation', 'runtime_generation'); Paired = @('runtime_generation') },
+                [pscustomobject]@{ Hold = @('source_terminal_generation', 'source_publication_terminal_generation', 'attempted_source_publication_terminal_generation', 'terminal_generation'); Paired = @('terminal_generation') },
+                [pscustomobject]@{ Hold = @('source_leg_generation', 'source_publication_leg_generation', 'attempted_source_publication_leg_generation', 'leg_generation'); Paired = @('leg_generation') })) {
+            $holdValue = Get-FallbackTailRecheckField -Event $hold -Names $aliases.Hold
+            $pairedValue = Get-FallbackTailRecheckField -Event $pairedYield[0] -Names $aliases.Paired
+            if ([string]::IsNullOrWhiteSpace($holdValue) -or
+                [string]::IsNullOrWhiteSpace($pairedValue) -or
+                $holdValue -ne $pairedValue) {
+                $ownerTupleMatches = $false
+                break
+            }
+        }
+        if (-not $ownerTupleMatches) {
+            continue
+        }
+
+        $invalidatedBeforeBoundary = @($Events | Where-Object {
+            [int64]$_.Sequence -gt $holdSequence -and
+            [int64]$_.Sequence -lt $boundarySequence -and
+            (Test-FallbackTailRecheckInvalidationEvent `
+                -Anchor $hold `
+                -Requested $hold `
+                -Candidate $_)
+        } | Select-Object -First 1).Count -gt 0
+        if ($invalidatedBeforeBoundary) {
+            continue
+        }
+
+        $rawCandidates.Add($boundary) | Out-Null
+        $requestKeyParts = @(
+            Get-FallbackTailRecheckField -Event $hold -Names @('session_id') -Default '(missing)'
+            Get-FallbackTailRecheckField -Event $hold -Names @('transfer_id') -Default '(missing)'
+            Get-FallbackTailRecheckField -Event $hold -Names @('direction', 'attempted_source_publication_direction') -Default 'outbound'
+            Get-FallbackTailRecheckField -Event $hold -Names @('contract_generation') -Default '(missing)'
+            Get-FallbackTailRecheckField -Event $hold -Names @('retired_generation') -Default '(missing)'
+            Get-FallbackTailRecheckField -Event $hold -Names @('dispatch_attempt_generation') -Default '(missing)'
+            Get-FallbackTailRecheckField -Event $hold -Names @('missing_dispatch_successor_generation') -Default '(missing)'
+            Get-FallbackTailRecheckField -Event $hold -Names @('predecessor_authority_id') -Default '(none)'
+            Get-FallbackTailRecheckField -Event $hold -Names @('source_route_publication_generation', 'source_publication_generation', 'attempted_source_publication_route_publication_generation') -Default '(missing)'
+            Get-FallbackTailRecheckField -Event $boundary -Names @('transport_epoch') -Default '(missing)'
+            Get-FallbackTailRecheckField -Event $boundary -Names @('handoff_kind') -Default '(missing)'
+            Get-FallbackTailRecheckField -Event $boundary -Names @('source_transport') -Default '(missing)'
+            Get-FallbackTailRecheckField -Event $boundary -Names @('target_transport') -Default '(missing)'
+            Get-FallbackTailRecheckField -Event $boundary -Names @('reason') -Default '(missing)'
+        )
+        $candidateKey = $requestKeyParts -join '|'
+        if ($seenCandidateKeys.ContainsKey($candidateKey)) {
+            continue
+        }
+
+        $seenCandidateKeys[$candidateKey] = $true
+        $distinctCandidates.Add($boundary) | Out-Null
+        $firstBoundaryInvalidation = @($Events | Where-Object {
+            [int64]$_.Sequence -gt $boundarySequence -and
+            (Test-FallbackTailRecheckInvalidationEvent `
+                -Anchor $hold `
+                -Requested $hold `
+                -Candidate $_)
+        } | Sort-Object Sequence | Select-Object -First 1)
+        $boundaryInvalidationSequence = if ($firstBoundaryInvalidation.Count -gt 0) {
+            [int64]$firstBoundaryInvalidation[0].Sequence
+        }
+        else {
+            [int64]::MaxValue
+        }
+        $matchingRequested = @($recheckRequestedEvents | Where-Object {
+            [int64]$_.Sequence -gt $boundarySequence -and
+            [int64]$_.Sequence -lt $boundaryInvalidationSequence -and
+            (Test-FallbackTailRecheckRequestMatch -Hold $hold -Decision $_) -and
+            (Test-FallbackTailRecheckBoundaryMatch -Boundary $boundary -Decision $_)
+        } | Sort-Object Sequence | Select-Object -First 1)
+        $matchingDecision = @()
+        if ($matchingRequested.Count -gt 0) {
+            $requested = $matchingRequested[0]
+            $requestedSequence = [int64]$requested.Sequence
+            $firstInvalidation = @($Events | Where-Object {
+                [int64]$_.Sequence -gt $requestedSequence -and
+                (Test-FallbackTailRecheckInvalidationEvent `
+                    -Anchor $hold `
+                    -Requested $requested `
+                    -Candidate $_)
+            } | Sort-Object Sequence | Select-Object -First 1)
+            $invalidationSequence = if ($firstInvalidation.Count -gt 0) {
+                [int64]$firstInvalidation[0].Sequence
+            }
+            else {
+                [int64]::MaxValue
+            }
+            $matchingDecision = @($recheckDecidedEvents | Where-Object {
+                [int64]$_.Sequence -gt $requestedSequence -and
+                [int64]$_.Sequence -lt $invalidationSequence -and
+                (Test-FallbackTailRecheckPublishedDecisionMatch `
+                    -Requested $requested `
+                    -Decided $_)
+            } | Sort-Object Sequence | Select-Object -First 1)
+        }
+        if ($matchingDecision.Count -gt 0) {
+            $recoveredCandidates.Add($boundary) | Out-Null
+        }
+        else {
+            $unresolvedCandidates.Add($boundary) | Out-Null
+        }
+    }
+
+    $verdict = if ($distinctCandidates.Count -eq 0) {
+        'none'
+    }
+    elseif ($unresolvedCandidates.Count -eq 0) {
+        'pass'
+    }
+    else {
+        'fail'
+    }
+
+    return [pscustomobject]@{
+        RequestedCount = $recheckRequestedEvents.Count
+        DecidedCount = $recheckDecidedEvents.Count
+        DiscardedCount = $recheckDiscardedEvents.Count
+        RawCount = $rawCandidates.Count
+        DistinctCount = $distinctCandidates.Count
+        RecoveredCount = $recoveredCandidates.Count
+        UnresolvedCount = $unresolvedCandidates.Count
+        Verdict = $verdict
+        RawCandidateEvents = @($rawCandidates.ToArray())
+        DistinctCandidateEvents = @($distinctCandidates.ToArray())
+        RecoveredCandidateEvents = @($recoveredCandidates.ToArray())
+        UnresolvedCandidateEvents = @($unresolvedCandidates.ToArray())
+    }
+}
+
 function Get-FileTransferRecoveryFailureClassification {
     param(
         [Parameter(Mandatory = $true)]$Summary
@@ -10285,6 +10941,8 @@ function Get-FileTransferRecoveryFailureClassification {
     })
     $runtimeUnlockRegularV4RecoveryLeaseIssuanceProof =
         Get-FileTransferRuntimeUnlockRegularV4RecoveryLeaseCorrelation -Events $events
+    $runtimeUnlockRetryFallbackTailUnblockRecheckProof =
+        Get-FileTransferRuntimeUnlockRetryFallbackTailUnblockRecheckCorrelation -Events $events
     $runtimeUnlockRegularV4RecoverySettlementProtocolObserved =
         $runtimeUnlockRegularV4RecoverySettlementReportedEvents.Count -gt 0 -or
         $runtimeUnlockRegularV4RecoverySettlementDecidedEvents.Count -gt 0
@@ -13572,6 +14230,12 @@ function Get-FileTransferRecoveryFailureClassification {
         -Events @($postTunaFallbackOutboundReceiveWorkerHandoffMissingCandidateEvents.ToArray())
     Add-FileTransferProofChainFailureCandidates `
         -Candidates $proofChainFailureCandidates `
+        -Class 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing' `
+        -Events @($runtimeUnlockRetryFallbackTailUnblockRecheckProof.UnresolvedCandidateEvents) `
+        -DefaultReason 'fallback_tail_unblock_retry_recheck_missing' `
+        -UseDefaultReason
+    Add-FileTransferProofChainFailureCandidates `
+        -Candidates $proofChainFailureCandidates `
         -Class 'post_tuna_fallback_paired_yield_bridge_recovery_generation_mismatch' `
         -Events @($fallbackTailProof.BridgeRecoveryGenerationMismatchCandidateEvents) `
         -DefaultReason 'bridge_recovery_generation_mismatch' `
@@ -14333,6 +14997,14 @@ function Get-FileTransferRecoveryFailureClassification {
         RuntimeUnlockProbeRecoveryAuthorityVerdict = $runtimeUnlockProbeRecoveryAuthorityVerdict
         RuntimeUnlockRetryDispatchAuthorityHeldCount = $runtimeUnlockRetryDispatchAuthorityHeldEvents.Count
         RuntimeUnlockRetryDispatchAuthorityHoldPreservedCount = $runtimeUnlockRetryDispatchAuthorityHoldPreservedEvents.Count
+        RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckRequestedCount = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.RequestedCount
+        RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DecidedCount
+        RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DiscardedCount
+        RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRawCount = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.RawCount
+        RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingDistinctCount = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.DistinctCount
+        RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.RecoveredCount
+        RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.UnresolvedCount
+        RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict = $runtimeUnlockRetryFallbackTailUnblockRecheckProof.Verdict
         PostTunaFallbackOutboundReceiveWorkerHandoffMissingCount = $postTunaFallbackOutboundReceiveWorkerHandoffMissingCount
         RuntimeUnlockBrokenStateFreshRetryConsumedCount = $runtimeUnlockBrokenStateFreshRetryConsumedEvents.Count
         RuntimeUnlockBrokenStateRetrySuppressedCount = $runtimeUnlockBrokenStateRetrySuppressedEvents.Count
@@ -14747,6 +15419,14 @@ function New-FileTransferInvariantLedgerObject {
         runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount
         runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count = [string]$recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount
         runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict = $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict
+        runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckRequestedCount
+        runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount
+        runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount
+        runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_raw_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRawCount
+        runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_distinct_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingDistinctCount
+        runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_recovered_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount
+        runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count = [string]$recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount
+        runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict = $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict
         fallback_tail_bridge_recovery_generation_pairing_verdict = $recoveryClassification.FallbackTailBridgeRecoveryGenerationPairingVerdict
         fallback_tail_bridge_recovery_generation_mismatch_raw_count = [string]$recoveryClassification.FallbackTailBridgeRecoveryGenerationMismatchRawCount
         fallback_tail_bridge_recovery_generation_mismatch_distinct_count = [string]$recoveryClassification.FallbackTailBridgeRecoveryGenerationMismatchDistinctCount
@@ -14912,7 +15592,8 @@ function Write-FileTransferDiagnosticsArtifacts {
             'runtime_unlock_tuna_probe_recovery_authority_lost',
             'runtime_unlock_regular_v4_recovery_lease_not_issued',
             'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted',
-            'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved') -and
+            'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved',
+            'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing') -and
         $effectiveGateStatus -ne 'fail') {
         $effectiveVerdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
         $effectiveGateStatus = 'fail'
@@ -14970,6 +15651,10 @@ function Write-FileTransferDiagnosticsArtifacts {
                 'recovery: regular-V4 closure-window session liveness was not preserved while awaiting local receive proof'
                 break
             }
+            'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing' {
+                'recovery: coordinator-held runtime unlock retry was not rechecked after fallback-tail recovery'
+                break
+            }
             default {
                 'recovery: runtime unlock retry release missing dispatch proof'
             }
@@ -14999,11 +15684,19 @@ function Write-FileTransferDiagnosticsArtifacts {
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_preservation_verdict={0}" -f $recoveryClassification.RuntimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict),
+        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckRequestedCount),
+        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckDecidedCount),
+        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckDiscardedCount),
+        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_raw_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRawCount),
+        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_distinct_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingDistinctCount),
+        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_recovered_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount),
+        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount),
+        ("runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict={0}" -f $recoveryClassification.RuntimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict),
         ("verdict={0}" -f $effectiveVerdict),
         ("gate_status={0}" -f $effectiveGateStatus),
         ("transfer_id={0}" -f ($(if ([string]::IsNullOrWhiteSpace($Summary.TransferId)) { '(none)' } else { $Summary.TransferId }))),
         ("next_artifact={0}" -f $effectiveNextArtifact),
-        ("acceptance_failure_class={0}" -f ($(if ($recoveryClassification.Class -in @('runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved')) { 'route_runtime' } elseif ($invariantMayOwnAcceptanceFailure) { $combinedInvariant.FailureClass } else { 'none' }))),
+        ("acceptance_failure_class={0}" -f ($(if ($recoveryClassification.Class -in @('runtime_unlock_regular_v4_recovery_lease_not_issued', 'runtime_unlock_regular_v4_recovery_lease_closure_not_adopted', 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved', 'runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing')) { 'route_runtime' } elseif ($invariantMayOwnAcceptanceFailure) { $combinedInvariant.FailureClass } else { 'none' }))),
         ("release_route_law_verdict={0}" -f $releaseRouteLaw.Verdict),
         ("terminal_lifecycle_invariant_verdict={0}" -f $terminalLifecycleInvariant.Verdict),
         ("control_priority_invariant_verdict={0}" -f $controlPriorityInvariant.Verdict),

@@ -342,6 +342,72 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
     }
 
     [Fact]
+    public async Task RunFileTransferRouteAcceptance_FallbackTailUnblockRecheckCountsReachScenarioAndRootSummaries()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string scenario = "regular-v4-live-activation-off-on-off-256mb";
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "phase5-fallback-tail-unblock-recheck-summary-propagation");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-fallback-tail-unblock-recheck-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_FALLBACK_TAIL_UNBLOCK_RECHECK_SUMMARY_FIXTURE"] = "1";
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ScenarioName", scenario,
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"Expected fake fallback-tail recheck propagation run to pass.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+
+            var evidence = ReadArtifactReport(Path.Combine(runRoot, scenario), "filetransfer-operator-verdict.txt");
+            Assert.Equal("1", evidence["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_raw_count"]);
+            Assert.Equal("1", evidence["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_distinct_count"]);
+            Assert.Equal("0", evidence["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_recovered_count"]);
+            Assert.Equal("1", evidence["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count"]);
+            Assert.Equal("fail", evidence["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict"]);
+
+            var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal("1", summary["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_raw_count"]);
+            Assert.Equal("1", summary["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_distinct_count"]);
+            Assert.Equal("0", summary["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_recovered_count"]);
+            Assert.Equal("1", summary["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count"]);
+            Assert.Equal("fail", summary["runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict"]);
+            Assert.Equal("1", summary[$"{scenario}.runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count"]);
+            Assert.Equal("fail", summary[$"{scenario}.runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict"]);
+
+            using var summaryJson = JsonDocument.Parse(
+                await File.ReadAllTextAsync(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.json")));
+            var root = summaryJson.RootElement;
+            Assert.Equal(1, root.GetProperty("runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRawCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount").GetInt32());
+            Assert.Equal("fail", root.GetProperty("runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict").GetString());
+            var run = Assert.Single(root.GetProperty("runs").EnumerateArray());
+            Assert.Equal(1, run.GetProperty("runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRawCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount").GetInt32());
+            Assert.Equal("fail", run.GetProperty("runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict").GetString());
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
     [Trait("Category", "Smoke")]
     public async Task RunFileTransferRouteAcceptance_CurrentArtifactEquivalentIsIncompleteProofWithRetryCandidate()
     {

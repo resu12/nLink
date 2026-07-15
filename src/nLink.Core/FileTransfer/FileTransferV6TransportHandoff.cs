@@ -50,7 +50,35 @@ public sealed record FileTransferV6TransportEpochSnapshot(
     FileTransferTransportKind TargetTransport,
     V6TransportEpochState State,
     string Reason,
-    bool IsUnresolved);
+    bool IsUnresolved)
+{
+    private sealed class ObservationMetadata
+    {
+        public TaskCompletionSource<bool> Completion { get; } = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public long RecoveryBoundaryGeneration { get; set; }
+    }
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<
+        FileTransferV6TransportEpochSnapshot,
+        ObservationMetadata> observationMetadata = new();
+
+    private ObservationMetadata Metadata => observationMetadata.GetValue(
+        this,
+        static _ => new ObservationMetadata());
+
+    internal long RecoveryBoundaryGeneration
+    {
+        get => Metadata.RecoveryBoundaryGeneration;
+        set => Metadata.RecoveryBoundaryGeneration = value;
+    }
+
+    internal Task ObservationCompleted => Metadata.Completion.Task;
+
+    internal void CompleteObservation()
+        => Metadata.Completion.TrySetResult(true);
+}
 
 public interface IFileTransferV6TransportEpochObserver
 {
@@ -62,6 +90,8 @@ internal sealed class V6TransportEpoch
     public RoutePublicationToken? RoutePublicationToken { get; set; }
 
     public long EpochId { get; init; }
+
+    public long RecoveryBoundaryGeneration { get; set; }
 
     public FileTransferTransportHandoffKind Kind { get; init; } = FileTransferTransportHandoffKind.RegularNknRecovery;
 

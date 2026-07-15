@@ -1254,6 +1254,7 @@ public sealed partial class SessionFileTransferService
             context.LastRecoveredV6TransportEpoch,
             context.LastRecoveredV6TransportEpochKind,
             context.LastRecoveredV6TransportTargetTransport,
+            ++context.V6RecoveryBoundaryGeneration,
             reason,
             handoffKind,
             targetTransport);
@@ -1299,6 +1300,7 @@ public sealed partial class SessionFileTransferService
             context.LastRecoveredV6TransportEpoch,
             context.LastRecoveredV6TransportEpochKind,
             context.LastRecoveredV6TransportTargetTransport,
+            ++context.V6RecoveryBoundaryGeneration,
             reason,
             handoffKind,
             targetTransport);
@@ -1311,6 +1313,7 @@ public sealed partial class SessionFileTransferService
         long recoveredTransportEpoch,
         FileTransferTransportHandoffKind recoveredHandoffKind,
         FileTransferTransportKind recoveredTargetTransport,
+        long recoveryBoundaryGeneration,
         string reason,
         FileTransferTransportHandoffKind requestedHandoffKind,
         FileTransferTransportKind requestedTargetTransport)
@@ -1327,8 +1330,7 @@ public sealed partial class SessionFileTransferService
         var sourceTransport = recoveredHandoffKind == FileTransferTransportHandoffKind.TunaToNormalFallback
             ? FileTransferTransportKind.Tuna
             : FileTransferTransportKind.Unknown;
-        observer.ObserveFileTransferV6TransportEpoch(
-            new FileTransferV6TransportEpochSnapshot(
+        var snapshot = new FileTransferV6TransportEpochSnapshot(
                 sessionId,
                 transferId,
                 direction,
@@ -1338,7 +1340,18 @@ public sealed partial class SessionFileTransferService
                 FileTransferTransportKind.RegularNkn,
                 V6TransportEpochState.Recovered,
                 reason,
-                IsUnresolved: false));
+                IsUnresolved: false)
+            {
+                RecoveryBoundaryGeneration = recoveryBoundaryGeneration,
+            };
+        try
+        {
+            observer.ObserveFileTransferV6TransportEpoch(snapshot);
+        }
+        finally
+        {
+            snapshot.CompleteObservation();
+        }
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_v6_epoch_recovered_restart_snapshot_published; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; recovered_transport_epoch={recoveredTransportEpoch}; recovered_handoff_kind={FormatFileTransferTransportHandoffKind(recoveredHandoffKind)}; requested_handoff_kind={FormatFileTransferTransportHandoffKind(requestedHandoffKind)}; requested_target_transport={FormatFileTransferTransportKind(requestedTargetTransport)}; reason={FormatProtocolLogValue(reason)}");

@@ -24,6 +24,20 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         FileTransferDirection Direction,
         long TransportEpoch);
 
+    private readonly record struct FileTransferV6TransportEpochScopeKey(
+        string SessionId,
+        string TransferId,
+        FileTransferDirection Direction);
+
+    private sealed class FileTransferV6RegularNknEpochScopeState
+    {
+        public FileTransferV6TransportEpochSnapshot? LatestSnapshot { get; set; }
+
+        public FileTransferV6TransportEpochSnapshot? CurrentRecoveredBoundary { get; set; }
+
+        public long LastRecoveryBoundaryGeneration { get; set; }
+    }
+
     internal readonly record struct FileTransferV6TransportEpochDiagnostics(
         long StartedCount,
         long NormalToTunaActivationStartedCount,
@@ -197,13 +211,13 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private readonly object fileTransferFallbackProofGate = new();
     private readonly object fileTransferV6TransportEpochGate = new();
     private readonly Dictionary<FileTransferV6TransportEpochKey, FileTransferV6TransportEpochSnapshot> unresolvedFileTransferV6TransportEpochs = new();
+    private readonly Dictionary<FileTransferV6TransportEpochScopeKey, FileTransferV6RegularNknEpochScopeState> fileTransferV6RegularNknEpochScopes = new();
     private long observedFileTransferV6TransportEpochStartedCount;
     private long observedFileTransferV6NormalToTunaActivationStartedCount;
     private long observedFileTransferV6TransportEpochRecoveredCount;
     private long observedFileTransferV6NormalToTunaActivationRecoveredCount;
     private long observedFileTransferV6TransportEpochWaitingCount;
     private long observedFileTransferV6TransportEpochTerminalCount;
-    private FileTransferV6TransportEpochSnapshot? lastRecoveredFileTransferV6RegularNknEpoch;
     private long fileTransferControlReceiveStallRecoveryBroadcastLastTick;
     private long bridgeReceiveStallLivenessProofSequence;
     private readonly SortedDictionary<long, InboundFileTransferDispatchWork> pendingInboundFileTransferControlDispatch = new();

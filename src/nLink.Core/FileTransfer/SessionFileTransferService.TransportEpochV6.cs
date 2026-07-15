@@ -158,8 +158,7 @@ public sealed partial class SessionFileTransferService
             return;
         }
 
-        observer.ObserveFileTransferV6TransportEpoch(
-            new FileTransferV6TransportEpochSnapshot(
+        var snapshot = new FileTransferV6TransportEpochSnapshot(
                 sessionId,
                 transferId,
                 epoch.Direction,
@@ -169,7 +168,19 @@ public sealed partial class SessionFileTransferService
                 epoch.TargetTransport,
                 epoch.State,
                 epoch.TerminalReason ?? epoch.Reason,
-                IsV6TransportEpochUnresolved(epoch)));
+                IsV6TransportEpochUnresolved(epoch))
+            {
+                RecoveryBoundaryGeneration = epoch.RecoveryBoundaryGeneration,
+            };
+        try
+        {
+            observer.ObserveFileTransferV6TransportEpoch(snapshot);
+        }
+        finally
+        {
+            // Infra may re-enter Core only after this observer invocation has returned.
+            snapshot.CompleteObservation();
+        }
     }
 
     private void NotifyRuntimeUnlockPathProbeStarted(
@@ -4349,6 +4360,13 @@ public sealed partial class SessionFileTransferService
             LastObservedHighestChunkIndex = Math.Max(-1, senderLocalAvailabilityUntilExclusive - 1),
             ProbeId = $"v6-probe:{message.TransportEpoch}:{Guid.NewGuid():N}",
         };
+        if (epoch.State == V6TransportEpochState.Recovered &&
+            epoch.TargetTransport == FileTransferTransportKind.RegularNkn &&
+            epoch.Kind is FileTransferTransportHandoffKind.TunaToNormalFallback or
+                FileTransferTransportHandoffKind.RegularNknRecovery)
+        {
+            epoch.RecoveryBoundaryGeneration = ++context.V6RecoveryBoundaryGeneration;
+        }
         context.V6TransportEpoch = epoch;
         context.V6PendingEpochRepairRequestIds.Clear();
         context.V6SenderPumpLastWakeReason = "peer_transport_epoch";
@@ -4498,6 +4516,13 @@ public sealed partial class SessionFileTransferService
             LastObservedHighestChunkIndex = context.PullHighestReceivedChunkIndex,
             ProbeId = $"v6-probe:{message.TransportEpoch}:{Guid.NewGuid():N}",
         };
+        if (epoch.State == V6TransportEpochState.Recovered &&
+            epoch.TargetTransport == FileTransferTransportKind.RegularNkn &&
+            epoch.Kind is FileTransferTransportHandoffKind.TunaToNormalFallback or
+                FileTransferTransportHandoffKind.RegularNknRecovery)
+        {
+            epoch.RecoveryBoundaryGeneration = ++context.V6RecoveryBoundaryGeneration;
+        }
         context.V6TransportEpoch = epoch;
         context.V6ReceiverTransportEpoch = epoch.EpochId;
         context.V6LastReceiverStateSentUtc = null;
@@ -5276,6 +5301,7 @@ public sealed partial class SessionFileTransferService
                 FallbackFrontierRepairSettlementOutcome.StaleRejected,
                 $"transport_epoch_completed_{reason}");
         }
+        epoch!.RecoveryBoundaryGeneration = ++context.V6RecoveryBoundaryGeneration;
         TrySetV6TransportEpochStateLocked(
             epoch,
             context.TransferId,
@@ -5431,6 +5457,7 @@ public sealed partial class SessionFileTransferService
             context,
             FallbackFrontierRepairSettlementOutcome.StaleRejected,
             $"transport_epoch_completed_{reason}");
+        epoch!.RecoveryBoundaryGeneration = ++context.V6RecoveryBoundaryGeneration;
         TrySetV6TransportEpochStateLocked(
             epoch,
             context.TransferId,

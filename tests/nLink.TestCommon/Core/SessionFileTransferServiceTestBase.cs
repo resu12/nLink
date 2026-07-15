@@ -223,6 +223,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         public ConcurrentQueue<FileTransferSessionOpenV2> SentSessionOpens { get; } = [];
         public ConcurrentQueue<FileTransferDataFrame> SentDataFrames { get; } = [];
         public ConcurrentQueue<FileTransferV6TransportEpochSnapshot> ObservedV6TransportEpochs { get; } = [];
+        public ConcurrentQueue<bool> V6TransportEpochObservationCompletionStates { get; } = [];
         public ConcurrentQueue<FileTransferReceiveRecoveryRequest> ReceiveRecoveryRequests { get; } = [];
         public ConcurrentQueue<FileTransferRegularV4ControlFeedbackPressure> RegularV4ControlFeedbackPressures { get; } = [];
         public ConcurrentQueue<FileTransferRegularV4FrontierRepairSettlement> RegularV4FrontierRepairSettlements { get; } = [];
@@ -330,7 +331,10 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         }
 
         public void ObserveFileTransferV6TransportEpoch(FileTransferV6TransportEpochSnapshot snapshot)
-            => ObservedV6TransportEpochs.Enqueue(snapshot);
+        {
+            V6TransportEpochObservationCompletionStates.Enqueue(snapshot.ObservationCompleted.IsCompleted);
+            ObservedV6TransportEpochs.Enqueue(snapshot);
+        }
 
         public void ObserveFileTransferRouteHint(FileTransferRouteHintNotification notification)
             => ObservedRouteHints.Enqueue(notification);

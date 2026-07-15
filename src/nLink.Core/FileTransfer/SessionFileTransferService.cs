@@ -18705,6 +18705,8 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public long LastRecoveredV6TransportEpoch { get; set; }
 
+        public long V6RecoveryBoundaryGeneration { get; set; }
+
         public int LastRecoveredV6TransportLiveRouteEpochId { get; set; }
 
         public FileTransferTransportHandoffKind LastRecoveredV6TransportEpochKind { get; set; }
@@ -19662,6 +19664,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         public long LastRecoveredV6TransportHandoffEpoch { get; set; }
 
         public long LastRecoveredV6TransportEpoch { get; set; }
+
+        public long V6RecoveryBoundaryGeneration { get; set; }
 
         public int LastRecoveredV6TransportLiveRouteEpochId { get; set; }
 

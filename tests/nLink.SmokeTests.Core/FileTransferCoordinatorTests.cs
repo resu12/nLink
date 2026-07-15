@@ -2074,6 +2074,173 @@ public sealed class FileTransferCoordinatorTests
     }
 
     [Fact]
+    public void RuntimeUnlockRetryDispatchAuthority_ExactHeldFallbackRequestGrantsAfterTailReleaseSettles()
+    {
+        var (state, request, tailYield) = AuthorizeFallbackRuntimeUnlockRetryDispatchSource();
+
+        var held = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            state,
+            request,
+            null,
+            RuntimeUnlockRetryReleaseKind.Unknown,
+            null,
+            0,
+            "pending");
+
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Held, held.Status);
+        Assert.Equal("fallback_paired_tail_yield_pending", held.Reason);
+        Assert.Equal(request, held.Request);
+        Assert.Null(held.Contract);
+        Assert.Null(held.State.CurrentRuntimeUnlockRetryDispatchAuthority);
+
+        var stillHeld = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            held.State,
+            request,
+            null,
+            RuntimeUnlockRetryReleaseKind.Unknown,
+            null,
+            0,
+            "pending");
+
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Held, stillHeld.Status);
+        Assert.Equal(request, stillHeld.Request);
+        Assert.Null(stillHeld.State.CurrentRuntimeUnlockRetryDispatchAuthority);
+
+        var granted = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            stillHeld.State,
+            request,
+            null,
+            RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield,
+            tailYield.AuthorityId,
+            tailYield.YieldGeneration,
+            tailYield.YieldKind.ToString());
+
+        Assert.True(granted.Granted);
+        Assert.Equal(request, granted.Request);
+        Assert.Equal(
+            RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield,
+            granted.Contract!.Authority.ReleaseKind);
+        Assert.Equal(tailYield.AuthorityId, granted.Contract.Authority.ReleaseAuthorityId);
+        Assert.Equal(tailYield.YieldGeneration, granted.Contract.Authority.ReleaseGeneration);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRetryDispatchAuthority_HeldFallbackRequestUsesCurrentSameLegTransportEpoch()
+    {
+        var (state, request, tailYield) = AuthorizeFallbackRuntimeUnlockRetryDispatchSource();
+        var originalTransportEpoch = state.CurrentLeg!.TransportEpochId;
+        var held = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            state,
+            request,
+            null,
+            RuntimeUnlockRetryReleaseKind.Unknown,
+            null,
+            0,
+            "pending");
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Held, held.Status);
+
+        held.State.CurrentLeg!.TransportEpochId = originalTransportEpoch + 1;
+        var granted = FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+            held.State,
+            request,
+            null,
+            RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield,
+            tailYield.AuthorityId,
+            tailYield.YieldGeneration,
+            tailYield.YieldKind.ToString());
+
+        Assert.True(granted.Granted);
+        Assert.Equal(request, granted.Request);
+        Assert.Equal(originalTransportEpoch + 1, granted.Contract!.Authority.TransportEpoch);
+        Assert.Equal(tailYield.AuthorityId, granted.Contract.Authority.ReleaseAuthorityId);
+    }
+
+    [Fact]
+    public void RuntimeUnlockRetryDispatchAuthority_HeldFallbackRequestRejectsStaleCurrentnessTuples()
+    {
+        var (state, request, tailYield) = AuthorizeFallbackRuntimeUnlockRetryDispatchSource();
+
+        RuntimeUnlockRetryDispatchDecision Recheck(
+            FileTransferCoordinatorState candidateState,
+            RuntimeUnlockRetryDispatchAuthorityRequest candidateRequest)
+            => FileTransferCoordinator.AuthorizeRuntimeUnlockRetryDispatch(
+                candidateState,
+                candidateRequest,
+                null,
+                RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield,
+                tailYield.AuthorityId,
+                tailYield.YieldGeneration,
+                tailYield.YieldKind.ToString());
+
+        var stalePublication = Recheck(
+            state,
+            request with
+            {
+                SourcePublicationAuthority = request.SourcePublicationAuthority with
+                {
+                    RoutePublicationGeneration =
+                        request.SourcePublicationAuthority.RoutePublicationGeneration + 1,
+                },
+            });
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, stalePublication.Status);
+        Assert.Equal("retry_dispatch_source_publication_mismatch", stalePublication.Reason);
+
+        var replacementPublication = FileTransferCoordinator.AuthorizeAction(
+            state,
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RoutePublication,
+                "test",
+                "fallback_retry_publication_replacement",
+                RuntimeOwner: state.CurrentRuntimeOwner,
+                Route: state.RouteSelection.Route,
+                ProtocolVersion: state.RouteSelection.ProtocolVersion,
+                LiveRouteEpoch: state.CurrentLeg!.LiveRouteEpochId,
+                LegGeneration: state.CurrentLeg.Generation,
+                RuntimeGeneration: state.CurrentRuntimeOwner!.Value.RuntimeGeneration,
+                TerminalGeneration: state.TerminalGeneration,
+                TargetRoute: state.RouteSelection.Route,
+                TargetProtocolVersion: state.RouteSelection.ProtocolVersion,
+                TargetTransport: FileTransferTransportKind.RegularNkn));
+        Assert.True(replacementPublication.Accepted);
+        var replacedPublication = Recheck(replacementPublication.State, request);
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, replacedPublication.Status);
+        Assert.Equal("retry_dispatch_source_publication_mismatch", replacedPublication.Reason);
+
+        var staleOwner = Recheck(
+            state with
+            {
+                CurrentRuntimeOwner = state.CurrentRuntimeOwner!.Value with
+                {
+                    RuntimeGeneration = state.CurrentRuntimeOwner.Value.RuntimeGeneration + 1,
+                },
+            },
+            request);
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, staleOwner.Status);
+
+        var staleRoute = Recheck(
+            state with
+            {
+                RouteSelection = FileTransferRouteResolver.Resolve(
+                    FileTransferRoute.RegularNknV4Fast),
+            },
+            request);
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, staleRoute.Status);
+
+        var terminal = Recheck(state with { IsTerminal = true }, request);
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, terminal.Status);
+        Assert.Equal("terminal_state", terminal.Reason);
+
+        var stalePredecessor = Recheck(
+            state,
+            request with
+            {
+                PredecessorAuthorityId = new FileTransferAuthorityId("fta2-stale-recheck-predecessor"),
+            });
+        Assert.Equal(RuntimeUnlockRetryDispatchDecisionStatus.Rejected, stalePredecessor.Status);
+        Assert.Equal("retry_dispatch_predecessor_missing", stalePredecessor.Reason);
+    }
+
+    [Fact]
     public void RuntimeUnlockRetryDispatchAuthority_SameGenerationStableRequestCollisionRejects()
     {
         var (state, request, release) = AuthorizeRegularRuntimeUnlockRetryDispatchSource();
@@ -6531,6 +6698,76 @@ public sealed class FileTransferCoordinatorTests
             },
             request,
             release);
+    }
+
+    private static (
+        FileTransferCoordinatorState State,
+        RuntimeUnlockRetryDispatchAuthorityRequest Request,
+        FallbackTailYieldDecision TailYield) AuthorizeFallbackRuntimeUnlockRetryDispatchSource()
+    {
+        var fallback = FileTransferRouteResolver.Resolve(FileTransferRoute.PostTunaFallbackV6);
+        var state = ActiveFallbackStateWithoutCheckpoint();
+        var owner = state.CurrentRuntimeOwner!.Value;
+        var leg = state.CurrentLeg!;
+        var publication = FileTransferCoordinator.AuthorizeAction(
+            state,
+            new FileTransferCoordinatorActionRequest(
+                FileTransferCoordinatorActionKind.RoutePublication,
+                Source: "test",
+                Reason: "fallback_retry_publication",
+                RuntimeOwner: owner,
+                Route: fallback.Route,
+                ProtocolVersion: fallback.ProtocolVersion,
+                LiveRouteEpoch: leg.LiveRouteEpochId,
+                LegGeneration: leg.Generation,
+                RuntimeGeneration: owner.RuntimeGeneration,
+                TerminalGeneration: state.TerminalGeneration,
+                TargetRoute: fallback.Route,
+                TargetProtocolVersion: fallback.ProtocolVersion,
+                TargetTransport: FileTransferTransportKind.RegularNkn));
+        Assert.True(publication.Accepted);
+
+        var yielded = FileTransferCoordinator.AuthorizeAction(
+            publication.State,
+            FallbackActionRequest(
+                FileTransferCoordinatorActionKind.FallbackTailQuiescent,
+                publication.State.CurrentRuntimeOwner!.Value,
+                publication.State.CurrentLeg!,
+                fallbackTailYieldKind: FallbackTailYieldKind.Quiescent));
+        Assert.True(yielded.Accepted);
+        var tailYield = Assert.IsType<FallbackTailYieldDecision>(yielded.FallbackTailYieldDecision);
+        var survivalState = tailYield.FallbackSurvivalState with
+        {
+            PairedFallbackYieldGranted = true,
+        };
+        state = FileTransferCoordinator.Apply(
+            CoordinatorEvent(
+                FileTransferCoordinatorEventKind.RuntimeUnlockFallbackSurvivalUpdated,
+                fallback,
+                reason: "paired_fallback_tail_yield_granted",
+                state: yielded.State.CurrentLeg!.State,
+                canSendData: yielded.State.CurrentLeg.CanSendData,
+                transportEpoch: yielded.State.CurrentLeg.TransportEpochId,
+                bridgeRecoveryGeneration: yielded.State.CurrentLeg.BridgeRecoveryGeneration,
+                runtimeUnlockFallbackSurvivalState: survivalState),
+            yielded.State).State;
+        var sourcePublication = Assert.IsType<FileTransferRoutePublicationAuthority>(
+            FileTransferCoordinator.CreateRoutePublicationAuthority(
+                state.CurrentRoutePublicationToken,
+                "fallback_retry_publication"));
+        var request = new RuntimeUnlockRetryDispatchAuthorityRequest(
+            state.SessionId,
+            state.TransferId,
+            state.Direction,
+            sourcePublication,
+            RecoveryContractGeneration: 71,
+            RetiredOfferGeneration: 29,
+            DispatchAttemptGeneration: 1,
+            RetryReason: "runtime_unlock_offer_send_not_observed",
+            RecoveryReason: "post_tuna_fallback_tail_unblocked",
+            RegularV4LivenessGeneration: 0,
+            BridgeDecisionGeneration: 0);
+        return (state, request, tailYield);
     }
 
     private static RuntimeUnlockRegularV4RecoverySettlementReport

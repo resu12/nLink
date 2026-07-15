@@ -19149,6 +19149,977 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetry_FallbackTailUnblockRechecksExactHeldRequestAsynchronously()
+    {
+        FakeNknClient.ResetNetwork();
+        var barrier = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        NknSignalingTransport.RuntimeUnlockRetryFallbackTailUnblockRecheckBarrierForTests =
+            () => barrier.Task;
+        try
+        {
+            var options = NknTransportOptions.Load();
+            var client = new FakeNknClient("runtime-unlock.fallback-tail-recheck.address");
+            using var transport = new NknSignalingTransport(
+                client,
+                options,
+                new NknIdentity("runtime-unlock-fallback-tail-recheck-id", client.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            const string sessionId = "session_runtime_unlock_fallback_tail_recheck";
+            const string transferId = "transfer_runtime_unlock_fallback_tail_recheck";
+            var (state, request) = SeedHeldFallbackTailRuntimeUnlockRetryForTests(
+                transport,
+                sessionId,
+                transferId);
+            var bridge = Assert.IsAssignableFrom<IRuntimeUnlockRetryDispatchAuthorityBridge>(transport);
+            var requests = new ConcurrentQueue<RuntimeUnlockRetryDispatchAuthorityRequest>();
+            var decisionsObserved = new ConcurrentQueue<bool>();
+            var callbackBeforeObserverReturned = 0;
+            var observerReturned = 0;
+            bridge.RuntimeUnlockRetryDispatchAuthorityRequested += (_, args) =>
+            {
+                if (Volatile.Read(ref observerReturned) == 0)
+                {
+                    Interlocked.Exchange(ref callbackBeforeObserverReturned, 1);
+                }
+                requests.Enqueue(args.Request);
+                decisionsObserved.Enqueue(bridge.ObserveRuntimeUnlockRetryDispatchDecision(
+                    new RuntimeUnlockRetryDispatchDecision(
+                        RuntimeUnlockRetryDispatchDecisionStatus.Held,
+                        "fallback_owner_work_pending",
+                        null)
+                    {
+                        Request = args.Request,
+                    }));
+            };
+            var recovered = new FileTransferV6TransportEpochSnapshot(
+                sessionId,
+                transferId,
+                FileTransferDirection.Outbound,
+                TransportEpoch: 17,
+                FileTransferTransportHandoffKind.TunaToNormalFallback,
+                FileTransferTransportKind.Tuna,
+                FileTransferTransportKind.RegularNkn,
+                V6TransportEpochState.Recovered,
+                "fallback_tail_unblocked",
+                IsUnresolved: false)
+            {
+                RecoveryBoundaryGeneration = 1,
+            };
+            var eligibilityArgs = new object?[] { state, request, recovered, null };
+            var eligibilityMethod = typeof(NknSignalingTransport).GetMethod(
+                "IsRuntimeUnlockRetryFallbackTailUnblockRequestCurrentUnsafe",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.NotNull(eligibilityMethod);
+            Assert.True(
+                Assert.IsType<bool>(eligibilityMethod!.Invoke(null, eligibilityArgs)),
+                eligibilityArgs[3]?.ToString());
+            var logStart = GetOperationalLogLength();
+
+            ObserveAndCompleteFileTransferV6TransportEpoch(transport, recovered);
+            Volatile.Write(ref observerReturned, 1);
+
+            Assert.Empty(requests);
+            barrier.TrySetResult(null);
+            await WaitUntilAsync(() => requests.Count == 1, TimeSpan.FromSeconds(2));
+
+            Assert.Equal(0, Volatile.Read(ref callbackBeforeObserverReturned));
+            Assert.Equal(request, Assert.Single(requests));
+            Assert.True(Assert.Single(decisionsObserved));
+            Assert.Null(state.GetType()
+                .GetProperty("PendingFallbackTailUnblockRecheckIntent")!
+                .GetValue(state));
+
+            ObserveAndCompleteFileTransferV6TransportEpoch(transport, recovered);
+            await Task.Delay(50);
+            Assert.Single(requests);
+
+            ObserveAndCompleteFileTransferV6TransportEpoch(
+                transport,
+                recovered with
+                {
+                    TransportEpoch = 18,
+                    Reason = "later_fallback_tail_unblocked",
+                    RecoveryBoundaryGeneration = 2,
+                });
+            await WaitUntilAsync(() => requests.Count == 2, TimeSpan.FromSeconds(2));
+            Assert.All(requests, candidate => Assert.Equal(request, candidate));
+
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Equal(
+                2,
+                logTail.Split(
+                    "event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested;",
+                    StringSplitOptions.None).Length - 1);
+            Assert.Equal(
+                2,
+                logTail.Split(
+                    "event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided;",
+                    StringSplitOptions.None).Length - 1);
+            Assert.Contains("source_route=post_tuna_fallback_v6", logTail, StringComparison.Ordinal);
+            Assert.Contains("recovered_transport_epoch=17", logTail, StringComparison.Ordinal);
+            Assert.Contains("recovered_transport_epoch=18", logTail, StringComparison.Ordinal);
+            Assert.Contains("decision_reason=fallback_owner_work_pending", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            NknSignalingTransport.RuntimeUnlockRetryFallbackTailUnblockRecheckBarrierForTests = null;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetry_FallbackTailUnblockRechecksHeldSuccessorWithoutChangingOrdinals()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var options = NknTransportOptions.Load();
+            var client = new FakeNknClient("runtime-unlock.fallback-tail-successor-recheck.address");
+            using var transport = new NknSignalingTransport(
+                client,
+                options,
+                new NknIdentity("runtime-unlock-fallback-tail-successor-recheck-id", client.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            const string sessionId = "session_runtime_unlock_fallback_tail_successor_recheck";
+            const string transferId = "transfer_runtime_unlock_fallback_tail_successor_recheck";
+            var predecessor = new FileTransferAuthorityId("retry-predecessor-for-tail-recheck");
+            var (state, request) = SeedHeldFallbackTailRuntimeUnlockRetryForTests(
+                transport,
+                sessionId,
+                transferId,
+                contractGeneration: 7,
+                retiredOfferGeneration: 11,
+                dispatchAttemptGeneration: 2,
+                missingDispatchSuccessorGeneration: 1,
+                predecessorAuthorityId: predecessor);
+            var bridge = Assert.IsAssignableFrom<IRuntimeUnlockRetryDispatchAuthorityBridge>(transport);
+            var rechecked = new TaskCompletionSource<RuntimeUnlockRetryDispatchAuthorityRequest>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            bridge.RuntimeUnlockRetryDispatchAuthorityRequested += (_, args) =>
+            {
+                rechecked.TrySetResult(args.Request);
+                _ = bridge.ObserveRuntimeUnlockRetryDispatchDecision(
+                    new RuntimeUnlockRetryDispatchDecision(
+                        RuntimeUnlockRetryDispatchDecisionStatus.Held,
+                        "fallback_paired_tail_yield_pending",
+                        null)
+                    {
+                        Request = args.Request,
+                    });
+            };
+            var logStart = GetOperationalLogLength();
+
+            var recovered = new FileTransferV6TransportEpochSnapshot(
+                sessionId,
+                transferId,
+                FileTransferDirection.Outbound,
+                TransportEpoch: 23,
+                FileTransferTransportHandoffKind.RegularNknRecovery,
+                FileTransferTransportKind.Tuna,
+                FileTransferTransportKind.RegularNkn,
+                V6TransportEpochState.Recovered,
+                "fallback_tail_unblocked",
+                IsUnresolved: false)
+            {
+                RecoveryBoundaryGeneration = 1,
+            };
+            var eligibilityArgs = new object?[] { state, request, recovered, null };
+            var eligibilityMethod = typeof(NknSignalingTransport).GetMethod(
+                "IsRuntimeUnlockRetryFallbackTailUnblockRequestCurrentUnsafe",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            Assert.NotNull(eligibilityMethod);
+            Assert.True(
+                Assert.IsType<bool>(eligibilityMethod!.Invoke(null, eligibilityArgs)),
+                eligibilityArgs[3]?.ToString());
+            ObserveAndCompleteFileTransferV6TransportEpoch(transport, recovered);
+            Assert.NotNull(state!.GetType()
+                .GetProperty("PendingFallbackTailUnblockRecheckIntent")!
+                .GetValue(state));
+
+            await Task.Delay(100);
+            Assert.True(rechecked.Task.IsCompleted, ReadOperationalLogTail(logStart));
+            var actual = await rechecked.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(request, actual);
+            Assert.Equal(7, actual.RecoveryContractGeneration);
+            Assert.Equal(11, actual.RetiredOfferGeneration);
+            Assert.Equal(2, actual.DispatchAttemptGeneration);
+            Assert.Equal(1, actual.MissingDispatchSuccessorGeneration);
+            Assert.Equal(predecessor, actual.PredecessorAuthorityId);
+            Assert.False(actual.RequestActivePredecessorSupersession);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetry_FallbackTailUnblockStaleRecoveredSnapshotDoesNotTriggerRecheck()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var client = new FakeNknClient("runtime-unlock.fallback-tail-stale-boundary.address");
+            using var transport = new NknSignalingTransport(
+                client,
+                NknTransportOptions.Load(),
+                new NknIdentity("runtime-unlock-fallback-tail-stale-boundary-id", client.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            const string sessionId = "session_runtime_unlock_fallback_tail_stale_boundary";
+            const string transferId = "transfer_runtime_unlock_fallback_tail_stale_boundary";
+            var (state, _) = SeedHeldFallbackTailRuntimeUnlockRetryForTests(
+                transport,
+                sessionId,
+                transferId);
+            var newerUnresolvedBoundary = new FileTransferV6TransportEpochSnapshot(
+                sessionId,
+                transferId,
+                FileTransferDirection.Outbound,
+                TransportEpoch: 61,
+                FileTransferTransportHandoffKind.TunaToNormalFallback,
+                FileTransferTransportKind.Tuna,
+                FileTransferTransportKind.RegularNkn,
+                V6TransportEpochState.TargetProofPending,
+                "newer_fallback_repair_pending",
+                IsUnresolved: true);
+            ObserveAndCompleteFileTransferV6TransportEpoch(transport, newerUnresolvedBoundary);
+            var bridge = Assert.IsAssignableFrom<IRuntimeUnlockRetryDispatchAuthorityBridge>(transport);
+            var callbackCount = 0;
+            bridge.RuntimeUnlockRetryDispatchAuthorityRequested += (_, _) =>
+                Interlocked.Increment(ref callbackCount);
+            var logStart = GetOperationalLogLength();
+
+            ObserveAndCompleteFileTransferV6TransportEpoch(
+                transport,
+                CreateRecoveredFallbackTailSnapshot(
+                    sessionId,
+                    transferId,
+                    transportEpoch: 60,
+                    reason: "stale_fallback_tail_unblocked"));
+            await Task.Delay(100);
+
+            Assert.Equal(0, Volatile.Read(ref callbackCount));
+            Assert.Null(state.GetType()
+                .GetProperty("PendingFallbackTailUnblockRecheckIntent")!
+                .GetValue(state));
+            Assert.DoesNotContain(
+                "event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested;",
+                ReadOperationalLogTail(logStart),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetry_FallbackTailUnblockTupleInvalidGrantIsNotLoggedAsDecided()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var client = new FakeNknClient("runtime-unlock.fallback-tail-invalid-grant.address");
+            using var transport = new NknSignalingTransport(
+                client,
+                NknTransportOptions.Load(),
+                new NknIdentity("runtime-unlock-fallback-tail-invalid-grant-id", client.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            const string sessionId = "session_runtime_unlock_fallback_tail_invalid_grant";
+            const string transferId = "transfer_runtime_unlock_fallback_tail_invalid_grant";
+            var (state, request) = SeedHeldFallbackTailRuntimeUnlockRetryForTests(
+                transport,
+                sessionId,
+                transferId);
+            var bridge = Assert.IsAssignableFrom<IRuntimeUnlockRetryDispatchAuthorityBridge>(transport);
+            var decisionObserved = new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            bridge.RuntimeUnlockRetryDispatchAuthorityRequested += (_, args) =>
+            {
+                var contract = CreateFallbackTailRuntimeUnlockRetryDispatchContractForTests(args.Request);
+                decisionObserved.TrySetResult(bridge.ObserveRuntimeUnlockRetryDispatchDecision(
+                    new RuntimeUnlockRetryDispatchDecision(
+                        RuntimeUnlockRetryDispatchDecisionStatus.Granted,
+                        "accepted",
+                        contract)
+                    {
+                        Request = args.Request,
+                        State = null!,
+                    }));
+            };
+            var logStart = GetOperationalLogLength();
+
+            ObserveAndCompleteFileTransferV6TransportEpoch(
+                transport,
+                CreateRecoveredFallbackTailSnapshot(
+                    sessionId,
+                    transferId,
+                    transportEpoch: 67));
+
+            Assert.False(await decisionObserved.Task.WaitAsync(TimeSpan.FromSeconds(2)));
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "decision_reason=recheck_decision_missing",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(2));
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "event=runtime_unlock_retry_dispatch_decision_tuple_rejected;",
+                logTail,
+                StringComparison.Ordinal);
+            Assert.Contains("mismatch_field=coordinator_state", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided;",
+                logTail,
+                StringComparison.Ordinal);
+            Assert.Equal(request, Assert.IsType<RuntimeUnlockRetryDispatchAuthorityRequest>(
+                state.GetType()
+                    .GetProperty("PendingDispatchAuthorityRequest")!
+                    .GetValue(state)));
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetry_FallbackTailUnblockQueuedRecheckFailsClosedAfterRequestReplacement()
+    {
+        FakeNknClient.ResetNetwork();
+        var barrier = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        NknSignalingTransport.RuntimeUnlockRetryFallbackTailUnblockRecheckBarrierForTests =
+            () => barrier.Task;
+        try
+        {
+            var options = NknTransportOptions.Load();
+            var client = new FakeNknClient("runtime-unlock.fallback-tail-stale-recheck.address");
+            using var transport = new NknSignalingTransport(
+                client,
+                options,
+                new NknIdentity("runtime-unlock-fallback-tail-stale-recheck-id", client.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            const string sessionId = "session_runtime_unlock_fallback_tail_stale_recheck";
+            const string transferId = "transfer_runtime_unlock_fallback_tail_stale_recheck";
+            var (state, request) = SeedHeldFallbackTailRuntimeUnlockRetryForTests(
+                transport,
+                sessionId,
+                transferId);
+            var bridge = Assert.IsAssignableFrom<IRuntimeUnlockRetryDispatchAuthorityBridge>(transport);
+            var callbackCount = 0;
+            bridge.RuntimeUnlockRetryDispatchAuthorityRequested += (_, _) =>
+                Interlocked.Increment(ref callbackCount);
+            var logStart = GetOperationalLogLength();
+
+            ObserveAndCompleteFileTransferV6TransportEpoch(
+                transport,
+                new FileTransferV6TransportEpochSnapshot(
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Outbound,
+                    TransportEpoch: 31,
+                    FileTransferTransportHandoffKind.TunaToNormalFallback,
+                    FileTransferTransportKind.Tuna,
+                    FileTransferTransportKind.RegularNkn,
+                    V6TransportEpochState.Recovered,
+                    "fallback_tail_unblocked",
+                    IsUnresolved: false)
+                {
+                    RecoveryBoundaryGeneration = 1,
+                });
+            state.GetType().GetProperty("PendingDispatchAuthorityRequest")!.SetValue(
+                state,
+                request with { RetiredOfferGeneration = request.RetiredOfferGeneration + 1 });
+            barrier.TrySetResult(null);
+
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_discarded;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(2));
+            Assert.Equal(0, Volatile.Read(ref callbackCount));
+            Assert.Null(state.GetType()
+                .GetProperty("PendingFallbackTailUnblockRecheckIntent")!
+                .GetValue(state));
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("decision_reason=recheck_request_replaced", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                "event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested;",
+                logTail,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            NknSignalingTransport.RuntimeUnlockRetryFallbackTailUnblockRecheckBarrierForTests = null;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Theory]
+    [Trait("Category", "Smoke")]
+    [InlineData(false, "recheck_state_terminal")]
+    [InlineData(true, "recheck_transport_disposed")]
+    public async Task RuntimeUnlockRetry_FallbackTailUnblockQueuedRecheckFailsClosedAfterTerminalOrDispose(
+        bool disposeTransport,
+        string expectedReason)
+    {
+        FakeNknClient.ResetNetwork();
+        var barrier = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        NknSignalingTransport.RuntimeUnlockRetryFallbackTailUnblockRecheckBarrierForTests =
+            () => barrier.Task;
+        try
+        {
+            var options = NknTransportOptions.Load();
+            var client = new FakeNknClient("runtime-unlock.fallback-tail-terminal-recheck.address");
+            using var transport = new NknSignalingTransport(
+                client,
+                options,
+                new NknIdentity("runtime-unlock-fallback-tail-terminal-recheck-id", client.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            const string sessionId = "session_runtime_unlock_fallback_tail_terminal_recheck";
+            const string transferId = "transfer_runtime_unlock_fallback_tail_terminal_recheck";
+            var (state, _) = SeedHeldFallbackTailRuntimeUnlockRetryForTests(
+                transport,
+                sessionId,
+                transferId);
+            var bridge = Assert.IsAssignableFrom<IRuntimeUnlockRetryDispatchAuthorityBridge>(transport);
+            var callbackCount = 0;
+            bridge.RuntimeUnlockRetryDispatchAuthorityRequested += (_, _) =>
+                Interlocked.Increment(ref callbackCount);
+            var logStart = GetOperationalLogLength();
+
+            ObserveAndCompleteFileTransferV6TransportEpoch(
+                transport,
+                new FileTransferV6TransportEpochSnapshot(
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Outbound,
+                    TransportEpoch: 37,
+                    FileTransferTransportHandoffKind.TunaToNormalFallback,
+                    FileTransferTransportKind.Tuna,
+                    FileTransferTransportKind.RegularNkn,
+                    V6TransportEpochState.Recovered,
+                    "fallback_tail_unblocked",
+                    IsUnresolved: false)
+                {
+                    RecoveryBoundaryGeneration = 1,
+                });
+            if (disposeTransport)
+            {
+                SetPrivateField(transport, "disposed", true);
+            }
+            else
+            {
+                state.GetType().GetProperty("ContractState")!.SetValue(
+                    state,
+                    SessionRecoveryContractState.Completed);
+            }
+            barrier.TrySetResult(null);
+
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    $"decision_reason={expectedReason}",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(2));
+            Assert.Equal(0, Volatile.Read(ref callbackCount));
+            Assert.Null(state.GetType()
+                .GetProperty("PendingFallbackTailUnblockRecheckIntent")!
+                .GetValue(state));
+        }
+        finally
+        {
+            NknSignalingTransport.RuntimeUnlockRetryFallbackTailUnblockRecheckBarrierForTests = null;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetry_FallbackTailUnblockDuplicateDecisionBeforePublicationDoesNotResolveRecheck()
+    {
+        FakeNknClient.ResetNetwork();
+        var barrier = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        NknSignalingTransport.RuntimeUnlockRetryFallbackTailUnblockRecheckBarrierForTests =
+            () => barrier.Task;
+        try
+        {
+            var client = new FakeNknClient("runtime-unlock.fallback-tail-duplicate-decision.address");
+            using var transport = new NknSignalingTransport(
+                client,
+                NknTransportOptions.Load(),
+                new NknIdentity("runtime-unlock-fallback-tail-duplicate-decision-id", client.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            const string sessionId = "session_runtime_unlock_fallback_tail_duplicate_decision";
+            const string transferId = "transfer_runtime_unlock_fallback_tail_duplicate_decision";
+            var (state, request) = SeedHeldFallbackTailRuntimeUnlockRetryForTests(
+                transport,
+                sessionId,
+                transferId);
+            var bridge = Assert.IsAssignableFrom<IRuntimeUnlockRetryDispatchAuthorityBridge>(transport);
+            var callbackCount = 0;
+            bridge.RuntimeUnlockRetryDispatchAuthorityRequested += (_, args) =>
+            {
+                Interlocked.Increment(ref callbackCount);
+                _ = bridge.ObserveRuntimeUnlockRetryDispatchDecision(
+                    new RuntimeUnlockRetryDispatchDecision(
+                        RuntimeUnlockRetryDispatchDecisionStatus.Held,
+                        "fallback_owner_work_pending",
+                        null)
+                    {
+                        Request = args.Request,
+                    });
+            };
+            var logStart = GetOperationalLogLength();
+
+            ObserveAndCompleteFileTransferV6TransportEpoch(
+                transport,
+                CreateRecoveredFallbackTailSnapshot(
+                    sessionId,
+                    transferId,
+                    transportEpoch: 41));
+            Assert.Equal(
+                "Captured",
+                state.GetType().GetProperty("PendingFallbackTailUnblockRecheckPhase")!.GetValue(state)!.ToString());
+
+            Assert.True(bridge.ObserveRuntimeUnlockRetryDispatchDecision(
+                new RuntimeUnlockRetryDispatchDecision(
+                    RuntimeUnlockRetryDispatchDecisionStatus.Held,
+                    "fallback_owner_work_pending",
+                    null)
+                {
+                    Request = request,
+                }));
+            Assert.NotNull(state.GetType()
+                .GetProperty("PendingFallbackTailUnblockRecheckIntent")!
+                .GetValue(state));
+            Assert.DoesNotContain(
+                "event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided;",
+                ReadOperationalLogTail(logStart),
+                StringComparison.Ordinal);
+
+            barrier.TrySetResult(null);
+            await WaitUntilAsync(() => Volatile.Read(ref callbackCount) == 1, TimeSpan.FromSeconds(2));
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains(
+                "event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested;",
+                logTail,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_decided;",
+                logTail,
+                StringComparison.Ordinal);
+            Assert.Contains("decision_valid=1", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            NknSignalingTransport.RuntimeUnlockRetryFallbackTailUnblockRecheckBarrierForTests = null;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetry_FallbackTailUnblockQueuedRecheckFailsClosedWhenSessionIsCleared()
+    {
+        FakeNknClient.ResetNetwork();
+        var barrier = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        NknSignalingTransport.RuntimeUnlockRetryFallbackTailUnblockRecheckBarrierForTests =
+            () => barrier.Task;
+        try
+        {
+            var client = new FakeNknClient("runtime-unlock.fallback-tail-session-cleared.address");
+            using var transport = new NknSignalingTransport(
+                client,
+                NknTransportOptions.Load(),
+                new NknIdentity("runtime-unlock-fallback-tail-session-cleared-id", client.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            const string sessionId = "session_runtime_unlock_fallback_tail_session_cleared";
+            const string transferId = "transfer_runtime_unlock_fallback_tail_session_cleared";
+            var (state, _) = SeedHeldFallbackTailRuntimeUnlockRetryForTests(
+                transport,
+                sessionId,
+                transferId);
+            var bridge = Assert.IsAssignableFrom<IRuntimeUnlockRetryDispatchAuthorityBridge>(transport);
+            var callbackCount = 0;
+            bridge.RuntimeUnlockRetryDispatchAuthorityRequested += (_, _) =>
+                Interlocked.Increment(ref callbackCount);
+            var logStart = GetOperationalLogLength();
+
+            ObserveAndCompleteFileTransferV6TransportEpoch(
+                transport,
+                CreateRecoveredFallbackTailSnapshot(
+                    sessionId,
+                    transferId,
+                    transportEpoch: 43));
+            SetPrivateField(transport, "currentSessionSecurityState", SessionSecurityState.Empty);
+            barrier.TrySetResult(null);
+
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "decision_reason=recheck_session_missing",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(2));
+            Assert.Equal(0, Volatile.Read(ref callbackCount));
+            Assert.Null(state.GetType()
+                .GetProperty("PendingFallbackTailUnblockRecheckIntent")!
+                .GetValue(state));
+        }
+        finally
+        {
+            NknSignalingTransport.RuntimeUnlockRetryFallbackTailUnblockRecheckBarrierForTests = null;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetry_FallbackTailUnblockTerminalCleanupClearsQueuedIntentSynchronously()
+    {
+        FakeNknClient.ResetNetwork();
+        var barrier = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        NknSignalingTransport.RuntimeUnlockRetryFallbackTailUnblockRecheckBarrierForTests =
+            () => barrier.Task;
+        try
+        {
+            var client = new FakeNknClient("runtime-unlock.fallback-tail-terminal-cleanup.address");
+            using var transport = new NknSignalingTransport(
+                client,
+                NknTransportOptions.Load(),
+                new NknIdentity("runtime-unlock-fallback-tail-terminal-cleanup-id", client.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            const string sessionId = "session_runtime_unlock_fallback_tail_terminal_cleanup";
+            const string transferId = "transfer_runtime_unlock_fallback_tail_terminal_cleanup";
+            var (state, _) = SeedHeldFallbackTailRuntimeUnlockRetryForTests(
+                transport,
+                sessionId,
+                transferId);
+            var bridge = Assert.IsAssignableFrom<IRuntimeUnlockRetryDispatchAuthorityBridge>(transport);
+            var callbackCount = 0;
+            bridge.RuntimeUnlockRetryDispatchAuthorityRequested += (_, _) =>
+                Interlocked.Increment(ref callbackCount);
+
+            ObserveAndCompleteFileTransferV6TransportEpoch(
+                transport,
+                CreateRecoveredFallbackTailSnapshot(
+                    sessionId,
+                    transferId,
+                    transportEpoch: 47));
+            Assert.NotNull(state.GetType()
+                .GetProperty("PendingFallbackTailUnblockRecheckIntent")!
+                .GetValue(state));
+
+            InvokePrivateMethod(
+                transport,
+                "CloseRuntimeUnlockRetryDispatchChainUnsafe",
+                state,
+                "transfer_terminal");
+            Assert.Null(state.GetType()
+                .GetProperty("PendingFallbackTailUnblockRecheckIntent")!
+                .GetValue(state));
+            Assert.Null(state.GetType()
+                .GetProperty("FallbackTailUnblockRecheckEligibleRequest")!
+                .GetValue(state));
+            Assert.Equal(
+                "None",
+                state.GetType().GetProperty("PendingFallbackTailUnblockRecheckPhase")!.GetValue(state)!.ToString());
+
+            barrier.TrySetResult(null);
+            await Task.Delay(50);
+            Assert.Equal(0, Volatile.Read(ref callbackCount));
+        }
+        finally
+        {
+            NknSignalingTransport.RuntimeUnlockRetryFallbackTailUnblockRecheckBarrierForTests = null;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetry_FallbackTailUnblockRecoveryBoundaryCurrentnessIsScopedByTransferAndDirection()
+    {
+        FakeNknClient.ResetNetwork();
+        var workerEntered = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseWorker = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        NknSignalingTransport.RuntimeUnlockRetryFallbackTailUnblockRecheckBarrierForTests = () =>
+        {
+            workerEntered.TrySetResult(null);
+            return releaseWorker.Task;
+        };
+        try
+        {
+            var client = new FakeNknClient("runtime-unlock.fallback-tail-scope-isolation.address");
+            using var transport = new NknSignalingTransport(
+                client,
+                NknTransportOptions.Load(),
+                new NknIdentity("runtime-unlock-fallback-tail-scope-isolation-id", client.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            const string sessionId = "session_runtime_unlock_fallback_tail_scope_isolation";
+            const string transferId = "transfer_runtime_unlock_fallback_tail_scope_isolation";
+            var (_, request) = SeedHeldFallbackTailRuntimeUnlockRetryForTests(
+                transport,
+                sessionId,
+                transferId);
+            var bridge = Assert.IsAssignableFrom<IRuntimeUnlockRetryDispatchAuthorityBridge>(transport);
+            var requested = new ConcurrentQueue<RuntimeUnlockRetryDispatchAuthorityRequest>();
+            bridge.RuntimeUnlockRetryDispatchAuthorityRequested += (_, args) =>
+            {
+                requested.Enqueue(args.Request);
+                _ = bridge.ObserveRuntimeUnlockRetryDispatchDecision(
+                    new RuntimeUnlockRetryDispatchDecision(
+                        RuntimeUnlockRetryDispatchDecisionStatus.Held,
+                        "fallback_owner_work_pending",
+                        null)
+                    {
+                        Request = args.Request,
+                    });
+            };
+
+            ObserveAndCompleteFileTransferV6TransportEpoch(
+                transport,
+                CreateRecoveredFallbackTailSnapshot(
+                    sessionId,
+                    transferId,
+                    transportEpoch: 71,
+                    recoveryBoundaryGeneration: 1));
+            await workerEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+            ObserveAndCompleteFileTransferV6TransportEpoch(
+                transport,
+                CreateRecoveredFallbackTailSnapshot(
+                    sessionId,
+                    transferId,
+                    transportEpoch: 72,
+                    recoveryBoundaryGeneration: 1,
+                    direction: FileTransferDirection.Inbound));
+            ObserveAndCompleteFileTransferV6TransportEpoch(
+                transport,
+                CreateRecoveredFallbackTailSnapshot(
+                    sessionId,
+                    transferId + "_other",
+                    transportEpoch: 73,
+                    recoveryBoundaryGeneration: 1));
+
+            releaseWorker.TrySetResult(null);
+            await WaitUntilAsync(() => requested.Count == 1, TimeSpan.FromSeconds(2));
+            Assert.Equal(request, Assert.Single(requested));
+        }
+        finally
+        {
+            NknSignalingTransport.RuntimeUnlockRetryFallbackTailUnblockRecheckBarrierForTests = null;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetry_FallbackTailUnblockCoalescesNewerBoundaryWhilePriorRecheckIsBlocked()
+    {
+        FakeNknClient.ResetNetwork();
+        var workerEntered = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseWorker = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        NknSignalingTransport.RuntimeUnlockRetryFallbackTailUnblockRecheckBarrierForTests = () =>
+        {
+            workerEntered.TrySetResult(null);
+            return releaseWorker.Task;
+        };
+        try
+        {
+            var client = new FakeNknClient("runtime-unlock.fallback-tail-coalesced-boundary.address");
+            using var transport = new NknSignalingTransport(
+                client,
+                NknTransportOptions.Load(),
+                new NknIdentity("runtime-unlock-fallback-tail-coalesced-boundary-id", client.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            const string sessionId = "session_runtime_unlock_fallback_tail_coalesced_boundary";
+            const string transferId = "transfer_runtime_unlock_fallback_tail_coalesced_boundary";
+            var (_, request) = SeedHeldFallbackTailRuntimeUnlockRetryForTests(
+                transport,
+                sessionId,
+                transferId);
+            var bridge = Assert.IsAssignableFrom<IRuntimeUnlockRetryDispatchAuthorityBridge>(transport);
+            var requested = new ConcurrentQueue<RuntimeUnlockRetryDispatchAuthorityRequest>();
+            bridge.RuntimeUnlockRetryDispatchAuthorityRequested += (_, args) =>
+            {
+                requested.Enqueue(args.Request);
+                _ = bridge.ObserveRuntimeUnlockRetryDispatchDecision(
+                    new RuntimeUnlockRetryDispatchDecision(
+                        RuntimeUnlockRetryDispatchDecisionStatus.Held,
+                        "fallback_owner_work_pending",
+                        null)
+                    {
+                        Request = args.Request,
+                    });
+            };
+            var logStart = GetOperationalLogLength();
+
+            ObserveAndCompleteFileTransferV6TransportEpoch(
+                transport,
+                CreateRecoveredFallbackTailSnapshot(
+                    sessionId,
+                    transferId,
+                    transportEpoch: 79,
+                    recoveryBoundaryGeneration: 1));
+            await workerEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            ObserveAndCompleteFileTransferV6TransportEpoch(
+                transport,
+                CreateRecoveredFallbackTailSnapshot(
+                    sessionId,
+                    transferId,
+                    transportEpoch: 79,
+                    recoveryBoundaryGeneration: 2));
+
+            releaseWorker.TrySetResult(null);
+            await WaitUntilAsync(() => requested.Count == 1, TimeSpan.FromSeconds(2));
+
+            Assert.Equal(request, Assert.Single(requested));
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("decision_reason=recheck_boundary_superseded", logTail, StringComparison.Ordinal);
+            var requestedLine = Assert.Single(
+                logTail.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                    .Where(line => line.Contains(
+                        "event=runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_requested;",
+                        StringComparison.Ordinal)));
+            Assert.Contains("recovery_boundary_generation=2", requestedLine, StringComparison.Ordinal);
+            Assert.DoesNotContain("recovery_boundary_generation=1", requestedLine, StringComparison.Ordinal);
+        }
+        finally
+        {
+            NknSignalingTransport.RuntimeUnlockRetryFallbackTailUnblockRecheckBarrierForTests = null;
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetry_FallbackTailUnblockSameEpochRestartIsDistinctAndDelayedBoundaryCannotReplay()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var client = new FakeNknClient("runtime-unlock.fallback-tail-boundary-generation.address");
+            using var transport = new NknSignalingTransport(
+                client,
+                NknTransportOptions.Load(),
+                new NknIdentity("runtime-unlock-fallback-tail-boundary-generation-id", client.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            const string sessionId = "session_runtime_unlock_fallback_tail_boundary_generation";
+            const string transferId = "transfer_runtime_unlock_fallback_tail_boundary_generation";
+            var (_, request) = SeedHeldFallbackTailRuntimeUnlockRetryForTests(
+                transport,
+                sessionId,
+                transferId);
+            var bridge = Assert.IsAssignableFrom<IRuntimeUnlockRetryDispatchAuthorityBridge>(transport);
+            var requested = new ConcurrentQueue<RuntimeUnlockRetryDispatchAuthorityRequest>();
+            bridge.RuntimeUnlockRetryDispatchAuthorityRequested += (_, args) =>
+            {
+                requested.Enqueue(args.Request);
+                _ = bridge.ObserveRuntimeUnlockRetryDispatchDecision(
+                    new RuntimeUnlockRetryDispatchDecision(
+                        RuntimeUnlockRetryDispatchDecisionStatus.Held,
+                        "fallback_owner_work_pending",
+                        null)
+                    {
+                        Request = args.Request,
+                    });
+            };
+            var first = CreateRecoveredFallbackTailSnapshot(
+                sessionId,
+                transferId,
+                transportEpoch: 83,
+                recoveryBoundaryGeneration: 1);
+
+            ObserveAndCompleteFileTransferV6TransportEpoch(transport, first);
+            await WaitUntilAsync(() => requested.Count == 1, TimeSpan.FromSeconds(2));
+            ObserveAndCompleteFileTransferV6TransportEpoch(
+                transport,
+                CreateRecoveredFallbackTailSnapshot(
+                    sessionId,
+                    transferId,
+                    transportEpoch: 83,
+                    recoveryBoundaryGeneration: 2));
+            await WaitUntilAsync(() => requested.Count == 2, TimeSpan.FromSeconds(2));
+
+            ObserveAndCompleteFileTransferV6TransportEpoch(transport, first);
+            await Task.Delay(100);
+
+            Assert.Equal(2, requested.Count);
+            Assert.All(requested, candidate => Assert.Equal(request, candidate));
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RuntimeUnlockRetry_FallbackTailUnblockCallbackRunsOnPostObserverTurnWithoutTestBarrier()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var client = new FakeNknClient("runtime-unlock.fallback-tail-post-observer-turn.address");
+            using var transport = new NknSignalingTransport(
+                client,
+                NknTransportOptions.Load(),
+                new NknIdentity("runtime-unlock-fallback-tail-post-observer-turn-id", client.Address),
+                NknTunaAccelerationOptions.Disabled,
+                accelerationLane: null);
+            const string sessionId = "session_runtime_unlock_fallback_tail_post_observer_turn";
+            const string transferId = "transfer_runtime_unlock_fallback_tail_post_observer_turn";
+            _ = SeedHeldFallbackTailRuntimeUnlockRetryForTests(transport, sessionId, transferId);
+            var bridge = Assert.IsAssignableFrom<IRuntimeUnlockRetryDispatchAuthorityBridge>(transport);
+            var callback = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var observerActive = 1;
+            bridge.RuntimeUnlockRetryDispatchAuthorityRequested += (_, args) =>
+            {
+                callback.TrySetResult(Volatile.Read(ref observerActive) != 0);
+                _ = bridge.ObserveRuntimeUnlockRetryDispatchDecision(
+                    new RuntimeUnlockRetryDispatchDecision(
+                        RuntimeUnlockRetryDispatchDecisionStatus.Held,
+                        "fallback_owner_work_pending",
+                        null)
+                    {
+                        Request = args.Request,
+                    });
+            };
+
+            var recovered = CreateRecoveredFallbackTailSnapshot(
+                sessionId,
+                transferId,
+                transportEpoch: 53);
+            transport.ObserveFileTransferV6TransportEpoch(recovered);
+            Assert.False(callback.Task.IsCompleted);
+            Volatile.Write(ref observerActive, 0);
+            recovered.CompleteObservation();
+
+            Assert.False(await callback.Task.WaitAsync(TimeSpan.FromSeconds(2)));
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task FallbackLegAuthority_CurrentReceiveProofAllowsRuntimeUnlockRetryDespiteUnresolvedEpoch()
     {
         FakeNknClient.ResetNetwork();
@@ -28805,6 +29776,235 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
         };
     }
 
+    private static (object State, RuntimeUnlockRetryDispatchAuthorityRequest Request)
+        SeedHeldFallbackTailRuntimeUnlockRetryForTests(
+            NknSignalingTransport transport,
+            string sessionId,
+            string transferId,
+            FileTransferDirection direction = FileTransferDirection.Outbound,
+            long contractGeneration = 1,
+            long retiredOfferGeneration = 2,
+            int dispatchAttemptGeneration = 1,
+            int missingDispatchSuccessorGeneration = 0,
+            FileTransferAuthorityId? predecessorAuthorityId = null,
+            bool requestActivePredecessorSupersession = false)
+    {
+        SetPrivateField(
+            transport,
+            "currentSessionSecurityState",
+            SessionSecurityState.Empty with { SessionId = new SessionId(sessionId) });
+        var publication = new FileTransferRoutePublicationAuthority(
+            sessionId,
+            transferId,
+            direction,
+            FileTransferRouteResolver.PostTunaFallbackV6Token,
+            FileTransferProtocol.ProtocolVersionV6,
+            LiveRouteEpoch: 4,
+            RuntimeGeneration: 3,
+            TerminalGeneration: 1,
+            LegGeneration: 3,
+            RoutePublicationGeneration: 5,
+            RouteCommitGeneration: 4,
+            FileTransferRouteResolver.FileTunaV4Token,
+            FileTransferProtocol.ProtocolVersionV4,
+            FileTransferTransportKind.Tuna,
+            FileTransferCoordinatorActionKind.RoutePublication.ToString(),
+            "test_post_tuna_fallback_publication");
+        var request = new RuntimeUnlockRetryDispatchAuthorityRequest(
+            sessionId,
+            transferId,
+            direction,
+            publication,
+            contractGeneration,
+            retiredOfferGeneration,
+            dispatchAttemptGeneration,
+            "runtime_unlock_offer_send_not_observed",
+            "post_tuna_fallback_repair_recovered",
+            RegularV4LivenessGeneration: 0,
+            BridgeDecisionGeneration: 0,
+            predecessorAuthorityId,
+            requestActivePredecessorSupersession,
+            missingDispatchSuccessorGeneration);
+
+        var stateType = typeof(NknSignalingTransport).GetNestedType(
+            "RuntimeUnlockRecoveryRetryState",
+            BindingFlags.NonPublic);
+        Assert.NotNull(stateType);
+        var state = Activator.CreateInstance(stateType!, nonPublic: true);
+        Assert.NotNull(state);
+        void Set(string propertyName, object? value)
+        {
+            var property = stateType!.GetProperty(
+                propertyName,
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            Assert.NotNull(property);
+            property!.SetValue(state, value);
+        }
+
+        Set("ContractGeneration", contractGeneration);
+        Set("RetiredOfferGeneration", retiredOfferGeneration);
+        Set("SessionId", sessionId);
+        Set("TransferId", transferId);
+        Set("RetryReason", request.RetryReason);
+        Set("RecoveryReason", request.RecoveryReason);
+        Set("CreatedUtcMs", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        Set("ContractState", SessionRecoveryContractState.RecoverySettled);
+        Set("RetryAuthorityPending", true);
+        Set("DispatchAttemptGeneration", dispatchAttemptGeneration);
+        Set("MissingDispatchSuccessorGeneration", missingDispatchSuccessorGeneration);
+        Set("SourcePublicationAuthority", publication);
+        Set("PendingDispatchAuthorityRequest", request);
+        Set("DispatchDecisionStatus", RuntimeUnlockRetryDispatchDecisionStatus.Held);
+        Set("DispatchDecisionReason", "fallback_paired_tail_yield_pending");
+        Set("AuthorityFailureReason", "fallback_paired_tail_yield_pending");
+        if (predecessorAuthorityId is { } predecessor)
+        {
+            var successorType = typeof(NknSignalingTransport).GetNestedType(
+                "RuntimeUnlockRetrySuccessorIntent",
+                BindingFlags.NonPublic);
+            Assert.NotNull(successorType);
+            var successor = Activator.CreateInstance(
+                successorType!,
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                binder: null,
+                args:
+                [
+                    retiredOfferGeneration,
+                    dispatchAttemptGeneration,
+                    missingDispatchSuccessorGeneration,
+                    sessionId,
+                    request.RetryReason,
+                    request.RecoveryReason,
+                    false,
+                    predecessor,
+                    requestActivePredecessorSupersession,
+                ],
+                culture: null);
+            Assert.NotNull(successor);
+            Set("PendingDispatchSuccessorIntent", successor);
+            Set("PendingDispatchSuccessorRequestIssued", true);
+            Set("PendingDispatchSuccessorRequestHeld", true);
+        }
+
+        SetPrivateField(transport, "runtimeUnlockRecoveryRetryState", state);
+        return (state!, request);
+    }
+
+    private static RuntimeUnlockRetryDispatchContract
+        CreateFallbackTailRuntimeUnlockRetryDispatchContractForTests(
+            RuntimeUnlockRetryDispatchAuthorityRequest request)
+    {
+        var source = request.SourcePublicationAuthority;
+        var owner = new RuntimeOwnerToken(
+            request.SessionId,
+            request.TransferId,
+            request.Direction,
+            FileTransferRoute.PostTunaFallbackV6,
+            source.RouteToken,
+            source.ProtocolVersion,
+            source.LiveRouteEpoch,
+            source.RuntimeGeneration,
+            source.TerminalGeneration,
+            "post_tuna_fallback_v6",
+            "test_fallback_tail_recheck");
+        var publication = new RoutePublicationToken(
+            request.SessionId,
+            request.TransferId,
+            request.Direction,
+            owner,
+            FileTransferRoute.PostTunaFallbackV6,
+            source.RouteToken,
+            source.ProtocolVersion,
+            source.LiveRouteEpoch,
+            source.RuntimeGeneration,
+            source.TerminalGeneration,
+            checked((int)source.LegGeneration),
+            source.RouteCommitGeneration,
+            FileTransferRoute.FileTunaV4,
+            source.TargetProtocolVersion,
+            source.TargetTransport,
+            source.RoutePublicationGeneration,
+            FileTransferCoordinatorActionKind.RoutePublication,
+            source.CoordinatorDecisionReason);
+        var authority = new RuntimeUnlockRetryDispatchAuthority(
+            request.SessionId,
+            request.TransferId,
+            request.Direction,
+            owner,
+            publication,
+            FileTransferRoute.PostTunaFallbackV6,
+            source.RouteToken,
+            source.ProtocolVersion,
+            source.LiveRouteEpoch,
+            source.RuntimeGeneration,
+            source.TerminalGeneration,
+            checked((int)source.LegGeneration),
+            TransportEpoch: 1,
+            BridgeRecoveryGeneration: 1,
+            request.BridgeDecisionGeneration,
+            source.RoutePublicationGeneration,
+            source.RouteCommitGeneration,
+            request.RecoveryContractGeneration,
+            request.RetiredOfferGeneration,
+            request.DispatchAttemptGeneration,
+            request.MissingDispatchSuccessorGeneration,
+            request.RetryReason,
+            request.RecoveryReason,
+            RuntimeUnlockRetryReleaseKind.FallbackPairedTailYield,
+            new FileTransferAuthorityId("fta2-test-fallback-tail-release"),
+            ReleaseGeneration: 1,
+            ReleaseOutcome: "PairedYieldGranted",
+            FileTransferRoute.FileTunaV4,
+            FileTransferProtocol.ProtocolVersionV4,
+            FileTransferTransportKind.Tuna,
+            AuthorityGeneration: 1,
+            new FileTransferAuthorityId("fta2-test-fallback-tail-retry"),
+            request.PredecessorAuthorityId);
+        return new RuntimeUnlockRetryDispatchContract(
+            authority,
+            request.RequestActivePredecessorSupersession,
+            request.RegularV4LivenessGeneration,
+            request.BridgeDecisionGeneration);
+    }
+
+    private static FileTransferV6TransportEpochSnapshot CreateRecoveredFallbackTailSnapshot(
+        string sessionId,
+        string transferId,
+        long transportEpoch,
+        string reason = "fallback_tail_unblocked",
+        FileTransferTransportHandoffKind handoffKind =
+            FileTransferTransportHandoffKind.TunaToNormalFallback,
+        long recoveryBoundaryGeneration = 1,
+        FileTransferDirection direction = FileTransferDirection.Outbound)
+        => new FileTransferV6TransportEpochSnapshot(
+            sessionId,
+            transferId,
+            direction,
+            transportEpoch,
+            handoffKind,
+            FileTransferTransportKind.Tuna,
+            FileTransferTransportKind.RegularNkn,
+            V6TransportEpochState.Recovered,
+            reason,
+            IsUnresolved: false)
+        {
+            RecoveryBoundaryGeneration = recoveryBoundaryGeneration,
+        };
+
+    private static void ObserveAndCompleteFileTransferV6TransportEpoch(
+        NknSignalingTransport transport,
+        FileTransferV6TransportEpochSnapshot snapshot)
+    {
+        try
+        {
+            transport.ObserveFileTransferV6TransportEpoch(snapshot);
+        }
+        finally
+        {
+            snapshot.CompleteObservation();
+        }
+    }
+
     private static void InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
         NknSignalingTransport transport,
         Func<RuntimeUnlockRetryDispatchAuthorityRequest, RuntimeUnlockRetryDispatchDecisionStatus>? statusSelector = null,
@@ -29452,6 +30652,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
         NknSignalingTransport.RuntimeUnlockRegularV4RepairPressureBlockerOverrideForTests = null;
         NknSignalingTransport.RuntimeUnlockOfferDirectObservedLaneBlockerOverrideForTests = null;
         NknSignalingTransport.RuntimeUnlockOfferSendRecoveryRequestOverrideForTests = null;
+        NknSignalingTransport.RuntimeUnlockRetryFallbackTailUnblockRecheckBarrierForTests = null;
     }
 
     private sealed class RecordingTunaListenerSidecarSupervisor : INknTunaListenerSidecarSupervisor
