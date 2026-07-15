@@ -229,7 +229,7 @@ function Invoke-TestLane {
                 -ResultSuffix "core-runtime-session"
             Invoke-DotnetTest `
                 -Target (Get-DomainProjectPath -RepoRoot $RepoRoot -ProjectName "nLink.SmokeTests.Core") `
-                -Filter "(FileTransferRuntimeSuite=SparseWorkerHandoff|FileTransferRuntimeSuite=FallbackTailChurn|FileTransferRuntimeSuite=RegularV4RecoveryAuthority)&FullyQualifiedName!~RegularNknV4Fast_LiveTunaActivationCanThenCycleOffOnOffSameTransfer&FullyQualifiedName!~FileTunaV4_LiveSwitchOffRecovery_DoesNotUseLiveV4RepairAndCompletesSameTransfer" `
+                -Filter "(FileTransferRuntimeSuite=SparseWorkerHandoff|FileTransferRuntimeSuite=FallbackTailChurn|FileTransferRuntimeSuite=RegularV4RecoveryAuthority|FileTransferRuntimeSuite=RegularV4FrontierRepairProjection)&FullyQualifiedName!~RegularNknV4Fast_LiveTunaActivationCanThenCycleOffOnOffSameTransfer&FullyQualifiedName!~FileTunaV4_LiveSwitchOffRecovery_DoesNotUseLiveV4RepairAndCompletesSameTransfer" `
                 -ResultSuffix "core-runtime-contracts"
         }
         "FileTransferAnalyzer" {

@@ -58,6 +58,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("pass", summary["cursor_integrity_verdict"]);
             Assert.Equal("complete", summary["transfer_evidence_status"]);
             Assert.Equal("incomplete_proof", summary["runtime_correctness_verdict"]);
+            Assert.Equal("0", summary["regular_v4_frontier_repair_missing_range_not_preserved_raw_count"]);
+            Assert.Equal("0", summary["regular_v4_frontier_repair_missing_range_not_preserved_distinct_count"]);
+            Assert.Equal("0", summary["regular_v4_frontier_repair_missing_range_not_preserved_recovered_count"]);
+            Assert.Equal("0", summary["regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count"]);
+            Assert.Equal("none", summary["regular_v4_frontier_repair_missing_range_preservation_verdict"]);
             Assert.Equal("none", summary["fallback_tail_bridge_recovery_generation_pairing_verdict"]);
             Assert.Equal("0", summary["fallback_tail_bridge_recovery_generation_mismatch_raw_count"]);
             Assert.Equal("0", summary["fallback_tail_bridge_recovery_generation_mismatch_distinct_count"]);
@@ -71,6 +76,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("1", summary["regular-v4-live-activation-off-on-off-256mb.manifest_present"]);
             Assert.Equal("pass", summary["regular-v4-live-activation-off-on-off-256mb.cursor_integrity_verdict"]);
             Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.current_runtime_proof"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.regular_v4_frontier_repair_missing_range_not_preserved_raw_count"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.regular_v4_frontier_repair_missing_range_not_preserved_distinct_count"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.regular_v4_frontier_repair_missing_range_not_preserved_recovered_count"]);
+            Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count"]);
+            Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.regular_v4_frontier_repair_missing_range_preservation_verdict"]);
             Assert.Equal("0", summary["regular-v4-live-activation-off-on-off-256mb.fallback_receiver_state_churn_warning_count"]);
             Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.fallback_receiver_state_churn_efficiency_class"]);
             Assert.Equal("none", summary["regular-v4-live-activation-off-on-off-256mb.fallback_tail_bridge_recovery_generation_pairing_verdict"]);
@@ -108,6 +118,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                 Assert.Equal(0, root.GetProperty("runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount").GetInt32());
                 Assert.Equal(0, root.GetProperty("runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount").GetInt32());
                 Assert.Equal("none", root.GetProperty("runtimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict").GetString());
+                Assert.Equal(0, root.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedRawCount").GetInt32());
+                Assert.Equal(0, root.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedDistinctCount").GetInt32());
+                Assert.Equal(0, root.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount").GetInt32());
+                Assert.Equal(0, root.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount").GetInt32());
+                Assert.Equal("none", root.GetProperty("regularV4FrontierRepairMissingRangePreservationVerdict").GetString());
 
                 var run = Assert.Single(root.GetProperty("runs").EnumerateArray());
                 Assert.Equal("none", run.GetProperty("fallbackTailBridgeRecoveryGenerationPairingVerdict").GetString());
@@ -120,6 +135,11 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
                 Assert.Equal(0, run.GetProperty("runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount").GetInt32());
                 Assert.Equal(0, run.GetProperty("runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount").GetInt32());
                 Assert.Equal("none", run.GetProperty("runtimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict").GetString());
+                Assert.Equal(0, run.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedRawCount").GetInt32());
+                Assert.Equal(0, run.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedDistinctCount").GetInt32());
+                Assert.Equal(0, run.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount").GetInt32());
+                Assert.Equal(0, run.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount").GetInt32());
+                Assert.Equal("none", run.GetProperty("regularV4FrontierRepairMissingRangePreservationVerdict").GetString());
             }
             Assert.True(File.Exists(Path.Combine(runRoot, "phase5-summary-writer-diagnostics.txt")), "Expected Phase 5 summary writer diagnostics.");
             Assert.True(File.Exists(Path.Combine(runRoot, "phase5-summary-writer-diagnostics.json")), "Expected Phase 5 summary writer JSON diagnostics.");
@@ -264,6 +284,74 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal(1, run.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchDistinctCount").GetInt32());
             Assert.Equal(0, run.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount").GetInt32());
             Assert.Equal(1, run.GetProperty("fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount").GetInt32());
+        }
+        finally
+        {
+            TryDeleteDirectory(artifactRoot);
+        }
+    }
+
+    [Fact]
+    public async Task RunFileTransferRouteAcceptance_RegularV4ProjectionCountsReachScenarioAndRootSummaries()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string scenario = "regular-v4-live-activation-off-on-off-256mb";
+        var repoRoot = FindRepoRoot();
+        var artifactRoot = Path.Combine(repoRoot, "artifacts", "filetransfer-route-acceptance-test", Guid.NewGuid().ToString("N"));
+        var runRoot = Path.Combine(artifactRoot, "phase5-projection-summary-propagation");
+
+        try
+        {
+            var environment = BuildFakeRouteAcceptanceEnvironment("phase5-projection-summary-propagation");
+            environment["NLINK_FILETRANSFER_ROUTE_ACCEPTANCE_FAKE_PHASE4_REGULAR_V4_LIVE_ACTIVATION_OFF_ON_OFF_256MB_REGULAR_V4_FRONTIER_REPAIR_PROJECTION_SUMMARY_FIXTURE"] = "1";
+
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferRouteAcceptance.ps1"),
+                [
+                    "-MatrixMode", "phase5-analyzer-gui-acceptance",
+                    "-ScenarioName", scenario,
+                    "-ArtifactRoot", artifactRoot,
+                    "-TimeoutSeconds", "30",
+                    "-ProgressTimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"Expected fake projection-summary propagation run to pass.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+
+            var summary = ReadArtifactReport(runRoot, "phase5-analyzer-gui-acceptance-summary.txt");
+            Assert.Equal("3", summary["regular_v4_frontier_repair_missing_range_not_preserved_raw_count"]);
+            Assert.Equal("2", summary["regular_v4_frontier_repair_missing_range_not_preserved_distinct_count"]);
+            Assert.Equal("1", summary["regular_v4_frontier_repair_missing_range_not_preserved_recovered_count"]);
+            Assert.Equal("1", summary["regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count"]);
+            Assert.Equal("fail", summary["regular_v4_frontier_repair_missing_range_preservation_verdict"]);
+            Assert.Equal("3", summary[$"{scenario}.regular_v4_frontier_repair_missing_range_not_preserved_raw_count"]);
+            Assert.Equal("2", summary[$"{scenario}.regular_v4_frontier_repair_missing_range_not_preserved_distinct_count"]);
+            Assert.Equal("1", summary[$"{scenario}.regular_v4_frontier_repair_missing_range_not_preserved_recovered_count"]);
+            Assert.Equal("1", summary[$"{scenario}.regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count"]);
+            Assert.Equal("fail", summary[$"{scenario}.regular_v4_frontier_repair_missing_range_preservation_verdict"]);
+
+            using var summaryJson = JsonDocument.Parse(
+                await File.ReadAllTextAsync(Path.Combine(runRoot, "phase5-analyzer-gui-acceptance-summary.json")));
+            var root = summaryJson.RootElement;
+            Assert.Equal(3, root.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedRawCount").GetInt32());
+            Assert.Equal(2, root.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedDistinctCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount").GetInt32());
+            Assert.Equal(1, root.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount").GetInt32());
+            Assert.Equal("fail", root.GetProperty("regularV4FrontierRepairMissingRangePreservationVerdict").GetString());
+
+            var run = Assert.Single(root.GetProperty("runs").EnumerateArray());
+            Assert.Equal(3, run.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedRawCount").GetInt32());
+            Assert.Equal(2, run.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedDistinctCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount").GetInt32());
+            Assert.Equal(1, run.GetProperty("regularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount").GetInt32());
+            Assert.Equal("fail", run.GetProperty("regularV4FrontierRepairMissingRangePreservationVerdict").GetString());
         }
         finally
         {
@@ -580,6 +668,8 @@ public sealed class FileTransferPhase5SummaryWriterTests : FileTransferAcceptanc
             Assert.Equal("regular_nkn_v4_fast", summary["regular-v4-live-activation-off-on-off-256mb.route_sequence"]);
             Assert.False(summary.ContainsKey("regular-v4-live-activation-off-on-off-256mb.setup_failure_phase"));
             Assert.False(summary.ContainsKey("regular-v4-live-activation-off-on-off-256mb.setup_failure_reason"));
+            Assert.Equal("regular_v4_frontier_repair", summary["regular-v4-live-activation-off-on-off-256mb.gui_reported_failure_phase"]);
+            Assert.Equal("regular_v4_frontier_repair_liveness_settlement_missing", summary["regular-v4-live-activation-off-on-off-256mb.gui_reported_failure_reason"]);
             Assert.Equal("regular_v4_frontier_repair_liveness_settlement_missing", summary["regular-v4-live-activation-off-on-off-256mb.acceptance_failure_class"]);
         }
         finally

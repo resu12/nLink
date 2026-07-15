@@ -5402,6 +5402,10 @@ public sealed partial class SessionFileTransferService : IDisposable
         {
             context.RoutePublicationAuthorityForwarder?.Invoke(currentToken, decision.Reason);
         }
+
+        ReconcileInboundRegularV4FrontierRepairProjectionLocked(
+            context,
+            $"coordinator_decision_{NormalizeReason(decision.Reason)}");
     }
 
     private void ForwardCoordinatorIssuedRoutePublicationAuthorityLocked(
@@ -5554,6 +5558,12 @@ public sealed partial class SessionFileTransferService : IDisposable
             decision.State.LastRuntimeUnlockRegularV4RecoveryLifecycle;
         context.RuntimeUnlockRecoveryLeaseClosureAvailable =
             decision.State.RuntimeUnlockRecoveryLeaseClosureAvailable;
+        if (decision.Kind != FileTransferCoordinatorActionKind.RepairReplay)
+        {
+            ReconcileInboundRegularV4FrontierRepairProjectionLocked(
+                context,
+                $"coordinator_action_{NormalizeReason(decision.Kind.ToString())}");
+        }
     }
 
     private static RuntimeUnlockRetryDispatchContract? ReconcileRuntimeUnlockRetryDispatchContract(
@@ -14687,26 +14697,46 @@ public sealed partial class SessionFileTransferService : IDisposable
         FileTransferControlPlaneDeliveryRequest request,
         CancellationToken ct)
     {
-        FallbackControlPlaneDeliveryContract? deliveryContract;
-        lock (gate)
-        {
-            if (!TryAuthorizeInboundFallbackControlPlaneSendLocked(context, request, out deliveryContract))
-            {
-                return (false, null);
-            }
-
-            request = deliveryContract?.Request ?? request;
-            if (deliveryContract is not null && request.PreTransportDeliveryValidator?.Invoke() != true)
-            {
-                return (false, null);
-            }
-        }
-
-        request = EnsureControlPlaneDeliveryRequestCorrelation(request);
-
+        FallbackControlPlaneDeliveryContract? deliveryContract = null;
+        Task? dataSessionFallbackSendTask = null;
         try
         {
-            var result = await SendFileTransferControlPlaneOrDataSessionCoreAsync(dataSession, request, ct).ConfigureAwait(false);
+            lock (gate)
+            {
+                if (!TryAuthorizeInboundFallbackControlPlaneSendLocked(context, request, out deliveryContract))
+                {
+                    return (false, null);
+                }
+
+                request = EnsureControlPlaneDeliveryRequestCorrelation(deliveryContract?.Request ?? request);
+                if (request.PreTransportDeliveryValidator is { } validator && !validator())
+                {
+                    return (false, null);
+                }
+
+                if (transport is not IFileTransferControlPlaneDeliveryTransport)
+                {
+                    // For a data-session fallback, validation and SendAsync invocation
+                    // form one Core commit point. Await completion after releasing the
+                    // lock so callbacks cannot nest Core and transport locks.
+                    dataSessionFallbackSendTask = dataSession.SendAsync(request.Frame, ct);
+                }
+            }
+
+            FileTransferControlPlaneDeliveryResult? result;
+            if (dataSessionFallbackSendTask is not null)
+            {
+                await dataSessionFallbackSendTask.ConfigureAwait(false);
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=filetransfer_control_plane_delivery_unavailable; kind={FormatFileTransferControlPlaneKind(request.Kind)}; transfer_id={request.Frame.TransferId}; session_id={request.Frame.SessionId}; frame_type={FormatProtocolLogValue(request.Frame.Type)}; reason={FormatProtocolLogValue(request.Reason)}; fallback=data_session");
+                result = null;
+            }
+            else
+            {
+                result = await SendFileTransferControlPlaneOrDataSessionCoreAsync(dataSession, request, ct).ConfigureAwait(false);
+            }
+
             if (result is not null)
             {
                 lock (gate)
@@ -19222,6 +19252,28 @@ public sealed partial class SessionFileTransferService : IDisposable
         public DateTimeOffset? DispatchedUtc { get; set; }
     }
 
+    private enum InboundRegularV4FrontierRepairProjectionKind
+    {
+        InitialDue = 0,
+        RetainedCurrent = 1,
+        Narrowed = 2,
+        RetiredAuthorityRetained = 3,
+    }
+
+    private sealed record InboundRegularV4FrontierRepairProjection(
+        int ProjectionGeneration,
+        string SourceRepairKey,
+        string ProjectedRepairKey,
+        IReadOnlyList<FileTransferRangeV4> SourceRanges,
+        IReadOnlyList<FileTransferRangeV4> ProjectedRanges,
+        string SourceRangeFingerprint,
+        string ProjectedRangeFingerprint,
+        int FrontierChunkIndex,
+        int DurableReceivedHighestChunkIndex,
+        long DataSessionGeneration,
+        RegularV4FrontierRepairContract SourceContract,
+        InboundRegularV4FrontierRepairProjectionKind Kind);
+
     private sealed class V4SenderRepairRequestState
     {
         public bool Queued { get; set; }
@@ -19237,6 +19289,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         public int LastSentRemoteFrontierChunkIndex { get; set; } = -1;
 
         public int SuppressedCount { get; set; }
+
+        public RegularV4FrontierRepairContract? RegularV4RepairContract { get; set; }
 
         public FallbackFrontierRepairContract? FallbackFrontierRepairContract { get; set; }
     }
@@ -19531,6 +19585,8 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public IFileTransferDataSession? DataSession { get; set; }
 
+        public long DataSessionGeneration { get; set; }
+
         public bool PullSessionActive { get; set; }
 
         public bool PullManifestReceived { get; set; }
@@ -19586,6 +19642,12 @@ public sealed partial class SessionFileTransferService : IDisposable
         public int V4LastRegularFrontierRepairCreditUntilChunkIndexExclusive { get; set; }
 
         public int V4RegularFrontierRepairSpamCoalescedCountTotal { get; set; }
+
+        public InboundRegularV4FrontierRepairProjection? V4RegularFrontierRepairProjection { get; set; }
+
+        public int LastV4RegularFrontierRepairProjectionGeneration { get; set; }
+
+        public bool V4RegularFrontierRepairProjectionRefreshRequired { get; set; }
 
         public string? V4RegularFrontierRepairSettledStalledRepairKey { get; set; }
 

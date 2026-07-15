@@ -2656,6 +2656,337 @@ public sealed class FileTransferRetainedV4TransportAnalyzerTests : FileTransferO
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RegularV4MissingRangeProjectionOmitted_SelectsEarliestEmptyEpoch()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildRegularV4ProjectionCurrentArtifactFixture("transfer_regular_v4_projection_omitted");
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("regular_v4_frontier_repair_missing_range_not_preserved", verdict["recovery_failure_class"]);
+        Assert.Equal("regular_v4_frontier_repair_missing_range_not_preserved", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("filetransfer_v4_state_sent", verdict["first_proof_chain_failure_event"]);
+        Assert.Equal("unresolved_frontier_repair_missing_range_omitted", verdict["first_proof_chain_failure_reason"]);
+        Assert.Equal("725", verdict["first_proof_chain_failure_sequence"]);
+        Assert.Equal("1", verdict["regular_v4_frontier_repair_missing_range_not_preserved_distinct_count"]);
+        Assert.Equal("1", verdict["regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count"]);
+        Assert.Equal("fail", verdict["regular_v4_frontier_repair_missing_range_preservation_verdict"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RegularV4MissingRangeProjectionCurrentArtifact_FullAndCompactAgree()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildRegularV4ProjectionCurrentArtifactFixture("transfer_regular_v4_projection_parity");
+        var full = await RunAnalyzeFixtureAsync(lines);
+        var compact = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: new Dictionary<string, string>
+            {
+                ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+            });
+
+        Assert.Equal(0, full.Script.ExitCode);
+        Assert.Equal(0, compact.Script.ExitCode);
+        var fullVerdict = ReadArtifactReport(full.ArtifactDir, "filetransfer-operator-verdict.txt");
+        var compactVerdict = ReadArtifactReport(compact.ArtifactDir, "filetransfer-operator-verdict.txt");
+        foreach (var field in new[]
+                 {
+                     "recovery_failure_class",
+                     "first_proof_chain_failure_class",
+                     "first_proof_chain_failure_event",
+                     "first_proof_chain_failure_reason",
+                     "first_proof_chain_failure_sequence",
+                     "regular_v4_frontier_repair_missing_range_not_preserved_raw_count",
+                     "regular_v4_frontier_repair_missing_range_not_preserved_distinct_count",
+                     "regular_v4_frontier_repair_missing_range_not_preserved_recovered_count",
+                     "regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count",
+                     "regular_v4_frontier_repair_missing_range_preservation_verdict"
+                 })
+        {
+            Assert.Equal(fullVerdict[field], compactVerdict[field]);
+        }
+
+        Assert.Equal("regular_v4_frontier_repair_missing_range_not_preserved", compactVerdict["first_proof_chain_failure_class"]);
+        Assert.Equal("725", compactVerdict["first_proof_chain_failure_sequence"]);
+        Assert.Equal("1", compactVerdict["regular_v4_frontier_repair_missing_range_not_preserved_raw_count"]);
+        Assert.Equal("1", compactVerdict["regular_v4_frontier_repair_missing_range_not_preserved_distinct_count"]);
+        Assert.Equal("1", compactVerdict["regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RegularV4MissingRangeProjectionDuplicateRetainedCopy_CountsOneDistinctEdge()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_regular_v4_projection_duplicate";
+        var lines = BuildRegularV4ProjectionCandidateFixture(transferId).ToList();
+        lines.Add(LogLine($"event=filetransfer_v4_state_sent; transfer_id={transferId}; session_id=sess_a; epoch=9; contiguous_committed_chunk_index=9; durable_received_highest_chunk_index=14; credit_until_chunk_index_exclusive=3136; missing_range_count=0; terminal_ready=0"));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("2", verdict["regular_v4_frontier_repair_missing_range_not_preserved_raw_count"]);
+        Assert.Equal("1", verdict["regular_v4_frontier_repair_missing_range_not_preserved_distinct_count"]);
+        Assert.Equal("1", verdict["regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count"]);
+        Assert.Equal("regular_v4_frontier_repair_missing_range_not_preserved", verdict["first_proof_chain_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RegularV4MissingRangeProjectionScopeReplacedBeforeOmission_DoesNotClassifyOldProjection()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_regular_v4_projection_replaced";
+        var lines = BuildRegularV4ProjectionCandidateFixtureWithoutOmission(transferId).ToList();
+        lines.Add(LogLine($"event=filetransfer_runtime_owner_changed; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=2; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; route_publication_generation=2"));
+        lines.Add(LogLine($"event=filetransfer_v4_state_sent; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=2; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; route_publication_generation=2; epoch=9; contiguous_committed_chunk_index=9; durable_received_highest_chunk_index=14; credit_until_chunk_index_exclusive=3136; missing_range_count=0; terminal_ready=0"));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("0", verdict["regular_v4_frontier_repair_missing_range_not_preserved_raw_count"]);
+        Assert.Equal("0", verdict["regular_v4_frontier_repair_missing_range_not_preserved_distinct_count"]);
+        Assert.Equal("0", verdict["regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count"]);
+        Assert.Equal("none", verdict["regular_v4_frontier_repair_missing_range_preservation_verdict"]);
+        Assert.NotEqual("regular_v4_frontier_repair_missing_range_not_preserved", verdict["first_proof_chain_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RegularV4MissingRangeProjectionZeroLagState_DoesNotClassifyOmission()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_regular_v4_projection_zero_lag";
+        var lines = BuildRegularV4ProjectionCandidateFixtureWithoutOmission(transferId).ToList();
+        lines.Add(LogLine($"event=filetransfer_v4_state_sent; transfer_id={transferId}; session_id=sess_a; epoch=9; contiguous_committed_chunk_index=9; durable_received_highest_chunk_index=9; credit_until_chunk_index_exclusive=3136; missing_range_count=0; terminal_ready=0"));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("0", verdict["regular_v4_frontier_repair_missing_range_not_preserved_raw_count"]);
+        Assert.Equal("0", verdict["regular_v4_frontier_repair_missing_range_not_preserved_distinct_count"]);
+        Assert.Equal("0", verdict["regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count"]);
+        Assert.Equal("none", verdict["regular_v4_frontier_repair_missing_range_preservation_verdict"]);
+        Assert.NotEqual("regular_v4_frontier_repair_missing_range_not_preserved", verdict["first_proof_chain_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RegularV4MissingRangeProjectionPartialDurableFill_RetainsNarrowedUnresolvedGap()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_regular_v4_projection_partial_fill";
+        var lines = BuildRegularV4ProjectionCandidateFixture(transferId).ToList();
+        lines.Add(LogLine($"event=filetransfer_v4_repair_filled; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; route_publication_generation=1; start_chunk_index=11; end_chunk_exclusive=12; repair_request_key=11:1:9:14; committed_frontier_after=9"));
+        lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_projection_retained; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; route_publication_generation=1; projected_repair_request_key={transferId}:9:2:9:14; source_ranges=9:3; projected_ranges=9:2; source_range_count=1; projected_range_count=1; projected_chunk_count=2; frontier_chunk_index=9; durable_received_highest_chunk_index=14; projection_generation=2; projection_kind=narrowed; source_authority_lifecycle=active; source_authority_settlement=(none); authority_id=fta2-repair_replay-partial-fill"));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["regular_v4_frontier_repair_missing_range_not_preserved_distinct_count"]);
+        Assert.Equal("0", verdict["regular_v4_frontier_repair_missing_range_not_preserved_recovered_count"]);
+        Assert.Equal("1", verdict["regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count"]);
+        Assert.Equal("fail", verdict["regular_v4_frontier_repair_missing_range_preservation_verdict"]);
+        Assert.Equal("regular_v4_frontier_repair_missing_range_not_preserved", verdict["first_proof_chain_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RegularV4MissingRangeProjectionCompleteDurableFill_RecoversCandidate()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_regular_v4_projection_complete_fill";
+        var lines = BuildRegularV4ProjectionCandidateFixture(transferId).ToList();
+        lines.Add(LogLine($"event=filetransfer_v4_repair_filled; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; route_publication_generation=1; start_chunk_index=11; end_chunk_exclusive=12; repair_request_key=11:1:9:14; committed_frontier_after=9"));
+        lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_projection_retained; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; route_publication_generation=1; projected_repair_request_key={transferId}:9:2:9:14; source_ranges=9:3; projected_ranges=9:2; source_range_count=1; projected_range_count=1; projected_chunk_count=2; frontier_chunk_index=9; durable_received_highest_chunk_index=14; projection_generation=2; projection_kind=narrowed; source_authority_lifecycle=active; source_authority_settlement=(none); authority_id=fta2-repair_replay-complete-fill"));
+        lines.Add(LogLine($"event=filetransfer_v4_repair_filled; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; route_publication_generation=1; start_chunk_index=9; end_chunk_exclusive=11; repair_request_key=9:2:9:14; committed_frontier_after=9"));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("1", verdict["regular_v4_frontier_repair_missing_range_not_preserved_distinct_count"]);
+        Assert.Equal("1", verdict["regular_v4_frontier_repair_missing_range_not_preserved_recovered_count"]);
+        Assert.Equal("0", verdict["regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count"]);
+        Assert.Equal("pass", verdict["regular_v4_frontier_repair_missing_range_preservation_verdict"]);
+        Assert.NotEqual("regular_v4_frontier_repair_missing_range_not_preserved", verdict["first_proof_chain_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RegularV4MissingRangeProjectionIndependentGaps_TracksRecoveredAndUnresolvedSeparately()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_regular_v4_projection_independent_gaps";
+        var lines = BuildRegularV4ProjectionCandidateFixture(transferId).ToList();
+        lines.Add(LogLine($"event=filetransfer_v4_repair_filled; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; route_publication_generation=1; start_chunk_index=9; end_chunk_exclusive=12; repair_request_key=9:3:9:14; committed_frontier_after=9"));
+        lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_authority_granted; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; route_publication_generation=1; repair_request_key=15:2:15:18; frontier_chunk_index=15; durable_received_highest_chunk_index=14; pending_repair_count=2; decision_generation=3; authority_id=fta2-repair_replay-second-gap"));
+        lines.Add(LogLine($"event=filetransfer_v4_repair_requested; direction=receiver; transfer_id={transferId}; session_id=sess_a; repair_request_key=15:2:15:18; epoch=11; attempt_count=1; range_count=1; requested_chunk_count=2; first_start_chunk_index=15; last_end_chunk_exclusive=17; contiguous_committed_chunk_index=15; durable_received_highest_chunk_index=18"));
+        lines.Add(LogLine($"event=filetransfer_v4_repair_suppressed; direction=receiver; transfer_id={transferId}; session_id=sess_a; repair_request_key=15:2:15:18; reason=retry_interval; epoch=12; attempt_count=1; range_count=1; requested_chunk_count=2; first_start_chunk_index=15; last_end_chunk_exclusive=17; contiguous_committed_chunk_index=15; durable_received_highest_chunk_index=18"));
+        lines.Add(LogLine($"event=filetransfer_v4_state_sent; transfer_id={transferId}; session_id=sess_a; epoch=12; contiguous_committed_chunk_index=15; durable_received_highest_chunk_index=18; credit_until_chunk_index_exclusive=3136; missing_range_count=0; terminal_ready=0"));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("2", verdict["regular_v4_frontier_repair_missing_range_not_preserved_distinct_count"]);
+        Assert.Equal("1", verdict["regular_v4_frontier_repair_missing_range_not_preserved_recovered_count"]);
+        Assert.Equal("1", verdict["regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count"]);
+        Assert.Equal("fail", verdict["regular_v4_frontier_repair_missing_range_preservation_verdict"]);
+        Assert.Equal("regular_v4_frontier_repair_missing_range_not_preserved", verdict["first_proof_chain_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RegularV4MissingRangeProjectionAppliedAndDispatched_FullAndCompactRecoverCandidate()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_regular_v4_projection_recovered";
+        var lines = BuildRegularV4ProjectionCandidateFixture(transferId).ToList();
+        lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_projection_published; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; source_repair_request_key={transferId}:9:12:9:20; projected_repair_request_key={transferId}:9:3:9:14; source_ranges=9:12; projected_ranges=9:3; source_range_count=1; projected_range_count=1; projected_chunk_count=3; frontier_chunk_index=9; durable_received_highest_chunk_index=14; projection_generation=2; projection_kind=narrowed; source_authority_lifecycle=retired; source_authority_settlement=SettledStalled; authority_id=fta2-repair_replay-projection"));
+        lines.Add(LogLine($"event=filetransfer_v4_state_sent; transfer_id={transferId}; session_id=sess_a; epoch=10; contiguous_committed_chunk_index=9; durable_received_highest_chunk_index=14; credit_until_chunk_index_exclusive=12; missing_range_count=1; terminal_ready=0; repair_projection_generation=2; repair_projection_kind=retired_authority_retained; repair_projection_authority_id=fta2-repair_replay-projection; repair_projection_projected_key={transferId}:9:3:9:14; repair_projection_projected_ranges=9:3"));
+        lines.Add(LogLine($"event=filetransfer_v4_state_received; transfer_id={transferId}; session_id=sess_a; epoch=10; applied=1; stale=0; contiguous_committed_chunk_index=9; durable_received_highest_chunk_index=14; credit_until_chunk_index_exclusive=12; missing_range_count=1"));
+        lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_authority_granted; direction=outbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; repair_request_key=9:3:9:14; frontier_chunk_index=9; durable_received_highest_chunk_index=8; pending_repair_count=3; authority_id=fta2-repair_replay-peer; decision_generation=4"));
+        lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_dispatched; direction=outbound; transfer_id={transferId}; session_id=sess_a; repair_request_key=9:3:9:3; frontier_chunk_index=9; requested_chunk_count=3; sent_chunk_count=3"));
+
+        var full = await RunAnalyzeFixtureAsync(lines);
+        var compact = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: new Dictionary<string, string>
+            {
+                ["NLINK_FILETRANSFER_RETAINED_ANALYSIS_COMPACT"] = "1"
+            });
+
+        Assert.Equal(0, full.Script.ExitCode);
+        Assert.Equal(0, compact.Script.ExitCode);
+        var fullVerdict = ReadArtifactReport(full.ArtifactDir, "filetransfer-operator-verdict.txt");
+        var compactVerdict = ReadArtifactReport(compact.ArtifactDir, "filetransfer-operator-verdict.txt");
+        foreach (var field in new[]
+                 {
+                     "regular_v4_frontier_repair_missing_range_not_preserved_raw_count",
+                     "regular_v4_frontier_repair_missing_range_not_preserved_distinct_count",
+                     "regular_v4_frontier_repair_missing_range_not_preserved_recovered_count",
+                     "regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count",
+                     "regular_v4_frontier_repair_missing_range_preservation_verdict"
+                 })
+        {
+            Assert.Equal(fullVerdict[field], compactVerdict[field]);
+        }
+
+        Assert.Equal("1", compactVerdict["regular_v4_frontier_repair_missing_range_not_preserved_distinct_count"]);
+        Assert.Equal("1", compactVerdict["regular_v4_frontier_repair_missing_range_not_preserved_recovered_count"]);
+        Assert.Equal("0", compactVerdict["regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count"]);
+        Assert.Equal("pass", compactVerdict["regular_v4_frontier_repair_missing_range_preservation_verdict"]);
+        Assert.NotEqual("regular_v4_frontier_repair_missing_range_not_preserved", compactVerdict["first_proof_chain_failure_class"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RegularV4MissingRangeProjectionArrivesStale_DoesNotRecoverCandidate()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_regular_v4_projection_stale";
+        var lines = BuildRegularV4ProjectionCandidateFixture(transferId).ToList();
+        lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_projection_published; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; source_repair_request_key={transferId}:9:12:9:20; projected_repair_request_key={transferId}:9:3:9:14; source_ranges=9:12; projected_ranges=9:3; source_range_count=1; projected_range_count=1; projected_chunk_count=3; frontier_chunk_index=9; durable_received_highest_chunk_index=14; projection_generation=2; projection_kind=narrowed; source_authority_lifecycle=retired; source_authority_settlement=SettledStalled; authority_id=fta2-repair_replay-projection"));
+        lines.Add(LogLine($"event=filetransfer_v4_state_sent; transfer_id={transferId}; session_id=sess_a; epoch=10; contiguous_committed_chunk_index=9; durable_received_highest_chunk_index=14; credit_until_chunk_index_exclusive=12; missing_range_count=1; terminal_ready=0; repair_projection_generation=2; repair_projection_kind=retired_authority_retained; repair_projection_authority_id=fta2-repair_replay-projection; repair_projection_projected_key={transferId}:9:3:9:14; repair_projection_projected_ranges=9:3"));
+        lines.Add(LogLine($"event=filetransfer_v4_state_received; transfer_id={transferId}; session_id=sess_a; epoch=10; applied=0; stale=1; contiguous_committed_chunk_index=9; durable_received_highest_chunk_index=14; credit_until_chunk_index_exclusive=12; missing_range_count=1"));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("regular_v4_frontier_repair_missing_range_not_preserved", verdict["first_proof_chain_failure_class"]);
+        Assert.Equal("0", verdict["regular_v4_frontier_repair_missing_range_not_preserved_recovered_count"]);
+        Assert.Equal("1", verdict["regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count"]);
+    }
+
+    private static IEnumerable<string> BuildRegularV4ProjectionCandidateFixture(string transferId)
+    {
+        foreach (var line in BuildRegularV4ProjectionCandidateFixtureWithoutOmission(transferId))
+        {
+            yield return line;
+        }
+
+        yield return LogLine($"event=filetransfer_v4_state_sent; transfer_id={transferId}; session_id=sess_a; epoch=9; contiguous_committed_chunk_index=9; durable_received_highest_chunk_index=14; credit_until_chunk_index_exclusive=3136; missing_range_count=0; terminal_ready=0");
+    }
+
+    private static IEnumerable<string> BuildRegularV4ProjectionCandidateFixtureWithoutOmission(string transferId)
+    {
+        yield return LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; route_publication_generation=1");
+        yield return LogLine($"event=filetransfer_regular_v4_frontier_repair_authority_granted; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; route_publication_generation=1; repair_request_key=9:12:9:12; frontier_chunk_index=9; durable_received_highest_chunk_index=8; pending_repair_count=12; decision_generation=2");
+        yield return LogLine($"event=filetransfer_v4_repair_requested; direction=receiver; transfer_id={transferId}; session_id=sess_a; repair_request_key=9:12:9:12; epoch=8; attempt_count=1; range_count=1; requested_chunk_count=12; first_start_chunk_index=9; last_end_chunk_exclusive=21; contiguous_committed_chunk_index=9; durable_received_highest_chunk_index=8");
+        yield return LogLine($"event=filetransfer_v4_repair_suppressed; direction=receiver; transfer_id={transferId}; session_id=sess_a; repair_request_key=9:3:9:3; reason=retry_interval; epoch=9; attempt_count=1; range_count=1; requested_chunk_count=3; first_start_chunk_index=9; last_end_chunk_exclusive=12; contiguous_committed_chunk_index=9; durable_received_highest_chunk_index=14");
+    }
+
+    private static List<string> BuildRegularV4ProjectionCurrentArtifactFixture(string transferId)
+    {
+        var lines = new List<string>
+        {
+            LogLine($"event=filetransfer_route_selected; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; runtime_profile=regular_nkn_v4_fast; frame_family=v4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; route_publication_generation=1"),
+            LogLine($"event=filetransfer_runtime_started; direction=inbound; role=receiver; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; runtime_generation=1; leg_generation=1"),
+            LogLine($"event=filetransfer_regular_v4_frontier_repair_authority_granted; direction=inbound; transfer_id={transferId}; session_id=sess_a; route=regular_nkn_v4_fast; protocol_version=4; live_route_epoch=0; runtime_generation=1; terminal_generation=0; leg_generation=1; transport_epoch=0; bridge_recovery_generation=0; route_publication_generation=1; repair_request_key=9:12:9:12; frontier_chunk_index=9; durable_received_highest_chunk_index=8; pending_repair_count=12; decision_generation=2"),
+            LogLine($"event=filetransfer_v4_repair_requested; direction=receiver; transfer_id={transferId}; session_id=sess_a; repair_request_key=9:12:9:12; epoch=8; attempt_count=1; range_count=1; requested_chunk_count=12; first_start_chunk_index=9; last_end_chunk_exclusive=21; contiguous_committed_chunk_index=9; durable_received_highest_chunk_index=8"),
+            LogLine($"event=filetransfer_v4_repair_suppressed; direction=receiver; transfer_id={transferId}; session_id=sess_a; repair_request_key=9:3:9:3; reason=retry_interval; epoch=9; attempt_count=1; range_count=1; requested_chunk_count=3; first_start_chunk_index=9; last_end_chunk_exclusive=12; contiguous_committed_chunk_index=9; durable_received_highest_chunk_index=14")
+        };
+        while (lines.Count < 724)
+        {
+            lines.Add(LogLine($"event=projection_fixture_noise; transfer_id={transferId}; session_id=sess_a; ordinal={lines.Count + 1}"));
+        }
+        lines.Add(LogLine($"event=filetransfer_v4_state_sent; transfer_id={transferId}; session_id=sess_a; reason=chunk_batch_committed; epoch=9; contiguous_committed_chunk_index=9; durable_received_highest_chunk_index=14; credit_until_chunk_index_exclusive=3136; missing_range_count=0; terminal_ready=0"));
+        lines.Add(LogLine($"event=filetransfer_regular_v4_frontier_repair_stalled; direction=inbound; transfer_id={transferId}; session_id=sess_a; repair_request_key=9:3:9:3; reason=retry_interval_without_frontier_progress; frontier_chunk_index=9; durable_received_highest_chunk_index=14; requested_chunk_count=3"));
+        return lines;
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_NoTransferEvidence_ReturnsInvalidSetup()
     {
         if (!OperatingSystem.IsWindows())

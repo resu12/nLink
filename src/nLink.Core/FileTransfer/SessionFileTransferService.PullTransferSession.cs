@@ -4884,6 +4884,14 @@ public sealed partial class SessionFileTransferService
         }
 
         context.DataSession = session;
+        var previousDataSessionGeneration = context.DataSessionGeneration;
+        context.DataSessionGeneration = Math.Max(1, context.DataSessionGeneration + 1);
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_data_session_recreated; direction=inbound; session_id={FormatProtocolLogValue(context.SessionId)}; transfer_id={FormatProtocolLogValue(context.TransferId)}; route={FormatProtocolLogValue(context.RouteSelection.TelemetryToken)}; protocol_version={context.NegotiatedDataProtocolVersion}; live_route_epoch={context.CurrentLiveRouteEpoch?.EpochId ?? 0}; runtime_generation={context.CurrentRuntimeOwner?.RuntimeGeneration ?? 0}; terminal_generation={context.CurrentRuntimeOwner?.TerminalGeneration ?? 0}; leg_generation={context.CurrentTransferLeg?.Generation ?? 0}; transport_epoch={context.CurrentTransferLeg?.TransportEpochId ?? 0}; bridge_recovery_generation={context.CurrentTransferLeg?.BridgeRecoveryGeneration ?? 0}; bridge_decision_generation={context.CurrentBridgeRecoveryDecision?.BridgeDecisionGeneration ?? 0}; route_publication_generation={context.CurrentRoutePublicationToken?.PublicationGeneration ?? 0}; route_commit_generation={context.CurrentRoutePublicationToken?.RouteCommitGeneration ?? 0}; previous_data_session_generation={previousDataSessionGeneration}; data_session_generation={context.DataSessionGeneration}; decision_reason=data_session_replaced");
+        ReconcileInboundRegularV4FrontierRepairProjectionLocked(
+            context,
+            "data_session_replaced");
         SubscribeDataSessionEvents(session);
         TryReplayInboundRuntimeUnlockPendingPreCommitProbeLocked(context, "data_session_attached");
         RetryInboundFallbackTailLocalYieldProofIfPendingLocked(context, "data_session_attached");

@@ -923,6 +923,11 @@ function New-RouteAcceptanceRunResult {
         transferEvidenceStatus = 'not_started'
         runtimeCorrectnessVerdict = 'incomplete_proof'
         runtimeFailureCandidate = '(none)'
+        regularV4FrontierRepairMissingRangeNotPreservedRawCount = 0
+        regularV4FrontierRepairMissingRangeNotPreservedDistinctCount = 0
+        regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount = 0
+        regularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount = 0
+        regularV4FrontierRepairMissingRangePreservationVerdict = 'none'
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount = 0
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount = 0
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = 0
@@ -941,6 +946,7 @@ function New-RouteAcceptanceRunResult {
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount = 0
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount = 0
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict = 'none'
+        firstProofChainFailureClass = '(none)'
         firstProofChainFailureEvent = '(none)'
         firstProofChainFailureReason = '(none)'
         firstProofChainFailureSequence = 0L
@@ -956,6 +962,9 @@ function New-RouteAcceptanceRunResult {
         rerunFailureReason = ''
         setupFailurePhase = ''
         setupFailureReason = ''
+        guiReportedFailurePhase = ''
+        guiReportedFailureReason = ''
+        guiReportedFailureError = ''
         scenarioIsolationPreflightCount = 0
         scenarioIsolationCleanWindowPassed = 0
         scenarioIsolationFailureReason = ''
@@ -2345,6 +2354,12 @@ function Assert-Phase4OperatorVerdict {
         $firstProofClass = Get-RouteAcceptanceReportValue -Report $operator -Name 'recovery_failure_class' -DefaultValue '(none)'
     }
     $Result.runtimeFailureCandidate = $firstProofClass
+    $Result.firstProofChainFailureClass = $firstProofClass
+    $Result.regularV4FrontierRepairMissingRangeNotPreservedRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_missing_range_not_preserved_raw_count' -DefaultValue '0')
+    $Result.regularV4FrontierRepairMissingRangeNotPreservedDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_missing_range_not_preserved_distinct_count' -DefaultValue '0')
+    $Result.regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_missing_range_not_preserved_recovered_count' -DefaultValue '0')
+    $Result.regularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count' -DefaultValue '0')
+    $Result.regularV4FrontierRepairMissingRangePreservationVerdict = Get-RouteAcceptanceReportValue -Report $operator -Name 'regular_v4_frontier_repair_missing_range_preservation_verdict' -DefaultValue 'none'
     $Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_raw_count' -DefaultValue '0')
     $Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_distinct_count' -DefaultValue '0')
     $Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = ConvertTo-RouteAcceptanceInt -Value (Get-RouteAcceptanceReportValue -Report $operator -Name 'runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count' -DefaultValue '0')
@@ -2616,6 +2631,9 @@ function Assert-Phase4ScenarioRun {
                 $errorSummary = Get-Content -LiteralPath $errorPath -Raw | ConvertFrom-Json
                 $failurePhase = [string](Get-JsonPropertyValue -Object $errorSummary -Name 'failurePhase' -DefaultValue '')
                 $failureReason = [string](Get-JsonPropertyValue -Object $errorSummary -Name 'failureReason' -DefaultValue '')
+                $result.guiReportedFailurePhase = $failurePhase
+                $result.guiReportedFailureReason = $failureReason
+                $result.guiReportedFailureError = [string](Get-JsonPropertyValue -Object $errorSummary -Name 'error' -DefaultValue '')
                 if ([string]::Equals($failurePhase, 'harness_log_cursor', [System.StringComparison]::OrdinalIgnoreCase)) {
                     $result.setupFailurePhase = $failurePhase
                     $result.setupFailureReason = $failureReason
@@ -2741,6 +2759,12 @@ function Assert-Phase4ScenarioRun {
                 $failurePhase = [string](Get-JsonPropertyValue -Object $errorSummary -Name 'failurePhase' -DefaultValue '')
                 $failureReason = [string](Get-JsonPropertyValue -Object $errorSummary -Name 'failureReason' -DefaultValue '')
                 $errorMessage = [string](Get-JsonPropertyValue -Object $errorSummary -Name 'error' -DefaultValue '')
+                $result.guiReportedFailurePhase = $failurePhase
+                $result.guiReportedFailureReason = $failureReason
+                $result.guiReportedFailureError = $errorMessage
+                # Preserve the harness' legacy setup classification until Phase 5 has
+                # enough retained runtime evidence to reclassify it. The raw GUI fields
+                # above remain immutable even when the setup fields are cleared later.
                 $result.setupFailurePhase = $failurePhase
                 $result.setupFailureReason = $failureReason
                 Add-RouteAcceptanceFailure -Result $result -Message ("Tuna GUI setup failure: phase={0}; reason={1}; error={2}" -f `
@@ -3801,6 +3825,32 @@ function Write-RouteAcceptanceFakePhase4Run {
             $reportPath = Join-Path $ArtifactDir $reportName
             $reportText = Get-Content -LiteralPath $reportPath -Raw
             foreach ($fixtureLine in $pairingFixtureLines) {
+                $separatorIndex = $fixtureLine.IndexOf('=')
+                $fixtureKey = $fixtureLine.Substring(0, $separatorIndex)
+                $fixturePattern = '(?m)^{0}=.*$' -f [regex]::Escape($fixtureKey)
+                if ([regex]::IsMatch($reportText, $fixturePattern)) {
+                    $reportText = [regex]::Replace($reportText, $fixturePattern, $fixtureLine)
+                }
+                else {
+                    $reportText = $reportText.TrimEnd("`r", "`n") + [Environment]::NewLine + $fixtureLine + [Environment]::NewLine
+                }
+            }
+            Set-Content -LiteralPath $reportPath -Value $reportText -Encoding UTF8
+        }
+    }
+
+    if (Test-RouteAcceptanceScenarioEnvEnabled -ScenarioName $scenarioName -Suffix 'REGULAR_V4_FRONTIER_REPAIR_PROJECTION_SUMMARY_FIXTURE') {
+        $projectionFixtureLines = @(
+            'regular_v4_frontier_repair_missing_range_not_preserved_raw_count=3',
+            'regular_v4_frontier_repair_missing_range_not_preserved_distinct_count=2',
+            'regular_v4_frontier_repair_missing_range_not_preserved_recovered_count=1',
+            'regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count=1',
+            'regular_v4_frontier_repair_missing_range_preservation_verdict=fail'
+        )
+        foreach ($reportName in @('filetransfer-route-consistency-summary.txt', 'filetransfer-operator-verdict.txt')) {
+            $reportPath = Join-Path $ArtifactDir $reportName
+            $reportText = Get-Content -LiteralPath $reportPath -Raw
+            foreach ($fixtureLine in $projectionFixtureLines) {
                 $separatorIndex = $fixtureLine.IndexOf('=')
                 $fixtureKey = $fixtureLine.Substring(0, $separatorIndex)
                 $fixturePattern = '(?m)^{0}=.*$' -f [regex]::Escape($fixtureKey)
@@ -7298,6 +7348,11 @@ function New-RouteAcceptanceSummaryRunDto {
         transferEvidenceStatus = [string]$Result.transferEvidenceStatus
         runtimeCorrectnessVerdict = [string]$Result.runtimeCorrectnessVerdict
         runtimeFailureCandidate = [string]$Result.runtimeFailureCandidate
+        regularV4FrontierRepairMissingRangeNotPreservedRawCount = [int]$Result.regularV4FrontierRepairMissingRangeNotPreservedRawCount
+        regularV4FrontierRepairMissingRangeNotPreservedDistinctCount = [int]$Result.regularV4FrontierRepairMissingRangeNotPreservedDistinctCount
+        regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount = [int]$Result.regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount
+        regularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount = [int]$Result.regularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount
+        regularV4FrontierRepairMissingRangePreservationVerdict = [string]$Result.regularV4FrontierRepairMissingRangePreservationVerdict
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount = [int]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount = [int]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = [int]$Result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount
@@ -7316,6 +7371,7 @@ function New-RouteAcceptanceSummaryRunDto {
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount = [int]$Result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount = [int]$Result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount
         runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict = [string]$Result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict
+        firstProofChainFailureClass = [string]$Result.firstProofChainFailureClass
         firstProofChainFailureEvent = [string]$Result.firstProofChainFailureEvent
         firstProofChainFailureReason = [string]$Result.firstProofChainFailureReason
         firstProofChainFailureSequence = [long]$Result.firstProofChainFailureSequence
@@ -7342,6 +7398,9 @@ function New-RouteAcceptanceSummaryRunDto {
         rerunFailureReason = [string]$Result.rerunFailureReason
         setupFailurePhase = [string]$Result.setupFailurePhase
         setupFailureReason = [string]$Result.setupFailureReason
+        guiReportedFailurePhase = [string]$Result.guiReportedFailurePhase
+        guiReportedFailureReason = [string]$Result.guiReportedFailureReason
+        guiReportedFailureError = [string]$Result.guiReportedFailureError
         fallbackReceiverStateDeferredCount = [int]$Result.fallbackReceiverStateDeferredCount
         fallbackReceiverStateCoalescedCount = [int]$Result.fallbackReceiverStateCoalescedCount
         fallbackReceiverStateChurnWarningCount = [int]$Result.fallbackReceiverStateChurnWarningCount
@@ -7424,10 +7483,19 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
     else {
         '(none)'
     }
+    $firstProofChainFailureClass = if ($runtimeCandidateDtos.Count -gt 0) { [string]$runtimeCandidateDtos[0].firstProofChainFailureClass } else { '(none)' }
+    $firstProofChainFailureEvent = if ($runtimeCandidateDtos.Count -gt 0) { [string]$runtimeCandidateDtos[0].firstProofChainFailureEvent } else { '(none)' }
+    $firstProofChainFailureReason = if ($runtimeCandidateDtos.Count -gt 0) { [string]$runtimeCandidateDtos[0].firstProofChainFailureReason } else { '(none)' }
+    $firstProofChainFailureSequence = if ($runtimeCandidateDtos.Count -gt 0) { [long]$runtimeCandidateDtos[0].firstProofChainFailureSequence } else { 0L }
+    $firstProofChainFailureSource = if ($runtimeCandidateDtos.Count -gt 0) { [string]$runtimeCandidateDtos[0].firstProofChainFailureSource } else { '(none)' }
     $fallbackTailBridgeRecoveryGenerationMismatchRawCount = 0
     $fallbackTailBridgeRecoveryGenerationMismatchDistinctCount = 0
     $fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount = 0
     $fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount = 0
+    $regularV4FrontierRepairMissingRangeNotPreservedRawCount = 0
+    $regularV4FrontierRepairMissingRangeNotPreservedDistinctCount = 0
+    $regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount = 0
+    $regularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount = 0
     $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount = 0
     $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount = 0
     $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = 0
@@ -7448,6 +7516,10 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $fallbackTailBridgeRecoveryGenerationMismatchDistinctCount += [int]$runDto.fallbackTailBridgeRecoveryGenerationMismatchDistinctCount
         $fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount += [int]$runDto.fallbackTailBridgeRecoveryGenerationMismatchRecoveredCount
         $fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount += [int]$runDto.fallbackTailBridgeRecoveryGenerationMismatchUnresolvedCount
+        $regularV4FrontierRepairMissingRangeNotPreservedRawCount += [int]$runDto.regularV4FrontierRepairMissingRangeNotPreservedRawCount
+        $regularV4FrontierRepairMissingRangeNotPreservedDistinctCount += [int]$runDto.regularV4FrontierRepairMissingRangeNotPreservedDistinctCount
+        $regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount += [int]$runDto.regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount
+        $regularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount += [int]$runDto.regularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount
         $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount
         $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount
         $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount += [int]$runDto.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount
@@ -7463,6 +7535,18 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingDistinctCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingDistinctCount
         $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount
         $runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount += [int]$runDto.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount
+    }
+    $regularV4FrontierRepairMissingRangePreservationVerdict = if (
+        $regularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.regularV4FrontierRepairMissingRangePreservationVerdict -eq 'fail' }).Count -gt 0) {
+        'fail'
+    }
+    elseif ($regularV4FrontierRepairMissingRangeNotPreservedDistinctCount -gt 0 -or
+        @($runDtos | Where-Object { [string]$_.regularV4FrontierRepairMissingRangePreservationVerdict -eq 'pass' }).Count -gt 0) {
+        'pass'
+    }
+    else {
+        'none'
     }
     $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessPreservationVerdict = if (
         $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedUnresolvedCount -gt 0 -or
@@ -7581,6 +7665,16 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         ("transfer_evidence_status={0}" -f $transferEvidenceStatus),
         ("runtime_correctness_verdict={0}" -f $runtimeCorrectnessVerdict),
         ("runtime_failure_candidate={0}" -f $runtimeFailureCandidate),
+        ("first_proof_chain_failure_class={0}" -f $firstProofChainFailureClass),
+        ("first_proof_chain_failure_event={0}" -f $firstProofChainFailureEvent),
+        ("first_proof_chain_failure_reason={0}" -f $firstProofChainFailureReason),
+        ("first_proof_chain_failure_sequence={0}" -f $firstProofChainFailureSequence),
+        ("first_proof_chain_failure_source={0}" -f $firstProofChainFailureSource),
+        ("regular_v4_frontier_repair_missing_range_not_preserved_raw_count={0}" -f $regularV4FrontierRepairMissingRangeNotPreservedRawCount),
+        ("regular_v4_frontier_repair_missing_range_not_preserved_distinct_count={0}" -f $regularV4FrontierRepairMissingRangeNotPreservedDistinctCount),
+        ("regular_v4_frontier_repair_missing_range_not_preserved_recovered_count={0}" -f $regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount),
+        ("regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count={0}" -f $regularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount),
+        ("regular_v4_frontier_repair_missing_range_preservation_verdict={0}" -f $regularV4FrontierRepairMissingRangePreservationVerdict),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_raw_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_distinct_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount),
         ("runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count={0}" -f $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount),
@@ -7659,6 +7753,11 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.transfer_evidence_status={1}" -f $prefix, $result.transferEvidenceStatus)
         $textLines += ("{0}.runtime_correctness_verdict={1}" -f $prefix, $result.runtimeCorrectnessVerdict)
         $textLines += ("{0}.runtime_failure_candidate={1}" -f $prefix, $result.runtimeFailureCandidate)
+        $textLines += ("{0}.regular_v4_frontier_repair_missing_range_not_preserved_raw_count={1}" -f $prefix, $result.regularV4FrontierRepairMissingRangeNotPreservedRawCount)
+        $textLines += ("{0}.regular_v4_frontier_repair_missing_range_not_preserved_distinct_count={1}" -f $prefix, $result.regularV4FrontierRepairMissingRangeNotPreservedDistinctCount)
+        $textLines += ("{0}.regular_v4_frontier_repair_missing_range_not_preserved_recovered_count={1}" -f $prefix, $result.regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount)
+        $textLines += ("{0}.regular_v4_frontier_repair_missing_range_not_preserved_unresolved_count={1}" -f $prefix, $result.regularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount)
+        $textLines += ("{0}.regular_v4_frontier_repair_missing_range_preservation_verdict={1}" -f $prefix, $result.regularV4FrontierRepairMissingRangePreservationVerdict)
         $textLines += ("{0}.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_raw_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount)
         $textLines += ("{0}.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_distinct_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount)
         $textLines += ("{0}.runtime_unlock_regular_v4_recovery_lease_closure_liveness_not_preserved_recovered_count={1}" -f $prefix, $result.runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount)
@@ -7677,6 +7776,7 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_recovered_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingRecoveredCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_missing_unresolved_count={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckMissingUnresolvedCount)
         $textLines += ("{0}.runtime_unlock_retry_dispatch_fallback_tail_unblock_recheck_verdict={1}" -f $prefix, $result.runtimeUnlockRetryDispatchFallbackTailUnblockRecheckVerdict)
+        $textLines += ("{0}.first_proof_chain_failure_class={1}" -f $prefix, $result.firstProofChainFailureClass)
         $textLines += ("{0}.first_proof_chain_failure_event={1}" -f $prefix, $result.firstProofChainFailureEvent)
         $textLines += ("{0}.first_proof_chain_failure_reason={1}" -f $prefix, $result.firstProofChainFailureReason)
         $textLines += ("{0}.first_proof_chain_failure_sequence={1}" -f $prefix, $result.firstProofChainFailureSequence)
@@ -7720,6 +7820,15 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         }
         if (-not [string]::IsNullOrWhiteSpace([string]$result.setupFailureReason)) {
             $textLines += ("{0}.setup_failure_reason={1}" -f $prefix, $result.setupFailureReason)
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$result.guiReportedFailurePhase)) {
+            $textLines += ("{0}.gui_reported_failure_phase={1}" -f $prefix, $result.guiReportedFailurePhase)
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$result.guiReportedFailureReason)) {
+            $textLines += ("{0}.gui_reported_failure_reason={1}" -f $prefix, $result.guiReportedFailureReason)
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$result.guiReportedFailureError)) {
+            $textLines += ("{0}.gui_reported_failure_error={1}" -f $prefix, $result.guiReportedFailureError)
         }
         $textLines += ("{0}.failure_count={1}" -f $prefix, $result.failures.Count)
         $textLines += ("{0}.correctness_failure_count={1}" -f $prefix, $result.correctnessFailureCount)
@@ -7802,6 +7911,16 @@ function Write-Phase4RouteAcceptanceSummaryFiles {
         transferEvidenceStatus = $transferEvidenceStatus
         runtimeCorrectnessVerdict = $runtimeCorrectnessVerdict
         runtimeFailureCandidate = $runtimeFailureCandidate
+        firstProofChainFailureClass = $firstProofChainFailureClass
+        firstProofChainFailureEvent = $firstProofChainFailureEvent
+        firstProofChainFailureReason = $firstProofChainFailureReason
+        firstProofChainFailureSequence = $firstProofChainFailureSequence
+        firstProofChainFailureSource = $firstProofChainFailureSource
+        regularV4FrontierRepairMissingRangeNotPreservedRawCount = $regularV4FrontierRepairMissingRangeNotPreservedRawCount
+        regularV4FrontierRepairMissingRangeNotPreservedDistinctCount = $regularV4FrontierRepairMissingRangeNotPreservedDistinctCount
+        regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount = $regularV4FrontierRepairMissingRangeNotPreservedRecoveredCount
+        regularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount = $regularV4FrontierRepairMissingRangeNotPreservedUnresolvedCount
+        regularV4FrontierRepairMissingRangePreservationVerdict = $regularV4FrontierRepairMissingRangePreservationVerdict
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount = $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRawCount
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount = $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedDistinctCount
         runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount = $runtimeUnlockRegularV4RecoveryLeaseClosureLivenessNotPreservedRecoveredCount

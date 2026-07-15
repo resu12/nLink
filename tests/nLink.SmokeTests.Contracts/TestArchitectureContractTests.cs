@@ -371,7 +371,7 @@ public sealed class TestArchitectureContractTests
     }
 
     [Fact]
-    public void FileTransferCoreRuntimeContract_OwnsSparseWorkerAndFallbackTailRuntimeSuites()
+    public void FileTransferCoreRuntimeContract_OwnsDeterministicRuntimeSuites()
     {
         var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
         var scriptText = File.ReadAllText(Path.Combine(repoRoot, "tools", "Test-Lanes.ps1"));
@@ -384,6 +384,7 @@ public sealed class TestArchitectureContractTests
         var runtimeBody = runtimeCase.Groups["body"].Value;
         Assert.Contains("FileTransferRuntimeSuite=SparseWorkerHandoff", runtimeBody, StringComparison.Ordinal);
         Assert.Contains("FileTransferRuntimeSuite=FallbackTailChurn", runtimeBody, StringComparison.Ordinal);
+        Assert.Contains("FileTransferRuntimeSuite=RegularV4FrontierRepairProjection", runtimeBody, StringComparison.Ordinal);
     }
 
     [Fact]
