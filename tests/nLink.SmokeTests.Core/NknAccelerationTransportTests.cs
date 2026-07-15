@@ -11797,8 +11797,7 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
     [Theory]
     [InlineData(FileTransferRegularV4FrontierRepairSettlementOutcome.SettledStalled, "v4_repair_settled_stalled")]
     [InlineData(FileTransferRegularV4FrontierRepairSettlementOutcome.AuthorityRejected, "v4_repair_authority_rejected")]
-    [Trait("Category", "Smoke")]
-    public async Task AcceptedRegularV4ClosureSettlementResolvesOnlyAtCurrentLifecycleBoundary(
+    public async Task AcceptedRegularV4ClosureSettlementAfterLifecycleCompletion_RequiresLocalProofForNonFailure(
         FileTransferRegularV4FrontierRepairSettlementOutcome outcome,
         string expectedDecisionReason)
     {
@@ -11828,6 +11827,9 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 cts.Token,
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare);
             var transferId = $"transfer_runtime_unlock_regular_v4_liveness_close_{expectedDecisionReason}";
+            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
+                host,
+                _ => RuntimeUnlockRetryDispatchDecisionStatus.Held);
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             InvokePrivateMethod(
                 host,
@@ -11918,16 +11920,27 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             }
             else
             {
-                Assert.True(recoveryState.TryGetActiveFileTransferRecoveryLivenessSnapshot(sessionId, out _));
+                Assert.True(recoveryState.TryGetActiveFileTransferRecoveryLivenessSnapshot(sessionId, out var heldSnapshot));
+                Assert.Equal(
+                    FileTransferRecoveryLivenessState.BridgeRecoveryCompletedAwaitingProof,
+                    heldSnapshot.State);
+                Assert.NotNull(heldSnapshot.RegularV4RecoveryLeaseClosureContinuationProof);
                 Assert.Contains(
                     "event=runtime_unlock_regular_v4_frontier_repair_settlement_handoff_adopted;",
                     tail,
                     StringComparison.Ordinal);
                 Assert.Contains(
+                    "event=runtime_unlock_regular_v4_frontier_repair_settlement_held_for_lease_closure_window;",
+                    tail,
+                    StringComparison.Ordinal);
+                Assert.DoesNotContain(
                     "event=runtime_unlock_regular_v4_frontier_repair_settlement_handoff_consumed;",
                     tail,
                     StringComparison.Ordinal);
-                Assert.Contains("lifecycle_boundary=bridge_lifecycle_completed", tail, StringComparison.Ordinal);
+                Assert.DoesNotContain(
+                    "event=runtime_unlock_regular_v4_recovery_settlement_reported;",
+                    tail,
+                    StringComparison.Ordinal);
                 Assert.DoesNotContain(
                     "event=regular_v4_receive_recovery_contract_closed_no_deferral;",
                     tail,
@@ -12231,7 +12244,6 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
     }
 
     [Fact]
-    [Trait("Category", "Smoke")]
     public async Task RuntimeUnlockRetryBlockedByRegularV4Recovery_HoldsAcceptedFrontierSettlementUntilLifecycleBoundary()
     {
         FakeNknClient.ResetNetwork();
@@ -12276,7 +12288,14 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 InviteCapabilities.Chat | InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare);
             const string transferId = "transfer_runtime_unlock_regular_v4_frontier_settlement";
             var coordinatorStatus = RuntimeUnlockRetryDispatchDecisionStatus.Held;
-            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(host, _ => coordinatorStatus);
+            var authorityRequestCount = 0;
+            InstallRuntimeUnlockRetryDispatchCoordinatorForTests(
+                host,
+                _ =>
+                {
+                    Interlocked.Increment(ref authorityRequestCount);
+                    return coordinatorStatus;
+                });
             _ = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             InvokePrivateMethod(
                 host,
@@ -12370,6 +12389,72 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
             Assert.DoesNotContain("event=regular_v4_receive_recovery_contract_closed_no_deferral;", heldTail, StringComparison.Ordinal);
             var recoveryState = Assert.IsAssignableFrom<IFileTransferRecoveryLivenessState>(host);
             Assert.True(recoveryState.TryGetActiveFileTransferRecoveryLivenessSnapshot(sessionId, out _));
+
+            InvokePrivateMethod(
+                host,
+                "MarkFileTransferRegularV4RecoveryLivenessBridgeRecoveryLifecycle",
+                "completed",
+                "test_regular_v4_recovery_completed_without_receive_proof");
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=runtime_unlock_regular_v4_recovery_lease_closure_retained;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(3));
+
+            var requestCountBeforeClosureRecheck = Volatile.Read(ref authorityRequestCount);
+            InvokePrivateMethod(
+                host,
+                "ScheduleRuntimeUnlockRetryAfterRecoveryIfArmed",
+                "bridge_lifecycle_completed");
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "event=runtime_unlock_retry_regular_v4_recovery_lease_closure_hold_preserved;",
+                    StringComparison.Ordinal),
+                TimeSpan.FromSeconds(3));
+
+            var closureHeldTail = ReadOperationalLogTail(logStart);
+            Assert.Equal(requestCountBeforeClosureRecheck, Volatile.Read(ref authorityRequestCount));
+            Assert.Contains("decision_reason=awaiting_local_receive_proof", closureHeldTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_dispatch_authority_rejected;", closureHeldTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_retry_rejected_after_regular_v4_receive_recovery;", closureHeldTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=runtime_unlock_regular_v4_frontier_repair_settlement_handoff_consumed;", closureHeldTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=session_recovery_contract_failed;", closureHeldTail, StringComparison.Ordinal);
+
+            var blockedRetryState = Assert.IsAssignableFrom<object>(
+                GetPrivateField(host, "runtimeUnlockRecoveryRetryState"));
+            var blockedRetryStateType = blockedRetryState.GetType();
+            Assert.Equal(
+                0L,
+                Assert.IsType<long>(blockedRetryStateType.GetProperty("RetryDeadlineUtcMs")!.GetValue(blockedRetryState)));
+            Assert.Equal(
+                0L,
+                Assert.IsType<long>(blockedRetryStateType.GetProperty("DispatchDeadlineUtcMs")!.GetValue(blockedRetryState)));
+            Assert.Equal(
+                0L,
+                Assert.IsType<long>(blockedRetryStateType.GetProperty("ObservedSendDeadlineUtcMs")!.GetValue(blockedRetryState)));
+
+            coordinatorStatus = RuntimeUnlockRetryDispatchDecisionStatus.Granted;
+            InvokePrivateMethod(
+                host,
+                "MarkFileTransferRegularV4RecoveryLivenessReceiveProofReceived",
+                sessionId,
+                transferId,
+                "test_receive_proof",
+                "control");
+            await WaitUntilAsync(
+                () => Volatile.Read(ref authorityRequestCount) == requestCountBeforeClosureRecheck + 1 &&
+                      ReadOperationalLogTail(logStart).Contains(
+                          "event=runtime_unlock_regular_v4_recovery_lease_closure_consumed;",
+                          StringComparison.Ordinal),
+                TimeSpan.FromSeconds(3));
+
+            var releasedTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=runtime_unlock_regular_v4_recovery_lease_closure_adopted;", releasedTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_regular_v4_frontier_repair_settlement_handoff_discarded;", releasedTail, StringComparison.Ordinal);
+            Assert.Contains("event=runtime_unlock_retry_dispatch_authority_granted;", releasedTail, StringComparison.Ordinal);
+            Assert.Contains("dispatch_attempt_generation=1", releasedTail, StringComparison.Ordinal);
+            Assert.Contains("missing_dispatch_successor_generation=0", releasedTail, StringComparison.Ordinal);
+            Assert.Contains("predecessor_authority_id=(none)", releasedTail, StringComparison.Ordinal);
         }
         finally
         {
@@ -24493,9 +24578,12 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase, IDisposa
                 observedOfferGeneration,
                 "control_to_bulk_endpoint")));
             await WaitUntilAsync(
-                () => ReadOperationalLogTail(0).Contains(
-                    "event=runtime_unlock_retry_dispatch_observed;",
-                    StringComparison.Ordinal),
+                () => GetPrivateField(host, "runtimeUnlockRecoveryRetryState") is { } state &&
+                      state.GetType().GetProperty("LastAppliedDispatchSettlementReport")!
+                          .GetValue(state) is RuntimeUnlockRetryDispatchSettlementReport
+                          {
+                              Outcome: RuntimeUnlockRetryDispatchSettlementOutcome.DispatchObserved
+                          },
                 TimeSpan.FromSeconds(3));
 
             var predecessorState = GetPrivateField(host, "runtimeUnlockRecoveryRetryState");
